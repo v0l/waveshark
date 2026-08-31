@@ -14,6 +14,7 @@ mod bresser;
 mod ev1527;
 mod fineoffset;
 mod globaltronics;
+mod keyfob;
 mod lacrosse;
 mod nexus;
 mod oregon;
@@ -25,6 +26,7 @@ pub use bresser::Bresser3Ch;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
 pub use globaltronics::{GtWt02, GtWt03};
+pub use keyfob::{Ansonic, Bett, came12_bit, came24_bit, Holtek, HoltekHt12x, Linear, LinearDelta3, NiceFlo, Princeton};
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
 pub use oregon::OregonV3;
@@ -51,7 +53,7 @@ use crate::bits::BitBuffer;
 pub(crate) fn find_frame(
     bits: &BitBuffer,
     bytes: usize,
-    ok: impl Fn(&[u8]) -> bool,
+    ok: impl FnMut(&[u8]) -> bool,
 ) -> Option<Vec<u8>> {
     find_frame_bits(bits, bytes * 8, ok)
 }
@@ -65,7 +67,7 @@ pub(crate) fn find_frame(
 pub(crate) fn find_frame_bits(
     bits: &BitBuffer,
     want: usize,
-    ok: impl Fn(&[u8]) -> bool,
+    mut ok: impl FnMut(&[u8]) -> bool,
 ) -> Option<Vec<u8>> {
     if bits.len() < want {
         return None;

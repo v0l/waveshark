@@ -8,7 +8,7 @@ decode every signal in it in parallel.
 Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
 with RDS, and ADS-B decodes aircraft off the air. What is missing is protocols:
-fifteen ISM device decoders are implemented where the goal is hundreds, and
+twenty-five ISM device decoders are implemented where the goal is hundreds, and
 only Fine Offset and ADS-B have been checked against real recordings.
 
 Proof it works: `crates/decode/tests/fineoffset_capture.rs` decodes a real

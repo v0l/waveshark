@@ -152,6 +152,16 @@ impl Protocols {
         p.add(Box::new(OregonV3));
         p.add(Box::new(X10Rf));
         p.add(Box::new(Ev1527));
+        p.add(Box::new(Princeton));
+        p.add(Box::new(Holtek));
+        p.add(Box::new(HoltekHt12x));
+        p.add(Box::new(Ansonic));
+        p.add(Box::new(Bett));
+        p.add(Box::new(came12_bit()));
+        p.add(Box::new(came24_bit()));
+        p.add(Box::new(NiceFlo));
+        p.add(Box::new(Linear));
+        p.add(Box::new(LinearDelta3));
         p
     }
 
