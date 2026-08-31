@@ -230,38 +230,56 @@ fn channels_without_a_chain_are_skipped() {
     assert!(events.iter().any(|e| matches!(e.event, Event::Decoded(_))));
 }
 
-/// The chain the app runs when it decodes everything it can hear: no protocol
+/// What the app runs when it decodes everything it can hear: no protocol
 /// chosen, no modulation chosen, nothing tuned by hand.
+///
+/// The bank finds the bursts and the protocols run once, downstream, over
+/// what every front end produced. That split is the thing under test: the
+/// channels must hand over enough for a decoder that never saw the radio to
+/// name the device.
 #[test]
 fn the_automatic_chain_decodes_without_being_told_the_modulation() {
+    use common::{Packet, PacketBody};
     let base = need_fixture!(fixture());
     let mut bank = make_bank();
     // Exactly what the app runs: gated on detection, both modulations, every
-    // protocol, nothing chosen by hand.
+    // channel, nothing chosen by hand.
     bank.set_gating(Gating::OnDetection);
     bank.set_detector_config(nodes::ism_detector_config());
     bank.set_all_graphs(nodes::ism_decode_graph).expect("build graphs");
     let wide = wideband(&base.samples, &bank);
 
-    let mut found: Vec<(usize, String)> = Vec::new();
+    let mut decoder = nodes::PacketDecodeNode::default();
+    let mut found: Vec<(u64, String)> = Vec::new();
     let mut unknown = 0;
     for block in wide.chunks(65_536) {
-        for ev in bank.process(block).expect("run bank") {
-            if let Event::Decoded(d) = &ev.event {
-                // Bursts nothing claims are reported too, and on this
-                // recording the repeated transmission produces some. They are
-                // counted rather than matched: the point here is the decode.
-                if d.protocol == "unknown" {
-                    unknown += 1;
-                    continue;
-                }
-                found.push((ev.channel, d.text.clone().unwrap_or_default()));
+        bank.process(block).expect("run bank");
+        let packets: Vec<Packet> = bank
+            .packages()
+            .iter()
+            .map(|p| Packet {
+                at_us: 0,
+                center_hz: p.center_hz,
+                bandwidth_hz: bank.channel_bandwidth() as u32,
+                rssi_dbfs: p.rssi_dbfs,
+                snr_db: p.snr_db,
+                body: PacketBody::Pulses(p.pulses.clone()),
+            })
+            .collect();
+        for d in decode_packets(&mut decoder, packets) {
+            // Bursts nothing claims are reported too, and on this recording
+            // the repeated transmission produces some. They are counted
+            // rather than matched: the point here is the decode.
+            if d.protocol == "unknown" {
+                unknown += 1;
+                continue;
             }
+            found.push((d.center.0, d.text.clone().unwrap_or_default()));
         }
     }
     assert!(unknown > 0, "unclaimed bursts should be reported, not dropped");
 
-    let mut channels: Vec<usize> = found.iter().map(|(c, _)| *c).collect();
+    let mut channels: Vec<usize> = found.iter().map(|(hz, _)| bank.channel_for(Hz(*hz))).collect();
     channels.sort_unstable();
     channels.dedup();
     assert_eq!(channels, OCCUPIED, "wrong channels decoded: {found:?}");
@@ -269,6 +287,25 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
         assert!(text.contains("Fineoffset-WHx080"), "{text}");
         assert!(text.contains("[CRC ok]"), "{text}");
     }
+}
+
+/// Run the bus decoder over one block's worth of packets.
+fn decode_packets(
+    node: &mut nodes::PacketDecodeNode,
+    packets: Vec<common::Packet>,
+) -> Vec<pipeline::event::Decoded> {
+    use pipeline::node::{NodeCtx, PortSpec, Simple};
+    use pipeline::port::{Payload, PortKind};
+    let mut spec = pipeline::StreamSpec::iq(0.0, Hz(0)).with_kind(PortKind::Packets);
+    spec.bandwidth = 31_250.0;
+    let ins = [PortSpec { spec, latency: 0 }];
+    let mut events = Vec::new();
+    let tags = Vec::new();
+    let mut new_tags = Vec::new();
+    let mut out = Payload::Packets(Vec::new());
+    let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+    Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
+    node.hits().to_vec()
 }
 
 /// Both branches must be live, or the graph is an OOK chain with extra steps.
@@ -280,9 +317,10 @@ fn the_automatic_chain_runs_an_ook_and_an_fsk_branch() {
     let kinds: Vec<&str> = t.nodes.iter().map(|n| n.kind.as_str()).collect();
     assert!(kinds.contains(&"pulse_detect"), "{kinds:?}");
     assert!(kinds.contains(&"fsk_detect"), "{kinds:?}");
-    assert_eq!(
-        kinds.iter().filter(|k| **k == "protocol_decode").count(),
-        2,
-        "each branch needs its own decoder: {kinds:?}"
+    // No decoder here: a channel finds bursts, and the protocols run once
+    // on the packet bus over everything every front end produced.
+    assert!(
+        !kinds.iter().any(|k| *k == "protocol_decode"),
+        "the protocols moved to the bus: {kinds:?}"
     );
 }

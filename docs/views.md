@@ -113,8 +113,10 @@ view exists to force them:
 
 The bus itself now exists as a node: every front end feeds `packet_bus`, it
 writes the packet log on the way through, and consumers attach to its output.
-The flight list is the first, and the on-screen packet list is the next one to
-move, since it still reads decoded events on a channel of its own.
+The flight list reads it, and so does `packet_decode`, which runs the protocol
+tables once over everything and produces the rows the packet list shows. A map,
+a chart or an alert would attach the same way, with one input and nothing to
+say about which demodulator was involved.
 
 None of that is worth building before the second view exists. The point of
 writing it down is that the shape of the first view should not make any of it

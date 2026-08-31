@@ -63,9 +63,16 @@ possible output for a tool meant to identify unknown signals.
 or two-level FSK, and both reduce to mark/gap timings: `pulse_detect` thresholds
 an envelope, `fsk_detect` thresholds a discriminator, `ask_detect` covers keying
 too shallow for the first to see, and the slicers and protocols below them
-cannot tell which one they were fed. The DSP runs once per
-channel; each protocol is then a timing table and a payload parser working on
-integers. That is what makes supporting hundreds of protocols affordable.
+cannot tell which one they were fed. The DSP runs once per channel; each
+protocol is then a timing table and a payload parser working on integers. That
+is what makes supporting hundreds of protocols affordable.
+
+The protocols themselves run once, on the packet bus, rather than inside every
+channel. A decoder per channel meant a hundred copies of the same tables, and a
+burst that arrived by any other route (a log being replayed, a front end added
+later) got no decoding at all. Measured on the throughput test it is also
+faster: 12.0x real time against 10.5x, because the tables are consulted once
+per burst rather than once per burst per channel.
 
 **One graph, and everything hangs off it.** The receiver is a single
 `pipeline::Graph`, from the DC notch and the zoom decimator at the head to the

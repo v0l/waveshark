@@ -22,7 +22,7 @@
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -32,10 +32,6 @@ pub struct ModeSNode {
     det: ModeSDetector,
     book: AddressBook,
     frames: Vec<ModeSFrame>,
-    /// What decoded in the last block. Events also go to the graph; this is
-    /// the typed view, for a host that wants this node's decodes rather than
-    /// everything the graph produced.
-    hits: Vec<Event>,
     /// Frames accepted since the node was built.
     accepted: u64,
 }
@@ -47,17 +43,11 @@ impl Default for ModeSNode {
 }
 
 impl ModeSNode {
-    /// What decoded in the last block.
-    pub fn hits(&self) -> &[Event] {
-        &self.hits
-    }
-
     pub fn new(cfg: ModeSConfig) -> Self {
         Self {
             cfg,
             // Replaced at negotiation, when the real sample rate is known.
             det: ModeSDetector::new(2_400_000.0, cfg),
-            hits: Vec::new(),
             book: AddressBook::new(),
             frames: Vec::new(),
             accepted: 0,
@@ -124,7 +114,6 @@ impl Simple for ModeSNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.frames.clear();
-        self.hits.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
             book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
@@ -143,20 +132,22 @@ impl Simple for ModeSNode {
             let Ok(frame) = adsb::parse(&bytes) else { continue };
             self.accepted += 1;
             out.push(bytes.clone());
-            let d = Event::Decoded(decoded(&frame, f, center, &bytes));
-            self.hits.push(d.clone());
-            c.emit(d);
+            // Not emitted as a decode here. The frame goes on the bus and
+            // the decoder attached to it turns every packet into a row,
+            // whichever front end produced it.
+            let _ = (&frame, center);
         }
         Ok(())
     }
 }
 
-fn decoded(
-    frame: &adsb::Frame,
-    raw: &ModeSFrame,
-    center: common::Hz,
-    bytes: &[u8],
-) -> Decoded {
+/// The decode a Mode S frame becomes.
+///
+/// Takes the bytes rather than the demodulator's own frame record, because
+/// what travels on the packet bus is the bytes: a consumer draws its own
+/// conclusions from the evidence, and a level measured at the demodulator is
+/// not evidence a log can carry per frame.
+pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
     use common::Value;
     let mut fields: Vec<(String, Value)> = Vec::new();
     if let Some(icao) = frame.icao {
@@ -203,12 +194,10 @@ fn decoded(
     };
     let detail =
         fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Decoded::bytes(protocol, center, raw.at_sample as f64, bytes.to_vec())
+    Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
         .with_modulation("PPM")
-        // Mode S has no per-frame noise estimate the way a gated burst does.
-        .with_level(raw.rssi_dbfs, f32::NAN)
         // Only the extended squitters carry a CRC of their own. A short reply
         // is believed because its address is one an ADS-B frame proved, which
         // is corroboration rather than an integrity check.
@@ -248,8 +237,7 @@ mod tests {
         use common::Value;
         let bytes = hex("8d40621d58c382d690c8ac2863a7");
         let frame = adsb::parse(&bytes).unwrap();
-        let raw = ModeSFrame { bytes: bytes.clone(), at_sample: 7, rssi_dbfs: -12.0, weak_bits: 0 };
-        let d = decoded(&frame, &raw, Hz(1_090_000_000), &bytes);
+        let d = adsb_decoded(&frame, &bytes, Hz(1_090_000_000));
         assert_eq!(d.protocol, "ADSB-Position");
         assert_eq!(d.crc_ok, Some(true));
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -261,8 +249,7 @@ mod tests {
     fn a_short_reply_claims_no_integrity_check() {
         let bytes = hex("02e19838adb7c4");
         let frame = adsb::parse(&bytes).unwrap();
-        let raw = ModeSFrame { bytes: bytes.clone(), at_sample: 0, rssi_dbfs: -20.0, weak_bits: 0 };
-        let d = decoded(&frame, &raw, Hz(1_090_000_000), &bytes);
+        let d = adsb_decoded(&frame, &bytes, Hz(1_090_000_000));
         assert_eq!(d.protocol, "ModeS-Reply");
         assert_eq!(d.crc_ok, None, "a reply's parity is an address, not a check");
     }

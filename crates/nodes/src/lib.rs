@@ -10,6 +10,7 @@ pub mod bank;
 pub mod decode_nodes;
 pub mod dsp_nodes;
 pub mod modes_nodes;
+pub mod packet_nodes;
 pub mod bank_node;
 pub mod sink_nodes;
 pub mod wfm;
@@ -18,6 +19,7 @@ pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
 pub use modes_nodes::ModeSNode;
+pub use packet_nodes::PacketDecodeNode;
 pub use bank_node::BankNode;
 pub use sink_nodes::{DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
@@ -372,6 +374,13 @@ pub fn ism_fsk_graph(input: StreamSpec) -> Result<Graph> {
     ism_graph(input, false, true)
 }
 
+/// A channel's front end: find the bursts, and stop there.
+///
+/// The protocols used to run here, once per channel. They run once, on the
+/// packet bus, because a decoder per channel meant a hundred copies of the
+/// same tables, decodes that reached the rest of the program through whatever
+/// happened to collect them, and no decoding at all for a burst that arrived
+/// by another route. What a channel produces is what it heard.
 fn ism_graph(input: StreamSpec, ook: bool, fsk: bool) -> Result<Graph> {
     let mut b = Graph::builder(input);
     let mut last = None;
@@ -385,29 +394,17 @@ fn ism_graph(input: StreamSpec, ook: bool, fsk: bool) -> Result<Graph> {
         let mut ook_det = PulseDetectNode::default_ook();
         ook_det.set_min_pulses(8);
         let det = b.add_labeled("OOK pulses", Box::new(ook_det));
-        let dec = b.add_labeled(
-            "OOK protocols",
-            Box::new(ProtocolDecodeNode::all().with_modulation("OOK")),
-        );
         b.source(env.i());
         b.link(env, det);
-        b.link(det, dec);
-        last = Some(dec);
+        last = Some(det);
     }
 
     if fsk {
         let det = b.add_labeled("FSK pulses", Box::new(FskDetectNode::default_fsk()));
-        let dec = b.add_labeled(
-            "FSK protocols",
-            Box::new(ProtocolDecodeNode::all().with_modulation("FSK")),
-        );
         b.source(det.i());
-        b.link(det, dec);
-        last = last.or(Some(dec));
+        last = last.or(Some(det));
     }
 
-    // Decodes leave as events, from every branch. The nominated output only
-    // decides what a downstream reader would see, so any branch will do.
     let out = last.ok_or_else(|| common::Error::other("an ISM graph needs a front end"))?;
     b.output(out.o());
     b.build()

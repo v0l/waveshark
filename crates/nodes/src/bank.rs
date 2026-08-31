@@ -104,10 +104,14 @@ pub struct ChannelBank {
     /// The undecoded ones are the point: a burst nothing claimed is exactly
     /// what a log is for, and it is gone the moment the block is overwritten.
     packages: Vec<Package>,
-    /// Which output of a channel's graph carries packages, discovered from
-    /// the built chain rather than assumed, since a chain is free to be
-    /// shaped however it likes as long as something in it detects bursts.
-    pulse_tap: Option<Out>,
+    /// Which outputs of a channel's graph carry packages, discovered from the
+    /// built chain rather than assumed, since a chain is free to be shaped
+    /// however it likes as long as something in it detects bursts.
+    ///
+    /// Plural because a chain commonly has more than one front end: the ISM
+    /// chain runs an OOK branch and an FSK branch over the same channel, and
+    /// taking only the first quietly loses every burst the other one heard.
+    pulse_taps: Vec<Out>,
 }
 
 impl ChannelBank {
@@ -130,7 +134,7 @@ impl ChannelBank {
             idle_blocks: vec![u32::MAX; channels],
             out: Vec::new(),
             packages: Vec::new(),
-            pulse_tap: None,
+            pulse_taps: Vec::new(),
         }
     }
 
@@ -208,7 +212,7 @@ impl ChannelBank {
         }
         let g = build_chain(self.channel_spec(ch), specs, reg)
             .map_err(|e| Error::other(format!("channel {ch}: {e}")))?;
-        self.pulse_tap = pulse_tap(&g);
+        self.pulse_taps = pulse_taps(&g);
         self.graphs[ch] = Some(g);
         Ok(())
     }
@@ -238,7 +242,7 @@ impl ChannelBank {
         for ch in 0..self.channels {
             let g = make(self.channel_spec(ch))
                 .map_err(|e| Error::other(format!("channel {ch}: {e}")))?;
-            self.pulse_tap = pulse_tap(&g);
+            self.pulse_taps = pulse_taps(&g);
             self.graphs[ch] = Some(g);
         }
         Ok(())
@@ -335,7 +339,7 @@ impl ChannelBank {
         let gating = self.gating;
         let idle_blocks = &self.idle_blocks;
         let lanes = &self.lanes;
-        let tap = self.pulse_tap;
+        let taps = self.pulse_taps.clone();
         let results: Vec<(usize, Vec<Event>, Vec<Package>)> = self
             .graphs
             .par_iter_mut()
@@ -360,11 +364,12 @@ impl ChannelBank {
                 // Read back what the front end detected, before the protocols
                 // had their say. A burst nothing recognised leaves no event at
                 // all, and it is the one worth keeping.
-                let pkgs: Vec<Package> = tap
-                    .and_then(|t| g.buf(t))
-                    .and_then(|p| p.as_pulses())
-                    .map(|p| p.to_vec())
-                    .unwrap_or_default();
+                let pkgs: Vec<Package> = taps
+                    .iter()
+                    .filter_map(|t| g.buf(*t))
+                    .filter_map(|p| p.as_pulses())
+                    .flat_map(|p| p.iter().cloned())
+                    .collect();
                 if evs.is_empty() && pkgs.is_empty() {
                     return None;
                 }
@@ -404,12 +409,15 @@ impl ChannelBank {
     }
 }
 
-/// The first output in a chain that carries packages.
-fn pulse_tap(g: &Graph) -> Option<Out> {
-    g.order().find_map(|(id, _)| {
-        let out = id.o();
-        matches!(g.spec_of(out).map(|s| s.kind), Some(pipeline::PortKind::Pulses)).then_some(out)
-    })
+/// Every output in a chain that carries packages.
+fn pulse_taps(g: &Graph) -> Vec<Out> {
+    g.order()
+        .filter_map(|(id, _)| {
+            let out = id.o();
+            matches!(g.spec_of(out).map(|s| s.kind), Some(pipeline::PortKind::Pulses))
+                .then_some(out)
+        })
+        .collect()
 }
 
 #[cfg(test)]

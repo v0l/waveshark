@@ -31,7 +31,6 @@ use nodes::{
     AgcNode, BankNode, DeemphasisNode, DecimateNode, EnvelopeNode, FmDemodNode, HighBlendNode,
     MixerNode, ModeSNode, RealDecimateNode, SpectrumNode, SquelchNode, SsbDemodNode, WfmDemodNode,
 };
-use pipeline::event::Event;
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
 
@@ -72,6 +71,7 @@ enum Role {
     /// A stage of one listening channel.
     Stage(u64, Stage),
     PacketBus,
+    PacketDecode,
     Flights,
 }
 
@@ -138,7 +138,6 @@ impl Chan {
 
 /// One bank sweeping the span.
 pub struct Bank {
-    id: NodeId,
     pub channels: usize,
 }
 
@@ -162,6 +161,7 @@ pub struct Receiver {
     /// bus itself had to be built again.
     log_dir: Option<PathBuf>,
     bus: Option<NodeId>,
+    decode: Option<NodeId>,
     flights: Option<NodeId>,
     /// Where the receiver is, which resolves a position from a single frame.
     location: Option<(f64, f64)>,
@@ -232,6 +232,7 @@ impl Receiver {
             pending_record: None,
             log_dir: sinks.packet_log,
             bus: None,
+            decode: None,
             flights: None,
             location: None,
             logged: 0,
@@ -457,6 +458,22 @@ impl Receiver {
             bus = Some(id);
         }
 
+        // The protocols run here, once, over everything on the bus. They used
+        // to run inside every channel of every bank, which meant a hundred
+        // copies of the same tables, decodes that reached the rest of the
+        // program through whatever happened to collect them, and no decoding
+        // at all for a packet that arrived by any other route.
+        let mut decode = None;
+        if let Some(bus) = bus {
+            let id = match pool.remove(&Role::PacketDecode) {
+                Some(p) => b.add_existing(p),
+                None => b.add_labeled("Protocols", Box::new(nodes::PacketDecodeNode::default())),
+            };
+            b.connect(bus.o(), id.i());
+            roles.push(Role::PacketDecode);
+            decode = Some(id);
+        }
+
         // The flight tracker is a consumer of the bus like any other, which
         // is what stops every view being wired to the demodulator it happens
         // to care about.
@@ -553,6 +570,7 @@ impl Receiver {
         self.spectrum = spectrum;
         self.record = record;
         self.bus = bus;
+        self.decode = decode;
         self.flights = flights;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
@@ -570,7 +588,7 @@ impl Receiver {
                     .and_then(|a| a.downcast_ref::<BankNode>())
                     .map(|b| b.channels())
                     .unwrap_or(0);
-                Bank { id, channels }
+                Bank { channels }
             })
             .collect();
         self.chans = chans;
@@ -635,27 +653,6 @@ impl Receiver {
             .and_then(|a| a.downcast_mut::<SpectrumNode>())
             .map(|s| s.power_db())
             .unwrap_or(&[])
-    }
-
-    /// Everything the banks decoded this block, with the channel centre and
-    /// the width that channel covers.
-    pub fn bank_hits(&self) -> Vec<(Hz, f64, &Event)> {
-        let mut out = Vec::new();
-        for bank in &self.banks {
-            let Some(n) = downcast::<BankNode>(&self.graph, bank.id) else { continue };
-            for (center, ev) in n.hits() {
-                out.push((*center, n.channel_hz(), ev));
-            }
-        }
-        out
-    }
-
-    /// Everything the Mode S decoder produced this block.
-    pub fn modes_hits(&self) -> Vec<&Event> {
-        let Some(n) = self.modes.and_then(|id| downcast::<ModeSNode>(&self.graph, id)) else {
-            return Vec::new();
-        };
-        n.hits().iter().collect()
     }
 
     pub fn modes_on(&self) -> bool {
@@ -734,28 +731,17 @@ impl Receiver {
         self.pending_record = rec.map(RecordRing::new);
     }
 
-    /// Everything that decoded this block, as packet log rows.
+    /// Everything that decoded this block, as packet list rows.
     ///
-    /// The banks know which channel a packet came from and the Mode S node
-    /// knows there is only one frequency it could be; both are lost by the
-    /// time an event reaches the graph's event list, which is why they are
-    /// read from the nodes rather than from `run`.
+    /// One place, because there is one decoder: whatever the front end, a
+    /// packet went onto the bus and came off it as a row.
     pub fn decodes(&self, at: std::time::Instant) -> Vec<DecodeRecord> {
-        let mut out = Vec::new();
-        for (center, width, ev) in self.bank_hits() {
-            if let Event::Decoded(d) = ev {
-                out.push(record(at, center.as_f64(), width, d));
-            }
-        }
-        for ev in self.modes_hits() {
-            if let Event::Decoded(d) = ev {
-                // Mode S occupies the whole band it is transmitted in; there
-                // is no channel to speak of, and nothing else is near enough
-                // to be confused with it.
-                out.push(record(at, d.center.as_f64(), MODES_BAND_HZ, d));
-            }
-        }
-        out
+        let Some(n) =
+            self.decode.and_then(|id| downcast::<nodes::PacketDecodeNode>(&self.graph, id))
+        else {
+            return Vec::new();
+        };
+        n.hits().iter().map(|d| record(at, d)).collect()
     }
 
     /// Point the log at a directory, or stop writing one.
@@ -838,15 +824,19 @@ impl Receiver {
 /// Bandwidth a Mode S transmission occupies, for the log's channel column.
 const MODES_BAND_HZ: f64 = 2_000_000.0;
 
-fn record(
-    at: std::time::Instant,
-    freq: f64,
-    channel_hz: f64,
-    d: &pipeline::event::Decoded,
-) -> DecodeRecord {
+fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
+    // Mode S occupies the whole band it is transmitted in; there is no
+    // channel to speak of, and nothing else is near enough to be confused
+    // with it. Anything from a bank was heard through one of its channels,
+    // and which bank is what its keying says.
+    let channel_hz = match d.modulation {
+        Some("PPM") => MODES_BAND_HZ,
+        Some("FSK") => FSK_CHANNEL_HZ,
+        _ => OOK_CHANNEL_HZ,
+    };
     DecodeRecord {
         at,
-        freq,
+        freq: d.center.as_f64(),
         channel_hz,
         model: d.protocol.to_string(),
         modulation: d.modulation.unwrap_or("?"),

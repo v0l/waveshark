@@ -409,6 +409,56 @@ impl Simple for FskDetectNode {
     }
 }
 
+/// Turn one report into the event a consumer sees.
+///
+/// Shared with the packet bus decoder, which runs the same protocols over the
+/// same packages at a different point in the graph. Two copies of this drifted
+/// within a day of existing.
+pub fn decoded_event(
+    report: &decode::Report,
+    pkg: &common::Package,
+    center: common::Hz,
+    modulation: &'static str,
+) -> Decoded {
+    Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
+        .with_text(report.to_string())
+        .with_detail(report.fields_line())
+        .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .with_modulation(modulation)
+        .with_level(pkg.rssi_dbfs, pkg.snr_db)
+        .with_crc(report.crc_valid)
+}
+
+/// The event for a burst no protocol claimed, read under a guessed coding.
+///
+/// Worth emitting, and it is the whole reason a scanner is worth running
+/// across a band: an unknown device is exactly what should be surfaced.
+/// Silence would make the receiver useless for the case it should be best at,
+/// and the inferred bits are where reverse engineering starts.
+pub fn unmatched_event(
+    pkg: &common::Package,
+    center: common::Hz,
+    modulation: &'static str,
+) -> Decoded {
+    let at = pkg.start_sample as f64;
+    let ev = match decode::analyze(pkg) {
+        Some(a) => Decoded::bytes("unknown", center, at, a.bits.as_bytes().to_vec())
+            .with_text(format!("unknown: {}", a.summary()))
+            .with_detail(a.summary()),
+        // Too short or too irregular to read. Still worth a line: it says
+        // something was there, which is the difference between a quiet band
+        // and a misconfigured chain.
+        None => Decoded::bytes("unknown", center, at, Vec::new())
+            .with_text("unknown: unreadable burst")
+            .with_detail(format!(
+                "{} pulses, {:.1} ms, no coding inferred",
+                pkg.pulses.len(),
+                pkg.duration_us() as f64 / 1000.0,
+            )),
+    };
+    ev.with_modulation(modulation).with_level(pkg.rssi_dbfs, pkg.snr_db)
+}
+
 /// Run protocols against pulse packages and emit decodes as events.
 pub struct ProtocolDecodeNode {
     protocols: Protocols,
@@ -452,25 +502,7 @@ impl ProtocolDecodeNode {
             return;
         }
         let center = c.inputs[0].spec.center;
-        let at = pkg.start_sample as f64;
-        let ev = match decode::analyze(pkg) {
-            Some(a) => Decoded::bytes("unknown", center, at, a.bits.as_bytes().to_vec())
-                .with_text(format!("unknown: {}", a.summary()))
-                .with_detail(a.summary()),
-            // Too short or too irregular to read. Still worth a line: it says
-            // something was there, which is the difference between a quiet
-            // band and a misconfigured chain.
-            None => Decoded::bytes("unknown", center, at, Vec::new())
-                .with_text("unknown: unreadable burst")
-                .with_detail(format!(
-                    "{} pulses, {:.1} ms, no coding inferred",
-                    pkg.pulses.len(),
-                    pkg.duration_us() as f64 / 1000.0,
-                )),
-        };
-        c.emit(Event::Decoded(
-            ev.with_modulation(self.modulation).with_level(pkg.rssi_dbfs, pkg.snr_db),
-        ));
+        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation)));
     }
 
     pub fn all() -> Self {
@@ -505,22 +537,13 @@ impl Simple for ProtocolDecodeNode {
                     Ok(report) => {
                         matched = true;
                         out.extend_from_slice(&report.raw);
-                        c.emit(Event::Decoded(
-                            Decoded::bytes(
-                                report.model,
-                                c.inputs[0].spec.center,
-                                pkg.start_sample as f64,
-                                report.raw.clone(),
-                            )
-                            .with_text(report.to_string())
-                            .with_detail(report.fields_line())
-                            .with_fields(
-                                report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                            )
-                            .with_modulation(self.modulation)
-                            .with_level(pkg.rssi_dbfs, pkg.snr_db)
-                            .with_crc(report.crc_valid),
-                        ));
+                        let center = c.inputs[0].spec.center;
+                        c.emit(Event::Decoded(decoded_event(
+                            &report,
+                            pkg,
+                            center,
+                            self.modulation,
+                        )));
                         if !self.report_all {
                             break;
                         }
