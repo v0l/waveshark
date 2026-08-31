@@ -87,9 +87,9 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 |---|---|---|---|---|---|---|
 | Fine Offset WH1080 family | 433.92 MHz | OOK PWM 544/1524 us | 31 kHz | done | table | CRC8, matches rtl_433 25.02 field for field |
 | PT2262 / EV1527 / HS1527 fixed code | 315/433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Garage doors, doorbells, cheap sensors. The most common thing on 433. No integrity check at all, so a burst is only claimed when it is exactly one frame long |
-| Nice Flo, CAME, Holtek, Ansonic, Linear | 433.92 MHz | OOK PWM | 31 kHz | table | table | Flipper's fixed-code gate remotes, one table each |
+| Princeton, Holtek, CAME 12/24, Ansonic, Bett, Nice Flo, Linear, Holtek HT12x, Linear Delta3 | 315/433.92 MHz | OOK PWM | 31 kHz | done | table | Flipper's fixed-code gate remotes, ported from Momentum-Firmware. No checksum, so a frame is only claimed when it repeats or the package is plainly one frame, and degenerate all-0/all-1 frames are refused |
 | Chamberlain / Security+ 1.0 and 2.0 | 310/315/390 MHz | OOK PWM | 31 kHz | table | table | Rolling code: readable, not cloneable |
-| KeeLoq, FAAC SLH, Somfy RTS, Star Line | 433.42/433.92 MHz | OOK PWM/Manchester | 31 kHz | table | table | Frames read fine; the payload is encrypted, so a replay is all a transmitter can do with one |
+| KeeLoq, FAAC SLH, Somfy RTS, Star Line | 433.42/433.92 MHz | OOK PWM/Manchester | 31 kHz | table | table | Frames read fine; the payload is encrypted, so a replay is all a transmitter can do with one. Manchester: the slicer's Manchester is untested and there are no captures, so these wait on both before being ported rather than shipping an unverifiable decoder |
 | Acurite 609TXC, 592TXR tower | 433.92 MHz | OOK PPM/PWM | 31 kHz | synthetic | table | Checksum, and per-byte parity on the tower family |
 | LaCrosse TX141TH-Bv2 | 433.92 MHz | OOK PWM | 31 kHz | synthetic | table | LFSR digest, not a CRC |
 | LaCrosse TX29-IT, TX35DTH-IT | 868.24 MHz | FSK NRZ 55/105 us | 125 kHz | synthetic | table | Sync word 0x2dd4, CRC8, BCD temperature |
