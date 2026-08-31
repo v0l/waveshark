@@ -161,6 +161,7 @@ impl Protocols {
         p.add(Box::new(came24_bit()));
         p.add(Box::new(NiceFlo));
         p.add(Box::new(Linear));
+        p.add(Box::new(LinearDelta3));
         p
     }
 

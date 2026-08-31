@@ -24,6 +24,7 @@ mod came;
 mod holtek;
 mod holtek_ht12x;
 mod linear;
+mod linear_delta3;
 mod nice_flo;
 mod princeton;
 
@@ -33,5 +34,6 @@ pub use came::{came12_bit, came24_bit};
 pub use holtek::Holtek;
 pub use holtek_ht12x::HoltekHt12x;
 pub use linear::Linear;
+pub use linear_delta3::LinearDelta3;
 pub use nice_flo::NiceFlo;
 pub use princeton::Princeton;

@@ -9,7 +9,7 @@
 
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::protocols::keyfob::shared::{find_and_parse, pwm};
+use crate::protocols::keyfob::shared::{find_and_parse, plausible, pwm};
 use crate::slicer::Timing;
 
 pub struct Linear;
@@ -28,7 +28,7 @@ impl Protocol for Linear {
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         find_and_parse(bits, FRAME_BITS, true, |b| {
             let data = ((b[0] as u16) << 2) | (b[1] as u16 >> 6);
-            if data == 0 {
+            if !plausible(data as u64, FRAME_BITS as u32) {
                 return None;
             }
             // The collected bits are inverted relative to the printed key.

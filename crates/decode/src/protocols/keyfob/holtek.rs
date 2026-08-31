@@ -18,7 +18,7 @@
 
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::protocols::keyfob::shared::{find_and_parse, pwm, reverse_key};
+use crate::protocols::keyfob::shared::{find_and_parse, plausible, pwm, reverse_key};
 use crate::slicer::Timing;
 
 pub struct Holtek;
@@ -43,7 +43,7 @@ impl Protocol for Holtek {
                 | (b[2] as u64) << 16
                 | (b[3] as u64) << 8
                 | b[4] as u64;
-            if data & HEADER_MASK != HEADER {
+            if data & HEADER_MASK != HEADER || !plausible(data, FRAME_BITS as u32) {
                 return None;
             }
             // Serial is the 20 bits under the header, sent LSB first.

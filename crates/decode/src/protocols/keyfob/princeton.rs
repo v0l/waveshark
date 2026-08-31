@@ -13,7 +13,7 @@
 
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::protocols::keyfob::shared::{find_and_parse, pwm};
+use crate::protocols::keyfob::shared::{find_and_parse, plausible, pwm};
 use crate::slicer::Timing;
 
 /// A Princeton 24-bit fixed-code remote.
@@ -34,7 +34,7 @@ impl Protocol for Princeton {
         find_and_parse(bits, FRAME_BITS, true, |b| {
             // 24-bit code, MSB first, short-mark-0 on the air.
             let code = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
-            if code == 0 {
+            if !plausible(code as u64, FRAME_BITS as u32) {
                 return None;
             }
             let (serial, btn) = match code & 0xff {
