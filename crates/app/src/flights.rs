@@ -83,11 +83,14 @@ impl Flights {
         self.reference = Some((lat, lon));
     }
 
-    /// Aircraft heard recently, most recently heard first.
+    /// Aircraft heard recently, in the order they were first heard.
+    ///
+    /// Not by how recently each was heard: an aircraft sends several frames a
+    /// second and the order of the last few changes constantly, so a list
+    /// sorted that way reshuffles faster than it can be read. First heard is
+    /// a row that stays where it was put until the aircraft is forgotten.
     pub fn active(&self, now: std::time::Instant) -> Vec<&Aircraft> {
-        let mut v: Vec<&Aircraft> = self.seen.iter().filter(|a| a.age(now) < FORGET).collect();
-        v.sort_by_key(|a| std::cmp::Reverse(a.last));
-        v
+        self.seen.iter().filter(|a| a.age(now) < FORGET).collect()
     }
 
     /// Fold one Mode S frame in.
