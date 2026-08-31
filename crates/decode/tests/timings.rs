@@ -13,7 +13,7 @@ use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
 use decode::protocols::{
     Acurite609Txc, AcuriteTower, Bresser3Ch, Ev1527, FineOffsetWh51, GtWt02, GtWt03, LacrosseIt,
-    LacrosseTx141thBv2, NexusTh, OregonV3, Rubicson, X10Rf,
+    LacrosseTx141thBv2, NexusTh, OregonV3, Rubicson, SomfyRts, X10Rf,
 };
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -242,7 +242,9 @@ fn nrz(bits: &[bool], bit_us: u32) -> Package {
     let mut pulses: Vec<(u32, u32)> = Vec::new();
     let mut i = 0;
     while i < bits.len() {
-        let run = |from: usize, want: bool| bits[from..].iter().take_while(|b| **b == want).count();
+        let run = |from: usize, want: bool| {
+            bits[from..].iter().take_while(|b| **b == want).count()
+        };
         if !bits[i] {
             let n = run(i, false) as u32;
             match pulses.last_mut() {
@@ -348,6 +350,68 @@ fn an_x10_press_decodes_from_its_timings() {
 }
 
 #[test]
+fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
+    // Sync word then 56 Manchester bits at a 604 us half symbol. The frame is
+    // scrambled by XOR with the previous byte and closed by a nibble checksum.
+    const HALF: u32 = 604;
+    let (seed, control, counter, address) = (0x5bu8, 2u8, 0x01feu16, 0x123456u32);
+    let mut f = [
+        seed,
+        control << 4,
+        (counter >> 8) as u8,
+        counter as u8,
+        address as u8,
+        (address >> 8) as u8,
+        (address >> 16) as u8,
+    ];
+    let sum = f
+        .iter()
+        .map(|&x| (x ^ (x >> 4)) & 0x0f)
+        .fold(0, |a, b| a ^ b);
+    f[1] = (control << 4) | sum;
+    for i in 1..f.len() {
+        f[i] ^= f[i - 1];
+    }
+
+    // Half-symbol levels: the sync, then IEEE Manchester over the 56 bits.
+    let sync = [0xf0u8, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00];
+    let mut levels: Vec<bool> = (0..49)
+        .map(|i| sync[i / 8] & (0x80 >> (i % 8)) != 0)
+        .collect();
+    for b in f {
+        for i in 0..8 {
+            let bit = b & (0x80 >> i) != 0;
+            levels.push(!bit);
+            levels.push(bit);
+        }
+    }
+
+    let mut pulses: Vec<(u32, u32)> = Vec::new();
+    let mut i = 0;
+    while i < levels.len() {
+        let ones = levels[i..].iter().take_while(|v| **v).count();
+        i += ones;
+        let zeros = levels[i..].iter().take_while(|v| !**v).count();
+        i += zeros;
+        if ones > 0 {
+            pulses.push((ones as u32 * HALF, zeros as u32 * HALF));
+        }
+    }
+    // The slicer treats the last gap as inter-package silence and drops it, so
+    // close the burst rather than lose the frame's final half symbol.
+    pulses.push((0, HALF));
+    let pkg = package(pulses);
+
+    let r = SomfyRts.decode_package(&pkg).expect("decode");
+    assert_eq!(r.model, "Somfy-RTS");
+    assert_eq!(r.get("id"), Some(&Value::Int(0x123456)));
+    assert_eq!(r.get("control"), Some(&Value::Text("Up".into())));
+    assert_eq!(r.get("counter"), Some(&Value::Int(0x01fe)));
+    assert_eq!(r.crc_valid, Some(true));
+    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+}
+
+#[test]
 fn noise_is_claimed_by_nothing() {
     // Pulses at widths no protocol uses. An empty result is the right answer,
     // and a decoder that invents one from this is worse than no decoder.
@@ -379,7 +443,11 @@ fn a_long_noisy_burst_does_not_manufacture_a_sensor() {
         let pulses: Vec<(u32, u32)> = (0..150)
             .map(|_| {
                 let short = rand() & 1 == 0;
-                if short { (208, 417) } else { (417, 208) }
+                if short {
+                    (208, 417)
+                } else {
+                    (417, 208)
+                }
             })
             .collect();
         let claimed = Protocols::all().decode_all(&package(pulses));

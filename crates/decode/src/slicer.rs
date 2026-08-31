@@ -163,29 +163,52 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
 }
 
 fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
+    let raw = slice_manchester_half(pkg, t)?;
+    Ok(manchester_decode(&raw, 0))
+}
+
+/// Slice a package into its raw half-symbol level stream: each bit is one
+/// half-symbol, mark as 1 and gap as 0, in the order they appear. This is the
+/// form rtl_433's OOK_PCM slicer hands to `bitbuffer_manchester_decode`.
+///
+/// Most Manchester protocols can pair straight from bit 0 and use
+/// [`slice`]`/`[`Coding::Manchester`]. A few (Somfy RTS) carry a sync word
+/// across the half-symbol stream whose length does not align the data with
+/// bit 0, so the decoder must find the frame in this raw stream and pair from
+/// an explicit offset with [`manchester_decode`].
+pub fn slice_manchester_half(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     if pkg.pulses.len() < 4 {
         return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
     }
     let half = t.short_us.max(1);
-    // Flatten the alternating mark/gap runs into a stream of half-symbol
-    // levels, then read a bit from each pair: a level transition means the
-    // second half carries the bit (bit 1 = low-then-high, bit 0 = the
-    // reverse). A same-level pair is not a Manchester symbol, so it is dropped
-    // rather than guessed.
-    let mut levels: Vec<bool> = Vec::new();
+    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
     for (i, p) in pkg.pulses.iter().enumerate() {
-        levels.extend(std::iter::repeat_n(true, manchester_halves(p.mark, half)));
+        b.extend(true, manchester_halves(p.mark, half));
         if i + 1 < pkg.pulses.len() {
-            levels.extend(std::iter::repeat_n(false, manchester_halves(p.gap, half)));
-        }
-    }
-    let mut b = BitBuffer::with_capacity(levels.len() / 2);
-    for pair in levels.chunks_exact(2) {
-        if pair[0] != pair[1] {
-            b.push(pair[1]);
+            b.extend(false, manchester_halves(p.gap, half));
         }
     }
     Ok(b)
+}
+
+/// Manchester-decode a half-symbol stream (`mark=1`, `gap=0`) starting at
+/// `start`, the rtl_433 `bitbuffer_manchester_decode` equivalent: read a bit
+/// from each pair, where a level transition means the second half carries the
+/// bit (bit 1 = low-then-high, bit 0 = the reverse). A same-level pair is not
+/// a Manchester symbol, so it is dropped rather than guessed.
+pub fn manchester_decode(raw: &BitBuffer, start: usize) -> BitBuffer {
+    let mut out = BitBuffer::with_capacity(raw.len() / 2);
+    let mut i = start;
+    while i + 1 < raw.len() {
+        let (a, b) = (raw.get(i), raw.get(i + 1));
+        if let (Some(a), Some(second)) = (a, b) {
+            if a != second {
+                out.push(second);
+            }
+        }
+        i += 2;
+    }
+    out
 }
 
 /// Number of half-symbols a mark or gap spans. A run narrower than half a
