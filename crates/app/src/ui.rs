@@ -119,6 +119,11 @@ pub struct App {
     feeds: Vec<nodes::FeedSpec>,
     /// The feed being typed into the settings modal.
     feed_host: String,
+    /// Where the packet log writes, as typed, and the size limit in
+    /// megabytes per day, or `None` for no limit.
+    log_dir_edit: String,
+    log_dir: Option<std::path::PathBuf>,
+    log_cap_mb: Option<u64>,
     feed_format: nodes::FeedFormat,
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
@@ -207,6 +212,18 @@ const DECODE_LOG_MAX: usize = 500;
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
 /// screen, which is about what a rooftop antenna hears.
 const DEFAULT_MAP_ZOOM: f64 = 8.0;
+
+/// Bytes, in whatever unit keeps the number readable.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [(&str, u64); 4] =
+        [("GB", 1 << 30), ("MB", 1 << 20), ("kB", 1 << 10), ("B", 1)];
+    for (name, size) in UNITS {
+        if n >= size {
+            return format!("{:.1} {name}", n as f64 / size as f64);
+        }
+    }
+    "0 B".into()
+}
 
 /// `host` or `host:port`, with the format's usual port when none is given.
 fn parse_feed(text: &str, format: nodes::FeedFormat) -> Option<nodes::FeedSpec> {
@@ -345,6 +362,9 @@ impl Default for App {
             feeds: Vec::new(),
             feed_host: String::new(),
             feed_format: nodes::FeedFormat::default(),
+            log_dir_edit: String::new(),
+            log_dir: None,
+            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
@@ -387,12 +407,20 @@ impl App {
             feeds: s.feeds.clone(),
             feed_host: String::new(),
             feed_format: nodes::FeedFormat::default(),
+            log_dir_edit: String::new(),
+            log_dir: None,
+            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
             station_edit: None,
             volume: s.volume,
             saved: s.clone(),
             pending_radio: Some(s),
             ..Default::default()
         };
+        // The settings show where the log is going, so they start from where
+        // it is actually going.
+        app.log_dir = app.packet_log.clone();
+        app.log_dir_edit =
+            app.log_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
         app.connect(&cc.egui_ctx);
         app
     }
@@ -1305,20 +1333,103 @@ impl App {
     /// reach the packet list, the log and the flight list exactly like the
     /// ones this receiver demodulated itself.
     fn packet_log_settings(&mut self, ui: &mut egui::Ui) {
-        row(ui, "writing to", |ui| match &self.packet_log {
-            Some(d) => {
-                ui.label(value(d.display().to_string()).size(11.0));
+        let (logged, bytes, full) = match &self.radio {
+            Some(r) => {
+                use std::sync::atomic::Ordering;
+                (
+                    r.status.logged.load(Ordering::Relaxed),
+                    r.status.log_bytes.load(Ordering::Relaxed),
+                    r.status.log_full.load(Ordering::Relaxed),
+                )
             }
-            None => {
-                ui.label(legend("nowhere, this session only"));
+            None => (0, 0, false),
+        };
+
+        // The log is on by default and stays on: the transmission worth
+        // having is always the one before somebody thought to press record.
+        // What is settable is where it goes and how large it may get.
+        let mut on = self.packet_log.is_some();
+        if ui.checkbox(&mut on, "Write every packet to disk").changed() {
+            let dir = if on {
+                self.log_dir
+                    .clone()
+                    .or_else(crate::packetlog::PacketLog::default_dir)
+            } else {
+                None
+            };
+            self.packet_log = dir.clone();
+            self.send(Cmd::PacketLog(dir));
+        }
+        hint(
+            ui,
+            "Timings and frames as the demodulator produced them, not decodes. \
+             A day per file, replayable with --replay.",
+        );
+        ui.add_space(8.0);
+
+        row(ui, "directory", |ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.log_dir_edit)
+                    .desired_width(240.0)
+                    .hint_text("where the files go"),
+            );
+            let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if typed || ui.small_button("SET").clicked() {
+                let dir = std::path::PathBuf::from(self.log_dir_edit.trim());
+                if !self.log_dir_edit.trim().is_empty() {
+                    self.log_dir = Some(dir.clone());
+                    self.packet_log = Some(dir.clone());
+                    self.send(Cmd::PacketLog(Some(dir)));
+                }
             }
         });
-        let logged = self
-            .radio
-            .as_ref()
-            .map(|r| r.status.logged.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        hint(ui, &format!("{logged} packets appended since the receiver started"));
+
+        row(ui, "size limit", |ui| {
+            let mut cap = self.log_cap_mb;
+            egui::ComboBox::from_id_salt("log_cap")
+                .selected_text(match cap {
+                    Some(mb) => format!("{mb} MB per day"),
+                    None => "no limit".into(),
+                })
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for opt in [Some(128u64), Some(512), Some(2048), Some(8192), None] {
+                        let label = match opt {
+                            Some(mb) => format!("{mb} MB per day"),
+                            None => "no limit".into(),
+                        };
+                        ui.selectable_value(&mut cap, opt, label);
+                    }
+                });
+            if cap != self.log_cap_mb {
+                self.log_cap_mb = cap;
+                self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
+            }
+        });
+        hint(
+            ui,
+            "A guard against a runaway, not a budget. 1090 MHz with a feed \
+             attached writes a few hundred megabytes an hour; a quiet ISM band \
+             writes a few megabytes.",
+        );
+        ui.add_space(10.0);
+
+        row(ui, "today", |ui| {
+            ui.label(value(format!("{} in {logged} packets", human_bytes(bytes))).size(11.0));
+        });
+        if full {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "The log has stopped: the day's file reached the limit. \
+                         Raise it here to start again.",
+                    )
+                    .small()
+                    .color(theme::FAULT),
+                )
+                .wrap(),
+            );
+        }
 
         ui.add_space(12.0);
         ui.separator();
@@ -2455,15 +2566,37 @@ impl App {
             // An aircraft heard a minute ago is drawn, but faintly: it is
             // where it was, not where it is.
             let fade = 1.0 - (a.age(now).as_secs_f32() / 60.0).clamp(0.0, 0.75);
+            // Drawn in segments, brightening towards the aircraft: a line of
+            // one colour says nothing about which end of it is now, and over
+            // map tiles a thin one is lost in the roads.
             if a.trail.len() > 1 {
                 let pts: Vec<Pos2> = a.trail.iter().map(|(la, lo)| to_screen(*la, *lo)).collect();
-                clip.add(egui::Shape::line(
-                    pts,
-                    Stroke::new(1.5, theme::TRACE.gamma_multiply(0.5 * fade)),
-                ));
+                let n = pts.len() as f32;
+                for (k, seg) in pts.windows(2).enumerate() {
+                    let along = (k as f32 + 1.0) / n;
+                    clip.line_segment(
+                        [seg[0], seg[1]],
+                        Stroke::new(
+                            2.5,
+                            theme::TRACE.gamma_multiply((0.25 + 0.65 * along) * fade),
+                        ),
+                    );
+                }
             }
             let at = to_screen(lat, lon);
-            Self::aircraft_mark(&clip, at, a.track_deg, theme::TRACE.gamma_multiply(fade));
+            // An unconfirmed position came from one frame read against the
+            // receiver, which is right for anything in ordinary range and a
+            // whole zone out beyond it. Drawn hollow so it does not claim
+            // more than it knows.
+            if a.confirmed {
+                Self::aircraft_mark(&clip, at, a.track_deg, theme::TRACE.gamma_multiply(fade));
+            } else {
+                clip.circle_stroke(
+                    at,
+                    3.5,
+                    Stroke::new(1.0, theme::TRACE.gamma_multiply(0.7 * fade)),
+                );
+            }
             let label = a.callsign.clone().unwrap_or_else(|| format!("{:06x}", a.icao));
             Self::map_label(&clip, Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
             if let Some(ft) = a.altitude_ft {
@@ -2811,7 +2944,7 @@ impl App {
                     self.decodes.clear();
                     self.selected = None;
                 }
-                if ui.button("FEEDS").clicked() {
+                if ui.button("SETTINGS").clicked() {
                     self.open = Some(Settings::PacketLog);
                 }
                 // Unknown bursts are the point of scanning a band, but on a

@@ -52,8 +52,9 @@ use std::path::PathBuf;
 use common::{Packet, PacketBody, Pulse};
 
 /// Stop appending when a day's file reaches this. A busy band writes a few
-/// megabytes an hour; this is a runaway guard, not a budget.
-const MAX_BYTES: u64 = 512 << 20;
+/// megabytes an hour and 1090 MHz writes rather more; this is a runaway
+/// guard, not a budget, and it can be raised or lifted in the settings.
+pub const DEFAULT_MAX_BYTES: u64 = 512 << 20;
 
 const MAGIC: &[u8; 6] = b"SRPKT\0";
 const VERSION: u16 = 1;
@@ -76,6 +77,8 @@ pub struct PacketLog {
     full: bool,
     /// Packets appended since the receiver started.
     written: u64,
+    /// Size at which a day's file stops growing, or `None` for no limit.
+    cap: Option<u64>,
 }
 
 impl PacketLog {
@@ -88,7 +91,19 @@ impl PacketLog {
     }
 
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, open: None, bytes: 0, full: false, written: 0 }
+        Self { dir, open: None, bytes: 0, full: false, written: 0, cap: Some(DEFAULT_MAX_BYTES) }
+    }
+
+    /// Change the runaway guard. `None` lifts it, which is what a receiver
+    /// left running on 1090 MHz for a week wants.
+    pub fn with_cap(mut self, cap: Option<u64>) -> Self {
+        self.cap = cap;
+        // Raising the cap on a log that stopped should start it again, or the
+        // setting would only take effect on the next restart.
+        if self.cap.is_none_or(|c| self.bytes < c) {
+            self.full = false;
+        }
+        self
     }
 
     /// Open or roll the day's file, returning false once logging has stopped.
@@ -138,13 +153,21 @@ impl PacketLog {
         let _ = w.flush();
         self.bytes += rec.len() as u64;
         self.written += 1;
-        if self.bytes >= MAX_BYTES {
+        if self.cap.is_some_and(|c| self.bytes >= c) {
             self.full = true;
         }
     }
 }
 
 impl nodes::PacketSink for PacketLog {
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    fn full(&self) -> bool {
+        self.full
+    }
+
     fn write(&mut self, p: &Packet) {
         let rec = match &p.body {
             PacketBody::Pulses(pulses) => {

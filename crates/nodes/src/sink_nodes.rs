@@ -241,6 +241,17 @@ pub trait PacketSink: Send + 'static {
     fn written(&self) -> u64 {
         0
     }
+
+    /// How large the sink has grown, and whether it has stopped accepting
+    /// anything. A log that quietly stopped writing is worse than one that
+    /// never started, so the interface has to be able to say which it is.
+    fn bytes(&self) -> u64 {
+        0
+    }
+
+    fn full(&self) -> bool {
+        false
+    }
 }
 
 /// The packet bus: where everything that produces packets meets everything
@@ -304,6 +315,15 @@ impl PacketBusNode {
     /// Packets written to the sink, or zero when there is none.
     pub fn written(&self) -> u64 {
         self.sink.as_ref().map(|s| s.written()).unwrap_or(0)
+    }
+
+    /// Size of what the sink has written, and whether it has given up.
+    pub fn sink_bytes(&self) -> u64 {
+        self.sink.as_ref().map(|s| s.bytes()).unwrap_or(0)
+    }
+
+    pub fn sink_full(&self) -> bool {
+        self.sink.as_ref().is_some_and(|s| s.full())
     }
 }
 

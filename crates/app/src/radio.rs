@@ -284,6 +284,9 @@ pub enum Cmd {
     /// log is a node in the graph: what it writes is what the demodulators
     /// produced, which never reaches the interface at all.
     PacketLog(Option<std::path::PathBuf>),
+    /// Size at which a day's packet log stops growing, or `None` to let it
+    /// grow until the disk says otherwise.
+    PacketLogCap(Option<u64>),
     /// Packet feeds from other receivers, as the complete set: the graph is
     /// rebuilt from a plan, so a change is the new list rather than an
     /// instruction to add or remove one.
@@ -638,6 +641,9 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub aircraft_list: parking_lot::Mutex<Vec<crate::flights::Aircraft>>,
+    /// Size of the day's log file, and whether it has stopped growing.
+    pub log_bytes: AtomicU64,
+    pub log_full: std::sync::atomic::AtomicBool,
     /// What each packet feed is doing, for the packet log settings.
     pub feeds: parking_lot::Mutex<Vec<crate::chain::FeedStatus>>,
     /// Whether the wideband Mode S path is the one running.
@@ -721,6 +727,8 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             aircraft_list: parking_lot::Mutex::new(Vec::new()),
+            log_bytes: AtomicU64::new(0),
+            log_full: std::sync::atomic::AtomicBool::new(false),
             feeds: parking_lot::Mutex::new(Vec::new()),
             modes_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
@@ -1175,6 +1183,7 @@ fn run(
                     rebuild = true;
                 }
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
+                Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::Feeds(feeds) => {
                     if feeds != plan.feeds {
                         plan.feeds = feeds;
@@ -1292,6 +1301,8 @@ fn run(
 
         status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
         status.logged.store(rx.logged(), Ordering::Relaxed);
+        status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
+        status.log_full.store(rx.log_full(), Ordering::Relaxed);
         let chans = rx.bank_channels();
         status.scan_channels.store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
         status

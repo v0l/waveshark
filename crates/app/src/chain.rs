@@ -163,6 +163,8 @@ pub struct Receiver {
     /// than an open file so that a rebuild has something to reopen when the
     /// bus itself had to be built again.
     log_dir: Option<PathBuf>,
+    /// Size at which a day's file stops growing, or `None` for no limit.
+    log_cap: Option<u64>,
     bus: Option<NodeId>,
     decode: Option<NodeId>,
     flights: Option<NodeId>,
@@ -245,6 +247,7 @@ impl Receiver {
             chans: Vec::new(),
             pending_record: None,
             log_dir: sinks.packet_log,
+            log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             bus: None,
             decode: None,
             flights: None,
@@ -552,11 +555,7 @@ impl Receiver {
                 .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
             {
                 if want != n.has_sink() {
-                    n.set_sink(
-                        self.log_dir
-                            .clone()
-                            .map(|d| Box::new(crate::packetlog::PacketLog::new(d)) as _),
-                    );
+                    n.set_sink(self.new_sink());
                 }
             }
         }
@@ -809,6 +808,30 @@ impl Receiver {
             .collect()
     }
 
+    /// Size at which a day's file stops growing. Changing it takes effect on
+    /// the file being written, so raising it restarts a log that stopped.
+    pub fn set_log_cap(&mut self, cap: Option<u64>) {
+        self.log_cap = cap;
+        let sink = self.new_sink();
+        if let Some(bus) = self.bus_mut() {
+            bus.set_sink(sink);
+        }
+    }
+
+    /// What the log has written, and whether it has given up.
+    pub fn log_bytes(&self) -> u64 {
+        self.bus
+            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+            .map(|b| b.sink_bytes())
+            .unwrap_or(0)
+    }
+
+    pub fn log_full(&self) -> bool {
+        self.bus
+            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+            .is_some_and(|b| b.sink_full())
+    }
+
     pub fn set_packet_log(&mut self, dir: Option<PathBuf>) {
         self.log_dir = dir;
         let sink = self.new_sink();
@@ -818,9 +841,11 @@ impl Receiver {
     }
 
     fn new_sink(&self) -> Option<Box<dyn nodes::PacketSink>> {
-        self.log_dir
-            .clone()
-            .map(|d| Box::new(crate::packetlog::PacketLog::new(d)) as Box<dyn nodes::PacketSink>)
+        let cap = self.log_cap;
+        self.log_dir.clone().map(|d| {
+            Box::new(crate::packetlog::PacketLog::new(d).with_cap(cap))
+                as Box<dyn nodes::PacketSink>
+        })
     }
 
     fn bus_mut(&mut self) -> Option<&mut nodes::PacketBusNode> {

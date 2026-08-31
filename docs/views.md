@@ -121,12 +121,26 @@ hundred lines against the PNG decoder the app already had. Tiles are cached
 under `$XDG_CACHE_HOME/super-radio/tiles`, fetched on one thread, and a
 failure is said out loud on the map rather than left looking like empty sky.
 
+A position drawn hollow came from a single frame read against the station
+position, which is right for anything in ordinary range and a whole latitude
+zone out beyond about 180 nm. It is shown because it is usually right and it
+appears immediately, but it never joins a trail and is never used to resolve
+the next frame. A solid mark has been confirmed by a pair of frames, which
+needs no reference and so cannot inherit anyone's mistake.
+
 Zoom is continuous and anchored to the pointer; the tile level is only where
 the pictures come from. Range rings are drawn around the station, not around
 the middle of the window, because a ring says how far a thing is from the
 antenna and that does not change when the map is dragged. The station is set
 by right-clicking the map or typing coordinates above it, and is remembered in
 the session file.
+
+The packet log settings, on the `SETTINGS` button in the packet list, control
+whether packets are written at all, where they go, and the size at which a
+day's file stops growing. The limit is a runaway guard rather than a budget:
+1090 MHz with a feed attached writes a few hundred megabytes an hour, a quiet
+ISM band a few. A log that has stopped because it hit the limit says so, and
+raising the limit starts it again without a restart.
 
 ### Feeds
 

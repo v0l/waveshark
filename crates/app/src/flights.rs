@@ -22,6 +22,11 @@ const FORGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// place: an aircraft at 500 knots moves a mile in seven seconds.
 const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a position stays usable as the reference for the next frame. An
+/// aircraft cannot leave the zone it was in within this, so the nearest
+/// answer is still the right one.
+const REFERENCE_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Points kept per aircraft. At a point every few seconds this is the last
 /// several minutes of flight, which at 500 knots is a long enough line to
 /// read a turn from.
@@ -37,6 +42,22 @@ pub struct Aircraft {
     pub vertical_rate_fpm: Option<i32>,
     /// Resolved position, once there is enough to resolve one.
     pub position: Option<(f64, f64)>,
+    /// Whether that position came from a pair of frames, which needs no
+    /// reference and can be wrong about nothing, rather than from one frame
+    /// read against the receiver's own position.
+    ///
+    /// The difference matters more than it looks. A single frame places an
+    /// aircraft within one 360 nm latitude zone, and the decoder returns the
+    /// answer nearest the receiver. For an aircraft further than half a zone
+    /// away that answer is a whole zone out, and it looks perfectly ordinary:
+    /// it is near the receiver by construction, so no distance check can
+    /// catch it. An unconfirmed position is shown, because it is right for
+    /// anything in normal range, but it is never used as a reference and
+    /// never joins a trail.
+    pub confirmed: bool,
+    /// When `position` was established, which decides whether it can still
+    /// be used to resolve the next frame.
+    pos_at: Option<std::time::Instant>,
     /// Where it has been since it was first heard, oldest first.
     ///
     /// A map without trails is a scatter of dots that says nothing about
@@ -61,6 +82,8 @@ impl Aircraft {
             track_deg: None,
             vertical_rate_fpm: None,
             position: None,
+            confirmed: false,
+            pos_at: None,
             trail: Vec::new(),
             messages: 0,
             last: at,
@@ -71,6 +94,32 @@ impl Aircraft {
 
     pub fn age(&self, now: std::time::Instant) -> std::time::Duration {
         now.saturating_duration_since(self.last)
+    }
+
+    /// Move the aircraft, and record where it has been.
+    ///
+    /// A position that contradicts the last one by more than an aircraft can
+    /// fly discards the trail rather than drawing a line to it: one of the
+    /// two is wrong, the new one came from better evidence, and a line across
+    /// the map to a place the aircraft never was is worse than no line.
+    fn set_position(&mut self, p: (f64, f64), at: std::time::Instant, confirmed: bool) {
+        if !confirmed {
+            self.position = Some(p);
+            self.confirmed = false;
+            return;
+        }
+        if let (Some(old), Some(t)) = (self.position, self.pos_at) {
+            let seconds = at.saturating_duration_since(t).as_secs_f64();
+            // 600 knots with ten miles of slack, which no airliner beats and
+            // no CPR zone error fits inside.
+            if nm_between(old, p) > 600.0 * seconds / 3600.0 + 10.0 {
+                self.trail.clear();
+            }
+        }
+        self.position = Some(p);
+        self.confirmed = true;
+        self.pos_at = Some(at);
+        self.push_trail();
     }
 
     /// Record the current position, if it moved far enough to be worth a
@@ -186,21 +235,48 @@ impl Flights {
             a.even = Some((cpr, at));
         }
 
-        // A known position, or the receiver's own, resolves a single frame.
-        // Otherwise it takes one of each parity, close enough together in time
-        // to be the same place.
-        if let Some(reference) = a.position.or(reference) {
-            a.position = Some(adsb::cpr_local(reference, cpr, odd));
-            a.push_trail();
+        // A position already established, and recent enough that the aircraft
+        // cannot have left the zone it was in, resolves this frame exactly.
+        // This is the smooth path: one frame, one instant, no blending, and
+        // it cannot inherit a mistake because only a pair can confirm a
+        // position in the first place.
+        let own = a.position.filter(|_| {
+            a.confirmed && a.pos_at.is_some_and(|t| at.saturating_duration_since(t) < REFERENCE_AGE)
+        });
+        if let Some(seed) = own {
+            a.set_position(adsb::cpr_local(seed, cpr, odd), at, true);
             return;
         }
+
+        // Otherwise a matching pair, which needs no reference at all. Second
+        // rather than first because its two halves are up to ten seconds
+        // apart and an airliner covers a mile and a half in that: preferring
+        // it would make every fix wobble between where the aircraft is and
+        // where it was.
         if let (Some((even, te)), Some((odd_cpr, to))) = (a.even, a.odd) {
             if te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW {
-                a.position = adsb::cpr_global(even, odd_cpr, to > te);
-                a.push_trail();
+                if let Some(p) = adsb::cpr_global(even, odd_cpr, to > te) {
+                    a.set_position(p, at, true);
+                    return;
+                }
             }
         }
+
+        // Nothing to refine from, so the receiver's own position gives a
+        // provisional answer: right for anything in ordinary range, and
+        // replaced by the first pair that arrives.
+        if let Some(r) = reference {
+            a.set_position(adsb::cpr_local(r, cpr, odd), at, false);
+        }
     }
+}
+
+/// Rough distance in nautical miles. Flat earth, which over a few hundred
+/// miles is wrong by less than the thing it is being compared against.
+fn nm_between(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let dlat = (b.0 - a.0) * 60.0;
+    let dlon = (b.1 - a.1) * 60.0 * a.0.to_radians().cos();
+    (dlat * dlat + dlon * dlon).sqrt()
 }
 
 /// The tracker as a node, fed by the Mode S demodulator.
@@ -287,6 +363,86 @@ impl pipeline::node::Simple for FlightsNode {
 
 #[cfg(test)]
 mod tests {
+    /// Real frames, from an hour of traffic over Ireland and the Irish Sea,
+    /// with the times they arrived.
+    ///
+    /// A tracker can be wrong in ways no synthetic test finds: an aircraft
+    /// four hundred miles away, one heard again after twenty minutes, one at
+    /// a zone boundary. This is the evidence for the rules in `update`, and
+    /// what a change to them has to keep passing.
+    fn recorded_frames() -> Vec<(std::time::Duration, Vec<u8>)> {
+        let text = include_str!("../testdata/adsb_tracks.hex");
+        text.lines()
+            .filter_map(|l| {
+                let (ms, hex) = l.split_once(' ')?;
+                let bytes = (0..hex.len() / 2)
+                    .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                    .collect::<Option<Vec<u8>>>()?;
+                Some((std::time::Duration::from_millis(ms.parse().ok()?), bytes))
+            })
+            .collect()
+    }
+
+    /// The bug this was written for: a track that zigzagged between two
+    /// longitude zones, and one that jumped six degrees of latitude after a
+    /// gap. Both came from decoding a frame against a reference that was not
+    /// good enough, and both are visible as a step no aircraft could fly.
+    #[test]
+    fn no_track_moves_faster_than_an_aircraft_can_fly() {
+        let frames = recorded_frames();
+        assert!(frames.len() > 2000, "fixture did not load");
+        let mut fl = Flights::new();
+        // The receiver in Dublin, hearing aircraft over England and the
+        // Atlantic: far enough for a single frame to be ambiguous.
+        fl.set_reference(53.35, -6.26);
+        let t0 = std::time::Instant::now();
+        let mut last: std::collections::HashMap<u32, ((f64, f64), std::time::Instant)> =
+            Default::default();
+        let mut worst = 0.0f64;
+        for (offset, bytes) in &frames {
+            let Ok(fr) = adsb::parse(bytes) else { continue };
+            let at = t0 + *offset;
+            fl.update(&fr, at);
+            let Some(icao) = fr.icao else { continue };
+            let Some(a) = fl.active(at).iter().find(|a| a.icao == icao).cloned() else { continue };
+            let Some(p) = a.position.filter(|_| a.confirmed) else { continue };
+            if let Some((old, t)) = last.get(&icao) {
+                let hours = at.saturating_duration_since(*t).as_secs_f64() / 3600.0;
+                let nm = nm_between(*old, p);
+                // 600 knots, and five miles of slack: a track's first fix
+                // comes from a pair of frames up to ten seconds apart, so it
+                // lands between where the aircraft was and where it is, and
+                // the next fix steps to the truth. That is a mile or two. A
+                // zone error, which is what this test exists to catch, is
+                // three hundred and sixty.
+                let allowed = 600.0 * hours + 5.0;
+                worst = worst.max(nm - allowed);
+                assert!(
+                    nm <= allowed,
+                    "{icao:06x} moved {nm:.1} nm in {:.1} s, from {old:?} to {p:?}",
+                    hours * 3600.0
+                );
+            }
+            last.insert(icao, (p, at));
+        }
+        assert!(worst <= 0.0);
+    }
+
+    /// The trail is a claim about where an aircraft has been, so a fix that
+    /// contradicts the last one throws the claim away rather than drawing a
+    /// line across the map to it.
+    #[test]
+    fn a_contradicted_position_drops_the_trail_rather_than_drawing_to_it() {
+        let mut a = Aircraft::new(0x4ca748, std::time::Instant::now());
+        let t = std::time::Instant::now();
+        a.set_position((53.4, -6.3), t, true);
+        a.set_position((53.5, -6.4), t + std::time::Duration::from_secs(10), true);
+        assert_eq!(a.trail.len(), 2, "a plausible move extends the trail");
+        // Ten degrees east in a second: one longitude zone, and impossible.
+        a.set_position((53.5, 3.6), t + std::time::Duration::from_secs(11), true);
+        assert_eq!(a.trail, vec![(53.5, 3.6)], "the old track was not where it was");
+    }
+
     use super::*;
 
     /// One of the published worked-example frames, decoded the way the node
