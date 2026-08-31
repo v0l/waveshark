@@ -390,37 +390,35 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
     }
     let protocols = decode::Protocols::all();
     let (mut decoded, mut silent) = (0, 0);
-    for b in &bursts {
-        let secs = b.at_us / 1_000_000 % 86_400;
+    for p in &bursts {
+        let secs = p.at_us / 1_000_000 % 86_400;
         let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
-        if b.kind == packetlog::KIND_BYTES {
+        let mhz = p.center_hz as f64 / 1e6;
+        let Some(pkg) = p.package() else {
+            let bytes = p.frame().unwrap_or_default();
             println!(
-                "{when}  {:10.4} MHz  {:>4} B  {}",
-                b.center_hz as f64 / 1e6,
-                b.bytes.len(),
-                b.bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
+                "{when}  {mhz:10.4} MHz  {:>4} B  {}",
+                bytes.len(),
+                bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
             );
             decoded += 1;
             continue;
-        }
-        let pkg = b.package();
+        };
         let reports = protocols.decode_all(&pkg);
         if reports.is_empty() {
             silent += 1;
             println!(
-                "{when}  {:10.4} MHz  {:>4} pulses  {:>5.1} dB  unclaimed",
-                b.center_hz as f64 / 1e6,
+                "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  unclaimed",
                 pkg.pulses.len(),
-                b.snr_db,
+                p.snr_db,
             );
         }
         for r in reports {
             decoded += 1;
             println!(
-                "{when}  {:10.4} MHz  {:>4} pulses  {:>5.1} dB  {:<22} {}",
-                b.center_hz as f64 / 1e6,
+                "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  {:<22} {}",
                 pkg.pulses.len(),
-                b.snr_db,
+                p.snr_db,
                 r.model,
                 r.fields_line(),
             );

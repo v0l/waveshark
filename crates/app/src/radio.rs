@@ -1166,7 +1166,7 @@ fn run(
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
-                    rx.set_packet_log(dir.map(crate::packetlog::PacketLog::new));
+                    rx.set_packet_log(dir);
                     rebuild = true;
                 }
                 Cmd::Zoom(n) => {

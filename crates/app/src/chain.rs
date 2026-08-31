@@ -37,6 +37,7 @@ use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
 
 use crate::radio::{ChannelSpec, DecodeRecord, Demod};
 use crate::record::Recorder;
+use std::path::PathBuf;
 
 /// Channel width for the OOK bank. Below this the measurements show no further
 /// gain, because the sensor's own bandwidth and its carrier offset start to
@@ -70,7 +71,7 @@ enum Role {
     Bank(u32),
     /// A stage of one listening channel.
     Stage(u64, Stage),
-    PacketLog,
+    PacketBus,
     Flights,
 }
 
@@ -156,9 +157,11 @@ pub struct Receiver {
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
     pending_record: Option<RecordRing>,
-    /// A packet log waiting for the same.
-    pending_log: Option<crate::packetlog::PacketLog>,
-    log: Option<NodeId>,
+    /// Where the packet log is written, if it is. Held as a directory rather
+    /// than an open file so that a rebuild has something to reopen when the
+    /// bus itself had to be built again.
+    log_dir: Option<PathBuf>,
+    bus: Option<NodeId>,
     flights: Option<NodeId>,
     /// Where the receiver is, which resolves a position from a single frame.
     location: Option<(f64, f64)>,
@@ -200,7 +203,8 @@ pub struct Plan {
 #[derive(Default)]
 pub struct Sinks {
     pub recorder: Option<Recorder>,
-    pub packet_log: Option<crate::packetlog::PacketLog>,
+    /// Where to write the packet log, if it is being written at all.
+    pub packet_log: Option<PathBuf>,
 }
 
 impl Plan {
@@ -226,8 +230,8 @@ impl Receiver {
             banks: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
-            pending_log: sinks.packet_log,
-            log: None,
+            log_dir: sinks.packet_log,
+            bus: None,
             flights: None,
             location: None,
             logged: 0,
@@ -420,44 +424,51 @@ impl Receiver {
             chans.push(add_channel(&mut b, &mut roles, &mut pool, head, spec, plan.eff_rate()));
         }
 
-        // The flight tracker reads the same output the log does. A view of
-        // the traffic belongs on the graph next to the other consumers of it,
-        // not assembled in the interface out of whatever packets got there.
+        // Everything that produces packets meets here, and everything that
+        // consumes them hangs off the far side. One input per source, added
+        // after the sources so it runs once they have all had their say.
+        let mut bus = None;
+        let sources: Vec<Out> =
+            banks.iter().map(|(id, _)| id.o()).chain(modes.map(|m| m.o())).collect();
+        if !sources.is_empty() {
+            let id = match pool.remove(&Role::PacketBus) {
+                Some(mut part) => {
+                    // The set of front ends changes with the tuning, and the
+                    // bus is carried over rather than rebuilt so that it
+                    // keeps the file it is writing.
+                    if let Some(n) = part
+                        .node
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+                    {
+                        n.set_inputs(sources.len());
+                    }
+                    b.add_existing(part)
+                }
+                None => b.add_labeled(
+                    "Packet log",
+                    Box::new(nodes::PacketBusNode::new(sources.len())),
+                ),
+            };
+            for (k, src) in sources.iter().enumerate() {
+                b.connect(*src, id.input(k));
+            }
+            roles.push(Role::PacketBus);
+            bus = Some(id);
+        }
+
+        // The flight tracker is a consumer of the bus like any other, which
+        // is what stops every view being wired to the demodulator it happens
+        // to care about.
         let mut flights = None;
-        if let Some(m) = modes {
+        if let (Some(bus), true) = (bus, plan.modes) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
                 None => b.add_labeled("Flight list", Box::new(crate::flights::FlightsNode::new())),
             };
-            b.connect(m.o(), id.i());
+            b.connect(bus.o(), id.i());
             roles.push(Role::Flights);
             flights = Some(id);
-        }
-
-        // The log takes one input per source of bursts, because a receiver
-        // hears them from several places at once and they belong in one file
-        // in the order they arrived. Added last so it runs after everything
-        // that could produce one this block.
-        let mut log = None;
-        if plan.log {
-            let sources: Vec<Out> =
-                banks.iter().map(|(id, _)| id.o()).chain(modes.map(|m| m.o())).collect();
-            let sink = self.pending_log.take().or_else(|| {
-                self.log
-                    .and_then(|_| pool.remove(&Role::PacketLog))
-                    .and_then(take_log)
-            });
-            if let (Some(sink), false) = (sink, sources.is_empty()) {
-                let id = b.add_labeled(
-                    "Packet log",
-                    Box::new(nodes::PackageLogNode::new(sink, sources.len())),
-                );
-                for (k, src) in sources.iter().enumerate() {
-                    b.connect(*src, id.input(k));
-                }
-                roles.push(Role::PacketLog);
-                log = Some(id);
-            }
         }
 
         // Some output has to be nominated and none of them is the output: a
@@ -474,6 +485,27 @@ impl Receiver {
             c.audio_rate = spec.frame_rate();
             c.channels = spec.channels;
         }
+        // A bus that was carried over from the last graph still holds its
+        // open file; one that had to be built again needs it reopened. The
+        // file is opened in append mode, so reopening costs nothing but a
+        // syscall and never loses what is already in it.
+        if let Some(id) = bus {
+            let want = self.log_dir.is_some();
+            if let Some(n) = graph
+                .node_mut(id)
+                .and_then(|n| n.as_any_mut())
+                .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+            {
+                if want != n.has_sink() {
+                    n.set_sink(
+                        self.log_dir
+                            .clone()
+                            .map(|d| Box::new(crate::packetlog::PacketLog::new(d)) as _),
+                    );
+                }
+            }
+        }
+
         // Settings that live on a node rather than in its wiring, applied
         // once the graph they belong to exists. A reused node arrives holding
         // whatever it was last told, which is not necessarily what the plan
@@ -520,7 +552,7 @@ impl Receiver {
         self.roles = roles;
         self.spectrum = spectrum;
         self.record = record;
-        self.log = log;
+        self.bus = bus;
         self.flights = flights;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
@@ -726,10 +758,29 @@ impl Receiver {
         out
     }
 
-    /// Start or stop the packet log. Takes effect on the next rebuild, since
-    /// the log is a node and the graph's shape is fixed once built.
-    pub fn set_packet_log(&mut self, log: Option<crate::packetlog::PacketLog>) {
-        self.pending_log = log;
+    /// Point the log at a directory, or stop writing one.
+    ///
+    /// The bus stays either way: turning the log off should stop writing to
+    /// disk, not disconnect every view from the traffic.
+    pub fn set_packet_log(&mut self, dir: Option<PathBuf>) {
+        self.log_dir = dir;
+        let sink = self.new_sink();
+        if let Some(bus) = self.bus_mut() {
+            bus.set_sink(sink);
+        }
+    }
+
+    fn new_sink(&self) -> Option<Box<dyn nodes::PacketSink>> {
+        self.log_dir
+            .clone()
+            .map(|d| Box::new(crate::packetlog::PacketLog::new(d)) as Box<dyn nodes::PacketSink>)
+    }
+
+    fn bus_mut(&mut self) -> Option<&mut nodes::PacketBusNode> {
+        self.bus
+            .and_then(|id| self.graph.node_mut(id))
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
     }
 
     /// Aircraft heard recently, most recently heard first.
@@ -753,13 +804,13 @@ impl Receiver {
         }
     }
 
-    /// Bursts written to the log since the receiver started.
+    /// Packets written to the log since the receiver started.
     pub fn logged(&self) -> u64 {
         self.logged
             + self
-                .log
-                .and_then(|id| downcast::<nodes::PackageLogNode<crate::packetlog::PacketLog>>(&self.graph, id))
-                .map(|n| n.sink().logged())
+                .bus
+                .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+                .map(|n| n.written())
                 .unwrap_or(0)
     }
 
@@ -811,16 +862,6 @@ fn record(
 
 fn downcast<T: 'static>(g: &Graph, id: NodeId) -> Option<&T> {
     g.node(id).and_then(|n| n.as_any()).and_then(|a| a.downcast_ref::<T>())
-}
-
-/// Recover a packet log from a node lifted out of a graph, so a rebuild
-/// keeps writing the same file.
-fn take_log(part: NodePart) -> Option<crate::packetlog::PacketLog> {
-    part.node
-        .into_any()?
-        .downcast::<nodes::PackageLogNode<crate::packetlog::PacketLog>>()
-        .ok()
-        .map(|n| n.into_sink())
 }
 
 /// The recorder, as a node.
@@ -1146,17 +1187,68 @@ mod tests {
         let rx = Receiver::build(
             &p,
             Sinks {
-                packet_log: Some(crate::packetlog::PacketLog::new(d.clone())),
+                packet_log: Some(d.clone()),
                 ..Default::default()
             },
         )
         .unwrap();
         let topo = rx.topology();
-        let log = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a packet log");
-        assert_eq!(log.inputs.len(), 2, "both banks feed it");
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a packet bus");
+        assert_eq!(bus.inputs.len(), 2, "both banks feed it");
         // Every input carries detected bursts rather than decoded frames.
-        assert!(log.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Pulses));
+        assert!(bus.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Pulses));
+        // And what leaves it is one stream, whatever produced it.
+        assert_eq!(bus.outputs[0].1.kind, pipeline::PortKind::Packets);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_view_reads_the_bus_rather_than_the_demodulator() {
+        // The whole shape of it: sources feed the log, consumers hang off the
+        // far side. A view wired straight to a demodulator would have to be
+        // rebuilt for every new source, and would see nothing when the source
+        // it knew about was not running.
+        let mut p = plan(2_400_000.0, Hz::mhz(1090));
+        p.modes = true;
+        p.scan = false;
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        let flights = topo.nodes.iter().find(|n| n.label == "Flight list").expect("a tracker");
+        let from_bus = bus.outputs.iter().any(|(slot, _)| {
+            flights.inputs.iter().any(|(in_slot, _)| in_slot == slot)
+        });
+        assert!(from_bus, "the flight list is not fed by the bus");
+        assert_eq!(flights.inputs[0].1.kind, pipeline::PortKind::Packets);
+    }
+
+    #[test]
+    fn retuning_to_a_different_set_of_front_ends_rewires_the_bus() {
+        // 433 MHz has two channel banks, 1090 MHz has one Mode S
+        // demodulator. The bus is carried over so it keeps the file it is
+        // writing, and a node carried over still claiming two inputs makes a
+        // graph that cannot be built.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        p.center = Hz::mhz(1090);
+        p.scan = false;
+        p.modes = true;
+        rx.rebuild(&p).expect("a receiver that can retune onto 1090");
+        let topo = rx.topology();
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        assert_eq!(bus.inputs.len(), 1, "only Mode S produces packets here");
+    }
+
+    #[test]
+    fn the_bus_runs_without_a_file() {
+        // Turning the log off stops writing to disk; it must not disconnect
+        // every view from the traffic.
+        let mut p = plan(2_400_000.0, Hz::mhz(1090));
+        p.modes = true;
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
+        assert!(rx.topology().nodes.iter().any(|n| n.label == "Flight list"));
+        assert_eq!(rx.logged(), 0, "nothing was asked to be written");
     }
 
     #[test]
@@ -1170,7 +1262,7 @@ mod tests {
         let mut rx = Receiver::build(
             &p,
             Sinks {
-                packet_log: Some(crate::packetlog::PacketLog::new(d)),
+                packet_log: Some(d),
                 ..Default::default()
             },
         )
@@ -1194,7 +1286,7 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         let d = std::env::temp_dir().join(format!("sr-latelog-{}", std::process::id()));
-        rx.set_packet_log(Some(crate::packetlog::PacketLog::new(d)));
+        rx.set_packet_log(Some(d));
         p.log = true;
         rx.rebuild(&p).unwrap();
         assert!(

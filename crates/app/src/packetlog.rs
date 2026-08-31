@@ -49,7 +49,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use common::{Package, Pulse};
+use common::{Packet, PacketBody, Pulse};
 
 /// Stop appending when a day's file reaches this. A busy band writes a few
 /// megabytes an hour; this is a runaway guard, not a budget.
@@ -71,10 +71,11 @@ pub struct PacketLog {
     dir: PathBuf,
     /// The day currently open, as `YYYY-MM-DD`, and its writer.
     open: Option<(String, std::io::BufWriter<std::fs::File>)>,
-    written: u64,
+    /// Bytes in the day's file, against the runaway guard.
+    bytes: u64,
     full: bool,
-    /// Bursts appended since the receiver started.
-    logged: u64,
+    /// Packets appended since the receiver started.
+    written: u64,
 }
 
 impl PacketLog {
@@ -87,11 +88,7 @@ impl PacketLog {
     }
 
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, open: None, written: 0, full: false, logged: 0 }
-    }
-
-    pub fn logged(&self) -> u64 {
-        self.logged
+        Self { dir, open: None, bytes: 0, full: false, written: 0 }
     }
 
     /// Open or roll the day's file, returning false once logging has stopped.
@@ -116,13 +113,13 @@ impl PacketLog {
                 return None;
             };
             let mut w = std::io::BufWriter::new(f);
-            self.written = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
-            if fresh || self.written == 0 {
+            self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
+            if fresh || self.bytes == 0 {
                 if w.write_all(MAGIC).is_err() || w.write_all(&VERSION.to_le_bytes()).is_err() {
                     self.full = true;
                     return None;
                 }
-                self.written += MAGIC.len() as u64 + 2;
+                self.bytes += MAGIC.len() as u64 + 2;
             }
             self.open = Some((day, w));
         }
@@ -139,100 +136,56 @@ impl PacketLog {
         // usually killed rather than closed, and an unflushed buffer is the
         // bursts nobody has.
         let _ = w.flush();
-        self.written += rec.len() as u64;
-        self.logged += 1;
-        if self.written >= MAX_BYTES {
+        self.bytes += rec.len() as u64;
+        self.written += 1;
+        if self.bytes >= MAX_BYTES {
             self.full = true;
         }
     }
 }
 
-impl nodes::PackageSink for PacketLog {
-    fn pulses(&mut self, at_us: u64, bandwidth_hz: u32, p: &Package) {
-        // A burst longer than this is not a packet; the count is capped
-        // rather than the record refused, so whatever it was is still on
-        // record with its level and frequency.
-        let n = p.pulses.len().min(u16::MAX as usize);
-        let mut rec = Vec::with_capacity(4 + HEAD_LEN + n * 8);
-        put_head(
-            &mut rec,
-            KIND_PULSES,
-            n as u16,
-            n * 8,
-            at_us,
-            p.center_hz,
-            bandwidth_hz,
-            p.rssi_dbfs,
-            p.snr_db,
-        );
-        for pulse in &p.pulses[..n] {
-            rec.extend_from_slice(&pulse.mark.to_le_bytes());
-            rec.extend_from_slice(&pulse.gap.to_le_bytes());
-        }
-        self.append(at_us, &rec);
+impl nodes::PacketSink for PacketLog {
+    fn write(&mut self, p: &Packet) {
+        let rec = match &p.body {
+            PacketBody::Pulses(pulses) => {
+                // A burst longer than this is not a packet; the count is
+                // capped rather than the record refused, so whatever it was
+                // is still on record with its level and frequency.
+                let n = pulses.len().min(u16::MAX as usize);
+                let mut rec = Vec::with_capacity(4 + HEAD_LEN + n * 8);
+                put_head(&mut rec, KIND_PULSES, n as u16, n * 8, p);
+                for pulse in &pulses[..n] {
+                    rec.extend_from_slice(&pulse.mark.to_le_bytes());
+                    rec.extend_from_slice(&pulse.gap.to_le_bytes());
+                }
+                rec
+            }
+            PacketBody::Frame(bytes) => {
+                let n = bytes.len().min(u16::MAX as usize);
+                let mut rec = Vec::with_capacity(4 + HEAD_LEN + n);
+                put_head(&mut rec, KIND_BYTES, n as u16, n, p);
+                rec.extend_from_slice(&bytes[..n]);
+                rec
+            }
+        };
+        self.append(p.at_us, &rec);
     }
 
-    fn bytes(&mut self, at_us: u64, center_hz: u64, bytes: &[u8]) {
-        let n = bytes.len().min(u16::MAX as usize);
-        let mut rec = Vec::with_capacity(4 + HEAD_LEN + n);
-        put_head(&mut rec, KIND_BYTES, n as u16, n, at_us, center_hz, 0, f32::NAN, f32::NAN);
-        rec.extend_from_slice(&bytes[..n]);
-        self.append(at_us, &rec);
+    fn written(&self) -> u64 {
+        self.written
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn put_head(
-    out: &mut Vec<u8>,
-    kind: u8,
-    count: u16,
-    body_len: usize,
-    at_us: u64,
-    center_hz: u64,
-    bandwidth_hz: u32,
-    rssi_dbfs: f32,
-    snr_db: f32,
-) {
+fn put_head(out: &mut Vec<u8>, kind: u8, count: u16, body_len: usize, p: &Packet) {
     out.extend_from_slice(&((HEAD_LEN + body_len) as u32).to_le_bytes());
     out.push(kind);
     out.push(0);
     out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&at_us.to_le_bytes());
-    out.extend_from_slice(&center_hz.to_le_bytes());
-    out.extend_from_slice(&bandwidth_hz.to_le_bytes());
-    out.extend_from_slice(&rssi_dbfs.to_le_bytes());
-    out.extend_from_slice(&snr_db.to_le_bytes());
-}
-
-/// One record, as read back.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LoggedBurst {
-    pub kind: u8,
-    pub at_us: u64,
-    pub center_hz: u64,
-    pub bandwidth_hz: u32,
-    pub rssi_dbfs: f32,
-    pub snr_db: f32,
-    pub pulses: Vec<Pulse>,
-    pub bytes: Vec<u8>,
-}
-
-impl LoggedBurst {
-    /// The burst as a package again, ready to be handed to a decoder.
-    ///
-    /// This is the point of logging timings rather than conclusions: what
-    /// comes back off disk is what the front end produced, so a decoder can
-    /// be run over it exactly as it would have run at the time, including one
-    /// written years later.
-    pub fn package(&self) -> Package {
-        Package {
-            pulses: self.pulses.clone(),
-            snr_db: self.snr_db,
-            rssi_dbfs: self.rssi_dbfs,
-            start_sample: 0,
-            center_hz: self.center_hz,
-        }
-    }
+    out.extend_from_slice(&p.at_us.to_le_bytes());
+    out.extend_from_slice(&p.center_hz.to_le_bytes());
+    out.extend_from_slice(&p.bandwidth_hz.to_le_bytes());
+    out.extend_from_slice(&p.rssi_dbfs.to_le_bytes());
+    out.extend_from_slice(&p.snr_db.to_le_bytes());
 }
 
 /// Read a log back.
@@ -241,14 +194,14 @@ impl LoggedBurst {
 /// writer and is tested against it. A truncated final record, which is what a
 /// receiver killed mid-write leaves, ends the iteration rather than failing:
 /// every complete record before it is still good.
-pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<LoggedBurst>> {
+pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<Packet>> {
     let mut f = std::fs::File::open(path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     Ok(parse(&buf))
 }
 
-pub fn parse(buf: &[u8]) -> Vec<LoggedBurst> {
+pub fn parse(buf: &[u8]) -> Vec<Packet> {
     let mut out = Vec::new();
     if buf.len() < MAGIC.len() + 2 || &buf[..MAGIC.len()] != MAGIC {
         return out;
@@ -268,32 +221,31 @@ pub fn parse(buf: &[u8]) -> Vec<LoggedBurst> {
         let get32 = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
         let getf = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
         let body = &r[HEAD_LEN..];
-        let mut b = LoggedBurst {
-            kind,
+        let packet_body = match kind {
+            KIND_PULSES => {
+                let mut pulses = Vec::new();
+                for k in 0..count.min(body.len() / 8) {
+                    let o = k * 8;
+                    pulses.push(Pulse {
+                        mark: u32::from_le_bytes(body[o..o + 4].try_into().unwrap()),
+                        gap: u32::from_le_bytes(body[o + 4..o + 8].try_into().unwrap()),
+                    });
+                }
+                PacketBody::Pulses(pulses)
+            }
+            KIND_BYTES => PacketBody::Frame(body[..count.min(body.len())].to_vec()),
+            // An unknown kind is skipped by its length rather than guessed
+            // at, which is the whole reason the length comes first.
+            _ => continue,
+        };
+        out.push(Packet {
             at_us: get64(4),
             center_hz: get64(12),
             bandwidth_hz: get32(20),
             rssi_dbfs: getf(24),
             snr_db: getf(28),
-            pulses: Vec::new(),
-            bytes: Vec::new(),
-        };
-        match kind {
-            KIND_PULSES => {
-                for k in 0..count.min(body.len() / 8) {
-                    let o = k * 8;
-                    b.pulses.push(Pulse {
-                        mark: u32::from_le_bytes(body[o..o + 4].try_into().unwrap()),
-                        gap: u32::from_le_bytes(body[o + 4..o + 8].try_into().unwrap()),
-                    });
-                }
-            }
-            KIND_BYTES => b.bytes.extend_from_slice(&body[..count.min(body.len())]),
-            // An unknown kind is skipped by its length rather than guessed
-            // at, which is the whole reason the length comes first.
-            _ => {}
-        }
-        out.push(b);
+            body: packet_body,
+        });
     }
     out
 }
@@ -318,7 +270,7 @@ fn day_of(at_us: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes::PackageSink;
+    use nodes::PacketSink;
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("sr-pktlog-{name}-{}", std::process::id()));
@@ -326,17 +278,29 @@ mod tests {
         d
     }
 
-    fn burst(center: u64) -> Package {
-        Package {
-            pulses: vec![
+    fn burst(center: u64) -> Packet {
+        Packet {
+            at_us: AT,
+            center_hz: center,
+            bandwidth_hz: 31_250,
+            rssi_dbfs: -21.25,
+            snr_db: 18.5,
+            body: PacketBody::Pulses(vec![
                 Pulse { mark: 500, gap: 1500 },
                 Pulse { mark: 1500, gap: 500 },
                 Pulse { mark: 500, gap: 9000 },
-            ],
-            snr_db: 18.5,
-            rssi_dbfs: -21.25,
-            start_sample: 4096,
-            center_hz: center,
+            ]),
+        }
+    }
+
+    fn frame(at_us: u64, bytes: &[u8]) -> Packet {
+        Packet {
+            at_us,
+            center_hz: 1_090_000_000,
+            bandwidth_hz: 2_000_000,
+            rssi_dbfs: f32::NAN,
+            snr_db: f32::NAN,
+            body: PacketBody::Frame(bytes.to_vec()),
         }
     }
 
@@ -350,17 +314,14 @@ mod tests {
         let d = dir("roundtrip");
         let mut log = PacketLog::new(d.clone());
         let p = burst(433_920_000);
-        log.pulses(AT, 31_250, &p);
+        log.write(&p);
 
         let got = read(d.join("2026-08-31.srpkt")).unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].kind, KIND_PULSES);
-        assert_eq!(got[0].pulses, p.pulses);
-        assert_eq!(got[0].center_hz, 433_920_000);
-        assert_eq!(got[0].bandwidth_hz, 31_250);
-        assert_eq!(got[0].at_us, AT);
-        assert_eq!(got[0].rssi_dbfs, -21.25);
-        assert_eq!(got[0].snr_db, 18.5);
+        assert_eq!(got[0], p, "what came back is not what was heard");
+        // And it is a package again, ready for a decoder that did not exist
+        // when it was written.
+        assert_eq!(got[0].package().map(|p| p.pulses.len()), Some(3));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -370,13 +331,12 @@ mod tests {
         // is storing the demodulator's output just the same.
         let d = dir("bytes");
         let mut log = PacketLog::new(d.clone());
-        let frame = [0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3];
-        log.bytes(AT, 1_090_000_000, &frame);
+        let bytes = [0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3];
+        log.write(&frame(AT, &bytes));
 
         let got = read(d.join("2026-08-31.srpkt")).unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].kind, KIND_BYTES);
-        assert_eq!(got[0].bytes, frame);
+        assert_eq!(got[0].frame(), Some(&bytes[..]));
         assert_eq!(got[0].center_hz, 1_090_000_000);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -388,7 +348,7 @@ mod tests {
         let d = dir("torn");
         let mut log = PacketLog::new(d.clone());
         for _ in 0..3 {
-            log.pulses(AT, 31_250, &burst(868_300_000));
+            log.write(&burst(868_300_000));
         }
         let path = d.join("2026-08-31.srpkt");
         let mut raw = std::fs::read(&path).unwrap();
@@ -401,8 +361,10 @@ mod tests {
     fn the_day_rolls_over_into_a_second_file() {
         let d = dir("roll");
         let mut log = PacketLog::new(d.clone());
-        log.pulses(AT, 31_250, &burst(433_920_000));
-        log.pulses(AT + 86_400_000_000, 31_250, &burst(433_920_000));
+        log.write(&burst(433_920_000));
+        let mut tomorrow = burst(433_920_000);
+        tomorrow.at_us += 86_400_000_000;
+        log.write(&tomorrow);
         assert!(d.join("2026-08-31.srpkt").exists());
         assert!(d.join("2026-09-01.srpkt").exists());
         let _ = std::fs::remove_dir_all(&d);

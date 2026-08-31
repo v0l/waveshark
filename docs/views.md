@@ -111,6 +111,11 @@ view exists to force them:
    into a printed list, which is what would let a view be tested without a
    radio.
 
+The bus itself now exists as a node: every front end feeds `packet_bus`, it
+writes the packet log on the way through, and consumers attach to its output.
+The flight list is the first, and the on-screen packet list is the next one to
+move, since it still reads decoded events on a channel of its own.
+
 None of that is worth building before the second view exists. The point of
 writing it down is that the shape of the first view should not make any of it
 harder.

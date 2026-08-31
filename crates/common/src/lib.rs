@@ -16,6 +16,6 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
-pub use pulse::{Package, Pulse};
+pub use pulse::{Package, Packet, PacketBody, Pulse};
 pub use value::Value;
 pub use units::{Hz, Sps};

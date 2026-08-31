@@ -92,3 +92,60 @@ fn histogram(vals: impl Iterator<Item = u32>, tol_us: u32) -> Vec<(u32, usize)> 
     buckets.sort_by_key(|(c, _, _)| *c);
     buckets.into_iter().map(|(c, n, _)| (c, n)).collect()
 }
+
+/// One packet on the bus: what a demodulator produced, and where.
+///
+/// The common currency between everything that produces packets and
+/// everything that consumes them. A channel bank produces timings, a Mode S
+/// demodulator produces frames, and a log, a list, a map or a tracker take
+/// either without caring which front end was involved.
+///
+/// What is *not* here is a parse. A model name and a field map are
+/// conclusions, and a conclusion travelling in place of its evidence cannot
+/// be checked, corrected or re-decoded later.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Packet {
+    /// Wall clock when the block carrying it was processed, in microseconds
+    /// since the epoch.
+    pub at_us: u64,
+    /// Where it was received, in Hz: the channel's own centre in a bank.
+    pub center_hz: u64,
+    /// The width it was heard through. The same burst read through a 31 kHz
+    /// channel and a 125 kHz one is not the same recording.
+    pub bandwidth_hz: u32,
+    pub rssi_dbfs: f32,
+    pub snr_db: f32,
+    pub body: PacketBody,
+}
+
+/// What the demodulator actually produced.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PacketBody {
+    /// A burst, as mark and gap timings.
+    Pulses(Vec<Pulse>),
+    /// A whole frame from a demodulator that produces bytes.
+    Frame(Vec<u8>),
+}
+
+impl Packet {
+    /// The burst as a package again, ready to hand to a decoder.
+    pub fn package(&self) -> Option<Package> {
+        match &self.body {
+            PacketBody::Pulses(p) => Some(Package {
+                pulses: p.clone(),
+                snr_db: self.snr_db,
+                rssi_dbfs: self.rssi_dbfs,
+                start_sample: 0,
+                center_hz: self.center_hz,
+            }),
+            PacketBody::Frame(_) => None,
+        }
+    }
+
+    pub fn frame(&self) -> Option<&[u8]> {
+        match &self.body {
+            PacketBody::Frame(b) => Some(b),
+            PacketBody::Pulses(_) => None,
+        }
+    }
+}

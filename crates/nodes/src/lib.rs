@@ -19,7 +19,7 @@ pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
 pub use modes_nodes::ModeSNode;
 pub use bank_node::BankNode;
-pub use sink_nodes::{DcBlockNode, PackageLogNode, PackageSink, Ring, RingNode, SpectrumNode};
+pub use sink_nodes::{DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
     RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,

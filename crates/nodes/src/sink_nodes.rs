@@ -231,56 +231,79 @@ impl<T: Ring> Simple for RingNode<T> {
     }
 }
 
-/// Somewhere to put every burst a receiver hears.
+/// Somewhere to put every packet a receiver hears.
 ///
 /// A trait rather than a file, so `nodes` does not have to know where the
 /// data goes or what it is written as, which is an application's business.
-pub trait PackageSink: Send + 'static {
-    /// A burst as the front end detected it: mark and gap timings, level,
-    /// and the frequency and channel width it was heard through.
-    ///
-    /// The width matters on replay: the same burst read through a 31 kHz
-    /// channel and a 125 kHz one is not the same recording, and a timing that
-    /// looks marginal in one is clean in the other.
-    fn pulses(&mut self, at_us: u64, bandwidth_hz: u32, p: &common::Package);
-    /// A frame from a demodulator that produces bytes rather than timings,
-    /// such as Mode S. `center_hz` is the stream it came from.
-    fn bytes(&mut self, at_us: u64, center_hz: u64, bytes: &[u8]);
+pub trait PacketSink: Send + 'static {
+    fn write(&mut self, p: &common::Packet);
+    /// How many have been written, for a status line.
+    fn written(&self) -> u64 {
+        0
+    }
 }
 
-/// The tap that writes every burst away, wherever it came from.
+/// The packet bus: where everything that produces packets meets everything
+/// that consumes them.
 ///
-/// It has one input per source, because a receiver hears bursts from several
+/// It has one input per source, because a receiver hears packets from several
 /// places at once: the OOK bank, the FSK bank, and on 1090 MHz a demodulator
-/// that produces bytes instead of timings. Fanning them in here rather than
-/// keeping a log per source means one file holds everything that arrived, in
-/// the order it arrived.
+/// that produces frames rather than timings. They arrive in different shapes
+/// and leave in one, so a consumer never has to care which front end was
+/// involved.
 ///
-/// What is written is what the demodulator produced and nothing else. The
-/// parsed frame is deliberately not stored: it is a conclusion, and a
-/// conclusion recorded next to nothing else is impossible to check later.
-/// Timings can be decoded again by a better decoder next year; a field map
-/// cannot be un-decoded.
-pub struct PackageLogNode<S: PackageSink> {
-    sink: S,
+/// Consumers hang off its output rather than off the demodulators, and that
+/// is the point of it: a flight list, a packet list, a map and a chart all
+/// want the same stream, and attaching each of them to the demodulator it
+/// happens to care about would rebuild the same fan-out four times and make
+/// every one of them a special case.
+///
+/// What travels is what the demodulator produced and nothing else. The parsed
+/// frame is deliberately absent: a parse is a conclusion, and a conclusion
+/// travelling in place of its evidence cannot be checked later, corrected by
+/// a better decoder, or shown to have been wrong. Timings can be decoded
+/// again next year; a field map cannot be un-decoded.
+///
+/// The file is optional and the bus is not. Turning the log off should stop
+/// writing to disk, not disconnect every view from the traffic.
+pub struct PacketBusNode {
+    sink: Option<Box<dyn PacketSink>>,
     inputs: usize,
 }
 
-impl<S: PackageSink> PackageLogNode<S> {
-    pub fn new(sink: S, inputs: usize) -> Self {
-        Self { sink, inputs: inputs.max(1) }
+impl PacketBusNode {
+    pub fn new(inputs: usize) -> Self {
+        Self { sink: None, inputs: inputs.max(1) }
     }
 
-    pub fn sink(&self) -> &S {
-        &self.sink
+    pub fn with_sink(mut self, sink: Option<Box<dyn PacketSink>>) -> Self {
+        self.sink = sink;
+        self
     }
 
-    pub fn sink_mut(&mut self) -> &mut S {
-        &mut self.sink
+    pub fn set_sink(&mut self, sink: Option<Box<dyn PacketSink>>) {
+        self.sink = sink;
     }
 
-    pub fn into_sink(self) -> S {
-        self.sink
+    pub fn has_sink(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Change how many sources feed it.
+    ///
+    /// The count is fixed at construction because the graph asks a node how
+    /// many inputs it has before wiring it, and it changes whenever the set
+    /// of front ends does: tuning from 433 MHz to 1090 replaces two channel
+    /// banks with one Mode S demodulator. Without this the bus carried into
+    /// the new graph still claims the old count and the build fails with a
+    /// port that nothing connected.
+    pub fn set_inputs(&mut self, n: usize) {
+        self.inputs = n.max(1);
+    }
+
+    /// Packets written to the sink, or zero when there is none.
+    pub fn written(&self) -> u64 {
+        self.sink.as_ref().map(|s| s.written()).unwrap_or(0)
     }
 }
 
@@ -288,7 +311,7 @@ impl<S: PackageSink> PackageLogNode<S> {
 ///
 /// Each block is stamped as it is processed, which on a live receiver is
 /// within a block of when the burst arrived: the same accuracy the packet
-/// list has always shown. Replaying a file stamps the packages with the time
+/// list has always shown. Replaying a file stamps the packets with the time
 /// of the replay, because that is when the receiver heard them; the file's
 /// own timeline belongs to the file.
 fn now_us() -> u64 {
@@ -298,9 +321,9 @@ fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
+impl pipeline::node::Node for PacketBusNode {
     fn name(&self) -> &str {
-        "package_log"
+        "packet_bus"
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -311,15 +334,11 @@ impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
         Some(self)
     }
 
-    /// Needed so a rebuild can lift the log out of the old graph and put it
+    /// Needed so a rebuild can lift the bus out of the old graph and put it
     /// in the new one. Without it the open file is dropped on the next
     /// retune, and logging silently stops.
     fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
         Some(self)
-    }
-
-    fn is_sink(&self) -> bool {
-        true
     }
 
     fn num_inputs(&self) -> usize {
@@ -330,37 +349,63 @@ impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
         for i in inputs {
             if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames) {
                 return Err(Error::other(
-                    "package_log takes detected bursts or demodulated frames",
+                    "the packet bus takes detected bursts or demodulated frames",
                 ));
             }
         }
         let first = inputs.first().map(|i| i.spec).unwrap_or(StreamSpec::iq(0.0, common::Hz(0)));
-        Ok(vec![first])
+        let mut out = first.with_kind(PortKind::Packets);
+        // Packets are events in time, not a sampled stream.
+        out.rate = 0.0;
+        Ok(vec![out])
     }
 
     fn process(
         &mut self,
         inputs: &[&Payload],
-        _outputs: &mut [Payload],
+        outputs: &mut [Payload],
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let at = now_us();
+        let at_us = now_us();
+        let out = outputs[0].packets_mut();
         for (k, payload) in inputs.iter().enumerate() {
             let spec = ctx.inputs.get(k).map(|p| p.spec);
             match payload {
                 Payload::Pulses(pkgs) => {
-                    let bw = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
+                    let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
                     for p in pkgs.iter() {
-                        self.sink.pulses(at, bw, p);
+                        out.push(common::Packet {
+                            at_us,
+                            center_hz: p.center_hz,
+                            bandwidth_hz,
+                            rssi_dbfs: p.rssi_dbfs,
+                            snr_db: p.snr_db,
+                            body: common::PacketBody::Pulses(p.pulses.clone()),
+                        });
                     }
                 }
                 Payload::Frames(frames) => {
-                    let center = spec.map(|s| s.center.0).unwrap_or(0);
+                    let center_hz = spec.map(|s| s.center.0).unwrap_or(0);
+                    let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
                     for f in frames.iter() {
-                        self.sink.bytes(at, center, f);
+                        out.push(common::Packet {
+                            at_us,
+                            center_hz,
+                            bandwidth_hz,
+                            // A byte demodulator hands over a frame it has
+                            // already accepted, with no level to report.
+                            rssi_dbfs: f32::NAN,
+                            snr_db: f32::NAN,
+                            body: common::PacketBody::Frame(f.clone()),
+                        });
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Some(sink) = self.sink.as_mut() {
+            for p in out.iter() {
+                sink.write(p);
             }
         }
         Ok(())

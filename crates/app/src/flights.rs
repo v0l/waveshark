@@ -216,8 +216,8 @@ impl pipeline::node::Simple for FlightsNode {
     }
 
     fn negotiate(&mut self, i: &pipeline::node::PortSpec) -> common::Result<pipeline::StreamSpec> {
-        if i.spec.kind != pipeline::PortKind::Frames {
-            return Err(common::Error::other("flights needs demodulated frames"));
+        if i.spec.kind != pipeline::PortKind::Packets {
+            return Err(common::Error::other("flights reads the packet bus"));
         }
         Ok(i.spec)
     }
@@ -232,8 +232,12 @@ impl pipeline::node::Simple for FlightsNode {
         // second and the table shows ages in seconds, so splitting hairs
         // inside a seven millisecond block would be false precision.
         let at = std::time::Instant::now();
-        for frame in i.as_frames().unwrap_or(&[]) {
-            let Ok(f) = adsb::parse(frame) else { continue };
+        for packet in i.as_packets().unwrap_or(&[]) {
+            // Everything on the bus arrives here, including bursts from the
+            // ISM banks. A frame that is not Mode S fails its CRC and is
+            // dropped, which is the same test the demodulator applies.
+            let Some(bytes) = packet.frame() else { continue };
+            let Ok(f) = adsb::parse(bytes) else { continue };
             self.flights.update(&f, at);
         }
         Ok(())

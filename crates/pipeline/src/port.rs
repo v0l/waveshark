@@ -21,6 +21,14 @@ pub enum PortKind {
     /// DSP, everything downstream is cheap integer parsing, and every OOK or
     /// two-level FSK protocol meets here.
     Pulses,
+    /// Packets on the bus: bursts and frames with the metadata that places
+    /// them, whatever front end produced them.
+    ///
+    /// The junction the consumers pivot on, the way [`PortKind::Pulses`] is
+    /// the junction the decoders pivot on. A log, a packet list, a tracker
+    /// and a map all want the same thing and none of them should care which
+    /// demodulator it came from.
+    Packets,
     /// Whole frames, each a run of bytes with its own boundaries.
     ///
     /// Distinct from [`PortKind::Bytes`] because a byte stream cannot say
@@ -41,6 +49,7 @@ pub enum Payload {
     Bytes(Vec<u8>),
     Pulses(Vec<Package>),
     Frames(Vec<Vec<u8>>),
+    Packets(Vec<common::Packet>),
 }
 
 impl Payload {
@@ -52,6 +61,7 @@ impl Payload {
             PortKind::Bytes => Payload::Bytes(Vec::new()),
             PortKind::Pulses => Payload::Pulses(Vec::new()),
             PortKind::Frames => Payload::Frames(Vec::new()),
+            PortKind::Packets => Payload::Packets(Vec::new()),
         }
     }
 
@@ -63,6 +73,7 @@ impl Payload {
             Payload::Bytes(_) => PortKind::Bytes,
             Payload::Pulses(_) => PortKind::Pulses,
             Payload::Frames(_) => PortKind::Frames,
+            Payload::Packets(_) => PortKind::Packets,
         }
     }
 
@@ -73,6 +84,7 @@ impl Payload {
             Payload::Bytes(v) => v.len(),
             Payload::Pulses(v) => v.len(),
             Payload::Frames(v) => v.len(),
+            Payload::Packets(v) => v.len(),
         }
     }
 
@@ -88,6 +100,7 @@ impl Payload {
             Payload::Bytes(v) => v.clear(),
             Payload::Pulses(v) => v.clear(),
             Payload::Frames(v) => v.clear(),
+            Payload::Packets(v) => v.clear(),
         }
     }
 
@@ -123,6 +136,20 @@ impl Payload {
         match self {
             Payload::Frames(v) => Some(v),
             _ => None,
+        }
+    }
+
+    pub fn as_packets(&self) -> Option<&[common::Packet]> {
+        match self {
+            Payload::Packets(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn packets_mut(&mut self) -> &mut Vec<common::Packet> {
+        match self {
+            Payload::Packets(v) => v,
+            _ => panic!("payload is {:?}, not Packets", self.kind()),
         }
     }
 

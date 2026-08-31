@@ -394,13 +394,21 @@ Undecoded bursts are written too, and they matter most: a burst no protocol
 claimed leaves no other trace at all, and it is the raw material for the
 protocol that would have claimed it.
 
-The log is a node in the graph, fed by both channel banks and by the 1090 MHz
-decoder, so it stores what those front ends heard rather than what reached the
-screen. The flight list hangs off the same output, for the same reason: a view
-of the traffic is a consumer of what the demodulator produced, not something
-the interface assembles out of the packets that happened to reach it. It keeps
-tracking whether or not anyone is looking at the list, and it sees frames the
-on-screen packet list scrolled past long ago. `--replay <file>.srpkt` runs the current decoders back over a log:
+The log is the packet bus, and it is a node in the graph. Everything that
+produces packets feeds it: both channel banks, and the 1090 MHz decoder.
+Everything that consumes them hangs off the far side, starting with the flight
+list. A view is a consumer of what the demodulator produced, not something the
+interface assembles out of the packets that happened to reach it, so the
+tracker keeps running whether or not anyone is looking at the list and sees
+frames the on-screen packet list scrolled past long ago.
+
+Wiring each view to the demodulator it happens to care about would rebuild the
+same fan-out for every one of them, and leave each one blind whenever its
+source was not running. Attaching them to the bus means a map, a chart or a
+meter view is a node with one input and nothing to say about front ends.
+
+The file is optional and the bus is not: turning the log off stops writing to
+disk rather than disconnecting every view from the traffic. `--replay <file>.srpkt` runs the current decoders back over a log:
 
 ```
 15:55:47   433.9200 MHz    88 pulses   22.5 dB  Fineoffset-WHx080  temperature_c=18 humidity_pct=61

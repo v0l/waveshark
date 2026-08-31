@@ -34,6 +34,7 @@ fn kind_label(k: PortKind) -> &'static str {
         PortKind::Pulses => "pulses",
         PortKind::Soft => "soft",
         PortKind::Frames => "frames",
+        PortKind::Packets => "packets",
     }
 }
 
