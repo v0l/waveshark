@@ -165,18 +165,19 @@ impl Session {
             s.push_str(&format!("toggle.{name} = {on}\n"));
         }
         for f in &self.feeds {
-            s.push_str(&format!("feed = {} {}\n", f.format.label(), f.address()));
+            s.push_str(&format!("feed = {} {}\n", f.kind.name, f.address()));
         }
         s
     }
 }
 
-/// `beast host:port`, as written by `render`.
+/// `beast host:port`, as written by `render`. An unknown kind is dropped
+/// rather than fatal: a session written by a later version has to load.
 fn parse_feed(v: &str) -> Option<nodes::FeedSpec> {
-    let (format, addr) = v.split_once(char::is_whitespace)?;
-    let format = nodes::FeedFormat::default().parse(format.trim())?;
+    let (kind, addr) = v.split_once(char::is_whitespace)?;
+    let kind = nodes::feed_kind(kind.trim())?;
     let (host, port) = addr.trim().rsplit_once(':')?;
-    Some(nodes::FeedSpec::new(host, port.parse().ok()?, format))
+    Some(nodes::FeedSpec::new(host, port.parse().ok()?, kind))
 }
 
 fn parse_gain(v: &str) -> Option<GainMode> {
@@ -216,8 +217,8 @@ mod tests {
             decode_on: false,
             volume: 0.25,
             feeds: vec![
-                nodes::FeedSpec::new("10.100.2.249", 30005, nodes::FeedFormat::Beast),
-                nodes::FeedSpec::new("pi.local", 30002, nodes::FeedFormat::Avr),
+                nodes::FeedSpec::new("10.100.2.249", 30005, &nodes::feed_nodes::BEAST),
+                nodes::FeedSpec::new("pi.local", 30002, &nodes::feed_nodes::AVR),
             ],
         };
         assert_eq!(Session::parse(&s.render()), s);

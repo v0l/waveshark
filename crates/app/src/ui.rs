@@ -124,7 +124,7 @@ pub struct App {
     log_dir_edit: String,
     log_dir: Option<std::path::PathBuf>,
     log_cap_mb: Option<u64>,
-    feed_format: nodes::FeedFormat,
+    feed_kind: &'static nodes::FeedKind,
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
     station_edit: Option<String>,
@@ -226,20 +226,20 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// `host` or `host:port`, with the format's usual port when none is given.
-fn parse_feed(text: &str, format: nodes::FeedFormat) -> Option<nodes::FeedSpec> {
+fn parse_feed(text: &str, kind: &'static nodes::FeedKind) -> Option<nodes::FeedSpec> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
     let (host, port) = match text.rsplit_once(':') {
         Some((h, p)) => (h, p.parse().ok()?),
-        None => (text, format.default_port()),
+        None => (text, kind.default_port),
     };
     let host = host.trim();
     if host.is_empty() {
         return None;
     }
-    Some(nodes::FeedSpec::new(host, port, format))
+    Some(nodes::FeedSpec::new(host, port, kind))
 }
 
 /// The average of the positions known, for opening the map somewhere useful
@@ -361,7 +361,7 @@ impl Default for App {
             tiles: crate::map::Tiles::new(),
             feeds: Vec::new(),
             feed_host: String::new(),
-            feed_format: nodes::FeedFormat::default(),
+            feed_kind: nodes::FEED_KINDS[0],
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -406,7 +406,7 @@ impl App {
             tiles: crate::map::Tiles::new(),
             feeds: s.feeds.clone(),
             feed_host: String::new(),
-            feed_format: nodes::FeedFormat::default(),
+            feed_kind: nodes::FEED_KINDS[0],
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -1360,11 +1360,7 @@ impl App {
             self.packet_log = dir.clone();
             self.send(Cmd::PacketLog(dir));
         }
-        hint(
-            ui,
-            "Timings and frames as the demodulator produced them, not decodes. \
-             A day per file, replayable with --replay.",
-        );
+        hint(ui, "Timings and frames as demodulated, a day per file, replayable.");
         ui.add_space(8.0);
 
         row(ui, "directory", |ui| {
@@ -1406,12 +1402,7 @@ impl App {
                 self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
             }
         });
-        hint(
-            ui,
-            "A guard against a runaway, not a budget. 1090 MHz with a feed \
-             attached writes a few hundred megabytes an hour; a quiet ISM band \
-             writes a few megabytes.",
-        );
+        hint(ui, "A runaway guard, not a budget.");
         ui.add_space(10.0);
 
         row(ui, "today", |ui| {
@@ -1435,33 +1426,26 @@ impl App {
         ui.separator();
         ui.add_space(6.0);
         ui.label(legend("feeds"));
-        hint(
-            ui,
-            "Another receiver's frames, over TCP. Beast carries a signal level and \
-             AVR does not, so prefer Beast where a feed offers both. BaseStation on \
-             port 30003 is not offered: it sends fields somebody else decoded, and a \
-             log of conclusions cannot be checked or re-read later.",
-        );
+        hint(ui, "Packets from another receiver, over TCP.");
         ui.add_space(8.0);
 
-        let status = self
-            .radio
-            .as_ref()
-            .map(|r| r.status.feeds.lock().clone())
-            .unwrap_or_default();
+        let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
         for (i, f) in self.feeds.iter().enumerate() {
-            let live = status.iter().find(|s| s.spec.address() == f.address());
+            let live = status.iter().find(|s| s.spec == *f);
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
-                let lamp = match live {
-                    Some(s) if s.connected => CRC_OK,
-                    Some(_) => theme::FAULT,
-                    None => theme::ETCH,
-                };
-                ui.painter().rect_filled(r, 1.0, lamp);
+                ui.painter().rect_filled(
+                    r,
+                    1.0,
+                    match live {
+                        Some(s) if s.connected => CRC_OK,
+                        Some(_) => theme::FAULT,
+                        None => theme::ETCH,
+                    },
+                );
                 ui.label(value(f.address()).size(11.0));
-                ui.label(legend(f.format.label()));
+                ui.label(legend(f.kind.name));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("REMOVE").clicked() {
                         remove = Some(i);
@@ -1471,13 +1455,11 @@ impl App {
                     }
                 });
             });
-            // A feed that is down says why. The alternative is a dark lamp
-            // and a guess about whether it is the network, the port or a
-            // receiver somebody turned off.
+            // A feed that is down says why. The alternative is a dark lamp and
+            // a guess about whether it is the network, the port, or a receiver
+            // somebody turned off.
             if let Some(e) = live.and_then(|s| s.error.clone()) {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT)).wrap(),
-                );
+                ui.add(egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT)).wrap());
             }
             ui.add_space(6.0);
         }
@@ -1491,18 +1473,21 @@ impl App {
             ui.add(
                 egui::TextEdit::singleline(&mut self.feed_host)
                     .desired_width(170.0)
-                    .hint_text("host:port"),
+                    .hint_text("host, or host:port"),
             );
-            egui::ComboBox::from_id_salt("feed_format")
-                .selected_text(self.feed_format.label())
-                .width(80.0)
+            egui::ComboBox::from_id_salt("feed_kind")
+                .selected_text(self.feed_kind.name)
+                .width(90.0)
                 .show_ui(ui, |ui| {
-                    for f in [nodes::FeedFormat::Beast, nodes::FeedFormat::Avr] {
-                        ui.selectable_value(&mut self.feed_format, f, f.label());
+                    for k in nodes::FEED_KINDS {
+                        let on = self.feed_kind.name == k.name;
+                        if ui.selectable_label(on, k.name).clicked() {
+                            self.feed_kind = k;
+                        }
                     }
                 });
             if ui.button("ADD").clicked() {
-                match parse_feed(&self.feed_host, self.feed_format) {
+                match parse_feed(&self.feed_host, self.feed_kind) {
                     Some(spec) if !self.feeds.contains(&spec) => {
                         self.feeds.push(spec);
                         self.send(Cmd::Feeds(self.feeds.clone()));
@@ -1513,11 +1498,6 @@ impl App {
                 }
             }
         });
-        hint(
-            ui,
-            "The port may be left off: 30005 for Beast, 30002 for AVR, which is where \
-             dump1090 serves them.",
-        );
     }
 
     /// Everything the radio itself can be set to.

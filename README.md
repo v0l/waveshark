@@ -67,11 +67,12 @@ cannot tell which one they were fed. The DSP runs once per channel; each
 protocol is then a timing table and a payload parser working on integers. That
 is what makes supporting hundreds of protocols affordable.
 
-Frames can also arrive from another receiver. A Beast or AVR feed over TCP is
-a front end like any other: it produces packets, so it attaches upstream of
-the bus and everything downstream treats its frames the same as the ones this
-receiver demodulated. Configured in the packet log settings, remembered in the
-session file.
+Frames can also arrive from another receiver. A feed over TCP is a front end
+like any other: it produces packets, so it attaches upstream of the bus and
+everything downstream treats its frames the same as the ones demodulated here.
+A wire format is a row in a table with a parser beside it, Beast and AVR to
+begin with. Configured in the packet log settings, remembered in the session
+file.
 
 The protocols themselves run once, on the packet bus, rather than inside every
 channel. A decoder per channel meant a hundred copies of the same tables, and a

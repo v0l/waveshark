@@ -20,7 +20,7 @@ pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
 pub use modes_nodes::ModeSNode;
-pub use feed_nodes::{FeedFormat, FeedNode, FeedSpec};
+pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
 pub use bank_node::BankNode;
 pub use sink_nodes::{DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};

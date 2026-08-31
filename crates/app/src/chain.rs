@@ -454,7 +454,7 @@ impl Receiver {
             let id = match pool.remove(&role) {
                 Some(part) => b.add_existing(part),
                 None => b.add_labeled(
-                    format!("{} {}", spec.format.label(), spec.address()),
+                    format!("{} {}", spec.kind.name, spec.address()),
                     Box::new(nodes::FeedNode::new(spec.clone())),
                 ),
             };
@@ -1307,7 +1307,7 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         // Nothing listens on port 1; the graph must build regardless, because
         // a feed that is down is a status line rather than a broken receiver.
-        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, nodes::FeedFormat::Beast)];
+        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, &nodes::feed_nodes::BEAST)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let feed = topo
@@ -1333,7 +1333,7 @@ mod tests {
     #[test]
     fn a_feed_survives_a_retune() {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
-        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, nodes::FeedFormat::Beast)];
+        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, &nodes::feed_nodes::BEAST)];
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         let before = rx.feed_status()[0].spec.clone();
         p.center = Hz::mhz(868);

@@ -6,11 +6,15 @@
 //! packet list, go into the log, and reach the flight list, with no view
 //! needing to know where they came from.
 //!
-//! Two wire formats, both of which carry frames rather than conclusions:
-//! Beast binary (usually port 30005) and AVR hex (usually 30002). The
-//! BaseStation CSV feed on port 30003 is deliberately not supported: it
-//! carries fields somebody else already decoded, and a log of conclusions
-//! cannot be re-decoded, corrected, or shown to be wrong.
+//! A wire format is a row in [`FEED_KINDS`]: a name, a port, a band and a
+//! function that takes frames off the front of a buffer. Nothing outside this
+//! file knows a Beast message from an AVR line, so adding a format is adding
+//! a row and a parser.
+//!
+//! What belongs here is anything that carries frames. A feed of fields
+//! somebody else already decoded, such as BaseStation on port 30003, does
+//! not: the log holds evidence, and a conclusion stored without what it was
+//! drawn from cannot be checked or read again later.
 
 use common::{Error, Hz, Packet, PacketBody, Result};
 use pipeline::node::{Node, NodeCtx, PortSpec};
@@ -21,61 +25,83 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
+/// One wire format, as a table entry.
+///
+/// A feed is a name, a port, a band and a function that turns bytes off a
+/// socket into frames. Adding one is adding a row here: nothing else in the
+/// program knows a Beast message from an AVR line, and the settings, the
+/// session file and the node all read this table rather than matching on a
+/// list of the formats that happened to exist when they were written.
+pub struct FeedKind {
+    /// What it is called on screen and in the session file.
+    pub name: &'static str,
+    /// Where it is usually served, so an address can be given without one.
+    pub default_port: u16,
+    /// What the far end is tuned to. Everything here carries Mode S so far;
+    /// a feed of something else brings its own frequency.
+    pub center_hz: u64,
+    /// Occupied bandwidth, for the packet log's record of where it came from.
+    pub bandwidth_hz: u32,
+    /// Take whole frames from the front of the buffer, leaving a partial one
+    /// for the next read.
+    pub parse: fn(&mut Vec<u8>) -> Vec<WireFrame>,
+}
+
 /// Mode S occupies the band rather than a channel in it.
 const MODES_BAND_HZ: u32 = 2_000_000;
+const MODES_HZ: u64 = 1_090_000_000;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum FeedFormat {
-    /// `0x1a`-framed binary with a timestamp and a signal level, the format
-    /// dump1090 serves on port 30005.
-    #[default]
-    Beast,
-    /// `*8d4840d6...;` lines, one frame each, on port 30002.
-    Avr,
+pub static BEAST: FeedKind = FeedKind {
+    name: "beast",
+    default_port: 30005,
+    center_hz: MODES_HZ,
+    bandwidth_hz: MODES_BAND_HZ,
+    parse: parse_beast,
+};
+
+pub static AVR: FeedKind = FeedKind {
+    name: "avr",
+    default_port: 30002,
+    center_hz: MODES_HZ,
+    bandwidth_hz: MODES_BAND_HZ,
+    parse: parse_avr,
+};
+
+/// Everything that can be attached, in the order it is offered.
+pub static FEED_KINDS: &[&FeedKind] = &[&BEAST, &AVR];
+
+pub fn feed_kind(name: &str) -> Option<&'static FeedKind> {
+    FEED_KINDS.iter().copied().find(|k| k.name == name)
 }
 
-impl FeedFormat {
-    pub fn label(&self) -> &'static str {
-        match self {
-            FeedFormat::Beast => "beast",
-            FeedFormat::Avr => "avr",
-        }
-    }
-
-    pub fn default_port(&self) -> u16 {
-        match self {
-            FeedFormat::Beast => 30005,
-            FeedFormat::Avr => 30002,
-        }
-    }
-
-    pub fn parse(&self, s: &str) -> Option<Self> {
-        match s {
-            "beast" => Some(FeedFormat::Beast),
-            "avr" => Some(FeedFormat::Avr),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone)]
 pub struct FeedSpec {
     pub host: String,
     pub port: u16,
-    pub format: FeedFormat,
-    /// What the far end is tuned to. Every format here carries Mode S, but
-    /// the packet log records a frequency for everything on it and inventing
-    /// one at the far end is better than leaving it zero.
-    pub center_hz: u64,
+    pub kind: &'static FeedKind,
 }
 
 impl FeedSpec {
-    pub fn new(host: impl Into<String>, port: u16, format: FeedFormat) -> Self {
-        Self { host: host.into(), port, format, center_hz: 1_090_000_000 }
+    pub fn new(host: impl Into<String>, port: u16, kind: &'static FeedKind) -> Self {
+        Self { host: host.into(), port, kind }
     }
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+impl PartialEq for FeedSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port && self.kind.name == other.kind.name
+    }
+}
+
+impl Eq for FeedSpec {}
+
+impl std::fmt::Debug for FeedSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.kind.name, self.address())
     }
 }
 
@@ -172,9 +198,10 @@ impl Node for FeedNode {
     }
 
     fn negotiate(&mut self, _inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
-        let mut out = StreamSpec::iq(0.0, Hz(self.spec.center_hz)).with_kind(PortKind::Packets);
+        let mut out =
+            StreamSpec::iq(0.0, Hz(self.spec.kind.center_hz)).with_kind(PortKind::Packets);
         out.rate = 0.0;
-        out.bandwidth = f64::from(MODES_BAND_HZ);
+        out.bandwidth = f64::from(self.spec.kind.bandwidth_hz);
         Ok(vec![out])
     }
 
@@ -265,10 +292,7 @@ fn read_loop(
             }
         };
         buf.extend_from_slice(&chunk[..n]);
-        let frames = match spec.format {
-            FeedFormat::Beast => parse_beast(&mut buf),
-            FeedFormat::Avr => parse_avr(&mut buf),
-        };
+        let frames = (spec.kind.parse)(&mut buf);
         // A stream of junk on the right port would otherwise grow the buffer
         // forever looking for a frame that never starts.
         if buf.len() > 1 << 20 {
@@ -279,8 +303,8 @@ fn read_loop(
             state.frames.fetch_add(1, Ordering::Relaxed);
             let packet = Packet {
                 at_us,
-                center_hz: spec.center_hz,
-                bandwidth_hz: MODES_BAND_HZ,
+                center_hz: spec.kind.center_hz,
+                bandwidth_hz: spec.kind.bandwidth_hz,
                 rssi_dbfs: f.rssi_dbfs,
                 snr_db: f32::NAN,
                 body: PacketBody::Frame(f.bytes),
@@ -556,10 +580,23 @@ mod tests {
 
     /// The node is a source, so it has to keep working with nothing on the
     /// far end: an unreachable feed is a status line, not a failed build.
+    /// Adding a format must not mean editing the settings, the session file
+    /// and the node. Everything reads the table, so the table is what a new
+    /// format has to satisfy.
+    #[test]
+    fn every_kind_is_reachable_by_name_and_has_a_port() {
+        for k in FEED_KINDS {
+            assert!(feed_kind(k.name).is_some(), "{} is not resolvable", k.name);
+            assert!(k.default_port > 0, "{} has no port to guess", k.name);
+            assert!(k.center_hz > 0 && k.bandwidth_hz > 0, "{} says nothing about its band", k.name);
+        }
+        assert!(feed_kind("basestation").is_none(), "conclusions are not a feed");
+    }
+
     #[test]
     fn a_feed_that_cannot_connect_still_builds_and_runs() {
         // Port 1 on localhost, which nothing listens on.
-        let mut node = FeedNode::new(FeedSpec::new("127.0.0.1", 1, FeedFormat::Beast));
+        let mut node = FeedNode::new(FeedSpec::new("127.0.0.1", 1, &BEAST));
         let spec = node.negotiate(&[]).unwrap();
         assert_eq!(spec[0].kind, PortKind::Packets);
         let mut out = vec![Payload::Packets(Vec::new())];
@@ -586,7 +623,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
 
-        let mut node = FeedNode::new(FeedSpec::new("127.0.0.1", port, FeedFormat::Beast));
+        let mut node = FeedNode::new(FeedSpec::new("127.0.0.1", port, &BEAST));
         node.negotiate(&[]).unwrap();
         let mut got = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

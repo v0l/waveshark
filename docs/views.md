@@ -148,10 +148,15 @@ Another receiver's frames, over TCP, added in the packet log settings. A feed
 is a source node with no input of its own, so it sits beside the radio at the
 head of the graph and its packets join the bus with everything the local front
 ends produced: they appear in the packet list, go into the log, and reach the
-flight list without any view knowing where they came from. Beast binary (port
-30005) and AVR hex (30002) are supported. BaseStation CSV on 30003 is not, and
-deliberately: it carries fields somebody else decoded, and the log holds
-evidence rather than conclusions.
+flight list without any view knowing where they came from.
+
+A format is a row in `FEED_KINDS` in `crates/nodes/src/feed_nodes.rs`: a name,
+a port, a band and a function that takes frames off the front of a buffer.
+Beast binary and AVR hex are the first two. Nothing outside that file knows one
+from the other, so adding a format is adding a row and a parser rather than
+touching the settings, the session file and the node. What belongs there is
+anything carrying frames; BaseStation CSV on port 30003 does not, since it
+sends fields somebody else decoded.
 
 Because the flight list is a consumer of the bus, a feed brings aircraft with
 it on a band where this receiver demodulates nothing of the sort. Tuned to
