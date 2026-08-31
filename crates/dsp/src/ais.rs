@@ -21,16 +21,20 @@
 //! the demodulator for the same reason Mode S puts its CRC inside the search.
 //! What `decode::ais` gets is a payload that has already proved itself.
 //!
-//! # Bit order, which is where this goes wrong
+//! # Bit order, which is where this went wrong
 //!
-//! HDLC puts each byte on the air least significant bit first, and the frame
-//! check sequence is defined over that order. The AIS message above it is
-//! defined as a bit string read most significant bit first. Both are true at
-//! once, and they are not contradictory because they describe different
-//! layers. The bits are therefore packed twice, once each way: LSB first for
-//! the check, MSB first for the payload handed upwards. Reversing bytes
-//! somewhere in the middle is the usual way to get a decoder that recovers
-//! the message type and nothing else.
+//! HDLC puts each byte on the air least significant bit first, and that is
+//! all there is to it: the payload is packed low bit first, exactly like the
+//! AX.25 frames sharing this link layer. Reading the *fields* inside those
+//! bytes most significant first is a separate question and `decode::ais`'s.
+//!
+//! This file said the opposite for a while, and every test agreed with it,
+//! because `encode_slot` built its bits the same wrong way round. Twenty
+//! synthetic tests cannot catch a convention shared by the encoder and the
+//! decoder. What caught it was fourteen seconds of real off-air audio, in
+//! which every frame passed the check sequence and every message decoded as
+//! a binary broadcast from an impossible country. The check sequence runs
+//! over the bit stream and never sees the packing, so it cannot object.
 
 use crate::demod::FmDemod;
 use crate::fir::FirDecim;
@@ -99,6 +103,127 @@ pub struct AisFrame {
     pub channel: u8,
 }
 
+/// Everything below the discriminator: clock recovery, NRZI and HDLC.
+///
+/// Separated from the radio front end because the boundary is real. What a
+/// receiver hands over at this point is the same whether it came from a
+/// wideband capture mixed down here, from a narrowband FM receiver's
+/// discriminator pin, or from a sound card. Splitting it is what lets a real
+/// off-air recording test the parts where the risk actually is, without a
+/// baseband capture of the whole band.
+///
+/// Polarity does not matter here, which is worth knowing before trying to
+/// correct for it: NRZI encodes a bit as the presence or absence of a
+/// transition, so inverting the discriminator inverts every level and leaves
+/// every transition, and the decoded bits are identical.
+pub struct AisSymbols {
+    /// Running mean of the discriminator, which is the frequency error of the
+    /// tuner and the transmitter together. Removed rather than trusted: it is
+    /// tens of hertz to a few kHz and it decides the sign of every symbol.
+    dc: f32,
+    dc_alpha: f32,
+    /// Samples per symbol at the rate being fed in.
+    sps: f32,
+    /// Samples since the last symbol was taken.
+    since: f32,
+    last_sign: bool,
+    /// NRZI reference: the level the previous symbol sat at.
+    prev_level: bool,
+    hdlc: Hdlc,
+}
+
+impl AisSymbols {
+    pub fn new(rate: f64) -> Self {
+        Self {
+            dc: 0.0,
+            // A few hundred symbols of memory: long enough not to track the
+            // data, short enough to follow a drifting tuner.
+            dc_alpha: (1.0 / (rate as f32 / BAUD as f32 * 200.0)).min(0.05),
+            sps: (rate / BAUD) as f32,
+            since: 0.0,
+            last_sign: false,
+            prev_level: false,
+            hdlc: Hdlc::new(MIN_FRAME_BITS, MAX_FRAME_BITS),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.hdlc.reset();
+        self.dc = 0.0;
+        self.since = 0.0;
+    }
+
+    /// One discriminator sample: track the clock, and take a symbol when it
+    /// comes round. Returns a payload when a frame closed and its check
+    /// sequence held.
+    pub fn push(&mut self, f: f32, cfg: &AisConfig) -> Option<Vec<u8>> {
+        self.dc += self.dc_alpha * (f - self.dc);
+        let v = f - self.dc;
+        let sign = v > 0.0;
+
+        // A transition marks a symbol boundary, so the next symbol centre is
+        // half a symbol away. The clock is nudged towards that rather than
+        // set to it, or every noise crossing would drag it.
+        if sign != self.last_sign {
+            let want = self.sps * 0.5;
+            self.since += cfg.clock_gain * (want - self.since);
+            self.last_sign = sign;
+        }
+
+        self.since += 1.0;
+        if self.since < self.sps {
+            return None;
+        }
+        self.since -= self.sps;
+
+        // Below the floor there is no signal, and clocking noise into the
+        // framer only gives the check sequence more chances to be fooled.
+        if v.abs() < cfg.min_level {
+            self.hdlc.reset();
+            self.prev_level = sign;
+            return None;
+        }
+
+        // NRZI: a zero is a transition, a one is no transition.
+        let bit = sign == self.prev_level;
+        self.prev_level = sign;
+        // Least significant bit first, the same as AX.25: an AIS message is
+        // a byte string and HDLC puts each byte on the air low bit first.
+        // The fields inside those bytes are then read most significant first,
+        // which is a different question and `decode::ais`'s.
+        self.hdlc.push(bit).map(|f| hdlc::pack_lsb(&f))
+    }
+}
+
+/// One AIS channel demodulated from a receiver's discriminator output.
+///
+/// The audio counterpart of [`AisDetector`], for a narrowband FM receiver
+/// already tuned to 161.975 or 162.025, or a recording of one.
+pub struct AisAudioDemod {
+    syms: AisSymbols,
+    cfg: AisConfig,
+}
+
+impl AisAudioDemod {
+    pub fn new(rate: f64, cfg: AisConfig) -> Self {
+        Self { syms: AisSymbols::new(rate), cfg }
+    }
+
+    pub fn reset(&mut self) {
+        self.syms.reset();
+    }
+
+    /// Demodulate a block of discriminator audio, appending the payloads that
+    /// passed their check sequence.
+    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Vec<u8>>) {
+        for &x in audio {
+            if let Some(f) = self.syms.push(x, &self.cfg) {
+                out.push(f);
+            }
+        }
+    }
+}
+
 /// One channel's receiver: the narrowband chain, then the framer.
 struct ChannelRx {
     channel: u8,
@@ -110,19 +235,7 @@ struct ChannelRx {
     mixed: Vec<C32>,
     narrow: Vec<C32>,
     freq: Vec<f32>,
-    /// Running mean of the discriminator, which is the frequency error of the
-    /// tuner and the transmitter together. Removed rather than trusted: it is
-    /// tens of hertz to a few kHz and it decides the sign of every symbol.
-    dc: f32,
-    dc_alpha: f32,
-    /// Samples per symbol at the decimated rate.
-    sps: f32,
-    /// Samples since the last symbol was taken.
-    since: f32,
-    last_sign: bool,
-    /// NRZI reference: the level the previous symbol sat at.
-    prev_level: bool,
-    hdlc: Hdlc,
+    syms: AisSymbols,
 }
 
 impl ChannelRx {
@@ -142,15 +255,7 @@ impl ChannelRx {
             mixed: Vec::new(),
             narrow: Vec::new(),
             freq: Vec::new(),
-            dc: 0.0,
-            // A few hundred symbols of memory: long enough not to track the
-            // data, short enough to follow a drifting tuner.
-            dc_alpha: (1.0 / (work as f32 / BAUD as f32 * 200.0)).min(0.05),
-            sps: (work / BAUD) as f32,
-            since: 0.0,
-            last_sign: false,
-            prev_level: false,
-            hdlc: Hdlc::new(MIN_FRAME_BITS, MAX_FRAME_BITS),
+            syms: AisSymbols::new(work),
         }
     }
 
@@ -164,52 +269,10 @@ impl ChannelRx {
 
         // Moved out so the per-sample loop can take `&mut self`; the buffer
         // goes back afterwards, so nothing is reallocated.
-        let freq = std::mem::take(&mut self.freq);
-        for &f in &freq {
-            self.symbol(f, cfg, out);
-        }
-        self.freq = freq;
-    }
-
-    /// One discriminator sample: track the clock, and take a symbol when it
-    /// comes round.
-    fn symbol(&mut self, f: f32, cfg: &AisConfig, out: &mut Vec<AisFrame>) {
-        self.dc += self.dc_alpha * (f - self.dc);
-        let v = f - self.dc;
-        let sign = v > 0.0;
-
-        // A transition marks a symbol boundary, so the next symbol centre is
-        // half a symbol away. The clock is nudged towards that rather than
-        // set to it, or every noise crossing would drag it.
-        if sign != self.last_sign {
-            let want = self.sps * 0.5;
-            self.since += cfg.clock_gain * (want - self.since);
-            self.last_sign = sign;
-        }
-
-        self.since += 1.0;
-        if self.since < self.sps {
-            return;
-        }
-        self.since -= self.sps;
-
-        // Below the floor there is no signal, and clocking noise into the
-        // framer only gives the check sequence more chances to be fooled.
-        if v.abs() < cfg.min_level {
-            self.hdlc.reset();
-            self.prev_level = sign;
-            return;
-        }
-
-        // NRZI: a zero is a transition, a one is no transition.
-        let bit = sign == self.prev_level;
-        self.prev_level = sign;
-        if let Some(frame) = self.hdlc.push(bit) {
-            // Packed most significant bit first here, not in the framer: an
-            // AIS message is defined as a bit string in that order, while the
-            // AX.25 frames sharing this link layer are ordinary bytes and
-            // pack the other way.
-            out.push(AisFrame { payload: hdlc::pack_msb(&frame), channel: self.channel });
+        for &f in &self.freq {
+            if let Some(payload) = self.syms.push(f, cfg) {
+                out.push(AisFrame { payload, channel: self.channel });
+            }
         }
     }
 
@@ -217,9 +280,7 @@ impl ChannelRx {
         self.mixer.reset();
         self.decim.reset();
         self.demod.reset();
-        self.hdlc.reset();
-        self.dc = 0.0;
-        self.since = 0.0;
+        self.syms.reset();
     }
 }
 
@@ -232,9 +293,9 @@ impl ChannelRx {
 /// whether it comes back. `bits` is the message length, 168 for the common
 /// messages and more for the longer ones.
 pub fn encode_slot(payload: &[u8], bits: usize) -> Vec<bool> {
-    // Most significant bit first, which is the order an AIS message is
-    // defined in and therefore the order it goes on the air.
-    let msg: Vec<bool> = (0..bits).map(|i| payload[i / 8] >> (7 - i % 8) & 1 == 1).collect();
+    // Least significant bit first within each byte, which is how HDLC puts a
+    // byte on the air.
+    let msg: Vec<bool> = (0..bits).map(|i| payload[i / 8] >> (i % 8) & 1 == 1).collect();
     // Twenty four bits of alternating training before the flag, which is what
     // gives the receiver's clock something to lock to.
     let training: Vec<bool> = (0..24).map(|i| i % 2 == 0).collect();

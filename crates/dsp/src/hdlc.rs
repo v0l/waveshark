@@ -13,14 +13,11 @@
 //! from a run of noise that looked like one, which is why the acceptance test
 //! lives here rather than in whatever parses the result.
 //!
-//! It does **not** decide what the bits mean, and deliberately hands back
-//! bits rather than bytes. HDLC puts each byte on the air least significant
-//! bit first, but the layer above does not have to agree with that: AX.25
-//! frames are ordinary bytes and pack least significant first, while an AIS
-//! message is defined as a bit string read most significant first. Packing
-//! here would force one of them to unpack and reverse again, which is exactly
-//! how a decoder ends up recovering a message type and nothing else. So the
-//! caller packs, with [`pack_lsb`] or [`pack_msb`].
+//! It does **not** decide what the bits mean, and hands back bits rather than
+//! bytes. Both callers happen to want [`pack_lsb`], since that is what HDLC
+//! byte order means, but the choice stays with them: what a payload is once
+//! it is bytes belongs to the protocol above, and this layer only knows that
+//! a frame happened.
 
 /// The flag, and the only byte that cannot occur inside a frame.
 pub const FLAG: u8 = 0x7E;

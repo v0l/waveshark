@@ -28,7 +28,7 @@ pub(crate) mod twolevel;
 pub mod window;
 
 pub use afsk::{AfskConfig, AfskDemod};
-pub use ais::{AisConfig, AisDetector, AisFrame};
+pub use ais::{AisAudioDemod, AisConfig, AisDetector, AisFrame};
 pub use ask::{AskConfig, AskDetector};
 pub use blend::{HighBlend, NoiseMeter, VariableLowpass};
 pub use channelizer::Channelizer;
