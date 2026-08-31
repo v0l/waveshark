@@ -111,6 +111,23 @@ view exists to force them:
    into a printed list, which is what would let a view be tested without a
    radio.
 
+### Flights
+
+Aircraft heard on 1090 MHz, on OpenStreetMap tiles. The tile layer is ours
+rather than a map crate's: slippy tiles are a URL template and a Mercator
+projection, and every map widget for egui brings a HTTP stack, an async
+runtime and an image pipeline to do what `crates/app/src/map.rs` does in two
+hundred lines against the PNG decoder the app already had. Tiles are cached
+under `$XDG_CACHE_HOME/super-radio/tiles`, fetched on one thread, and a
+failure is said out loud on the map rather than left looking like empty sky.
+
+Zoom is continuous and anchored to the pointer; the tile level is only where
+the pictures come from. Range rings are drawn around the station, not around
+the middle of the window, because a ring says how far a thing is from the
+antenna and that does not change when the map is dragged. The station is set
+by right-clicking the map or typing coordinates above it, and is remembered in
+the session file.
+
 The bus itself now exists as a node: every front end feeds `packet_bus`, it
 writes the packet log on the way through, and consumers attach to its output.
 The flight list reads it, and so does `packet_decode`, which runs the protocol

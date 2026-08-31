@@ -8,6 +8,7 @@ mod bands;
 mod devices;
 mod dial;
 mod flights;
+mod map;
 mod modes;
 mod packetlog;
 mod chainview;
@@ -492,7 +493,8 @@ fn replay(path: &str) -> anyhow::Result<()> {
 /// switch that sets the receiver up so a session can be reproduced without a
 /// dozen clicks first.
 /// `53.64,-6.65` as a pair of degrees.
-fn parse_location(s: &str) -> Result<(f64, f64), String> {
+/// `LAT,LON` in decimal degrees, from the command line or the station field.
+pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
     let lon: f64 = o.trim().parse().map_err(|_| "longitude is not a number")?;
@@ -526,6 +528,10 @@ struct Args {
     /// Write a PNG of the interface and exit
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "/tmp/shot.png")]
     shot: Option<String>,
+
+    /// Seconds to wait before the screenshot, for views that need traffic
+    #[arg(long, value_name = "SECS", default_value_t = 6.0)]
+    shot_after: f32,
 
     /// Open on the signal chain view
     #[arg(long)]
@@ -693,6 +699,7 @@ fn main() -> eframe::Result<()> {
                 app.set_location(lat, lon);
             }
             app.shot = args.shot.clone();
+            app.shot_after = args.shot_after;
             if let Some(dir) = args.record.clone() {
                 app.record_to(dir, args.record_mb);
             }

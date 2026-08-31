@@ -57,6 +57,8 @@ pub struct App {
     pub soak: Option<f32>,
     /// Save a PNG to this path once the radio has settled, then quit.
     pub shot: Option<String>,
+    /// Seconds of running before the screenshot is taken.
+    pub shot_after: f32,
     /// Where bursts are being written and how much may be written, when
     /// recording.
     record_dir: Option<(std::path::PathBuf, Option<u64>)>,
@@ -108,6 +110,13 @@ pub struct App {
     aircraft: Vec<crate::flights::Aircraft>,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
+    /// Where the flight map is looking, and how far it reaches.
+    map: MapView,
+    /// OSM tiles under it, fetched in the background.
+    tiles: crate::map::Tiles,
+    /// The station position being typed, while it is being typed. Kept apart
+    /// from the real one so a half-finished latitude does not move the map.
+    station_edit: Option<String>,
     saved: crate::session::Session,
     saved_at: Option<std::time::Instant>,
     /// Gain stages and switches restored from the session, waiting for the
@@ -187,6 +196,42 @@ impl View {
 /// reading speed, and bounded memory on a band that never goes quiet.
 const DECODE_LOG_MAX: usize = 500;
 
+/// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
+/// screen, which is about what a rooftop antenna hears.
+const DEFAULT_MAP_ZOOM: f64 = 8.0;
+
+/// The average of the positions known, for opening the map somewhere useful
+/// when the receiver has not been told where it is.
+fn mean_position(active: &[&crate::flights::Aircraft]) -> Option<(f64, f64)> {
+    let fixes: Vec<(f64, f64)> = active.iter().filter_map(|a| a.position).collect();
+    if fixes.is_empty() {
+        return None;
+    }
+    let n = fixes.len() as f64;
+    Some((
+        fixes.iter().map(|f| f.0).sum::<f64>() / n,
+        fixes.iter().map(|f| f.1).sum::<f64>() / n,
+    ))
+}
+
+/// Where the flight map is looking. `center` is `None` until something has
+/// been heard, so the first aircraft decides where the map opens rather than
+/// the map opening on the ocean.
+#[derive(Clone, Copy)]
+struct MapView {
+    center: Option<(f64, f64)>,
+    /// Continuous, not a tile level: the tile level is where the pictures
+    /// come from, and rounding the view to it would make most scroll notches
+    /// do nothing.
+    zoom: f64,
+}
+
+impl Default for MapView {
+    fn default() -> Self {
+        Self { center: None, zoom: DEFAULT_MAP_ZOOM }
+    }
+}
+
 /// Colour of a packet whose integrity check passed.
 const CRC_OK: Color32 = Color32::from_rgb(0x6F, 0xD1, 0x8A);
 
@@ -250,6 +295,7 @@ impl Default for App {
             zoom: 1,
             soak: None,
             shot: None,
+            shot_after: 6.0,
             decodes: Vec::new(),
             next_packet: 1,
             selected: None,
@@ -269,6 +315,9 @@ impl Default for App {
             packet_log: None,
             aircraft: Vec::new(),
             location: None,
+            map: MapView::default(),
+            tiles: crate::map::Tiles::new(),
+            station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
             pending_radio: None,
@@ -305,6 +354,9 @@ impl App {
             dc_block: s.dc_block,
             decode_on: s.decode_on,
             location: s.location,
+            map: MapView::default(),
+            tiles: crate::map::Tiles::new(),
+            station_edit: None,
             volume: s.volume,
             saved: s.clone(),
             pending_radio: Some(s),
@@ -397,7 +449,6 @@ impl App {
     /// Tell the tracker where the receiver is, so a single position frame
     /// resolves instead of waiting for a matching pair.
     pub fn set_location(&mut self, lat: f64, lon: f64) {
-        self.location = Some((lat, lon));
         self.location = Some((lat, lon));
         self.send(Cmd::Location(lat, lon));
     }
@@ -957,7 +1008,7 @@ impl App {
         let t0 = *self.shot_at.get_or_insert_with(std::time::Instant::now);
         // Wait for the tuner to lock and the waterfall to fill; a screenshot
         // taken before that reviews an empty screen, not the design.
-        if !self.shot_sent && t0.elapsed().as_secs_f32() > 6.0 {
+        if !self.shot_sent && t0.elapsed().as_secs_f32() > self.shot_after {
             if self.channels.is_empty() {
                 self.add_channel(95.8e6);
                 self.add_channel(95.35e6);
@@ -2071,15 +2122,340 @@ impl App {
     /// ones still in the on-screen packet list.
     fn flights_view(&mut self, ui: &mut egui::Ui) {
         let now = std::time::Instant::now();
-        let active: Vec<&crate::flights::Aircraft> = self.aircraft.iter().collect();
         // The pane runs to the window edge, and a table that starts there is
         // unreadable.
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
-        margin.show(ui, |ui| self.flights_table(ui, &active, now));
+        self.tiles.poll(ui.ctx());
+        let mut view = self.map;
+        let mut place = None;
+        let mut edit = self.station_edit.take();
+        {
+            let tiles = &mut self.tiles;
+            let active: Vec<&crate::flights::Aircraft> = self.aircraft.iter().collect();
+            let home = self.location;
+            let body = |ui: &mut egui::Ui| {
+                place = Self::station_row(ui, home, &mut edit);
+                ui.add_space(6.0);
+                // Half the pane each, roughly: the map is the view worth
+                // having and the table is what you read once something on it
+                // is interesting.
+                let h = (ui.available_height() * 0.55).clamp(160.0, 1200.0);
+                let (v, dropped) = Self::flights_map(ui, tiles, &active, now, home, view, h);
+                view = v;
+                place = place.or(dropped);
+                ui.add_space(10.0);
+                Self::flights_rows(ui, &active, now);
+            };
+            margin.show(ui, body);
+        }
+        self.map = view;
+        self.station_edit = edit;
+        if let Some((lat, lon)) = place {
+            self.set_location(lat, lon);
+            self.station_edit = None;
+        }
     }
 
-    fn flights_table(
-        &self,
+    /// The station position, shown and editable.
+    ///
+    /// Worth a control rather than only a command line flag: it is what makes
+    /// a single position frame resolve instead of waiting for a matching
+    /// pair, and it is the point the range rings are drawn around. Anything
+    /// within a couple of hundred miles of the truth does the job.
+    fn station_row(
+        ui: &mut egui::Ui,
+        home: Option<(f64, f64)>,
+        edit: &mut Option<String>,
+    ) -> Option<(f64, f64)> {
+        let mut set = None;
+        ui.horizontal(|ui| {
+            ui.label(legend("station"));
+            let text = edit.get_or_insert_with(|| match home {
+                Some((lat, lon)) => format!("{lat:.4}, {lon:.4}"),
+                None => String::new(),
+            });
+            let r = ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(150.0)
+                    .hint_text("lat, lon")
+                    .font(FontId::new(12.0, FontFamily::Name(theme::READOUT_FONT.into()))),
+            );
+            let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if typed || ui.small_button("SET").clicked() {
+                if let Ok(p) = crate::parse_location(text) {
+                    set = Some(p);
+                }
+            }
+            ui.add_space(8.0);
+            ui.label(legend(if home.is_some() {
+                "right-click the map to move it"
+            } else {
+                "type it, or right-click the map"
+            }));
+        });
+        set
+    }
+
+    /// Where the aircraft are, on OpenStreetMap tiles.
+    ///
+    /// The tiles come from our own fetcher rather than a map crate: slippy
+    /// tiles are a URL template and a Mercator projection, and what a map
+    /// widget adds on top is a way to draw things over them, which is the
+    /// part this view has to write anyway.
+    ///
+    /// Returns the view to use next frame, since dragging and scrolling
+    /// change it, and a position if the station was dropped somewhere.
+    fn flights_map(
+        ui: &mut egui::Ui,
+        tiles: &mut crate::map::Tiles,
+        active: &[&crate::flights::Aircraft],
+        now: std::time::Instant,
+        home: Option<(f64, f64)>,
+        view: MapView,
+        height: f32,
+    ) -> (MapView, Option<(f64, f64)>) {
+        let w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, height), Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, theme::WELL);
+        let font = FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()));
+
+        // Centre on the receiver, or on what it can hear, until someone drags
+        // the map somewhere else. After that it stays where it was put: a map
+        // that recentres itself is a map you cannot read.
+        let mut view = view;
+        if view.center.is_none() {
+            view.center = home.or_else(|| mean_position(active));
+        }
+        let Some((clat, clon)) = view.center else {
+            p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+            p.text(rect.center(), Align2::CENTER_CENTER, "no positions yet", font, theme::LEGEND);
+            return (view, None);
+        };
+
+        let mid = rect.center();
+        let mut center = (clat, clon);
+        let offset = |pos: Pos2| (f64::from(pos.x - mid.x), f64::from(pos.y - mid.y));
+
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            center = crate::map::screen_to_ll(
+                center,
+                view.zoom,
+                (f64::from(-d.x), f64::from(-d.y)),
+            );
+        }
+        if let (true, Some(pos)) = (resp.hovered(), resp.hover_pos()) {
+            let d = ui.input(|i| i.smooth_scroll_delta.y);
+            if d != 0.0 {
+                let next = (view.zoom + f64::from(d) * 0.004).clamp(2.0, 19.0);
+                center = crate::map::anchored_zoom(center, view.zoom, next, offset(pos));
+                view.zoom = next;
+            }
+        }
+        view.center = Some(center);
+
+        let (z, scale) = (crate::map::level(view.zoom), crate::map::tile_scale(view.zoom));
+        let (cx, cy) = crate::map::project(center.0, center.1, z);
+        let to_screen = |lat: f64, lon: f64| {
+            let (x, y) = crate::map::ll_to_screen(center, view.zoom, (lat, lon));
+            Pos2::new(mid.x + x as f32, mid.y + y as f32)
+        };
+
+        let clip = p.with_clip_rect(rect);
+        Self::draw_tiles(&clip, tiles, rect, mid, (cx, cy), z, scale);
+
+        // Range rings are centred on the receiver, not on the view. They say
+        // how far away something is from the antenna, which does not change
+        // when the map is dragged.
+        let m_px = crate::map::resolution(center.0, z) * crate::map::TILE_PX / scale;
+        let nm_px = 1852.0 / m_px;
+        if let Some((lat, lon)) = home {
+            let at = to_screen(lat, lon);
+            // Rings at a round distance that fits the window, rather than a
+            // fraction of a zoom: 25 nm is 25 nm at every scale.
+            let span = f64::from(rect.width().min(rect.height())) / 2.0 / nm_px;
+            let step = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
+                .into_iter()
+                .find(|s| s * 2.0 >= span)
+                .unwrap_or(1000.0);
+            for k in 1..=3 {
+                let r = (step * f64::from(k) * nm_px) as f32;
+                clip.circle_stroke(at, r, Stroke::new(1.0, theme::READOUT.gamma_multiply(0.30)));
+                clip.text(
+                    Pos2::new(at.x + 4.0, at.y - r),
+                    Align2::LEFT_CENTER,
+                    format!("{:.0} nm", step * f64::from(k)),
+                    font.clone(),
+                    theme::READOUT.gamma_multiply(0.55),
+                );
+            }
+            clip.circle_stroke(at, 5.0, Stroke::new(1.5, theme::READOUT));
+            clip.circle_filled(at, 1.5, theme::READOUT);
+        }
+
+        for a in active {
+            let Some((lat, lon)) = a.position else { continue };
+            // An aircraft heard a minute ago is drawn, but faintly: it is
+            // where it was, not where it is.
+            let fade = 1.0 - (a.age(now).as_secs_f32() / 60.0).clamp(0.0, 0.75);
+            if a.trail.len() > 1 {
+                let pts: Vec<Pos2> = a.trail.iter().map(|(la, lo)| to_screen(*la, *lo)).collect();
+                clip.add(egui::Shape::line(
+                    pts,
+                    Stroke::new(1.5, theme::TRACE.gamma_multiply(0.5 * fade)),
+                ));
+            }
+            let at = to_screen(lat, lon);
+            Self::aircraft_mark(&clip, at, a.track_deg, theme::TRACE.gamma_multiply(fade));
+            let label = a.callsign.clone().unwrap_or_else(|| format!("{:06x}", a.icao));
+            Self::map_label(&clip, Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
+            if let Some(ft) = a.altitude_ft {
+                let t = format!("{ft} ft");
+                Self::map_label(
+                    &clip,
+                    Pos2::new(at.x + 9.0, at.y + 5.0),
+                    &t,
+                    theme::LEGEND,
+                    fade,
+                );
+            }
+        }
+
+        let shown = active.iter().filter(|a| a.position.is_some()).count();
+        Self::map_label(
+            &clip,
+            Pos2::new(rect.left() + 8.0, rect.top() + 10.0),
+            &format!("{shown} plotted    {:.1} nm/cm    z{:.1}    drag to pan, scroll to zoom", nm_px.recip() * 37.8, view.zoom),
+            theme::LEGEND,
+            1.0,
+        );
+        // Required by the tile usage policy, and by the licence the map data
+        // is under.
+        Self::map_label(
+            &clip,
+            Pos2::new(rect.right() - 150.0, rect.bottom() - 10.0),
+            "(c) OpenStreetMap contributors",
+            theme::LEGEND,
+            1.0,
+        );
+
+        // A map with no tiles under it still shows aircraft, and would
+        // quietly look like an empty sky. Say what failed instead.
+        if let Some((err, n)) = tiles.error() {
+            let short: String = err.chars().take(110).collect();
+            clip.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.bottom() - 30.0),
+                    Pos2::new(rect.right(), rect.bottom()),
+                ),
+                0.0,
+                theme::WELL,
+            );
+            Self::map_label(
+                &clip,
+                Pos2::new(rect.left() + 8.0, rect.bottom() - 20.0),
+                &format!("{n} tile(s) failed, map is not showing terrain"),
+                theme::FAULT,
+                1.0,
+            );
+            Self::map_label(
+                &clip,
+                Pos2::new(rect.left() + 8.0, rect.bottom() - 8.0),
+                &short,
+                theme::LEGEND,
+                1.0,
+            );
+        }
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+
+        // Right-click puts the station where the pointer is. A receiver knows
+        // where it is on a map long before it knows its coordinates.
+        let mut place = None;
+        if resp.secondary_clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                place = Some(crate::map::screen_to_ll(center, view.zoom, offset(pos)));
+            }
+        }
+        (view, place)
+    }
+
+    /// Every tile the view touches, asked for as it is drawn.
+    fn draw_tiles(
+        p: &egui::Painter,
+        tiles: &mut crate::map::Tiles,
+        rect: Rect,
+        mid: Pos2,
+        center: (f64, f64),
+        z: u8,
+        scale: f64,
+    ) {
+        let (cx, cy) = center;
+        let half_w = f64::from(rect.width()) / 2.0 / scale;
+        let half_h = f64::from(rect.height()) / 2.0 / scale;
+        let n = 1i64 << z;
+        let (x0, x1) = ((cx - half_w).floor() as i64, (cx + half_w).floor() as i64);
+        let (y0, y1) = ((cy - half_h).floor() as i64, (cy + half_h).floor() as i64);
+        for ty in y0..=y1 {
+            // The world does not wrap north to south, so a tile above the
+            // pole is nothing rather than a tile from the other end.
+            if ty < 0 || ty >= n {
+                continue;
+            }
+            for tx in x0..=x1 {
+                // Longitude does wrap, so panning past the date line shows
+                // the far side of the world rather than a hole.
+                let wrapped = tx.rem_euclid(n);
+                let id = crate::map::TileId { z, x: wrapped as u32, y: ty as u32 };
+                let Some(tex) = tiles.get(id) else { continue };
+                let min = Pos2::new(
+                    mid.x + ((tx as f64 - cx) * scale) as f32,
+                    mid.y + ((ty as f64 - cy) * scale) as f32,
+                );
+                let at = Rect::from_min_size(min, Vec2::splat(scale as f32));
+                p.image(
+                    tex.id(),
+                    at,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    // Held back so the aircraft over it stay the brightest
+                    // thing on screen, and so it sits in the panel's palette
+                    // rather than glowing white in a dark interface.
+                    Color32::from_gray(150),
+                );
+            }
+        }
+    }
+
+    /// Text with a dark backing, since map tiles are busy and unbacked labels
+    /// vanish over a town.
+    fn map_label(p: &egui::Painter, at: Pos2, text: &str, col: Color32, fade: f32) {
+        let font = FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()));
+        let g = p.layout_no_wrap(text.to_string(), font, col.gamma_multiply(fade));
+        let r = Rect::from_min_size(at - Vec2::new(2.0, g.size().y / 2.0), g.size() + Vec2::new(4.0, 0.0));
+        p.rect_filled(r, 2.0, Color32::from_black_alpha((190.0 * fade) as u8));
+        p.galley(Pos2::new(at.x, at.y - g.size().y / 2.0), g, col);
+    }
+
+    /// A triangle pointing where the aircraft is going, or a dot when nothing
+    /// has said which way that is.
+    fn aircraft_mark(p: &egui::Painter, at: Pos2, track_deg: Option<f64>, col: Color32) {
+        let Some(track) = track_deg else {
+            p.circle_filled(at, 3.0, col);
+            return;
+        };
+        let t = (track as f32).to_radians();
+        let (s, c) = (t.sin(), t.cos());
+        // Track is clockwise from north, and north is up, so a point ahead of
+        // the aircraft is (sin, -cos) in screen coordinates.
+        let rot = |x: f32, y: f32| Pos2::new(at.x + x * c + y * s, at.y + x * s - y * c);
+        p.add(egui::Shape::convex_polygon(
+            vec![rot(0.0, 6.0), rot(-4.0, -4.0), rot(0.0, -1.5), rot(4.0, -4.0)],
+            col,
+            Stroke::NONE,
+        ));
+    }
+
+    fn flights_rows(
         ui: &mut egui::Ui,
         active: &[&crate::flights::Aircraft],
         now: std::time::Instant,

@@ -22,6 +22,11 @@ const FORGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// place: an aircraft at 500 knots moves a mile in seven seconds.
 const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Points kept per aircraft. At a point every few seconds this is the last
+/// several minutes of flight, which at 500 knots is a long enough line to
+/// read a turn from.
+const TRAIL_MAX: usize = 128;
+
 #[derive(Clone, Debug)]
 pub struct Aircraft {
     pub icao: u32,
@@ -32,6 +37,13 @@ pub struct Aircraft {
     pub vertical_rate_fpm: Option<i32>,
     /// Resolved position, once there is enough to resolve one.
     pub position: Option<(f64, f64)>,
+    /// Where it has been since it was first heard, oldest first.
+    ///
+    /// A map without trails is a scatter of dots that says nothing about
+    /// where anything is going. Capped because an aircraft crossing the range
+    /// of a receiver reports its position a few times a second for half an
+    /// hour, and the far end of that is off the screen anyway.
+    pub trail: Vec<(f64, f64)>,
     pub messages: u64,
     pub last: std::time::Instant,
     /// Most recent encoded halves, kept until their opposite parity arrives.
@@ -49,6 +61,7 @@ impl Aircraft {
             track_deg: None,
             vertical_rate_fpm: None,
             position: None,
+            trail: Vec::new(),
             messages: 0,
             last: at,
             even: None,
@@ -58,6 +71,23 @@ impl Aircraft {
 
     pub fn age(&self, now: std::time::Instant) -> std::time::Duration {
         now.saturating_duration_since(self.last)
+    }
+
+    /// Record the current position, if it moved far enough to be worth a
+    /// point. A stationary aircraft on an apron would otherwise fill the
+    /// trail with the same coordinate.
+    fn push_trail(&mut self) {
+        let Some(p) = self.position else { return };
+        if let Some(last) = self.trail.last() {
+            // Roughly 50 m, below which the line would be a dot anyway.
+            if (last.0 - p.0).abs() < 0.0005 && (last.1 - p.1).abs() < 0.0005 {
+                return;
+            }
+        }
+        self.trail.push(p);
+        if self.trail.len() > TRAIL_MAX {
+            self.trail.remove(0);
+        }
     }
 }
 
@@ -161,11 +191,13 @@ impl Flights {
         // to be the same place.
         if let Some(reference) = a.position.or(reference) {
             a.position = Some(adsb::cpr_local(reference, cpr, odd));
+            a.push_trail();
             return;
         }
         if let (Some((even, te)), Some((odd_cpr, to))) = (a.even, a.odd) {
             if te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW {
                 a.position = adsb::cpr_global(even, odd_cpr, to > te);
+                a.push_trail();
             }
         }
     }
