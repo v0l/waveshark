@@ -91,7 +91,7 @@ impl PacketDecodeNode {
         }
         // The 2 m packet channels. Wherever the scanner put APRS, a frame
         // from it arrives tagged with that channel rather than 1090.
-        if (144_000_000.0..146_000_000.0).contains(&(p.center_hz as f64)) {
+        if dsp::afsk::is_packet_band(p.center_hz as f64) {
             let Ok(frame) = decode::ax25::parse(bytes) else { return };
             self.hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
             return;

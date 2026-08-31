@@ -56,9 +56,12 @@ Retention differs from the list: a list keeps the last N packets, a map keeps
 the last position per identity plus a trail, and drops an aircraft that has
 been silent for a minute or two. That is the view's business, not the bus's.
 
-None of ADS-B, AIS or radiosonde decoding exists yet, so the map has nothing to
-plot. It should be written with the first of them and not before, or it will be
-designed against imagined data.
+ADS-B, AIS and APRS all exist now, and the map was generalised with the second
+of them rather than before it, which was the right order. Written against
+ADS-B alone the abstraction would have had one implementation, and the parts
+that look general would have been indistinguishable from the parts that are
+pure ADS-B. What the second protocol showed is where the seam actually is, and
+the third fitted without moving it.
 
 ### Image pane, for APT, LRPT, SSTV and HRIT
 
@@ -111,9 +114,25 @@ view exists to force them:
    into a printed list, which is what would let a view be tested without a
    radio.
 
-### Flights
+### Map
 
-Aircraft heard on 1090 MHz, on OpenStreetMap tiles. The tile layer is ours
+Aircraft from ADS-B on 1090 MHz, vessels and navigation marks from AIS on
+162 MHz, and vehicles and stations from APRS on 144.800, all on OpenStreetMap
+tiles.
+
+Three protocols, one tracker, and the differences between them are where the
+design is. Identity is shared but is not a number: an ICAO address, an MMSI
+and a callsign are three identity spaces, so a track is identified by the pair
+of protocol and value and nothing can collide. Position reassembly is not
+shared at all; only ADS-B has compact position reporting, so the CPR machinery
+hangs off that path and neither of the others touches it. Ageing and
+plausibility are shared but not constant: an aircraft silent for a minute is
+gone, a Class B vessel reports every thirty seconds, and an APRS station
+beacons every few minutes.
+
+A kind decides how a thing is drawn and how long it is remembered. AIS says
+which it is by message type; APRS says it with a symbol, so an APRS station
+reporting itself as a balloon is drawn as an aircraft rather than as a car. The tile layer is ours
 rather than a map crate's: slippy tiles are a URL template and a Mercator
 projection, and every map widget for egui brings a HTTP stack, an async
 runtime and an image pipeline to do what `crates/app/src/map.rs` does in two

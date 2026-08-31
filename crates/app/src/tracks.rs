@@ -24,7 +24,7 @@
 //!   thirty seconds and is still there ten minutes later. A limit that says
 //!   how far a thing can have moved is right for both, and the number is not.
 
-use decode::{adsb, ais};
+use decode::{adsb, ais, aprs, ax25};
 
 /// Points kept per track. At a point every few seconds this is the last
 /// several minutes, which is a long enough line to read a turn from.
@@ -44,7 +44,11 @@ const REFERENCE_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 pub enum Kind {
     Aircraft,
     Vessel,
-    /// Something that does not move: a shore station or a navigation mark.
+    /// Something moving on land: a car, a cyclist, a train. APRS is where
+    /// these come from, and neither of the other moving kinds fits one.
+    Vehicle,
+    /// Something that does not move: a shore station, a navigation mark, a
+    /// digipeater or a weather station.
     Station,
 }
 
@@ -59,6 +63,10 @@ impl Kind {
         match self {
             Kind::Aircraft => std::time::Duration::from_secs(60),
             Kind::Vessel => std::time::Duration::from_secs(600),
+            // An APRS station beacons every few minutes at best, and a
+            // stationary one every twenty. Forgetting it on the aircraft's
+            // schedule would empty the map between transmissions.
+            Kind::Vehicle => std::time::Duration::from_secs(1800),
             Kind::Station => std::time::Duration::from_secs(3600),
         }
     }
@@ -71,6 +79,9 @@ impl Kind {
             // No airliner beats this, and no CPR zone error fits inside it.
             Kind::Aircraft => 600.0,
             Kind::Vessel => 60.0,
+            // A train at two hundred knots is faster than anything on a road
+            // and slower than the errors worth catching.
+            Kind::Vehicle => 200.0,
             Kind::Station => 1.0,
         }
     }
@@ -88,6 +99,10 @@ pub enum TrackId {
     Icao(u32),
     /// Maritime Mobile Service Identity, from AIS.
     Mmsi(u32),
+    /// A callsign with its substation identifier, from APRS. A string rather
+    /// than a number because that is what the protocol issues: this is the
+    /// variant the enum existed to make room for.
+    Call(String),
 }
 
 impl TrackId {
@@ -96,6 +111,7 @@ impl TrackId {
         match self {
             TrackId::Icao(v) => format!("{v:06x}"),
             TrackId::Mmsi(v) => v.to_string(),
+            TrackId::Call(c) => c.clone(),
         }
     }
 }
@@ -119,6 +135,18 @@ pub enum Detail {
         /// A navigation mark rather than a shore station.
         aid: bool,
     },
+    /// An APRS station, which says what it is with a symbol rather than with
+    /// a message type.
+    Aprs {
+        symbol_table: char,
+        symbol_code: char,
+        altitude_ft: Option<i32>,
+        /// Whatever the operator put after the position, which is where APRS
+        /// keeps everything it has no field for.
+        comment: Option<String>,
+        /// Fixed rather than moving, decided by the symbol.
+        fixed: bool,
+    },
 }
 
 impl Detail {
@@ -127,8 +155,34 @@ impl Detail {
             Detail::Aircraft { .. } => Kind::Aircraft,
             Detail::Vessel { .. } => Kind::Vessel,
             Detail::Station { .. } => Kind::Station,
+            Detail::Aprs { symbol_code, symbol_table, fixed, .. } => {
+                aprs_kind(*symbol_table, *symbol_code, *fixed)
+            }
         }
     }
+}
+
+/// What an APRS symbol says the station is.
+///
+/// A station declares itself with a two character symbol rather than with a
+/// message type, so this is the only thing that distinguishes a car from a
+/// weather station from a balloon. Worth reading rather than drawing
+/// everything the same: an APRS station reporting itself as an aircraft
+/// should look like one on a map that already has aircraft on it.
+fn aprs_kind(_table: char, code: char, fixed: bool) -> Kind {
+    match code {
+        // Balloons, gliders and aeroplanes.
+        '^' | 'O' | 'g' | '\'' => Kind::Aircraft,
+        // Boats and yachts.
+        's' | 'Y' => Kind::Vessel,
+        _ if fixed => Kind::Station,
+        _ => Kind::Vehicle,
+    }
+}
+
+/// Symbols that mean a thing which does not move.
+fn aprs_is_fixed(code: char) -> bool {
+    matches!(code, '-' | '_' | '#' | '&' | 'r' | 'l' | 'I' | ';' | '=')
 }
 
 #[derive(Clone, Debug)]
@@ -189,10 +243,11 @@ impl Track {
         now.saturating_duration_since(self.last)
     }
 
-    /// Altitude, for the kinds that have one.
+    /// Altitude, for the kinds that report one.
     pub fn altitude_ft(&self) -> Option<i32> {
         match self.detail {
             Detail::Aircraft { altitude_ft, .. } => altitude_ft,
+            Detail::Aprs { altitude_ft, .. } => altitude_ft,
             _ => None,
         }
     }
@@ -377,6 +432,67 @@ impl Tracks {
         }
     }
 
+    /// Fold in one APRS frame.
+    ///
+    /// Shorter than either of the others, because AX.25 carries the identity
+    /// in the frame header and APRS carries an absolute position in the
+    /// payload. There is nothing to pair and nothing to resolve. What it does
+    /// have that the others do not is a station saying in a symbol what sort
+    /// of thing it is, which is what decides how the map draws it.
+    pub fn update_aprs(&mut self, frame: &ax25::Frame, at: std::time::Instant) {
+        let id = TrackId::Call(frame.source.to_string());
+        // The destination is not only an address: Mic-E hides half its
+        // latitude in there, so the payload cannot be read without it.
+        let report = frame
+            .is_ui()
+            .then(|| aprs::parse(&frame.info, &frame.destination.call))
+            .flatten();
+
+        let detail = match &report {
+            Some(aprs::Report::Position { position, comment }) => Detail::Aprs {
+                symbol_table: position.symbol_table,
+                symbol_code: position.symbol_code,
+                altitude_ft: position.altitude_ft,
+                comment: comment.clone(),
+                fixed: aprs_is_fixed(position.symbol_code),
+            },
+            _ => Detail::Aprs {
+                symbol_table: '/',
+                symbol_code: '.',
+                altitude_ft: None,
+                comment: None,
+                fixed: false,
+            },
+        };
+        let i = self.entry(id, detail, at);
+        let e = &mut self.seen[i];
+        e.track.messages += 1;
+        e.track.last = at;
+        // A callsign is a name, unlike an ICAO address, so a station has one
+        // from its first frame rather than waiting for an identification.
+        if e.track.label.is_none() {
+            e.track.label = Some(frame.source.to_string());
+        }
+
+        // A status or a message is evidence the station is there and carries
+        // no position to move it to, so only a position report does anything
+        // beyond the message count above.
+        if let Some(aprs::Report::Position { position, comment }) = report {
+                e.track.speed_kt = position.speed_kt.or(e.track.speed_kt);
+                e.track.course_deg = position.course_deg.or(e.track.course_deg);
+                e.track.detail = Detail::Aprs {
+                    symbol_table: position.symbol_table,
+                    symbol_code: position.symbol_code,
+                    altitude_ft: position.altitude_ft,
+                    comment,
+                    fixed: aprs_is_fixed(position.symbol_code),
+                };
+                // Absolute, checked by the frame check sequence, and with no
+                // reading of it that could be a zone out.
+            e.track.set_position((position.lat, position.lon), at, true);
+        }
+    }
+
     /// Fold in one Mode S frame.
     pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
         let Some(icao) = frame.icao else { return };
@@ -541,6 +657,10 @@ impl pipeline::node::Simple for TracksNode {
             if dsp::ais::is_ais_band(packet.center_hz as f64) {
                 if let Ok(f) = ais::parse(bytes) {
                     self.tracks.update_ais(&f, at);
+                }
+            } else if dsp::afsk::is_packet_band(packet.center_hz as f64) {
+                if let Ok(f) = ax25::parse(bytes) {
+                    self.tracks.update_aprs(&f, at);
                 }
             } else if let Ok(f) = adsb::parse(bytes) {
                 self.tracks.update_adsb(&f, at);
@@ -812,6 +932,100 @@ mod tests {
         let (lat, lon) = s.position.expect("a surveyed position");
         assert!((lat - 36.883_766).abs() < 1e-5, "latitude {lat}");
         assert!((lon - -76.352_361).abs() < 1e-5, "longitude {lon}");
+    }
+
+    /// Build an AX.25 UI frame carrying an APRS payload.
+    fn aprs_frame(src: &str, ssid: u8, info: &[u8]) -> ax25::Frame {
+        let mut f = Vec::new();
+        for (call, id, last) in [("APRS  ", 0u8, false), (src, ssid, true)] {
+            let padded = format!("{call:<6}");
+            for c in padded.bytes().take(6) {
+                f.push(c << 1);
+            }
+            f.push(0x60 | (id << 1) | u8::from(last));
+        }
+        f.push(0x03);
+        f.push(0xF0);
+        f.extend_from_slice(info);
+        ax25::parse(&f).expect("an AX.25 frame")
+    }
+
+    /// One APRS frame is a position, an identity and a name at once, which is
+    /// neither of the other two protocols' shapes.
+    #[test]
+    fn one_aprs_frame_is_a_named_station_on_its_own() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        t.update_aprs(
+            &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>088/036on the road"),
+            now,
+        );
+        let active = t.active(now);
+        assert_eq!(active.len(), 1);
+        let v = active[0];
+        assert_eq!(v.id, TrackId::Call("EI2ABC-9".into()));
+        // A callsign is a name, so there is no waiting for an identification
+        // frame the way there is with ADS-B.
+        assert_eq!(v.label.as_deref(), Some("EI2ABC-9"));
+        assert!(v.confirmed);
+        let (lat, lon) = v.position.expect("a fix");
+        assert!((lat - 53.633_33).abs() < 1e-4, "latitude {lat}");
+        assert!((lon - -6.25).abs() < 1e-4, "longitude {lon}");
+        assert_eq!(v.speed_kt, Some(36.0));
+        assert_eq!(v.course_deg, Some(88.0));
+        // A car symbol is something that moves on land.
+        assert_eq!(v.kind(), Kind::Vehicle);
+    }
+
+    /// A station says what it is with a symbol rather than a message type, and
+    /// the map draws it accordingly, so the symbol has to be read.
+    #[test]
+    fn the_aprs_symbol_decides_what_kind_of_thing_it_is() {
+        let now = std::time::Instant::now();
+        for (sym, want) in [
+            ('>', Kind::Vehicle),
+            ('O', Kind::Aircraft),
+            ('^', Kind::Aircraft),
+            ('s', Kind::Vessel),
+            ('-', Kind::Station),
+            ('_', Kind::Station),
+            ('#', Kind::Station),
+        ] {
+            let info = format!("!5338.00N/00615.00W{sym}");
+            let mut t = Tracks::new();
+            t.update_aprs(&aprs_frame("EI2ABC", 0, info.as_bytes()), now);
+            assert_eq!(t.active(now)[0].kind(), want, "symbol {sym}");
+        }
+    }
+
+    /// Three protocols, three identity spaces, and no way for a callsign to
+    /// collide with a number.
+    #[test]
+    fn the_three_protocols_do_not_share_an_identity_space() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        t.update_adsb(&ident(), now);
+        t.update_ais(&ais_frame(&ais_position()), now);
+        t.update_aprs(&aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>"), now);
+        let active = t.active(now);
+        assert_eq!(active.len(), 3, "one protocol swallowed another");
+        assert!(active.iter().any(|x| matches!(x.id, TrackId::Icao(_))));
+        assert!(active.iter().any(|x| matches!(x.id, TrackId::Mmsi(_))));
+        assert!(active.iter().any(|x| matches!(x.id, TrackId::Call(_))));
+    }
+
+    /// A status frame carries no position, and must not move a station that
+    /// already has one.
+    #[test]
+    fn a_status_frame_does_not_move_a_station() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        t.update_aprs(&aprs_frame("EI2ABC", 0, b"!5338.00N/00615.00W>"), now);
+        let before = t.active(now)[0].position;
+        t.update_aprs(&aprs_frame("EI2ABC", 0, b">just listening"), now);
+        let after = t.active(now)[0];
+        assert_eq!(after.position, before, "a status report moved the station");
+        assert_eq!(after.messages, 2, "but it is still evidence it is there");
     }
 
     #[test]

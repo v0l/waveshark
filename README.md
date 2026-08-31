@@ -489,6 +489,21 @@ within ten seconds of each other, or a reference within 180 nautical miles.
 the first frame from an aircraft puts it on the map instead of the first
 matching pair. The value is remembered in the session file.
 
+### APRS
+
+Tune to 144.800 MHz and packet stations appear on the same map as the aircraft
+and the shipping. Two layers of modulation: the channel is ordinary narrowband
+FM, and the data is in the audio as Bell 202 tones at 1200 and 2200 Hz. Above
+the tones it is AX.25, which is HDLC, which is the same link layer AIS uses,
+so the flags, the bit destuffing and the check sequence are shared code.
+
+Positions arrive in three encodings that share almost nothing. Uncompressed is
+readable off the packet, compressed packs the same thing into thirteen
+characters of base 91, and Mic-E splits it between the payload and the
+destination callsign, abusing an address field to carry latitude digits
+because a frame has to have a destination anyway. Most vehicle trackers send
+Mic-E, so a decoder without it misses most of what moves.
+
 Zoom in past level nine and airports appear under the aircraft as amber
 markers, their codes labelled as the view narrows, with the tower, ground,
 ATIS and approach frequencies for the one under the pointer shown on hover.

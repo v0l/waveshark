@@ -37,6 +37,18 @@ pub const BAUD: f64 = 1200.0;
 pub const MARK_HZ: f64 = 1200.0;
 pub const SPACE_HZ: f64 = 2200.0;
 
+/// Whether a packet's reported centre says it came off the 2 m packet
+/// segment.
+///
+/// The counterpart of `ais::is_ais_band`, and used the same way: a consumer of
+/// the bus tells an AX.25 frame from a Mode S one by where it was received,
+/// since both are bytes and that is evidence the packet already carries.
+/// A range rather than a frequency because the scanner decides where APRS
+/// listens, and 144.800, 144.390 and 144.640 are all in use.
+pub fn is_packet_band(center_hz: f64) -> bool {
+    (144_000_000.0..146_000_000.0).contains(&center_hz)
+}
+
 /// An AX.25 frame is at least an address pair, a control byte and a PID, and
 /// at most that plus 256 bytes of information. In bits, with the check
 /// sequence, that brackets what the framer should assemble.

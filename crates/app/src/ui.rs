@@ -2975,7 +2975,9 @@ impl App {
             // fixed and has neither.
             let under = match a.kind() {
                 crate::tracks::Kind::Aircraft => a.altitude_ft().map(|ft| format!("{ft} ft")),
-                crate::tracks::Kind::Vessel => a.speed_kt.map(|kt| format!("{kt:.1} kt")),
+                crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => {
+                    a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
+                }
                 crate::tracks::Kind::Station => None,
             };
             if let Some(t) = under {
@@ -3363,13 +3365,15 @@ impl App {
             }
             // Longer and narrower, with a squared stern: a hull rather than a
             // wing.
-            _ => vec![
+            Kind::Vessel => vec![
                 rot(0.0, 7.0),
                 rot(-2.5, 2.0),
                 rot(-2.5, -5.0),
                 rot(2.5, -5.0),
                 rot(2.5, 2.0),
             ],
+            // Short and blunt, which is neither of the other two at a glance.
+            _ => vec![rot(0.0, 4.5), rot(-3.0, 1.0), rot(-3.0, -3.0), rot(3.0, -3.0), rot(3.0, 1.0)],
         };
         p.add(egui::Shape::convex_polygon(shape, col, Stroke::NONE));
     }
@@ -3387,7 +3391,12 @@ impl App {
             // Broken down by kind, because "14 tracks" on a coast says nothing
             // about whether the aircraft or the shipping is being heard.
             for (k, name) in
-                [(Kind::Aircraft, "aircraft"), (Kind::Vessel, "vessels"), (Kind::Station, "marks")]
+                [
+                    (Kind::Aircraft, "aircraft"),
+                    (Kind::Vessel, "vessels"),
+                    (Kind::Vehicle, "vehicles"),
+                    (Kind::Station, "stations"),
+                ]
             {
                 let n = count(k);
                 if n > 0 {
@@ -3398,7 +3407,9 @@ impl App {
             }
             if active.is_empty() {
                 ui.add_space(10.0);
-                ui.label(legend("tune to 1090 MHz for aircraft or 162 MHz for shipping"));
+                ui.label(legend(
+                    "tune to 1090 for aircraft, 162 for shipping, 144.8 for APRS",
+                ));
             }
         });
         ui.add_space(6.0);
@@ -3472,10 +3483,20 @@ impl App {
                         if *aid { "navigation mark".into() } else { "shore station".into() },
                         theme::LEGEND,
                     ),
+                    // An APRS station says what it is in a comment more often
+                    // than in any field, so that is what the column shows.
+                    crate::tracks::Detail::Aprs { comment, altitude_ft, .. } => (
+                        comment
+                            .clone()
+                            .or_else(|| altitude_ft.map(|v| format!("{v} ft")))
+                            .unwrap_or_else(|| dash.clone()),
+                        theme::LEGEND,
+                    ),
                 };
                 let kind = match a.kind() {
                     Kind::Aircraft => "air",
                     Kind::Vessel => "sea",
+                    Kind::Vehicle => "land",
                     Kind::Station => "fixed",
                 };
                 let text = [
