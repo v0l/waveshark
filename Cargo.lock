@@ -286,6 +286,7 @@ dependencies = [
  "clap",
  "common",
  "crossbeam-channel",
+ "decode",
  "dsp",
  "eframe",
  "egui",

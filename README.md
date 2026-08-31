@@ -7,9 +7,9 @@ decode every signal in it in parallel.
 
 Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
-with RDS. What is missing is protocols: twelve ISM device decoders are
-implemented where the goal is hundreds, and only the Fine Offset one has been
-checked against a real recording.
+with RDS, and ADS-B decodes aircraft off the air. What is missing is protocols:
+fifteen ISM device decoders are implemented where the goal is hundreds, and
+only Fine Offset and ADS-B have been checked against real recordings.
 
 Proof it works: `crates/decode/tests/fineoffset_capture.rs` decodes a real
 recorded 433.92 MHz weather-station transmission and asserts the result matches
@@ -355,6 +355,79 @@ drag it to give either one more room, double click it to go back to the
 default. The packet log resizes the same way, by its top edge. Which pane
 matters depends on what is being looked for, so none of the three is fixed.
 
+### Packet log
+
+Every decoded packet is appended to `$XDG_DATA_HOME/super-radio/packets`, one
+JSON object per line, one file per day. It is on by default and has no switch
+in the interface, because the value of a packet log is in already having it:
+the interesting transmission is always the one that happened before anyone
+thought to press record. A receiver left on a band overnight is a test corpus,
+and real frames are the only honest way to tell whether a change to a decoder
+helped.
+
+```
+{"at":1788185123.791,"freq":433920000,"model":"Fineoffset-WHx080",
+ "modulation":"OOK","rssi_dbfs":-27.4,"snr_db":31.9,"crc_ok":true,
+ "bytes":"ffac42473d0306211906fc",
+ "fields":{"battery_ok":true,"humidity_pct":61,"temperature_c":15.9}}
+```
+
+`crc_ok` is absent rather than false for a protocol that has no integrity
+check, so filtering on the key separates "verified" from "unverifiable" without
+a special case. `--packet-log <dir>` moves it, `--no-packet-log` turns it off,
+and it stops appending at 512 MB, which is a runaway guard rather than a
+budget.
+
+### ADS-B
+
+Tune to 1090 MHz with a span of 2 MS/s or more and aircraft appear in the same
+packet list as everything else. Mode S does not go through the channel banks:
+its bits are 1 us wide, a thousand times faster than anything on 433 MHz, so it
+runs on the wideband stream through a chain of its own, and the banks are
+switched off while it does, since 1090 MHz carries nothing they understand.
+
+That chain is a graph like any other, so the `Signal chain` view shows it, its
+parameters appear on the same surface as a filter's, and its latency is
+accounted the same way. It is a single node rather than the usual front end
+plus protocol pair, and the reason is in `crates/nodes/src/modes_nodes.rs`: a
+believed frame blanks the 120 us it occupies, so a false preamble destroys
+every real frame overlapping it, and only the CRC can tell the two apart. The
+acceptance test therefore has to run inside the search rather than downstream
+of it. Split across two nodes it recovers 8 frames from a recorded band where
+one node recovers 27.
+
+Frames arrive as `ADSB-Position`, `ADSB-Velocity`, `ADSB-Identification` and
+`ModeS-Reply` rows with structured fields: ICAO address, callsign, altitude,
+ground speed, track, and the encoded halves of a position. Turning a pair of
+those into a latitude belongs to whatever tracks aircraft over time, not to a
+row in a packet log, so `decode::adsb` offers `cpr_global` and `cpr_local` and
+leaves the choice to the caller.
+
+Short replies are the awkward part. DF0, 4, 5, 20 and 21 overlay the aircraft
+address on their parity field, so they cannot verify themselves and 56 bits of
+noise decode to a plausible-looking one every time. They are believed only once
+their address has been seen three times in frames the demodulator read without
+a single marginal bit. Dropping that rule produced 86 phantom aircraft on a four
+second capture; keeping it produced none.
+
+### Flights
+
+The `Flights` view in the top bar is a table of aircraft rather than of
+packets: callsign, ICAO address, altitude, ground speed, track, climb rate,
+position and how long since the last frame. It is a view over the same packet
+stream the log shows, reading the structured fields of a decode and knowing
+nothing about how those bytes arrived, which is what `docs/views.md` means by a
+bus. Point it at live packets or a day of the packet log and it behaves the
+same.
+
+The work it does is that no single ADS-B frame says where an aircraft is. One
+carries a callsign, another an altitude, another half a position, and they
+arrive interleaved with everyone else's. A position needs either both halves
+within ten seconds of each other, or a reference within 180 nautical miles.
+`--location 53.64,-6.65` supplies the latter, which is worth doing: with it,
+the first frame from an aircraft puts it on the map instead of the first
+matching pair. The value is remembered in the session file.
+
 ### Decoding the whole span
 
 Data decoding is not something you tune to. The receiver splits whatever span
@@ -419,9 +492,15 @@ narrow and 20 wide channels, the scanner runs at about 17x real time.
 
 ### Signal chain
 
-The other view draws the graph the listening channel is running, with the type
-and rate on every link and the delay through the whole chain. It is read from
-the built graph, so it shows what is running rather than what was intended.
+This view draws whichever graph the receiver is running, with the type and rate
+on every link and the delay through the whole chain. It is read from the built
+graph, so it shows what is running rather than what was intended.
+
+There is always one to show, which is the point of everything being a graph: a
+channel you tuned has its audio chain, 1090 MHz has its Mode S chain, and a
+band being scanned has the decode chain every bank channel runs. The order is
+by how specific your intent was, so a channel beats a band. Only the stopped
+radio has nothing.
 
 ### FM broadcast
 

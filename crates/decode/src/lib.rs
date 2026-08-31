@@ -13,6 +13,7 @@
 //! operates on integers and costs almost nothing, which is what makes running
 //! every known protocol against every detected burst affordable.
 
+pub mod adsb;
 pub mod analyze;
 pub mod bits;
 pub mod protocol;

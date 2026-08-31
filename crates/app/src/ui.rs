@@ -98,6 +98,13 @@ pub struct App {
     /// Settings as last written to disk, and when. Compared against the live
     /// ones each frame rather than tracked with a dirty flag, because every
     /// control that changes one would otherwise have to remember to set it.
+    /// Every packet, appended to disk as it arrives. On unless the receiver
+    /// has nowhere to write, which is the case in tests.
+    packet_log: Option<crate::packetlog::PacketLog>,
+    /// Aircraft, folded together from the ADS-B packets in the same stream.
+    flights: crate::flights::Flights,
+    /// Where the receiver is, when it has been told.
+    location: Option<(f64, f64)>,
     saved: crate::session::Session,
     saved_at: Option<std::time::Instant>,
     /// Gain stages and switches restored from the session, waiting for the
@@ -160,6 +167,7 @@ const SPEEDS: [(&str, f32); 5] = [
 enum View {
     Spectrum,
     Chain,
+    Flights,
 }
 
 impl View {
@@ -167,6 +175,7 @@ impl View {
         match self {
             View::Spectrum => "Spectrum",
             View::Chain => "Signal chain",
+            View::Flights => "Flights",
         }
     }
 }
@@ -254,6 +263,9 @@ impl Default for App {
             view: View::Spectrum,
             chain_topo: None,
             chain_latency: 0.0,
+            packet_log: None,
+            flights: crate::flights::Flights::new(),
+            location: None,
             saved: crate::session::Session::default(),
             saved_at: None,
             pending_radio: None,
@@ -276,6 +288,15 @@ impl App {
         let mut app = Self {
             devices,
             device,
+            packet_log: crate::packetlog::PacketLog::default_dir()
+                .map(crate::packetlog::PacketLog::new),
+            flights: {
+                let mut f = crate::flights::Flights::new();
+                if let Some((lat, lon)) = s.location {
+                    f.set_reference(lat, lon);
+                }
+                f
+            },
             center: s.center,
             wf_center: s.center,
             db_center: s.center,
@@ -287,6 +308,7 @@ impl App {
             fft_size: s.fft,
             dc_block: s.dc_block,
             decode_on: s.decode_on,
+            location: s.location,
             volume: s.volume,
             saved: s.clone(),
             pending_radio: Some(s),
@@ -316,6 +338,7 @@ impl App {
                 .map(|r| r.toggles.iter().map(|t| (t.name.clone(), t.on)).collect())
                 .unwrap_or_else(|| self.saved.toggles.clone()),
             ppm: radio.as_ref().map(|r| r.ppm).unwrap_or(self.saved.ppm),
+            location: self.location,
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.volume,
@@ -373,6 +396,23 @@ impl App {
         if !want.decode_on {
             self.send(Cmd::Decode(false));
         }
+    }
+
+    /// Tell the tracker where the receiver is, so a single position frame
+    /// resolves instead of waiting for a matching pair.
+    pub fn set_location(&mut self, lat: f64, lon: f64) {
+        self.location = Some((lat, lon));
+        self.flights.set_reference(lat, lon);
+    }
+
+    /// Turn the packet log off, or point it somewhere other than the default.
+    pub fn set_packet_log(&mut self, off: bool, dir: Option<std::path::PathBuf>) {
+        self.packet_log = if off {
+            None
+        } else {
+            dir.or_else(crate::packetlog::PacketLog::default_dir)
+                .map(crate::packetlog::PacketLog::new)
+        };
     }
 
     /// Record every burst that decodes into a directory of captures.
@@ -554,7 +594,13 @@ impl App {
 
     /// Append decoded packets to the log, oldest first.
     fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
+        // To disk before the screen. The on-screen list is bounded and drops
+        // its oldest rows; the file is the one that has to keep everything.
+        if let Some(l) = self.packet_log.as_mut() {
+            l.append(&batch, std::time::SystemTime::now());
+        }
         for rec in batch {
+            self.flights.update(&rec);
             let id = self.next_packet;
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
@@ -851,6 +897,7 @@ impl eframe::App for App {
                 .show(ui, |ui| match self.view {
                     View::Spectrum => self.scope(ui),
                     View::Chain => self.chain(ui),
+                    View::Flights => self.flights_view(ui),
                 });
         }
         self.settings_modal(ui.ctx());
@@ -1076,7 +1123,7 @@ impl App {
                             .selected_text(v.label())
                             .width(120.0)
                             .show_ui(ui, |ui| {
-                                for opt in [View::Spectrum, View::Chain] {
+                                for opt in [View::Spectrum, View::Chain, View::Flights] {
                                     ui.selectable_value(&mut v, opt, opt.label());
                                 }
                             });
@@ -1712,15 +1759,28 @@ impl App {
         self.view = View::Chain;
     }
 
+    pub fn show_flights(&mut self) {
+        self.view = View::Flights;
+    }
+
+    /// Point the receiver at a frequency without opening a channel on it.
+    ///
+    /// Distinct from [`Self::tune_to`], which also starts demodulating: ADS-B
+    /// and the band scanners want the dial moved and nothing listening, since
+    /// there is no audio to be had at 1090 MHz.
+    pub fn set_center(&mut self, mhz: f64) {
+        self.center = mhz * 1e6;
+        self.send(Cmd::Center(Hz(self.center as u64)));
+        self.reset_waterfall();
+    }
+
     /// The signal chain the listening channel is running.
     fn chain(&mut self, ui: &mut egui::Ui) {
         let Some(topo) = self.chain_topo.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new(
-                        "No channel is being listened to, so no chain is running.",
-                    )
-                    .color(theme::LEGEND),
+                    egui::RichText::new("The radio is stopped, so no chain is running.")
+                        .color(theme::LEGEND),
                 );
             });
             return;
@@ -2002,6 +2062,123 @@ impl App {
         }
     }
 
+    /// Aircraft, assembled from the ADS-B packets in the same stream the log
+    /// shows. A view over the packet bus, not a second receiver.
+    fn flights_view(&mut self, ui: &mut egui::Ui) {
+        let now = std::time::Instant::now();
+        let active = self.flights.active(now);
+        // The pane runs to the window edge, and a table that starts there is
+        // unreadable.
+        let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
+        margin.show(ui, |ui| self.flights_table(ui, &active, now));
+    }
+
+    fn flights_table(
+        &self,
+        ui: &mut egui::Ui,
+        active: &[&crate::flights::Aircraft],
+        now: std::time::Instant,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(legend("aircraft"));
+            ui.label(value(active.len().to_string()).size(12.0));
+            if active.is_empty() {
+                ui.add_space(10.0);
+                ui.label(legend("tune to 1090 MHz with a span of 2 MS/s or more"));
+            }
+        });
+        ui.add_space(6.0);
+
+        const COLS: [(&str, f32); 8] = [
+            ("callsign", 90.0),
+            ("icao", 70.0),
+            ("altitude", 80.0),
+            ("speed", 70.0),
+            ("track", 60.0),
+            ("climb", 80.0),
+            ("position", 170.0),
+            ("msgs", 56.0),
+        ];
+        // Wide enough that the last column is not clipped when the channel
+        // strip is open, and scrolled sideways rather than squeezed when the
+        // window is narrower than that.
+        let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 60.0;
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_min_width(width);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::hover());
+        let p = ui.painter_at(rect);
+        let mut x = rect.left();
+        for (name, w) in COLS {
+            Self::cell(&p, rect, x, w, name, theme::LEGEND);
+            x += w;
+        }
+        Self::cell(&p, rect, x, rect.right() - x, "age", theme::LEGEND);
+        p.line_segment(
+            [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
+            Stroke::new(1.0, theme::ETCH),
+        );
+
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (n, a) in active.iter().enumerate() {
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::hover());
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let p = ui.painter_at(rect);
+                if n % 2 == 1 {
+                    p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                }
+                let dash = "-".to_string();
+                let text = [
+                    (a.callsign.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
+                    (format!("{:06x}", a.icao), theme::VALUE),
+                    (
+                        a.altitude_ft.map(|v| format!("{v} ft")).unwrap_or_else(|| dash.clone()),
+                        theme::VALUE,
+                    ),
+                    (
+                        a.ground_speed_kt
+                            .map(|v| format!("{v:.0} kt"))
+                            .unwrap_or_else(|| dash.clone()),
+                        theme::VALUE,
+                    ),
+                    (
+                        a.track_deg.map(|v| format!("{v:.0}")).unwrap_or_else(|| dash.clone()),
+                        theme::LEGEND,
+                    ),
+                    (
+                        a.vertical_rate_fpm
+                            .map(|v| format!("{v:+} fpm"))
+                            .unwrap_or_else(|| dash.clone()),
+                        // Climb and descent are worth telling apart at a
+                        // glance; level flight is not worth colouring at all.
+                        match a.vertical_rate_fpm {
+                            Some(v) if v > 128 => CRC_OK,
+                            Some(v) if v < -128 => theme::READOUT,
+                            _ => theme::LEGEND,
+                        },
+                    ),
+                    (
+                        a.position
+                            .map(|(lat, lon)| format!("{lat:.4}, {lon:.4}"))
+                            .unwrap_or_else(|| dash.clone()),
+                        theme::TRACE,
+                    ),
+                    (a.messages.to_string(), theme::LEGEND),
+                ];
+                let mut x = rect.left();
+                for ((t, c), (_, w)) in text.iter().zip(COLS) {
+                    Self::cell(&p, rect, x, w, t, *c);
+                    x += w;
+                }
+                let age = a.age(now).as_secs();
+                Self::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
+            }
+        });
+        });
+    }
+
     /// The packet log: everything decoded anywhere in the span.
     fn decode_log(&mut self, ui: &mut egui::Ui) {
         if !self.log_open {
@@ -2069,12 +2246,20 @@ impl App {
                 let narrow = r.status.scan_channels.load(Ordering::Relaxed);
                 let wide = r.status.scan_channels_wide.load(Ordering::Relaxed);
                 let total = r.status.decoded.load(Ordering::Relaxed);
+                let aircraft = r.status.aircraft.load(Ordering::Relaxed);
                 ui.add_space(10.0);
-                ui.label(legend(&if narrow > 0 {
+                ui.label(legend(&if r.status.modes_on.load(Ordering::Relaxed) {
+                    format!("1090 MHz mode s, {aircraft} aircraft, {total} frames")
+                } else if narrow > 0 {
                     format!("{narrow} ook + {wide} fsk channels, {total} seen")
                 } else {
                     "decoding off".into()
                 }));
+            }
+            if let Some(l) = &self.packet_log {
+                ui.add_space(10.0);
+                ui.label(legend(&format!("{} saved", l.logged())))
+                    .on_hover_text(format!("appended to {}", l.dir().display()));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {

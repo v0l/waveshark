@@ -19,6 +19,7 @@ rtlsdr.workspace = true
 hackrf.workspace = true
 sources.workspace = true
 nodes.workspace = true
+decode.workspace = true
 pipeline.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true

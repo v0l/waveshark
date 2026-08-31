@@ -35,6 +35,9 @@ pub struct Session {
     /// Named switches: bias tee, digital AGC and so on.
     pub toggles: Vec<(String, bool)>,
     pub ppm: f64,
+    /// Where the receiver is, in degrees. Used to resolve an aircraft's
+    /// position from a single frame instead of waiting for a matching pair.
+    pub location: Option<(f64, f64)>,
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
@@ -51,6 +54,7 @@ impl Default for Session {
             gains: Vec::new(),
             toggles: Vec::new(),
             ppm: 0.0,
+            location: None,
             dc_block: true,
             decode_on: true,
             volume: 0.5,
@@ -119,6 +123,10 @@ impl Session {
             gains,
             toggles,
             ppm: f("ppm", d.ppm),
+            location: match (kv.get("lat"), kv.get("lon")) {
+                (Some(a), Some(o)) => a.parse().ok().zip(o.parse().ok()),
+                _ => None,
+            },
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
@@ -135,6 +143,9 @@ impl Session {
         s.push_str(&format!("zoom = {}\n", self.zoom));
         s.push_str(&format!("fft = {}\n", self.fft));
         s.push_str(&format!("ppm = {}\n", self.ppm));
+        if let Some((lat, lon)) = self.location {
+            s.push_str(&format!("lat = {lat}\nlon = {lon}\n"));
+        }
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("volume = {}\n", self.volume));
@@ -180,6 +191,7 @@ mod tests {
             ],
             toggles: vec![("bias_tee".into(), true)],
             ppm: -3.5,
+            location: Some((53.5137, -6.2431)),
             dc_block: false,
             decode_on: false,
             volume: 0.25,

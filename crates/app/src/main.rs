@@ -6,6 +6,9 @@ mod wheel;
 mod bands;
 mod devices;
 mod dial;
+mod flights;
+mod modes;
+mod packetlog;
 mod chainview;
 mod theme;
 mod radio;
@@ -432,6 +435,17 @@ fn replay(path: &str) -> anyhow::Result<()> {
 /// Everything else is either a diagnostic that prints numbers and exits, or a
 /// switch that sets the receiver up so a session can be reproduced without a
 /// dozen clicks first.
+/// `53.64,-6.65` as a pair of degrees.
+fn parse_location(s: &str) -> Result<(f64, f64), String> {
+    let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
+    let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
+    let lon: f64 = o.trim().parse().map_err(|_| "longitude is not a number")?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return Err("outside the range of a coordinate".into());
+    }
+    Ok((lat, lon))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "super-radio", about = "Software defined radio receiver", version)]
 struct Args {
@@ -461,6 +475,14 @@ struct Args {
     #[arg(long)]
     chain: bool,
 
+    /// Open on the flight tracker
+    #[arg(long)]
+    flights: bool,
+
+    /// Tune here, in MHz, without opening a channel on it
+    #[arg(long, value_name = "MHZ")]
+    center: Option<f64>,
+
     /// Open the radio's own controls
     #[arg(long)]
     gain: bool,
@@ -468,6 +490,20 @@ struct Args {
     /// Write every burst that decodes into this directory
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "captures")]
     record: Option<PathBuf>,
+
+    /// Where decoded packets are appended as JSON lines. Defaults to
+    /// $XDG_DATA_HOME/super-radio/packets
+    #[arg(long, value_name = "DIR")]
+    packet_log: Option<PathBuf>,
+
+    /// Do not write the packet log
+    #[arg(long)]
+    no_packet_log: bool,
+
+    /// Receiver position as LAT,LON in degrees, which lets one ADS-B frame
+    /// fix an aircraft instead of needing a matching pair
+    #[arg(long, value_name = "LAT,LON", value_parser = parse_location)]
+    location: Option<(f64, f64)>,
 
     /// How much may be written before recording stops
     #[arg(long, value_name = "MB")]
@@ -596,6 +632,10 @@ fn main() -> eframe::Result<()> {
             for mhz in &args.tune {
                 app.tune_to(*mhz, args.mode.into());
             }
+            app.set_packet_log(args.no_packet_log, args.packet_log.clone());
+            if let Some((lat, lon)) = args.location {
+                app.set_location(lat, lon);
+            }
             app.shot = args.shot.clone();
             if let Some(dir) = args.record.clone() {
                 app.record_to(dir, args.record_mb);
@@ -603,8 +643,14 @@ fn main() -> eframe::Result<()> {
             if args.gain {
                 app.show_radio_settings();
             }
+            if let Some(mhz) = args.center {
+                app.set_center(mhz);
+            }
             if args.chain {
                 app.show_chain();
+            }
+            if args.flights {
+                app.show_flights();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

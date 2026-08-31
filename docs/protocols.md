@@ -135,7 +135,7 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| ADS-B 1090ES (Mode S) | 1090 MHz | PPM 1 Mbit/s | 2 MHz | chain | mod | The pulse layer fits, the rate does not: 0.5 us half-bits need 2 MS/s or better, so it wants its own chain. CRC24 |
+| ADS-B 1090ES (Mode S) | 1090 MHz | PPM 1 Mbit/s | 2 MHz | done | mod | Own demodulator in `dsp::modes`, frames in `decode::adsb`. Verified against dump1090-rb over a shared recording: 27 of its 40 frames, no frame it did not also see |
 | Mode A/C | 1090 MHz | pulse pairs | 2 MHz | chain | mod | Same chain as Mode S once it exists |
 | UAT | 978 MHz | CPFSK 1.041667 Mbps | 2 MHz | chain | mod | US general aviation, Reed-Solomon |
 | ACARS | 129-137 MHz | AM, MSK 2400 bps | 25 kHz | framing | mod | Rides on an AM channel: envelope path plus MSK bit recovery |

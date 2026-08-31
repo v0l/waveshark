@@ -494,6 +494,17 @@ impl Scanner {
         true
     }
 
+    /// The decode chain a bank channel runs, for the chain view.
+    ///
+    /// Every channel in a bank is built from the same graph, so the first one
+    /// that exists describes all of them.
+    fn decode_chain(&self) -> Option<pipeline::graph::Topology> {
+        (0..self.narrow.channels())
+            .find_map(|c| self.narrow.graph(c))
+            .or_else(|| (0..self.wide.channels()).find_map(|c| self.wide.graph(c)))
+            .map(|g| g.topology())
+    }
+
     /// Channels in each bank, narrow first.
     fn channels(&self) -> (usize, usize) {
         (self.narrow.channels(), self.wide.channels())
@@ -588,11 +599,53 @@ pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<DecodeRec
     let src = sources::FileSource::open(path.as_ref())?;
     let buf = src.read_all()?;
     let mut sc = Scanner::new(buf.rate.as_f64(), buf.center);
+    // A 1090 MHz capture goes through the wideband path instead of the
+    // channel banks, the same way the live receiver decides.
+    let mut modes = crate::modes::ModeS::for_tuning(buf.center.as_f64(), buf.rate.as_f64());
     let mut out = Vec::new();
     for block in buf.samples.chunks(16_384) {
-        sc.process(block, &mut out);
+        // 1090 MHz carries nothing the ISM banks understand, so running them
+        // there only spends CPU inventing unknown bursts out of Mode S.
+        match modes.as_mut() {
+            Some(m) => m.process(block, &mut out),
+            None => sc.process(block, &mut out),
+        }
     }
     Ok(out)
+}
+
+/// Publish the chain the receiver is actually running.
+///
+/// There is always one, which is the point: a listening channel has its audio
+/// chain, 1090 MHz has its Mode S chain, and a band being scanned has the
+/// per-channel decode chain every bank channel runs. Showing "no chain" while
+/// the receiver is busy decoding a whole band was never true, it was just the
+/// view asking the wrong question.
+///
+/// Only one can be shown, and the order is by how specific the operator's
+/// intent was: a channel they tuned beats a band being swept.
+fn publish_chain(
+    status: &Status,
+    live: &[Live],
+    modes: Option<&crate::modes::ModeS>,
+    scan: Option<&Scanner>,
+) {
+    if let Some(l) = live.first() {
+        status.set_chain(Some(l.audio.graph().topology()), l.audio.latency_ms());
+        return;
+    }
+    if let Some(m) = modes {
+        status.set_chain(Some(m.topology()), m.latency_ms());
+        return;
+    }
+    // Every channel in a bank runs the same graph, so any of them describes
+    // the decoder. The narrow bank is the one with the OOK front end most
+    // ISM traffic goes through.
+    if let Some(g) = scan.and_then(|s| s.decode_chain()) {
+        status.set_chain(Some(g), 0.0);
+        return;
+    }
+    status.set_chain(None, 0.0);
 }
 
 /// Drop the copies of a burst that other channels also reported.
@@ -683,6 +736,10 @@ pub struct Status {
     /// off. Narrow ones run the OOK front end, wide ones the FSK front end.
     pub scan_channels: AtomicU64,
     pub scan_channels_wide: AtomicU64,
+    /// Aircraft whose address has proved itself, when tuned to 1090 MHz.
+    pub aircraft: AtomicU64,
+    /// Whether the wideband Mode S path is the one running.
+    pub modes_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
 }
@@ -757,6 +814,8 @@ impl Default for Status {
             decoded: AtomicU64::new(0),
             scan_channels: AtomicU64::new(0),
             scan_channels_wide: AtomicU64::new(0),
+            aircraft: AtomicU64::new(0),
+            modes_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
     }
@@ -1263,6 +1322,9 @@ fn run(
     let mut next_frame = std::time::Instant::now();
     let mut cur_rate = dev.rate().as_f64();
     let mut cur_center = dev.center().as_f64();
+    // The wideband Mode S path, which exists only while the dial is on
+    // 1090 MHz.
+    let mut modes = crate::modes::ModeS::for_tuning(cur_center, eff_rate(cur_rate, zoom));
     let mut retune = false;
     // A rate or span change invalidates every chain, where an edit to the
     // channel list does not.
@@ -1316,6 +1378,11 @@ fn run(
                     // A different span is a different set of channels, so the
                     // bank is rebuilt rather than retuned.
                     scan = scan_on.then(|| Scanner::new(eff_rate(cur_rate, zoom), dev.center()));
+                    modes = crate::modes::ModeS::for_tuning(
+                        dev.center().as_f64(),
+                        eff_rate(cur_rate, zoom),
+                    );
+                    publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
                     narrow = None;
                     if let Some(r) = rec.as_mut() {
                         r.retune(eff_rate(cur_rate, zoom), dev.center());
@@ -1398,6 +1465,11 @@ fn run(
                         // Every downstream stage is built for a sample rate,
                         // so all of them are rebuilt rather than adjusted.
                         scan = scan_on.then(|| Scanner::new(eff_rate(cur_rate, zoom), dev.center()));
+                        modes = crate::modes::ModeS::for_tuning(
+                            dev.center().as_f64(),
+                            eff_rate(cur_rate, zoom),
+                        );
+                        publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
                         if let Some(r) = rec.as_mut() {
                             r.retune(eff_rate(cur_rate, zoom), dev.center());
                         }
@@ -1418,6 +1490,13 @@ fn run(
             // volume nudge would restart each AGC and drop the RDS decoder's
             // state along with the station name it had recovered.
             live.retain(|l| wanted.iter().any(|w| w.id == l.spec.id));
+            // A channel the span no longer covers cannot be demodulated: the
+            // mixer would shift a frequency the radio never sampled down to
+            // baseband, and the chain would produce noise that sounds like a
+            // dead station rather than silence. This happens whenever the dial
+            // moves far from where a channel was placed, which a restored
+            // session does on the first frame.
+            live.retain(|l| l.spec.offset_hz.abs() <= eff_rate(cur_rate, zoom) / 2.0);
             let mut refused: Option<String> = None;
             let mut rebuilt: Vec<u64> = Vec::new();
             for want in &wanted {
@@ -1437,6 +1516,14 @@ fn run(
                         l.spec = want.clone();
                     }
                     _ => {
+                        if want.offset_hz.abs() > rate / 2.0 {
+                            refused = Some(format!(
+                                "{:.4} MHz is outside the span",
+                                (cur_center + want.offset_hz) / 1e6,
+                            ));
+                            live.retain(|l| l.spec.id != want.id);
+                            continue;
+                        }
                         if rate < want.demod.if_rate() {
                             refused = Some(format!(
                                 "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
@@ -1462,12 +1549,7 @@ fn run(
                 }
             }
             *status.error.lock() = refused;
-            // The chain view shows one chain, and the first channel is the
-            // one it shows.
-            status.set_chain(
-                live.first().map(|l| l.audio.graph().topology()),
-                live.first().map(|l| l.audio.latency_ms()).unwrap_or(0.0),
-            );
+            publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
             // A chain that was rebuilt has lost its RDS state, and its old
             // station name must not sit over whatever it is tuned to now.
             let wfm: Vec<u64> = live
@@ -1494,6 +1576,11 @@ fn run(
                 if let Some(s) = scan.as_mut() {
                     s.retune(dev.center());
                 }
+                // Tuning onto or off 1090 MHz starts or stops the Mode S
+                // path, and the address book starts empty at a new frequency
+                // because nothing it learned applies there.
+                modes = crate::modes::ModeS::for_tuning(cur_center, eff_rate(cur_rate, zoom));
+                publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
                 if let Some(r) = rec.as_mut() {
                     r.retune(eff_rate(cur_rate, zoom), dev.center());
                 }
@@ -1564,9 +1651,25 @@ fn run(
             }
         }
 
+        status.modes_on.store(modes.is_some(), Ordering::Relaxed);
+        if let Some(m) = modes.as_mut() {
+            let _s = tracing::info_span!("modes").entered();
+            let mut frames = Vec::new();
+            m.process(&buf.samples, &mut frames);
+            if !frames.is_empty() {
+                status.decoded.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                match decodes.try_send(frames) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => return Ok(()),
+                }
+                repaint();
+            }
+        }
+
         {
             let _s = tracing::info_span!("scan").entered();
-            if let Some(sc) = scan.as_mut() {
+            // Skipped entirely while Mode S is running: see `replay`.
+            if let Some(sc) = scan.as_mut().filter(|_| modes.is_none()) {
                 records.clear();
                 // The recorder sees the block before the scanner does, so a
                 // burst the scanner then reports is already in its history.
@@ -1653,6 +1756,27 @@ fn run(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
+        // Restoring a session tuned elsewhere leaves channels behind that the
+        // radio is no longer sampling. Demodulating one shifts a frequency
+        // that was never received down to baseband, and the result is noise
+        // that sounds like a dead station.
+        let rate = 2_400_000.0;
+        let inside = ChannelSpec {
+            id: 1,
+            offset_hz: -400_000.0,
+            demod: Demod::Wfm,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+        };
+        let outside = ChannelSpec { id: 2, offset_hz: -994_200_000.0, ..inside.clone() };
+        assert!(inside.offset_hz.abs() <= rate / 2.0);
+        assert!(outside.offset_hz.abs() > rate / 2.0, "95.8 MHz is not inside a 1090 MHz span");
+    }
 
     #[test]
     fn each_channel_keeps_its_own_station() {

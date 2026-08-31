@@ -9,11 +9,13 @@
 pub mod bank;
 pub mod decode_nodes;
 pub mod dsp_nodes;
+pub mod modes_nodes;
 pub mod wfm;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
+pub use modes_nodes::ModeSNode;
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
     RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
@@ -404,6 +406,20 @@ fn ism_graph(input: StreamSpec, ook: bool, fsk: bool) -> Result<Graph> {
     // decides what a downstream reader would see, so any branch will do.
     let out = last.ok_or_else(|| common::Error::other("an ISM graph needs a front end"))?;
     b.output(out.o());
+    b.build()
+}
+
+/// The 1090 MHz chain: one node over the wideband stream.
+///
+/// A graph of one looks odd next to the ISM chains, and it is still worth
+/// being a graph: it is how the chain view, the parameter surface and the
+/// latency accounting reach a decoder, and none of those should need to know
+/// which decoder they are looking at.
+pub fn adsb_graph(input: StreamSpec) -> Result<Graph> {
+    let mut b = Graph::builder(input);
+    let n = b.add_labeled("1090 Mode S", Box::new(ModeSNode::default()));
+    b.source(n.i());
+    b.output(n.o());
     b.build()
 }
 

@@ -92,3 +92,31 @@ pi = 0x2208
 station_name = "SPIRIT"
 radiotext_contains = "Spirit"
 group_yield_min_pct = 60.0
+
+[[capture]]
+name = "adsb_1090M_2400k.cu8"
+sha256 = "fc3821a72532469b2ef001daf324b2492786467a164144f7aa5491e4b65fdb58"
+url = "https://nostr.download/fc3821a72532469b2ef001daf324b2492786467a164144f7aa5491e4b65fdb58.xz"
+compression = "xz"
+center_hz = 1_090_000_000
+rate_sps = 2_400_000
+format = "cu8"
+description = """
+Four seconds of 1090 MHz, RTL-SDR at 49.6 dB gain on a telescopic antenna
+indoors, so the aircraft are the loud ones and the rest of the band is noise.
+That is the useful property: a Mode S demodulator that only works on strong
+signals looks fine on a clean capture, and this one has marginal frames in it.
+
+The reference decode in adsb_1090M_2400k.dump1090.hex comes from dump1090-rb
+1.0.15 run over this exact file, so agreement is evidence from an independent
+implementation rather than a restatement of our own assumptions. It finds 40
+distinct frames; the tests require most of those and, more importantly, no
+frame that dump1090 did not also see.
+"""
+
+[capture.expect]
+reference = "adsb_1090M_2400k.dump1090.hex"
+reference_frames = 40
+matched_min = 25
+false_positives = 0
+icao = 0x4b1880
