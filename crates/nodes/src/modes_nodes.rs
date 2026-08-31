@@ -32,6 +32,10 @@ pub struct ModeSNode {
     det: ModeSDetector,
     book: AddressBook,
     frames: Vec<ModeSFrame>,
+    /// What decoded in the last block. Events also go to the graph; this is
+    /// the typed view, for a host that wants this node's decodes rather than
+    /// everything the graph produced.
+    hits: Vec<Event>,
     /// Frames accepted since the node was built.
     accepted: u64,
 }
@@ -43,11 +47,17 @@ impl Default for ModeSNode {
 }
 
 impl ModeSNode {
+    /// What decoded in the last block.
+    pub fn hits(&self) -> &[Event] {
+        &self.hits
+    }
+
     pub fn new(cfg: ModeSConfig) -> Self {
         Self {
             cfg,
             // Replaced at negotiation, when the real sample rate is known.
             det: ModeSDetector::new(2_400_000.0, cfg),
+            hits: Vec::new(),
             book: AddressBook::new(),
             frames: Vec::new(),
             accepted: 0,
@@ -111,6 +121,7 @@ impl Simple for ModeSNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.frames.clear();
+        self.hits.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
             book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
@@ -129,7 +140,9 @@ impl Simple for ModeSNode {
             let Ok(frame) = adsb::parse(&bytes) else { continue };
             self.accepted += 1;
             out.extend_from_slice(&bytes);
-            c.emit(Event::Decoded(decoded(&frame, f, center, &bytes)));
+            let d = Event::Decoded(decoded(&frame, f, center, &bytes));
+            self.hits.push(d.clone());
+            c.emit(d);
         }
         Ok(())
     }

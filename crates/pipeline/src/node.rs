@@ -77,6 +77,16 @@ pub trait Node: Send + 'static {
         None
     }
 
+    /// Downcast an owned node back to its concrete type.
+    ///
+    /// Needed when a graph is taken apart and something inside a node has to
+    /// come out with it: a recorder's open file, for instance, which must
+    /// survive the graph being rebuilt around it. `as_any` cannot do this
+    /// because it only ever borrows.
+    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
+        None
+    }
+
     /// The mutable counterpart, for changing a running node's own settings.
     ///
     /// Parameters can also be set by name, and that is the right route for
@@ -86,6 +96,33 @@ pub trait Node: Send + 'static {
     /// it can label itself.
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
+    }
+
+    /// The graph this node runs inside itself, if it is a composite.
+    ///
+    /// A node that owns an inner graph is still one node to the scheduler,
+    /// which is how a bank keeps hundreds of channels behind a single
+    /// channelizer and one batched transform. Without this the work it does
+    /// would be invisible: a view of the chain would show a box labelled
+    /// "bank" and no sign of the decoder every channel is running.
+    fn subgraph(&self) -> Option<crate::graph::Topology> {
+        None
+    }
+
+    /// How many times [`Node::subgraph`] runs per block, for a view that draws
+    /// one branch and says how many there are.
+    fn subgraph_count(&self) -> usize {
+        1
+    }
+
+    /// Whether this node ends the stream rather than passing one on.
+    ///
+    /// A spectrum display, a recorder and a channel bank all consume samples
+    /// and write no buffer. The graph still gives them an output slot, because
+    /// every node has one, so without saying so they look like stages with an
+    /// output nobody happens to have connected.
+    fn is_sink(&self) -> bool {
+        false
     }
 
     fn num_inputs(&self) -> usize {
@@ -137,6 +174,18 @@ pub trait Node: Send + 'static {
 pub trait Simple: Send {
     fn name(&self) -> &str;
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec>;
+    /// See [`Node::subgraph`]. A composite with one input and one output, such
+    /// as a channel bank, is still the common case.
+    fn subgraph(&self) -> Option<crate::graph::Topology> {
+        None
+    }
+    fn subgraph_count(&self) -> usize {
+        1
+    }
+    /// See [`Node::is_sink`].
+    fn is_sink(&self) -> bool {
+        false
+    }
     fn latency(&self) -> u64 {
         0
     }
@@ -198,5 +247,17 @@ impl<T: Simple + 'static> Node for T {
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
+    }
+    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
+        Some(self)
+    }
+    fn subgraph(&self) -> Option<crate::graph::Topology> {
+        Simple::subgraph(self)
+    }
+    fn subgraph_count(&self) -> usize {
+        Simple::subgraph_count(self)
+    }
+    fn is_sink(&self) -> bool {
+        Simple::is_sink(self)
     }
 }

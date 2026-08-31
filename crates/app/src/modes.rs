@@ -1,17 +1,9 @@
-//! The 1090 MHz path, as a graph like every other decoder.
+//! Where Mode S is.
 //!
-//! This module is the tuning decision and nothing else: whether 1090 MHz is
-//! what the receiver is pointed at, and if so, running the graph that decodes
-//! it and turning what falls out into packet log rows. The demodulator lives
-//! in `dsp::modes`, the frame format in `decode::adsb`, and the node wiring
-//! them together in `nodes::modes_nodes`, so the chain view, the parameter
-//! surface and the latency accounting all reach it the same way they reach an
-//! ISM chain.
-
-use crate::radio::DecodeRecord;
-use common::C32;
-use pipeline::graph::Graph;
-use pipeline::port::StreamSpec;
+//! All that is left here is the tuning question. The demodulator lives in
+//! `dsp::modes`, the frame format in `decode::adsb`, and the node wiring them
+//! together in `nodes::modes_nodes`, which the receiver's graph attaches like
+//! any other decoder.
 
 /// The only frequency Mode S is ever on.
 const CENTER_HZ: f64 = 1_090_000_000.0;
@@ -25,77 +17,13 @@ const CENTER_HZ: f64 = 1_090_000_000.0;
 /// the band with the rest of the spectrum's noise on top of it.
 const TOLERANCE_HZ: f64 = 100_000.0;
 
-/// Occupied bandwidth of a Mode S transmission, for the log's channel column.
-const BAND_HZ: f64 = 2_000_000.0;
-
 /// Slowest sample rate the 1 us bits survive. The node refuses anything below
-/// this too; checking here as well keeps a doomed graph from being built.
+/// this too; asking here as well keeps a doomed decoder out of the graph.
 const MIN_RATE: f64 = 2_000_000.0;
 
-pub struct ModeS {
-    graph: Graph,
-    rate: f64,
-}
-
-impl ModeS {
-    /// A decoder for this tuning, or `None` unless the dial is on 1090 MHz.
-    pub fn for_tuning(center: f64, rate: f64) -> Option<Self> {
-        if rate < MIN_RATE || (center - CENTER_HZ).abs() > TOLERANCE_HZ {
-            return None;
-        }
-        let spec = StreamSpec::iq(rate, common::Hz(center as u64));
-        // A graph that will not build is a bug in the chain, not a runtime
-        // condition, but it must not take the receiver down either.
-        match nodes::adsb_graph(spec) {
-            Ok(graph) => Some(Self { graph, rate }),
-            Err(e) => {
-                tracing::warn!("no 1090 MHz chain: {e}");
-                None
-            }
-        }
-    }
-
-    /// Shape of the running chain, for the chain view.
-    pub fn topology(&self) -> pipeline::graph::Topology {
-        self.graph.topology()
-    }
-
-    /// Delay through the chain, in milliseconds.
-    pub fn latency_ms(&self) -> f64 {
-        self.graph.output_latency() as f64 / self.rate.max(1.0) * 1e3
-    }
-
-    pub fn process(&mut self, iq: &[C32], out: &mut Vec<DecodeRecord>) {
-        // Stamped at the start of the block, not at the moment the frame fell
-        // out of it: the aircraft transmitted somewhere inside the block, and
-        // the whole block has already been read by the time this runs.
-        let block = std::time::Duration::from_secs_f64(iq.len() as f64 / self.rate.max(1.0));
-        let now = std::time::Instant::now() - block;
-        let buf = self.graph.input_buf();
-        buf.clear();
-        buf.iq_mut().extend_from_slice(iq);
-        let Ok(events) = self.graph.run() else { return };
-        for ev in events {
-            let pipeline::event::Event::Decoded(d) = ev else { continue };
-            out.push(DecodeRecord {
-                at: now,
-                freq: CENTER_HZ,
-                // Mode S occupies the whole band it is transmitted in; there
-                // is no channel to speak of, and nothing else is near enough
-                // to be confused with it.
-                channel_hz: BAND_HZ,
-                model: d.protocol.to_string(),
-                modulation: d.modulation.unwrap_or("PPM"),
-                detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
-                fields: d.fields.clone(),
-                media_type: d.media_type,
-                rssi_dbfs: d.rssi_dbfs.unwrap_or(f32::NAN),
-                snr_db: d.snr_db.unwrap_or(f32::NAN),
-                bytes: d.payload.clone(),
-                crc: d.crc_ok,
-            });
-        }
-    }
+/// Whether this tuning is one where Mode S can be decoded.
+pub fn tuned_to_mode_s(center: f64, rate: f64) -> bool {
+    rate >= MIN_RATE && (center - CENTER_HZ).abs() <= TOLERANCE_HZ
 }
 
 #[cfg(test)]
@@ -106,29 +34,20 @@ mod tests {
     fn the_wideband_path_only_runs_where_mode_s_is() {
         // It costs a pass over every sample, so it must not run while the
         // receiver is listening to anything else.
-        assert!(ModeS::for_tuning(1_090_000_000.0, 2_400_000.0).is_some());
+        assert!(tuned_to_mode_s(1_090_000_000.0, 2_400_000.0));
         // Nudged off centre to dodge the DC spur, still on 1090.
-        assert!(ModeS::for_tuning(1_089_950_000.0, 2_400_000.0).is_some());
+        assert!(tuned_to_mode_s(1_089_950_000.0, 2_400_000.0));
         // Far enough off that the signal is in the corner of the band.
-        assert!(ModeS::for_tuning(1_089_000_000.0, 2_400_000.0).is_none());
-        assert!(ModeS::for_tuning(433_920_000.0, 2_400_000.0).is_none());
-        assert!(ModeS::for_tuning(95_800_000.0, 2_400_000.0).is_none());
+        assert!(!tuned_to_mode_s(1_089_000_000.0, 2_400_000.0));
+        assert!(!tuned_to_mode_s(433_920_000.0, 2_400_000.0));
+        assert!(!tuned_to_mode_s(95_800_000.0, 2_400_000.0));
     }
 
     #[test]
     fn a_span_too_narrow_for_one_microsecond_bits_is_refused() {
         // Under two samples a bit the two halves cannot be told apart, so a
         // decoder here would report noise rather than nothing.
-        assert!(ModeS::for_tuning(1_090_000_000.0, 1_024_000.0).is_none());
-        assert!(ModeS::for_tuning(1_090_000_000.0, 2_048_000.0).is_some());
-    }
-
-    #[test]
-    fn the_chain_is_a_graph_like_any_other() {
-        // Which is the point of this module being thin: the chain view asks a
-        // graph what shape it is, and does not care what it decodes.
-        let m = ModeS::for_tuning(1_090_000_000.0, 2_400_000.0).expect("a chain");
-        let topo = m.topology();
-        assert!(!topo.nodes.is_empty(), "a chain with no nodes is not a chain");
+        assert!(!tuned_to_mode_s(1_090_000_000.0, 1_024_000.0));
+        assert!(tuned_to_mode_s(1_090_000_000.0, 2_048_000.0));
     }
 }

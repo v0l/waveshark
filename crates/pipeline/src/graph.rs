@@ -112,6 +112,21 @@ impl GraphBuilder {
         NodeId(self.nodes.len() - 1)
     }
 
+    /// Add a node taken out of a previous graph, keeping its label.
+    ///
+    /// This is how a graph changes shape without losing what its nodes had
+    /// learned. The alternative, building the new graph from fresh nodes,
+    /// silently resets every one of them: an RDS decoder forgets the station
+    /// it had spent a minute acquiring, AGCs re-converge audibly, and burst
+    /// detectors lose their noise floor and spend the next second either deaf
+    /// or hallucinating. Since only the wiring is changing, the nodes should
+    /// not notice at all.
+    pub fn add_existing(&mut self, part: NodePart) -> NodeId {
+        let id = self.add(part.node);
+        self.labels[id.0] = part.label;
+        id
+    }
+
     pub fn add_labeled(&mut self, label: impl Into<String>, node: Box<dyn Node>) -> NodeId {
         let id = self.add(node);
         self.labels[id.0] = label.into();
@@ -158,6 +173,12 @@ impl GraphBuilder {
     }
 }
 
+/// A node lifted out of a graph, ready to be built into another one.
+pub struct NodePart {
+    pub label: String,
+    pub node: Box<dyn Node>,
+}
+
 /// A node as it exists in a built graph.
 #[derive(Clone, Debug)]
 pub struct TopoNode {
@@ -168,6 +189,12 @@ pub struct TopoNode {
     pub latency: u64,
     pub inputs: Vec<(usize, StreamSpec)>,
     pub outputs: Vec<(usize, StreamSpec)>,
+    /// The graph this node runs inside itself, and how many times per block.
+    /// A bank reports the chain one channel runs and the number of channels.
+    pub inner: Option<Box<Topology>>,
+    pub inner_count: usize,
+    /// Whether the node ends the stream rather than passing one on.
+    pub sink: bool,
 }
 
 /// The built graph's shape, in execution order.
@@ -447,9 +474,23 @@ impl Graph {
                     .map(|&s| (s, self.specs[s]))
                     .collect(),
                 outputs: e.out_slots.iter().map(|&s| (s, self.specs[s])).collect(),
+                inner: e.node.subgraph().map(Box::new),
+                inner_count: e.node.subgraph_count(),
+                sink: e.node.is_sink(),
             });
         }
         Topology { input: self.specs[INPUT_SLOT], nodes, output_slot: self.output_slot }
+    }
+
+    /// Take the nodes back out, to be rebuilt into a different shape.
+    ///
+    /// Returned in `NodeId` order, so a caller that remembers which id was
+    /// which can pick out the ones it still wants and let the rest drop.
+    pub fn into_parts(self) -> Vec<NodePart> {
+        self.entries
+            .into_iter()
+            .map(|e| NodePart { label: e.label, node: e.node })
+            .collect()
     }
 
     pub fn reset(&mut self) {
@@ -477,6 +518,32 @@ impl Graph {
 
     pub fn output(&self) -> &Payload {
         &self.bufs[self.output_slot]
+    }
+
+    /// What a particular node port produced this block.
+    ///
+    /// A graph carrying the whole receiver has more than one place output
+    /// leaves it: every listening channel ends in audio of its own, and
+    /// nominating one of them as *the* output would be arbitrary. Decoders
+    /// need none of this, since what they produce arrives as events.
+    pub fn buf(&self, from: Out) -> Option<&Payload> {
+        let e = self.entries.get(from.node.0)?;
+        e.out_slots.get(from.port).map(|&s| &self.bufs[s])
+    }
+
+    /// Negotiated spec at a particular node port.
+    pub fn spec_of(&self, from: Out) -> Option<StreamSpec> {
+        let e = self.entries.get(from.node.0)?;
+        e.out_slots.get(from.port).map(|&s| self.specs[s])
+    }
+
+    /// Group delay at a particular node port, in samples at that port's rate.
+    pub fn latency_of(&self, from: Out) -> u64 {
+        self.entries
+            .get(from.node.0)
+            .and_then(|e| e.out_slots.get(from.port))
+            .map(|&s| self.latency[s])
+            .unwrap_or(0)
     }
 
     /// Run every node once over the current input buffer.
@@ -905,6 +972,50 @@ mod tests {
         let dot = g.to_dot();
         assert!(dot.contains("gain") && dot.contains("mag"), "{dot}");
         assert!(dot.contains("input ->"));
+    }
+
+    /// A node with history, standing in for anything that has to learn:
+    /// an RDS decoder holding a station, an AGC that has converged.
+    struct Counting(u64);
+    impl Simple for Counting {
+        fn name(&self) -> &str {
+            "counting"
+        }
+        fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec)
+        }
+        fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+            self.0 += i.len() as u64;
+            o.iq_mut().extend_from_slice(i.as_iq().unwrap());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rebuilding_a_graph_out_of_its_own_nodes_keeps_what_they_had_learned() {
+        let mut g = chain(spec(), vec![Box::new(Counting(0)), Box::new(Gain(2.0))]).unwrap();
+        g.feed_iq(&ramp(8)).unwrap();
+
+        // The shape changes, the nodes do not.
+        let mut parts = g.into_parts();
+        let gain = parts.pop().expect("gain");
+        let counter = parts.pop().expect("counter");
+        let mut b = GraphBuilder::new(spec());
+        let a = b.add_existing(gain);
+        let c = b.add_existing(counter);
+        b.source(a.i());
+        b.link(a, c);
+        b.output(c.o());
+        let mut g = b.build().unwrap();
+
+        assert_eq!(g.label(c), Some("counting"), "a rebuilt node keeps its label");
+        g.feed_iq(&ramp(4)).unwrap();
+        let n = g
+            .node(c)
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<Counting>())
+            .map(|c| c.0);
+        assert_eq!(n, Some(12), "the node kept counting rather than starting over");
     }
 
     #[test]

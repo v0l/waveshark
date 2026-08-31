@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod prof;
 mod wheel;
+mod chain;
 mod bands;
 mod devices;
 mod dial;

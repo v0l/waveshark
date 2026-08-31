@@ -10,12 +10,16 @@ pub mod bank;
 pub mod decode_nodes;
 pub mod dsp_nodes;
 pub mod modes_nodes;
+pub mod bank_node;
+pub mod sink_nodes;
 pub mod wfm;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
 pub use modes_nodes::ModeSNode;
+pub use bank_node::BankNode;
+pub use sink_nodes::{DcBlockNode, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
     RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,

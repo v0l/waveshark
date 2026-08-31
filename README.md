@@ -67,12 +67,30 @@ cannot tell which one they were fed. The DSP runs once per
 channel; each protocol is then a timing table and a payload parser working on
 integers. That is what makes supporting hundreds of protocols affordable.
 
-**The app runs on the graph, not beside it.** The audio chain is a
-`pipeline::Graph` built from the same nodes everything else uses, so rate
-negotiation and latency accounting happen in one place. The chain view draws
-that graph's topology rather than a diagram kept alongside it, which is the only
-way it can be trusted: documentation that has drifted is worse than none,
-because it is believed.
+**One graph, and everything hangs off it.** The receiver is a single
+`pipeline::Graph`, from the DC notch and the zoom decimator at the head to the
+spectrum, the recorder's ring, the ISM banks, the 1090 MHz decoder and a branch
+per channel being listened to. Nothing acts on a sample outside it. Anything
+driven beside the graph is invisible to the chain view, absent from the
+parameter surface and missing from the latency accounting, and it will drift
+from the code that does run.
+
+The shape changes often, and a graph is fixed once built, so a change rebuilds
+it out of the *same nodes* (`Graph::into_parts`). Building fresh ones instead
+would reset every branch that was left alone: adding a second channel would
+cost the first its RDS station, its AGC convergence and its detector's noise
+floor. A node is only reused where that is meaningful, so a channel whose
+offset, mode or rate changed is built again rather than run with coefficients
+designed for something else.
+
+A bank is one node with several hundred graphs inside it, because that is what
+makes it fast: one polyphase channelizer, one tiled transpose, one burst
+detector, then a rayon sweep of the channels worth running. It reports what its
+channels run, so the view shows the decoder rather than an opaque box.
+
+The chain view draws that graph's topology rather than a diagram kept alongside
+it, which is the only way it can be trusted: documentation that has drifted is
+worse than none, because it is believed.
 
 ## Measured throughput
 
@@ -383,13 +401,11 @@ budget.
 Tune to 1090 MHz with a span of 2 MS/s or more and aircraft appear in the same
 packet list as everything else. Mode S does not go through the channel banks:
 its bits are 1 us wide, a thousand times faster than anything on 433 MHz, so it
-runs on the wideband stream through a chain of its own, and the banks are
+runs on the wideband stream as a branch of the same graph, and the banks are
 switched off while it does, since 1090 MHz carries nothing they understand.
 
-That chain is a graph like any other, so the `Signal chain` view shows it, its
-parameters appear on the same surface as a filter's, and its latency is
-accounted the same way. It is a single node rather than the usual front end
-plus protocol pair, and the reason is in `crates/nodes/src/modes_nodes.rs`: a
+It is a single node rather than the usual front end plus protocol pair, and the
+reason is in `crates/nodes/src/modes_nodes.rs`: a
 believed frame blanks the 120 us it occupies, so a false preamble destroys
 every real frame overlapping it, and only the CRC can tell the two apart. The
 acceptance test therefore has to run inside the search rather than downstream
@@ -492,15 +508,17 @@ narrow and 20 wide channels, the scanner runs at about 17x real time.
 
 ### Signal chain
 
-This view draws whichever graph the receiver is running, with the type and rate
-on every link and the delay through the whole chain. It is read from the built
-graph, so it shows what is running rather than what was intended.
+This view draws the graph, with the type and rate on every link and the delay
+through the chain. It is read from the built graph, so it shows what is running
+rather than what was intended.
 
-There is always one to show, which is the point of everything being a graph: a
-channel you tuned has its audio chain, 1090 MHz has its Mode S chain, and a
-band being scanned has the decode chain every bank channel runs. The order is
-by how specific your intent was, so a channel beats a band. Only the stopped
-radio has nothing.
+It shows all of it, because there is only one: the head of the chain, then the
+spectrum, the recorder, both ISM banks, the 1090 MHz decoder and every channel
+you are listening to, each as a branch of its own. Branches are drawn abreast
+rather than stacked, since a column would say one feeds the next. A bank draws
+the chain its channels run beneath it, with the channel count. A sink is drawn
+without an output rate because it produces no stream, only decodes or a
+display.
 
 ### FM broadcast
 

@@ -364,8 +364,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sr-record-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap();
-        let live = crate::radio::scan_with_recorder(&buf, &mut rec);
+        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap();
+        let (live, _rec) = crate::radio::scan_with_recorder(&buf, rec);
         assert!(
             live.iter().any(|r| r.model.contains("Fineoffset")),
             "the fixture did not decode live, so replay proves nothing"
@@ -411,9 +411,8 @@ mod tests {
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let dir = std::env::temp_dir().join(format!("sr-short-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut rec =
-            Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.25);
-        crate::radio::scan_with_recorder(&buf, &mut rec);
+        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.25);
+        crate::radio::scan_with_recorder(&buf, rec);
 
         let decoded = std::fs::read_dir(&dir)
             .unwrap()

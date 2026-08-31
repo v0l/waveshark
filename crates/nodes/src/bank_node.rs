@@ -1,0 +1,234 @@
+//! The channel bank as a single node.
+//!
+//! A bank runs hundreds of decode chains, and it is still one node, because
+//! the whole reason it is fast is that those chains are not independent
+//! branches of the outer graph. One polyphase channelizer produces every
+//! channel at once, one tiled transpose lays them out, one burst detector
+//! decides which are worth running, and then a rayon pool sweeps the chains
+//! that are. Expressed as N branches from the source, the scheduler would run
+//! them one after another on one thread and the channelizer would be done N
+//! times over.
+//!
+//! What the outer graph gets instead is a node that says what it contains:
+//! [`Node::subgraph`] reports the chain one channel runs and
+//! [`Node::subgraph_count`] how many channels run it. So a view of the chain
+//! shows the bank's decoder rather than an opaque box, without pretending the
+//! channels are separate nodes.
+
+use common::{Hz, Result};
+use dsp::DetectorConfig;
+use pipeline::event::Event;
+use pipeline::graph::Topology;
+use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::Graph;
+
+use crate::bank::{ChannelBank, Gating};
+
+pub struct BankNode {
+    bank: ChannelBank,
+    /// Width each channel is treated as occupying, for the packet log. This is
+    /// the width asked for rather than the channelizer's spacing, since a span
+    /// rarely divides into exactly the requested width.
+    width_hz: f64,
+    make: Box<dyn Fn(StreamSpec) -> Result<Graph> + Send>,
+    label: String,
+    /// Channel centre of each event this block, alongside the event itself.
+    /// Kept so the host can log where a packet came from, which the event
+    /// alone cannot say: every channel's decoder believes it is at baseband.
+    hits: Vec<(Hz, Event)>,
+    rate: f64,
+    center: Hz,
+}
+
+impl BankNode {
+    /// A bank splitting its input into channels roughly `width_hz` wide, each
+    /// running a chain from `make`.
+    pub fn new(
+        label: impl Into<String>,
+        width_hz: f64,
+        make: impl Fn(StreamSpec) -> Result<Graph> + Send + 'static,
+    ) -> Self {
+        Self {
+            // Sized properly at negotiation, when the input rate is known.
+            // Two channels is the smallest a channelizer will build.
+            bank: ChannelBank::new(2, 12, 2.0 * width_hz, Hz(0)),
+            width_hz,
+            make: Box::new(make),
+            label: label.into(),
+            hits: Vec::new(),
+            rate: 0.0,
+            center: Hz(0),
+        }
+    }
+
+    /// Channels a span splits into at a given width.
+    ///
+    /// The channelizer requires an even count, and a single channel would be a
+    /// decimator with extra steps.
+    pub fn channels_for(rate: f64, width_hz: f64) -> usize {
+        let n = (rate / width_hz).round() as usize;
+        (n.clamp(2, 1024) + 1) & !1
+    }
+
+    pub fn channels(&self) -> usize {
+        self.bank.channels()
+    }
+
+    /// Width each channel is treated as occupying, never wider than the
+    /// channelizer actually delivers.
+    pub fn channel_hz(&self) -> f64 {
+        self.width_hz.min(self.bank.channel_bandwidth())
+    }
+
+    /// What decoded in the last block, and on which channel.
+    pub fn hits(&self) -> &[(Hz, Event)] {
+        &self.hits
+    }
+
+    pub fn set_detector_config(&mut self, cfg: DetectorConfig) {
+        self.bank.set_detector_config(cfg);
+    }
+
+    pub fn set_gating(&mut self, g: Gating) {
+        self.bank.set_gating(g);
+    }
+
+    /// Rebuild the bank for a span or a centre frequency.
+    ///
+    /// A change of centre alone keeps the graphs and clears their state, since
+    /// every channel now covers a different frequency and anything half
+    /// collected belongs to the old one. A change of rate changes how many
+    /// channels there are, so the bank is built again from nothing.
+    fn configure(&mut self, rate: f64, center: Hz) -> Result<()> {
+        if rate == self.rate {
+            self.bank.set_center(center);
+            self.center = center;
+            return Ok(());
+        }
+        let channels = Self::channels_for(rate, self.width_hz);
+        // 12 taps per branch is about 90 dB of channel-to-channel isolation,
+        // enough that a strong transmitter does not paint copies of itself
+        // across the band and decode several times over.
+        let mut bank = ChannelBank::new(channels, 12, rate, center);
+        bank.set_gating(Gating::OnDetection);
+        bank.set_detector_config(crate::ism_detector_config());
+        bank.set_all_graphs(&self.make)?;
+        self.bank = bank;
+        self.rate = rate;
+        self.center = center;
+        Ok(())
+    }
+}
+
+impl Simple for BankNode {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn subgraph(&self) -> Option<Topology> {
+        (0..self.bank.channels()).find_map(|c| self.bank.graph(c)).map(|g| g.topology())
+    }
+
+    fn subgraph_count(&self) -> usize {
+        self.bank.channels()
+    }
+
+    /// What a bank produces is decodes, not a stream.
+    fn is_sink(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Iq {
+            return Err(common::Error::other(format!("{}: needs IQ", self.label)));
+        }
+        self.configure(i.spec.rate, i.spec.center)?;
+        Ok(i.spec)
+    }
+
+    fn process(&mut self, i: &Payload, _o: &mut Payload, ctx: &mut NodeCtx<'_>) -> Result<()> {
+        self.hits.clear();
+        let iq = i.as_iq().unwrap_or(&[]);
+        if iq.is_empty() {
+            return Ok(());
+        }
+        for ev in self.bank.process(iq)? {
+            // Warnings are per burst and per channel, so across a whole band
+            // they arrive in the thousands. Only decodes are worth passing up.
+            if matches!(ev.event, Event::Decoded(_)) {
+                self.hits.push((ev.center, ev.event.clone()));
+                ctx.emit(ev.event.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.bank.reset();
+        self.hits.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipeline::node::Node;
+
+    fn bank() -> BankNode {
+        BankNode::new("OOK bank", 31_250.0, crate::ism_ook_graph)
+    }
+
+    fn spec(rate: f64) -> PortSpec {
+        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
+    }
+
+    #[test]
+    fn a_span_splits_into_channels_of_about_the_width_asked_for() {
+        let mut b = bank();
+        Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
+        assert_eq!(b.channels(), 78, "2.4 MHz at 31.25 kHz");
+        assert!(b.channel_hz() <= 31_250.0);
+    }
+
+    #[test]
+    fn a_narrow_span_still_gets_a_usable_bank() {
+        // The channelizer will not build fewer than two channels, and a span
+        // narrower than one channel must not round down to zero.
+        let mut b = bank();
+        Node::negotiate(&mut b, &[spec(40_000.0)]).unwrap();
+        assert_eq!(b.channels(), 2);
+    }
+
+    #[test]
+    fn the_bank_says_what_its_channels_run() {
+        // The point of the composite: one node to the scheduler, a visible
+        // chain to anything drawing the graph.
+        let mut b = bank();
+        Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
+        let inner = Node::subgraph(&b).expect("the chain a channel runs");
+        let names: Vec<&str> = inner.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("Envelope")), "{names:?}");
+        assert_eq!(Node::subgraph_count(&b), b.channels());
+    }
+
+    #[test]
+    fn retuning_keeps_the_chains_and_drops_their_state() {
+        let mut b = bank();
+        Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
+        let before = b.channels();
+        let mut moved = spec(2_400_000.0);
+        moved.spec.center = Hz(868_300_000);
+        Node::negotiate(&mut b, &[moved]).unwrap();
+        assert_eq!(b.channels(), before, "a retune is not a rebuild");
+        assert!(Node::subgraph(&b).is_some(), "the chains survived");
+    }
+
+    #[test]
+    fn a_wider_span_rebuilds_the_bank() {
+        let mut b = bank();
+        Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
+        Node::negotiate(&mut b, &[spec(1_024_000.0)]).unwrap();
+        assert_eq!(b.channels(), 34, "1.024 MHz at 31.25 kHz");
+    }
+}

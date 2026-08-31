@@ -21,7 +21,7 @@ pub mod port;
 pub mod registry;
 
 pub use event::{Decoded, Event};
-pub use graph::{chain, Graph, GraphBuilder, In, NodeId, Out, GRAPH_INPUT};
+pub use graph::{chain, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT};
 pub use node::{Node, NodeCtx, PortSpec, Simple};
 pub use param::{Param, ParamRange, ParamValue};
 pub use registry::Registry as NodeRegistry;

@@ -2,17 +2,12 @@
 //! demodulates whichever channel is selected for audio.
 
 use audio::AudioPlayer;
+use crate::chain::Plan;
 use common::{GainMode, Hz, Sps, C32};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use dsp::fir::FirDecim;
-use dsp::{DcBlock, Spectrum};
 use nodes::{
-    AgcNode, ChannelBank, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, Gating,
-    HighBlendNode, MixerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
-    WfmDemodNode,
+    AgcNode, SquelchKind, SquelchNode,
 };
-use pipeline::graph::{Graph, NodeId};
-use pipeline::port::StreamSpec;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
@@ -48,7 +43,7 @@ impl Demod {
         matches!(self, Demod::Usb | Demod::Lsb | Demod::Cw)
     }
 
-    fn sideband(self) -> dsp::ssb::Sideband {
+    pub(crate) fn sideband(self) -> dsp::ssb::Sideband {
         match self {
             Demod::Lsb => dsp::ssb::Sideband::Lower,
             _ => dsp::ssb::Sideband::Upper,
@@ -134,7 +129,7 @@ impl Demod {
     /// until the output rate matches the bandwidth leaves no transition band,
     /// and the anti-alias filter then needs thousands of taps: 7947 for NFM
     /// against 281 here, with a history buffer too big for L2.
-    fn if_rate(self) -> f64 {
+    pub(crate) fn if_rate(self) -> f64 {
         match self {
             // Must clear the 264 kHz occupied bandwidth with room for a
             // transition band.
@@ -147,7 +142,7 @@ impl Demod {
     }
 
     /// Audio bandwidth after demodulation.
-    fn audio_bw(self) -> f64 {
+    pub(crate) fn audio_bw(self) -> f64 {
         match self {
             Demod::Wfm => 15_000.0,
             Demod::Nfm => 4_000.0,
@@ -157,7 +152,7 @@ impl Demod {
         }
     }
 
-    fn deviation(self) -> f64 {
+    pub(crate) fn deviation(self) -> f64 {
         match self {
             Demod::Wfm => 75_000.0,
             Demod::Nfm => 5_000.0,
@@ -172,6 +167,16 @@ impl Demod {
 /// what any receiver does with a mono station, and it means an FM broadcast in
 /// stereo can share the output with a narrowband channel that has no such
 /// thing without either of them needing to know.
+/// Sum one channel's audio into the mix, at its own volume.
+///
+/// The gain is applied here rather than in the chain because the chain is
+/// shared: a recording, a decoder or a level meter reading the same tap wants
+/// the signal as received, not as somebody set the volume slider.
+fn mix_gain_into(mix: &mut Vec<f32>, pcm: &[f32], stereo: bool, gain: f32) -> usize {
+    let scaled: Vec<f32> = pcm.iter().map(|v| v * gain).collect();
+    mix_into(mix, &scaled, stereo)
+}
+
 fn mix_into(mix: &mut Vec<f32>, pcm: &[f32], stereo: bool) -> usize {
     let n = if stereo { pcm.len() / 2 } else { pcm.len() };
     if mix.len() < n * 2 {
@@ -220,11 +225,6 @@ fn restart(
     let _ = dev.set_gain("tuner", gain);
     let stream = dev.start_rx()?;
     Ok((dev, stream))
-}
-
-/// The sample rate everything downstream of the zoom decimator sees.
-fn eff_rate(rate: f64, zoom: usize) -> f64 {
-    rate / zoom.max(1) as f64
 }
 
 /// Shortest gap between retunes.
@@ -306,12 +306,6 @@ pub struct ChannelState {
     pub squelch_open: bool,
     pub squelch_db: f32,
     pub stereo_blend: f32,
-}
-
-/// A channel being demodulated, and the chain doing it.
-struct Live {
-    spec: ChannelSpec,
-    audio: Audio,
 }
 
 /// One spectrum update.
@@ -402,16 +396,38 @@ impl DecodeRecord {
 /// channel the carrier sits, and the FSK path measures both tones from the
 /// burst itself, so a SAW transmitter tens of kHz off nominal reads the same
 /// as one on frequency. Width therefore costs sensitivity and nothing else.
-struct Scanner {
-    /// Narrow channels running the OOK front end.
-    narrow: ChannelBank,
-    /// Wide channels running the FSK front end.
-    wide: ChannelBank,
-    rate: f64,
-    hits: u64,
-    /// Bursts already reported, for long enough to recognise the same one
-    /// arriving again from another channel.
+/// Bursts already reported, for long enough to recognise the same one
+/// arriving again from another channel.
+///
+/// Deduping within a block is not enough. Reads from the radio are short,
+/// about seven milliseconds at 2.3 MS/s, and a burst that starts near the end
+/// of one is finished by the detectors in the next, so the copies from
+/// neighbouring channels straddle the boundary. Measured on live 868 MHz
+/// traffic, one transmission appeared as four rows 31 kHz apart.
+#[derive(Default)]
+struct Dedupe {
     recent: Vec<Reported>,
+}
+
+impl Dedupe {
+    /// Whether a burst is new, remembering it if so.
+    fn accept(&mut self, r: &DecodeRecord, now: std::time::Instant) -> bool {
+        self.recent.retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
+        if self.recent.iter().any(|k| same_burst(k, r)) {
+            return false;
+        }
+        self.recent.push(Reported {
+            at: r.at,
+            freq: r.freq,
+            channel_hz: r.channel_hz,
+            modulation: r.modulation,
+        });
+        true
+    }
+
+    fn clear(&mut self) {
+        self.recent.clear();
+    }
 }
 
 /// A burst that has already been logged.
@@ -435,217 +451,83 @@ struct Reported {
 /// two or three times a second still gets a row per repeat.
 const DEDUPE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// Channel width for the OOK bank. Below this the measurements show no further
-/// gain, because the sensor's own bandwidth and its carrier offset start to
-/// matter more than the noise saved.
-const OOK_CHANNEL_HZ: f64 = 31_250.0;
-/// Channel width for the FSK bank. rtl_433 runs at 250 kHz for the same
-/// signals; half that still holds a 50 kHz tone separation comfortably.
-const FSK_CHANNEL_HZ: f64 = 125_000.0;
+/// Scan a buffer while recording, as the radio thread does. Test support.
+/// A receiver set up to sweep a capture, the way the live one sweeps the air.
+fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) -> anyhow::Result<crate::chain::Receiver> {
+    let rate = buf.rate.as_f64();
+    // A 1090 MHz capture goes through the wideband path instead of the
+    // channel banks, the same way the live receiver decides: 1090 carries
+    // nothing the ISM banks understand, so running them there only spends CPU
+    // inventing unknown bursts out of Mode S.
+    let modes = crate::modes::tuned_to_mode_s(buf.center.as_f64(), rate);
+    let plan = Plan {
+        center: buf.center,
+        rate,
+        zoom: 1,
+        // A file has already been through whatever the receiver did to it.
+        dc_block: false,
+        refresh_hz: 30.0,
+        fft: 1024,
+        channels: Vec::new(),
+        scan: !modes,
+        modes,
+        record: rec.is_some(),
+    };
+    Ok(crate::chain::Receiver::build(&plan, rec)?)
+}
 
-impl Scanner {
-    /// Channels a span splits into at a given width.
-    fn channels_for(rate: f64, width_hz: f64) -> usize {
-        let n = (rate / width_hz).round() as usize;
-        // The channelizer requires an even count, and a single channel would
-        // be a decimator with extra steps.
-        (n.clamp(2, 1024) + 1) & !1
-    }
-
-    fn bank(rate: f64, center: Hz, width_hz: f64) -> ChannelBank {
-        let channels = Self::channels_for(rate, width_hz);
-        // 12 taps per branch is about 90 dB of channel-to-channel isolation,
-        // enough that a strong transmitter does not paint copies of itself
-        // across the band and decode several times over.
-        let mut b = ChannelBank::new(channels, 12, rate, center);
-        b.set_gating(Gating::OnDetection);
-        b.set_detector_config(nodes::ism_detector_config());
-        b
-    }
-
-    fn new(rate: f64, center: Hz) -> Self {
-        let mut narrow = Self::bank(rate, center, OOK_CHANNEL_HZ);
-        let mut wide = Self::bank(rate, center, FSK_CHANNEL_HZ);
-        // Building every graph can only fail if the chain itself is malformed,
-        // which is a bug rather than a runtime condition.
-        narrow.set_all_graphs(nodes::ism_ook_graph).expect("OOK decode graph");
-        wide.set_all_graphs(nodes::ism_fsk_graph).expect("FSK decode graph");
-        Self { narrow, wide, rate, hits: 0, recent: Vec::new() }
-    }
-
-    /// Whether a burst is new, remembering it if so.
-    ///
-    /// Deduping within a block is not enough. Reads from the radio are short,
-    /// about seven milliseconds at 2.3 MS/s, and a burst that starts near the
-    /// end of one is finished by the detectors in the next, so the copies from
-    /// neighbouring channels straddle the boundary. Measured on live 868 MHz
-    /// traffic, one transmission appeared as four rows 31 kHz apart.
-    fn accept(&mut self, r: &DecodeRecord, now: std::time::Instant) -> bool {
-        self.recent.retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
-        if self.recent.iter().any(|k| same_burst(k, r)) {
-            return false;
+/// Sweep a capture as the radio thread does, block by block.
+///
+/// Blocks are the size the radio delivers, because deduplication depends on
+/// how a burst falls across block boundaries and a whole-file call would not
+/// exercise it.
+fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf) -> Vec<DecodeRecord> {
+    let mut dedupe = Dedupe::default();
+    let mut out = Vec::new();
+    let rate = buf.rate.as_f64().max(1.0);
+    for block in buf.samples.chunks(16_384) {
+        if rx.process(block).is_err() {
+            break;
         }
-        self.recent.push(Reported {
-            at: r.at,
-            freq: r.freq,
-            channel_hz: r.channel_hz,
-            modulation: r.modulation,
-        });
-        true
-    }
-
-    /// The decode chain a bank channel runs, for the chain view.
-    ///
-    /// Every channel in a bank is built from the same graph, so the first one
-    /// that exists describes all of them.
-    fn decode_chain(&self) -> Option<pipeline::graph::Topology> {
-        (0..self.narrow.channels())
-            .find_map(|c| self.narrow.graph(c))
-            .or_else(|| (0..self.wide.channels()).find_map(|c| self.wide.graph(c)))
-            .map(|g| g.topology())
-    }
-
-    /// Channels in each bank, narrow first.
-    fn channels(&self) -> (usize, usize) {
-        (self.narrow.channels(), self.wide.channels())
-    }
-
-    fn retune(&mut self, center: Hz) {
-        self.narrow.set_center(center);
-        self.wide.set_center(center);
-        // Every channel covers a different frequency now, so nothing already
-        // reported can be the same burst as anything arriving next.
-        self.recent.clear();
-    }
-
-    /// Run a block and append whatever decoded.
-    fn process(&mut self, iq: &[C32], out: &mut Vec<DecodeRecord>) {
-        // Stamped at the start of the block rather than at the moment the
-        // decode fell out of it. The packet happened somewhere inside the
-        // block, and a pulse detector only closes a package once it has seen
-        // the silence afterwards, so "now" is always late by up to a block.
-        // Anything drawing this against a waterfall would put the mark below
-        // the trace it belongs to.
-        let block = std::time::Duration::from_secs_f64(iq.len() as f64 / self.rate.max(1.0));
-        let now = std::time::Instant::now() - block;
-        let first = out.len();
-
-        let mut found = Vec::new();
-        for (bank, width) in [
-            (&mut self.narrow, OOK_CHANNEL_HZ),
-            (&mut self.wide, FSK_CHANNEL_HZ),
-        ] {
-            let width = width.min(bank.channel_bandwidth());
-            let Ok(evs) = bank.process(iq) else { continue };
-            for ev in evs {
-                // Warnings are per burst and per channel, so across a whole
-                // band they arrive in the thousands. The log is for packets.
-                if let pipeline::event::Event::Decoded(d) = &ev.event {
-                    found.push(DecodeRecord {
-                        at: now,
-                        freq: ev.center.as_f64(),
-                        channel_hz: width,
-                        model: d.protocol.to_string(),
-                        modulation: d.modulation.unwrap_or("?"),
-                        detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
-                        fields: d.fields.clone(),
-                        media_type: d.media_type,
-                        rssi_dbfs: d.rssi_dbfs.unwrap_or(f32::NAN),
-                        snr_db: d.snr_db.unwrap_or(f32::NAN),
-                        bytes: d.payload.clone(),
-                        crc: d.crc_ok,
-                    });
-                }
-            }
-        }
-
+        let at = std::time::Instant::now()
+            - std::time::Duration::from_secs_f64(block.len() as f64 / rate);
+        let mut found = rx.decodes(at);
         dedupe_neighbours(&mut found);
-        for r in found.into_iter().filter(|r| !r.model.is_empty()) {
-            if self.accept(&r, now) {
-                out.push(r);
+        let seen = out.len();
+        out.extend(found.into_iter().filter(|r| !r.model.is_empty() && dedupe.accept(r, at)));
+        if let Some(r) = rx.recorder_mut() {
+            for d in &out[seen..] {
+                r.capture(d);
             }
         }
-        self.hits += (out.len() - first) as u64;
     }
+    out
 }
 
 /// Scan a buffer while recording, as the radio thread does. Test support.
 #[cfg(test)]
 pub fn scan_with_recorder(
     buf: &common::IqBuf,
-    rec: &mut crate::record::Recorder,
-) -> Vec<DecodeRecord> {
-    let mut sc = Scanner::new(buf.rate.as_f64(), buf.center);
-    let mut out = Vec::new();
-    for block in buf.samples.chunks(16_384) {
-        let seen = out.len();
-        rec.push(block);
-        sc.process(block, &mut out);
-        for d in &out[seen..] {
-            rec.capture(d);
-        }
-    }
-    out
+    rec: crate::record::Recorder,
+) -> (Vec<DecodeRecord>, Option<crate::record::Recorder>) {
+    let mut rx = match replay_receiver(buf, Some(rec)) {
+        Ok(rx) => rx,
+        Err(_) => return (Vec::new(), None),
+    };
+    let out = replay_blocks(&mut rx, buf);
+    (out, rx.take_recorder())
 }
 
-/// Run a capture through the same scanner the live receiver uses.
+/// Run a capture through the same chain the live receiver uses.
 ///
 /// The point of recording bursts is to be able to try again without waiting
 /// for a device to transmit, so replay has to go through the same code the
-/// receiver does, not a simplified copy of it. Blocks are the size the radio
-/// delivers, because the scanner's deduplication depends on how a burst falls
-/// across block boundaries and a whole-file call would not exercise it.
+/// receiver does, not a simplified copy of it.
 pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<DecodeRecord>> {
     let src = sources::FileSource::open(path.as_ref())?;
     let buf = src.read_all()?;
-    let mut sc = Scanner::new(buf.rate.as_f64(), buf.center);
-    // A 1090 MHz capture goes through the wideband path instead of the
-    // channel banks, the same way the live receiver decides.
-    let mut modes = crate::modes::ModeS::for_tuning(buf.center.as_f64(), buf.rate.as_f64());
-    let mut out = Vec::new();
-    for block in buf.samples.chunks(16_384) {
-        // 1090 MHz carries nothing the ISM banks understand, so running them
-        // there only spends CPU inventing unknown bursts out of Mode S.
-        match modes.as_mut() {
-            Some(m) => m.process(block, &mut out),
-            None => sc.process(block, &mut out),
-        }
-    }
-    Ok(out)
-}
-
-/// Publish the chain the receiver is actually running.
-///
-/// There is always one, which is the point: a listening channel has its audio
-/// chain, 1090 MHz has its Mode S chain, and a band being scanned has the
-/// per-channel decode chain every bank channel runs. Showing "no chain" while
-/// the receiver is busy decoding a whole band was never true, it was just the
-/// view asking the wrong question.
-///
-/// Only one can be shown, and the order is by how specific the operator's
-/// intent was: a channel they tuned beats a band being swept.
-fn publish_chain(
-    status: &Status,
-    live: &[Live],
-    modes: Option<&crate::modes::ModeS>,
-    scan: Option<&Scanner>,
-) {
-    if let Some(l) = live.first() {
-        status.set_chain(Some(l.audio.graph().topology()), l.audio.latency_ms());
-        return;
-    }
-    if let Some(m) = modes {
-        status.set_chain(Some(m.topology()), m.latency_ms());
-        return;
-    }
-    // Every channel in a bank runs the same graph, so any of them describes
-    // the decoder. The narrow bank is the one with the OOK front end most
-    // ISM traffic goes through.
-    if let Some(g) = scan.and_then(|s| s.decode_chain()) {
-        status.set_chain(Some(g), 0.0);
-        return;
-    }
-    status.set_chain(None, 0.0);
+    let mut rx = replay_receiver(&buf, None)?;
+    Ok(replay_blocks(&mut rx, &buf))
 }
 
 /// Drop the copies of a burst that other channels also reported.
@@ -966,13 +848,6 @@ impl Drop for Radio {
     }
 }
 
-/// How wide a CW filter is.
-///
-/// 500 Hz is the common contest setting: narrow enough to silence a station a
-/// few hundred hertz away, wide enough that being slightly off the dial still
-/// lets the tone through.
-const CW_FILTER_HZ: f64 = 500.0;
-
 /// The squelch a mode wants, if any.
 ///
 /// Broadcast FM is never squelched: the signal is either there or the
@@ -981,7 +856,7 @@ const CW_FILTER_HZ: f64 = 500.0;
 /// neither has a capture effect to measure noise against, and both are
 /// routinely listened to with the squelch off, which is why the threshold
 /// starts low enough to pass almost anything.
-fn squelch_for(mode: Demod) -> Option<SquelchNode> {
+pub(crate) fn squelch_for(mode: Demod) -> Option<SquelchNode> {
     let db = mode.default_squelch_db()?;
     Some(match mode {
         Demod::Nfm => SquelchNode::new(SquelchKind::Noise, db),
@@ -995,7 +870,7 @@ fn squelch_for(mode: Demod) -> Option<SquelchNode> {
 /// so an AGC on top of that only compresses what the broadcaster spent money
 /// deciding. The rest of the modes have no level control at the far end at
 /// all: that is what makes an AGC the difference between usable and not.
-fn agc_for(mode: Demod) -> Option<AgcNode> {
+pub(crate) fn agc_for(mode: Demod) -> Option<AgcNode> {
     match mode {
         Demod::Cw => Some(AgcNode::cw()),
         Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(AgcNode::voice()),
@@ -1003,259 +878,83 @@ fn agc_for(mode: Demod) -> Option<AgcNode> {
     }
 }
 
-/// Audio chain for one channel, rebuilt whenever the tuning or mode changes.
+/// One listening channel on its own, for tests and benchmarks.
 ///
-/// Built as a `pipeline::Graph` from the same nodes the rest of the app uses.
-/// The chain was hand-wired before, which meant the graph engine existed and
-/// nothing ran on it: rate negotiation, latency reporting and per-node
-/// parameters were all reimplemented here or simply absent.
+/// A thin holder around a [`crate::chain::Receiver`] carrying a single
+/// channel, so that measuring a chain measures the chain the receiver builds.
+/// It used to construct its own copy of the audio branch, which drifted:
+/// whatever was true of a filter here was not necessarily true of the one the
+/// radio ran.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Audio {
-    graph: Graph,
-    wfm: Option<NodeId>,
-    agc: Option<NodeId>,
-    squelch: Option<NodeId>,
-    agc_gain_db: f32,
-    squelch_open: bool,
-    squelch_db: f32,
-    audio_rate: f64,
-    channels: usize,
-    iq: Vec<C32>,
+    rx: crate::chain::Receiver,
     pcm: Vec<f32>,
-    detail: String,
-    station: dsp::rds::Station,
-    stats: (u64, u64, bool),
-    blend: f32,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Audio {
-    pub fn new(offset: f64, rate: f64, mode: Demod, target: f64) -> Self {
-        let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
-        let if_rate = rate / if_dec as f64;
-        let au_dec = ((if_rate / target).round() as usize).max(1);
-
-        let mut b = Graph::builder(StreamSpec::iq(rate, Hz(0)));
-        // CW is tuned low by the pitch so the dial reads the carrier rather
-        // than the note; every other mode is tuned to what it listens to.
-        let mix = b.add_labeled("Mixer", Box::new(MixerNode::new(-(offset - mode.cw_pitch()))));
-        // Sized from the signal's bandwidth, not from the decimation factor:
-        // the stopband has to land where the first alias folds down.
-        let mut dec = DecimateNode::new(if_dec);
-        dec.set_passband_hz(rate, mode.bandwidth() / 2.0);
-        let ifd = b.add_labeled("IF decimator", Box::new(dec));
-        b.source(mix.i());
-        b.connect(mix.o(), ifd.i());
-
-        let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
-        let mut wfm = None;
-        let demod = if stereo {
-            let id = b.add_labeled("WFM demod", Box::new(WfmDemodNode::new()));
-            wfm = Some(id);
-            id
-        } else if mode == Demod::Am {
-            b.add_labeled("AM envelope", Box::new(EnvelopeNode))
-        } else if mode.is_ssb() {
-            let node = if mode == Demod::Cw {
-                SsbDemodNode::cw(mode.sideband(), mode.cw_pitch(), CW_FILTER_HZ)
-            } else {
-                SsbDemodNode::voice(mode.sideband())
-            };
-            b.add_labeled(if mode == Demod::Cw { "CW filter" } else { "Sideband filter" }, Box::new(node))
-        } else {
-            b.add_labeled("FM discriminator", Box::new(FmDemodNode::new(mode.deviation())))
+    pub fn new(offset: f64, rate: f64, mode: Demod, _target: f64) -> Self {
+        let spec = ChannelSpec {
+            id: 1,
+            offset_hz: offset,
+            demod: mode,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
         };
-        b.connect(ifd.o(), demod.i());
-
-        // The squelch goes here, on the demodulator's raw output, and not
-        // later where the audio is. An FM noise squelch works by measuring
-        // the hiss above the speech band, and the audio filter's whole job is
-        // to remove that: measured on an empty 2 m channel, a squelch after
-        // the filter saw a clean signal and held itself open on pure noise.
-        let mut demod_tail = demod;
-        let mut squelch = None;
-        if let Some(sq) = squelch_for(mode) {
-            let id = b.add_labeled("Squelch", Box::new(sq));
-            b.connect(demod_tail.o(), id.i());
-            squelch = Some(id);
-            demod_tail = id;
-        }
-
-        let mut ad = RealDecimateNode::new(au_dec);
-        ad.set_passband_hz(if_rate, mode.audio_bw());
-        let aud = b.add_labeled("Audio decimator", Box::new(ad));
-        b.connect(demod_tail.o(), aud.i());
-        let last = if mode == Demod::Am || mode.is_ssb() {
-            // De-emphasis is an FM thing: it undoes the pre-emphasis the
-            // transmitter applied. Applying it to AM or SSB would just be a
-            // treble cut nobody asked for.
-            aud
-        } else {
-            let de = b.add_labeled("De-emphasis", Box::new(DeemphasisNode::new(50.0)));
-            b.connect(aud.o(), de.i());
-            de
+        let plan = Plan {
+            center: Hz(0),
+            rate,
+            zoom: 1,
+            dc_block: false,
+            refresh_hz: 30.0,
+            fft: 1024,
+            channels: vec![spec],
+            scan: false,
+            modes: false,
+            record: false,
         };
-
-        // The gain control comes after the squelch, so what it sees is either
-        // a signal or silence. The other order lets the AGC lift the noise on
-        // a dead channel up to the threshold and hold the squelch open.
-        let mut tail = last;
-        let mut agc = None;
-        if let Some(node) = agc_for(mode) {
-            let id = b.add_labeled("AGC", Box::new(node));
-            b.connect(tail.o(), id.i());
-            agc = Some(id);
-            tail = id;
-        }
-
-        let hb = b.add_labeled("High blend", Box::new(HighBlendNode::new()));
-        b.connect(tail.o(), hb.i());
-        b.output(hb.o());
-
-        let graph = b.build().expect("audio chain");
-        let spec = graph.output_spec();
-        let detail = format!(
-            "if /{if_dec} to {:.0} kHz, audio /{au_dec} to {:.1} kHz{}",
-            if_rate / 1e3,
-            spec.frame_rate() / 1e3,
-            if stereo { ", stereo" } else { "" }
-        );
-        Self {
-            graph,
-            wfm,
-            agc,
-            squelch,
-            agc_gain_db: 0.0,
-            squelch_open: true,
-            squelch_db: 0.0,
-            audio_rate: spec.frame_rate(),
-            channels: spec.channels,
-            iq: Vec::new(),
-            pcm: Vec::new(),
-            detail,
-            station: dsp::rds::Station::default(),
-            stats: (0, 0, false),
-            blend: 0.0,
-        }
+        let rx = crate::chain::Receiver::build(&plan, None).expect("audio chain");
+        Self { rx, pcm: Vec::new() }
     }
 
-    pub fn is_stereo(&self) -> bool {
-        self.channels == 2
-    }
-
-    pub fn stereo_blend(&self) -> f32 {
-        self.blend
-    }
-
-    pub fn station(&self) -> &dsp::rds::Station {
-        &self.station
-    }
-
-    /// Groups decoded, blocks rejected, and whether framing is currently held.
-    pub fn rds_stats(&self) -> (u64, u64, bool) {
-        self.stats
+    fn chan(&self) -> &crate::chain::Chan {
+        &self.rx.channels()[0]
     }
 
     pub fn cost(&self) -> String {
-        self.detail.clone()
+        self.chan().detail.clone()
     }
 
-    /// Delay through the whole chain, in milliseconds of audio.
-    ///
-    /// Every filter reports its own group delay and the graph adds them up, so
-    /// this is the number to watch rather than any single tap count: a chain
-    /// can be built from short filters and still be slow.
     pub fn latency_ms(&self) -> f64 {
-        self.graph.output_latency() as f64 / self.audio_rate.max(1.0) * 1e3
-    }
-
-    /// Move the squelch threshold on the running chain.
-    ///
-    /// The units differ by mode and that is not hidden: FM measures how much
-    /// of the signal is noise, everything else measures level in dBFS. A
-    /// control has to label itself from [`Audio::squelch_kind`] rather than
-    /// assume.
-    pub fn set_squelch_threshold(&mut self, db: f32) {
-        let Some(id) = self.squelch else { return };
-        if let Some(n) = self.graph.node_mut(id).and_then(|n| n.as_any_mut()) {
-            if let Some(sq) = n.downcast_mut::<SquelchNode>() {
-                sq.set_threshold_db(db);
-            }
-        }
-    }
-
-    pub fn set_agc_enabled(&mut self, on: bool) {
-        let Some(id) = self.agc else { return };
-        if let Some(n) = self.graph.node_mut(id).and_then(|n| n.as_any_mut()) {
-            if let Some(a) = n.downcast_mut::<AgcNode>() {
-                a.set_enabled(on);
-            }
-        }
+        self.rx.latency_ms(0)
     }
 
     /// How much gain the AGC is applying, or zero in a mode without one.
-    ///
-    /// Worth showing: on a weak signal this is the difference between a dead
-    /// band and a deaf receiver, and the two look identical without it.
     pub fn agc_gain_db(&self) -> f32 {
-        self.agc_gain_db
+        self.chan().agc_gain_db
     }
 
     /// What the squelch measured on the last block, in dB.
     pub fn squelch_db(&self) -> f32 {
-        self.squelch_db
+        self.chan().squelch_db
     }
 
-    /// Whether the squelch is passing audio. True in a mode with no squelch.
-    pub fn squelch_open(&self) -> bool {
-        self.squelch_open
+    pub fn audio_rate(&self) -> f64 {
+        self.chan().audio_rate
     }
 
-    /// The running chain, for the graph view.
-    pub fn graph(&self) -> &Graph {
-        &self.graph
+    pub fn topology(&self) -> pipeline::graph::Topology {
+        self.rx.topology()
     }
 
     pub fn process(&mut self, input: &[C32], gain: f32) -> &[f32] {
-        self.iq.clear();
-        self.iq.extend_from_slice(input);
-        let buf = self.graph.input_buf();
-        buf.clear();
-        buf.iq_mut().extend_from_slice(&self.iq);
-        if self.graph.run().is_err() {
-            self.pcm.clear();
+        self.pcm.clear();
+        if self.rx.process(input).is_err() {
             return &self.pcm;
         }
-        self.pcm.clear();
-        if let Some(out) = self.graph.output().as_real() {
-            self.pcm.extend(out.iter().map(|v| v * gain));
-        }
-        // Read back what the demodulator learned. Events carry the same
-        // information but only when it changes, and the status panel wants a
-        // current value on every frame rather than the last one it happened to
-        // catch.
-        if let Some(id) = self.agc {
-            if let Some(n) = self.graph.node(id).and_then(|n| n.as_any()) {
-                if let Some(a) = n.downcast_ref::<AgcNode>() {
-                    self.agc_gain_db = a.gain_db();
-                }
-            }
-        }
-        if let Some(id) = self.squelch {
-            if let Some(n) = self.graph.node(id).and_then(|n| n.as_any()) {
-                if let Some(sq) = n.downcast_ref::<SquelchNode>() {
-                    self.squelch_open = sq.is_open();
-                    self.squelch_db = sq.measured_db();
-                }
-            }
-        }
-        if let Some(id) = self.wfm {
-            if let Some(n) = self.graph.node(id).and_then(|n| n.as_any()) {
-                if let Some(w) = n.downcast_ref::<WfmDemodNode>() {
-                    self.station = w.station().clone();
-                    self.stats = w.rds_stats();
-                    self.blend = w.blend();
-                }
-            }
-        }
+        self.pcm.extend(self.rx.audio(0).iter().map(|v| v * gain));
         &self.pcm
     }
 }
@@ -1293,41 +992,40 @@ fn run(
         }
     };
 
-    let mut spec = Spectrum::new(fft);
-    let mut dc: Option<DcBlock> = None;
-    let mut dc_on = true;
     let mut stream = dev.start_rx()?;
     status.running.store(true, Ordering::Relaxed);
     status.set_radio(RadioControls::read(dev.as_ref()));
 
-    // Every channel being listened to, each with its own chain. They all see
-    // the same samples and their audio is summed.
-    let mut live: Vec<Live> = Vec::new();
-    let mut wanted: Vec<ChannelSpec> = Vec::new();
+    // What the receiver should be doing. Everything that acts on a sample is
+    // in the graph this describes, so a command changes the plan and the
+    // graph is rebuilt from it, rather than each command reaching into a
+    // different object.
+    let mut plan = Plan {
+        center: dev.center(),
+        rate: dev.rate().as_f64(),
+        zoom: 1,
+        dc_block: true,
+        refresh_hz: 30.0,
+        fft,
+        channels: Vec::new(),
+        // Scanning from the start: a receiver that only decodes what you
+        // tuned to will miss the sensor that transmitted once while you were
+        // reading the spectrum, and that transmission is the whole reason to
+        // be here.
+        scan: true,
+        modes: false,
+        record: false,
+    };
+    plan.modes = modes_here(&plan);
+    let mut rx = crate::chain::Receiver::build(&plan, None)?;
+    publish_chain(status, &rx);
+
     let mut mix: Vec<f32> = Vec::new();
-    // Software zoom: the radio keeps sampling at its own rate and everything
-    // downstream sees a decimated copy.
-    let mut zoom: usize = 1;
-    let mut narrow: Option<FirDecim> = None;
-    let mut narrowed: Vec<C32> = Vec::new();
-    // On from the start: a receiver that only decodes what you tuned to will
-    // miss the sensor that transmitted once while you were reading the
-    // spectrum, and that transmission is the whole reason to be here.
-    let mut scan: Option<Scanner> = Some(Scanner::new(dev.rate().as_f64(), dev.center()));
-    let mut scan_on = true;
-    let mut rec: Option<crate::record::Recorder> = None;
     let mut records: Vec<DecodeRecord> = Vec::new();
+    let mut dedupe = Dedupe::default();
+    let mut hits = 0u64;
     let mut volume = 0.5f32;
-    let mut refresh = 30.0f32;
-    let mut next_frame = std::time::Instant::now();
-    let mut cur_rate = dev.rate().as_f64();
-    let mut cur_center = dev.center().as_f64();
-    // The wideband Mode S path, which exists only while the dial is on
-    // 1090 MHz.
-    let mut modes = crate::modes::ModeS::for_tuning(cur_center, eff_rate(cur_rate, zoom));
-    let mut retune = false;
-    // A rate or span change invalidates every chain, where an edit to the
-    // channel list does not.
+    let mut scan_on = true;
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
     let gap = tune_gap();
@@ -1355,7 +1053,7 @@ fn run(
                     if dev.rate_needs_restart() {
                         stream.stop();
                         drop(stream);
-                        match restart(&entry, r, Hz(cur_center as u64), gain) {
+                        match restart(&entry, r, plan.center, gain) {
                             Ok((d, s)) => {
                                 dev = d;
                                 stream = s;
@@ -1369,40 +1067,26 @@ fn run(
                         *status.error.lock() = Some(format!("cannot change span: {e}"));
                         continue;
                     }
-                    cur_rate = dev.rate().as_f64();
-                    spec.reset();
-                    retune = true;
+                    plan.rate = dev.rate().as_f64();
                     rebuild = true;
-                    // The notch width is set from the rate.
-                    dc = None;
-                    // A different span is a different set of channels, so the
-                    // bank is rebuilt rather than retuned.
-                    scan = scan_on.then(|| Scanner::new(eff_rate(cur_rate, zoom), dev.center()));
-                    modes = crate::modes::ModeS::for_tuning(
-                        dev.center().as_f64(),
-                        eff_rate(cur_rate, zoom),
-                    );
-                    publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
-                    narrow = None;
-                    if let Some(r) = rec.as_mut() {
-                        r.retune(eff_rate(cur_rate, zoom), dev.center());
-                    }
                 }
                 Cmd::Channels(specs) => {
-                    wanted = specs;
-                    retune = true;
+                    plan.channels = specs;
+                    rebuild = true;
                 }
                 Cmd::Volume(v) => volume = v,
                 Cmd::Fft(n) => {
-                    let keep = spec.smoothing;
-                    spec = Spectrum::new(n);
-                    spec.smoothing = keep;
+                    plan.fft = n;
+                    rebuild = true;
                 }
-                Cmd::Refresh(hz) => refresh = hz.clamp(1.0, 120.0),
-                Cmd::Smoothing(v) => spec.smoothing = v.clamp(0.01, 1.0),
+                Cmd::Refresh(hz) => {
+                    plan.refresh_hz = hz.clamp(1.0, 120.0);
+                    rx.set_refresh(plan.refresh_hz);
+                }
+                Cmd::Smoothing(v) => rx.set_smoothing(v.clamp(0.01, 1.0)),
                 Cmd::DcBlock(on) => {
-                    dc_on = on;
-                    dc = None;
+                    plan.dc_block = on;
+                    rx.set_dc_block(on);
                 }
                 Cmd::GainStage(stage, mode) => {
                     if let Err(e) = dev.set_gain(&stage, mode) {
@@ -1417,7 +1101,7 @@ fn run(
                     // control has to be told what it actually got rather than
                     // what it asked for.
                     status.set_radio(RadioControls::read(dev.as_ref()));
-                    dc = None;
+                    rx.remeasure_dc();
                 }
                 Cmd::Toggle(name, on) => {
                     if let Err(e) = dev.set_toggle(&name, on) {
@@ -1426,140 +1110,52 @@ fn run(
                     status.set_radio(RadioControls::read(dev.as_ref()));
                     // Any of these changes the offset, and a stale estimate
                     // shows up as a spur that was not there a moment ago.
-                    dc = None;
+                    rx.remeasure_dc();
                 }
                 Cmd::Ppm(ppm) => {
                     if let Err(e) = dev.set_ppm(ppm) {
                         *status.error.lock() = Some(format!("ppm: {e}"));
                     }
                     status.set_radio(RadioControls::read(dev.as_ref()));
-                    retune = true;
+                    rebuild = true;
                 }
                 Cmd::Record(dir) => {
-                    rec = match dir {
+                    let rec = match dir {
                         Some((d, mb)) => match crate::record::Recorder::new(
                             &d,
-                            eff_rate(cur_rate, zoom),
-                            Hz(cur_center as u64),
+                            plan.eff_rate(),
+                            plan.center,
                         ) {
                             Ok(r) => Some(match mb {
                                 Some(mb) => r.with_budget(mb << 20),
                                 None => r,
                             }),
                             Err(e) => {
-                                *status.error.lock() = Some(format!("cannot record to {}: {e}", d.display()));
+                                *status.error.lock() =
+                                    Some(format!("cannot record to {}: {e}", d.display()));
                                 None
                             }
                         },
                         None => None,
                     };
+                    plan.record = rec.is_some();
+                    rx.set_recorder(rec);
+                    rebuild = true;
                 }
                 Cmd::Zoom(n) => {
                     let n = n.clamp(1, 64);
-                    if n != zoom {
-                        zoom = n;
-                        narrow = None;
-                        spec.reset();
-                        retune = true;
+                    if n != plan.zoom {
+                        plan.zoom = n;
                         rebuild = true;
-                        // Every downstream stage is built for a sample rate,
-                        // so all of them are rebuilt rather than adjusted.
-                        scan = scan_on.then(|| Scanner::new(eff_rate(cur_rate, zoom), dev.center()));
-                        modes = crate::modes::ModeS::for_tuning(
-                            dev.center().as_f64(),
-                            eff_rate(cur_rate, zoom),
-                        );
-                        publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
-                        if let Some(r) = rec.as_mut() {
-                            r.retune(eff_rate(cur_rate, zoom), dev.center());
-                        }
-                        status.zoom.store(zoom as u64, Ordering::Relaxed);
+                        status.zoom.store(n as u64, Ordering::Relaxed);
                     }
                 }
                 Cmd::Decode(on) => {
                     scan_on = on;
-                    scan = on.then(|| Scanner::new(eff_rate(cur_rate, zoom), dev.center()));
+                    plan.scan = on;
+                    rebuild = true;
                 }
             }
-        }
-
-        if retune {
-            let rate = eff_rate(cur_rate, zoom);
-            // Chains are kept across edits and rebuilt only when what they
-            // are demodulating changes. Rebuilding all of them on every
-            // volume nudge would restart each AGC and drop the RDS decoder's
-            // state along with the station name it had recovered.
-            live.retain(|l| wanted.iter().any(|w| w.id == l.spec.id));
-            // A channel the span no longer covers cannot be demodulated: the
-            // mixer would shift a frequency the radio never sampled down to
-            // baseband, and the chain would produce noise that sounds like a
-            // dead station rather than silence. This happens whenever the dial
-            // moves far from where a channel was placed, which a restored
-            // session does on the first frame.
-            live.retain(|l| l.spec.offset_hz.abs() <= eff_rate(cur_rate, zoom) / 2.0);
-            let mut refused: Option<String> = None;
-            let mut rebuilt: Vec<u64> = Vec::new();
-            for want in &wanted {
-                let same = |a: &ChannelSpec, b: &ChannelSpec| {
-                    a.demod == b.demod && (a.offset_hz - b.offset_hz).abs() < 1.0
-                };
-                match live.iter_mut().find(|l| l.spec.id == want.id) {
-                    Some(l) if same(&l.spec, want) && !rebuild => {
-                        if l.spec.agc != want.agc {
-                            l.audio.set_agc_enabled(want.agc);
-                        }
-                        if l.spec.squelch_db != want.squelch_db {
-                            if let Some(db) = want.squelch_db {
-                                l.audio.set_squelch_threshold(db);
-                            }
-                        }
-                        l.spec = want.clone();
-                    }
-                    _ => {
-                        if want.offset_hz.abs() > rate / 2.0 {
-                            refused = Some(format!(
-                                "{:.4} MHz is outside the span",
-                                (cur_center + want.offset_hz) / 1e6,
-                            ));
-                            live.retain(|l| l.spec.id != want.id);
-                            continue;
-                        }
-                        if rate < want.demod.if_rate() {
-                            refused = Some(format!(
-                                "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
-                                want.demod.label(),
-                                want.demod.if_rate() / 1e3,
-                                rate / 1e3,
-                            ));
-                            live.retain(|l| l.spec.id != want.id);
-                            continue;
-                        }
-                        rebuilt.push(want.id);
-                        let mut audio = Audio::new(want.offset_hz, rate, want.demod, 48_000.0);
-                        if let Some(db) = want.squelch_db {
-                            audio.set_squelch_threshold(db);
-                        }
-                        audio.set_agc_enabled(want.agc);
-                        let l = Live { spec: want.clone(), audio };
-                        match live.iter_mut().find(|x| x.spec.id == want.id) {
-                            Some(slot) => *slot = l,
-                            None => live.push(l),
-                        }
-                    }
-                }
-            }
-            *status.error.lock() = refused;
-            publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
-            // A chain that was rebuilt has lost its RDS state, and its old
-            // station name must not sit over whatever it is tuned to now.
-            let wfm: Vec<u64> = live
-                .iter()
-                .filter(|l| l.spec.demod == Demod::Wfm && !rebuilt.contains(&l.spec.id))
-                .map(|l| l.spec.id)
-                .collect();
-            status.keep_stations(&wfm);
-            retune = false;
-            rebuild = false;
         }
 
         // Retuning costs about 25 ms on the RTL-SDR, more than a frame at
@@ -1571,143 +1167,116 @@ fn run(
             if last_tune.elapsed() >= gap {
                 let _t = tracing::info_span!("set_center").entered();
                 dev.set_center(f)?;
-                cur_center = dev.center().as_f64();
-                spec.reset();
-                if let Some(s) = scan.as_mut() {
-                    s.retune(dev.center());
-                }
-                // Tuning onto or off 1090 MHz starts or stops the Mode S
-                // path, and the address book starts empty at a new frequency
-                // because nothing it learned applies there.
-                modes = crate::modes::ModeS::for_tuning(cur_center, eff_rate(cur_rate, zoom));
-                publish_chain(&status, &live, modes.as_ref(), scan.as_ref());
-                if let Some(r) = rec.as_mut() {
-                    r.retune(eff_rate(cur_rate, zoom), dev.center());
-                }
-                // The offset differs from tuning to tuning, so re-measure
-                // rather than dragging the old one to the new frequency.
-                dc = None;
+                plan.center = dev.center();
+                rebuild = true;
                 want_center = None;
                 last_tune = std::time::Instant::now();
             }
         }
 
+        if rebuild {
+            let _t = tracing::info_span!("rebuild").entered();
+            plan.scan = scan_on && !modes_here(&plan);
+            plan.modes = modes_here(&plan);
+            let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
+            if let Err(e) = rx.rebuild(&plan) {
+                *status.error.lock() = Some(format!("cannot build the chain: {e}"));
+                return Ok(());
+            }
+            *status.error.lock() = rx.refused.clone();
+            // A channel that was rebuilt has lost its RDS state, and its old
+            // station name must not sit over whatever it is tuned to now.
+            let kept: Vec<u64> = rx
+                .channels()
+                .iter()
+                .filter(|c| before.contains(&c.spec.id) && c.kept)
+                .map(|c| c.spec.id)
+                .collect();
+            status.keep_stations(&kept);
+            // Every channel covers a different frequency now, so nothing
+            // already reported can be the same burst as anything arriving.
+            dedupe.clear();
+            if let Some(r) = rx.recorder_mut() {
+                r.retune(plan.eff_rate(), plan.center);
+            }
+            publish_chain(status, &rx);
+            rebuild = false;
+        }
+
         let read_span = tracing::info_span!("rf_read").entered();
-        let mut buf = match stream.read() {
+        let buf = match stream.read() {
             Ok(b) => b,
             Err(_) => return Ok(()),
         };
         drop(read_span);
         status.dropped.store(stream.dropped(), Ordering::Relaxed);
 
-        // A direct-conversion front end puts local oscillator leakage and the
-        // ADC's offset at exactly the tuned frequency, which reads as a very
-        // strong carrier that is not there. Removed before anything else sees
-        // it, so the spectrum, the detectors and the audio all agree.
-        if dc_on {
-            let _d = tracing::info_span!("dc_block").entered();
-            let dcb = dc.get_or_insert_with(|| {
-                let mut d = DcBlock::new(cur_rate);
-                d.prime(&buf.samples);
-                d
-            });
-            dcb.process(&mut buf.samples);
-        }
-
-        // Narrowing happens after the DC block and before anything else, so
-        // the spectrum, the detectors and the audio all see the same samples
-        // at the same rate.
-        if zoom > 1 {
-            let _z = tracing::info_span!("zoom").entered();
-            let f = narrow.get_or_insert_with(|| {
-                // Passband just inside the new Nyquist: the whole point is
-                // that what is left is clean, since anything folded in cannot
-                // be told from a signal afterwards.
-                FirDecim::design_hz(cur_rate, zoom, eff_rate(cur_rate, zoom) * 0.45, 70.0)
-            });
-            narrowed.clear();
-            f.process(&buf.samples, &mut narrowed);
-            std::mem::swap(&mut buf.samples, &mut narrowed);
-        }
-        let cur_rate = eff_rate(cur_rate, zoom);
-
-        // Only run the FFT and wake the UI when a frame is actually due.
-        // Waking on every USB buffer asks for ~260 repaints a second, which
-        // pins a core redrawing frames no display can show.
-        let now = std::time::Instant::now();
-        if now >= next_frame {
-            next_frame = now + std::time::Duration::from_secs_f32(1.0 / refresh);
-            let _s = tracing::info_span!("spectrum").entered();
-            if spec.process(&buf.samples) {
-                let f =
-                    Frame { db: spec.power_db().to_vec(), center: cur_center, rate: cur_rate };
-                // Drop rather than block: the radio must never stall waiting
-                // for the UI, and a stale spectrum is worthless anyway.
-                match frames.try_send(f) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {}
-                    Err(TrySendError::Disconnected(_)) => return Ok(()),
-                }
-                repaint();
-            }
-        }
-
-        status.modes_on.store(modes.is_some(), Ordering::Relaxed);
-        if let Some(m) = modes.as_mut() {
-            let _s = tracing::info_span!("modes").entered();
-            let mut frames = Vec::new();
-            m.process(&buf.samples, &mut frames);
-            if !frames.is_empty() {
-                status.decoded.fetch_add(frames.len() as u64, Ordering::Relaxed);
-                match decodes.try_send(frames) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {}
-                    Err(TrySendError::Disconnected(_)) => return Ok(()),
-                }
-                repaint();
-            }
-        }
-
         {
-            let _s = tracing::info_span!("scan").entered();
-            // Skipped entirely while Mode S is running: see `replay`.
-            if let Some(sc) = scan.as_mut().filter(|_| modes.is_none()) {
-                records.clear();
-                // The recorder sees the block before the scanner does, so a
-                // burst the scanner then reports is already in its history.
-                if let Some(r) = rec.as_mut() {
-                    r.push(&buf.samples);
-                }
-                sc.process(&buf.samples, &mut records);
-                if let Some(r) = rec.as_mut() {
-                    for d in &records {
-                        r.capture(d);
-                    }
-                    if r.is_full() {
-                        *status.error.lock() = Some(format!(
-                            "recording stopped: wrote {} MB",
-                            r.written() >> 20
-                        ));
-                        rec = None;
-                    }
-                }
-                let (narrow, wide) = sc.channels();
-                status.scan_channels.store(narrow as u64, Ordering::Relaxed);
-                status.scan_channels_wide.store(wide as u64, Ordering::Relaxed);
-                if !records.is_empty() {
-                    status.decoded.store(sc.hits, Ordering::Relaxed);
-                    // Never block the radio thread on a UI that is behind; a
-                    // dropped batch is reported by the counter going up
-                    // without the log growing to match.
-                    match decodes.try_send(std::mem::take(&mut records)) {
-                        Ok(()) | Err(TrySendError::Full(_)) => {}
-                        Err(TrySendError::Disconnected(_)) => return Ok(()),
-                    }
-                    records = Vec::new();
-                    repaint();
-                }
-            } else {
-                status.scan_channels.store(0, Ordering::Relaxed);
-                status.scan_channels_wide.store(0, Ordering::Relaxed);
+            let _g = tracing::info_span!("graph").entered();
+            if let Err(e) = rx.process(&buf.samples) {
+                *status.error.lock() = Some(format!("chain: {e}"));
+                return Ok(());
             }
+        }
+
+        if rx.spectrum_ready() {
+            let f = Frame {
+                db: rx.power_db().to_vec(),
+                center: plan.center.as_f64(),
+                rate: plan.eff_rate(),
+            };
+            // Drop rather than block: the radio must never stall waiting for
+            // the UI, and a stale spectrum is worthless anyway.
+            match frames.try_send(f) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => return Ok(()),
+            }
+            repaint();
+        }
+
+        status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
+        let chans = rx.bank_channels();
+        status.scan_channels.store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
+        status
+            .scan_channels_wide
+            .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
+
+        // Stamped at the start of the block rather than at the moment the
+        // decode fell out of it. The packet happened somewhere inside the
+        // block, and a pulse detector only closes a package once it has seen
+        // the silence afterwards, so "now" is always late by up to a block.
+        let block =
+            std::time::Duration::from_secs_f64(buf.samples.len() as f64 / plan.rate.max(1.0));
+        let at = std::time::Instant::now() - block;
+
+        records.clear();
+        records.extend(rx.decodes(at));
+        dedupe_neighbours(&mut records);
+        records.retain(|r| !r.model.is_empty() && dedupe.accept(r, at));
+        if let Some(r) = rx.recorder_mut() {
+            for d in &records {
+                r.capture(d);
+            }
+            if r.is_full() {
+                let mb = r.written() >> 20;
+                *status.error.lock() = Some(format!("recording stopped: wrote {mb} MB"));
+                plan.record = false;
+                rx.set_recorder(None);
+                rebuild = true;
+            }
+        }
+        if !records.is_empty() {
+            hits += records.len() as u64;
+            status.decoded.store(hits, Ordering::Relaxed);
+            // Never block the radio thread on a UI that is behind; a dropped
+            // batch is reported by the counter going up without the log
+            // growing to match.
+            match decodes.try_send(std::mem::take(&mut records)) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => return Ok(()),
+            }
+            records = Vec::new();
+            repaint();
         }
 
         let _a = tracing::info_span!("audio").entered();
@@ -1721,19 +1290,18 @@ fn run(
             let mut frames = 0usize;
             let mut rate = 48_000.0;
             mix.clear();
-            let mut states = Vec::with_capacity(live.len());
-            for l in live.iter_mut() {
-                let stereo = l.audio.is_stereo();
-                rate = l.audio.audio_rate;
-                let gain = if l.spec.muted { 0.0 } else { l.spec.volume * volume };
-                let pcm = l.audio.process(&buf.samples, gain);
-                frames = frames.max(mix_into(&mut mix, pcm, stereo));
+            let mut states = Vec::with_capacity(rx.channels().len());
+            for (i, c) in rx.channels().iter().enumerate() {
+                rate = c.audio_rate;
+                let gain = if c.spec.muted { 0.0 } else { c.spec.volume * volume };
+                let pcm = rx.audio(i);
+                frames = frames.max(mix_gain_into(&mut mix, pcm, c.is_stereo(), gain));
                 states.push(ChannelState {
-                    id: l.spec.id,
-                    agc_gain_db: l.audio.agc_gain_db(),
-                    squelch_open: l.audio.squelch_open(),
-                    squelch_db: l.audio.squelch_db(),
-                    stereo_blend: l.audio.stereo_blend(),
+                    id: c.spec.id,
+                    agc_gain_db: c.agc_gain_db,
+                    squelch_open: c.squelch_open,
+                    squelch_db: c.squelch_db,
+                    stereo_blend: c.blend,
                 });
             }
             status.set_channel_states(states);
@@ -1742,20 +1310,52 @@ fn run(
                 s.write_adaptive_stereo(&mix[..frames * 2], rate);
                 status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
             }
-            for w in live.iter_mut().filter(|l| l.spec.demod == Demod::Wfm) {
-                let (g, e, sy) = w.audio.rds_stats();
-                status.set_station(w.spec.id, w.audio.station(), g, e, sy);
+            for w in rx.channels().iter().filter(|c| c.spec.demod == Demod::Wfm) {
+                let (g, e, sy) = w.rds_stats;
+                status.set_station(w.spec.id, &w.station, g, e, sy);
             }
-            if let Some(w) = live.iter_mut().find(|l| l.spec.demod == Demod::Wfm) {
-                status.set_blend(w.audio.stereo_blend());
+            if let Some(w) = rx.channels().iter().find(|c| c.spec.demod == Demod::Wfm) {
+                status.set_blend(w.blend);
             }
         }
+    }
+}
+
+/// Whether the dial is on Mode S, which is the only thing that decides
+/// whether that decoder is worth running.
+fn modes_here(plan: &Plan) -> bool {
+    crate::modes::tuned_to_mode_s(plan.center.as_f64(), plan.eff_rate())
+}
+
+/// Publish the chain the receiver is running, for the chain view.
+///
+/// There is one graph and it holds everything, so this is no longer a choice
+/// between chains: what is drawn is what runs.
+fn publish_chain(status: &Status, rx: &crate::chain::Receiver) {
+    status.set_chain(Some(rx.topology()), rx.latency_ms(0));
+}
+
+/// A plan that only scans, for tests about the shape of the receiver.
+#[cfg(test)]
+fn plan_at(rate: f64, center: Hz) -> Plan {
+    Plan {
+        center,
+        rate,
+        zoom: 1,
+        dc_block: false,
+        refresh_hz: 30.0,
+        fft: 1024,
+        channels: Vec::new(),
+        scan: true,
+        modes: false,
+        record: false,
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::chain::{FSK_CHANNEL_HZ, OOK_CHANNEL_HZ};
 
     #[test]
     fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
@@ -1811,7 +1411,6 @@ pub(crate) mod tests {
             })
             .collect()
     }
-
 
     /// A carrier `offset_hz` from the centre, modulated by an audio tone.
     ///
@@ -1947,6 +1546,11 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    /// A silent buffer, for building a receiver whose shape is the point.
+    fn empty_buf(rate: f64, center: Hz) -> common::IqBuf {
+        common::IqBuf { samples: vec![C32::default(); 1024], rate: Sps(rate as u64), center, seq: 0 }
+    }
+
     #[test]
     fn each_bank_splits_the_span_to_the_width_its_front_end_wants() {
         for rate in [250_000.0, 1_024_000.0, 2_400_000.0, 20_000_000.0] {
@@ -1954,7 +1558,7 @@ pub(crate) mod tests {
                 (OOK_CHANNEL_HZ, 15_000.0, 70_000.0),
                 (FSK_CHANNEL_HZ, 60_000.0, 260_000.0),
             ] {
-                let n = Scanner::channels_for(rate, want);
+                let n = nodes::BankNode::channels_for(rate, want);
                 assert_eq!(n % 2, 0, "{rate} at {want} Hz gave an odd count {n}");
                 let width = rate / n as f64;
                 assert!(
@@ -1970,19 +1574,19 @@ pub(crate) mod tests {
         // The whole reason for two banks. Measured on the Fine Offset capture,
         // a 31 kHz channel decodes it down to 12.3 dB peak-to-noise where a
         // 125 kHz channel needs 22.9 dB.
-        let sc = Scanner::new(2_400_000.0, Hz::mhz(868));
-        let (narrow, wide) = sc.channels();
+        let rx = replay_receiver(&empty_buf(2_400_000.0, Hz::mhz(868)), None).unwrap();
+        let chans = rx.bank_channels();
+        let (narrow, wide) = (chans[0], chans[1]);
         assert!(narrow > wide, "{narrow} narrow against {wide} wide");
-        assert!(sc.narrow.channel_bandwidth() < sc.wide.channel_bandwidth());
     }
 
     #[test]
     fn a_narrow_span_still_gets_a_usable_bank() {
         // Two channels is the floor: the channelizer needs an even count and
         // one channel would just be a decimator.
-        assert_eq!(Scanner::channels_for(1_000.0, OOK_CHANNEL_HZ), 2);
+        assert_eq!(nodes::BankNode::channels_for(1_000.0, OOK_CHANNEL_HZ), 2);
         assert!(
-            Scanner::channels_for(1e9, OOK_CHANNEL_HZ) <= 1024,
+            nodes::BankNode::channels_for(1e9, OOK_CHANNEL_HZ) <= 1024,
             "the count has to stay bounded"
         );
     }
@@ -1995,11 +1599,8 @@ pub(crate) mod tests {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
         };
-        let mut sc = Scanner::new(buf.rate.as_f64(), buf.center);
-        let mut out = Vec::new();
-        for block in buf.samples.chunks(65_536) {
-            sc.process(block, &mut out);
-        }
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
 
         assert!(!out.is_empty(), "nothing decoded from a capture that contains a packet");
         // Unrecognised bursts are reported too, so pick out the real one
@@ -2131,7 +1732,7 @@ pub(crate) mod tests {
         // Observed on live 868 MHz traffic: one transmission arrived as four
         // rows 31 kHz apart, because reads from the radio are milliseconds
         // long and each was deduped alone.
-        let mut sc = Scanner::new(2_400_000.0, Hz::mhz(868));
+        let mut sc = Dedupe::default();
         let t0 = std::time::Instant::now();
         let block = std::time::Duration::from_millis(7);
         let mut kept = 0;
@@ -2149,7 +1750,7 @@ pub(crate) mod tests {
         // Same channel through the same front end is a second transmission,
         // not a second reading of the first, and a sensor that sends its
         // packet three times should show three rows.
-        let mut sc = Scanner::new(2_400_000.0, Hz::mhz(868));
+        let mut sc = Dedupe::default();
         let t0 = std::time::Instant::now();
         for n in 0..3u32 {
             let at = t0 + std::time::Duration::from_millis(60) * n;
@@ -2159,7 +1760,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_neighbour_is_only_a_duplicate_while_the_burst_is_recent() {
-        let mut sc = Scanner::new(2_400_000.0, Hz::mhz(868));
+        let mut sc = Dedupe::default();
         let t0 = std::time::Instant::now();
         assert!(sc.accept(&ook_at(868_362_300.0, t0), t0));
 
@@ -2187,14 +1788,11 @@ pub(crate) mod tests {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
         };
-        let mut sc = Scanner::new(buf.rate.as_f64(), buf.center);
-        let mut out = Vec::new();
+        let mut rx = replay_receiver(&buf, None).unwrap();
         let t0 = std::time::Instant::now();
-        for block in buf.samples.chunks(65_536) {
-            sc.process(block, &mut out);
-        }
+        let out = replay_blocks(&mut rx, &buf);
         let rec = out.first().expect("a decode");
-        // 65536 samples at 250 kS/s is 262 ms of signal, and the packet is
+        // 16384 samples at 250 kS/s is 65 ms of signal, and the packet is
         // somewhere inside that, so the stamp must precede the call that
         // produced it by about a block.
         let back = t0.duration_since(rec.at).as_secs_f64();
@@ -2204,11 +1802,13 @@ pub(crate) mod tests {
     #[test]
     fn retuning_clears_state_rather_than_carrying_it_across() {
         // A burst half-collected at one frequency must not finish at another.
-        let mut sc = Scanner::new(250_000.0, Hz::mhz(433));
-        let mut out = Vec::new();
-        sc.process(&block(8192), &mut out);
-        sc.retune(Hz::mhz(868));
-        sc.process(&block(8192), &mut out);
+        let mut rx = replay_receiver(&empty_buf(250_000.0, Hz::mhz(433)), None).unwrap();
+        rx.process(&block(8192)).unwrap();
+        let mut plan = plan_at(250_000.0, Hz::mhz(868));
+        plan.scan = true;
+        rx.rebuild(&plan).unwrap();
+        rx.process(&block(8192)).unwrap();
+        let out = rx.decodes(std::time::Instant::now());
         assert!(out.is_empty(), "a steady tone decoded as {out:?}");
     }
 
@@ -2222,22 +1822,21 @@ pub(crate) mod tests {
             return;
         }
         let rate = 2_400_000.0;
-        let mut sc = Scanner::new(rate, Hz::mhz(868));
+        let mut rx = replay_receiver(&empty_buf(rate, Hz::mhz(868)), None).unwrap();
         let b = block(262_144);
-        let mut out = Vec::new();
         // One pass to warm the filters and the pool.
-        sc.process(&b, &mut out);
+        rx.process(&b).unwrap();
 
         let t = std::time::Instant::now();
         let blocks = 20;
         for _ in 0..blocks {
-            out.clear();
-            sc.process(&b, &mut out);
+            rx.process(&b).unwrap();
         }
         let secs = t.elapsed().as_secs_f64();
         let audio_secs = blocks as f64 * b.len() as f64 / rate;
         let x = audio_secs / secs;
-        let (narrow, wide) = sc.channels();
+        let chans = rx.bank_channels();
+        let (narrow, wide) = (chans[0], chans[1]);
         eprintln!("scanner: {x:.1}x real time on {narrow} narrow + {wide} wide channels");
         assert!(
             x > 1.0,
@@ -2256,7 +1855,7 @@ pub(crate) mod tests {
         // that is the symptom either way.
         let mut a = Audio::new(120_000.0, 2_304_000.0, Demod::Wfm, 48_000.0);
         let b = block(8192);
-        let mut cost = |a: &mut Audio| {
+        let cost = |a: &mut Audio| {
             let t = std::time::Instant::now();
             for _ in 0..10 {
                 a.process(&b, 0.5);
@@ -2332,7 +1931,8 @@ pub(crate) mod tests {
         // The point of building on the graph: the stages can be listed, which
         // is what the chain view draws.
         let a = Audio::new(0.0, 2_304_000.0, Demod::Wfm, 48_000.0);
-        let names: Vec<&str> = a.graph().order().map(|(_, l)| l).collect();
+        let topo = a.topology();
+        let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
         assert!(names.contains(&"Mixer"), "{names:?}");
         assert!(names.contains(&"WFM demod"), "{names:?}");
         assert!(names.contains(&"High blend"), "{names:?}");
@@ -2342,7 +1942,8 @@ pub(crate) mod tests {
     #[test]
     fn am_skips_de_emphasis_and_uses_an_envelope_detector() {
         let a = Audio::new(0.0, 2_304_000.0, Demod::Am, 48_000.0);
-        let names: Vec<&str> = a.graph().order().map(|(_, l)| l).collect();
+        let topo = a.topology();
+        let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
         assert!(names.contains(&"AM envelope"), "{names:?}");
         assert!(!names.contains(&"De-emphasis"), "{names:?}");
     }
@@ -2351,13 +1952,11 @@ pub(crate) mod tests {
     fn the_audio_rate_is_close_to_what_was_asked_for() {
         for mode in [Demod::Wfm, Demod::Nfm, Demod::Am, Demod::Usb, Demod::Cw] {
             let a = Audio::new(0.0, 2_304_000.0, mode, 48_000.0);
-            let r = a.audio_rate;
+            let r = a.audio_rate();
             assert!((r - 48_000.0).abs() < 12_000.0, "{} gave {r} Hz", mode.label());
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod squelch_probe {
@@ -2437,7 +2036,7 @@ mod zoom_tests {
         let native = 2_000_000.0;
         let fft = 2048;
         for zoom in [1usize, 32] {
-            let rate = eff_rate(native, zoom);
+            let rate = native / zoom as f64;
             let bins_per_channel = 12_500.0 / (rate / fft as f64);
             if zoom == 1 {
                 assert!(bins_per_channel < 15.0, "{bins_per_channel:.1} bins already");
@@ -2450,22 +2049,30 @@ mod zoom_tests {
         }
     }
 
+    /// The receiver zoomed in, with nothing else attached, so what is being
+    /// measured is the narrowing and not the rest of the chain.
+    fn zoomed(native: f64, zoom: usize) -> crate::chain::Receiver {
+        let mut plan = plan_at(native, Hz::mhz(433));
+        plan.zoom = zoom;
+        plan.scan = false;
+        crate::chain::Receiver::build(&plan, None).expect("a zoom chain")
+    }
+
     // Timing, so it needs optimisation to mean anything.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
     fn narrowing_costs_little_enough_to_run_alongside_everything_else() {
-        // It runs on the radio thread, ahead of the spectrum, the scanner and
-        // the audio, so anything near real time here stalls all three.
+        // It runs at the head of the graph, ahead of the spectrum, the banks
+        // and the audio, so anything near real time here stalls all three.
         let native = 2_400_000.0;
-        let n = 2_400_000;
-        let sig = tone(native, 30_000.0, n);
+        let sig = tone(native, 30_000.0, 2_400_000);
         for zoom in [2usize, 8, 32] {
-            let mut f = FirDecim::design_hz(native, zoom, eff_rate(native, zoom) * 0.45, 70.0);
-            let mut out = Vec::new();
+            let mut rx = zoomed(native, zoom);
+            rx.process(&sig[..1024]).unwrap();
             let t = std::time::Instant::now();
-            f.process(&sig, &mut out);
+            rx.process(&sig).unwrap();
             let x = 1.0 / t.elapsed().as_secs_f64();
-            eprintln!("zoom /{zoom}: {} taps, {x:.0}x real time", f.taps());
+            eprintln!("zoom /{zoom}: {x:.0}x real time");
             assert!(x > 5.0, "narrowing by {zoom} only ran at {x:.1}x real time");
         }
     }
@@ -2476,11 +2083,23 @@ mod zoom_tests {
         // what is left, and a folded signal cannot be told from a real one.
         let native = 2_000_000.0;
         let zoom = 8;
-        let keep = eff_rate(native, zoom) / 2.0;
-        let mut f = FirDecim::design_hz(native, zoom, eff_rate(native, zoom) * 0.45, 70.0);
-        let mut out = Vec::new();
+        let keep = native / zoom as f64 / 2.0;
+        let mut plan = plan_at(native, Hz::mhz(433));
+        plan.zoom = zoom;
+        plan.scan = false;
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            offset_hz: 0.0,
+            demod: Demod::Nfm,
+            volume: 1.0,
+            muted: false,
+            squelch_db: Some(-200.0),
+            agc: false,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, None).expect("a zoom chain");
         // A signal well outside the narrowed span, which must not appear.
-        f.process(&tone(native, keep * 4.0, 262_144), &mut out);
+        rx.process(&tone(native, keep * 4.0, 262_144)).unwrap();
+        let out = rx.zoomed_samples();
         let tail = &out[out.len() / 2..];
         let leaked = tail.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
         let db = 20.0 * leaked.max(1e-12).log10();

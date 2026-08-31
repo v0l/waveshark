@@ -1,0 +1,1027 @@
+//! The receiver as one graph.
+//!
+//! Everything the radio thread does to a block of samples is a node in here:
+//! the spectrum behind the waterfall, the recorder's ring, the channel banks
+//! that sweep a whole span, the Mode S decoder on 1090, and a branch per
+//! channel being listened to. The alternative, which this replaces, was a
+//! handful of independent objects each fed the same buffer by hand. Every one
+//! of them was a chain the chain view could not draw and a set of parameters
+//! nothing generic could reach.
+//!
+//! # Rebuilding
+//!
+//! A graph is fixed once built, and what the receiver is doing is not: a
+//! channel appears, the dial moves onto 1090, the span doubles. So the shape
+//! changes by building a new graph out of the *same nodes*, through
+//! [`pipeline::Graph::into_parts`]. That distinction matters more than it
+//! looks: rebuilding from fresh nodes would reset every branch that was left
+//! alone, so adding a second channel would cost the first one its RDS
+//! station, its AGC convergence and its detector's noise floor.
+//!
+//! A node is only reused where reusing it is meaningful. Anything whose
+//! coefficients depend on the span, or a channel whose offset or mode
+//! changed, is built again, because a filter designed for the old rate is not
+//! the same filter.
+
+use std::collections::HashMap;
+
+use common::{Hz, Result, C32};
+use dsp::rds::Station;
+use nodes::{
+    AgcNode, BankNode, DeemphasisNode, DecimateNode, EnvelopeNode, FmDemodNode, HighBlendNode,
+    MixerNode, ModeSNode, RealDecimateNode, SpectrumNode, SquelchNode, SsbDemodNode, WfmDemodNode,
+};
+use pipeline::event::Event;
+use pipeline::graph::{NodePart, Topology};
+use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
+
+use crate::radio::{ChannelSpec, DecodeRecord, Demod};
+use crate::record::Recorder;
+
+/// Channel width for the OOK bank. Below this the measurements show no further
+/// gain, because the sensor's own bandwidth and its carrier offset start to
+/// matter more than the noise saved.
+pub const OOK_CHANNEL_HZ: f64 = 31_250.0;
+/// Channel width for the FSK bank. rtl_433 runs at 250 kHz for the same
+/// signals; half that still holds a 50 kHz tone separation comfortably.
+pub const FSK_CHANNEL_HZ: f64 = 125_000.0;
+
+/// Audio sample rate every channel branch aims for.
+const AUDIO_HZ: f64 = 48_000.0;
+
+/// The narrow CW filter, in Hz.
+const CW_FILTER_HZ: f64 = 500.0;
+
+/// What a node in the graph is for, so a rebuild can find it again.
+///
+/// Keyed by purpose rather than by position: the whole point is that a node
+/// keeps its state when the graph around it changes, and its position is
+/// exactly what changed.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Role {
+    DcBlock,
+    /// The software zoom decimator, keyed by its factor: a different factor is
+    /// a different filter.
+    Zoom(usize),
+    Spectrum,
+    Record,
+    ModeS,
+    /// Banks are distinguished by the channel width they were built for.
+    Bank(u32),
+    /// A stage of one listening channel.
+    Stage(u64, Stage),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Stage {
+    Mixer,
+    IfDecimate,
+    Demod,
+    Squelch,
+    AudioDecimate,
+    Deemphasis,
+    Agc,
+    Blend,
+}
+
+/// What a channel branch was built for. A branch is only reused while all of
+/// this is unchanged, since every one of these decides a filter's
+/// coefficients or a mixer's shift.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct ChanKey {
+    demod: Demod,
+    offset_bits: u64,
+    rate_bits: u64,
+}
+
+impl ChanKey {
+    fn new(spec: &ChannelSpec, rate: f64) -> Self {
+        Self {
+            demod: spec.demod,
+            offset_bits: spec.offset_hz.to_bits(),
+            rate_bits: rate.to_bits(),
+        }
+    }
+}
+
+/// One listening channel inside the graph.
+pub struct Chan {
+    pub spec: ChannelSpec,
+    /// Whether this channel came through the rebuild with its nodes intact.
+    /// A channel built from scratch has forgotten its station and its gain.
+    pub kept: bool,
+    key: ChanKey,
+    tail: Out,
+    agc: Option<NodeId>,
+    squelch: Option<NodeId>,
+    wfm: Option<NodeId>,
+    pub audio_rate: f64,
+    pub channels: usize,
+    /// What the chain cost, for the status line.
+    pub detail: String,
+    pub agc_gain_db: f32,
+    pub squelch_open: bool,
+    pub squelch_db: f32,
+    pub blend: f32,
+    pub station: Station,
+    pub rds_stats: (u64, u64, bool),
+}
+
+impl Chan {
+    pub fn is_stereo(&self) -> bool {
+        self.channels == 2
+    }
+}
+
+/// One bank sweeping the span.
+pub struct Bank {
+    id: NodeId,
+    pub channels: usize,
+}
+
+pub struct Receiver {
+    graph: Graph,
+    /// What each node is, indexed by `NodeId`, so a rebuild can hand the same
+    /// nodes to the new graph.
+    roles: Vec<Role>,
+    dc: NodeId,
+    /// Last node of the head chain, whose output every branch reads.
+    head: NodeId,
+    spectrum: NodeId,
+    record: Option<NodeId>,
+    modes: Option<NodeId>,
+    banks: Vec<Bank>,
+    chans: Vec<Chan>,
+    /// A recorder waiting for the next rebuild to become a node.
+    pending_record: Option<RecordRing>,
+    center: Hz,
+    rate: f64,
+    /// Channels that could not be built, for the status line.
+    pub refused: Option<String>,
+}
+
+/// What the receiver should be doing, as opposed to what it is.
+pub struct Plan {
+    pub center: Hz,
+    /// The rate the device is delivering, before zoom.
+    pub rate: f64,
+    /// Software zoom: the radio keeps sampling at its own rate and everything
+    /// downstream sees a decimated copy.
+    pub zoom: usize,
+    pub dc_block: bool,
+    /// Frames a second the spectrum is worth producing.
+    pub refresh_hz: f32,
+    pub fft: usize,
+    pub channels: Vec<ChannelSpec>,
+    /// Whether to sweep the span with the ISM banks.
+    pub scan: bool,
+    /// Whether to run the Mode S decoder.
+    pub modes: bool,
+    pub record: bool,
+}
+
+impl Plan {
+    /// The rate everything downstream of the zoom decimator sees.
+    pub fn eff_rate(&self) -> f64 {
+        self.rate / self.zoom.max(1) as f64
+    }
+}
+
+impl Receiver {
+    pub fn build(plan: &Plan, recorder: Option<Recorder>) -> Result<Self> {
+        let mut rx = Self {
+            // Placeholder, replaced immediately. A graph cannot be built
+            // empty and then filled, which is the same constraint that makes
+            // rebuilding the interesting case.
+            graph: Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
+            roles: Vec::new(),
+            dc: NodeId(0),
+            head: NodeId(0),
+            spectrum: NodeId(0),
+            record: None,
+            modes: None,
+            banks: Vec::new(),
+            chans: Vec::new(),
+            pending_record: None,
+            center: plan.center,
+            rate: plan.rate,
+            refused: None,
+        };
+        rx.assemble(plan, HashMap::new(), recorder.map(RecordRing::new))?;
+        Ok(rx)
+    }
+
+    /// Change what the receiver is doing, keeping every node that still means
+    /// the same thing.
+    pub fn rebuild(&mut self, plan: &Plan) -> Result<()> {
+        let old_keys: HashMap<u64, ChanKey> =
+            self.chans.iter().map(|c| (c.spec.id, c.key)).collect();
+        let old_rate = self.rate;
+        let old_center = self.center;
+
+        let graph = std::mem::replace(
+            &mut self.graph,
+            Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
+        );
+        let roles = std::mem::take(&mut self.roles);
+        let mut pool: HashMap<Role, NodePart> =
+            roles.into_iter().zip(graph.into_parts()).collect();
+
+        // A channel whose mixer shift or filter design would differ is not
+        // the same channel; drop its nodes rather than reuse coefficients
+        // computed for something else.
+        let retuned = plan.center != old_center || plan.rate != old_rate;
+        pool.retain(|role, _| match role {
+            Role::Stage(id, _) => {
+                let want = plan.channels.iter().find(|c| c.id == *id);
+                match (want, old_keys.get(id)) {
+                    (Some(w), Some(k)) => ChanKey::new(w, plan.eff_rate()) == *k,
+                    _ => false,
+                }
+            }
+            // A bank rebuilds itself internally on a retune and keeps its
+            // chains, which is cheaper than building several hundred graphs.
+            Role::Bank(_) => true,
+            // The spectrum's FFT size can change, and the node cannot resize.
+            Role::Spectrum => !retuned && self.fft_size() == plan.fft,
+            _ => true,
+        });
+
+        // The recorder is a file being written; it survives every rebuild
+        // short of being switched off, and a newly started one is waiting
+        // here for its place in the graph.
+        let ring = self.pending_record.take().or_else(|| {
+            self.record
+                .and_then(|_| pool.remove(&Role::Record))
+                .and_then(|p| RecordRing::from_part(p.node))
+        });
+
+        self.record = None;
+        self.modes = None;
+        self.banks.clear();
+        self.center = plan.center;
+        self.rate = plan.rate;
+        self.assemble(plan, pool, ring)
+    }
+
+    fn fft_size(&self) -> usize {
+        self.graph
+            .node(self.spectrum)
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<SpectrumNode>())
+            .map(|s| s.size())
+            .unwrap_or(0)
+    }
+
+    fn assemble(
+        &mut self,
+        plan: &Plan,
+        mut pool: HashMap<Role, NodePart>,
+        ring: Option<RecordRing>,
+    ) -> Result<()> {
+        let input = StreamSpec::iq(plan.rate, plan.center);
+        let mut b = Graph::builder(input);
+        let mut roles: Vec<Role> = Vec::new();
+
+        // The head of the chain: what every branch downstream agrees the
+        // samples are. Both stages belong here rather than in the caller,
+        // because a branch that saw the spur or the full rate would disagree
+        // with the others about what arrived.
+        let dc = match pool.remove(&Role::DcBlock) {
+            Some(p) => b.add_existing(p),
+            None => b.add_labeled("DC block", Box::new(nodes::DcBlockNode::new())),
+        };
+        b.source(dc.i());
+        roles.push(Role::DcBlock);
+
+        let mut head = dc;
+        if plan.zoom > 1 {
+            let role = Role::Zoom(plan.zoom);
+            let id = match pool.remove(&role) {
+                Some(p) => b.add_existing(p),
+                None => {
+                    // Passband just inside the new Nyquist: the whole point is
+                    // that what is left is clean, since anything folded in
+                    // cannot be told from a signal afterwards.
+                    let mut d = DecimateNode::new(plan.zoom);
+                    d.set_passband_hz(plan.rate, plan.eff_rate() * 0.45);
+                    b.add_labeled(format!("Zoom /{}", plan.zoom), Box::new(d))
+                }
+            };
+            b.connect(head.o(), id.i());
+            roles.push(role);
+            head = id;
+        }
+
+        // Added before the decoders so it runs before them. Nodes are executed
+        // in the order they were added once their inputs are ready, and the
+        // ring has to hold a burst before whatever decodes it says so: a
+        // recording that starts when a decoder finishes has already missed the
+        // packet.
+        let mut record = None;
+        if plan.record {
+            if let Some(r) = ring {
+                let id = b.add_labeled("Recorder", Box::new(nodes::RingNode::new(r)));
+                b.connect(head.o(), id.i());
+                roles.push(Role::Record);
+                record = Some(id);
+            }
+        }
+
+        let spectrum = match pool.remove(&Role::Spectrum) {
+            Some(p) => b.add_existing(p),
+            None => b.add_labeled("Spectrum", Box::new(SpectrumNode::new(plan.fft))),
+        };
+        b.connect(head.o(), spectrum.i());
+        roles.push(Role::Spectrum);
+
+        let mut modes = None;
+        if plan.modes {
+            let id = match pool.remove(&Role::ModeS) {
+                Some(p) => b.add_existing(p),
+                None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
+            };
+            b.connect(head.o(), id.i());
+            roles.push(Role::ModeS);
+            modes = Some(id);
+        }
+
+        let mut banks = Vec::new();
+        if plan.scan {
+            for (label, width, make) in [
+                ("OOK bank", OOK_CHANNEL_HZ, nodes::ism_ook_graph as fn(_) -> _),
+                ("FSK bank", FSK_CHANNEL_HZ, nodes::ism_fsk_graph as fn(_) -> _),
+            ] {
+                let role = Role::Bank(width as u32);
+                let id = match pool.remove(&role) {
+                    Some(p) => b.add_existing(p),
+                    None => b.add_labeled(label, Box::new(BankNode::new(label, width, make))),
+                };
+                b.connect(head.o(), id.i());
+                roles.push(role);
+                banks.push((id, width));
+            }
+        }
+
+        let mut chans: Vec<Chan> = Vec::new();
+        let mut refused = None;
+        for spec in &plan.channels {
+            // A channel the span no longer covers cannot be demodulated: the
+            // mixer would shift a frequency the radio never sampled down to
+            // baseband, and the chain would produce noise that sounds like a
+            // dead station rather than silence.
+            if spec.offset_hz.abs() > plan.eff_rate() / 2.0 {
+                refused = Some(format!(
+                    "{:.4} MHz is outside the span",
+                    (plan.center.as_f64() + spec.offset_hz) / 1e6,
+                ));
+                continue;
+            }
+            if plan.eff_rate() < spec.demod.if_rate() {
+                refused = Some(format!(
+                    "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
+                    spec.demod.label(),
+                    spec.demod.if_rate() / 1e3,
+                    plan.eff_rate() / 1e3,
+                ));
+                continue;
+            }
+            chans.push(add_channel(&mut b, &mut roles, &mut pool, head, spec, plan.eff_rate()));
+        }
+
+        // Some output has to be nominated and none of them is the output: a
+        // receiver has as many as it has channels, and the spectrum and the
+        // decoders produce nothing that flows. The last channel is as good as
+        // any; readers ask for the port they want by name.
+        if let Some(c) = chans.last() {
+            b.output(c.tail);
+        }
+
+        let mut graph = b.build()?;
+        for c in chans.iter_mut() {
+            let spec = graph.spec_of(c.tail).unwrap_or(input);
+            c.audio_rate = spec.frame_rate();
+            c.channels = spec.channels;
+        }
+        // Settings that live on a node rather than in its wiring, applied
+        // once the graph they belong to exists. A reused node arrives holding
+        // whatever it was last told, which is not necessarily what the plan
+        // now says.
+        if let Some(n) = graph
+            .node_mut(dc)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
+        {
+            n.set_enabled(plan.dc_block);
+        }
+        if let Some(n) = graph
+            .node_mut(spectrum)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<SpectrumNode>())
+        {
+            n.set_refresh(plan.refresh_hz);
+        }
+        for c in chans.iter() {
+            // Applied every time rather than only on a fresh node: a channel
+            // whose nodes were reused still has to be told what the channel
+            // list now says about its squelch and its gain control.
+            if let (Some(id), Some(db)) = (c.squelch, c.spec.squelch_db) {
+                if let Some(sq) = graph
+                    .node_mut(id)
+                    .and_then(|n| n.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<SquelchNode>())
+                {
+                    sq.set_threshold_db(db);
+                }
+            }
+            if let Some(a) = c
+                .agc
+                .and_then(|id| graph.node_mut(id))
+                .and_then(|n| n.as_any_mut())
+                .and_then(|a| a.downcast_mut::<AgcNode>())
+            {
+                a.set_enabled(c.spec.agc);
+            }
+        }
+        self.graph = graph;
+        self.dc = dc;
+        self.head = head;
+        self.roles = roles;
+        self.spectrum = spectrum;
+        self.record = record;
+        self.modes = modes;
+        self.banks = banks
+            .into_iter()
+            .map(|(id, _width)| {
+                let channels = self
+                    .graph
+                    .node(id)
+                    .and_then(|n| n.as_any())
+                    .and_then(|a| a.downcast_ref::<BankNode>())
+                    .map(|b| b.channels())
+                    .unwrap_or(0);
+                Bank { id, channels }
+            })
+            .collect();
+        self.chans = chans;
+        self.refused = refused;
+        Ok(())
+    }
+
+    /// Run one block through everything.
+    pub fn process(&mut self, iq: &[C32]) -> Result<()> {
+        let buf = self.graph.input_buf();
+        buf.clear();
+        buf.iq_mut().extend_from_slice(iq);
+        self.graph.run()?;
+        self.read_back();
+        Ok(())
+    }
+
+    /// Copy out the state a display wants on every frame.
+    ///
+    /// Read here rather than through events because these are things that
+    /// *are* rather than things that happened: an AGC's gain has a current
+    /// value whether or not it changed, and a panel wants it either way.
+    fn read_back(&mut self) {
+        for c in &mut self.chans {
+            if let Some(a) = c.agc.and_then(|id| downcast::<AgcNode>(&self.graph, id)) {
+                c.agc_gain_db = a.gain_db();
+            }
+            if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id)) {
+                c.squelch_open = sq.is_open();
+                c.squelch_db = sq.measured_db();
+            }
+            if let Some(w) = c.wfm.and_then(|id| downcast::<WfmDemodNode>(&self.graph, id)) {
+                c.station = w.station().clone();
+                c.rds_stats = w.rds_stats();
+                c.blend = w.blend();
+            }
+        }
+    }
+
+    pub fn channels(&self) -> &[Chan] {
+        &self.chans
+    }
+
+    /// Audio from one channel, as the graph left it.
+    pub fn audio(&self, i: usize) -> &[f32] {
+        self.chans
+            .get(i)
+            .and_then(|c| self.graph.buf(c.tail))
+            .and_then(|p| p.as_real())
+            .unwrap_or(&[])
+    }
+
+    /// Whether the spectrum completed a frame this block.
+    pub fn spectrum_ready(&self) -> bool {
+        downcast::<SpectrumNode>(&self.graph, self.spectrum).map(|s| s.is_fresh()).unwrap_or(false)
+    }
+
+    pub fn power_db(&mut self) -> &[f32] {
+        self.graph
+            .node_mut(self.spectrum)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<SpectrumNode>())
+            .map(|s| s.power_db())
+            .unwrap_or(&[])
+    }
+
+    /// Everything the banks decoded this block, with the channel centre and
+    /// the width that channel covers.
+    pub fn bank_hits(&self) -> Vec<(Hz, f64, &Event)> {
+        let mut out = Vec::new();
+        for bank in &self.banks {
+            let Some(n) = downcast::<BankNode>(&self.graph, bank.id) else { continue };
+            for (center, ev) in n.hits() {
+                out.push((*center, n.channel_hz(), ev));
+            }
+        }
+        out
+    }
+
+    /// Everything the Mode S decoder produced this block.
+    pub fn modes_hits(&self) -> Vec<&Event> {
+        let Some(n) = self.modes.and_then(|id| downcast::<ModeSNode>(&self.graph, id)) else {
+            return Vec::new();
+        };
+        n.hits().iter().collect()
+    }
+
+    pub fn modes_on(&self) -> bool {
+        self.modes.is_some()
+    }
+
+    /// Channels in each bank, in the order the banks were added.
+    pub fn bank_channels(&self) -> Vec<usize> {
+        self.banks.iter().map(|b| b.channels).collect()
+    }
+
+    pub fn recorder_mut(&mut self) -> Option<&mut Recorder> {
+        let id = self.record?;
+        self.graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::RingNode<RecordRing>>())
+            .and_then(|r| r.ring_mut().rec.as_mut())
+    }
+
+    /// Shape of everything running, for the chain view.
+    pub fn topology(&self) -> Topology {
+        self.graph.topology()
+    }
+
+    /// Delay to a channel's audio, in milliseconds.
+    pub fn latency_ms(&self, i: usize) -> f64 {
+        let Some(c) = self.chans.get(i) else { return 0.0 };
+        self.graph.latency_of(c.tail) as f64 / c.audio_rate.max(1.0) * 1e3
+    }
+
+
+
+    pub fn set_refresh(&mut self, hz: f32) {
+        if let Some(s) = self.spectrum_mut() {
+            s.set_refresh(hz);
+        }
+    }
+
+    pub fn set_smoothing(&mut self, v: f32) {
+        if let Some(s) = self.spectrum_mut() {
+            s.set_smoothing(v);
+        }
+    }
+
+    fn spectrum_mut(&mut self) -> Option<&mut SpectrumNode> {
+        self.graph
+            .node_mut(self.spectrum)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<SpectrumNode>())
+    }
+
+    pub fn set_dc_block(&mut self, on: bool) {
+        if let Some(d) = self.dc_mut() {
+            d.set_enabled(on);
+        }
+    }
+
+    /// Forget the measured DC offset, after anything that moves it.
+    pub fn remeasure_dc(&mut self) {
+        if let Some(d) = self.dc_mut() {
+            d.remeasure();
+        }
+    }
+
+    fn dc_mut(&mut self) -> Option<&mut nodes::DcBlockNode> {
+        self.graph
+            .node_mut(self.dc)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
+    }
+
+    /// Start or stop recording. Takes effect on the next rebuild, since a
+    /// recorder is a node and the graph's shape is fixed once built.
+    pub fn set_recorder(&mut self, rec: Option<Recorder>) {
+        self.pending_record = rec.map(RecordRing::new);
+    }
+
+    /// Everything that decoded this block, as packet log rows.
+    ///
+    /// The banks know which channel a packet came from and the Mode S node
+    /// knows there is only one frequency it could be; both are lost by the
+    /// time an event reaches the graph's event list, which is why they are
+    /// read from the nodes rather than from `run`.
+    pub fn decodes(&self, at: std::time::Instant) -> Vec<DecodeRecord> {
+        let mut out = Vec::new();
+        for (center, width, ev) in self.bank_hits() {
+            if let Event::Decoded(d) = ev {
+                out.push(record(at, center.as_f64(), width, d));
+            }
+        }
+        for ev in self.modes_hits() {
+            if let Event::Decoded(d) = ev {
+                // Mode S occupies the whole band it is transmitted in; there
+                // is no channel to speak of, and nothing else is near enough
+                // to be confused with it.
+                out.push(record(at, d.center.as_f64(), MODES_BAND_HZ, d));
+            }
+        }
+        out
+    }
+
+    /// Take the recorder back out, after a replay that wrote one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_recorder(&mut self) -> Option<Recorder> {
+        let id = self.record.take()?;
+        self.graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::RingNode<RecordRing>>())
+            .and_then(|r| r.ring_mut().rec.take())
+    }
+
+    /// What the head of the chain handed downstream this block: the samples
+    /// after the DC notch and the zoom decimator, which is what every branch
+    /// actually sees.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn zoomed_samples(&self) -> &[C32] {
+        self.graph.buf(self.head.o()).and_then(|p| p.as_iq()).unwrap_or(&[])
+    }
+
+}
+
+/// Bandwidth a Mode S transmission occupies, for the log's channel column.
+const MODES_BAND_HZ: f64 = 2_000_000.0;
+
+fn record(
+    at: std::time::Instant,
+    freq: f64,
+    channel_hz: f64,
+    d: &pipeline::event::Decoded,
+) -> DecodeRecord {
+    DecodeRecord {
+        at,
+        freq,
+        channel_hz,
+        model: d.protocol.to_string(),
+        modulation: d.modulation.unwrap_or("?"),
+        detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
+        fields: d.fields.clone(),
+        media_type: d.media_type,
+        rssi_dbfs: d.rssi_dbfs.unwrap_or(f32::NAN),
+        snr_db: d.snr_db.unwrap_or(f32::NAN),
+        bytes: d.payload.clone(),
+        crc: d.crc_ok,
+    }
+}
+
+fn downcast<T: 'static>(g: &Graph, id: NodeId) -> Option<&T> {
+    g.node(id).and_then(|n| n.as_any()).and_then(|a| a.downcast_ref::<T>())
+}
+
+/// The recorder, as a node.
+///
+/// It only pushes here. What to keep is decided from decoded events, which do
+/// not exist until the decoders downstream have run, so the host makes that
+/// call between blocks. A node cannot read the future and should not pretend
+/// to.
+struct RecordRing {
+    /// An `Option` only so the recorder can be taken back out of a graph that
+    /// is still running, which a replay does once it has finished writing.
+    rec: Option<Recorder>,
+}
+
+impl RecordRing {
+    fn new(rec: Recorder) -> Self {
+        Self { rec: Some(rec) }
+    }
+
+    /// Recover the recorder from a node lifted out of a graph, so a rebuild
+    /// keeps writing the same file.
+    fn from_part(node: Box<dyn pipeline::node::Node>) -> Option<Self> {
+        let any = node.into_any()?;
+        any.downcast::<nodes::RingNode<Self>>().ok().map(|n| n.into_ring())
+    }
+}
+
+impl nodes::Ring for RecordRing {
+    fn push(&mut self, iq: &[C32]) {
+        if let Some(r) = self.rec.as_mut() {
+            r.push(iq);
+        }
+    }
+}
+
+/// Build one listening channel's branch onto the graph.
+///
+/// The same construction the receiver has always used, lifted out so the one
+/// graph and the single-channel test harness cannot drift apart.
+fn add_channel(
+    b: &mut GraphBuilder,
+    roles: &mut Vec<Role>,
+    pool: &mut HashMap<Role, NodePart>,
+    head: NodeId,
+    spec: &ChannelSpec,
+    rate: f64,
+) -> Chan {
+    let mode = spec.demod;
+    let id = spec.id;
+    let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
+    let if_rate = rate / if_dec as f64;
+    let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
+
+    // Set false by the first stage that has to be built rather than reused.
+    let mut kept = true;
+    let mut take = |b: &mut GraphBuilder,
+                    roles: &mut Vec<Role>,
+                    stage: Stage,
+                    label: &str,
+                    make: Box<dyn pipeline::node::Node>| {
+        let role = Role::Stage(id, stage);
+        let nid = match pool.remove(&role) {
+            Some(p) => b.add_existing(p),
+            None => {
+                kept = false;
+                b.add_labeled(label, make)
+            }
+        };
+        roles.push(role);
+        nid
+    };
+
+    // CW is tuned low by the pitch so the dial reads the carrier rather than
+    // the note; every other mode is tuned to what it listens to.
+    let mix = take(
+        b,
+        roles,
+        Stage::Mixer,
+        "Mixer",
+        Box::new(MixerNode::new(-(spec.offset_hz - mode.cw_pitch()))),
+    );
+    // Sized from the signal's bandwidth, not from the decimation factor: the
+    // stopband has to land where the first alias folds down.
+    let mut dec = DecimateNode::new(if_dec);
+    dec.set_passband_hz(rate, mode.bandwidth() / 2.0);
+    let ifd = take(b, roles, Stage::IfDecimate, "IF decimator", Box::new(dec));
+    b.connect(head.o(), mix.i());
+    b.connect(mix.o(), ifd.i());
+
+    let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
+    let mut wfm = None;
+    let demod = if stereo {
+        let d = take(b, roles, Stage::Demod, "WFM demod", Box::new(WfmDemodNode::new()));
+        wfm = Some(d);
+        d
+    } else if mode == Demod::Am {
+        take(b, roles, Stage::Demod, "AM envelope", Box::new(EnvelopeNode))
+    } else if mode.is_ssb() {
+        let node = if mode == Demod::Cw {
+            SsbDemodNode::cw(mode.sideband(), mode.cw_pitch(), CW_FILTER_HZ)
+        } else {
+            SsbDemodNode::voice(mode.sideband())
+        };
+        let label = if mode == Demod::Cw { "CW filter" } else { "Sideband filter" };
+        take(b, roles, Stage::Demod, label, Box::new(node))
+    } else {
+        take(
+            b,
+            roles,
+            Stage::Demod,
+            "FM discriminator",
+            Box::new(FmDemodNode::new(mode.deviation())),
+        )
+    };
+    b.connect(ifd.o(), demod.i());
+
+    // The squelch goes here, on the demodulator's raw output, and not later
+    // where the audio is. An FM noise squelch works by measuring the hiss
+    // above the speech band, and the audio filter's whole job is to remove
+    // that: measured on an empty 2 m channel, a squelch after the filter saw a
+    // clean signal and held itself open on pure noise.
+    let mut tail = demod;
+    let mut squelch = None;
+    if let Some(sq) = crate::radio::squelch_for(mode) {
+        let s = take(b, roles, Stage::Squelch, "Squelch", Box::new(sq));
+        b.connect(tail.o(), s.i());
+        squelch = Some(s);
+        tail = s;
+    }
+
+    let mut ad = RealDecimateNode::new(au_dec);
+    ad.set_passband_hz(if_rate, mode.audio_bw());
+    let aud = take(b, roles, Stage::AudioDecimate, "Audio decimator", Box::new(ad));
+    b.connect(tail.o(), aud.i());
+    tail = aud;
+
+    if !(mode == Demod::Am || mode.is_ssb()) {
+        // De-emphasis is an FM thing: it undoes the pre-emphasis the
+        // transmitter applied. Applying it to AM or SSB would just be a treble
+        // cut nobody asked for.
+        let de =
+            take(b, roles, Stage::Deemphasis, "De-emphasis", Box::new(DeemphasisNode::new(50.0)));
+        b.connect(tail.o(), de.i());
+        tail = de;
+    }
+
+    // The gain control comes after the squelch, so what it sees is either a
+    // signal or silence. The other order lets the AGC lift the noise on a dead
+    // channel up to the threshold and hold the squelch open.
+    let mut agc = None;
+    if let Some(node) = crate::radio::agc_for(mode) {
+        let a = take(b, roles, Stage::Agc, "AGC", Box::new(node));
+        b.connect(tail.o(), a.i());
+        agc = Some(a);
+        tail = a;
+    }
+
+    let hb = take(b, roles, Stage::Blend, "High blend", Box::new(HighBlendNode::new()));
+    b.connect(tail.o(), hb.i());
+
+    Chan {
+        spec: spec.clone(),
+        kept,
+        key: ChanKey::new(spec, rate),
+        tail: hb.o(),
+        agc,
+        squelch,
+        wfm,
+        audio_rate: AUDIO_HZ,
+        channels: if stereo { 2 } else { 1 },
+        detail: format!(
+            "if /{if_dec} to {:.0} kHz, audio /{au_dec}{}",
+            if_rate / 1e3,
+            if stereo { ", stereo" } else { "" }
+        ),
+        agc_gain_db: 0.0,
+        squelch_open: true,
+        squelch_db: 0.0,
+        blend: 0.0,
+        station: Station::default(),
+        rds_stats: (0, 0, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan(rate: f64, center: Hz) -> Plan {
+        Plan {
+            center,
+            rate,
+            zoom: 1,
+            dc_block: true,
+            refresh_hz: 30.0,
+            fft: 1024,
+            channels: Vec::new(),
+            scan: true,
+            modes: false,
+            record: false,
+        }
+    }
+
+    fn chan(id: u64, offset: f64, demod: Demod) -> ChannelSpec {
+        ChannelSpec {
+            id,
+            offset_hz: offset,
+            demod,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+        }
+    }
+
+    fn block(n: usize) -> Vec<C32> {
+        (0..n)
+            .map(|i| {
+                let p = std::f32::consts::TAU * 0.01 * i as f32;
+                C32::new(p.cos() * 0.2, p.sin() * 0.2)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn everything_the_receiver_does_is_in_one_graph() {
+        // The point of the whole arrangement. If any of these is missing it
+        // is being driven by hand somewhere, which is how a chain ends up
+        // invisible to the view, the parameters and the latency accounting.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.channels = vec![chan(1, 100_000.0, Demod::Nfm)];
+        let rx = Receiver::build(&p, None).unwrap();
+        let labels: Vec<String> =
+            rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
+        for want in ["DC block", "Spectrum", "OOK bank", "FSK bank", "Mixer"] {
+            assert!(labels.iter().any(|l| l == want), "{want} is not in {labels:?}");
+        }
+    }
+
+    #[test]
+    fn a_bank_shows_the_chain_its_channels_run() {
+        let rx = Receiver::build(&plan(2_400_000.0, Hz::mhz(433)), None).unwrap();
+        let topo = rx.topology();
+        let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").expect("the OOK bank");
+        let inner = bank.inner.as_ref().expect("what a channel runs");
+        assert!(inner.nodes.iter().any(|n| n.label.contains("Envelope")));
+        assert!(bank.inner_count > 1, "a bank of one channel is not a bank");
+        // A bank consumes samples and produces decodes, so drawing it with an
+        // output rate would invent a stream that is not there.
+        assert!(bank.sink);
+    }
+
+    #[test]
+    fn adding_a_channel_leaves_the_others_untouched() {
+        // The reason a rebuild reuses nodes. Building afresh would cost the
+        // first channel its RDS station and its AGC convergence every time a
+        // second one was added.
+        let mut p = plan(2_400_000.0, Hz::mhz(95));
+        p.channels = vec![chan(1, 100_000.0, Demod::Wfm)];
+        let mut rx = Receiver::build(&p, None).unwrap();
+        rx.process(&block(4096)).unwrap();
+
+        p.channels.push(chan(2, -250_000.0, Demod::Nfm));
+        rx.rebuild(&p).unwrap();
+        assert_eq!(rx.channels().len(), 2);
+        assert!(rx.channels()[0].kept, "the channel that did not change was rebuilt");
+        assert!(!rx.channels()[1].kept, "a new channel cannot have kept anything");
+    }
+
+    #[test]
+    fn changing_what_a_channel_listens_to_rebuilds_it() {
+        // Its mixer shift and every filter design follow from the offset and
+        // the mode, so reusing those nodes would leave a chain built for a
+        // frequency it is no longer on.
+        let mut p = plan(2_400_000.0, Hz::mhz(95));
+        p.channels = vec![chan(1, 100_000.0, Demod::Wfm)];
+        let mut rx = Receiver::build(&p, None).unwrap();
+        rx.process(&block(4096)).unwrap();
+
+        p.channels = vec![chan(1, 300_000.0, Demod::Wfm)];
+        rx.rebuild(&p).unwrap();
+        assert!(!rx.channels()[0].kept);
+    }
+
+    #[test]
+    fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
+        // Restoring a session tuned elsewhere leaves channels behind that the
+        // radio is no longer sampling. Demodulating one shifts a frequency
+        // that was never received down to baseband, and the result is noise
+        // that sounds like a dead station.
+        let mut p = plan(2_400_000.0, Hz::mhz(1090));
+        p.channels = vec![chan(1, -994_200_000.0, Demod::Wfm)];
+        let rx = Receiver::build(&p, None).unwrap();
+        assert!(rx.channels().is_empty());
+        assert!(rx.refused.unwrap().contains("outside the span"));
+    }
+
+    #[test]
+    fn zooming_rebuilds_at_the_narrower_rate() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.zoom = 8;
+        let rx = Receiver::build(&p, None).unwrap();
+        let topo = rx.topology();
+        let zoom = topo.nodes.iter().find(|n| n.label.starts_with("Zoom")).expect("a zoom stage");
+        assert_eq!(zoom.outputs[0].1.rate, 300_000.0);
+        // Everything downstream sees the narrowed rate, which is the whole
+        // reason the zoom is a node rather than something the caller does to
+        // the buffer first.
+        let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").unwrap();
+        assert_eq!(bank.inputs[0].1.rate, 300_000.0);
+    }
+
+    #[test]
+    fn the_recorder_holds_the_burst_before_anything_decodes_it() {
+        // A recording that starts when a decoder reports has already missed
+        // the packet, so the ring must run ahead of the banks.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.record = true;
+        let dir = std::env::temp_dir().join(format!("sr-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = Recorder::new(&dir, p.eff_rate(), p.center).unwrap();
+        let rx = Receiver::build(&p, Some(rec)).unwrap();
+        let order: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
+        let ring = order.iter().position(|l| l == "Recorder").expect("a recorder");
+        let bank = order.iter().position(|l| l == "OOK bank").expect("a bank");
+        assert!(ring < bank, "the recorder runs after the decoders: {order:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
