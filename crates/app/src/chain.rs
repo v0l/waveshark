@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 
+use crate::scanners::Front;
 use common::{Hz, Result, C32};
 use dsp::rds::Station;
 use nodes::{
@@ -67,6 +68,7 @@ enum Role {
     Record,
     ModeS,
     Ais,
+    Aprs,
     /// Banks are distinguished by the channel width they were built for.
     Bank(u32),
     /// A stage of one listening channel.
@@ -157,6 +159,7 @@ pub struct Receiver {
     record: Option<NodeId>,
     modes: Option<NodeId>,
     ais: Option<NodeId>,
+    aprs: Option<NodeId>,
     banks: Vec<Bank>,
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
@@ -194,13 +197,10 @@ pub struct Plan {
     pub refresh_hz: f32,
     pub fft: usize,
     pub channels: Vec<ChannelSpec>,
-    /// Whether to sweep the span with the ISM banks.
-    pub scan: bool,
-    /// Whether to run the Mode S decoder.
-    pub modes: bool,
-    /// Whether to run the AIS decoder, which needs both 162 MHz channels in
-    /// the span.
-    pub ais: bool,
+    /// The front end to run, resolved from the scanner table for this
+    /// tuning. `None` is a band nothing is configured for, which costs
+    /// nothing rather than sweeping it for sensors that are not there.
+    pub front: Option<Front>,
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
@@ -249,6 +249,7 @@ impl Receiver {
             record: None,
             modes: None,
             ais: None,
+            aprs: None,
             banks: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
@@ -318,6 +319,7 @@ impl Receiver {
         self.record = None;
         self.modes = None;
         self.ais = None;
+        self.aprs = None;
         self.banks.clear();
         self.center = plan.center;
         self.rate = plan.rate;
@@ -395,45 +397,59 @@ impl Receiver {
         b.connect(head.o(), spectrum.i());
         roles.push(Role::Spectrum);
 
-        let mut modes = None;
-        if plan.modes {
-            let id = match pool.remove(&Role::ModeS) {
-                Some(p) => b.add_existing(p),
-                None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
-            };
-            b.connect(head.o(), id.i());
-            roles.push(Role::ModeS);
-            modes = Some(id);
-        }
-
-        // AIS is the same shape: a wideband decoder on the head of the chain
-        // that puts frames on the bus. It costs a pass over every sample, so
-        // like Mode S it only runs where its signal is.
-        let mut ais = None;
-        if plan.ais {
-            let id = match pool.remove(&Role::Ais) {
-                Some(p) => b.add_existing(p),
-                None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
-            };
-            b.connect(head.o(), id.i());
-            roles.push(Role::Ais);
-            ais = Some(id);
-        }
-
+        // One front end, chosen by the scanner table rather than by a chain
+        // of band tests here. Which demodulator belongs on which frequency is
+        // configuration, not structure: see `scanners.rs`.
+        let (mut modes, mut ais, mut aprs) = (None, None, None);
         let mut banks = Vec::new();
-        if plan.scan {
-            for (label, width, make) in [
-                ("OOK bank", OOK_CHANNEL_HZ, nodes::ism_ook_graph as fn(_) -> _),
-                ("FSK bank", FSK_CHANNEL_HZ, nodes::ism_fsk_graph as fn(_) -> _),
-            ] {
-                let role = Role::Bank(width as u32);
-                let id = match pool.remove(&role) {
+        match &plan.front {
+            None => {}
+            Some(Front::ModeS) => {
+                let id = match pool.remove(&Role::ModeS) {
                     Some(p) => b.add_existing(p),
-                    None => b.add_labeled(label, Box::new(BankNode::new(label, width, make))),
+                    None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
                 };
                 b.connect(head.o(), id.i());
-                roles.push(role);
-                banks.push((id, width));
+                roles.push(Role::ModeS);
+                modes = Some(id);
+            }
+            Some(Front::Ais) => {
+                let id = match pool.remove(&Role::Ais) {
+                    Some(p) => b.add_existing(p),
+                    None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
+                };
+                b.connect(head.o(), id.i());
+                roles.push(Role::Ais);
+                ais = Some(id);
+            }
+            Some(Front::Aprs) => {
+                let id = match pool.remove(&Role::Aprs) {
+                    Some(p) => b.add_existing(p),
+                    None => b.add_labeled("144 APRS", Box::new(nodes::AprsNode::default())),
+                };
+                b.connect(head.o(), id.i());
+                roles.push(Role::Aprs);
+                aprs = Some(id);
+            }
+            Some(Front::Banks(widths)) => {
+                for &width in widths {
+                    // Which front end runs in a channel follows from its
+                    // width: the narrow bank is where OOK is worth detecting
+                    // and the wide one is where FSK's two tones both fit.
+                    let (label, make) = if width <= OOK_CHANNEL_HZ {
+                        ("OOK bank", nodes::ism_ook_graph as fn(_) -> _)
+                    } else {
+                        ("FSK bank", nodes::ism_fsk_graph as fn(_) -> _)
+                    };
+                    let role = Role::Bank(width as u32);
+                    let id = match pool.remove(&role) {
+                        Some(p) => b.add_existing(p),
+                        None => b.add_labeled(label, Box::new(BankNode::new(label, width, make))),
+                    };
+                    b.connect(head.o(), id.i());
+                    roles.push(role);
+                    banks.push((id, width));
+                }
             }
         }
 
@@ -489,6 +505,7 @@ impl Receiver {
             .map(|(id, _)| id.o())
             .chain(modes.map(|m| m.o()))
             .chain(ais.map(|a| a.o()))
+            .chain(aprs.map(|a| a.o()))
             .chain(feeds.iter().map(|f| f.o()))
             .collect();
         if !sources.is_empty() {
@@ -542,7 +559,11 @@ impl Receiver {
         // A feed is usually the reason to run this at all on a band that is
         // neither 1090 nor 162.
         let mut tracks = None;
-        if let (Some(bus), true) = (bus, plan.modes || plan.ais || !plan.feeds.is_empty()) {
+        let makes_tracks = matches!(
+            plan.front,
+            Some(Front::ModeS) | Some(Front::Ais) | Some(Front::Aprs)
+        );
+        if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
                 None => b.add_labeled("Tracks", Box::new(crate::tracks::TracksNode::new())),
@@ -722,6 +743,10 @@ impl Receiver {
 
     pub fn ais_on(&self) -> bool {
         self.ais.is_some()
+    }
+
+    pub fn aprs_on(&self) -> bool {
+        self.aprs.is_some()
     }
 
     /// Whether anything is tracking aircraft, from the local demodulator or
@@ -1166,9 +1191,7 @@ mod tests {
             refresh_hz: 30.0,
             fft: 1024,
             channels: Vec::new(),
-            scan: true,
-            modes: false,
-            ais: false,
+            front: Some(Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())),
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1318,8 +1341,7 @@ mod tests {
         // rebuilt for every new source, and would see nothing when the source
         // it knew about was not running.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.modes = true;
-        p.scan = false;
+        p.front = Some(Front::ModeS);
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1340,8 +1362,7 @@ mod tests {
     #[test]
     fn ais_reaches_the_tracker_through_the_bus_like_mode_s_does() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.ais = true;
-        p.scan = false;
+        p.front = Some(Front::Ais);
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.ais_on(), "the AIS decoder is not running");
         let topo = rx.topology();
@@ -1366,8 +1387,7 @@ mod tests {
     #[test]
     fn the_ism_banks_do_not_run_on_the_ais_band() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.ais = true;
-        p.scan = false;
+        p.front = Some(Front::Ais);
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         assert!(
@@ -1429,8 +1449,8 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         p.center = Hz::mhz(1090);
-        p.scan = false;
-        p.modes = true;
+        p.front = None;
+        p.front = Some(Front::ModeS);
         rx.rebuild(&p).expect("a receiver that can retune onto 1090");
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1442,7 +1462,7 @@ mod tests {
         // Turning the log off stops writing to disk; it must not disconnect
         // every view from the traffic.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.modes = true;
+        p.front = Some(Front::ModeS);
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));

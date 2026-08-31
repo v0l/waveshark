@@ -475,10 +475,10 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
     // channel banks, the same way the live receiver decides: 1090 carries
     // nothing the ISM banks understand, so running them there only spends CPU
     // inventing unknown bursts out of Mode S.
-    let modes = crate::modes::tuned_to_mode_s(buf.center.as_f64(), rate);
-    // The same question for AIS, which has its own band and its own reason
-    // not to run the banks over it.
-    let ais = crate::marine::tuned_to_ais(buf.center.as_f64(), rate);
+    // A capture goes through whatever front end the scanner table puts on
+    // its frequency, the same way the live receiver decides.
+    let scanners = crate::scanners::Scanners::load();
+    let front = scanners.resolve(buf.center.as_f64(), rate).map(|s| s.front.clone());
     let plan = Plan {
         center: buf.center,
         rate,
@@ -488,9 +488,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        scan: !modes && !ais,
-        modes,
-        ais,
+        front,
         feeds: Vec::new(),
         record: rec.is_some(),
         log: false,
@@ -654,6 +652,8 @@ pub struct Status {
     pub modes_on: AtomicBool,
     /// Whether the AIS path is the one running.
     pub ais_on: AtomicBool,
+    /// Whether the APRS path is the one running.
+    pub aprs_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
@@ -738,6 +738,7 @@ impl Default for Status {
             feeds: parking_lot::Mutex::new(Vec::new()),
             modes_on: AtomicBool::new(false),
             ais_on: AtomicBool::new(false),
+            aprs_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
     }
@@ -951,9 +952,7 @@ impl Audio {
             refresh_hz: 30.0,
             fft: 1024,
             channels: vec![spec],
-            scan: false,
-            modes: false,
-            ais: false,
+            front: None,
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1051,13 +1050,8 @@ fn run(
         refresh_hz: 30.0,
         fft,
         channels: Vec::new(),
-        // Scanning from the start: a receiver that only decodes what you
-        // tuned to will miss the sensor that transmitted once while you were
-        // reading the spectrum, and that transmission is the whole reason to
-        // be here.
-        scan: true,
-        modes: false,
-        ais: false,
+        // Resolved from the scanner table below, once the tuning is known.
+        front: None,
         record: false,
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
@@ -1065,8 +1059,10 @@ fn run(
         // Feeds arrive from the session or the settings modal, as a command.
         feeds: Vec::new(),
     };
-    plan.modes = modes_here(&plan);
-    plan.ais = ais_here(&plan);
+    // What to run follows from where the dial is, and that mapping is
+    // configuration rather than structure.
+    let scanners = crate::scanners::Scanners::load();
+    plan.front = front_here(&scanners, &plan, true);
     let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
     publish_chain(status, &rx);
 
@@ -1215,7 +1211,6 @@ fn run(
                 }
                 Cmd::Decode(on) => {
                     scan_on = on;
-                    plan.scan = on;
                     rebuild = true;
                 }
             }
@@ -1241,9 +1236,7 @@ fn run(
             let _t = tracing::info_span!("rebuild").entered();
             // The banks understand nothing on either wideband band, so
             // running them there only spends CPU inventing unknown bursts.
-            plan.scan = scan_on && !modes_here(&plan) && !ais_here(&plan);
-            plan.modes = modes_here(&plan);
-            plan.ais = ais_here(&plan);
+            plan.front = front_here(&scanners, &plan, scan_on);
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
                 *status.error.lock() = Some(format!("cannot build the chain: {e}"));
@@ -1314,6 +1307,7 @@ fn run(
 
         status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
         status.ais_on.store(rx.ais_on(), Ordering::Relaxed);
+        status.aprs_on.store(rx.aprs_on(), Ordering::Relaxed);
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);
@@ -1403,15 +1397,20 @@ fn run(
     }
 }
 
-/// Whether the dial is on Mode S, which is the only thing that decides
-/// whether that decoder is worth running.
-fn modes_here(plan: &Plan) -> bool {
-    crate::modes::tuned_to_mode_s(plan.center.as_f64(), plan.eff_rate())
-}
-
-/// Whether the dial is on AIS, with both of its channels in the span.
-fn ais_here(plan: &Plan) -> bool {
-    crate::marine::tuned_to_ais(plan.center.as_f64(), plan.eff_rate())
+/// The front end for where the dial is, or none.
+///
+/// `decode_on` is the operator's own switch: turning decoding off stops the
+/// front end being built at all, which is the expensive thing the receiver
+/// does. It does not change which front end belongs here.
+fn front_here(
+    scanners: &crate::scanners::Scanners,
+    plan: &Plan,
+    decode_on: bool,
+) -> Option<crate::scanners::Front> {
+    if !decode_on {
+        return None;
+    }
+    scanners.resolve(plan.center.as_f64(), plan.eff_rate()).map(|s| s.front.clone())
 }
 
 /// Publish the chain the receiver is running, for the chain view.
@@ -1433,9 +1432,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        scan: true,
-        modes: false,
-        ais: false,
+        front: Some(crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())),
         record: false,
         log: false,
         feeds: Vec::new(),
@@ -1895,7 +1892,7 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&empty_buf(250_000.0, Hz::mhz(433)), None).unwrap();
         rx.process(&block(8192)).unwrap();
         let mut plan = plan_at(250_000.0, Hz::mhz(868));
-        plan.scan = true;
+        plan.front = Some(crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()));
         rx.rebuild(&plan).unwrap();
         rx.process(&block(8192)).unwrap();
         let out = rx.decodes(std::time::Instant::now());
@@ -2144,7 +2141,7 @@ mod zoom_tests {
     fn zoomed(native: f64, zoom: usize) -> crate::chain::Receiver {
         let mut plan = plan_at(native, Hz::mhz(433));
         plan.zoom = zoom;
-        plan.scan = false;
+        plan.front = None;
         crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain")
     }
 
@@ -2176,7 +2173,7 @@ mod zoom_tests {
         let keep = native / zoom as f64 / 2.0;
         let mut plan = plan_at(native, Hz::mhz(433));
         plan.zoom = zoom;
-        plan.scan = false;
+        plan.front = None;
         plan.channels = vec![ChannelSpec {
             id: 1,
             offset_hz: 0.0,

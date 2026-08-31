@@ -89,6 +89,13 @@ impl PacketDecodeNode {
             self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
             return;
         }
+        // The 2 m packet channels. Wherever the scanner put APRS, a frame
+        // from it arrives tagged with that channel rather than 1090.
+        if (144_000_000.0..146_000_000.0).contains(&(p.center_hz as f64)) {
+            let Ok(frame) = decode::ax25::parse(bytes) else { return };
+            self.hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
+            return;
+        }
         let Ok(frame) = adsb::parse(bytes) else { return };
         let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
         // A local demodulator reports no level for a frame it has already
