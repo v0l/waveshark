@@ -4,6 +4,7 @@
 //! sample. Parallelism is the caller's business, so these types are `Send` but
 //! not internally threaded.
 
+pub mod afsk;
 pub mod agc;
 pub mod ais;
 pub mod ask;
@@ -26,6 +27,7 @@ pub mod stereo;
 pub(crate) mod twolevel;
 pub mod window;
 
+pub use afsk::{AfskConfig, AfskDemod};
 pub use ais::{AisConfig, AisDetector, AisFrame};
 pub use ask::{AskConfig, AskDetector};
 pub use blend::{HighBlend, NoiseMeter, VariableLowpass};

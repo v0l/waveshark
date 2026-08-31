@@ -15,6 +15,8 @@
 
 pub mod adsb;
 pub mod ais;
+pub mod aprs;
+pub mod ax25;
 pub mod analyze;
 pub mod bits;
 pub mod protocol;
