@@ -68,7 +68,11 @@ enum Role {
     Record,
     ModeS,
     Ais,
-    Aprs,
+    /// Keyed by the channel, like the pager one and for the same reason: a
+    /// scanner table pointed at another frequency has to rebuild the node
+    /// rather than keep one tuned where it was.
+    Aprs(u64),
+    Pocsag(u64),
     /// Banks are distinguished by the channel width they were built for.
     Bank(u32),
     /// A stage of one listening channel.
@@ -160,6 +164,7 @@ pub struct Receiver {
     modes: Option<NodeId>,
     ais: Option<NodeId>,
     aprs: Option<NodeId>,
+    pocsag: Option<NodeId>,
     banks: Vec<Bank>,
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
@@ -250,6 +255,7 @@ impl Receiver {
             modes: None,
             ais: None,
             aprs: None,
+            pocsag: None,
             banks: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
@@ -320,6 +326,7 @@ impl Receiver {
         self.modes = None;
         self.ais = None;
         self.aprs = None;
+        self.pocsag = None;
         self.banks.clear();
         self.center = plan.center;
         self.rate = plan.rate;
@@ -400,7 +407,7 @@ impl Receiver {
         // One front end, chosen by the scanner table rather than by a chain
         // of band tests here. Which demodulator belongs on which frequency is
         // configuration, not structure: see `scanners.rs`.
-        let (mut modes, mut ais, mut aprs) = (None, None, None);
+        let (mut modes, mut ais, mut aprs, mut pocsag) = (None, None, None, None);
         let mut banks = Vec::new();
         match &plan.front {
             None => {}
@@ -422,14 +429,31 @@ impl Receiver {
                 roles.push(Role::Ais);
                 ais = Some(id);
             }
-            Some(Front::Aprs) => {
-                let id = match pool.remove(&Role::Aprs) {
+            Some(Front::Aprs(hz)) => {
+                let role = Role::Aprs(*hz as u64);
+                let id = match pool.remove(&role) {
                     Some(p) => b.add_existing(p),
-                    None => b.add_labeled("144 APRS", Box::new(nodes::AprsNode::default())),
+                    None => b.add_labeled(
+                        format!("{:.3} APRS", hz / 1e6),
+                        Box::new(nodes::AprsNode::new(*hz)),
+                    ),
                 };
                 b.connect(head.o(), id.i());
-                roles.push(Role::Aprs);
+                roles.push(role);
                 aprs = Some(id);
+            }
+            Some(Front::Pocsag(hz)) => {
+                let role = Role::Pocsag(*hz as u64);
+                let id = match pool.remove(&role) {
+                    Some(p) => b.add_existing(p),
+                    None => b.add_labeled(
+                        format!("{:.4} pager", hz / 1e6),
+                        Box::new(nodes::PocsagNode::new(*hz)),
+                    ),
+                };
+                b.connect(head.o(), id.i());
+                roles.push(role);
+                pocsag = Some(id);
             }
             Some(Front::Banks(widths)) => {
                 for &width in widths {
@@ -506,6 +530,7 @@ impl Receiver {
             .chain(modes.map(|m| m.o()))
             .chain(ais.map(|a| a.o()))
             .chain(aprs.map(|a| a.o()))
+            .chain(pocsag.map(|p| p.o()))
             .chain(feeds.iter().map(|f| f.o()))
             .collect();
         if !sources.is_empty() {
@@ -561,7 +586,7 @@ impl Receiver {
         let mut tracks = None;
         let makes_tracks = matches!(
             plan.front,
-            Some(Front::ModeS) | Some(Front::Ais) | Some(Front::Aprs)
+            Some(Front::ModeS) | Some(Front::Ais) | Some(Front::Aprs(_))
         );
         if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
@@ -654,6 +679,7 @@ impl Receiver {
         self.decode = decode;
         self.ais = ais;
         self.aprs = aprs;
+        self.pocsag = pocsag;
         self.tracks = tracks;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
@@ -748,6 +774,10 @@ impl Receiver {
 
     pub fn aprs_on(&self) -> bool {
         self.aprs.is_some()
+    }
+
+    pub fn pocsag_on(&self) -> bool {
+        self.pocsag.is_some()
     }
 
     /// Whether anything is tracking aircraft, from the local demodulator or
@@ -974,6 +1004,12 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         // AIS is heard through one 25 kHz marine channel, whichever of the
         // two carried the frame.
         Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
+        // A pager is keyed FSK like an 868 MHz sensor and heard through a
+        // channel a tenth the width, so the keying alone does not say which
+        // front end produced it.
+        Some("FSK") if d.protocol.starts_with("POCSAG") => {
+            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
+        }
         Some("FSK") => FSK_CHANNEL_HZ,
         _ => OOK_CHANNEL_HZ,
     };

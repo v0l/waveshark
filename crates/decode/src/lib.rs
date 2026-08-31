@@ -19,6 +19,7 @@ pub mod aprs;
 pub mod ax25;
 pub mod analyze;
 pub mod bits;
+pub mod pocsag;
 pub mod protocol;
 pub mod protocols;
 pub mod slicer;

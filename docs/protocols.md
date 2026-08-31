@@ -156,12 +156,14 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| POCSAG | 137-174, 450-470, 929 MHz | 2-FSK 512/1200/2400 bps | 25 kHz | framing | table | Fits the FSK front end directly; needs sync word search and BCH(31,21). Amateur DAPNET networks run the same protocol |
+| POCSAG | 137-174, 450-470, 929 MHz | 2-FSK 512/1200/2400 bps | 25 kHz | synthetic | table | `dsp::pocsag` and `decode::pocsag`. All three bit rates are demodulated at once, since nothing in the signal says which is in use, and both polarities are searched for. BCH(31,21) corrects up to two errors per codeword. The message layer is checked against a published off-air capture decoded by POC32; the demodulator in front of it has not met real RF. Amateur DAPNET networks run the same protocol |
 | FLEX | 929-932 MHz | 2/4-FSK 1600-6400 bps | 25 kHz | demod | mod | The four-level modes need a four-way slicer |
 | ERMES | 169 MHz | 4-FSK 6250 bps | 25 kHz | demod | mod | As FLEX |
 
 Pager traffic is unencrypted and often carries medical and personal detail.
-Worth knowing before pointing a decoder at it and logging the output.
+Worth knowing before pointing a decoder at it and logging the output: the
+packet log keeps what the demodulator produced, and for POCSAG that is
+codewords the message text can be read back out of.
 
 ## Land mobile and digital voice
 
@@ -271,7 +273,8 @@ Cheapest first, by value per unit of work:
    variants exercise both banks.
 4. **AIS.** The first protocol needing real framing (NRZI, bit stuffing,
    CRC16) but no new demodulator, and the results are immediately legible.
-5. **POCSAG.** Adds BCH error correction, reusable afterwards.
+5. ~~**POCSAG.**~~ Done. The BCH(31,21) correction it added is reusable for
+   FLEX, ERMES and the radiosondes.
 6. **Wireless M-Bus T and C.** Common on 868 in Europe, and the sync word plus
    block CRC work carries over to Z-Wave and Homematic.
 7. **The transmit path, ending in Morse.** Device, encoder, modulator,

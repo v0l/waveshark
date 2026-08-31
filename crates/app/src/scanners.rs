@@ -43,9 +43,23 @@ pub enum Front {
     ModeS,
     /// Both 162 MHz channels, GMSK.
     Ais,
-    /// Narrowband FM into Bell 202 AFSK, and AX.25 above it.
-    Aprs,
+    /// Narrowband FM into Bell 202 AFSK, and AX.25 above it. Carries the
+    /// channel, since APRS is on a different frequency in each region.
+    Aprs(f64),
+    /// One paging channel, NRZ FSK at whichever of the three POCSAG rates it
+    /// turns out to be. Carries the channel, because paging allocations are
+    /// national and there is no frequency worth compiling in.
+    Pocsag(f64),
 }
+
+/// The amateur DAPNET channel, used until a block says otherwise. Amateur
+/// rather than commercial because it is the one paging frequency that is the
+/// same across Europe.
+pub const DEFAULT_POCSAG_HZ: f64 = 439_987_500.0;
+
+/// Where APRS is across Europe, used until a block says otherwise. North
+/// America is 144.390 and Japan 144.640.
+pub const DEFAULT_APRS_HZ: f64 = 144_800_000.0;
 
 impl Front {
     /// The word this front end is written as in the file.
@@ -54,7 +68,8 @@ impl Front {
             Front::Banks(_) => "banks",
             Front::ModeS => "modes",
             Front::Ais => "ais",
-            Front::Aprs => "aprs",
+            Front::Aprs(_) => "aprs",
+            Front::Pocsag(_) => "pocsag",
         }
     }
 
@@ -64,16 +79,18 @@ impl Front {
             Front::Banks(_) => "banks",
             Front::ModeS => "mode s",
             Front::Ais => "ais",
-            Front::Aprs => "aprs",
+            Front::Aprs(_) => "aprs",
+            Front::Pocsag(_) => "pager",
         }
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 4] {
+    pub fn all() -> [Front; 5] {
         [
             Front::ModeS,
             Front::Ais,
-            Front::Aprs,
+            Front::Aprs(DEFAULT_APRS_HZ),
+            Front::Pocsag(DEFAULT_POCSAG_HZ),
             Front::Banks(DEFAULT_WIDTHS.to_vec()),
         ]
     }
@@ -83,7 +100,8 @@ impl Front {
             "banks" | "scan" => Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
             "modes" | "mode-s" | "adsb" => Some(Front::ModeS),
             "ais" => Some(Front::Ais),
-            "aprs" => Some(Front::Aprs),
+            "aprs" => Some(Front::Aprs(DEFAULT_APRS_HZ)),
+            "pocsag" | "pager" => Some(Front::Pocsag(DEFAULT_POCSAG_HZ)),
             _ => None,
         }
     }
@@ -231,7 +249,8 @@ impl Scanners {
                 continue;
             }
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-                if let Some(s) = cur.take().filter(|s| !s.channels_unset()) {
+                if let Some(mut s) = cur.take().filter(|s| !s.channels_unset()) {
+                    s.settle();
                     list.push(s);
                 }
                 cur = Some(Scanner {
@@ -278,7 +297,8 @@ impl Scanners {
                 _ => {}
             }
         }
-        if let Some(s) = cur.filter(|s| !s.channels_unset()) {
+        if let Some(mut s) = cur.filter(|s| !s.channels_unset()) {
+            s.settle();
             list.push(s);
         }
         Self { list }
@@ -290,6 +310,24 @@ impl Scanner {
     /// nothing, and both are worse than dropping it.
     fn channels_unset(&self) -> bool {
         self.hi <= self.lo
+    }
+
+    /// Fold what the block said into the front end, now that the whole block
+    /// has been read.
+    ///
+    /// The single-channel front ends need this: what they demodulate is one
+    /// frequency, that frequency is regional, and the block already names it.
+    /// Without this the channel decides only whether the block matches, and a
+    /// receiver told to listen on 144.390 would gate on that and then
+    /// demodulate 144.800, which is silence that looks like a quiet band.
+    /// Done at the end of the block rather than as the keys arrive, so that
+    /// `channels` and `front` can be written in either order.
+    fn settle(&mut self) {
+        let Some(&c) = self.channels.first() else { return };
+        match &mut self.front {
+            Front::Aprs(f) | Front::Pocsag(f) => *f = c,
+            _ => {}
+        }
     }
 }
 
@@ -336,7 +374,7 @@ pub const HEADER: &str = "\
 #
 #   range     the dial must sit inside this
 #   span      narrowest span the front end works in
-#   front     modes | ais | aprs | banks
+#   front     modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
@@ -356,7 +394,7 @@ pub const DEFAULT_TEXT: &str = "\
 #
 #   range     the dial must sit inside this
 #   span      narrowest span the front end works in
-#   front     modes | ais | aprs | banks
+#   front     modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
@@ -383,6 +421,18 @@ span     = 48 kHz
 front    = aprs
 channels = 144.800 MHz
 margin   = 8 kHz
+
+[POCSAG]
+# The amateur DAPNET network, which runs POCSAG at 1200 baud and is the one
+# paging channel that is the same across Europe. Commercial paging is
+# national: 138 to 153 MHz in the UK, 929 to 932 MHz in the United States,
+# 450 to 470 MHz in much of Europe. Point this at a channel you can hear, and
+# read the note about pager traffic in docs/protocols.md before logging it.
+range    = 439.9 - 440.1 MHz
+span     = 100 kHz
+front    = pocsag
+channels = 439.9875 MHz
+margin   = 12.5 kHz
 
 [ISM 433]
 range  = 433.05 - 434.79 MHz
@@ -411,7 +461,7 @@ mod tests {
     fn the_shipped_defaults_parse() {
         let s = Scanners::default();
         let names: Vec<&str> = s.list.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, ["ADS-B", "AIS", "APRS", "ISM 433", "ISM 868", "ISM 315"]);
+        assert_eq!(names, ["ADS-B", "AIS", "APRS", "POCSAG", "ISM 433", "ISM 868", "ISM 315"]);
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
@@ -421,7 +471,8 @@ mod tests {
         let front = |c: f64, r: f64| s.resolve(c, r).map(|x| x.front.clone());
         assert_eq!(front(1_090_000_000.0, 2_400_000.0), Some(Front::ModeS));
         assert_eq!(front(162_000_000.0, 2_400_000.0), Some(Front::Ais));
-        assert_eq!(front(144_800_000.0, 2_400_000.0), Some(Front::Aprs));
+        assert_eq!(front(144_800_000.0, 2_400_000.0), Some(Front::Aprs(144_800_000.0)));
+        assert_eq!(front(439_987_500.0, 2_400_000.0), Some(Front::Pocsag(439_987_500.0)));
         assert!(matches!(front(433_920_000.0, 2_400_000.0), Some(Front::Banks(_))));
         assert!(matches!(front(868_300_000.0, 2_400_000.0), Some(Front::Banks(_))));
     }
@@ -470,14 +521,38 @@ mod tests {
 
     /// Moving APRS to North America is one line, which is the test that says
     /// the frequency really is data and not code.
+    ///
+    /// The front end has to carry the channel too, not only gate on it. A
+    /// block that matches at 144.390 and then demodulates 144.800 hears
+    /// nothing, and an empty packet list looks exactly like a quiet band.
     #[test]
     fn aprs_can_be_moved_to_another_region() {
         let s = Scanners::parse(
             "[APRS]\nrange = 144.38 - 144.40 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
-        assert!(s.resolve(144_390_000.0, 500_000.0).is_some());
+        let hit = s.resolve(144_390_000.0, 500_000.0).expect("the block should match");
+        assert_eq!(hit.front, Front::Aprs(144_390_000.0));
         assert_eq!(s.resolve(144_800_000.0, 500_000.0), None, "the European one is gone");
+    }
+
+    /// The channel a POCSAG block names is the channel the demodulator tunes,
+    /// because paging allocations are national and nothing sensible can be
+    /// compiled in. This is the test that says the frequency really is data.
+    #[test]
+    fn a_pocsag_block_carries_its_channel_into_the_front_end() {
+        let s = Scanners::parse(
+            "[Pagers]\nrange = 153 - 154 MHz\nspan = 100 kHz\nfront = pocsag\n\
+             channels = 153.35 MHz\nmargin = 12.5 kHz\n",
+        );
+        assert_eq!(s.list[0].front, Front::Pocsag(153_350_000.0));
+        // And in the other order, since a hand-written block may write
+        // either key first.
+        let s = Scanners::parse(
+            "[Pagers]\nchannels = 153.35 MHz\nrange = 153 - 154 MHz\nspan = 100 kHz\n\
+             front = pocsag\n",
+        );
+        assert_eq!(s.list[0].front, Front::Pocsag(153_350_000.0));
     }
 
     #[test]

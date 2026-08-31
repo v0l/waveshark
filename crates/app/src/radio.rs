@@ -667,6 +667,8 @@ pub struct Status {
     pub ais_on: AtomicBool,
     /// Whether the APRS path is the one running.
     pub aprs_on: AtomicBool,
+    /// Whether the pager path is the one running.
+    pub pocsag_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
@@ -752,6 +754,7 @@ impl Default for Status {
             modes_on: AtomicBool::new(false),
             ais_on: AtomicBool::new(false),
             aprs_on: AtomicBool::new(false),
+            pocsag_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
     }
@@ -1330,6 +1333,7 @@ fn run(
         status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
         status.ais_on.store(rx.ais_on(), Ordering::Relaxed);
         status.aprs_on.store(rx.aprs_on(), Ordering::Relaxed);
+        status.pocsag_on.store(rx.pocsag_on(), Ordering::Relaxed);
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);

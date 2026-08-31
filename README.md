@@ -7,9 +7,10 @@ decode every signal in it in parallel.
 
 Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
-with RDS, and ADS-B decodes aircraft off the air. What is missing is protocols:
-twenty-five ISM device decoders are implemented where the goal is hundreds, and
-only Fine Offset and ADS-B have been checked against real recordings.
+with RDS, and ADS-B decodes aircraft off the air. AIS, APRS and POCSAG decode
+too. What is missing is protocols: twenty-five ISM device decoders are
+implemented where the goal is hundreds, and only Fine Offset and ADS-B have
+been checked against real recordings.
 
 Proof it works: `crates/decode/tests/fineoffset_capture.rs` decodes a real
 recorded 433.92 MHz weather-station transmission and asserts the result matches
@@ -492,7 +493,10 @@ matching pair. The value is remembered in the session file.
 ### APRS
 
 Tune to 144.800 MHz and packet stations appear on the same map as the aircraft
-and the shipping. Two layers of modulation: the channel is ordinary narrowband
+and the shipping. North America uses 144.390 and Japan 144.640, which is a
+channel in the scanner file rather than a constant: the block's `channels`
+line is the frequency the demodulator tunes, not only the gate that decides
+whether the block applies. Two layers of modulation: the channel is ordinary narrowband
 FM, and the data is in the audio as Bell 202 tones at 1200 and 2200 Hz. Above
 the tones it is AX.25, which is HDLC, which is the same link layer AIS uses,
 so the flags, the bit destuffing and the check sequence are shared code.
@@ -509,6 +513,34 @@ markers, their codes labelled as the view narrows, with the tower, ground,
 ATIS and approach frequencies for the one under the pointer shown on hover.
 The airports and their frequencies are a bundled slice of the public-domain
 OurAirports dataset (`crates/app/data/`), not something fetched at runtime.
+
+### Pagers
+
+POCSAG runs wherever the scanner table points it, which for the shipped block
+is the amateur DAPNET channel at 439.9875 MHz. Commercial paging is national,
+so the frequency is a line in the file rather than a constant in the code.
+
+The protocol is plain NRZ two-level FSK, which the discriminator already
+produces, so the work is in the framing: a sync word, batches of sixteen
+codewords, and BCH(31,21) over every one of them, correcting up to two bit
+errors. Nothing in the signal says whether it is being sent at 512, 1200 or
+2400 bits per second, so all three bit clocks run at once and the sync word
+decides which was right. Polarity is settled the same way, by searching for
+the sync word and for its complement, because a pager transmission is
+routinely received upside down and a receiver that only worked one way up
+would appear perfect on one radio and deaf on another.
+
+A page is addressed by a 21-bit number, and only 18 of those bits are in the
+codeword: the other three are the position of the codeword in the batch,
+because a pager only listens during its own frame. Message characters are sent
+least significant bit first inside codewords that are sent most significant
+bit first, and skipping that reversal still produces printable text, which is
+why `crates/decode/src/pocsag.rs` is checked against a published off-air
+capture decoded by somebody else's program rather than only against itself.
+
+Pager traffic is unencrypted and carries medical and personal detail as a
+matter of routine. The packet log stores what the demodulator produced, so a
+pager channel left running overnight writes recoverable message text to disk.
 
 ### Decoding the whole span
 

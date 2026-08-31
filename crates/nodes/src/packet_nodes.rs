@@ -91,9 +91,19 @@ impl PacketDecodeNode {
         }
         // The 2 m packet channels. Wherever the scanner put APRS, a frame
         // from it arrives tagged with that channel rather than 1090.
+        //
+        // Tested before the pager bands because 144 to 146 MHz is inside the
+        // VHF paging allocation. Two protocols really do share that spectrum,
+        // and the narrower window is the more specific claim.
         if dsp::afsk::is_packet_band(p.center_hz as f64) {
             let Ok(frame) = decode::ax25::parse(bytes) else { return };
             self.hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
+            return;
+        }
+        // A pager transmission is codewords rather than one frame, so it can
+        // become several rows: a transmitter empties its queue in one go.
+        if dsp::pocsag::is_pager_band(p.center_hz as f64) {
+            self.hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
             return;
         }
         let Ok(frame) = adsb::parse(bytes) else { return };
@@ -252,6 +262,38 @@ mod tests {
         assert_eq!(ook[0].modulation, Some("OOK"));
         let fsk = run(&mut n, vec![burst(868_300_000, 125_000, pulses)]);
         assert_eq!(fsk[0].modulation, Some("FSK"));
+    }
+
+    /// A pager transmission arrives as bytes like a Mode S frame does, and
+    /// only where it was received says which it is. It also becomes several
+    /// rows rather than one, because a transmitter sends its whole queue in
+    /// one go.
+    #[test]
+    fn a_pager_transmission_becomes_a_row_for_each_page() {
+        use decode::pocsag::Body;
+        let mut contents = decode::pocsag::encode(1_000_001, 3, &Body::Alpha("ON CALL".into()));
+        contents.extend(decode::pocsag::encode(2_000_002, 0, &Body::Numeric("999".into())));
+        let bytes: Vec<u8> = contents
+            .into_iter()
+            .flat_map(|c| dsp::pocsag::encode_codeword(c).to_be_bytes())
+            .collect();
+
+        let mut n = PacketDecodeNode::default();
+        let hits = run(
+            &mut n,
+            vec![Packet {
+                at_us: 0,
+                center_hz: 439_987_500,
+                bandwidth_hz: 12_500,
+                rssi_dbfs: f32::NAN,
+                snr_db: f32::NAN,
+                body: PacketBody::Frame(bytes),
+            }],
+        );
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].protocol, "POCSAG-Alpha");
+        assert_eq!(hits[0].text.as_deref(), Some("ON CALL"));
+        assert_eq!(hits[1].protocol, "POCSAG-Numeric");
     }
 
     #[test]

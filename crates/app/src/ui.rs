@@ -3607,6 +3607,8 @@ impl App {
                     format!("162 MHz ais, {aircraft} tracks, {total} frames")
                 } else if r.status.aprs_on.load(Ordering::Relaxed) {
                     format!("144 MHz aprs, {aircraft} tracks, {total} frames")
+                } else if r.status.pocsag_on.load(Ordering::Relaxed) {
+                    format!("pocsag, {total} pages")
                 } else if narrow > 0 {
                     format!("{narrow} ook + {wide} fsk channels, {total} seen")
                 } else {
