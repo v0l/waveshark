@@ -71,6 +71,7 @@ enum Role {
     /// A stage of one listening channel.
     Stage(u64, Stage),
     PacketLog,
+    Flights,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -158,6 +159,9 @@ pub struct Receiver {
     /// A packet log waiting for the same.
     pending_log: Option<crate::packetlog::PacketLog>,
     log: Option<NodeId>,
+    flights: Option<NodeId>,
+    /// Where the receiver is, which resolves a position from a single frame.
+    location: Option<(f64, f64)>,
     /// Bursts logged before the last rebuild, since the node holding the
     /// count is replaced by each one.
     logged: u64,
@@ -224,6 +228,8 @@ impl Receiver {
             pending_record: None,
             pending_log: sinks.packet_log,
             log: None,
+            flights: None,
+            location: None,
             logged: 0,
             center: plan.center,
             rate: plan.rate,
@@ -414,6 +420,20 @@ impl Receiver {
             chans.push(add_channel(&mut b, &mut roles, &mut pool, head, spec, plan.eff_rate()));
         }
 
+        // The flight tracker reads the same output the log does. A view of
+        // the traffic belongs on the graph next to the other consumers of it,
+        // not assembled in the interface out of whatever packets got there.
+        let mut flights = None;
+        if let Some(m) = modes {
+            let id = match pool.remove(&Role::Flights) {
+                Some(p) => b.add_existing(p),
+                None => b.add_labeled("Flight list", Box::new(crate::flights::FlightsNode::new())),
+            };
+            b.connect(m.o(), id.i());
+            roles.push(Role::Flights);
+            flights = Some(id);
+        }
+
         // The log takes one input per source of bursts, because a receiver
         // hears them from several places at once and they belong in one file
         // in the order they arrived. Added last so it runs after everything
@@ -501,6 +521,12 @@ impl Receiver {
         self.spectrum = spectrum;
         self.record = record;
         self.log = log;
+        self.flights = flights;
+        // A tracker built fresh has to be told where the receiver is, which
+        // is what resolves a position from a single frame.
+        if let Some((lat, lon)) = self.location {
+            self.set_location(lat, lon);
+        }
         self.modes = modes;
         self.banks = banks
             .into_iter()
@@ -704,6 +730,27 @@ impl Receiver {
     /// the log is a node and the graph's shape is fixed once built.
     pub fn set_packet_log(&mut self, log: Option<crate::packetlog::PacketLog>) {
         self.pending_log = log;
+    }
+
+    /// Aircraft heard recently, most recently heard first.
+    pub fn aircraft(&self, now: std::time::Instant) -> Vec<crate::flights::Aircraft> {
+        self.flights
+            .and_then(|id| downcast::<crate::flights::FlightsNode>(&self.graph, id))
+            .map(|n| n.rows(now))
+            .unwrap_or_default()
+    }
+
+    /// Tell the tracker roughly where the receiver is.
+    pub fn set_location(&mut self, lat: f64, lon: f64) {
+        self.location = Some((lat, lon));
+        if let Some(n) = self
+            .flights
+            .and_then(|id| self.graph.node_mut(id))
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<crate::flights::FlightsNode>())
+        {
+            n.set_reference(lat, lon);
+        }
     }
 
     /// Bursts written to the log since the receiver started.

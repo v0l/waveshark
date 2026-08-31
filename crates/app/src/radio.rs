@@ -275,6 +275,9 @@ pub enum Cmd {
     /// Write every burst that decodes to this directory, with an optional
     /// budget in megabytes, or stop recording.
     Record(Option<(std::path::PathBuf, Option<u64>)>),
+    /// Where the receiver is, in degrees, which lets the flight tracker
+    /// resolve a position from a single frame instead of waiting for a pair.
+    Location(f64, f64),
     /// Log every burst the front ends detect to this directory, or stop.
     ///
     /// Sent to the radio thread rather than kept in the interface because the
@@ -459,7 +462,7 @@ const DEDUPE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300)
 
 /// Scan a buffer while recording, as the radio thread does. Test support.
 /// A receiver set up to sweep a capture, the way the live one sweeps the air.
-fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) -> anyhow::Result<crate::chain::Receiver> {
+pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) -> anyhow::Result<crate::chain::Receiver> {
     let rate = buf.rate.as_f64();
     // A 1090 MHz capture goes through the wideband path instead of the
     // channel banks, the same way the live receiver decides: 1090 carries
@@ -488,7 +491,7 @@ fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) ->
 /// Blocks are the size the radio delivers, because deduplication depends on
 /// how a burst falls across block boundaries and a whole-file call would not
 /// exercise it.
-fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf) -> Vec<DecodeRecord> {
+pub(crate) fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf) -> Vec<DecodeRecord> {
     let mut dedupe = Dedupe::default();
     let mut out = Vec::new();
     let rate = buf.rate.as_f64().max(1.0);
@@ -627,6 +630,9 @@ pub struct Status {
     pub scan_channels_wide: AtomicU64,
     /// Aircraft whose address has proved itself, when tuned to 1090 MHz.
     pub aircraft: AtomicU64,
+    /// The aircraft the tracker in the graph is holding, republished at the
+    /// display's frame rate.
+    pub aircraft_list: parking_lot::Mutex<Vec<crate::flights::Aircraft>>,
     /// Whether the wideband Mode S path is the one running.
     pub modes_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
@@ -707,6 +713,7 @@ impl Default for Status {
             scan_channels_wide: AtomicU64::new(0),
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
+            aircraft_list: parking_lot::Mutex::new(Vec::new()),
             modes_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
@@ -1156,6 +1163,7 @@ fn run(
                     rx.set_recorder(rec);
                     rebuild = true;
                 }
+                Cmd::Location(lat, lon) => rx.set_location(lat, lon),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
                     rx.set_packet_log(dir.map(crate::packetlog::PacketLog::new));
@@ -1240,6 +1248,14 @@ fn run(
         }
 
         if rx.spectrum_ready() {
+            // Published with the spectrum rather than every block: the table
+            // is redrawn at the display's rate, and cloning it 140 times a
+            // second for a pane nobody may be looking at is wasted work.
+            if rx.modes_on() {
+                let rows = rx.aircraft(std::time::Instant::now());
+                status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
+                *status.aircraft_list.lock() = rows;
+            }
             let f = Frame {
                 db: rx.power_db().to_vec(),
                 center: plan.center.as_f64(),

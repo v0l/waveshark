@@ -328,9 +328,9 @@ impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         for i in inputs {
-            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Bytes) {
+            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames) {
                 return Err(Error::other(
-                    "package_log takes detected bursts or demodulated bytes",
+                    "package_log takes detected bursts or demodulated frames",
                 ));
             }
         }
@@ -354,13 +354,11 @@ impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
                         self.sink.pulses(at, bw, p);
                     }
                 }
-                Payload::Bytes(b) if !b.is_empty() => {
+                Payload::Frames(frames) => {
                     let center = spec.map(|s| s.center.0).unwrap_or(0);
-                    // A byte demodulator writes whole frames back to back and
-                    // every frame it emits is the same length, so the block
-                    // splits evenly. Mode S is the only one so far, at 7 or
-                    // 14 bytes, and its node writes one frame per call.
-                    self.sink.bytes(at, center, b);
+                    for f in frames.iter() {
+                        self.sink.bytes(at, center, f);
+                    }
                 }
                 _ => {}
             }

@@ -90,7 +90,10 @@ impl Simple for ModeSNode {
             ));
         }
         self.det = ModeSDetector::new(rate, self.cfg);
-        Ok(i.spec.with_kind(PortKind::Bytes))
+        // Frames rather than bytes: two short replies written into one
+        // buffer are indistinguishable from one long frame, and a reply's
+        // length is what says which kind of reply it is.
+        Ok(i.spec.with_kind(PortKind::Frames))
     }
 
     fn params(&self) -> Vec<Param> {
@@ -129,7 +132,7 @@ impl Simple for ModeSNode {
         self.book = book.into_inner();
 
         let center = c.inputs[0].spec.center;
-        let out = o.bytes_mut();
+        let out = o.frames_mut();
         for f in &self.frames {
             // Correcting a flipped bit is arithmetic on the frame, so it
             // happens here rather than in the demodulator.
@@ -139,7 +142,7 @@ impl Simple for ModeSNode {
             };
             let Ok(frame) = adsb::parse(&bytes) else { continue };
             self.accepted += 1;
-            out.extend_from_slice(&bytes);
+            out.push(bytes.clone());
             let d = Event::Decoded(decoded(&frame, f, center, &bytes));
             self.hits.push(d.clone());
             c.emit(d);
@@ -237,7 +240,7 @@ mod tests {
     fn the_node_outputs_bytes() {
         let mut n = ModeSNode::default();
         let out = n.negotiate(&spec(2_400_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Bytes);
+        assert_eq!(out.kind, PortKind::Frames);
     }
 
     #[test]

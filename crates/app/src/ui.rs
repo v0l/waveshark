@@ -104,7 +104,8 @@ pub struct App {
     /// itself lives in the graph, on the radio thread.
     packet_log: Option<std::path::PathBuf>,
     /// Aircraft, folded together from the ADS-B packets in the same stream.
-    flights: crate::flights::Flights,
+    /// The most recent aircraft table published by the receiver.
+    aircraft: Vec<crate::flights::Aircraft>,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     saved: crate::session::Session,
@@ -266,7 +267,7 @@ impl Default for App {
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
-            flights: crate::flights::Flights::new(),
+            aircraft: Vec::new(),
             location: None,
             saved: crate::session::Session::default(),
             saved_at: None,
@@ -291,13 +292,7 @@ impl App {
             devices,
             device,
             packet_log: crate::packetlog::PacketLog::default_dir(),
-            flights: {
-                let mut f = crate::flights::Flights::new();
-                if let Some((lat, lon)) = s.location {
-                    f.set_reference(lat, lon);
-                }
-                f
-            },
+            aircraft: Vec::new(),
             center: s.center,
             wf_center: s.center,
             db_center: s.center,
@@ -403,7 +398,8 @@ impl App {
     /// resolves instead of waiting for a matching pair.
     pub fn set_location(&mut self, lat: f64, lon: f64) {
         self.location = Some((lat, lon));
-        self.flights.set_reference(lat, lon);
+        self.location = Some((lat, lon));
+        self.send(Cmd::Location(lat, lon));
     }
 
     /// Turn the packet log off, or point it somewhere other than the default.
@@ -539,6 +535,11 @@ impl App {
 
     fn drain(&mut self) {
         let Some(radio) = &self.radio else { return };
+        // The flight tracker lives in the graph; this is the table it
+        // published on the last frame.
+        if self.view == View::Flights || !self.aircraft.is_empty() {
+            self.aircraft = radio.status.aircraft_list.lock().clone();
+        }
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
         }
@@ -602,7 +603,6 @@ impl App {
     /// this list: these are conclusions, and they are bounded.
     fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
         for rec in batch {
-            self.flights.update(&rec);
             let id = self.next_packet;
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
@@ -2064,11 +2064,14 @@ impl App {
         }
     }
 
-    /// Aircraft, assembled from the ADS-B packets in the same stream the log
-    /// shows. A view over the packet bus, not a second receiver.
+    /// Aircraft, as the tracker in the graph has them.
+    ///
+    /// Read from the receiver rather than assembled here: the tracker is a
+    /// node fed by the demodulator, so it sees every frame rather than the
+    /// ones still in the on-screen packet list.
     fn flights_view(&mut self, ui: &mut egui::Ui) {
         let now = std::time::Instant::now();
-        let active = self.flights.active(now);
+        let active: Vec<&crate::flights::Aircraft> = self.aircraft.iter().collect();
         // The pane runs to the window edge, and a table that starts there is
         // unreadable.
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));

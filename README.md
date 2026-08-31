@@ -396,7 +396,11 @@ protocol that would have claimed it.
 
 The log is a node in the graph, fed by both channel banks and by the 1090 MHz
 decoder, so it stores what those front ends heard rather than what reached the
-screen. `--replay <file>.srpkt` runs the current decoders back over a log:
+screen. The flight list hangs off the same output, for the same reason: a view
+of the traffic is a consumer of what the demodulator produced, not something
+the interface assembles out of the packets that happened to reach it. It keeps
+tracking whether or not anyone is looking at the list, and it sees frames the
+on-screen packet list scrolled past long ago. `--replay <file>.srpkt` runs the current decoders back over a log:
 
 ```
 15:55:47   433.9200 MHz    88 pulses   22.5 dB  Fineoffset-WHx080  temperature_c=18 humidity_pct=61

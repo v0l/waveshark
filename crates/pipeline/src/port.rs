@@ -21,6 +21,14 @@ pub enum PortKind {
     /// DSP, everything downstream is cheap integer parsing, and every OOK or
     /// two-level FSK protocol meets here.
     Pulses,
+    /// Whole frames, each a run of bytes with its own boundaries.
+    ///
+    /// Distinct from [`PortKind::Bytes`] because a byte stream cannot say
+    /// where one frame ends and the next begins, and for a framed protocol
+    /// that is most of the information. Mode S made the point: two 7-byte
+    /// replies written into one buffer came back out of a log as a single
+    /// 14-byte frame that never existed.
+    Frames,
 }
 
 /// A reusable buffer. Stages write into the caller's buffer rather than
@@ -32,6 +40,7 @@ pub enum Payload {
     Soft(Vec<f32>),
     Bytes(Vec<u8>),
     Pulses(Vec<Package>),
+    Frames(Vec<Vec<u8>>),
 }
 
 impl Payload {
@@ -42,6 +51,7 @@ impl Payload {
             PortKind::Soft => Payload::Soft(Vec::new()),
             PortKind::Bytes => Payload::Bytes(Vec::new()),
             PortKind::Pulses => Payload::Pulses(Vec::new()),
+            PortKind::Frames => Payload::Frames(Vec::new()),
         }
     }
 
@@ -52,6 +62,7 @@ impl Payload {
             Payload::Soft(_) => PortKind::Soft,
             Payload::Bytes(_) => PortKind::Bytes,
             Payload::Pulses(_) => PortKind::Pulses,
+            Payload::Frames(_) => PortKind::Frames,
         }
     }
 
@@ -61,6 +72,7 @@ impl Payload {
             Payload::Real(v) | Payload::Soft(v) => v.len(),
             Payload::Bytes(v) => v.len(),
             Payload::Pulses(v) => v.len(),
+            Payload::Frames(v) => v.len(),
         }
     }
 
@@ -75,6 +87,7 @@ impl Payload {
             Payload::Real(v) | Payload::Soft(v) => v.clear(),
             Payload::Bytes(v) => v.clear(),
             Payload::Pulses(v) => v.clear(),
+            Payload::Frames(v) => v.clear(),
         }
     }
 
@@ -103,6 +116,20 @@ impl Payload {
         match self {
             Payload::Pulses(v) => Some(v),
             _ => None,
+        }
+    }
+
+    pub fn as_frames(&self) -> Option<&[Vec<u8>]> {
+        match self {
+            Payload::Frames(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn frames_mut(&mut self) -> &mut Vec<Vec<u8>> {
+        match self {
+            Payload::Frames(v) => v,
+            _ => panic!("payload is {:?}, not Frames", self.kind()),
         }
     }
 

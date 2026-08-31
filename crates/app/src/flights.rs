@@ -10,7 +10,6 @@
 //! they arrive interleaved with everyone else's. Turning that into a row per
 //! aircraft is what a tracker is.
 
-use common::Value;
 use decode::adsb;
 
 /// How long an aircraft stays in the list after its last frame.
@@ -91,19 +90,16 @@ impl Flights {
         v
     }
 
-    /// Fold one packet in, ignoring anything that is not an aircraft.
-    pub fn update(&mut self, rec: &crate::radio::DecodeRecord) {
-        if !rec.model.starts_with("ADSB-") {
-            return;
-        }
-        let Some(icao) = field(rec, "icao").and_then(|v| match v {
-            Value::Text(t) => u32::from_str_radix(&t, 16).ok(),
-            _ => None,
-        }) else {
-            return;
-        };
-
-        let at = rec.at;
+    /// Fold one Mode S frame in.
+    ///
+    /// Takes the decoded frame rather than a packet from the log, because the
+    /// tracker is a node in the graph now and what reaches it is what the
+    /// demodulator produced. That is also less indirection than it was: the
+    /// fields it wants are the ones `adsb::parse` already recovered, and
+    /// looking them up again by name in a map only added a way to misspell
+    /// one.
+    pub fn update(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
+        let Some(icao) = frame.icao else { return };
         let i = match self.seen.iter().position(|a| a.icao == icao) {
             Some(i) => i,
             None => {
@@ -123,28 +119,34 @@ impl Flights {
         a.messages += 1;
         a.last = at;
 
-        if let Some(Value::Text(c)) = field(rec, "callsign") {
-            a.callsign = Some(c);
-        }
-        if let Some(Value::Int(alt)) = field(rec, "altitude_ft") {
-            a.altitude_ft = Some(alt as i32);
-        }
-        if let Some(Value::Float(s)) = field(rec, "ground_speed_kt") {
-            a.ground_speed_kt = Some(s);
-        }
-        if let Some(Value::Float(t)) = field(rec, "track_deg") {
-            a.track_deg = Some(t);
-        }
-        if let Some(Value::Int(v)) = field(rec, "vertical_rate_fpm") {
-            a.vertical_rate_fpm = Some(v as i32);
-        }
-
-        let (Some(Value::Int(lat)), Some(Value::Int(lon)), Some(Value::Bool(odd))) =
-            (field(rec, "lat_cpr"), field(rec, "lon_cpr"), field(rec, "cpr_odd"))
-        else {
-            return;
+        let (cpr, odd) = match &frame.kind {
+            adsb::Message::Identification { callsign, .. } => {
+                a.callsign = Some(callsign.clone());
+                return;
+            }
+            adsb::Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
+                a.ground_speed_kt = Some(*ground_speed_kt);
+                a.track_deg = Some(*track_deg);
+                a.vertical_rate_fpm = Some(*vertical_rate_fpm);
+                return;
+            }
+            adsb::Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
+                if let Some(alt) = altitude_ft {
+                    a.altitude_ft = Some(*alt);
+                }
+                ((*lat_cpr, *lon_cpr), *odd)
+            }
+            adsb::Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
+                // On the ground, so the altitude the table shows should not
+                // be whatever it was reporting on the way down.
+                a.altitude_ft = Some(0);
+                ((*lat_cpr, *lon_cpr), *odd)
+            }
+            // Counted, because a frame from an aircraft is evidence it is
+            // there even when this decoder cannot read it.
+            adsb::Message::Unsupported { .. } | adsb::Message::ShortReply => return,
         };
-        let cpr = (lat as u32, lon as u32);
+
         if odd {
             a.odd = Some((cpr, at));
         } else {
@@ -166,86 +168,115 @@ impl Flights {
     }
 }
 
-fn field(rec: &crate::radio::DecodeRecord, name: &str) -> Option<Value> {
-    rec.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+/// The tracker as a node, fed by the Mode S demodulator.
+///
+/// It hangs off the same output the packet log does, for the same reason: a
+/// view of the traffic is a consumer of what the demodulator produced, not
+/// something the interface assembles out of packets that happened to reach
+/// it. Attached here it appears in the chain view, it keeps running whether
+/// or not anyone is looking at the list, and it sees frames the on-screen
+/// packet list has long since scrolled past.
+///
+/// The table is read back by downcasting rather than through events, because
+/// it is a thing that *is* rather than a thing that happened: a display wants
+/// the current aircraft on every frame, not a stream of changes to fold.
+pub struct FlightsNode {
+    flights: Flights,
+}
+
+impl Default for FlightsNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlightsNode {
+    pub fn new() -> Self {
+        Self { flights: Flights::new() }
+    }
+
+    pub fn set_reference(&mut self, lat: f64, lon: f64) {
+        self.flights.set_reference(lat, lon);
+    }
+
+    /// The aircraft heard recently, as the table wants them.
+    pub fn rows(&self, now: std::time::Instant) -> Vec<Aircraft> {
+        self.flights.active(now).into_iter().cloned().collect()
+    }
+
+}
+
+impl pipeline::node::Simple for FlightsNode {
+    fn name(&self) -> &str {
+        "flights"
+    }
+
+    fn is_sink(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, i: &pipeline::node::PortSpec) -> common::Result<pipeline::StreamSpec> {
+        if i.spec.kind != pipeline::PortKind::Frames {
+            return Err(common::Error::other("flights needs demodulated frames"));
+        }
+        Ok(i.spec)
+    }
+
+    fn process(
+        &mut self,
+        i: &pipeline::port::Payload,
+        _o: &mut pipeline::port::Payload,
+        _c: &mut pipeline::node::NodeCtx<'_>,
+    ) -> common::Result<()> {
+        // Stamped once for the block: an aircraft transmits several times a
+        // second and the table shows ages in seconds, so splitting hairs
+        // inside a seven millisecond block would be false precision.
+        let at = std::time::Instant::now();
+        for frame in i.as_frames().unwrap_or(&[]) {
+            let Ok(f) = adsb::parse(frame) else { continue };
+            self.flights.update(&f, at);
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        // Retuning away from 1090 and back is a different set of aircraft
+        // overhead by the time it returns.
+        self.flights = Flights::new();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::radio::DecodeRecord;
 
-    /// A packet as the ADS-B node emits one.
+    /// One of the published worked-example frames, decoded the way the node
+    /// decodes what the demodulator hands it.
     ///
-    /// Built here rather than run through the decoder: a view is defined by
-    /// the fields it reads, and a test that goes through a demodulator to
-    /// produce them is testing the demodulator. That the names line up with
-    /// what the node actually emits is what `capture_tests` below checks, on
-    /// real RF.
-    fn packet(
-        model: &str,
-        icao: &str,
-        fields: &[(&str, Value)],
-        at: std::time::Instant,
-    ) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(1_090_000_000.0, model);
-        r.at = at;
-        r.fields = std::iter::once(("icao".to_string(), Value::Text(icao.into())))
-            .chain(fields.iter().map(|(k, v)| (k.to_string(), v.clone())))
+    /// The real frames rather than a hand-built field map: the tracker takes
+    /// what `adsb::parse` produced, so a test that starts from the same bytes
+    /// the air carries is testing the thing that runs.
+    fn frame(hex: &str) -> adsb::Frame {
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
             .collect();
-        r
+        adsb::parse(&bytes).expect("a frame")
     }
 
-    /// Field values from the published worked examples, the same frames the
-    /// decoder's own tests use.
-    fn ident(at: std::time::Instant) -> DecodeRecord {
-        packet(
-            "ADSB-Identification",
-            "4840d6",
-            &[("callsign", Value::Text("KLM1023".into()))],
-            at,
-        )
+    fn ident() -> adsb::Frame {
+        frame("8D4840D6202CC371C32CE0576098")
     }
 
-    fn pos_even(at: std::time::Instant) -> DecodeRecord {
-        packet(
-            "ADSB-Position",
-            "40621d",
-            &[
-                ("altitude_ft", Value::Int(38_000)),
-                ("cpr_odd", Value::Bool(false)),
-                ("lat_cpr", Value::Int(93_000)),
-                ("lon_cpr", Value::Int(51_372)),
-            ],
-            at,
-        )
+    fn pos_even() -> adsb::Frame {
+        frame("8D40621D58C382D690C8AC2863A7")
     }
 
-    fn pos_odd(at: std::time::Instant) -> DecodeRecord {
-        packet(
-            "ADSB-Position",
-            "40621d",
-            &[
-                ("altitude_ft", Value::Int(38_000)),
-                ("cpr_odd", Value::Bool(true)),
-                ("lat_cpr", Value::Int(74_158)),
-                ("lon_cpr", Value::Int(50_194)),
-            ],
-            at,
-        )
+    fn pos_odd() -> adsb::Frame {
+        frame("8D40621D58C386435CC412692AD6")
     }
 
-    fn velocity(at: std::time::Instant) -> DecodeRecord {
-        packet(
-            "ADSB-Velocity",
-            "485020",
-            &[
-                ("ground_speed_kt", Value::Float(159.2)),
-                ("track_deg", Value::Float(182.88)),
-                ("vertical_rate_fpm", Value::Int(-832)),
-            ],
-            at,
-        )
+    fn velocity() -> adsb::Frame {
+        frame("8D485020994409940838175B284F")
     }
 
     #[test]
@@ -255,8 +286,8 @@ mod tests {
         // a list nobody can read.
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        f.update(&ident(now));
-        f.update(&ident(now));
+        f.update(&ident(), now);
+        f.update(&ident(), now);
         let active = f.active(now);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].callsign.as_deref(), Some("KLM1023"));
@@ -269,9 +300,9 @@ mod tests {
         // long as it hears both parities close together.
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        f.update(&pos_even(now));
+        f.update(&pos_even(), now);
         assert!(f.active(now)[0].position.is_none(), "one parity says nothing");
-        f.update(&pos_odd(now + std::time::Duration::from_millis(500)));
+        f.update(&pos_odd(), now + std::time::Duration::from_millis(500));
         let (lat, lon) = f.active(now)[0].position.expect("a position");
         // Reported at the newer frame's position, not the older one's: the
         // aircraft is where it last said it was. These two frames were
@@ -286,8 +317,8 @@ mod tests {
         // frames a minute apart puts it somewhere it never was.
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        f.update(&pos_even(now));
-        f.update(&pos_odd(now + std::time::Duration::from_secs(45)));
+        f.update(&pos_even(), now);
+        f.update(&pos_odd(), now + std::time::Duration::from_secs(45));
         assert!(f.active(now + std::time::Duration::from_secs(45))[0].position.is_none());
     }
 
@@ -296,7 +327,7 @@ mod tests {
         let now = std::time::Instant::now();
         let mut f = Flights::new();
         f.set_reference(52.258, 3.918);
-        f.update(&pos_even(now));
+        f.update(&pos_even(), now);
         let (lat, lon) = f.active(now)[0].position.expect("a position");
         assert!((lat - 52.2572).abs() < 0.01, "latitude {lat}");
         assert!((lon - 3.9194).abs() < 0.01, "longitude {lon}");
@@ -306,7 +337,7 @@ mod tests {
     fn velocity_and_altitude_land_on_the_same_row() {
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        f.update(&velocity(now));
+        f.update(&velocity(), now);
         let a = &f.active(now)[0];
         assert_eq!(a.icao, 0x485020);
         assert!((a.ground_speed_kt.unwrap() - 159.2).abs() < 0.5);
@@ -317,7 +348,7 @@ mod tests {
     fn aircraft_that_stop_transmitting_leave_the_list() {
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        f.update(&ident(now));
+        f.update(&ident(), now);
         assert_eq!(f.active(now).len(), 1);
         assert!(f.active(now + FORGET + std::time::Duration::from_secs(1)).is_empty());
     }
@@ -327,19 +358,17 @@ mod tests {
         // The tracker shares its input with every sensor on 433 MHz.
         let now = std::time::Instant::now();
         let mut f = Flights::new();
-        let mut weather = DecodeRecord::for_test(433_920_000.0, "Fineoffset-WHx080");
-        weather.at = now;
-        f.update(&weather);
+        // A short reply carries no address, so there is nothing to track.
+        f.update(&frame("5D4007FB3E0376"), now);
         assert!(f.active(now).is_empty());
     }
 }
 
 #[cfg(test)]
 mod capture_tests {
-    use super::*;
 
-    /// The whole path on real RF: recorded 1090 MHz, through the demodulator
-    /// and the frame parser, into packets, into aircraft.
+    /// The whole path on real RF: recorded 1090 MHz, through the graph, into
+    /// the tracker hanging off the demodulator.
     ///
     /// Skips when the fixture is absent, like every other capture test.
     #[test]
@@ -350,21 +379,19 @@ mod capture_tests {
             eprintln!("skipping: run testdata/fetch.sh to enable");
             return;
         }
-        let records = crate::radio::replay(&path).expect("replay the capture");
-        assert!(!records.is_empty(), "no packets from a capture full of them");
-
-        let mut f = Flights::new();
+        let buf = sources::FileSource::open(&path).unwrap().read_all().unwrap();
+        let mut rx = crate::radio::replay_receiver(&buf, None).expect("a receiver");
         // Recorded here, so the receiver's own position resolves the frames
         // that arrived without a matching parity.
-        f.set_reference(53.64, -6.65);
-        for r in &records {
-            f.update(r);
-        }
-        let now = records.last().unwrap().at;
-        let active = f.active(now);
+        rx.set_location(53.64, -6.65);
+        let records = crate::radio::replay_blocks(&mut rx, &buf);
+        assert!(!records.is_empty(), "no packets from a capture full of them");
+
+        let now = std::time::Instant::now();
+        let active = rx.aircraft(now);
         assert_eq!(active.len(), 1, "expected one aircraft, got {}", active.len());
 
-        let a = active[0];
+        let a = &active[0];
         assert_eq!(a.icao, 0x4b1880);
         assert_eq!(a.callsign.as_deref(), Some("SWR14V"));
         assert_eq!(a.altitude_ft, Some(36_000));
