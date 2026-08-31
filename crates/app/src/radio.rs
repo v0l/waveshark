@@ -505,6 +505,16 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
 /// Blocks are the size the radio delivers, because deduplication depends on
 /// how a burst falls across block boundaries and a whole-file call would not
 /// exercise it.
+/// When a block's signal arrived, given the moment its processing finished.
+///
+/// A decode is stamped with the start of the block that carried it rather than
+/// the moment the decoder finished with it. The burst is somewhere inside
+/// those samples, and a stamp taken afterwards drifts by however long decoding
+/// took, which on a loaded machine is longer than the block itself.
+fn block_start(finished: std::time::Instant, samples: usize, rate: f64) -> std::time::Instant {
+    finished - std::time::Duration::from_secs_f64(samples as f64 / rate.max(1.0))
+}
+
 pub(crate) fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf) -> Vec<DecodeRecord> {
     let mut dedupe = Dedupe::default();
     let mut out = Vec::new();
@@ -513,8 +523,7 @@ pub(crate) fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf
         if rx.process(block).is_err() {
             break;
         }
-        let at = std::time::Instant::now()
-            - std::time::Duration::from_secs_f64(block.len() as f64 / rate);
+        let at = block_start(std::time::Instant::now(), block.len(), rate);
         let mut found = rx.decodes(at);
         dedupe_neighbours(&mut found);
         let seen = out.len();
@@ -1884,20 +1893,38 @@ pub(crate) mod tests {
 
     #[test]
     fn a_decode_is_stamped_when_the_block_started_not_when_it_finished() {
+        // Arithmetic rather than a race against the clock. This used to
+        // compare the stamp against an instant taken before the whole replay,
+        // which quietly asserted that decoding beat real time: every block
+        // processed before the first decode had to fit inside one block's
+        // worth of signal. On a loaded machine, or in a debug build, it failed
+        // for a reason that had nothing to do with stamping, which is the
+        // other test's job.
+        let finished = std::time::Instant::now();
+        let at = block_start(finished, 16_384, 250_000.0);
+        // 16384 samples at 250 kS/s is 65.536 ms of signal.
+        let back = finished.duration_since(at).as_secs_f64();
+        assert!((back - 0.065_536).abs() < 1e-9, "stamped {back}s before the block ended");
+        assert!(at < finished, "the stamp must precede the block it came from");
+        // A rate of zero must not divide by it.
+        assert!(block_start(finished, 16_384, 0.0) < finished);
+    }
+
+    /// And the same thing where it is actually used, which no arithmetic test
+    /// can check: a replayed decode must not be stamped in the future.
+    #[test]
+    fn a_replayed_decode_is_not_stamped_in_the_future() {
         let Some(buf) = fixture() else {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
-        let t0 = std::time::Instant::now();
         let out = replay_blocks(&mut rx, &buf);
+        let done = std::time::Instant::now();
         let rec = out.first().expect("a decode");
-        // 16384 samples at 250 kS/s is 65 ms of signal, and the packet is
-        // somewhere inside that, so the stamp must precede the call that
-        // produced it by about a block.
-        let back = t0.duration_since(rec.at).as_secs_f64();
-        assert!(back > 0.0, "stamped {back}s after the block it came from");
+        assert!(rec.at < done, "a decode is stamped after the replay that produced it");
     }
+
 
     #[test]
     fn retuning_clears_state_rather_than_carrying_it_across() {
@@ -1998,6 +2025,15 @@ pub(crate) mod tests {
         // this one reads 6.4x here and 3.0x on a two core VM. It is a guard
         // against a chain that has gone accidentally quadratic, not a
         // performance target. Real numbers come from --bench-audio.
+        // Only meaningful in a release build. The workspace optimises
+        // dependencies in dev but not the crate under test, so this code runs
+        // unoptimised here and reads a fraction of real time no matter how
+        // healthy the chain is. CI runs the suite with --release, which is
+        // where the guard bites.
+        if cfg!(debug_assertions) {
+            eprintln!("skipping: throughput is only measurable in a release build");
+            return;
+        }
         let rate = 2_304_000.0;
         let b = block(131_072);
         for mode in [Demod::Wfm, Demod::Nfm, Demod::Am, Demod::Usb, Demod::Cw] {

@@ -144,12 +144,26 @@ impl StereoDecoder {
     }
 
     /// Decode one block of multiplex into left and right.
-    pub fn process(&mut self, mpx: &[f32], left: &mut Vec<f32>, right: &mut Vec<f32>) {
+    /// Run the pilot loop over a block, recording the phase at every sample.
+    ///
+    /// Always run, even when only mono audio is wanted. RDS is locked to the
+    /// pilot's third harmonic and takes its symbol clock from the pilot
+    /// divided by sixteen, so a receiver that stops tracking the pilot
+    /// because the listener asked for mono stops decoding RDS as well. That
+    /// is not what mono means, and it used to be what happened: `phases` was
+    /// left empty, and the RDS demodulator zips against it, so it silently
+    /// read nothing at all.
+    ///
+    /// `want_diff` builds the doubled carrier the difference arm needs, which
+    /// mono has no use for.
+    fn track(&mut self, mpx: &[f32], want_diff: bool) {
         let inc = TAU / self.rate;
         self.mixed.clear();
-        self.mixed.reserve(mpx.len());
         self.phases.clear();
         self.phases.reserve(mpx.len());
+        if want_diff {
+            self.mixed.reserve(mpx.len());
+        }
 
         for &x in mpx {
             let v = x as f64;
@@ -182,8 +196,14 @@ impl StereoDecoder {
 
             // Coherent demodulation by the second harmonic. The factor of two
             // undoes the half that falls out of the product.
-            self.mixed.push((2.0 * v * (2.0 * phase).cos()) as f32);
+            if want_diff {
+                self.mixed.push((2.0 * v * (2.0 * phase).cos()) as f32);
+            }
         }
+    }
+
+    pub fn process(&mut self, mpx: &[f32], left: &mut Vec<f32>, right: &mut Vec<f32>) {
+        self.track(mpx, true);
 
         self.sum.clear();
         self.diff.clear();
@@ -215,6 +235,9 @@ impl StereoDecoder {
 
     /// Mono output, for when there is no pilot or stereo is not wanted.
     pub fn process_mono(&mut self, mpx: &[f32], out: &mut Vec<f32>) {
+        // The pilot loop still runs: see `track`. Only the difference arm is
+        // skipped, which is the part mono actually does not want.
+        self.track(mpx, false);
         out.clear();
         self.sum_lp.process(mpx, out);
     }
@@ -225,6 +248,50 @@ mod tests {
     use super::*;
 
     const RATE: f64 = 288_000.0;
+
+    /// Mono is an audio decision, not an RDS one.
+    ///
+    /// The pilot phase is what RDS mixes and clocks against, and the RDS
+    /// demodulator zips its input against it, so a phase buffer left empty
+    /// does not fail loudly: it decodes nothing and looks like a station with
+    /// no RDS. Asking for mono used to do exactly that.
+    #[test]
+    fn mono_still_tracks_the_pilot_for_rds() {
+        let n = 4096;
+        let l = tone(n, 1000.0, 0.4, 0.0);
+        let mpx = multiplex(&l, &l, 0.1);
+        let mut d = StereoDecoder::new(RATE);
+        let mut out = Vec::new();
+        d.process_mono(&mpx, &mut out);
+        assert_eq!(
+            d.phases().len(),
+            mpx.len(),
+            "mono left the pilot phase unusable, so RDS would read nothing"
+        );
+        assert!(!out.is_empty(), "mono produced no audio");
+    }
+
+    /// The two paths must agree about the pilot, or switching to mono would
+    /// make the loop start again from nothing.
+    #[test]
+    fn mono_and_stereo_track_the_pilot_the_same_way() {
+        let n = 8192;
+        let l = tone(n, 1000.0, 0.4, 0.0);
+        let r = tone(n, 700.0, 0.4, 1.0);
+        let mpx = multiplex(&l, &r, 0.1);
+        let (mut a, mut b) = (StereoDecoder::new(RATE), StereoDecoder::new(RATE));
+        let (mut x, mut y, mut z) = (Vec::new(), Vec::new(), Vec::new());
+        a.process(&mpx, &mut x, &mut y);
+        b.process_mono(&mpx, &mut z);
+        assert_eq!(a.phases().len(), b.phases().len());
+        let worst = a
+            .phases()
+            .iter()
+            .zip(b.phases())
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f64, f64::max);
+        assert!(worst < 1e-9, "the two paths disagree about the pilot by {worst}");
+    }
 
     fn tone(n: usize, hz: f64, amp: f64, phase: f64) -> Vec<f64> {
         (0..n).map(|i| amp * (TAU * hz * i as f64 / RATE + phase).sin()).collect()
