@@ -20,9 +20,14 @@ pub enum Coding {
     /// bit. Short gap is 0, long gap is 1, again matching rtl_433, whose PPM
     /// slicer uses the opposite polarity to its PWM one.
     Ppm,
-    /// Manchester: each bit is a transition at mid-symbol. Encoded here over
-    /// mark/gap pairs, with the convention that a full-length mark or gap is
-    /// two half-bits.
+    /// Manchester: each bit is a transition at mid-symbol. The signal is read
+    /// as alternating half-symbol runs; a full-length mark or gap is two
+    /// half-bits. This is the rtl_433 convention (plain IEEE Manchester),
+    /// where a bit is a low-then-high or high-then-low half-pair. The slicer
+    /// pairs from the package's first mark, so it is aligned when that mark is
+    /// the first half of a symbol; a decoder finds its sync across the
+    /// produced stream (it may start a half-symbol in), the way
+    /// `OregonV3::decode` searches for its sync word.
     Manchester,
     /// Non-return-to-zero: mark and gap lengths are integer multiples of one
     /// symbol period, marks being 1 and gaps 0.
@@ -161,26 +166,34 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
     if pkg.pulses.len() < 4 {
         return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
     }
-    // Flatten into alternating mark/gap half-symbol runs, then read a bit at
-    // each symbol boundary from the level of the first half.
-    let half = t.short_us;
+    let half = t.short_us.max(1);
+    // Flatten the alternating mark/gap runs into a stream of half-symbol
+    // levels, then read a bit from each pair: a level transition means the
+    // second half carries the bit (bit 1 = low-then-high, bit 0 = the
+    // reverse). A same-level pair is not a Manchester symbol, so it is dropped
+    // rather than guessed.
     let mut levels: Vec<bool> = Vec::new();
     for (i, p) in pkg.pulses.iter().enumerate() {
-        let m = ((p.mark as f32 / half as f32).round() as usize).clamp(1, 4);
-        levels.extend(std::iter::repeat_n(true, m));
+        levels.extend(std::iter::repeat_n(true, manchester_halves(p.mark, half)));
         if i + 1 < pkg.pulses.len() {
-            let g = ((p.gap as f32 / half as f32).round() as usize).clamp(1, 4);
-            levels.extend(std::iter::repeat_n(false, g));
+            levels.extend(std::iter::repeat_n(false, manchester_halves(p.gap, half)));
         }
     }
     let mut b = BitBuffer::with_capacity(levels.len() / 2);
     for pair in levels.chunks_exact(2) {
-        // A rising half-pair is one symbol value, a falling pair the other.
         if pair[0] != pair[1] {
             b.push(pair[1]);
         }
     }
     Ok(b)
+}
+
+/// Number of half-symbols a mark or gap spans. A run narrower than half a
+/// symbol (including the zero-width edge some envelope detectors emit) spans
+/// nothing; manufacturing a level for it would turn a spurious pulse into a
+/// fabricated bit.
+fn manchester_halves(width_us: u32, half: u32) -> usize {
+    (width_us as f32 / half as f32).round() as usize
 }
 
 fn slice_nrz(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
@@ -311,6 +324,97 @@ mod tests {
             slice(&p, &t),
             Err(SliceError::TooFewPulses { got: 3, need: 8 })
         );
+    }
+
+    // Build a Package from a bit stream using plain IEEE Manchester: bit 1 is
+    // a low-then-high half-pair (rising at the symbol center), bit 0 is
+    // high-then-low. Consecutive halves alternate as on the wire; a same-level
+    // boundary (a long run) appears where equal bits meet.
+    fn manchester_ieee(bits: &[bool], half: u32) -> Package {
+        let mut lv: Vec<bool> = Vec::new();
+        for &b in bits {
+            lv.push(!b); // first half
+            lv.push(b);  // second half
+        }
+        let mut runs: Vec<(bool, u32)> = Vec::new();
+        for &level in &lv {
+            if let Some(last) = runs.last_mut() {
+                if last.0 == level {
+                    last.1 += 1;
+                    continue;
+                }
+            }
+            runs.push((level, 1));
+        }
+        // Convert to (mark_us, gap_us) pairs. The package starts on a mark, so
+        // the first run is high; a leading low (which the envelope detector
+        // sees only as the pre-first-mark gap) is dropped, which is the phase
+        // choice the slicer makes.
+        let mut pulses: Vec<(u32, u32)> = Vec::new();
+        let mut idx = 0;
+        let _leading = if runs[0].0 { 0 } else { runs[0].1; idx = 1; 0 };
+        loop {
+            let mut mw = 0;
+            while idx < runs.len() && runs[idx].0 {
+                mw += runs[idx].1;
+                idx += 1;
+            }
+            let mut gw = 0;
+            while idx < runs.len() && !runs[idx].0 {
+                gw += runs[idx].1;
+                idx += 1;
+            }
+            if mw == 0 {
+                break; // trailing gap only
+            }
+            pulses.push((mw * half, gw * half));
+            if idx >= runs.len() {
+                break;
+            }
+        }
+        // Terminator gap so the slicer's final gap check is exercised.
+        if *runs.last().map(|(l, _)| l).unwrap_or(&false) {
+            pulses.push((0, half));
+        }
+        Package {
+            pulses: pulses.into_iter().map(|(m, g)| Pulse { mark: m, gap: g }).collect(),
+            snr_db: 20.0,
+            rssi_dbfs: -12.0,
+            center_hz: 0,
+            start_sample: 0,
+        }
+    }
+
+    #[test]
+    fn manchester_recovers_ieee_bits_when_aligned() {
+        // The slicer pairs from the package's first mark, so it is aligned when
+        // that mark is the first half of a symbol, i.e. the first bit is 0
+        // (high-then-low). Both alternating bits (boundary transitions) and
+        // equal bits (long runs) must come back intact.
+        let bits: Vec<bool> = vec![false, true, true, false, true, false, false, true];
+        let p = manchester_ieee(&bits, 640);
+        let t = Timing { coding: Coding::Manchester, short_us: 640, long_us: 1280, ..Timing::pwm(640, 1280, 0) };
+        let out = slice(&p, &t).unwrap();
+        assert_eq!(out.len(), bits.len(), "bit count");
+        for (i, &b) in bits.iter().enumerate() {
+            assert_eq!(out.get(i), Some(b), "bit {i}");
+        }
+    }
+
+    #[test]
+    fn manchester_zero_width_edge_adds_no_bit() {
+        // Some envelope detectors emit a zero-width edge. It must contribute no
+        // level and therefore no bit, not a fabricated one.
+        let t = Timing { coding: Coding::Manchester, short_us: 640, long_us: 1280, ..Timing::pwm(640, 1280, 0) };
+        let bits = vec![false, true, true, false, true, false, false, true];
+        let mut p = manchester_ieee(&bits, 640);
+        let clean = slice(&p, &t).unwrap();
+        assert_eq!(clean.len(), 8);
+        // Prepend a degenerate pulse (zero mark and zero gap): it must
+        // contribute no level and therefore no bit.
+        p.pulses.insert(0, Pulse { mark: 0, gap: 0 });
+        let out = slice(&p, &t).unwrap();
+        assert_eq!(out.len(), 8, "zero-width edge became a bit");
     }
 
     #[test]
