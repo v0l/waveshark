@@ -202,10 +202,14 @@ pub struct Plan {
     pub refresh_hz: f32,
     pub fft: usize,
     pub channels: Vec<ChannelSpec>,
-    /// The front end to run, resolved from the scanner table for this
-    /// tuning. `None` is a band nothing is configured for, which costs
-    /// nothing rather than sweeping it for sensors that are not there.
-    pub front: Option<Front>,
+    /// The front ends to run, from the scanner table for this span. Empty is
+    /// a span nothing is configured for, which costs nothing rather than
+    /// sweeping it for sensors that are not there.
+    ///
+    /// Several, because a span is wide: a couple of megahertz of VHF can hold
+    /// a pager channel and a packet channel at once, and both are one
+    /// narrowband demodulator each.
+    pub fronts: Vec<Front>,
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
@@ -404,32 +408,50 @@ impl Receiver {
         b.connect(head.o(), spectrum.i());
         roles.push(Role::Spectrum);
 
-        // One front end, chosen by the scanner table rather than by a chain
-        // of band tests here. Which demodulator belongs on which frequency is
-        // configuration, not structure: see `scanners.rs`.
+        // The front ends the scanner table put on this span, rather than a
+        // chain of band tests here. Which demodulator belongs on which
+        // frequency is configuration, not structure: see `scanners.rs`.
         let (mut modes, mut ais, mut aprs, mut pocsag) = (None, None, None, None);
         let mut banks = Vec::new();
-        match &plan.front {
-            None => {}
-            Some(Front::ModeS) => {
+        let mut refused = None;
+        // Everything that is not a bank, in the order the table listed it, so
+        // the bus can be connected to all of them without asking which kinds
+        // happen to be running.
+        let mut narrowband: Vec<NodeId> = Vec::new();
+        // A single-channel front end whose channel does not clear the span
+        // edge by its own bandwidth is dropped rather than built. The node
+        // would refuse it at negotiation and take the whole graph down with
+        // it, and one badly placed block should cost its own front end, not
+        // the receiver.
+        let fits = |hz: f64, width: f64| {
+            (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width
+        };
+        for front in &plan.fronts {
+            match front {
+            Front::ModeS => {
                 let id = match pool.remove(&Role::ModeS) {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
                 };
                 b.connect(head.o(), id.i());
                 roles.push(Role::ModeS);
+                narrowband.push(id);
                 modes = Some(id);
             }
-            Some(Front::Ais) => {
+            Front::Ais => {
                 let id = match pool.remove(&Role::Ais) {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
                 };
                 b.connect(head.o(), id.i());
                 roles.push(Role::Ais);
+                narrowband.push(id);
                 ais = Some(id);
             }
-            Some(Front::Aprs(hz)) => {
+            Front::Aprs(hz) if !fits(*hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ) => {
+                refused = Some(format!("{:.4} MHz is too near the span edge for aprs", hz / 1e6));
+            }
+            Front::Aprs(hz) => {
                 let role = Role::Aprs(*hz as u64);
                 let id = match pool.remove(&role) {
                     Some(p) => b.add_existing(p),
@@ -440,9 +462,14 @@ impl Receiver {
                 };
                 b.connect(head.o(), id.i());
                 roles.push(role);
+                narrowband.push(id);
                 aprs = Some(id);
             }
-            Some(Front::Pocsag(hz)) => {
+            Front::Pocsag(hz) if !fits(*hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ) => {
+                refused =
+                    Some(format!("{:.4} MHz is too near the span edge for pocsag", hz / 1e6));
+            }
+            Front::Pocsag(hz) => {
                 let role = Role::Pocsag(*hz as u64);
                 let id = match pool.remove(&role) {
                     Some(p) => b.add_existing(p),
@@ -453,9 +480,10 @@ impl Receiver {
                 };
                 b.connect(head.o(), id.i());
                 roles.push(role);
+                narrowband.push(id);
                 pocsag = Some(id);
             }
-            Some(Front::Banks(widths)) => {
+            Front::Banks(widths) => {
                 for &width in widths {
                     // Which front end runs in a channel follows from its
                     // width: the narrow bank is where OOK is worth detecting
@@ -475,10 +503,10 @@ impl Receiver {
                     banks.push((id, width));
                 }
             }
+            }
         }
 
         let mut chans: Vec<Chan> = Vec::new();
-        let mut refused = None;
         for spec in &plan.channels {
             // A channel the span no longer covers cannot be demodulated: the
             // mixer would shift a frequency the radio never sampled down to
@@ -527,10 +555,7 @@ impl Receiver {
         let sources: Vec<Out> = banks
             .iter()
             .map(|(id, _)| id.o())
-            .chain(modes.map(|m| m.o()))
-            .chain(ais.map(|a| a.o()))
-            .chain(aprs.map(|a| a.o()))
-            .chain(pocsag.map(|p| p.o()))
+            .chain(narrowband.iter().map(|n| n.o()))
             .chain(feeds.iter().map(|f| f.o()))
             .collect();
         if !sources.is_empty() {
@@ -584,10 +609,10 @@ impl Receiver {
         // A feed is usually the reason to run this at all on a band that is
         // neither 1090 nor 162.
         let mut tracks = None;
-        let makes_tracks = matches!(
-            plan.front,
-            Some(Front::ModeS) | Some(Front::Ais) | Some(Front::Aprs(_))
-        );
+        let makes_tracks = plan
+            .fronts
+            .iter()
+            .any(|f| matches!(f, Front::ModeS | Front::Ais | Front::Aprs(_)));
         if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
@@ -1228,7 +1253,7 @@ mod tests {
             refresh_hz: 30.0,
             fft: 1024,
             channels: Vec::new(),
-            front: Some(Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())),
+            fronts: vec![Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())],
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1378,7 +1403,7 @@ mod tests {
         // rebuilt for every new source, and would see nothing when the source
         // it knew about was not running.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.front = Some(Front::ModeS);
+        p.fronts = vec![Front::ModeS];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1399,7 +1424,7 @@ mod tests {
     #[test]
     fn ais_reaches_the_tracker_through_the_bus_like_mode_s_does() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.front = Some(Front::Ais);
+        p.fronts = vec![Front::Ais];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.ais_on(), "the AIS decoder is not running");
         let topo = rx.topology();
@@ -1418,13 +1443,53 @@ mod tests {
         assert!(from_bus, "the tracker is not fed by the bus");
     }
 
+    /// A span wide enough for two protocols runs both of them, and both
+    /// reach the same bus.
+    ///
+    /// This is what the span rather than the dial deciding actually buys: at
+    /// 2.4 MS/s in the middle of VHF the receiver has a packet channel and a
+    /// pager channel in front of it at once, and hearing only one of them
+    /// because its block was written first was never a decision anybody made.
+    #[test]
+    fn two_front_ends_on_one_span_both_reach_the_bus() {
+        let mut p = plan(2_400_000.0, Hz(144_400_000));
+        p.fronts = vec![Front::Aprs(144_800_000.0), Front::Pocsag(153_350_000.0)];
+        // The pager channel is nine megahertz away, well outside this span,
+        // so it is dropped rather than built into a node that would refuse
+        // its own input and take the graph down.
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.aprs_on());
+        assert!(!rx.pocsag_on(), "a channel outside the span must not be built");
+        assert!(rx.refused.is_some(), "and the interface has to be told why");
+
+        // Both inside the span now.
+        let mut p = plan(2_400_000.0, Hz(144_400_000));
+        p.fronts = vec![Front::Aprs(144_800_000.0), Front::Pocsag(145_000_000.0)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.aprs_on() && rx.pocsag_on(), "both front ends should run");
+        let topo = rx.topology();
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        for label in ["144.800 APRS", "145.0000 pager"] {
+            let node = topo
+                .nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap_or_else(|| panic!("no {label} node"));
+            let to_bus = node
+                .outputs
+                .iter()
+                .any(|(slot, _)| bus.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+            assert!(to_bus, "{label} does not reach the bus");
+        }
+    }
+
     /// The banks understand nothing on 162 MHz, so they must not run there:
     /// it would be a pass over every sample to invent unknown bursts out of
     /// GMSK.
     #[test]
     fn the_ism_banks_do_not_run_on_the_ais_band() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.front = Some(Front::Ais);
+        p.fronts = vec![Front::Ais];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         assert!(
@@ -1486,8 +1551,8 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         p.center = Hz::mhz(1090);
-        p.front = None;
-        p.front = Some(Front::ModeS);
+        p.fronts.clear();
+        p.fronts = vec![Front::ModeS];
         rx.rebuild(&p).expect("a receiver that can retune onto 1090");
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1499,7 +1564,7 @@ mod tests {
         // Turning the log off stops writing to disk; it must not disconnect
         // every view from the traffic.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.front = Some(Front::ModeS);
+        p.fronts = vec![Front::ModeS];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));

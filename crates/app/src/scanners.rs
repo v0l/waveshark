@@ -15,6 +15,21 @@
 //! anything else is a block somebody added: a protocol on a frequency this
 //! author never thought of is four lines, not a patch.
 //!
+//! # What decides that a block runs
+//!
+//! The span, not the dial. A block runs when the frequencies it demodulates
+//! are inside the sampled bandwidth, and every block that qualifies runs at
+//! once. The dial is where somebody is looking; the span is what the receiver
+//! actually has, and at 2.4 MS/s that is a couple of megahertz of spectrum
+//! arriving whether or not anything is pointed at it.
+//!
+//! This used to test the dial against the block's range and take the first
+//! block that matched, which was wrong twice over. A receiver at 153.4 MHz
+//! with a pager channel 50 kHz away heard nothing, because the dial was
+//! outside a range written narrowly around the channel. And a span holding
+//! two protocols ran whichever block was written higher in the file, which is
+//! not a decision anybody made.
+//!
 //! # Why it is not in the session file
 //!
 //! `session.rs` is rewritten whole every couple of seconds as settings
@@ -111,7 +126,9 @@ impl Front {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Scanner {
     pub name: String,
-    /// The dial must sit inside this for the scanner to apply.
+    /// The band this block is about. A block with no `channels` runs when any
+    /// part of this is inside the span; a block with channels is decided by
+    /// those instead, since they are the frequencies it actually demodulates.
     pub lo: f64,
     pub hi: f64,
     /// Narrowest span the front end works in.
@@ -134,10 +151,26 @@ pub struct Scanner {
 
 impl Scanner {
     /// Whether this scanner applies to a tuning.
+    ///
+    /// What decides it is whether the span covers what the block needs, not
+    /// where the dial happens to sit. A receiver on 20 MS/s at 440 MHz has
+    /// the pager channel in front of it whether or not the dial is parked on
+    /// it, and a front end that waits to be tuned to a frequency it is
+    /// already sampling is throwing the signal away.
     pub fn applies(&self, center: f64, rate: f64) -> bool {
-        if rate < self.min_rate || center < self.lo || center > self.hi {
+        if rate < self.min_rate {
             return false;
         }
+        if self.channels.is_empty() {
+            // Nothing specific to demodulate, so the band is the test: any
+            // overlap with the span, since a bank channelizes whatever it is
+            // handed and a wideband detector does not care where in the span
+            // a signal sits.
+            return self.lo < center + rate / 2.0 && self.hi > center - rate / 2.0;
+        }
+        // Every channel has to clear the span edge by its margin. A channel
+        // on the edge is one being demodulated through the anti-alias
+        // filter's skirt, which reads as silence.
         let edge = rate / 2.0 - self.margin_hz;
         self.channels.iter().all(|c| (c - center).abs() <= edge)
     }
@@ -182,13 +215,35 @@ impl Scanners {
         }
     }
 
-    /// The first scanner that applies, or none.
+    /// Every scanner the span covers, in file order.
     ///
-    /// First rather than all: two front ends on one span is a thing to say
-    /// deliberately, and quietly running both because two blocks overlap is
-    /// how the old default came to sweep every band it was not told about.
-    pub fn resolve(&self, center: f64, rate: f64) -> Option<&Scanner> {
-        self.list.iter().find(|s| s.applies(center, rate))
+    /// All of them rather than the first, because a span is wide and what is
+    /// in it is a fact rather than a preference: at 2.4 MS/s a receiver in
+    /// the middle of VHF can hear a pager channel and a packet channel at
+    /// once, and hearing one of them because its block is written higher up
+    /// the file is not a decision anybody made.
+    ///
+    /// The cost of an extra front end is what it demodulates. The narrowband
+    /// ones are one channel each and cost almost nothing; the banks are the
+    /// expensive one, and they are still bounded by the block's own range
+    /// overlapping the span at all.
+    pub fn active(&self, center: f64, rate: f64) -> Vec<&Scanner> {
+        self.list.iter().filter(|s| s.applies(center, rate)).collect()
+    }
+
+    /// The front ends the span covers, deduplicated.
+    ///
+    /// Two blocks that ask for the same thing are one front end: a duplicate
+    /// would be a second demodulator on the same channel producing the same
+    /// packets twice.
+    pub fn fronts(&self, center: f64, rate: f64) -> Vec<Front> {
+        let mut out: Vec<Front> = Vec::new();
+        for s in self.active(center, rate) {
+            if !out.contains(&s.front) {
+                out.push(s.front.clone());
+            }
+        }
+        out
     }
 
     /// The table as the file, which is what the interface writes.
@@ -368,11 +423,13 @@ fn num(v: f64) -> String {
 pub const HEADER: &str = "\
 # super-radio scanners: what to run, and where.
 #
-# The first block whose range holds the dial, and whose span is wide enough,
-# is the one that runs. Edit here or in the interface; the interface rewrites
-# this file from its own blocks, so comments below this header are not kept.
+# Every block the tuned span covers runs, and a block is covered when the
+# frequencies it demodulates are inside the span. Edit here or in the
+# interface; the interface rewrites this file from its own blocks, so comments
+# below this header are not kept.
 #
-#   range     the dial must sit inside this
+#   range     the band this block is about; with no channels, any overlap
+#             with the span runs it
 #   span      narrowest span the front end works in
 #   front     modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
@@ -389,10 +446,11 @@ pub const DEFAULT_TEXT: &str = "\
 #
 # Written once when this file was missing, and only read afterwards, so it is
 # safe to edit. Delete a block to stop it running; add one to scan somewhere
-# new. The first block whose range holds the dial, and whose span is wide
-# enough, is the one that runs.
+# new. Every block the tuned span covers runs, and a block is covered when the
+# frequencies it demodulates are inside the span, wherever the dial sits.
 #
-#   range     the dial must sit inside this
+#   range     the band this block is about; with no channels, any overlap
+#             with the span runs it
 #   span      narrowest span the front end works in
 #   front     modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
@@ -468,13 +526,13 @@ mod tests {
     #[test]
     fn the_defaults_put_each_front_end_where_it_belongs() {
         let s = Scanners::default();
-        let front = |c: f64, r: f64| s.resolve(c, r).map(|x| x.front.clone());
-        assert_eq!(front(1_090_000_000.0, 2_400_000.0), Some(Front::ModeS));
-        assert_eq!(front(162_000_000.0, 2_400_000.0), Some(Front::Ais));
-        assert_eq!(front(144_800_000.0, 2_400_000.0), Some(Front::Aprs(144_800_000.0)));
-        assert_eq!(front(439_987_500.0, 2_400_000.0), Some(Front::Pocsag(439_987_500.0)));
-        assert!(matches!(front(433_920_000.0, 2_400_000.0), Some(Front::Banks(_))));
-        assert!(matches!(front(868_300_000.0, 2_400_000.0), Some(Front::Banks(_))));
+        let fronts = |c: f64, r: f64| s.fronts(c, r);
+        assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::ModeS]);
+        assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
+        assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
+        assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::Pocsag(439_987_500.0)]);
+        assert!(matches!(fronts(433_920_000.0, 2_400_000.0)[..], [Front::Banks(_)]));
+        assert!(matches!(fronts(868_300_000.0, 2_400_000.0)[..], [Front::Banks(_)]));
     }
 
     /// The point of the change: a band nobody declared runs nothing, instead
@@ -482,9 +540,13 @@ mod tests {
     #[test]
     fn a_band_with_no_scanner_runs_nothing() {
         let s = Scanners::default();
-        assert_eq!(s.resolve(95_800_000.0, 2_400_000.0), None, "FM broadcast");
-        assert_eq!(s.resolve(124_000_000.0, 2_400_000.0), None, "airband");
-        assert_eq!(s.resolve(145_500_000.0, 2_400_000.0), None, "2 m voice");
+        assert!(s.fronts(95_800_000.0, 2_400_000.0).is_empty(), "FM broadcast");
+        assert!(s.fronts(124_000_000.0, 2_400_000.0).is_empty(), "airband");
+        assert!(s.fronts(145_500_000.0, 200_000.0).is_empty(), "2 m voice");
+        // Widen that last span until it reaches the packet channel 700 kHz
+        // away, though, and APRS runs: the receiver is sampling it either
+        // way, and the dial is only where somebody is looking.
+        assert_eq!(s.fronts(145_500_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
     }
 
     /// A span too narrow for the front end is not that front end.
@@ -492,8 +554,8 @@ mod tests {
     fn a_span_the_front_end_cannot_work_in_does_not_match() {
         let s = Scanners::default();
         // Mode S bits are 1 us wide and need 2 MS/s.
-        assert_eq!(s.resolve(1_090_000_000.0, 1_024_000.0), None);
-        assert!(s.resolve(1_090_000_000.0, 2_048_000.0).is_some());
+        assert!(s.fronts(1_090_000_000.0, 1_024_000.0).is_empty());
+        assert_eq!(s.fronts(1_090_000_000.0, 2_048_000.0), [Front::ModeS]);
     }
 
     /// The channel test is what the AIS gate used to be: both channels have to
@@ -503,8 +565,48 @@ mod tests {
         let s = Scanners::default();
         // Centred on one channel with 60 kHz: the other is 50 kHz away and
         // the span reaches only 30 kHz, so it is outside.
-        assert_eq!(s.resolve(161_975_000.0, 60_000.0), None);
-        assert!(s.resolve(162_000_000.0, 200_000.0).is_some());
+        assert!(s.fronts(161_975_000.0, 60_000.0).is_empty());
+        assert_eq!(s.fronts(162_000_000.0, 200_000.0), [Front::Ais]);
+    }
+
+    /// The span decides, not the dial. A pager channel 200 kHz off the
+    /// centre of a 2.4 MS/s span is being sampled, and a front end that
+    /// waits to be tuned to it is discarding a signal it already has.
+    #[test]
+    fn a_channel_off_the_centre_but_inside_the_span_still_runs() {
+        let s = Scanners::default();
+        // Tuned 200 kHz below the DAPNET channel, which the old rule would
+        // have refused because the dial sits outside the block's range.
+        assert_eq!(s.fronts(439_787_500.0, 2_400_000.0), [Front::Pocsag(439_987_500.0)]);
+        // And AIS from a dial parked on marine voice a megahertz away.
+        assert_eq!(s.fronts(161_000_000.0, 2_400_000.0), [Front::Ais]);
+    }
+
+    /// Everything the span covers runs. Which of two protocols a receiver
+    /// hears should not depend on which block was written first.
+    #[test]
+    fn a_span_holding_two_blocks_runs_both() {
+        let s = Scanners::parse(
+            "[Pagers]\nrange = 153 - 154 MHz\nspan = 100 kHz\nfront = pocsag\n\
+             channels = 153.35 MHz\nmargin = 12.5 kHz\n\
+             [Packet]\nrange = 153.5 - 153.6 MHz\nspan = 48 kHz\nfront = aprs\n\
+             channels = 153.55 MHz\nmargin = 8 kHz\n",
+        );
+        let fronts = s.fronts(153_450_000.0, 1_000_000.0);
+        assert_eq!(fronts, [Front::Pocsag(153_350_000.0), Front::Aprs(153_550_000.0)]);
+    }
+
+    /// Two blocks asking for the same thing are one front end. A duplicate
+    /// would be a second demodulator on the same channel, reporting every
+    /// packet twice.
+    #[test]
+    fn identical_front_ends_are_not_built_twice() {
+        let s = Scanners::parse(
+            "[A]\nrange = 433 - 435 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n\
+             [B]\nrange = 433.5 - 434 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n",
+        );
+        assert_eq!(s.active(433_900_000.0, 1_000_000.0).len(), 2, "both blocks match");
+        assert_eq!(s.fronts(433_900_000.0, 1_000_000.0), [Front::Banks(vec![20_000.0])]);
     }
 
     /// The case the file exists for.
@@ -514,7 +616,7 @@ mod tests {
             "[Doorbells]\nrange = 314 - 316 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n",
         );
         assert_eq!(s.list.len(), 1);
-        let hit = s.resolve(315_000_000.0, 1_000_000.0).expect("the block should match");
+        let hit = *s.active(315_000_000.0, 1_000_000.0).first().expect("the block should match");
         assert_eq!(hit.name, "Doorbells");
         assert_eq!(hit.front, Front::Banks(vec![20_000.0]));
     }
@@ -531,9 +633,8 @@ mod tests {
             "[APRS]\nrange = 144.38 - 144.40 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
-        let hit = s.resolve(144_390_000.0, 500_000.0).expect("the block should match");
-        assert_eq!(hit.front, Front::Aprs(144_390_000.0));
-        assert_eq!(s.resolve(144_800_000.0, 500_000.0), None, "the European one is gone");
+        assert_eq!(s.fronts(144_390_000.0, 500_000.0), [Front::Aprs(144_390_000.0)]);
+        assert!(s.fronts(144_800_000.0, 500_000.0).is_empty(), "the European one is gone");
     }
 
     /// The channel a POCSAG block names is the channel the demodulator tunes,
@@ -596,12 +697,17 @@ mod tests {
         assert_eq!(s.list.len(), 2);
     }
 
+    /// Blocks are reported in file order, which is the order the front ends
+    /// are built in and the order the interface lists them.
     #[test]
-    fn the_first_matching_block_wins() {
+    fn matching_blocks_come_back_in_the_order_they_were_written() {
         let s = Scanners::parse(
             "[first]\nrange = 100 - 200 MHz\nspan = 1 kHz\nfront = aprs\n\
+             channels = 150 MHz\n\
              [second]\nrange = 100 - 200 MHz\nspan = 1 kHz\nfront = ais\n",
         );
-        assert_eq!(s.resolve(150_000_000.0, 1_000_000.0).unwrap().name, "first");
+        let names: Vec<&str> =
+            s.active(150_000_000.0, 1_000_000.0).iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["first", "second"]);
     }
 }

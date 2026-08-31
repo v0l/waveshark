@@ -482,7 +482,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
     // A capture goes through whatever front end the scanner table puts on
     // its frequency, the same way the live receiver decides.
     let scanners = crate::scanners::Scanners::load();
-    let front = scanners.resolve(buf.center.as_f64(), rate).map(|s| s.front.clone());
+    let fronts = scanners.fronts(buf.center.as_f64(), rate);
     let plan = Plan {
         center: buf.center,
         rate,
@@ -492,7 +492,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        front,
+        fronts,
         feeds: Vec::new(),
         record: rec.is_some(),
         log: false,
@@ -968,7 +968,7 @@ impl Audio {
             refresh_hz: 30.0,
             fft: 1024,
             channels: vec![spec],
-            front: None,
+            fronts: Vec::new(),
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1067,7 +1067,7 @@ fn run(
         fft,
         channels: Vec::new(),
         // Resolved from the scanner table below, once the tuning is known.
-        front: None,
+        fronts: Vec::new(),
         record: false,
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
@@ -1078,7 +1078,7 @@ fn run(
     // What to run follows from where the dial is, and that mapping is
     // configuration rather than structure.
     let mut scanners = crate::scanners::Scanners::load();
-    plan.front = front_here(&scanners, &plan, true);
+    plan.fronts = fronts_here(&scanners, &plan, true);
     let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
     publish_chain(status, &rx);
 
@@ -1261,7 +1261,7 @@ fn run(
             let _t = tracing::info_span!("rebuild").entered();
             // The banks understand nothing on either wideband band, so
             // running them there only spends CPU inventing unknown bursts.
-            plan.front = front_here(&scanners, &plan, scan_on);
+            plan.fronts = fronts_here(&scanners, &plan, scan_on);
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
                 *status.error.lock() = Some(format!("cannot build the chain: {e}"));
@@ -1423,20 +1423,20 @@ fn run(
     }
 }
 
-/// The front end for where the dial is, or none.
+/// Every front end the span covers, or none of them.
 ///
 /// `decode_on` is the operator's own switch: turning decoding off stops the
-/// front end being built at all, which is the expensive thing the receiver
-/// does. It does not change which front end belongs here.
-fn front_here(
+/// front ends being built at all, which is the expensive thing the receiver
+/// does. It does not change which of them belong here.
+fn fronts_here(
     scanners: &crate::scanners::Scanners,
     plan: &Plan,
     decode_on: bool,
-) -> Option<crate::scanners::Front> {
+) -> Vec<crate::scanners::Front> {
     if !decode_on {
-        return None;
+        return Vec::new();
     }
-    scanners.resolve(plan.center.as_f64(), plan.eff_rate()).map(|s| s.front.clone())
+    scanners.fronts(plan.center.as_f64(), plan.eff_rate())
 }
 
 /// Publish the chain the receiver is running, for the chain view.
@@ -1458,7 +1458,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        front: Some(crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())),
+        fronts: vec![crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())],
         record: false,
         log: false,
         feeds: Vec::new(),
@@ -1936,7 +1936,7 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&empty_buf(250_000.0, Hz::mhz(433)), None).unwrap();
         rx.process(&block(8192)).unwrap();
         let mut plan = plan_at(250_000.0, Hz::mhz(868));
-        plan.front = Some(crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()));
+        plan.fronts = vec![crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())];
         rx.rebuild(&plan).unwrap();
         rx.process(&block(8192)).unwrap();
         let out = rx.decodes(std::time::Instant::now());
@@ -2194,7 +2194,7 @@ mod zoom_tests {
     fn zoomed(native: f64, zoom: usize) -> crate::chain::Receiver {
         let mut plan = plan_at(native, Hz::mhz(433));
         plan.zoom = zoom;
-        plan.front = None;
+        plan.fronts.clear();
         crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain")
     }
 
@@ -2226,7 +2226,7 @@ mod zoom_tests {
         let keep = native / zoom as f64 / 2.0;
         let mut plan = plan_at(native, Hz::mhz(433));
         plan.zoom = zoom;
-        plan.front = None;
+        plan.fronts.clear();
         plan.channels = vec![ChannelSpec {
             id: 1,
             offset_hz: 0.0,

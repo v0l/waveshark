@@ -544,10 +544,17 @@ pager channel left running overnight writes recoverable message text to disk.
 
 ### Decoding the whole span
 
-Data decoding is not something you tune to. The receiver splits whatever span
-it is on into channels and runs a decoder on every one of them at once, all
-the time, so a sensor that transmits once a minute is caught whether or not you
-were looking at its frequency. Both an OOK and an FSK front end run over the
+Data decoding is not something you tune to. What runs is decided by the span,
+not by the dial: every block in the scanner file whose frequencies fall inside
+the sampled bandwidth runs, and all of them run at once. A 2.4 MS/s span in
+the middle of VHF can hold a packet channel and a pager channel together, and
+both are one narrowband demodulator each. The dial is where you are looking;
+the span is what the receiver actually has.
+
+Within a block that channelizes, the receiver splits whatever span it is on
+into channels and runs a decoder on every one of them at once, all the time,
+so a sensor that transmits once a minute is caught whether or not you were
+looking at its frequency. Both an OOK and an FSK front end run over the
 whole span, because which modulation a device uses is not visible in a
 waterfall.
 

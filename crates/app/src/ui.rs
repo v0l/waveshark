@@ -1524,7 +1524,8 @@ impl App {
         let live: Vec<crate::scanners::Scanner> =
             rows.iter().filter_map(ScannerRow::to_scanner).collect();
         let table = crate::scanners::Scanners { list: live };
-        let active = table.resolve(center, rate).map(|s| s.name.clone());
+        let active: Vec<String> =
+            table.active(center, rate).into_iter().map(|s| s.name.clone()).collect();
 
         ui.horizontal(|ui| {
             ui.label(legend("tuned to"));
@@ -1534,14 +1535,14 @@ impl App {
             ui.label(value(format!("{:.0} kHz", rate / 1e3)).size(12.0));
             ui.add_space(8.0);
             ui.label(legend("running"));
-            match &active {
-                Some(n) => ui.label(
-                    egui::RichText::new(n).color(theme::TRACE).size(13.0),
+            match active.is_empty() {
+                false => ui.label(
+                    egui::RichText::new(active.join(", ")).color(theme::TRACE).size(13.0),
                 ),
-                None => ui.label(egui::RichText::new("nothing").color(theme::FAULT).size(13.0)),
+                true => ui.label(egui::RichText::new("nothing").color(theme::FAULT).size(13.0)),
             };
         });
-        if active.is_none() {
+        if active.is_empty() {
             hint(ui, "No block covers this frequency and span, so nothing is decoded here. Add one, or widen a range.");
         }
         ui.add_space(8.0);
@@ -1550,9 +1551,9 @@ impl App {
         let mut tune_to = None;
         egui::ScrollArea::vertical().max_height(360.0).id_salt("scanrows").show(ui, |ui| {
             for (i, r) in rows.iter_mut().enumerate() {
-                let on = active.as_deref() == Some(r.name.as_str());
-                // The running block is framed, so which one is in charge is
-                // visible without reading every range.
+                let on = active.iter().any(|n| n == &r.name);
+                // Running blocks are framed, so which of them the span covers
+                // is visible without reading every range.
                 let frame = egui::Frame::NONE
                     .fill(if on { theme::WELL } else { theme::CHASSIS })
                     .stroke(Stroke::new(1.0, if on { theme::TRACE } else { theme::ETCH }))
@@ -3601,18 +3602,33 @@ impl App {
                 let total = r.status.decoded.load(Ordering::Relaxed);
                 let aircraft = r.status.aircraft.load(Ordering::Relaxed);
                 ui.add_space(10.0);
-                ui.label(legend(&if r.status.modes_on.load(Ordering::Relaxed) {
-                    format!("1090 MHz mode s, {aircraft} aircraft, {total} frames")
-                } else if r.status.ais_on.load(Ordering::Relaxed) {
-                    format!("162 MHz ais, {aircraft} tracks, {total} frames")
-                } else if r.status.aprs_on.load(Ordering::Relaxed) {
-                    format!("144 MHz aprs, {aircraft} tracks, {total} frames")
-                } else if r.status.pocsag_on.load(Ordering::Relaxed) {
-                    format!("pocsag, {total} pages")
-                } else if narrow > 0 {
-                    format!("{narrow} ook + {wide} fsk channels, {total} seen")
+                // Several front ends can run on one span now, so this names
+                // all of them rather than the first that happens to be on.
+                let mut running: Vec<String> = Vec::new();
+                if r.status.modes_on.load(Ordering::Relaxed) {
+                    running.push("mode s".into());
+                }
+                if r.status.ais_on.load(Ordering::Relaxed) {
+                    running.push("ais".into());
+                }
+                if r.status.aprs_on.load(Ordering::Relaxed) {
+                    running.push("aprs".into());
+                }
+                if r.status.pocsag_on.load(Ordering::Relaxed) {
+                    running.push("pocsag".into());
+                }
+                if narrow > 0 || wide > 0 {
+                    running.push(format!("{narrow} ook + {wide} fsk channels"));
+                }
+                let tracking = r.status.modes_on.load(Ordering::Relaxed)
+                    || r.status.ais_on.load(Ordering::Relaxed)
+                    || r.status.aprs_on.load(Ordering::Relaxed);
+                ui.label(legend(&if running.is_empty() {
+                    "decoding off".to_string()
+                } else if tracking {
+                    format!("{}, {aircraft} tracks, {total} frames", running.join(" + "))
                 } else {
-                    "decoding off".into()
+                    format!("{}, {total} frames", running.join(" + "))
                 }));
             }
             let logged = self
@@ -3701,11 +3717,15 @@ impl App {
             // What is actually running here, rather than a claim about
             // sweeping the span that has not been true since the front end
             // became a table lookup.
-            let waiting = match (self.decode_on, self.scanners.resolve(self.center, self.rate)) {
+            let running = self.scanners.active(self.center, self.rate);
+            let waiting = match (self.decode_on, running.as_slice()) {
                 (false, _) => "decoding is off".to_string(),
-                (true, Some(s)) => format!("{} is running, nothing heard yet", s.name),
-                (true, None) => {
-                    "no scanner covers this frequency: press SCAN to add one".to_string()
+                (true, []) => {
+                    "no scanner covers this span: press SCAN to add one".to_string()
+                }
+                (true, blocks) => {
+                    let names: Vec<&str> = blocks.iter().map(|s| s.name.as_str()).collect();
+                    format!("{} running, nothing heard yet", names.join(", "))
                 }
             };
             ui.label(legend(&waiting));
