@@ -48,6 +48,36 @@ pub enum Front {
 }
 
 impl Front {
+    /// The word this front end is written as in the file.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Front::Banks(_) => "banks",
+            Front::ModeS => "modes",
+            Front::Ais => "ais",
+            Front::Aprs => "aprs",
+        }
+    }
+
+    /// What it is called where a person reads it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Front::Banks(_) => "banks",
+            Front::ModeS => "mode s",
+            Front::Ais => "ais",
+            Front::Aprs => "aprs",
+        }
+    }
+
+    /// Every front end, for a control that offers a choice of them.
+    pub fn all() -> [Front; 4] {
+        [
+            Front::ModeS,
+            Front::Ais,
+            Front::Aprs,
+            Front::Banks(DEFAULT_WIDTHS.to_vec()),
+        ]
+    }
+
     fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "banks" | "scan" => Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
@@ -141,6 +171,52 @@ impl Scanners {
     /// how the old default came to sweep every band it was not told about.
     pub fn resolve(&self, center: f64, rate: f64) -> Option<&Scanner> {
         self.list.iter().find(|s| s.applies(center, rate))
+    }
+
+    /// The table as the file, which is what the interface writes.
+    ///
+    /// Generated rather than edited in place, so the comments are the ones
+    /// this version ships and a block removed in the interface really is
+    /// gone. A file somebody hand-edited round trips through here with its
+    /// blocks intact and its own comments replaced by the standard header,
+    /// which is the price of the table being editable in two places.
+    pub fn render(&self) -> String {
+        let mut s = String::from(HEADER);
+        for sc in &self.list {
+            s.push_str(&format!("\n[{}]\n", sc.name));
+            s.push_str(&format!(
+                "range = {} - {} MHz\n",
+                num(sc.lo / 1e6),
+                num(sc.hi / 1e6)
+            ));
+            s.push_str(&format!("span  = {} kHz\n", num(sc.min_rate / 1e3)));
+            s.push_str(&format!("front = {}\n", sc.front.key()));
+            if let Front::Banks(w) = &sc.front {
+                let widths: Vec<String> =
+                    w.iter().map(|x| format!("{} kHz", num(x / 1e3))).collect();
+                s.push_str(&format!("widths = {}\n", widths.join(", ")));
+            }
+            if !sc.channels.is_empty() {
+                let ch: Vec<String> =
+                    sc.channels.iter().map(|x| format!("{} MHz", num(x / 1e6))).collect();
+                s.push_str(&format!("channels = {}\n", ch.join(", ")));
+            }
+            if sc.margin_hz > 0.0 {
+                s.push_str(&format!("margin = {} kHz\n", num(sc.margin_hz / 1e3)));
+            }
+        }
+        s
+    }
+
+    /// Write the file, creating its directory.
+    pub fn save(&self) -> std::io::Result<()> {
+        let Some(path) = Self::path() else {
+            return Err(std::io::Error::other("no config directory"));
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, self.render())
     }
 
     /// Blocks of `key = value` under a `[name]` heading. Anything unparsable
@@ -241,6 +317,30 @@ fn hz_with(s: &str, unit: f64) -> Option<f64> {
     let v: f64 = t.parse().ok()?;
     Some(v * if unit_of(s) == 1.0 { unit } else { unit_of(s) })
 }
+
+/// Print a frequency without trailing zeros: 162.025, not 162.025000.
+fn num(v: f64) -> String {
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    s.to_string()
+}
+
+/// The header the interface writes above the blocks, which is also the
+/// format's documentation.
+pub const HEADER: &str = "\
+# super-radio scanners: what to run, and where.
+#
+# The first block whose range holds the dial, and whose span is wide enough,
+# is the one that runs. Edit here or in the interface; the interface rewrites
+# this file from its own blocks, so comments below this header are not kept.
+#
+#   range     the dial must sit inside this
+#   span      narrowest span the front end works in
+#   front     modes | ais | aprs | banks
+#   channels  frequencies that must all be inside the span (optional)
+#   margin    how far inside the span edge they must fall (optional)
+#   widths    channel widths, for front = banks
+";
 
 /// The defaults, written out when there is no file.
 ///
@@ -399,6 +499,26 @@ mod tests {
         // An unknown key is ignored, so a later version's file still loads.
         let s = Scanners::parse("[x]\nrange = 1 - 2 MHz\nfuture = 7\nfront = ais\n");
         assert_eq!(s.list.len(), 1);
+    }
+
+    /// The interface writes this file, so what it writes has to read back as
+    /// what it had. Without this a block edited in the interface can come
+    /// back subtly different, or not at all.
+    #[test]
+    fn the_table_round_trips_through_the_file_it_writes() {
+        let s = Scanners::default();
+        assert_eq!(Scanners::parse(&s.render()), s);
+    }
+
+    #[test]
+    fn a_hand_written_block_survives_being_rewritten() {
+        let s = Scanners::parse(
+            "[Doorbells]\nrange = 314 - 316 MHz\nspan = 250 kHz\nfront = banks\n\
+             widths = 20 kHz\n[Weather]\nrange = 868 - 869 MHz\nspan = 250 kHz\n\
+             front = ais\nchannels = 868.3 MHz\nmargin = 12.5 kHz\n",
+        );
+        assert_eq!(Scanners::parse(&s.render()), s);
+        assert_eq!(s.list.len(), 2);
     }
 
     #[test]

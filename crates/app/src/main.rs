@@ -550,6 +550,10 @@ struct Args {
     #[arg(long)]
     gain: bool,
 
+    /// Open the scanner table, which decides what runs on which frequency
+    #[arg(long)]
+    scanners: bool,
+
     /// Write every burst that decodes into this directory
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "captures")]
     record: Option<PathBuf>,
@@ -706,6 +710,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.gain {
                 app.show_radio_settings();
+            }
+            if args.scanners {
+                app.show_scanner_settings();
             }
             if let Some(mhz) = args.center {
                 app.set_center(mhz);

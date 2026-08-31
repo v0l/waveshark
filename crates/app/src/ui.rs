@@ -122,6 +122,11 @@ pub struct App {
     feed_host: String,
     /// Where the packet log writes, as typed, and the size limit in
     /// megabytes per day, or `None` for no limit.
+    /// The scanner file as text, while it is being edited. Held apart from
+    /// the live table so a half-typed block does not retune the receiver.
+    scanner_edit: Option<Vec<ScannerRow>>,
+    /// The live table, as the radio thread has it.
+    scanners: crate::scanners::Scanners,
     log_dir_edit: String,
     log_dir: Option<std::path::PathBuf>,
     log_cap_mb: Option<u64>,
@@ -148,6 +153,8 @@ pub enum Settings {
     Radio,
     /// The packet log: where it is written, and what else feeds it.
     PacketLog,
+    /// The scanner table: which front end runs on which frequency.
+    Scanners,
 }
 
 /// A decode, as shown in the packet log.
@@ -363,6 +370,8 @@ impl Default for App {
             feeds: Vec::new(),
             feed_host: String::new(),
             feed_kind: nodes::FEED_KINDS[0],
+            scanner_edit: None,
+            scanners: crate::scanners::Scanners::default(),
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -408,6 +417,8 @@ impl App {
             feeds: s.feeds.clone(),
             feed_host: String::new(),
             feed_kind: nodes::FEED_KINDS[0],
+            scanner_edit: None,
+            scanners: crate::scanners::Scanners::load(),
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -886,6 +897,113 @@ impl App {
     }
 }
 
+/// One scanner as the interface edits it.
+///
+/// Frequencies are held in the units they are typed in, and the lists stay as
+/// text while they are being typed: a half-finished "161.9" must not be
+/// parsed into a channel and used to decide what runs. Converting happens at
+/// [`ScannerRow::to_scanner`], and a row that does not convert is shown as
+/// incomplete rather than silently dropped.
+pub struct ScannerRow {
+    name: String,
+    lo_mhz: f64,
+    hi_mhz: f64,
+    span_khz: f64,
+    margin_khz: f64,
+    front: crate::scanners::Front,
+    channels: String,
+    widths: String,
+}
+
+impl ScannerRow {
+    fn from_scanner(s: &crate::scanners::Scanner) -> Self {
+        let widths = match &s.front {
+            crate::scanners::Front::Banks(w) => {
+                w.iter().map(|x| trim_num(x / 1e3)).collect::<Vec<_>>().join(", ")
+            }
+            _ => String::new(),
+        };
+        Self {
+            name: s.name.clone(),
+            lo_mhz: s.lo / 1e6,
+            hi_mhz: s.hi / 1e6,
+            span_khz: s.min_rate / 1e3,
+            margin_khz: s.margin_hz / 1e3,
+            front: s.front.clone(),
+            channels: s.channels.iter().map(|c| trim_num(c / 1e6)).collect::<Vec<_>>().join(", "),
+            widths,
+        }
+    }
+
+    /// A new block around the frequency being looked at, which is why
+    /// somebody is adding one.
+    fn new_at(center: f64, rate: f64) -> Self {
+        let mhz = center / 1e6;
+        let half = (rate / 2e6).max(0.01);
+        Self {
+            name: "New scanner".into(),
+            lo_mhz: (mhz - half).max(0.0),
+            hi_mhz: mhz + half,
+            span_khz: (rate / 1e3).max(1.0),
+            margin_khz: 0.0,
+            front: crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()),
+            channels: String::new(),
+            widths: crate::scanners::DEFAULT_WIDTHS
+                .iter()
+                .map(|x| trim_num(x / 1e3))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+
+    /// The banks front end carrying whatever widths are currently typed, so
+    /// switching away and back does not lose them.
+    fn banks_with_current_widths(&self) -> crate::scanners::Front {
+        let w: Vec<f64> = parse_list(&self.widths, 1e3);
+        crate::scanners::Front::Banks(if w.is_empty() {
+            crate::scanners::DEFAULT_WIDTHS.to_vec()
+        } else {
+            w
+        })
+    }
+
+    fn to_scanner(&self) -> Option<crate::scanners::Scanner> {
+        let name = self.name.trim();
+        if name.is_empty() || self.hi_mhz <= self.lo_mhz {
+            return None;
+        }
+        let front = match self.front {
+            crate::scanners::Front::Banks(_) => self.banks_with_current_widths(),
+            ref f => f.clone(),
+        };
+        Some(crate::scanners::Scanner {
+            name: name.to_string(),
+            lo: self.lo_mhz * 1e6,
+            hi: self.hi_mhz * 1e6,
+            min_rate: self.span_khz * 1e3,
+            channels: parse_list(&self.channels, 1e6),
+            margin_hz: self.margin_khz * 1e3,
+            front,
+        })
+    }
+}
+
+/// A comma separated list of numbers, scaled to hertz.
+fn parse_list(text: &str, unit: f64) -> Vec<f64> {
+    text.split(',').filter_map(|p| p.trim().parse::<f64>().ok()).map(|v| v * unit).collect()
+}
+
+/// A number without trailing zeros, for putting one back in a text field.
+fn trim_num(v: f64) -> String {
+    let s = format!("{v:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// A megahertz field, typed to enough places for a 25 kHz channel raster.
+fn mhz_field(ui: &mut egui::Ui, v: &mut f64) {
+    ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=6000.0).max_decimals(4));
+}
+
 /// A line of explanation under a control.
 ///
 /// Added through `Label` with wrapping asked for explicitly: inside a modal
@@ -1320,6 +1438,12 @@ impl App {
                             if ui.selectable_label(self.log_open, "LOG").clicked() {
                                 self.log_open = !self.log_open;
                             }
+                            // What runs on this frequency, and the file that
+                            // decides it. Beside the decode switch because
+                            // that is the question it answers.
+                            if ui.selectable_label(false, "SCAN").clicked() {
+                                self.open = Some(Settings::Scanners);
+                            }
                         });
                     });
 
@@ -1346,12 +1470,14 @@ impl App {
             Settings::Waterfall => "Waterfall",
             Settings::Radio => "Radio",
             Settings::PacketLog => "Packet log",
+            Settings::Scanners => "Scanners",
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(match which {
                     Settings::Radio | Settings::PacketLog => 420.0,
+                    Settings::Scanners => 560.0,
                     _ => 320.0,
                 });
                 ui.label(legend(title));
@@ -1361,6 +1487,7 @@ impl App {
                     Settings::Waterfall => self.waterfall_settings(ui),
                     Settings::Radio => self.radio_settings(ui),
                     Settings::PacketLog => self.packet_log_settings(ui),
+                    Settings::Scanners => self.scanner_settings(ui),
                 }
                 ui.add_space(12.0);
                 ui.separator();
@@ -1375,6 +1502,207 @@ impl App {
             });
         if r.should_close() {
             self.open = None;
+        }
+    }
+
+    /// The scanner table: which front end runs on which frequency.
+    ///
+    /// A block per scanner rather than a text box over the file. The file is
+    /// still the format of record and is still worth hand-editing, but the
+    /// question this pane answers is "why is nothing decoding here", and the
+    /// answer is a frequency compared against a list of ranges. That is a
+    /// thing to show, not a thing to make somebody read.
+    fn scanner_settings(&mut self, ui: &mut egui::Ui) {
+        let (center, rate) = (self.center, self.rate);
+        // Taken out of `self` so the closures below can borrow the rest of
+        // it, and put back at the end.
+        let mut rows = self
+            .scanner_edit
+            .take()
+            .unwrap_or_else(|| self.scanners.list.iter().map(ScannerRow::from_scanner).collect());
+
+        let live: Vec<crate::scanners::Scanner> =
+            rows.iter().filter_map(ScannerRow::to_scanner).collect();
+        let table = crate::scanners::Scanners { list: live };
+        let active = table.resolve(center, rate).map(|s| s.name.clone());
+
+        ui.horizontal(|ui| {
+            ui.label(legend("tuned to"));
+            ui.label(value(format!("{:.4} MHz", center / 1e6)).size(12.0));
+            ui.add_space(8.0);
+            ui.label(legend("span"));
+            ui.label(value(format!("{:.0} kHz", rate / 1e3)).size(12.0));
+            ui.add_space(8.0);
+            ui.label(legend("running"));
+            match &active {
+                Some(n) => ui.label(
+                    egui::RichText::new(n).color(theme::TRACE).size(13.0),
+                ),
+                None => ui.label(egui::RichText::new("nothing").color(theme::FAULT).size(13.0)),
+            };
+        });
+        if active.is_none() {
+            hint(ui, "No block covers this frequency and span, so nothing is decoded here. Add one, or widen a range.");
+        }
+        ui.add_space(8.0);
+
+        let mut remove = None;
+        let mut tune_to = None;
+        egui::ScrollArea::vertical().max_height(360.0).id_salt("scanrows").show(ui, |ui| {
+            for (i, r) in rows.iter_mut().enumerate() {
+                let on = active.as_deref() == Some(r.name.as_str());
+                // The running block is framed, so which one is in charge is
+                // visible without reading every range.
+                let frame = egui::Frame::NONE
+                    .fill(if on { theme::WELL } else { theme::CHASSIS })
+                    .stroke(Stroke::new(1.0, if on { theme::TRACE } else { theme::ETCH }))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .corner_radius(2);
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut r.name)
+                                .desired_width(120.0)
+                                .hint_text("name"),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(legend("front"));
+                        egui::ComboBox::from_id_salt(("front", i))
+                            .selected_text(r.front.label())
+                            .width(84.0)
+                            .show_ui(ui, |ui| {
+                                for f in crate::scanners::Front::all() {
+                                    let label = f.label();
+                                    // Keep the widths already typed when
+                                    // switching back to banks.
+                                    let pick = if matches!(f, crate::scanners::Front::Banks(_)) {
+                                        r.banks_with_current_widths()
+                                    } else {
+                                        f
+                                    };
+                                    if ui
+                                        .selectable_label(r.front.key() == pick.key(), label)
+                                        .clicked()
+                                    {
+                                        r.front = pick;
+                                    }
+                                }
+                            });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("REMOVE").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui.add_enabled(!on, egui::Button::new("TUNE")).clicked() {
+                                tune_to = Some((r.lo_mhz + r.hi_mhz) / 2.0);
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(legend("range"));
+                        mhz_field(ui, &mut r.lo_mhz);
+                        ui.label(legend("to"));
+                        mhz_field(ui, &mut r.hi_mhz);
+                        ui.label(legend("MHz"));
+                        ui.add_space(8.0);
+                        ui.label(legend("span"));
+                        ui.add(
+                            egui::DragValue::new(&mut r.span_khz)
+                                .speed(10.0)
+                                .range(1.0..=20_000.0)
+                                .suffix(" kHz"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        match &mut r.front {
+                            // A bank front end is defined by its channel
+                            // widths; everything else by the channels that
+                            // have to be inside the span.
+                            crate::scanners::Front::Banks(_) => {
+                                ui.label(legend("widths"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut r.widths)
+                                        .desired_width(180.0)
+                                        .hint_text("31.25, 125 kHz"),
+                                );
+                                ui.label(legend("kHz"));
+                            }
+                            _ => {
+                                ui.label(legend("channels"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut r.channels)
+                                        .desired_width(180.0)
+                                        // Not an example of a value: a hint
+                                        // that looks like data reads as data
+                                        // on a row that needs none.
+                                        .hint_text("none needed"),
+                                );
+                                ui.label(legend("MHz"));
+                                ui.add_space(6.0);
+                                ui.label(legend("margin"));
+                                ui.add(
+                                    egui::DragValue::new(&mut r.margin_khz)
+                                        .speed(1.0)
+                                        .range(0.0..=1000.0)
+                                        .suffix(" kHz"),
+                                );
+                            }
+                        }
+                    });
+                    if r.to_scanner().is_none() {
+                        ui.label(
+                            egui::RichText::new("needs a name and a range that goes upwards")
+                                .color(theme::FAULT)
+                                .size(10.0),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        });
+
+        if let Some(i) = remove {
+            rows.remove(i);
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("ADD").clicked() {
+                // Starts on the frequency being looked at, since wanting a
+                // scanner here is why the pane is open.
+                rows.push(ScannerRow::new_at(center, rate));
+            }
+            if ui.button("DEFAULTS").clicked() {
+                rows = crate::scanners::Scanners::default()
+                    .list
+                    .iter()
+                    .map(ScannerRow::from_scanner)
+                    .collect();
+            }
+            let dirty = table != self.scanners;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Saving writes the file and hands the table to the radio
+                // thread, which rebuilds: a change to what runs on this
+                // frequency has to take effect without a retune.
+                if ui.add_enabled(dirty, egui::Button::new("SAVE")).clicked() {
+                    let _ = table.save();
+                    self.scanners = table.clone();
+                    self.send(Cmd::Scanners(table.clone()));
+                }
+                if ui.add_enabled(dirty, egui::Button::new("REVERT")).clicked() {
+                    rows = self.scanners.list.iter().map(ScannerRow::from_scanner).collect();
+                }
+                if dirty {
+                    ui.label(egui::RichText::new("unsaved").color(theme::READOUT).size(11.0));
+                }
+            });
+        });
+        if let Some(p) = crate::scanners::Scanners::path() {
+            ui.add_space(4.0);
+            hint(ui, &p.display().to_string());
+        }
+
+        self.scanner_edit = Some(rows);
+        if let Some(mhz) = tune_to {
+            self.retune(mhz * 1e6);
         }
     }
 
@@ -2109,6 +2437,11 @@ impl App {
 
     pub fn show_chain(&mut self) {
         self.view = View::Chain;
+    }
+
+    /// Open the scanner table.
+    pub fn show_scanner_settings(&mut self) {
+        self.open = Some(Settings::Scanners);
     }
 
     pub fn show_map(&mut self) {
@@ -3342,11 +3675,17 @@ impl App {
 
     fn log_rows(&mut self, ui: &mut egui::Ui, width: f32) {
         if self.decodes.is_empty() {
-            ui.label(legend(if self.decode_on {
-                "listening to every channel in the span"
-            } else {
-                "decoding is off"
-            }));
+            // What is actually running here, rather than a claim about
+            // sweeping the span that has not been true since the front end
+            // became a table lookup.
+            let waiting = match (self.decode_on, self.scanners.resolve(self.center, self.rate)) {
+                (false, _) => "decoding is off".to_string(),
+                (true, Some(s)) => format!("{} is running, nothing heard yet", s.name),
+                (true, None) => {
+                    "no scanner covers this frequency: press SCAN to add one".to_string()
+                }
+            };
+            ui.label(legend(&waiting));
             return;
         }
         let t0 = self.decodes.first().map(|l| l.rec.at);

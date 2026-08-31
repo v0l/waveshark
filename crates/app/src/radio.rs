@@ -291,6 +291,10 @@ pub enum Cmd {
     /// rebuilt from a plan, so a change is the new list rather than an
     /// instruction to add or remove one.
     Feeds(Vec<nodes::FeedSpec>),
+    /// The scanner table, as the complete set for the same reason feeds are:
+    /// the graph is rebuilt from a plan, so a change is the new table rather
+    /// than an instruction to edit one row of it.
+    Scanners(crate::scanners::Scanners),
     Stop,
 }
 
@@ -1061,7 +1065,7 @@ fn run(
     };
     // What to run follows from where the dial is, and that mapping is
     // configuration rather than structure.
-    let scanners = crate::scanners::Scanners::load();
+    let mut scanners = crate::scanners::Scanners::load();
     plan.front = front_here(&scanners, &plan, true);
     let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
     publish_chain(status, &rx);
@@ -1193,6 +1197,15 @@ fn run(
                 Cmd::Feeds(feeds) => {
                     if feeds != plan.feeds {
                         plan.feeds = feeds;
+                        rebuild = true;
+                    }
+                }
+                Cmd::Scanners(table) => {
+                    // A different table can mean a different front end on the
+                    // frequency the dial is already on, so this rebuilds
+                    // rather than waiting for the next retune.
+                    if table != scanners {
+                        scanners = table;
                         rebuild = true;
                     }
                 }

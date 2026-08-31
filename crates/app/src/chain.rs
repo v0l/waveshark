@@ -653,6 +653,7 @@ impl Receiver {
         self.bus = bus;
         self.decode = decode;
         self.ais = ais;
+        self.aprs = aprs;
         self.tracks = tracks;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
