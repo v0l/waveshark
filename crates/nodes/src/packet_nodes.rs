@@ -73,12 +73,23 @@ impl PacketDecodeNode {
 
     /// A frame from a demodulator that produces bytes.
     ///
-    /// Only Mode S so far. Parsing again here rather than carrying the
-    /// demodulator's own parse on the bus is deliberate: what travels is the
-    /// evidence, and every consumer draws its own conclusions from it.
+    /// Mode S and AIS both arrive here as bytes with nothing to distinguish
+    /// them, so the packet's own centre frequency does it. That is not a tag
+    /// somebody attached: where a frame was received is evidence the packet
+    /// already carries, and a 162 MHz frame is not a Mode S frame no matter
+    /// what its bits would parse as.
+    ///
+    /// Parsing again here rather than carrying the demodulator's own parse on
+    /// the bus is deliberate: what travels is the evidence, and every consumer
+    /// draws its own conclusions from it.
     fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
-        let Ok(frame) = adsb::parse(bytes) else { return };
         let center = common::Hz(p.center_hz);
+        if dsp::ais::is_ais_band(p.center_hz as f64) {
+            let Ok(frame) = decode::ais::parse(bytes) else { return };
+            self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
+            return;
+        }
+        let Ok(frame) = adsb::parse(bytes) else { return };
         let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
         // A local demodulator reports no level for a frame it has already
         // accepted, but a Beast feed carries one, and dropping it would make

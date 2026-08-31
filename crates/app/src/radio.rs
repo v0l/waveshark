@@ -476,6 +476,9 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
     // nothing the ISM banks understand, so running them there only spends CPU
     // inventing unknown bursts out of Mode S.
     let modes = crate::modes::tuned_to_mode_s(buf.center.as_f64(), rate);
+    // The same question for AIS, which has its own band and its own reason
+    // not to run the banks over it.
+    let ais = crate::marine::tuned_to_ais(buf.center.as_f64(), rate);
     let plan = Plan {
         center: buf.center,
         rate,
@@ -485,8 +488,9 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        scan: !modes,
+        scan: !modes && !ais,
         modes,
+        ais,
         feeds: Vec::new(),
         record: rec.is_some(),
         log: false,
@@ -640,7 +644,7 @@ pub struct Status {
     pub aircraft: AtomicU64,
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
-    pub aircraft_list: parking_lot::Mutex<Vec<crate::flights::Aircraft>>,
+    pub track_list: parking_lot::Mutex<Vec<crate::tracks::Track>>,
     /// Size of the day's log file, and whether it has stopped growing.
     pub log_bytes: AtomicU64,
     pub log_full: std::sync::atomic::AtomicBool,
@@ -648,6 +652,8 @@ pub struct Status {
     pub feeds: parking_lot::Mutex<Vec<crate::chain::FeedStatus>>,
     /// Whether the wideband Mode S path is the one running.
     pub modes_on: AtomicBool,
+    /// Whether the AIS path is the one running.
+    pub ais_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
@@ -726,11 +732,12 @@ impl Default for Status {
             scan_channels_wide: AtomicU64::new(0),
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
-            aircraft_list: parking_lot::Mutex::new(Vec::new()),
+            track_list: parking_lot::Mutex::new(Vec::new()),
             log_bytes: AtomicU64::new(0),
             log_full: std::sync::atomic::AtomicBool::new(false),
             feeds: parking_lot::Mutex::new(Vec::new()),
             modes_on: AtomicBool::new(false),
+            ais_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
     }
@@ -946,6 +953,7 @@ impl Audio {
             channels: vec![spec],
             scan: false,
             modes: false,
+            ais: false,
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1049,6 +1057,7 @@ fn run(
         // be here.
         scan: true,
         modes: false,
+        ais: false,
         record: false,
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
@@ -1057,6 +1066,7 @@ fn run(
         feeds: Vec::new(),
     };
     plan.modes = modes_here(&plan);
+    plan.ais = ais_here(&plan);
     let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
     publish_chain(status, &rx);
 
@@ -1229,8 +1239,11 @@ fn run(
 
         if rebuild {
             let _t = tracing::info_span!("rebuild").entered();
-            plan.scan = scan_on && !modes_here(&plan);
+            // The banks understand nothing on either wideband band, so
+            // running them there only spends CPU inventing unknown bursts.
+            plan.scan = scan_on && !modes_here(&plan) && !ais_here(&plan);
             plan.modes = modes_here(&plan);
+            plan.ais = ais_here(&plan);
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
                 *status.error.lock() = Some(format!("cannot build the chain: {e}"));
@@ -1278,9 +1291,9 @@ fn run(
             // is redrawn at the display's rate, and cloning it 140 times a
             // second for a pane nobody may be looking at is wasted work.
             if rx.tracking() {
-                let rows = rx.aircraft(std::time::Instant::now());
+                let rows = rx.tracks(std::time::Instant::now());
                 status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
-                *status.aircraft_list.lock() = rows;
+                *status.track_list.lock() = rows;
             }
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();
@@ -1300,6 +1313,7 @@ fn run(
         }
 
         status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
+        status.ais_on.store(rx.ais_on(), Ordering::Relaxed);
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);
@@ -1395,6 +1409,11 @@ fn modes_here(plan: &Plan) -> bool {
     crate::modes::tuned_to_mode_s(plan.center.as_f64(), plan.eff_rate())
 }
 
+/// Whether the dial is on AIS, with both of its channels in the span.
+fn ais_here(plan: &Plan) -> bool {
+    crate::marine::tuned_to_ais(plan.center.as_f64(), plan.eff_rate())
+}
+
 /// Publish the chain the receiver is running, for the chain view.
 ///
 /// There is one graph and it holds everything, so this is no longer a choice
@@ -1416,6 +1435,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         channels: Vec::new(),
         scan: true,
         modes: false,
+        ais: false,
         record: false,
         log: false,
         feeds: Vec::new(),

@@ -7,8 +7,10 @@ mod chain;
 mod bands;
 mod devices;
 mod dial;
-mod flights;
+mod tracks;
 mod map;
+mod airports;
+mod marine;
 mod modes;
 mod packetlog;
 mod chainview;
@@ -713,7 +715,7 @@ fn main() -> eframe::Result<()> {
                 app.show_chain();
             }
             if args.flights {
-                app.show_flights();
+                app.show_map();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

@@ -135,6 +135,16 @@ antenna and that does not change when the map is dragged. The station is set
 by right-clicking the map or typing coordinates above it, and is remembered in
 the session file.
 
+Once the map is zoomed in past about level nine, airports appear as amber
+markers under the aircraft, their ident codes labelled as the view narrows
+(large fields first, then medium, then small) and dropping where they would
+cover one another. Hovering a marker shows a card with the airport's name,
+code and elevation and its air traffic frequencies, primary ones first. The
+airports and frequencies come from `crates/app/data/airports.tsv` and
+`frequencies.tsv`, a slice of the public-domain OurAirports dataset covering
+Ireland, Britain, northern France, the Low Countries, Germany, Scandinavia and
+Iceland, read once at startup and held.
+
 The packet log settings, on the `SETTINGS` button in the packet list, control
 whether packets are written at all, where they go, and the size at which a
 day's file stops growing. The limit is a runaway guard rather than a budget:

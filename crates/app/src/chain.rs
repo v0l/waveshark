@@ -66,6 +66,7 @@ enum Role {
     Spectrum,
     Record,
     ModeS,
+    Ais,
     /// Banks are distinguished by the channel width they were built for.
     Bank(u32),
     /// A stage of one listening channel.
@@ -155,6 +156,7 @@ pub struct Receiver {
     spectrum: NodeId,
     record: Option<NodeId>,
     modes: Option<NodeId>,
+    ais: Option<NodeId>,
     banks: Vec<Bank>,
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
@@ -167,7 +169,7 @@ pub struct Receiver {
     log_cap: Option<u64>,
     bus: Option<NodeId>,
     decode: Option<NodeId>,
-    flights: Option<NodeId>,
+    tracks: Option<NodeId>,
     /// Where the receiver is, which resolves a position from a single frame.
     location: Option<(f64, f64)>,
     /// Bursts logged before the last rebuild, since the node holding the
@@ -196,6 +198,9 @@ pub struct Plan {
     pub scan: bool,
     /// Whether to run the Mode S decoder.
     pub modes: bool,
+    /// Whether to run the AIS decoder, which needs both 162 MHz channels in
+    /// the span.
+    pub ais: bool,
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
@@ -243,6 +248,7 @@ impl Receiver {
             spectrum: NodeId(0),
             record: None,
             modes: None,
+            ais: None,
             banks: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
@@ -250,7 +256,7 @@ impl Receiver {
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             bus: None,
             decode: None,
-            flights: None,
+            tracks: None,
             location: None,
             logged: 0,
             center: plan.center,
@@ -311,6 +317,7 @@ impl Receiver {
 
         self.record = None;
         self.modes = None;
+        self.ais = None;
         self.banks.clear();
         self.center = plan.center;
         self.rate = plan.rate;
@@ -399,6 +406,20 @@ impl Receiver {
             modes = Some(id);
         }
 
+        // AIS is the same shape: a wideband decoder on the head of the chain
+        // that puts frames on the bus. It costs a pass over every sample, so
+        // like Mode S it only runs where its signal is.
+        let mut ais = None;
+        if plan.ais {
+            let id = match pool.remove(&Role::Ais) {
+                Some(p) => b.add_existing(p),
+                None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
+            };
+            b.connect(head.o(), id.i());
+            roles.push(Role::Ais);
+            ais = Some(id);
+        }
+
         let mut banks = Vec::new();
         if plan.scan {
             for (label, width, make) in [
@@ -467,6 +488,7 @@ impl Receiver {
             .iter()
             .map(|(id, _)| id.o())
             .chain(modes.map(|m| m.o()))
+            .chain(ais.map(|a| a.o()))
             .chain(feeds.iter().map(|f| f.o()))
             .collect();
         if !sources.is_empty() {
@@ -515,18 +537,19 @@ impl Receiver {
         // The flight tracker is a consumer of the bus like any other, which
         // is what stops every view being wired to the demodulator it happens
         // to care about.
-        // Attached whenever anything could produce a Mode S frame: the local
-        // demodulator, or a feed from a receiver that has one. A feed is
-        // usually the reason to run this at all on a band that is not 1090.
-        let mut flights = None;
-        if let (Some(bus), true) = (bus, plan.modes || !plan.feeds.is_empty()) {
+        // Attached whenever anything could produce a frame it can track: the
+        // Mode S or AIS demodulators, or a feed from a receiver that has one.
+        // A feed is usually the reason to run this at all on a band that is
+        // neither 1090 nor 162.
+        let mut tracks = None;
+        if let (Some(bus), true) = (bus, plan.modes || plan.ais || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
-                None => b.add_labeled("Flight list", Box::new(crate::flights::FlightsNode::new())),
+                None => b.add_labeled("Tracks", Box::new(crate::tracks::TracksNode::new())),
             };
             b.connect(bus.o(), id.i());
             roles.push(Role::Flights);
-            flights = Some(id);
+            tracks = Some(id);
         }
 
         // Some output has to be nominated and none of them is the output: a
@@ -608,7 +631,8 @@ impl Receiver {
         self.record = record;
         self.bus = bus;
         self.decode = decode;
-        self.flights = flights;
+        self.ais = ais;
+        self.tracks = tracks;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
         if let Some((lat, lon)) = self.location {
@@ -696,10 +720,14 @@ impl Receiver {
         self.modes.is_some()
     }
 
+    pub fn ais_on(&self) -> bool {
+        self.ais.is_some()
+    }
+
     /// Whether anything is tracking aircraft, from the local demodulator or
     /// from a feed.
     pub fn tracking(&self) -> bool {
-        self.flights.is_some()
+        self.tracks.is_some()
     }
 
     /// Channels in each bank, in the order the banks were added.
@@ -855,10 +883,10 @@ impl Receiver {
             .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
     }
 
-    /// Aircraft heard recently, most recently heard first.
-    pub fn aircraft(&self, now: std::time::Instant) -> Vec<crate::flights::Aircraft> {
-        self.flights
-            .and_then(|id| downcast::<crate::flights::FlightsNode>(&self.graph, id))
+    /// Tracks heard recently, in the order they were first heard.
+    pub fn tracks(&self, now: std::time::Instant) -> Vec<crate::tracks::Track> {
+        self.tracks
+            .and_then(|id| downcast::<crate::tracks::TracksNode>(&self.graph, id))
             .map(|n| n.rows(now))
             .unwrap_or_default()
     }
@@ -867,10 +895,10 @@ impl Receiver {
     pub fn set_location(&mut self, lat: f64, lon: f64) {
         self.location = Some((lat, lon));
         if let Some(n) = self
-            .flights
+            .tracks
             .and_then(|id| self.graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<crate::flights::FlightsNode>())
+            .and_then(|a| a.downcast_mut::<crate::tracks::TracksNode>())
         {
             n.set_reference(lat, lon);
         }
@@ -917,6 +945,9 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
     // and which bank is what its keying says.
     let channel_hz = match d.modulation {
         Some("PPM") => MODES_BAND_HZ,
+        // AIS is heard through one 25 kHz marine channel, whichever of the
+        // two carried the frame.
+        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
         Some("FSK") => FSK_CHANNEL_HZ,
         _ => OOK_CHANNEL_HZ,
     };
@@ -1137,6 +1168,7 @@ mod tests {
             channels: Vec::new(),
             scan: true,
             modes: false,
+            ais: false,
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1291,12 +1323,57 @@ mod tests {
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
-        let flights = topo.nodes.iter().find(|n| n.label == "Flight list").expect("a tracker");
+        let tracker = topo.nodes.iter().find(|n| n.label == "Tracks").expect("a tracker");
         let from_bus = bus.outputs.iter().any(|(slot, _)| {
-            flights.inputs.iter().any(|(in_slot, _)| in_slot == slot)
+            tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot)
         });
         assert!(from_bus, "the flight list is not fed by the bus");
-        assert_eq!(flights.inputs[0].1.kind, pipeline::PortKind::Packets);
+        assert_eq!(tracker.inputs[0].1.kind, pipeline::PortKind::Packets);
+    }
+
+    /// AIS is a front end like Mode S: it feeds the bus, and the tracker
+    /// reads it from there rather than being wired to the demodulator.
+    ///
+    /// This is the test that says the bus abstraction actually holds. It had
+    /// exactly one producer of tracks until AIS, and an abstraction with one
+    /// implementation has not been shown to be one.
+    #[test]
+    fn ais_reaches_the_tracker_through_the_bus_like_mode_s_does() {
+        let mut p = plan(2_400_000.0, Hz(162_000_000));
+        p.ais = true;
+        p.scan = false;
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.ais_on(), "the AIS decoder is not running");
+        let topo = rx.topology();
+        let ais = topo.nodes.iter().find(|n| n.label == "162 AIS").expect("an AIS node");
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        let tracker = topo.nodes.iter().find(|n| n.label == "Tracks").expect("a tracker");
+        let to_bus = ais
+            .outputs
+            .iter()
+            .any(|(slot, _)| bus.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(to_bus, "AIS does not reach the bus");
+        let from_bus = bus
+            .outputs
+            .iter()
+            .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(from_bus, "the tracker is not fed by the bus");
+    }
+
+    /// The banks understand nothing on 162 MHz, so they must not run there:
+    /// it would be a pass over every sample to invent unknown bursts out of
+    /// GMSK.
+    #[test]
+    fn the_ism_banks_do_not_run_on_the_ais_band() {
+        let mut p = plan(2_400_000.0, Hz(162_000_000));
+        p.ais = true;
+        p.scan = false;
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        assert!(
+            !topo.nodes.iter().any(|n| n.label.contains("bank")),
+            "a channel bank is running on the AIS band"
+        );
     }
 
     /// A feed is a front end, not a special case. It has to reach the bus,
@@ -1368,7 +1445,7 @@ mod tests {
         p.modes = true;
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
-        assert!(rx.topology().nodes.iter().any(|n| n.label == "Flight list"));
+        assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));
         assert_eq!(rx.logged(), 0, "nothing was asked to be written");
     }
 

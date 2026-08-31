@@ -489,6 +489,12 @@ within ten seconds of each other, or a reference within 180 nautical miles.
 the first frame from an aircraft puts it on the map instead of the first
 matching pair. The value is remembered in the session file.
 
+Zoom in past level nine and airports appear under the aircraft as amber
+markers, their codes labelled as the view narrows, with the tower, ground,
+ATIS and approach frequencies for the one under the pointer shown on hover.
+The airports and their frequencies are a bundled slice of the public-domain
+OurAirports dataset (`crates/app/data/`), not something fetched at runtime.
+
 ### Decoding the whole span
 
 Data decoding is not something you tune to. The receiver splits whatever span

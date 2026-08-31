@@ -6,6 +6,7 @@
 //! discrimination instead of an envelope), and that should be a
 //! reconfiguration rather than a recompile.
 
+pub mod ais_nodes;
 pub mod bank;
 pub mod decode_nodes;
 pub mod dsp_nodes;
@@ -19,6 +20,7 @@ pub mod wfm;
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
+pub use ais_nodes::AisNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;

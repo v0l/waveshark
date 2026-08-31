@@ -5,6 +5,7 @@
 //! not internally threaded.
 
 pub mod agc;
+pub mod ais;
 pub mod ask;
 pub mod blend;
 pub mod channelizer;
@@ -13,6 +14,7 @@ pub mod demod;
 pub mod detect;
 pub mod fir;
 pub mod fsk;
+pub mod hdlc;
 pub mod mixer;
 pub mod modes;
 pub mod pulse;
@@ -24,6 +26,7 @@ pub mod stereo;
 pub(crate) mod twolevel;
 pub mod window;
 
+pub use ais::{AisConfig, AisDetector, AisFrame};
 pub use ask::{AskConfig, AskDetector};
 pub use blend::{HighBlend, NoiseMeter, VariableLowpass};
 pub use channelizer::Channelizer;

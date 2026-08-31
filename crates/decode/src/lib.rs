@@ -14,6 +14,7 @@
 //! every known protocol against every detected burst affordable.
 
 pub mod adsb;
+pub mod ais;
 pub mod analyze;
 pub mod bits;
 pub mod protocol;
