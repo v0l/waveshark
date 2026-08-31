@@ -18,6 +18,7 @@
 use decode::adsb::{self, AddressBook};
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 const FIXTURE: &str = "adsb_1090M_2400k.cu8";
 const REFERENCE: &str = "adsb_1090M_2400k.dump1090.hex";
@@ -27,16 +28,17 @@ fn testdata(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name)
 }
 
-fn capture() -> Option<Vec<common::C32>> {
-    let raw = std::fs::read(testdata(FIXTURE)).ok()?;
-    Some(
-        raw.chunks_exact(2)
-            .map(|c| {
-                common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
-            })
-            .collect(),
-    )
-}
+/// Samples handed to the detector at a time, the way a radio delivers them,
+/// so the buffer boundary is part of what is being tested.
+const BLOCK: usize = 65_536;
+
+/// The capture, demodulated once for the whole file.
+///
+/// Each test asks a different question about the same four seconds, and cargo
+/// runs them in parallel, so demodulating inside each one ran the search three
+/// times over and held three copies of the capture at once. The work is
+/// identical, so it happens once and the tests read the frames.
+static FRAMES: LazyLock<Option<Vec<String>>> = LazyLock::new(decode);
 
 /// What dump1090 made of the same file.
 fn reference() -> HashSet<String> {
@@ -50,14 +52,20 @@ fn reference() -> HashSet<String> {
 
 /// Every frame the receiver believes, as hex.
 fn decode() -> Option<Vec<String>> {
-    let iq = capture()?;
+    let raw = std::fs::read(testdata(FIXTURE)).ok()?;
     let mut d = ModeSDetector::new(RATE, ModeSConfig::default());
     let book = std::cell::RefCell::new(AddressBook::new());
     let mut frames = Vec::new();
-    // In blocks, the way a radio delivers them, so the buffer boundary is part
-    // of what is being tested.
-    for block in iq.chunks(65_536) {
-        d.process_valid(block, &mut frames, &|f: &ModeSFrame| {
+    // Converted a block at a time rather than all at once: the detector reads
+    // the capture in blocks anyway, so building the whole thing as complex
+    // floats first only costs memory.
+    let mut block: Vec<common::C32> = Vec::with_capacity(BLOCK);
+    for bytes in raw.chunks(BLOCK * 2) {
+        block.clear();
+        block.extend(bytes.chunks_exact(2).map(|c| {
+            common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
+        }));
+        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| {
             book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
         });
     }
@@ -89,7 +97,8 @@ macro_rules! skip_without_fixture {
 
 #[test]
 fn every_frame_we_report_is_one_dump1090_also_saw() {
-    let ours: HashSet<String> = skip_without_fixture!(decode()).into_iter().collect();
+    let ours: HashSet<String> =
+        skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
     let theirs = reference();
     let invented: Vec<&String> = ours.difference(&theirs).collect();
     assert!(
@@ -102,7 +111,8 @@ fn every_frame_we_report_is_one_dump1090_also_saw() {
 
 #[test]
 fn most_of_what_dump1090_found_is_found_here_too() {
-    let ours: HashSet<String> = skip_without_fixture!(decode()).into_iter().collect();
+    let ours: HashSet<String> =
+        skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
     let theirs = reference();
     let matched = ours.intersection(&theirs).count();
     // dump1090 recovers a few more through two-bit error correction and
@@ -118,12 +128,12 @@ fn most_of_what_dump1090_found_is_found_here_too() {
 #[test]
 fn the_aircraft_in_the_capture_decodes_to_a_position_and_a_callsign() {
     // The end of the pipeline, on real RF: bytes to something a map could use.
-    let frames = skip_without_fixture!(decode());
+    let frames = skip_without_fixture!(FRAMES.as_ref());
     let mut altitude = None;
     let mut position = None;
     let mut callsign = None;
     let mut icaos = HashSet::new();
-    for hex in &frames {
+    for hex in frames {
         let bytes: Vec<u8> = (0..hex.len() / 2)
             .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
             .collect();

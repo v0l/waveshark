@@ -7,6 +7,7 @@
 
 use common::C32;
 use dsp::{FirDecim, FmDemod, Mixer, StereoDecoder};
+use std::sync::LazyLock;
 
 const FIXTURE: &str = "../../testdata/wfm_stereo_95.5M_1024k.cu8";
 /// Encoded in the filename, rtl_433 style.
@@ -15,6 +16,14 @@ const RATE: f64 = 1_024_000.0;
 /// Unsigned 8-bit offset binary, which is what the filename's `cu8` means.
 /// Read directly rather than through `sources`, because that crate depends on
 /// this one and a dev-dependency back would be a cycle.
+/// The multiplex, recovered once for the whole file.
+///
+/// Both tests want the same demodulated baseband and cargo runs them in
+/// parallel, so doing it per test mixed, filtered and discriminated the whole
+/// capture twice over at the same time. Same reason as the other capture
+/// tests: the work is identical, so it happens once.
+static MPX: LazyLock<Option<(Vec<f32>, f64)>> = LazyLock::new(mpx);
+
 fn mpx() -> Option<(Vec<f32>, f64)> {
     let raw = std::fs::read(FIXTURE).ok()?;
     let samples: Vec<C32> = raw
@@ -42,10 +51,11 @@ fn mpx() -> Option<(Vec<f32>, f64)> {
 
 #[test]
 fn the_pll_locks_to_the_broadcast_pilot() {
-    let Some((disc, rate)) = mpx() else {
+    let Some((disc, rate)) = MPX.as_ref() else {
         eprintln!("fixture missing, run testdata/fetch.sh");
         return;
     };
+    let (disc, rate) = (disc.as_slice(), *rate);
     let mut d = StereoDecoder::new(rate);
     let (mut l, mut r) = (Vec::new(), Vec::new());
     d.process(&disc, &mut l, &mut r);
@@ -60,7 +70,8 @@ fn the_pll_locks_to_the_broadcast_pilot() {
 
 #[test]
 fn a_mono_broadcast_does_not_produce_invented_separation() {
-    let Some((disc, rate)) = mpx() else { return };
+    let Some((disc, rate)) = MPX.as_ref() else { return };
+    let (disc, rate) = (disc.as_slice(), *rate);
     let mut d = StereoDecoder::new(rate);
     let (mut l, mut r) = (Vec::new(), Vec::new());
     d.process(&disc, &mut l, &mut r);

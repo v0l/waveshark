@@ -13,10 +13,23 @@
 use common::C32;
 use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use dsp::{FirDecim, FmDemod, StereoDecoder};
+use std::sync::LazyLock;
 
 const FIXTURE: &str = "../../testdata/rds_92.4M_1024k.cu8";
 const RATE: f64 = 1_024_000.0;
 const EXPECT_PI: u16 = 0x2208;
+
+/// Samples handed to the chain at a time.
+const BLOCK: usize = 262_144;
+
+/// The capture, decoded once for the whole file.
+///
+/// Every test here asks a different question about the same forty seconds of
+/// radio, and cargo runs them in parallel. Decoding inside each test ran the
+/// whole chain four times over and held four copies of the capture at once,
+/// which is about 1.6 GB and enough to get the test binary killed rather than
+/// failed. The work is identical, so it happens once and the tests read it.
+static DECODED: LazyLock<Option<Decoded>> = LazyLock::new(decode);
 
 struct Decoded {
     pi: Option<u16>,
@@ -29,10 +42,6 @@ struct Decoded {
 
 fn decode() -> Option<Decoded> {
     let raw = std::fs::read(FIXTURE).ok()?;
-    let samples: Vec<C32> = raw
-        .chunks_exact(2)
-        .map(|p| C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5))
-        .collect();
 
     // Occupied bandwidth is 264 kHz: Carson with RDS at 57 kHz as the highest
     // modulating frequency, not audio at 15 kHz.
@@ -49,9 +58,18 @@ fn decode() -> Option<Decoded> {
     let (mut l, mut r, mut bits) = (Vec::new(), Vec::new(), Vec::new());
     let mut total = 0u64;
 
-    for chunk in samples.chunks(262_144) {
+    // Converted a block at a time rather than all at once. The chain consumes
+    // the capture in blocks anyway, so materialising all forty seconds as
+    // complex floats first costs 328 MB to hand the same samples over in the
+    // same order.
+    let mut chunk: Vec<C32> = Vec::with_capacity(BLOCK);
+    for bytes in raw.chunks(BLOCK * 2) {
+        chunk.clear();
+        chunk.extend(bytes.chunks_exact(2).map(|p| {
+            C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5)
+        }));
         iq.clear();
-        iff.process(chunk, &mut iq);
+        iff.process(&chunk, &mut iq);
         disc.clear();
         fm.process(&iq, &mut disc);
         st.process(&disc, &mut l, &mut r);
@@ -90,15 +108,15 @@ macro_rules! need {
 
 #[test]
 fn the_station_identifier_and_name_are_recovered() {
-    let d = need!(decode());
+    let d = need!(DECODED.as_ref());
     assert_eq!(d.pi, Some(EXPECT_PI), "wrong identifier from {} groups", d.groups);
     assert_eq!(d.name.as_deref(), Some("SPIRIT"));
 }
 
 #[test]
 fn radiotext_is_recovered() {
-    let d = need!(decode());
-    let rt = d.radiotext.unwrap_or_default();
+    let d = need!(DECODED.as_ref());
+    let rt = d.radiotext.clone().unwrap_or_default();
     assert!(rt.contains("Spirit"), "radiotext was {rt:?}");
 }
 
@@ -107,7 +125,7 @@ fn enough_groups_survive_to_be_useful() {
     // A group is 104 bits. Without forward error correction some blocks are
     // always lost, but a yield this far below what the air time allows would
     // mean the demodulator, not the reception, is the limit.
-    let d = need!(decode());
+    let d = need!(DECODED.as_ref());
     let possible = d.bits / 104;
     let yield_pct = 100.0 * d.groups as f64 / possible.max(1) as f64;
     assert!(
@@ -119,6 +137,6 @@ fn enough_groups_survive_to_be_useful() {
 
 #[test]
 fn the_pilot_is_found_on_a_real_broadcast() {
-    let d = need!(decode());
+    let d = need!(DECODED.as_ref());
     assert!(d.stereo_locked, "no stereo lock on a live station");
 }
