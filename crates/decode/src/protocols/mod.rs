@@ -19,6 +19,7 @@ mod lacrosse;
 mod nexus;
 mod oregon;
 mod rubicson;
+mod somfy_rts;
 mod x10;
 
 pub use acurite::{Acurite609Txc, AcuriteTower};
@@ -31,6 +32,7 @@ pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
 pub use oregon::OregonV3;
 pub use rubicson::Rubicson;
+pub use somfy_rts::SomfyRts;
 pub use x10::X10Rf;
 
 use crate::bits::BitBuffer;

@@ -60,6 +60,13 @@ impl BitBuffer {
         self.len += 1;
     }
 
+    /// Append `n` copies of `bit`.
+    pub fn extend(&mut self, bit: bool, n: usize) {
+        for _ in 0..n {
+            self.push(bit);
+        }
+    }
+
     pub fn get(&self, i: usize) -> Option<bool> {
         if i >= self.len {
             return None;
