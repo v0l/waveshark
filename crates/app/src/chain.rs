@@ -70,6 +70,7 @@ enum Role {
     Bank(u32),
     /// A stage of one listening channel.
     Stage(u64, Stage),
+    PacketLog,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -154,6 +155,12 @@ pub struct Receiver {
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
     pending_record: Option<RecordRing>,
+    /// A packet log waiting for the same.
+    pending_log: Option<crate::packetlog::PacketLog>,
+    log: Option<NodeId>,
+    /// Bursts logged before the last rebuild, since the node holding the
+    /// count is replaced by each one.
+    logged: u64,
     center: Hz,
     rate: f64,
     /// Channels that could not be built, for the status line.
@@ -178,6 +185,18 @@ pub struct Plan {
     /// Whether to run the Mode S decoder.
     pub modes: bool,
     pub record: bool,
+    /// Log every burst the front ends detect.
+    pub log: bool,
+}
+
+/// Where a receiver's output goes, beyond the audio and the screen.
+///
+/// Both of these own an open file, so they are handed to the graph rather
+/// than created by it, and they survive a rebuild by being carried across.
+#[derive(Default)]
+pub struct Sinks {
+    pub recorder: Option<Recorder>,
+    pub packet_log: Option<crate::packetlog::PacketLog>,
 }
 
 impl Plan {
@@ -188,7 +207,7 @@ impl Plan {
 }
 
 impl Receiver {
-    pub fn build(plan: &Plan, recorder: Option<Recorder>) -> Result<Self> {
+    pub fn build(plan: &Plan, sinks: Sinks) -> Result<Self> {
         let mut rx = Self {
             // Placeholder, replaced immediately. A graph cannot be built
             // empty and then filled, which is the same constraint that makes
@@ -203,11 +222,14 @@ impl Receiver {
             banks: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
+            pending_log: sinks.packet_log,
+            log: None,
+            logged: 0,
             center: plan.center,
             rate: plan.rate,
             refused: None,
         };
-        rx.assemble(plan, HashMap::new(), recorder.map(RecordRing::new))?;
+        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new))?;
         Ok(rx)
     }
 
@@ -219,6 +241,9 @@ impl Receiver {
         let old_rate = self.rate;
         let old_center = self.center;
 
+        // The node holding the count is about to be replaced, and a counter
+        // that restarted on every retune would be worse than no counter.
+        self.logged = self.logged();
         let graph = std::mem::replace(
             &mut self.graph,
             Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
@@ -389,6 +414,32 @@ impl Receiver {
             chans.push(add_channel(&mut b, &mut roles, &mut pool, head, spec, plan.eff_rate()));
         }
 
+        // The log takes one input per source of bursts, because a receiver
+        // hears them from several places at once and they belong in one file
+        // in the order they arrived. Added last so it runs after everything
+        // that could produce one this block.
+        let mut log = None;
+        if plan.log {
+            let sources: Vec<Out> =
+                banks.iter().map(|(id, _)| id.o()).chain(modes.map(|m| m.o())).collect();
+            let sink = self.pending_log.take().or_else(|| {
+                self.log
+                    .and_then(|_| pool.remove(&Role::PacketLog))
+                    .and_then(take_log)
+            });
+            if let (Some(sink), false) = (sink, sources.is_empty()) {
+                let id = b.add_labeled(
+                    "Packet log",
+                    Box::new(nodes::PackageLogNode::new(sink, sources.len())),
+                );
+                for (k, src) in sources.iter().enumerate() {
+                    b.connect(*src, id.input(k));
+                }
+                roles.push(Role::PacketLog);
+                log = Some(id);
+            }
+        }
+
         // Some output has to be nominated and none of them is the output: a
         // receiver has as many as it has channels, and the spectrum and the
         // decoders produce nothing that flows. The last channel is as good as
@@ -449,6 +500,7 @@ impl Receiver {
         self.roles = roles;
         self.spectrum = spectrum;
         self.record = record;
+        self.log = log;
         self.modes = modes;
         self.banks = banks
             .into_iter()
@@ -648,6 +700,22 @@ impl Receiver {
         out
     }
 
+    /// Start or stop the packet log. Takes effect on the next rebuild, since
+    /// the log is a node and the graph's shape is fixed once built.
+    pub fn set_packet_log(&mut self, log: Option<crate::packetlog::PacketLog>) {
+        self.pending_log = log;
+    }
+
+    /// Bursts written to the log since the receiver started.
+    pub fn logged(&self) -> u64 {
+        self.logged
+            + self
+                .log
+                .and_then(|id| downcast::<nodes::PackageLogNode<crate::packetlog::PacketLog>>(&self.graph, id))
+                .map(|n| n.sink().logged())
+                .unwrap_or(0)
+    }
+
     /// Take the recorder back out, after a replay that wrote one.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_recorder(&mut self) -> Option<Recorder> {
@@ -696,6 +764,16 @@ fn record(
 
 fn downcast<T: 'static>(g: &Graph, id: NodeId) -> Option<&T> {
     g.node(id).and_then(|n| n.as_any()).and_then(|a| a.downcast_ref::<T>())
+}
+
+/// Recover a packet log from a node lifted out of a graph, so a rebuild
+/// keeps writing the same file.
+fn take_log(part: NodePart) -> Option<crate::packetlog::PacketLog> {
+    part.node
+        .into_any()?
+        .downcast::<nodes::PackageLogNode<crate::packetlog::PacketLog>>()
+        .ok()
+        .map(|n| n.into_sink())
 }
 
 /// The recorder, as a node.
@@ -896,6 +974,7 @@ mod tests {
             scan: true,
             modes: false,
             record: false,
+            log: false,
         }
     }
 
@@ -927,7 +1006,7 @@ mod tests {
         // invisible to the view, the parameters and the latency accounting.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.channels = vec![chan(1, 100_000.0, Demod::Nfm)];
-        let rx = Receiver::build(&p, None).unwrap();
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let labels: Vec<String> =
             rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
         for want in ["DC block", "Spectrum", "OOK bank", "FSK bank", "Mixer"] {
@@ -937,15 +1016,15 @@ mod tests {
 
     #[test]
     fn a_bank_shows_the_chain_its_channels_run() {
-        let rx = Receiver::build(&plan(2_400_000.0, Hz::mhz(433)), None).unwrap();
+        let rx = Receiver::build(&plan(2_400_000.0, Hz::mhz(433)), Sinks::default()).unwrap();
         let topo = rx.topology();
         let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").expect("the OOK bank");
         let inner = bank.inner.as_ref().expect("what a channel runs");
         assert!(inner.nodes.iter().any(|n| n.label.contains("Envelope")));
         assert!(bank.inner_count > 1, "a bank of one channel is not a bank");
-        // A bank consumes samples and produces decodes, so drawing it with an
-        // output rate would invent a stream that is not there.
-        assert!(bank.sink);
+        // What a bank passes on is the bursts its channels detected, decoded
+        // or not, which is what a log or an analyser attaches to.
+        assert_eq!(bank.outputs[0].1.kind, pipeline::PortKind::Pulses);
     }
 
     #[test]
@@ -955,7 +1034,7 @@ mod tests {
         // second one was added.
         let mut p = plan(2_400_000.0, Hz::mhz(95));
         p.channels = vec![chan(1, 100_000.0, Demod::Wfm)];
-        let mut rx = Receiver::build(&p, None).unwrap();
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         rx.process(&block(4096)).unwrap();
 
         p.channels.push(chan(2, -250_000.0, Demod::Nfm));
@@ -972,7 +1051,7 @@ mod tests {
         // frequency it is no longer on.
         let mut p = plan(2_400_000.0, Hz::mhz(95));
         p.channels = vec![chan(1, 100_000.0, Demod::Wfm)];
-        let mut rx = Receiver::build(&p, None).unwrap();
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         rx.process(&block(4096)).unwrap();
 
         p.channels = vec![chan(1, 300_000.0, Demod::Wfm)];
@@ -988,7 +1067,7 @@ mod tests {
         // that sounds like a dead station.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
         p.channels = vec![chan(1, -994_200_000.0, Demod::Wfm)];
-        let rx = Receiver::build(&p, None).unwrap();
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.channels().is_empty());
         assert!(rx.refused.unwrap().contains("outside the span"));
     }
@@ -997,7 +1076,7 @@ mod tests {
     fn zooming_rebuilds_at_the_narrower_rate() {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.zoom = 8;
-        let rx = Receiver::build(&p, None).unwrap();
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let zoom = topo.nodes.iter().find(|n| n.label.starts_with("Zoom")).expect("a zoom stage");
         assert_eq!(zoom.outputs[0].1.rate, 300_000.0);
@@ -1009,6 +1088,75 @@ mod tests {
     }
 
     #[test]
+    fn the_log_is_fed_by_every_front_end_at_once() {
+        // One file, in the order things arrived, rather than a log per
+        // source: the banks and the 1090 MHz decoder all hear bursts, and
+        // which of them heard one is a property of the record, not the file.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.log = true;
+        let d = std::env::temp_dir().join(format!("sr-chainlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let rx = Receiver::build(
+            &p,
+            Sinks {
+                packet_log: Some(crate::packetlog::PacketLog::new(d.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let topo = rx.topology();
+        let log = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a packet log");
+        assert_eq!(log.inputs.len(), 2, "both banks feed it");
+        // Every input carries detected bursts rather than decoded frames.
+        assert!(log.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Pulses));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_log_survives_a_retune() {
+        // It holds an open file, and a rebuild that cannot lift it out of the
+        // old graph drops it: logging stops at the first retune and nothing
+        // says so. Every sink with state has this failure mode.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.log = true;
+        let d = std::env::temp_dir().join(format!("sr-keeplog-{}", std::process::id()));
+        let mut rx = Receiver::build(
+            &p,
+            Sinks {
+                packet_log: Some(crate::packetlog::PacketLog::new(d)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        p.center = Hz::mhz(868);
+        rx.rebuild(&p).unwrap();
+        assert!(
+            rx.topology().nodes.iter().any(|n| n.label == "Packet log"),
+            "the log was dropped by a retune"
+        );
+        // Still the same node, so still the same open file: a fresh one
+        // would have restarted the count.
+        assert_eq!(rx.logged(), 0);
+    }
+
+    #[test]
+    fn switching_the_log_on_later_puts_it_in_the_graph() {
+        // How it actually happens: the interface names a directory after the
+        // radio thread is already running, so the log arrives at a receiver
+        // that was built without one.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let d = std::env::temp_dir().join(format!("sr-latelog-{}", std::process::id()));
+        rx.set_packet_log(Some(crate::packetlog::PacketLog::new(d)));
+        p.log = true;
+        rx.rebuild(&p).unwrap();
+        assert!(
+            rx.topology().nodes.iter().any(|n| n.label == "Packet log"),
+            "the log never joined the graph"
+        );
+    }
+
+    #[test]
     fn the_recorder_holds_the_burst_before_anything_decodes_it() {
         // A recording that starts when a decoder reports has already missed
         // the packet, so the ring must run ahead of the banks.
@@ -1017,7 +1165,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sr-chain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rec = Recorder::new(&dir, p.eff_rate(), p.center).unwrap();
-        let rx = Receiver::build(&p, Some(rec)).unwrap();
+        let rx =
+            Receiver::build(&p, Sinks { recorder: Some(rec), ..Default::default() }).unwrap();
         let order: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
         let ring = order.iter().position(|l| l == "Recorder").expect("a recorder");
         let bank = order.iter().position(|l| l == "OOK bank").expect("a bank");

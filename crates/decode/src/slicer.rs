@@ -212,6 +212,7 @@ mod tests {
             snr_db: 20.0,
             rssi_dbfs: -12.0,
             start_sample: 0,
+            center_hz: 0,
         }
     }
 

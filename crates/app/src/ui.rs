@@ -100,7 +100,9 @@ pub struct App {
     /// control that changes one would otherwise have to remember to set it.
     /// Every packet, appended to disk as it arrives. On unless the receiver
     /// has nowhere to write, which is the case in tests.
-    packet_log: Option<crate::packetlog::PacketLog>,
+    /// Where the packet log is being written, for the status line. The log
+    /// itself lives in the graph, on the radio thread.
+    packet_log: Option<std::path::PathBuf>,
     /// Aircraft, folded together from the ADS-B packets in the same stream.
     flights: crate::flights::Flights,
     /// Where the receiver is, when it has been told.
@@ -288,8 +290,7 @@ impl App {
         let mut app = Self {
             devices,
             device,
-            packet_log: crate::packetlog::PacketLog::default_dir()
-                .map(crate::packetlog::PacketLog::new),
+            packet_log: crate::packetlog::PacketLog::default_dir(),
             flights: {
                 let mut f = crate::flights::Flights::new();
                 if let Some((lat, lon)) = s.location {
@@ -407,12 +408,9 @@ impl App {
 
     /// Turn the packet log off, or point it somewhere other than the default.
     pub fn set_packet_log(&mut self, off: bool, dir: Option<std::path::PathBuf>) {
-        self.packet_log = if off {
-            None
-        } else {
-            dir.or_else(crate::packetlog::PacketLog::default_dir)
-                .map(crate::packetlog::PacketLog::new)
-        };
+        self.packet_log = if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
+        let dir = self.packet_log.clone();
+        self.send(Cmd::PacketLog(dir));
     }
 
     /// Record every burst that decodes into a directory of captures.
@@ -501,6 +499,11 @@ impl App {
         }
         if let Some(r) = self.record_dir.clone() {
             self.send(Cmd::Record(Some(r)));
+        }
+        // The log is a node in the graph, so a new radio thread means a new
+        // graph and it has to be told where to write again.
+        if let Some(d) = self.packet_log.clone() {
+            self.send(Cmd::PacketLog(Some(d)));
         }
         // Whatever the radio was set to last time has to be pushed at it
         // again: a new thread means a freshly opened device at its defaults.
@@ -592,13 +595,12 @@ impl App {
         }
     }
 
-    /// Append decoded packets to the log, oldest first.
+    /// Add decoded packets to the on-screen list, oldest first.
+    ///
+    /// Nothing is written here. The packet log is a node in the graph and
+    /// stores what the demodulators produced, which is a better record than
+    /// this list: these are conclusions, and they are bounded.
     fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
-        // To disk before the screen. The on-screen list is bounded and drops
-        // its oldest rows; the file is the one that has to keep everything.
-        if let Some(l) = self.packet_log.as_mut() {
-            l.append(&batch, std::time::SystemTime::now());
-        }
         for rec in batch {
             self.flights.update(&rec);
             let id = self.next_packet;
@@ -2256,10 +2258,18 @@ impl App {
                     "decoding off".into()
                 }));
             }
-            if let Some(l) = &self.packet_log {
+            let logged = self
+                .radio
+                .as_ref()
+                .map(|r| r.status.logged.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            if logged > 0 {
                 ui.add_space(10.0);
-                ui.label(legend(&format!("{} saved", l.logged())))
-                    .on_hover_text(format!("appended to {}", l.dir().display()));
+                ui.label(legend(&format!("{logged} saved")))
+                    .on_hover_text(match &self.packet_log {
+                        Some(d) => format!("appended to {}", d.display()),
+                        None => "appended to the packet log".into(),
+                    });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {

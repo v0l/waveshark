@@ -375,26 +375,45 @@ matters depends on what is being looked for, so none of the three is fixed.
 
 ### Packet log
 
-Every decoded packet is appended to `$XDG_DATA_HOME/super-radio/packets`, one
-JSON object per line, one file per day. It is on by default and has no switch
-in the interface, because the value of a packet log is in already having it:
-the interesting transmission is always the one that happened before anyone
-thought to press record. A receiver left on a band overnight is a test corpus,
-and real frames are the only honest way to tell whether a change to a decoder
-helped.
+Every burst the front ends detect is appended to
+`$XDG_DATA_HOME/super-radio/packets`, one file per day. It is on by default and
+has no switch in the interface, because the value of a log like this is in
+already having it: the interesting transmission is always the one that happened
+before anyone thought to press record. A receiver left on a band overnight is a
+test corpus, and real bursts are the only honest way to tell whether a change to
+a decoder helped.
+
+What is stored is what the demodulator produced: the mark and gap timings of
+each burst, or the frame bytes where the demodulator makes bytes rather than
+timings. The parsed frame is deliberately absent. A parse is a conclusion, and a
+conclusion stored without the evidence cannot be checked later, corrected by a
+better decoder, or shown to have been wrong. Timings can be decoded again next
+year; a field map cannot be un-decoded.
+
+Undecoded bursts are written too, and they matter most: a burst no protocol
+claimed leaves no other trace at all, and it is the raw material for the
+protocol that would have claimed it.
+
+The log is a node in the graph, fed by both channel banks and by the 1090 MHz
+decoder, so it stores what those front ends heard rather than what reached the
+screen. `--replay <file>.srpkt` runs the current decoders back over a log:
 
 ```
-{"at":1788185123.791,"freq":433920000,"model":"Fineoffset-WHx080",
- "modulation":"OOK","rssi_dbfs":-27.4,"snr_db":31.9,"crc_ok":true,
- "bytes":"ffac42473d0306211906fc",
- "fields":{"battery_ok":true,"humidity_pct":61,"temperature_c":15.9}}
+15:55:47   433.9200 MHz    88 pulses   22.5 dB  Fineoffset-WHx080  temperature_c=18 humidity_pct=61
+15:55:47   433.9200 MHz   305 pulses   16.4 dB  unclaimed
 ```
 
-`crc_ok` is absent rather than false for a protocol that has no integrity
-check, so filtering on the key separates "verified" from "unverifiable" without
-a special case. `--packet-log <dir>` moves it, `--no-packet-log` turns it off,
-and it stops appending at 512 MB, which is a runaway guard rather than a
-budget.
+The format is little-endian binary: a six-byte magic and a version, then a
+length-prefixed record per burst carrying the time, frequency, channel width,
+level, noise and the timings themselves. Binary rather than the line-delimited
+JSON this replaces, because the content changed: a burst is a few hundred
+timings, and a hundred bytes of quoted JSON per pulse turns an overnight capture
+into gigabytes. The length prefix means an unknown record kind is skipped rather
+than misparsed, and a receiver killed mid-write costs the last record rather
+than the file.
+
+`--packet-log <dir>` moves it, `--no-packet-log` turns it off, and it stops
+appending at 512 MB, which is a runaway guard rather than a budget.
 
 ### ADS-B
 

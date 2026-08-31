@@ -266,6 +266,9 @@ impl FskDetector {
                 snr_db: snr,
                 rssi_dbfs: dbfs(self.gate.signal_level()),
                 start_sample: self.burst_start,
+                // Stamped by the node that owns this detector, which is where
+                // the stream's centre frequency is known.
+                center_hz: 0,
             });
             self.stats.accepted += 1;
         } else if !pulses.is_empty() {

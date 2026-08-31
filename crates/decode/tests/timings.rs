@@ -24,6 +24,7 @@ fn package(pulses: Vec<(u32, u32)>) -> Package {
         snr_db: 22.0,
         rssi_dbfs: -20.0,
         start_sample: 0,
+        center_hz: 0,
     }
 }
 

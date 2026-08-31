@@ -376,8 +376,65 @@ fn bench_pan() {
 /// a slicer or a protocol and see immediately whether the same burst now
 /// decodes. No radio, no waiting for a device to transmit, and the same
 /// answer every time.
+/// Run the decoders over a packet log.
+///
+/// The log stores what the demodulator produced rather than what a decoder
+/// made of it, so this is not a printout of old conclusions: the protocols
+/// run again, now, over the bursts as they were heard. A decoder written
+/// after the log was written gets its chance at every burst in it, and a
+/// decoder that has since been fixed shows what it used to get wrong.
+fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
+    let bursts = packetlog::read(path)?;
+    if bursts.is_empty() {
+        anyhow::bail!("{} holds no bursts", path.display());
+    }
+    let protocols = decode::Protocols::all();
+    let (mut decoded, mut silent) = (0, 0);
+    for b in &bursts {
+        let secs = b.at_us / 1_000_000 % 86_400;
+        let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+        if b.kind == packetlog::KIND_BYTES {
+            println!(
+                "{when}  {:10.4} MHz  {:>4} B  {}",
+                b.center_hz as f64 / 1e6,
+                b.bytes.len(),
+                b.bytes.iter().map(|x| format!("{x:02x}")).collect::<String>()
+            );
+            decoded += 1;
+            continue;
+        }
+        let pkg = b.package();
+        let reports = protocols.decode_all(&pkg);
+        if reports.is_empty() {
+            silent += 1;
+            println!(
+                "{when}  {:10.4} MHz  {:>4} pulses  {:>5.1} dB  unclaimed",
+                b.center_hz as f64 / 1e6,
+                pkg.pulses.len(),
+                b.snr_db,
+            );
+        }
+        for r in reports {
+            decoded += 1;
+            println!(
+                "{when}  {:10.4} MHz  {:>4} pulses  {:>5.1} dB  {:<22} {}",
+                b.center_hz as f64 / 1e6,
+                pkg.pulses.len(),
+                b.snr_db,
+                r.model,
+                r.fields_line(),
+            );
+        }
+    }
+    println!("\n{} burst(s): {decoded} decoded, {silent} unclaimed", bursts.len());
+    Ok(())
+}
+
 fn replay(path: &str) -> anyhow::Result<()> {
     let path = std::path::Path::new(path);
+    if path.extension().and_then(|s| s.to_str()) == Some("srpkt") {
+        return replay_log(path);
+    }
     let mut files: Vec<std::path::PathBuf> = if path.is_dir() {
         std::fs::read_dir(path)?
             .filter_map(|e| e.ok().map(|e| e.path()))

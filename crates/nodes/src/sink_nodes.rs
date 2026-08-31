@@ -231,6 +231,144 @@ impl<T: Ring> Simple for RingNode<T> {
     }
 }
 
+/// Somewhere to put every burst a receiver hears.
+///
+/// A trait rather than a file, so `nodes` does not have to know where the
+/// data goes or what it is written as, which is an application's business.
+pub trait PackageSink: Send + 'static {
+    /// A burst as the front end detected it: mark and gap timings, level,
+    /// and the frequency and channel width it was heard through.
+    ///
+    /// The width matters on replay: the same burst read through a 31 kHz
+    /// channel and a 125 kHz one is not the same recording, and a timing that
+    /// looks marginal in one is clean in the other.
+    fn pulses(&mut self, at_us: u64, bandwidth_hz: u32, p: &common::Package);
+    /// A frame from a demodulator that produces bytes rather than timings,
+    /// such as Mode S. `center_hz` is the stream it came from.
+    fn bytes(&mut self, at_us: u64, center_hz: u64, bytes: &[u8]);
+}
+
+/// The tap that writes every burst away, wherever it came from.
+///
+/// It has one input per source, because a receiver hears bursts from several
+/// places at once: the OOK bank, the FSK bank, and on 1090 MHz a demodulator
+/// that produces bytes instead of timings. Fanning them in here rather than
+/// keeping a log per source means one file holds everything that arrived, in
+/// the order it arrived.
+///
+/// What is written is what the demodulator produced and nothing else. The
+/// parsed frame is deliberately not stored: it is a conclusion, and a
+/// conclusion recorded next to nothing else is impossible to check later.
+/// Timings can be decoded again by a better decoder next year; a field map
+/// cannot be un-decoded.
+pub struct PackageLogNode<S: PackageSink> {
+    sink: S,
+    inputs: usize,
+}
+
+impl<S: PackageSink> PackageLogNode<S> {
+    pub fn new(sink: S, inputs: usize) -> Self {
+        Self { sink, inputs: inputs.max(1) }
+    }
+
+    pub fn sink(&self) -> &S {
+        &self.sink
+    }
+
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
+    }
+
+    pub fn into_sink(self) -> S {
+        self.sink
+    }
+}
+
+/// Wall clock, in microseconds since the epoch.
+///
+/// Each block is stamped as it is processed, which on a live receiver is
+/// within a block of when the burst arrived: the same accuracy the packet
+/// list has always shown. Replaying a file stamps the packages with the time
+/// of the replay, because that is when the receiver heard them; the file's
+/// own timeline belongs to the file.
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+impl<S: PackageSink> pipeline::node::Node for PackageLogNode<S> {
+    fn name(&self) -> &str {
+        "package_log"
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    /// Needed so a rebuild can lift the log out of the old graph and put it
+    /// in the new one. Without it the open file is dropped on the next
+    /// retune, and logging silently stops.
+    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
+        Some(self)
+    }
+
+    fn is_sink(&self) -> bool {
+        true
+    }
+
+    fn num_inputs(&self) -> usize {
+        self.inputs
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        for i in inputs {
+            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Bytes) {
+                return Err(Error::other(
+                    "package_log takes detected bursts or demodulated bytes",
+                ));
+            }
+        }
+        let first = inputs.first().map(|i| i.spec).unwrap_or(StreamSpec::iq(0.0, common::Hz(0)));
+        Ok(vec![first])
+    }
+
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        _outputs: &mut [Payload],
+        ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let at = now_us();
+        for (k, payload) in inputs.iter().enumerate() {
+            let spec = ctx.inputs.get(k).map(|p| p.spec);
+            match payload {
+                Payload::Pulses(pkgs) => {
+                    let bw = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
+                    for p in pkgs.iter() {
+                        self.sink.pulses(at, bw, p);
+                    }
+                }
+                Payload::Bytes(b) if !b.is_empty() => {
+                    let center = spec.map(|s| s.center.0).unwrap_or(0);
+                    // A byte demodulator writes whole frames back to back and
+                    // every frame it emits is the same length, so the block
+                    // splits evenly. Mode S is the only one so far, at 7 or
+                    // 14 bytes, and its node writes one frame per call.
+                    self.sink.bytes(at, center, b);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The DC notch at the head of the chain.
 ///
 /// A direct-conversion front end puts local oscillator leakage and the ADC's

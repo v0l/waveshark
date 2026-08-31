@@ -134,20 +134,23 @@ impl Simple for BankNode {
         self.bank.channels()
     }
 
-    /// What a bank produces is decodes, not a stream.
-    fn is_sink(&self) -> bool {
-        true
-    }
-
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other(format!("{}: needs IQ", self.label)));
         }
         self.configure(i.spec.rate, i.spec.center)?;
-        Ok(i.spec)
+        // Every burst the channels detected leaves as a package, so a log or
+        // an analyser can be attached to the bank the same way anything else
+        // is attached to anything else. Packages are events in time rather
+        // than a sampled stream, so the rate is zero; the bandwidth is one
+        // channel's, since that is what each burst was heard through.
+        let mut out = i.spec.with_kind(PortKind::Pulses);
+        out.rate = 0.0;
+        out.bandwidth = self.channel_hz();
+        Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, _o: &mut Payload, ctx: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, ctx: &mut NodeCtx<'_>) -> Result<()> {
         self.hits.clear();
         let iq = i.as_iq().unwrap_or(&[]);
         if iq.is_empty() {
@@ -161,6 +164,7 @@ impl Simple for BankNode {
                 ctx.emit(ev.event.clone());
             }
         }
+        o.pulses_mut().extend_from_slice(self.bank.packages());
         Ok(())
     }
 

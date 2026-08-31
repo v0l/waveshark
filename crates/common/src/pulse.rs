@@ -37,6 +37,13 @@ pub struct Package {
     pub rssi_dbfs: f32,
     /// Sample index where the burst started, for correlating with a waterfall.
     pub start_sample: u64,
+    /// Where the burst was received, in Hz.
+    ///
+    /// Stamped by the detector from the stream it read, which in a channel
+    /// bank is the channel's own centre rather than the tuner's. A package
+    /// that has been separated from the port it arrived on is otherwise
+    /// unplaceable, and a burst without a frequency is not evidence of much.
+    pub center_hz: u64,
 }
 
 impl Package {

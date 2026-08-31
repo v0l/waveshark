@@ -275,6 +275,12 @@ pub enum Cmd {
     /// Write every burst that decodes to this directory, with an optional
     /// budget in megabytes, or stop recording.
     Record(Option<(std::path::PathBuf, Option<u64>)>),
+    /// Log every burst the front ends detect to this directory, or stop.
+    ///
+    /// Sent to the radio thread rather than kept in the interface because the
+    /// log is a node in the graph: what it writes is what the demodulators
+    /// produced, which never reaches the interface at all.
+    PacketLog(Option<std::path::PathBuf>),
     Stop,
 }
 
@@ -472,8 +478,9 @@ fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) ->
         scan: !modes,
         modes,
         record: rec.is_some(),
+        log: false,
     };
-    Ok(crate::chain::Receiver::build(&plan, rec)?)
+    Ok(crate::chain::Receiver::build(&plan, crate::chain::Sinks { recorder: rec, ..Default::default() })?)
 }
 
 /// Sweep a capture as the radio thread does, block by block.
@@ -624,6 +631,8 @@ pub struct Status {
     pub modes_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
+    /// Bursts written to the packet log since the receiver started.
+    pub logged: AtomicU64,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -697,6 +706,7 @@ impl Default for Status {
             scan_channels: AtomicU64::new(0),
             scan_channels_wide: AtomicU64::new(0),
             aircraft: AtomicU64::new(0),
+            logged: AtomicU64::new(0),
             modes_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
@@ -914,8 +924,9 @@ impl Audio {
             scan: false,
             modes: false,
             record: false,
+            log: false,
         };
-        let rx = crate::chain::Receiver::build(&plan, None).expect("audio chain");
+        let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
         Self { rx, pcm: Vec::new() }
     }
 
@@ -1015,9 +1026,12 @@ fn run(
         scan: true,
         modes: false,
         record: false,
+        // Switched on as soon as the interface says where to write; the
+        // default is on, and the command arrives with the first frame.
+        log: false,
     };
     plan.modes = modes_here(&plan);
-    let mut rx = crate::chain::Receiver::build(&plan, None)?;
+    let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
     publish_chain(status, &rx);
 
     let mut mix: Vec<f32> = Vec::new();
@@ -1142,6 +1156,11 @@ fn run(
                     rx.set_recorder(rec);
                     rebuild = true;
                 }
+                Cmd::PacketLog(dir) => {
+                    plan.log = dir.is_some();
+                    rx.set_packet_log(dir.map(crate::packetlog::PacketLog::new));
+                    rebuild = true;
+                }
                 Cmd::Zoom(n) => {
                     let n = n.clamp(1, 64);
                     if n != plan.zoom {
@@ -1199,6 +1218,7 @@ fn run(
             if let Some(r) = rx.recorder_mut() {
                 r.retune(plan.eff_rate(), plan.center);
             }
+            status.logged.store(rx.logged(), Ordering::Relaxed);
             publish_chain(status, &rx);
             rebuild = false;
         }
@@ -1235,6 +1255,7 @@ fn run(
         }
 
         status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
+        status.logged.store(rx.logged(), Ordering::Relaxed);
         let chans = rx.bank_channels();
         status.scan_channels.store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
         status
@@ -1349,6 +1370,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         scan: true,
         modes: false,
         record: false,
+        log: false,
     }
 }
 
@@ -2055,7 +2077,7 @@ mod zoom_tests {
         let mut plan = plan_at(native, Hz::mhz(433));
         plan.zoom = zoom;
         plan.scan = false;
-        crate::chain::Receiver::build(&plan, None).expect("a zoom chain")
+        crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain")
     }
 
     // Timing, so it needs optimisation to mean anything.
@@ -2096,7 +2118,8 @@ mod zoom_tests {
             squelch_db: Some(-200.0),
             agc: false,
         }];
-        let mut rx = crate::chain::Receiver::build(&plan, None).expect("a zoom chain");
+        let mut rx =
+            crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain");
         // A signal well outside the narrowed span, which must not appear.
         rx.process(&tone(native, keep * 4.0, 262_144)).unwrap();
         let out = rx.zoomed_samples();

@@ -60,6 +60,13 @@ impl Simple for PulseDetectNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let pkgs = o.pulses_mut();
         self.det.process(i.as_real().unwrap(), pkgs);
+        // Where the burst was received. The detector reads a stream and knows
+        // nothing about frequency; the port it arrived on does, and in a
+        // channel bank that is the channel's centre rather than the tuner's.
+        let center = c.inputs[0].spec.center.0;
+        for p in pkgs.iter_mut() {
+            p.center_hz = center;
+        }
         for p in pkgs.iter() {
             // Tag the burst so anything downstream, or a waterfall, can point
             // at exactly where in the stream it happened.
@@ -178,6 +185,11 @@ impl Simple for AskDetectNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let pkgs = o.pulses_mut();
         self.det.process(i.as_real().unwrap(), pkgs);
+        // Where the burst was received; see `pulse_detect`.
+        let center = c.inputs[0].spec.center.0;
+        for p in pkgs.iter_mut() {
+            p.center_hz = center;
+        }
         let depth = self.det.depth_db() as f64;
         for p in pkgs.iter() {
             c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
@@ -302,6 +314,11 @@ impl Simple for FskDetectNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let pkgs = o.pulses_mut();
         self.det.process(i.as_iq().unwrap(), pkgs);
+        // Where the burst was received; see `pulse_detect`.
+        let center = c.inputs[0].spec.center.0;
+        for p in pkgs.iter_mut() {
+            p.center_hz = center;
+        }
         let sep = self.det.separation_hz() as f64;
         for p in pkgs.iter() {
             c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));

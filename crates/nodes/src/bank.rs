@@ -37,11 +37,11 @@
 //! memory bandwidth is wasted. Doing it once, in tiles, then handing each graph
 //! a contiguous run, is far cheaper than doing it lazily per channel.
 
-use common::{Error, Hz, Result, C32};
+use common::{Error, Hz, Package, Result, C32};
 use dsp::{Channelizer, Detector, DetectorConfig};
 use pipeline::event::Event;
 use pipeline::registry::Registry;
-use pipeline::{Graph, StreamSpec};
+use pipeline::{Graph, Out, StreamSpec};
 use rayon::prelude::*;
 
 use crate::{build_chain, NodeSpec};
@@ -99,6 +99,15 @@ pub struct ChannelBank {
     idle_blocks: Vec<u32>,
     /// Scratch for collected results, reused between blocks.
     out: Vec<ChannelEvent>,
+    /// Every burst the channels detected this block, decoded or not.
+    ///
+    /// The undecoded ones are the point: a burst nothing claimed is exactly
+    /// what a log is for, and it is gone the moment the block is overwritten.
+    packages: Vec<Package>,
+    /// Which output of a channel's graph carries packages, discovered from
+    /// the built chain rather than assumed, since a chain is free to be
+    /// shaped however it likes as long as something in it detects bursts.
+    pulse_tap: Option<Out>,
 }
 
 impl ChannelBank {
@@ -120,6 +129,8 @@ impl ChannelBank {
             gating: Gating::Always,
             idle_blocks: vec![u32::MAX; channels],
             out: Vec::new(),
+            packages: Vec::new(),
+            pulse_tap: None,
         }
     }
 
@@ -197,6 +208,7 @@ impl ChannelBank {
         }
         let g = build_chain(self.channel_spec(ch), specs, reg)
             .map_err(|e| Error::other(format!("channel {ch}: {e}")))?;
+        self.pulse_tap = pulse_tap(&g);
         self.graphs[ch] = Some(g);
         Ok(())
     }
@@ -226,6 +238,7 @@ impl ChannelBank {
         for ch in 0..self.channels {
             let g = make(self.channel_spec(ch))
                 .map_err(|e| Error::other(format!("channel {ch}: {e}")))?;
+            self.pulse_tap = pulse_tap(&g);
             self.graphs[ch] = Some(g);
         }
         Ok(())
@@ -322,7 +335,8 @@ impl ChannelBank {
         let gating = self.gating;
         let idle_blocks = &self.idle_blocks;
         let lanes = &self.lanes;
-        let results: Vec<(usize, Vec<Event>)> = self
+        let tap = self.pulse_tap;
+        let results: Vec<(usize, Vec<Event>, Vec<Package>)> = self
             .graphs
             .par_iter_mut()
             .enumerate()
@@ -336,32 +350,47 @@ impl ChannelBank {
                 let buf = g.input_buf();
                 buf.clear();
                 buf.iq_mut().extend_from_slice(&lanes[c]);
-                match g.run() {
-                    Ok(ev) if ev.is_empty() => None,
-                    Ok(ev) => Some((c, ev.to_vec())),
-                    Err(e) => Some((
-                        c,
-                        vec![Event::Warning {
-                            stage: format!("channel {c}"),
-                            message: e.to_string(),
-                        }],
-                    )),
+                let evs = match g.run() {
+                    Ok(ev) => ev.to_vec(),
+                    Err(e) => vec![Event::Warning {
+                        stage: format!("channel {c}"),
+                        message: e.to_string(),
+                    }],
+                };
+                // Read back what the front end detected, before the protocols
+                // had their say. A burst nothing recognised leaves no event at
+                // all, and it is the one worth keeping.
+                let pkgs: Vec<Package> = tap
+                    .and_then(|t| g.buf(t))
+                    .and_then(|p| p.as_pulses())
+                    .map(|p| p.to_vec())
+                    .unwrap_or_default();
+                if evs.is_empty() && pkgs.is_empty() {
+                    return None;
                 }
+                Some((c, evs, pkgs))
             })
             .collect();
 
         // 5. Flatten, in channel order so output is deterministic regardless
         //    of how rayon happened to schedule the work.
         self.out.clear();
+        self.packages.clear();
         let mut results = results;
-        results.sort_by_key(|(c, _)| *c);
-        for (c, evs) in results {
+        results.sort_by_key(|(c, _, _)| *c);
+        for (c, evs, pkgs) in results {
             let center = self.channel_center(c);
             for e in evs {
                 self.out.push(ChannelEvent { channel: c, center, event: e });
             }
+            self.packages.extend(pkgs);
         }
         Ok(&self.out)
+    }
+
+    /// Every burst the last block detected, decoded or not.
+    pub fn packages(&self) -> &[Package] {
+        &self.packages
     }
 
     /// Channels with a burst in progress.
@@ -373,6 +402,14 @@ impl ChannelBank {
     pub fn drain_peak_hold_db(&mut self, out: &mut Vec<f32>) {
         self.detector.drain_peak_hold_db(out);
     }
+}
+
+/// The first output in a chain that carries packages.
+fn pulse_tap(g: &Graph) -> Option<Out> {
+    g.order().find_map(|(id, _)| {
+        let out = id.o();
+        matches!(g.spec_of(out).map(|s| s.kind), Some(pipeline::PortKind::Pulses)).then_some(out)
+    })
 }
 
 #[cfg(test)]
