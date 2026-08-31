@@ -128,6 +128,22 @@ antenna and that does not change when the map is dragged. The station is set
 by right-clicking the map or typing coordinates above it, and is remembered in
 the session file.
 
+### Feeds
+
+Another receiver's frames, over TCP, added in the packet log settings. A feed
+is a source node with no input of its own, so it sits beside the radio at the
+head of the graph and its packets join the bus with everything the local front
+ends produced: they appear in the packet list, go into the log, and reach the
+flight list without any view knowing where they came from. Beast binary (port
+30005) and AVR hex (30002) are supported. BaseStation CSV on 30003 is not, and
+deliberately: it carries fields somebody else decoded, and the log holds
+evidence rather than conclusions.
+
+Because the flight list is a consumer of the bus, a feed brings aircraft with
+it on a band where this receiver demodulates nothing of the sort. Tuned to
+433.92 MHz for weather sensors, with a Beast feed attached, the flight list
+fills from the rooftop receiver while the ISM banks run locally.
+
 The bus itself now exists as a node: every front end feeds `packet_bus`, it
 writes the packet log on the way through, and consumers attach to its output.
 The flight list reads it, and so does `packet_decode`, which runs the protocol

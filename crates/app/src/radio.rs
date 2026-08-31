@@ -284,6 +284,10 @@ pub enum Cmd {
     /// log is a node in the graph: what it writes is what the demodulators
     /// produced, which never reaches the interface at all.
     PacketLog(Option<std::path::PathBuf>),
+    /// Packet feeds from other receivers, as the complete set: the graph is
+    /// rebuilt from a plan, so a change is the new list rather than an
+    /// instruction to add or remove one.
+    Feeds(Vec<nodes::FeedSpec>),
     Stop,
 }
 
@@ -480,6 +484,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         channels: Vec::new(),
         scan: !modes,
         modes,
+        feeds: Vec::new(),
         record: rec.is_some(),
         log: false,
     };
@@ -633,6 +638,8 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub aircraft_list: parking_lot::Mutex<Vec<crate::flights::Aircraft>>,
+    /// What each packet feed is doing, for the packet log settings.
+    pub feeds: parking_lot::Mutex<Vec<crate::chain::FeedStatus>>,
     /// Whether the wideband Mode S path is the one running.
     pub modes_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
@@ -714,6 +721,7 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             aircraft_list: parking_lot::Mutex::new(Vec::new()),
+            feeds: parking_lot::Mutex::new(Vec::new()),
             modes_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
         }
@@ -932,6 +940,7 @@ impl Audio {
             modes: false,
             record: false,
             log: false,
+            feeds: Vec::new(),
         };
         let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
         Self { rx, pcm: Vec::new() }
@@ -1036,6 +1045,8 @@ fn run(
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
         log: false,
+        // Feeds arrive from the session or the settings modal, as a command.
+        feeds: Vec::new(),
     };
     plan.modes = modes_here(&plan);
     let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
@@ -1164,6 +1175,12 @@ fn run(
                     rebuild = true;
                 }
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
+                Cmd::Feeds(feeds) => {
+                    if feeds != plan.feeds {
+                        plan.feeds = feeds;
+                        rebuild = true;
+                    }
+                }
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
                     rx.set_packet_log(dir);
@@ -1251,10 +1268,13 @@ fn run(
             // Published with the spectrum rather than every block: the table
             // is redrawn at the display's rate, and cloning it 140 times a
             // second for a pane nobody may be looking at is wasted work.
-            if rx.modes_on() {
+            if rx.tracking() {
                 let rows = rx.aircraft(std::time::Instant::now());
                 status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
                 *status.aircraft_list.lock() = rows;
+            }
+            if !plan.feeds.is_empty() {
+                *status.feeds.lock() = rx.feed_status();
             }
             let f = Frame {
                 db: rx.power_db().to_vec(),
@@ -1387,6 +1407,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         modes: false,
         record: false,
         log: false,
+        feeds: Vec::new(),
     }
 }
 

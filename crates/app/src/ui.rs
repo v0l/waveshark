@@ -114,6 +114,12 @@ pub struct App {
     map: MapView,
     /// OSM tiles under it, fetched in the background.
     tiles: crate::map::Tiles,
+    /// Packet feeds from other receivers, as configured here and saved in
+    /// the session.
+    feeds: Vec<nodes::FeedSpec>,
+    /// The feed being typed into the settings modal.
+    feed_host: String,
+    feed_format: nodes::FeedFormat,
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
     station_edit: Option<String>,
@@ -134,6 +140,8 @@ pub enum Settings {
     /// The radio's own controls: gain stages, its switches, and the
     /// corrections applied to what comes off it.
     Radio,
+    /// The packet log: where it is written, and what else feeds it.
+    PacketLog,
 }
 
 /// A decode, as shown in the packet log.
@@ -199,6 +207,23 @@ const DECODE_LOG_MAX: usize = 500;
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
 /// screen, which is about what a rooftop antenna hears.
 const DEFAULT_MAP_ZOOM: f64 = 8.0;
+
+/// `host` or `host:port`, with the format's usual port when none is given.
+fn parse_feed(text: &str, format: nodes::FeedFormat) -> Option<nodes::FeedSpec> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (host, port) = match text.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse().ok()?),
+        None => (text, format.default_port()),
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(nodes::FeedSpec::new(host, port, format))
+}
 
 /// The average of the positions known, for opening the map somewhere useful
 /// when the receiver has not been told where it is.
@@ -317,6 +342,9 @@ impl Default for App {
             location: None,
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
+            feeds: Vec::new(),
+            feed_host: String::new(),
+            feed_format: nodes::FeedFormat::default(),
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
@@ -356,6 +384,9 @@ impl App {
             location: s.location,
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
+            feeds: s.feeds.clone(),
+            feed_host: String::new(),
+            feed_format: nodes::FeedFormat::default(),
             station_edit: None,
             volume: s.volume,
             saved: s.clone(),
@@ -387,6 +418,7 @@ impl App {
                 .unwrap_or_else(|| self.saved.toggles.clone()),
             ppm: radio.as_ref().map(|r| r.ppm).unwrap_or(self.saved.ppm),
             location: self.location,
+            feeds: self.feeds.clone(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.volume,
@@ -551,6 +583,14 @@ impl App {
         // graph and it has to be told where to write again.
         if let Some(d) = self.packet_log.clone() {
             self.send(Cmd::PacketLog(Some(d)));
+        }
+        // Same for the feeds and the station position: they belong to the
+        // graph, and a new radio thread has built a new one.
+        if !self.feeds.is_empty() {
+            self.send(Cmd::Feeds(self.feeds.clone()));
+        }
+        if let Some((lat, lon)) = self.location {
+            self.send(Cmd::Location(lat, lon));
         }
         // Whatever the radio was set to last time has to be pushed at it
         // again: a new thread means a freshly opened device at its defaults.
@@ -1225,17 +1265,22 @@ impl App {
             Settings::Spectrum => "Spectrum",
             Settings::Waterfall => "Waterfall",
             Settings::Radio => "Radio",
+            Settings::PacketLog => "Packet log",
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(if which == Settings::Radio { 420.0 } else { 320.0 });
+                ui.set_width(match which {
+                    Settings::Radio | Settings::PacketLog => 420.0,
+                    _ => 320.0,
+                });
                 ui.label(legend(title));
                 ui.add_space(10.0);
                 match which {
                     Settings::Spectrum => self.spectrum_settings(ui),
                     Settings::Waterfall => self.waterfall_settings(ui),
                     Settings::Radio => self.radio_settings(ui),
+                    Settings::PacketLog => self.packet_log_settings(ui),
                 }
                 ui.add_space(12.0);
                 ui.separator();
@@ -1251,6 +1296,117 @@ impl App {
         if r.should_close() {
             self.open = None;
         }
+    }
+
+    /// The packet log, and everything else that feeds the bus.
+    ///
+    /// Feeds live here rather than beside the tuner because that is what they
+    /// are: another front end putting packets on the same bus, whose frames
+    /// reach the packet list, the log and the flight list exactly like the
+    /// ones this receiver demodulated itself.
+    fn packet_log_settings(&mut self, ui: &mut egui::Ui) {
+        row(ui, "writing to", |ui| match &self.packet_log {
+            Some(d) => {
+                ui.label(value(d.display().to_string()).size(11.0));
+            }
+            None => {
+                ui.label(legend("nowhere, this session only"));
+            }
+        });
+        let logged = self
+            .radio
+            .as_ref()
+            .map(|r| r.status.logged.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        hint(ui, &format!("{logged} packets appended since the receiver started"));
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(legend("feeds"));
+        hint(
+            ui,
+            "Another receiver's frames, over TCP. Beast carries a signal level and \
+             AVR does not, so prefer Beast where a feed offers both. BaseStation on \
+             port 30003 is not offered: it sends fields somebody else decoded, and a \
+             log of conclusions cannot be checked or re-read later.",
+        );
+        ui.add_space(8.0);
+
+        let status = self
+            .radio
+            .as_ref()
+            .map(|r| r.status.feeds.lock().clone())
+            .unwrap_or_default();
+        let mut remove = None;
+        for (i, f) in self.feeds.iter().enumerate() {
+            let live = status.iter().find(|s| s.spec.address() == f.address());
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                let lamp = match live {
+                    Some(s) if s.connected => CRC_OK,
+                    Some(_) => theme::FAULT,
+                    None => theme::ETCH,
+                };
+                ui.painter().rect_filled(r, 1.0, lamp);
+                ui.label(value(f.address()).size(11.0));
+                ui.label(legend(f.format.label()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("REMOVE").clicked() {
+                        remove = Some(i);
+                    }
+                    if let Some(s) = live {
+                        ui.label(legend(&format!("{} frames", s.frames)));
+                    }
+                });
+            });
+            // A feed that is down says why. The alternative is a dark lamp
+            // and a guess about whether it is the network, the port or a
+            // receiver somebody turned off.
+            if let Some(e) = live.and_then(|s| s.error.clone()) {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT)).wrap(),
+                );
+            }
+            ui.add_space(6.0);
+        }
+        if let Some(i) = remove {
+            self.feeds.remove(i);
+            self.send(Cmd::Feeds(self.feeds.clone()));
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.feed_host)
+                    .desired_width(170.0)
+                    .hint_text("host:port"),
+            );
+            egui::ComboBox::from_id_salt("feed_format")
+                .selected_text(self.feed_format.label())
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for f in [nodes::FeedFormat::Beast, nodes::FeedFormat::Avr] {
+                        ui.selectable_value(&mut self.feed_format, f, f.label());
+                    }
+                });
+            if ui.button("ADD").clicked() {
+                match parse_feed(&self.feed_host, self.feed_format) {
+                    Some(spec) if !self.feeds.contains(&spec) => {
+                        self.feeds.push(spec);
+                        self.send(Cmd::Feeds(self.feeds.clone()));
+                        self.feed_host.clear();
+                    }
+                    Some(_) => self.err = Some("that feed is already attached".into()),
+                    None => self.err = Some("expected host or host:port".into()),
+                }
+            }
+        });
+        hint(
+            ui,
+            "The port may be left off: 30005 for Beast, 30002 for AVR, which is where \
+             dump1090 serves them.",
+        );
     }
 
     /// Everything the radio itself can be set to.
@@ -2654,6 +2810,9 @@ impl App {
                 if ui.button("CLEAR").clicked() {
                     self.decodes.clear();
                     self.selected = None;
+                }
+                if ui.button("FEEDS").clicked() {
+                    self.open = Some(Settings::PacketLog);
                 }
                 // Unknown bursts are the point of scanning a band, but on a
                 // noisy one they crowd out the decodes, so they can be hidden

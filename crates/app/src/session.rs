@@ -41,6 +41,8 @@ pub struct Session {
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
+    /// Packet feeds from other receivers, as `format host:port`.
+    pub feeds: Vec<nodes::FeedSpec>,
 }
 
 impl Default for Session {
@@ -58,6 +60,7 @@ impl Default for Session {
             dc_block: true,
             decode_on: true,
             volume: 0.5,
+            feeds: Vec::new(),
         }
     }
 }
@@ -95,6 +98,7 @@ impl Session {
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut gains = Vec::new();
         let mut toggles = Vec::new();
+        let mut feeds = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -108,6 +112,10 @@ impl Session {
                 }
             } else if let Some(name) = k.strip_prefix("toggle.") {
                 toggles.push((name.to_string(), v == "true"));
+            } else if k == "feed" {
+                if let Some(f) = parse_feed(v) {
+                    feeds.push(f);
+                }
             } else {
                 kv.insert(k, v);
             }
@@ -130,6 +138,7 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
+            feeds,
         }
     }
 
@@ -155,8 +164,19 @@ impl Session {
         for (name, on) in &self.toggles {
             s.push_str(&format!("toggle.{name} = {on}\n"));
         }
+        for f in &self.feeds {
+            s.push_str(&format!("feed = {} {}\n", f.format.label(), f.address()));
+        }
         s
     }
+}
+
+/// `beast host:port`, as written by `render`.
+fn parse_feed(v: &str) -> Option<nodes::FeedSpec> {
+    let (format, addr) = v.split_once(char::is_whitespace)?;
+    let format = nodes::FeedFormat::default().parse(format.trim())?;
+    let (host, port) = addr.trim().rsplit_once(':')?;
+    Some(nodes::FeedSpec::new(host, port.parse().ok()?, format))
 }
 
 fn parse_gain(v: &str) -> Option<GainMode> {
@@ -195,6 +215,10 @@ mod tests {
             dc_block: false,
             decode_on: false,
             volume: 0.25,
+            feeds: vec![
+                nodes::FeedSpec::new("10.100.2.249", 30005, nodes::FeedFormat::Beast),
+                nodes::FeedSpec::new("pi.local", 30002, nodes::FeedFormat::Avr),
+            ],
         };
         assert_eq!(Session::parse(&s.render()), s);
     }

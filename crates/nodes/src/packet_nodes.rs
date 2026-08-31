@@ -79,7 +79,14 @@ impl PacketDecodeNode {
     fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
         let Ok(frame) = adsb::parse(bytes) else { return };
         let center = common::Hz(p.center_hz);
-        self.hits.push(crate::modes_nodes::adsb_decoded(&frame, bytes, center));
+        let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
+        // A local demodulator reports no level for a frame it has already
+        // accepted, but a Beast feed carries one, and dropping it would make
+        // a remote receiver's frames look weaker than nothing.
+        if p.rssi_dbfs.is_finite() {
+            d = d.with_level(p.rssi_dbfs, p.snr_db);
+        }
+        self.hits.push(d);
     }
 }
 

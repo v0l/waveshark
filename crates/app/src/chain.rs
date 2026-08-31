@@ -57,7 +57,7 @@ const CW_FILTER_HZ: f64 = 500.0;
 /// Keyed by purpose rather than by position: the whole point is that a node
 /// keeps its state when the graph around it changes, and its position is
 /// exactly what changed.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Role {
     DcBlock,
     /// The software zoom decimator, keyed by its factor: a different factor is
@@ -72,6 +72,9 @@ enum Role {
     Stage(u64, Stage),
     PacketBus,
     PacketDecode,
+    /// A packet feed from another receiver, keyed by where it comes from so a
+    /// rebuild keeps the connection open rather than reconnecting.
+    Feed(String),
     Flights,
 }
 
@@ -194,6 +197,17 @@ pub struct Plan {
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
+    /// Other receivers feeding the same packet bus.
+    pub feeds: Vec<nodes::FeedSpec>,
+}
+
+/// One feed, as the interface sees it.
+#[derive(Clone, Debug)]
+pub struct FeedStatus {
+    pub spec: nodes::FeedSpec,
+    pub connected: bool,
+    pub frames: u64,
+    pub error: Option<String>,
 }
 
 /// Where a receiver's output goes, beyond the audio and the screen.
@@ -428,9 +442,30 @@ impl Receiver {
         // Everything that produces packets meets here, and everything that
         // consumes them hangs off the far side. One input per source, added
         // after the sources so it runs once they have all had their say.
+        // A feed from another receiver is a front end like any other: it
+        // produces packets, so it belongs upstream of the bus rather than
+        // beside it. Added before the bus so its output exists to connect.
+        let mut feeds = Vec::new();
+        for spec in &plan.feeds {
+            let role = Role::Feed(spec.address());
+            let id = match pool.remove(&role) {
+                Some(part) => b.add_existing(part),
+                None => b.add_labeled(
+                    format!("{} {}", spec.format.label(), spec.address()),
+                    Box::new(nodes::FeedNode::new(spec.clone())),
+                ),
+            };
+            roles.push(role);
+            feeds.push(id);
+        }
+
         let mut bus = None;
-        let sources: Vec<Out> =
-            banks.iter().map(|(id, _)| id.o()).chain(modes.map(|m| m.o())).collect();
+        let sources: Vec<Out> = banks
+            .iter()
+            .map(|(id, _)| id.o())
+            .chain(modes.map(|m| m.o()))
+            .chain(feeds.iter().map(|f| f.o()))
+            .collect();
         if !sources.is_empty() {
             let id = match pool.remove(&Role::PacketBus) {
                 Some(mut part) => {
@@ -477,8 +512,11 @@ impl Receiver {
         // The flight tracker is a consumer of the bus like any other, which
         // is what stops every view being wired to the demodulator it happens
         // to care about.
+        // Attached whenever anything could produce a Mode S frame: the local
+        // demodulator, or a feed from a receiver that has one. A feed is
+        // usually the reason to run this at all on a band that is not 1090.
         let mut flights = None;
-        if let (Some(bus), true) = (bus, plan.modes) {
+        if let (Some(bus), true) = (bus, plan.modes || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
                 None => b.add_labeled("Flight list", Box::new(crate::flights::FlightsNode::new())),
@@ -659,6 +697,12 @@ impl Receiver {
         self.modes.is_some()
     }
 
+    /// Whether anything is tracking aircraft, from the local demodulator or
+    /// from a feed.
+    pub fn tracking(&self) -> bool {
+        self.flights.is_some()
+    }
+
     /// Channels in each bank, in the order the banks were added.
     pub fn bank_channels(&self) -> Vec<usize> {
         self.banks.iter().map(|b| b.channels).collect()
@@ -748,6 +792,23 @@ impl Receiver {
     ///
     /// The bus stays either way: turning the log off should stop writing to
     /// disk, not disconnect every view from the traffic.
+    /// What each feed is doing, for the settings modal: where it points, and
+    /// whether anything is coming from it.
+    pub fn feed_status(&self) -> Vec<FeedStatus> {
+        self.roles
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, Role::Feed(_)))
+            .filter_map(|(k, _)| downcast::<nodes::FeedNode>(&self.graph, NodeId(k)))
+            .map(|n| FeedStatus {
+                spec: n.spec().clone(),
+                connected: n.connected(),
+                frames: n.frames(),
+                error: n.error(),
+            })
+            .collect()
+    }
+
     pub fn set_packet_log(&mut self, dir: Option<PathBuf>) {
         self.log_dir = dir;
         let sink = self.new_sink();
@@ -1053,6 +1114,7 @@ mod tests {
             modes: false,
             record: false,
             log: false,
+            feeds: Vec::new(),
         }
     }
 
@@ -1210,6 +1272,50 @@ mod tests {
         });
         assert!(from_bus, "the flight list is not fed by the bus");
         assert_eq!(flights.inputs[0].1.kind, pipeline::PortKind::Packets);
+    }
+
+    /// A feed is a front end, not a special case. It has to reach the bus,
+    /// and the tracker has to be there to read it even on a band where this
+    /// receiver demodulates nothing of the sort.
+    #[test]
+    fn a_feed_is_a_front_end_on_a_band_that_has_none() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        // Nothing listens on port 1; the graph must build regardless, because
+        // a feed that is down is a status line rather than a broken receiver.
+        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, nodes::FeedFormat::Beast)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        let feed = topo
+            .nodes
+            .iter()
+            .find(|n| n.label.contains("127.0.0.1:1"))
+            .expect("the feed is in the graph");
+        let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        let feeds_bus = feed
+            .outputs
+            .iter()
+            .any(|(slot, _)| bus.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(feeds_bus, "the feed does not reach the bus");
+        assert!(rx.tracking(), "a Mode S feed should bring the flight list with it");
+        let status = rx.feed_status();
+        assert_eq!(status.len(), 1);
+        assert!(!status[0].connected);
+    }
+
+    /// A feed that is carried across a retune keeps its socket: reconnecting
+    /// on every tuning change would drop frames for as long as it takes the
+    /// far end to accept, for no reason at all.
+    #[test]
+    fn a_feed_survives_a_retune() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.feeds = vec![nodes::FeedSpec::new("127.0.0.1", 1, nodes::FeedFormat::Beast)];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let before = rx.feed_status()[0].spec.clone();
+        p.center = Hz::mhz(868);
+        rx.rebuild(&p).expect("retune");
+        let after = rx.feed_status();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].spec, before);
     }
 
     #[test]

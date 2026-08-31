@@ -347,9 +347,9 @@ impl pipeline::node::Node for PacketBusNode {
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         for i in inputs {
-            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames) {
+            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames | PortKind::Packets) {
                 return Err(Error::other(
-                    "the packet bus takes detected bursts or demodulated frames",
+                    "the packet bus takes detected bursts, demodulated frames or packets",
                 ));
             }
         }
@@ -400,6 +400,10 @@ impl pipeline::node::Node for PacketBusNode {
                         });
                     }
                 }
+                // A feed from another receiver arrives already stamped: it
+                // knows when it heard the frame, on what frequency and how
+                // strongly, and none of that should be replaced with ours.
+                Payload::Packets(ps) => out.extend(ps.iter().cloned()),
                 _ => {}
             }
         }
