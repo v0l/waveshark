@@ -28,6 +28,11 @@ pub const TRACE: Color32 = Color32::from_rgb(0x5C, 0xD0, 0xE8);
 /// Fault state.
 pub const FAULT: Color32 = Color32::from_rgb(0xE2, 0x6D, 0x5A);
 
+/// A lamp that means the thing is doing its job. Desaturated to sit beside the
+/// amber readout without competing with it: this is the state you stop looking
+/// at, and the panel's attention belongs on the frequency.
+pub const OK: Color32 = Color32::from_rgb(0x5C, 0xB0, 0x7A);
+
 /// Font roles. `Legend` is condensed and set uppercase with wide tracking, the
 /// way a panel legend is silkscreened.
 pub const READOUT_FONT: &str = "readout";

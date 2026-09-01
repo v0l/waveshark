@@ -28,8 +28,11 @@ use std::path::{Path, PathBuf};
 /// quantised to the block the radio happened to deliver.
 ///
 /// Measured on the Fine Offset capture at 250 kS/s in 16384 sample blocks,
-/// which is the worst case because a block is 65 ms at that rate: 0.25 s of
-/// history loses the packet, 0.3 s catches it. This is set well above that
+/// which is the worst case because a block is 65 ms at that rate: 0.2 s of
+/// history loses the packet, 0.25 s catches it. It was 0.25 and 0.3 before the
+/// banks were given their own sub-band, which lowered the rate the channelizer
+/// runs at and with it the time its filter delay comes to. This is set well
+/// above the measurement
 /// because a lost burst is not recoverable and the memory is cheap: even at
 /// 20 MS/s the ring is 120 MB, and at the usual 2.4 MS/s it is 14 MB.
 const PRE_ROLL: f64 = 0.75;
@@ -396,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quarter_second_of_history_is_not_enough() {
+    fn a_fifth_of_a_second_of_history_is_not_enough() {
         // The reason PRE_ROLL is what it is. A packet takes time to send, the
         // detector waits for silence after it, and the filters add latency, so
         // by the time a decode is reported the burst is long past. If this
@@ -411,7 +414,7 @@ mod tests {
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let dir = std::env::temp_dir().join(format!("sr-short-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.25);
+        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.2);
         crate::radio::scan_with_recorder(&buf, rec);
 
         let decoded = std::fs::read_dir(&dir)
@@ -421,7 +424,7 @@ mod tests {
             .any(|f| {
                 crate::radio::replay(f).unwrap().iter().any(|r| r.model.contains("Fineoffset"))
             });
-        assert!(!decoded, "0.25 s now catches the burst; PRE_ROLL can be reduced");
+        assert!(!decoded, "0.2 s now catches the burst; PRE_ROLL can be reduced");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

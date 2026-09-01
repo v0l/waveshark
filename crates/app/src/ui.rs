@@ -33,6 +33,9 @@ pub struct App {
     /// requested centre while a retune is pending.
     db_center: f64,
     wf_pending: Vec<f32>,
+    /// Where the frames feeding `wf_pending` were tuned, so a retune starts a
+    /// fresh row instead of mixing two spans into one.
+    wf_pending_center: f64,
     wf_last: Option<std::time::Instant>,
     rows_per_sec: f32,
     refresh: f32,
@@ -111,6 +114,10 @@ pub struct App {
     tracks: Vec<crate::tracks::Track>,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
+    /// The stage whose settings the chain view is showing, by node id.
+    chain_sel: Option<usize>,
+    /// ISO country code, or empty when nothing has chosen one.
+    country: String,
     /// Where the flight map is looking, and how far it reaches.
     map: MapView,
     /// OSM tiles under it, fetched in the background.
@@ -155,6 +162,9 @@ pub enum Settings {
     PacketLog,
     /// The scanner table: which front end runs on which frequency.
     Scanners,
+    /// Everything about where this receiver is rather than what it is doing:
+    /// language, country, band plan, station position.
+    App,
 }
 
 /// A decode, as shown in the packet log.
@@ -299,13 +309,10 @@ const SPLIT_GRIP_H: f32 = 7.0;
 /// the drag is reported and the grab is never seen.
 const GRAB_PX: f64 = 10.0;
 
-/// Rate limits per driver, used to build the span list before the device is
-/// opened. The driver reports the same numbers through `DeviceInfo`.
+/// Rate limits for a device, used to build the span list before it is opened.
+/// The driver reports the same numbers through `DeviceInfo` once it is.
 fn device_rates(e: &crate::devices::Entry) -> std::ops::RangeInclusive<Sps> {
-    match e.kind {
-        common::DriverKind::HackRf => Sps(2_000_000)..=Sps(20_000_000),
-        _ => Sps(225_000)..=Sps(2_400_000),
-    }
+    e.rates.clone()
 }
 
 impl Default for App {
@@ -325,6 +332,7 @@ impl Default for App {
             wf_center: crate::session::DEFAULT_CENTER,
             db_center: crate::session::DEFAULT_CENTER,
             wf_pending: Vec::new(),
+            wf_pending_center: 0.0,
             wf_last: None,
             rows_per_sec: 20.0,
             refresh: 30.0,
@@ -365,6 +373,8 @@ impl Default for App {
             packet_log: None,
             tracks: Vec::new(),
             location: None,
+            chain_sel: None,
+            country: String::new(),
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
             feeds: Vec::new(),
@@ -386,8 +396,10 @@ impl Default for App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
+        crate::shutdown::install(cc.egui_ctx.clone());
         let devices = crate::devices::list();
-        let s = crate::session::Session::load();
+        let mut s = crate::session::Session::load();
+        apply_locale(&mut s);
         // The saved radio may not be plugged in any more, in which case the
         // rest of the session still applies to whatever is.
         let device = s
@@ -412,6 +424,7 @@ impl App {
             dc_block: s.dc_block,
             decode_on: s.decode_on,
             location: s.location,
+            country: s.country.clone(),
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
             feeds: s.feeds.clone(),
@@ -456,8 +469,15 @@ impl App {
                 .as_ref()
                 .map(|r| r.toggles.iter().map(|t| (t.name.clone(), t.on)).collect())
                 .unwrap_or_else(|| self.saved.toggles.clone()),
+            choices: radio
+                .as_ref()
+                .map(|r| r.choices.iter().map(|c| (c.name.clone(), c.selected.clone())).collect())
+                .unwrap_or_else(|| self.saved.choices.clone()),
             ppm: radio.as_ref().map(|r| r.ppm).unwrap_or(self.saved.ppm),
             location: self.location,
+            language: crate::i18n::language().code().to_string(),
+            country: self.country.clone(),
+            band_plan: crate::bands::plan().id().to_string(),
             feeds: self.feeds.clone(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
@@ -493,7 +513,8 @@ impl App {
         let Some(want) = self.pending_radio.clone() else { return };
         let Some(radio) = self.radio.as_ref() else { return };
         let controls = radio.status.radio();
-        if controls.stages.is_empty() && controls.toggles.is_empty() {
+        if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
+        {
             return;
         }
         self.pending_radio = None;
@@ -505,6 +526,13 @@ impl App {
         for (name, on) in &want.toggles {
             if controls.toggles.iter().any(|t| &t.name == name) {
                 self.send(Cmd::Toggle(name.clone(), *on));
+            }
+        }
+        for (name, value) in &want.choices {
+            // Saved by name rather than by position, so a driver that gains an
+            // option does not silently move every setting along one.
+            if controls.choices.iter().any(|c| &c.name == name && c.options.contains(value)) {
+                self.send(Cmd::Choice(name.clone(), value.clone()));
             }
         }
         if want.ppm != 0.0 {
@@ -674,16 +702,26 @@ impl App {
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
         }
-        let mut latest: Option<Frame> = None;
+        let mut frames: Vec<Frame> = Vec::new();
         while let Ok(f) = radio.frames.try_recv() {
-            latest = Some(f);
+            frames.push(f);
         }
+        // Every frame is peak-held into the pending row, not just the one that
+        // happens to be last in the queue. Folding only the last of each batch
+        // tied a waterfall row's content to how often the interface repainted:
+        // dragging a slider repaints continuously, fewer frames were thrown
+        // away between drains, and the history visibly changed contrast for as
+        // long as the drag lasted.
         self.chain_topo = radio.status.chain();
         self.chain_latency = radio.status.chain_latency();
         let mut batches = Vec::new();
         while let Ok(batch) = radio.decodes.try_recv() {
             batches.push(batch);
         }
+        for f in &frames {
+            self.hold_peak(f);
+        }
+        let latest: Option<Frame> = frames.pop();
         for b in batches {
             self.log_decodes(b);
         }
@@ -700,15 +738,6 @@ impl App {
             }
             self.slide_waterfall(f.center, f.db.len());
 
-            // Hold the peak between rows rather than sampling one frame in N,
-            // or a short burst lands between rows and is never drawn.
-            if self.wf_pending.len() != f.db.len() {
-                self.wf_pending = f.db.clone();
-            } else {
-                for (a, b) in self.wf_pending.iter_mut().zip(&f.db) {
-                    *a = a.max(*b);
-                }
-            }
             let due = self
                 .wf_last
                 .map(|t| t.elapsed().as_secs_f32() >= 1.0 / self.rows_per_sec)
@@ -752,6 +781,25 @@ impl App {
     }
 
     /// Slide the waterfall to match a new centre frequency.
+    /// Fold one spectrum frame into the row being built.
+    ///
+    /// Peak-held rather than averaged or sampled: a burst shorter than the row
+    /// interval lands between rows otherwise and is never drawn at all, which
+    /// on a band of short transmissions is most of them.
+    fn hold_peak(&mut self, f: &Frame) {
+        // A frame from a different place is not the same row. Peak-holding
+        // across a retune would smear the old span's carriers onto the new
+        // one's frequencies.
+        if self.wf_pending.len() != f.db.len() || self.wf_pending_center != f.center {
+            self.wf_pending = f.db.clone();
+            self.wf_pending_center = f.center;
+            return;
+        }
+        for (a, b) in self.wf_pending.iter_mut().zip(&f.db) {
+            *a = a.max(*b);
+        }
+    }
+
     fn slide_waterfall(&mut self, center: f64, bins: usize) {
         if bins == 0 {
             return;
@@ -1009,6 +1057,32 @@ fn mhz_field(ui: &mut egui::Ui, v: &mut f64) {
 /// Added through `Label` with wrapping asked for explicitly: inside a modal
 /// the surrounding layout justifies text, which spreads a wrapped sentence
 /// across the full width and leaves holes in the middle of it.
+/// Put the saved language, country and band plan into effect, filling in what
+/// has never been chosen.
+///
+/// Done once at startup rather than read from the session on every lookup:
+/// naming the band a frequency falls in happens from drawing code that has no
+/// settings object to consult.
+fn apply_locale(s: &mut crate::session::Session) {
+    if let Some(l) = crate::i18n::Language::from_code(&s.language) {
+        crate::i18n::set_language(l);
+    }
+    // A first run has nothing saved, and the environment already knows: a
+    // locale of en_IE means the European plan, and guessing wrong puts an
+    // American on a table where 915 MHz is a phone.
+    if s.country.is_empty() {
+        if let Some(c) = crate::locale::from_environment() {
+            s.country = c.code.to_string();
+            if s.band_plan.is_empty() {
+                s.band_plan = c.plan.id().to_string();
+            }
+        }
+    }
+    if let Some(p) = crate::bands::Plan::from_id(&s.band_plan) {
+        crate::bands::set_plan(p);
+    }
+}
+
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
 }
@@ -1134,20 +1208,7 @@ fn cog_rect(pane: &Rect) -> Rect {
 
 fn cog(p: &egui::Painter, r: &Rect, hot: bool) {
     let col = if hot { theme::READOUT } else { Color32::from_rgb(0x6A, 0x72, 0x7C) };
-    let c = r.center();
-    let rad = r.width() * 0.30;
-    for i in 0..6 {
-        let a = std::f32::consts::TAU * i as f32 / 6.0;
-        let (s, co) = a.sin_cos();
-        p.line_segment(
-            [
-                Pos2::new(c.x + co * rad * 0.95, c.y + s * rad * 0.95),
-                Pos2::new(c.x + co * rad * 1.55, c.y + s * rad * 1.55),
-            ],
-            Stroke::new(1.6, col),
-        );
-    }
-    p.circle_stroke(c, rad, Stroke::new(1.6, col));
+    crate::icons::Icon::Setup.paint(p, *r, col);
 }
 
 fn fmt_hz(hz: f64) -> String {
@@ -1169,6 +1230,12 @@ impl eframe::App for App {
         }
         self.screenshot(ui.ctx());
         self.soak_check(ui.ctx());
+        if crate::shutdown::asked() {
+            // Closing rather than exiting, so the session is saved and the
+            // radio and the log are dropped the way a click on the close
+            // button drops them.
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         {
             let _s = tracing::info_span!("head").entered();
             self.head(ui);
@@ -1302,7 +1369,13 @@ impl App {
                     ui.add_space(18.0);
 
                     ui.vertical(|ui| {
-                        ui.label(legend("radio"));
+                        ui.horizontal(|ui| {
+                            ui.label(legend("radio"));
+                            // Beside the device it describes. Off in the
+                            // corner it was a readout of something, and which
+                            // something was anyone's guess.
+                            self.status_lamp(ui);
+                        });
                         let cur = self
                             .device
                             .as_ref()
@@ -1343,18 +1416,22 @@ impl App {
                             // Stopping releases the USB claim, which is the
                             // only way to hand the radio to another program
                             // without quitting.
+                            use crate::icons::{icon_button, Icon};
                             let on = self.radio.is_some();
-                            if ui
-                                .add_enabled(!on, egui::Button::new("START"))
-                                .clicked()
-                            {
+                            let t = crate::i18n::t;
+                            if icon_button(ui, Icon::Play, t("ui.start"), !on, false).clicked() {
                                 let c = ui.ctx().clone();
                                 self.connect(&c);
                             }
-                            if ui.add_enabled(on, egui::Button::new("STOP")).clicked() {
+                            if icon_button(ui, Icon::Stop, t("ui.stop"), on, false).clicked() {
                                 self.stop();
                             }
-                            if ui.add_enabled(on, egui::Button::new("GAIN")).clicked() {
+                            // Not gain alone: the pane behind it also holds
+                            // the radio's switches, its antenna and channel
+                            // choices, and the crystal correction.
+                            if icon_button(ui, Icon::Sliders, t("ui.settings"), on, false)
+                                .clicked()
+                            {
                                 self.open = Some(Settings::Radio);
                             }
                         });
@@ -1426,29 +1503,49 @@ impl App {
                     ui.add_space(18.0);
 
                     ui.vertical(|ui| {
-                        ui.label(legend("decode"));
+                        ui.label(legend("packets"));
                         ui.horizontal(|ui| {
-                            // Decoding the whole span at once is the expensive
-                            // thing the app does, so it is a switch rather
-                            // than something buried in a settings modal.
-                            if ui.selectable_label(self.decode_on, "ALL").clicked() {
-                                self.decode_on = !self.decode_on;
-                                self.send(Cmd::Decode(self.decode_on));
-                            }
-                            if ui.selectable_label(self.log_open, "LOG").clicked() {
+                            // Only the switch that opens the log. What decodes
+                            // and what runs where are questions about the
+                            // packets, so they are asked in the window that
+                            // shows them rather than up here.
+                            if crate::icons::icon_button(
+                                ui,
+                                crate::icons::Icon::Log,
+                                crate::i18n::t("ui.log"),
+                                true,
+                                self.log_open,
+                            )
+                            .clicked()
+                            {
                                 self.log_open = !self.log_open;
-                            }
-                            // What runs on this frequency, and the file that
-                            // decides it. Beside the decode switch because
-                            // that is the question it answers.
-                            if ui.selectable_label(false, "SCAN").clicked() {
-                                self.open = Some(Settings::Scanners);
                             }
                         });
                     });
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.lamps(ui);
+                    // Pinned to the far end, and built like every other group
+                    // on this row: a legend with its control under it. Floating
+                    // loose against the right edge, it read as a lamp or a
+                    // dismiss button, because nothing said what it belonged to.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(legend("setup"));
+                            ui.horizontal(|ui| {
+                                let open = crate::icons::icon_button(
+                                    ui,
+                                    crate::icons::Icon::Setup,
+                                    crate::i18n::t("ui.setup"),
+                                    true,
+                                    self.open == Some(Settings::App),
+                                );
+                                if open.clicked() {
+                                    self.open = Some(Settings::App);
+                                }
+                            });
+                        });
+                        ui.add_space(18.0);
+                        self.divider(ui);
+                        ui.add_space(18.0);
                     });
                 });
 
@@ -1471,12 +1568,13 @@ impl App {
             Settings::Radio => "Radio",
             Settings::PacketLog => "Packet log",
             Settings::Scanners => "Scanners",
+            Settings::App => crate::i18n::t("settings.title"),
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(match which {
-                    Settings::Radio | Settings::PacketLog => 420.0,
+                    Settings::Radio | Settings::PacketLog | Settings::App => 420.0,
                     Settings::Scanners => 560.0,
                     _ => 320.0,
                 });
@@ -1488,13 +1586,14 @@ impl App {
                     Settings::Radio => self.radio_settings(ui),
                     Settings::PacketLog => self.packet_log_settings(ui),
                     Settings::Scanners => self.scanner_settings(ui),
+                    Settings::App => self.app_settings(ui),
                 }
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("CLOSE").clicked() {
+                        if ui.button(crate::i18n::t("ui.close")).clicked() {
                             self.open = None;
                         }
                     });
@@ -1744,6 +1843,19 @@ impl App {
         hint(ui, "Timings and frames as demodulated, a day per file, replayable.");
         ui.add_space(8.0);
 
+        // What the list shows, rather than what the receiver does. An
+        // unrecognised burst is still reported, logged and replayable with
+        // this off; it is only kept out of the table.
+        let mut unknown = self.show_unknown;
+        if ui.checkbox(&mut unknown, "Show unrecognised bursts").changed() {
+            self.show_unknown = unknown;
+        }
+        hint(
+            ui,
+            "Bursts that decoded to no known protocol. They are the point of scanning an unfamiliar band, and on a noisy one they bury the decodes.",
+        );
+        ui.add_space(8.0);
+
         row(ui, "directory", |ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.log_dir_edit)
@@ -1883,6 +1995,97 @@ impl App {
 
     /// Everything the radio itself can be set to.
     ///
+    /// Where this receiver is, rather than what it is doing.
+    ///
+    /// One pane for the settings that are true of the installation and not of
+    /// the session: they survive changing radio, they are asked once, and
+    /// none of them belong under a cog on the spectrum.
+    fn app_settings(&mut self, ui: &mut egui::Ui) {
+        let t = crate::i18n::t;
+
+        ui.label(legend(t("settings.language")));
+        let mut lang = crate::i18n::language();
+        egui::ComboBox::from_id_salt("app-language")
+            .selected_text(lang.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for l in crate::i18n::Language::ALL {
+                    ui.selectable_value(&mut lang, l, l.label());
+                }
+            });
+        crate::i18n::set_language(lang);
+        hint(ui, t("settings.language.help"));
+        ui.add_space(10.0);
+
+        ui.label(legend(t("settings.country")));
+        let current = crate::locale::by_code(&self.country);
+        let mut pick: Option<&'static crate::locale::Country> = None;
+        egui::ComboBox::from_id_salt("app-country")
+            .selected_text(current.map(|c| c.name).unwrap_or("—"))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for c in crate::locale::COUNTRIES {
+                    let on = current.is_some_and(|s| s.code == c.code);
+                    if ui.selectable_label(on, c.name).clicked() && !on {
+                        pick = Some(c);
+                    }
+                }
+            });
+        if let Some(c) = pick {
+            self.country = c.code.to_string();
+            // A country decides the plan the first time and then stops having
+            // an opinion, so choosing one after overriding the plan puts the
+            // override back rather than leaving a mismatch nobody asked for.
+            crate::bands::set_plan(c.plan);
+            // The map has to open somewhere. A capital city is wrong by a
+            // couple of hundred miles, which is close enough to draw with and
+            // is replaced the moment a real position is typed in.
+            if self.location.is_none() {
+                self.set_location(c.centre.0, c.centre.1);
+                self.station_edit = None;
+            }
+        }
+        hint(ui, t("settings.country.help"));
+        ui.add_space(10.0);
+
+        ui.label(legend(t("settings.band_plan")));
+        let mut plan = crate::bands::plan();
+        egui::ComboBox::from_id_salt("app-band-plan")
+            .selected_text(plan.label())
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for p in crate::bands::Plan::ALL {
+                    ui.selectable_value(&mut plan, p, p.label());
+                }
+            });
+        crate::bands::set_plan(plan);
+        hint(ui, t("settings.band_plan.help"));
+        ui.add_space(4.0);
+        // The plan is abstract until it is applied to the frequency in front
+        // of you, and this is the one line that makes the choice concrete.
+        hint(
+            ui,
+            &format!(
+                "{} here is {}",
+                fmt_hz(self.center),
+                crate::bands::name_at_in(plan, self.center)
+            ),
+        );
+        ui.add_space(10.0);
+
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(legend(t("settings.position")));
+        let mut edit = self.station_edit.take();
+        let set = Self::station_row(ui, self.location, &mut edit);
+        self.station_edit = edit;
+        if let Some((lat, lon)) = set {
+            self.set_location(lat, lon);
+            self.station_edit = None;
+        }
+        hint(ui, t("settings.position.help"));
+    }
+
     /// Separate from the spectrum and waterfall settings because it is a
     /// different kind of thing: those change what you see, these change what
     /// the receiver does, and getting them wrong costs sensitivity or
@@ -1893,7 +2096,8 @@ impl App {
             return;
         };
         let controls = radio.status.radio();
-        if controls.stages.is_empty() && controls.toggles.is_empty() {
+        if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
+        {
             ui.label(legend("this device has no adjustable stages"));
             return;
         }
@@ -1939,6 +2143,28 @@ impl App {
                 hint(ui, &format!("{:.0} dB steps, {lo:.0} to {hi:.0} dB", stage.step));
             }
             ui.add_space(10.0);
+        }
+
+        if !controls.choices.is_empty() {
+            ui.separator();
+            ui.add_space(6.0);
+            for c in &controls.choices {
+                ui.label(legend(&c.label));
+                let mut picked = c.selected.clone();
+                egui::ComboBox::from_id_salt(format!("radio-choice-{}", c.name))
+                    .selected_text(&picked)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for opt in &c.options {
+                            ui.selectable_value(&mut picked, opt.clone(), opt);
+                        }
+                    });
+                if picked != c.selected {
+                    self.send(Cmd::Choice(c.name.clone(), picked));
+                }
+                hint(ui, &c.help);
+                ui.add_space(8.0);
+            }
         }
 
         if !controls.toggles.is_empty() {
@@ -2139,16 +2365,43 @@ impl App {
     }
 
     /// Status lamps. Dark is good; an unlit lamp means nothing is wrong.
-    fn lamps(&self, ui: &mut egui::Ui) {
-        let Some(r) = &self.radio else { return };
+    /// One lamp for the whole receive path.
+    ///
+    /// Two lamps and two numbers used to say this, in the far corner, and the
+    /// numbers were the wrong thing to print: a sample count nobody can act on
+    /// is noise, while its colour is the one thing worth seeing across a room.
+    /// Green is receiving cleanly. Red is either stopped or dropping, which
+    /// are the same news, and the hover text says which.
+    fn status_lamp(&self, ui: &mut egui::Ui) {
         use std::sync::atomic::Ordering;
-        let dropped = r.status.dropped.load(Ordering::Relaxed);
-        let running = r.status.running.load(Ordering::Relaxed);
+        let (running, dropped) = match &self.radio {
+            Some(r) => (
+                r.status.running.load(Ordering::Relaxed),
+                r.status.dropped.load(Ordering::Relaxed),
+            ),
+            None => (false, 0),
+        };
+        let good = running && dropped == 0;
+        let col = if good { theme::OK } else { theme::FAULT };
 
-        ui.vertical(|ui| {
-            ui.add_space(4.0);
-            lamp(ui, "drops", dropped > 0, theme::FAULT, &format!("{dropped}"));
-            lamp(ui, "rx", running, theme::TRACE, if running { "on" } else { "off" });
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+        let p = ui.painter();
+        p.circle_filled(rect.center(), 3.5, col);
+        // A halo, so it reads as a lit lamp rather than a printed dot.
+        p.circle_filled(
+            rect.center(),
+            6.0,
+            Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 34),
+        );
+        resp.on_hover_text(if !running {
+            "Stopped. The device is free for another program.".to_string()
+        } else if dropped == 0 {
+            "Receiving, no samples dropped.".to_string()
+        } else {
+            format!(
+                "Receiving, but {} samples were dropped: the host is not keeping up with this span.",
+                thousands(dropped)
+            )
         });
     }
 
@@ -2297,9 +2550,18 @@ impl App {
                 let mut tune = None;
                 for (i, ch) in self.channels.iter_mut().enumerate() {
                     let active = self.listening == Some(i);
+                    // Both strips take the panel fill. The selected one used a
+                    // lighter wash, which was the exact colour of a slider's
+                    // handle and trough, so the volume control disappeared
+                    // into the strip it sat on. Selection is carried by the
+                    // amber edge and the lit bar instead, which is how it is
+                    // marked on a mixing desk: a lamp, not a change of paint.
                     egui::Frame::NONE
-                        .fill(if active { Color32::from_rgb(0x2A, 0x2E, 0x36) } else { theme::WELL })
-                        .stroke(Stroke::new(1.0, if active { theme::READOUT } else { theme::ETCH }))
+                        .fill(theme::PANEL)
+                        .stroke(Stroke::new(
+                            if active { 1.5 } else { 1.0 },
+                            if active { theme::READOUT } else { theme::ETCH },
+                        ))
                         .corner_radius(2.0)
                         .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
@@ -2471,9 +2733,51 @@ impl App {
             });
             return;
         };
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            crate::chainview::draw(ui, &topo, self.chain_latency);
-        });
+        // Node ids are positions in the built graph, so a rebuild can leave
+        // the selection pointing at a stage that is no longer there.
+        if self.chain_sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
+            self.chain_sel = None;
+        }
+        // The inspector takes a column on the right when a stage is selected,
+        // rather than floating over the graph: what a stage is set to is read
+        // against where it sits in the chain, and a panel covering the chain
+        // hides half of that.
+        let mut act = crate::chainview::Interaction {
+            selected: self.chain_sel,
+            changed: None,
+        };
+        if self.chain_sel.is_some() {
+            Panel::right("chain-inspector")
+                .default_size(260.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::symmetric(12, 10)),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if let Some(sel) = self.chain_sel {
+                            act.changed = crate::chainview::inspector(ui, &topo, sel);
+                        }
+                    });
+                });
+        }
+        // Dragged, not only scrolled: the graph is wider and taller than the
+        // pane on any real chain, and reaching for a scrollbar to see a branch
+        // is not how anyone reads a diagram.
+        let drawn = egui::ScrollArea::both()
+            .scroll_source(egui::containers::scroll_area::ScrollSource {
+                drag: egui::containers::scroll_area::DragScroll::Always,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                crate::chainview::draw(ui, &topo, self.chain_latency, self.chain_sel)
+            })
+            .inner;
+        self.chain_sel = drawn.selected;
+        if let Some((id, name, value)) = act.changed.or(drawn.changed) {
+            self.send(Cmd::NodeParam(id, name, value));
+        }
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {
@@ -2503,6 +2807,11 @@ impl App {
             let _s = tracing::info_span!("trace").entered();
             self.trace(&p, &plot);
         }
+        // Over the trace, because the trace is filled to the floor of the
+        // plot and anything drawn under it there is washed out to the fill's
+        // own colour. Kept to four pixels and a low alpha so it reads as a
+        // margin note rather than as a signal.
+        self.scan_marks(&p, &plot);
         self.ribbon(&p, &ribbon);
 
         p.rect_filled(fall, 0.0, theme::CHASSIS);
@@ -2632,6 +2941,115 @@ impl App {
         }
     }
 
+    /// Where the scanner table is listening, along the foot of the spectrum.
+    ///
+    /// A bank has hundreds of channels and drawing a line per channel is a
+    /// grey wash that hides the spectrum it is describing, so the band is a
+    /// strip and the channel grid appears as ticks only when the ticks are far
+    /// enough apart to be counted. Below that the strip alone is the honest
+    /// drawing: the channels are narrower than a pixel.
+    fn scan_marks(&self, p: &egui::Painter, plot: &Rect) {
+        if !self.decode_on {
+            return;
+        }
+        let marks = crate::chain::scan_marks(&self.scanners, self.center, self.rate);
+        if marks.is_empty() {
+            return;
+        }
+        let col = theme::OK;
+        let dim = |a: u8| Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a);
+        // Read against the trace's own fill, which is what is behind this.
+        let (fill_a, tick_a, text_a) = (110u8, 190u8, 220u8);
+        // A strip at the foot of the plot, clear of the trace's baseline.
+        let floor = plot.bottom() - 1.0;
+        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        // Banks stack upward. Two of them cover the same band at different
+        // channel widths, and drawn on one row they were one strip with two
+        // labels printed over each other.
+        let mut row = 0usize;
+
+        for m in &marks {
+            match m {
+                crate::chain::ScanMark::Band { lo, hi, origin, spacing, label } => {
+                    let y1 = floor - row as f32 * 6.0;
+                    let y0 = y1 - 4.0;
+                    row += 1;
+                    let (x0, x1) = (self.x_of(plot, *lo), self.x_of(plot, *hi));
+                    let (cx0, cx1) = (x0.max(plot.left()), x1.min(plot.right()));
+                    if cx1 - cx0 < 1.0 {
+                        continue;
+                    }
+                    p.rect_filled(
+                        Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)),
+                        1.0,
+                        dim(fill_a),
+                    );
+                    let step_px = (x1 - x0) * (*spacing as f32) / (*hi - *lo).max(1.0) as f32;
+                    if step_px >= 7.0 {
+                        // Stepped from a real channel centre rather than from
+                        // the band edge, which is where the grid happens to be
+                        // cut. Half a channel of error in a drawing of where
+                        // the channels are is the whole of what it says.
+                        let first =
+                            ((lo - origin) / spacing).ceil() * spacing + origin - spacing / 2.0;
+                        let mut hz = first;
+                        while hz <= *hi + spacing {
+                            let x = self.x_of(plot, hz);
+                            if plot.x_range().contains(x) && x >= x0 && x <= x1 {
+                                p.line_segment(
+                                    [Pos2::new(x, y0 - 2.0), Pos2::new(x, y1)],
+                                    Stroke::new(1.0, dim(tick_a)),
+                                );
+                            }
+                            hz += spacing;
+                        }
+                    }
+                    // Named at the left edge of its own strip, where it cannot
+                    // be mistaken for a label on the band beside it.
+                    if cx1 - cx0 > 46.0 {
+                        p.text(
+                            Pos2::new(cx0 + 3.0, y0 - 3.0),
+                            Align2::LEFT_BOTTOM,
+                            label,
+                            font.clone(),
+                            dim(text_a),
+                        );
+                    }
+                }
+                crate::chain::ScanMark::Channel { hz, width, label } => {
+                    let (y1, y0) = (floor, floor - 4.0);
+                    let x = self.x_of(plot, *hz);
+                    if !plot.x_range().contains(x) {
+                        continue;
+                    }
+                    let (x0, x1) =
+                        (self.x_of(plot, hz - width / 2.0), self.x_of(plot, hz + width / 2.0));
+                    if x1 - x0 >= 2.0 {
+                        p.rect_filled(
+                            Rect::from_min_max(
+                                Pos2::new(x0.max(plot.left()), y0),
+                                Pos2::new(x1.min(plot.right()), y1),
+                            ),
+                            1.0,
+                            dim(fill_a),
+                        );
+                    }
+                    p.line_segment(
+                        [Pos2::new(x, y1 - 9.0), Pos2::new(x, y1)],
+                        Stroke::new(1.0, dim(tick_a)),
+                    );
+                    p.text(
+                        Pos2::new(x + 3.0, y1 - 9.0),
+                        Align2::LEFT_BOTTOM,
+                        label,
+                        font.clone(),
+                        dim(text_a),
+                    );
+                }
+            }
+        }
+    }
+
     fn grid(&self, p: &egui::Painter, plot: &Rect) {
         for i in 0..=10 {
             let x = plot.left() + plot.width() * i as f32 / 10.0;
@@ -2648,13 +3066,24 @@ impl App {
                 Stroke::new(1.0, Color32::from_rgb(0x22, 0x26, 0x2B)),
             );
             let db = self.ceil - (self.ceil - self.floor) * i as f32 / 4.0;
-            p.text(
-                Pos2::new(plot.right() - 4.0, y - 1.0),
-                Align2::RIGHT_BOTTOM,
-                format!("{db:.0}"),
-                FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into())),
-                Color32::from_rgb(0x4A, 0x51, 0x5A),
+            // The unit once, on the top line. Repeating it on every gridline
+            // is three times the ink for the same fact.
+            let text = if i == 1 { format!("{db:.0} dBFS") } else { format!("{db:.0}") };
+            // Set at 11 rather than 9, and in the panel's legend grey rather
+            // than a shade above the background. These are the numbers that
+            // say what the trace is worth, and they were unreadable.
+            let font = FontId::new(11.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+            let at = Pos2::new(plot.right() - 5.0, y - 1.0);
+            let galley = p.layout_no_wrap(text, font, theme::LEGEND);
+            let rect = Align2::RIGHT_BOTTOM.anchor_size(at, galley.size());
+            // A backing, because the trace runs behind these and a number
+            // crossed by a carrier is not a number any more.
+            p.rect_filled(
+                rect.expand2(Vec2::new(3.0, 1.0)),
+                2.0,
+                Color32::from_rgba_unmultiplied(0x14, 0x16, 0x19, 190),
             );
+            p.galley(rect.min, galley, theme::LEGEND);
         }
     }
 
@@ -3593,8 +4022,27 @@ impl App {
 
     fn log_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(legend("packets"));
-            ui.label(value(self.decodes.len().to_string()).size(12.0));
+            // The switch that produces everything below it. Decoding the whole
+            // span at once is the expensive thing this app does, so it stays a
+            // one-click switch rather than a line in a settings modal, and it
+            // sits beside the legend that reports what it did.
+            if crate::icons::icon_button(
+                ui,
+                crate::icons::Icon::Decode,
+                crate::i18n::t("ui.decode_all"),
+                true,
+                self.decode_on,
+            )
+            .clicked()
+            {
+                self.decode_on = !self.decode_on;
+                self.send(Cmd::Decode(self.decode_on));
+            }
+            ui.add_space(6.0);
+            // No row count here. The list keeps the last 500 and drops the
+            // rest, so the number stops meaning anything the moment a band
+            // gets busy, which is exactly when it would be looked at. The
+            // frame total below is a real total and is worth printing.
             if let Some(r) = &self.radio {
                 use std::sync::atomic::Ordering;
                 let narrow = r.status.scan_channels.load(Ordering::Relaxed);
@@ -3652,11 +4100,13 @@ impl App {
                 if ui.button("SETTINGS").clicked() {
                     self.open = Some(Settings::PacketLog);
                 }
-                // Unknown bursts are the point of scanning a band, but on a
-                // noisy one they crowd out the decodes, so they can be hidden
-                // here without turning the reporting off upstream.
-                if ui.selectable_label(self.show_unknown, "UNKNOWN").clicked() {
-                    self.show_unknown = !self.show_unknown;
+
+                // Which front end runs on which frequency. Named rather than
+                // drawn: it sits in a row of named buttons with room for a
+                // word, and no glyph says "the table deciding what decodes
+                // where" without being learned first.
+                if ui.button("SCANNERS").clicked() {
+                    self.open = Some(Settings::Scanners);
                 }
             });
         });
@@ -4016,20 +4466,19 @@ fn hex_dump(ui: &mut egui::Ui, bytes: &[u8]) {
         });
 }
 
-fn lamp(ui: &mut egui::Ui, label: &str, lit: bool, col: Color32, text: &str) {
-    ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(Vec2::new(7.0, 7.0), Sense::hover());
-        let c = if lit { col } else { Color32::from_rgb(0x2C, 0x31, 0x38) };
-        ui.painter().circle_filled(r.center(), 3.5, c);
-        if lit {
-            // A faint halo reads as a lit lamp rather than a painted dot.
-            ui.painter()
-                .circle_filled(r.center(), 6.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 30));
+/// Group a large count so it can be read at a glance rather than counted.
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(' ');
         }
-        ui.label(legend(label));
-        ui.label(value(text).size(11.0).color(if lit { col } else { theme::LEGEND }));
-    });
+        out.push(c);
+    }
+    out
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -4226,6 +4675,39 @@ mod tests {
             });
         }
         a
+    }
+
+    /// The band plan is process-wide, so the tests that move it cannot run
+    /// beside each other: one would assert on the other's value.
+    static PLAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_saved_locale_is_put_into_effect_at_startup() {
+        let _g = PLAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::session::Session {
+            country: "US".into(),
+            band_plan: "americas".into(),
+            language: "en".into(),
+            ..Default::default()
+        };
+        apply_locale(&mut s);
+        assert_eq!(crate::bands::plan(), crate::bands::Plan::Americas);
+        assert_eq!(crate::i18n::language(), crate::i18n::Language::English);
+        // Put it back: the plan is global, and a test that leaves it changed
+        // renames every band for whatever runs next.
+        crate::bands::set_plan(crate::bands::Plan::Europe);
+    }
+
+    #[test]
+    fn a_first_run_takes_its_plan_from_the_country_it_infers() {
+        let _g = PLAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = crate::session::Session { country: "JP".into(), ..Default::default() };
+        // Nothing saved for the plan, but the country is known, so the plan
+        // follows it rather than defaulting to wherever the author lives.
+        s.band_plan = crate::locale::by_code(&s.country).unwrap().plan.id().to_string();
+        apply_locale(&mut s);
+        assert_eq!(crate::bands::plan(), crate::bands::Plan::AsiaPacific);
+        crate::bands::set_plan(crate::bands::Plan::Europe);
     }
 
     #[test]
