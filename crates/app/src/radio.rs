@@ -2272,7 +2272,13 @@ mod zoom_tests {
             rx.process(&sig).unwrap();
             let x = 1.0 / t.elapsed().as_secs_f64();
             eprintln!("zoom /{zoom}: {x:.0}x real time");
-            assert!(x > 5.0, "narrowing by {zoom} only ran at {x:.1}x real time");
+            // The bar is what the stage is for, not what a fast machine does
+            // with it: narrowing must not cost real time, since it runs ahead
+            // of the spectrum, the banks and the audio. This desktop manages
+            // 10x and a shared CI runner 3.5x, so a threshold set near the
+            // desktop figure measures the runner's neighbours rather than
+            // this code.
+            assert!(x > 2.5, "narrowing by {zoom} only ran at {x:.1}x real time");
         }
     }
 
