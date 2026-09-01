@@ -16,6 +16,7 @@ pub mod feed_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod bank_node;
+mod filter_nodes;
 pub mod sink_nodes;
 pub mod wfm;
 
@@ -29,6 +30,7 @@ pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
 pub use bank_node::BankNode;
+pub use filter_nodes::{FirFilterNode, IirFilterNode};
 pub use sink_nodes::{DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
@@ -214,6 +216,46 @@ pub fn registry() -> Registry {
             // A power of two, because that is what the transform takes.
             let size = 1usize << (usize::BITS - 1 - size.leading_zeros()) as usize;
             Ok(Box::new(SpectrumNode::new(size)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "fir_filter",
+            summary: "Windowed-sinc pass or block filter: linear phase, and \
+                      as sharp as the taps you pay for",
+            category: "filter",
+        },
+        |s: &Settings| {
+            let r = dsp::filter::Response::from_name(s.str_or("response", "lowpass"))
+                .unwrap_or(dsp::filter::Response::Lowpass);
+            Ok(Box::new(FirFilterNode::new(
+                r,
+                s.f64_or("freq_hz", 5_000.0),
+                s.f64_or("width_hz", 2_000.0),
+                s.i64_or("taps", 127).clamp(3, 4095) as usize,
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "iir_filter",
+            summary: "Biquad pass or block filter: a handful of coefficients \
+                      where an FIR would need hundreds, at the cost of phase",
+            category: "filter",
+        },
+        |s: &Settings| {
+            let r = dsp::filter::Response::from_name(s.str_or("response", "lowpass"))
+                .unwrap_or(dsp::filter::Response::Lowpass);
+            let freq = s.f64_or("freq_hz", 5_000.0);
+            // A band is described by its width everywhere except in the
+            // arithmetic, which wants a resonance.
+            let q = match s.get("width_hz") {
+                Some(w) => dsp::filter::Biquad::band_q(freq, w.as_f64().unwrap_or(1.0)),
+                None => s.f64_or("q", 0.707),
+            };
+            Ok(Box::new(IirFilterNode::new(r, freq, q)) as Box<dyn Node>)
         },
     );
 

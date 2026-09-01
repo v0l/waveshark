@@ -13,6 +13,7 @@ pub mod channelizer;
 pub mod dc;
 pub mod demod;
 pub mod detect;
+pub mod filter;
 pub mod fir;
 pub mod fsk;
 pub mod hdlc;

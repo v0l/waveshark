@@ -1608,6 +1608,12 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
             }
         }
         "mixer" => "Mixer".into(),
+        "fir_filter" | "iir_filter" => {
+            let what = settings.str_or("response", "lowpass");
+            let hz = settings.f64_or("freq_hz", 0.0);
+            let how = if kind == "fir_filter" { "FIR" } else { "IIR" };
+            format!("{how} {what} {}", hz_label(hz))
+        }
         "envelope" => "Envelope".into(),
         "fm_demod" => "FM discriminator".into(),
         "deemphasis" => "De-emphasis".into(),

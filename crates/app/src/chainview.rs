@@ -19,7 +19,10 @@ use std::collections::HashMap;
 const BOX_W: f32 = 190.0;
 const BOX_H: f32 = 46.0;
 const GAP: f32 = 34.0;
-const COL_GAP: f32 = 16.0;
+/// Space between one column of stages and the next. Wide enough for the wire
+/// label that sits in it: the rate a link carries is the most useful thing on
+/// the screen and it used to be printed over the boxes on either side.
+const COL_GAP: f32 = 120.0;
 /// A composite node's inner chain, drawn smaller beneath it.
 const INNER_H: f32 = 26.0;
 const INNER_GAP: f32 = 8.0;
@@ -1142,11 +1145,15 @@ fn edge(
         p.line_segment([Pos2::new(to.x - 6.0, to.y + d), to], stroke);
     }
     if label {
-        // Just before the stage it feeds, so the label stays in the gap
-        // between two boxes rather than over either of them.
+        // Halfway along the wire, which is the middle of the gap between two
+        // boxes: printed at either end it landed on top of one of them.
+        let mid = Pos2::new(
+            (from.x + 3.0 * pts[1].x + 3.0 * pts[2].x + to.x) / 8.0,
+            (from.y + 3.0 * pts[1].y + 3.0 * pts[2].y + to.y) / 8.0,
+        );
         p.text(
-            Pos2::new(to.x - 8.0, to.y - 2.0),
-            egui::Align2::RIGHT_BOTTOM,
+            Pos2::new(mid.x, mid.y - 3.0),
+            egui::Align2::CENTER_BOTTOM,
             format!("{}  {}", kind_label(spec.kind), rate_label(spec)),
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,

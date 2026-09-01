@@ -97,6 +97,20 @@ impl Param {
         }
     }
 
+    /// One of a named set, rendered as a list. The value is a position in
+    /// `choices`, which is what makes a choice storable without every stage
+    /// agreeing on a spelling.
+    pub fn choice(name: &str, value: usize, choices: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            label: String::new(),
+            unit: String::new(),
+            value: ParamValue::Choice(value),
+            range: ParamRange::Choices(choices),
+            affects_rate: false,
+        }
+    }
+
     pub fn bool(name: &str, value: bool) -> Self {
         Self {
             name: name.into(),
