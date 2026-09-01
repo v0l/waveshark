@@ -57,3 +57,23 @@ codegen-units = 1
 # Debug builds still need usable DSP throughput.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The glob above covers dependencies only, so the workspace crates on the
+# signal path have to be named. Without this the test suite runs the
+# channelizer, the detectors and the slicers unoptimised: replaying the rtl_433
+# corpus took 75 seconds that way and takes 4 with them optimised.
+[profile.dev.package.common]
+opt-level = 3
+[profile.dev.package.dsp]
+opt-level = 3
+[profile.dev.package.decode]
+opt-level = 3
+[profile.dev.package.nodes]
+opt-level = 3
+[profile.dev.package.sources]
+opt-level = 3
+
+# Test binaries carry the corpus replay itself, which is the same arithmetic
+# over again.
+[profile.test]
+opt-level = 3
