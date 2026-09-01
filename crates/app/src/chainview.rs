@@ -998,7 +998,7 @@ mod tests {
         let mut edit = Edit { manual: true, ..Default::default() };
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        let mut frame = |edit: &mut Edit| {
+        let frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
                 draw(ui, &topo, 0.0, None, edit, None);
             });

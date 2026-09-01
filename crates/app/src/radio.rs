@@ -1455,10 +1455,15 @@ fn run(
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();
             }
+            // The rate the spectrum sees rather than the one the radio
+            // delivers: in manual mode a stage can sit between the two, and
+            // an axis drawn from the wrong one puts every signal in the
+            // wrong place.
+            let seen = rx.spectrum_rate();
             let f = Frame {
                 db: rx.power_db().to_vec(),
                 center: plan.center.as_f64(),
-                rate: plan.eff_rate(),
+                rate: if seen > 0.0 { seen } else { plan.eff_rate() },
             };
             // Drop rather than block: the radio must never stall waiting for
             // the UI, and a stale spectrum is worthless anyway.

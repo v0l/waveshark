@@ -15,6 +15,27 @@
 
 use pipeline::registry::Settings;
 
+/// The receiver's own stages, as link targets.
+///
+/// The spectrum and the recorder read the head of the chain unless the
+/// operator says otherwise, and saying otherwise is the whole reason to put a
+/// stage between the two. They are named by reserved ids rather than by a
+/// second kind of link so that a wire is a wire: the view, the patch and the
+/// builder all treat them like any other target.
+pub mod builtin {
+    /// The spectrum behind the waterfall.
+    pub const SPECTRUM: u64 = u64::MAX;
+    /// The recorder's ring.
+    pub const RECORDER: u64 = u64::MAX - 1;
+
+    /// Ids at or above this belong to the receiver rather than to the patch.
+    pub const FIRST: u64 = u64::MAX - 15;
+
+    pub fn is(id: u64) -> bool {
+        id >= FIRST
+    }
+}
+
 /// Where a link starts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
@@ -59,12 +80,24 @@ impl Patch {
         &self.stages
     }
 
+    /// For setting what a stage is built with before it is built.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn stages_mut(&mut self) -> &mut [Stage] {
+        &mut self.stages
+    }
+
     pub fn links(&self) -> &[Link] {
         &self.links
     }
 
     pub fn stage(&self, id: u64) -> Option<&Stage> {
         self.stages.iter().find(|s| s.id == id)
+    }
+
+    /// What the receiver's own stage is told to read, when it has been told
+    /// anything. `None` leaves it on the head of the chain.
+    pub fn tap(&self, builtin: u64) -> Option<Source> {
+        self.feeding((builtin, 0))
     }
 
     /// Add a stage, unconnected. Wiring it up is a separate decision, since a
@@ -92,6 +125,17 @@ impl Patch {
         if matches!(from, Source::Stage(f, _) if f == to.0) {
             return;
         }
+        // A wire has to end somewhere that exists, and cannot start at one of
+        // the receiver's own stages: the spectrum and the recorder consume
+        // samples and produce nothing a patch could read.
+        if !self.exists(to.0) {
+            return;
+        }
+        if let Source::Stage(f, _) = from {
+            if builtin::is(f) || !self.exists(f) {
+                return;
+            }
+        }
         self.links.retain(|l| l.to != to);
         self.links.push(Link { from, to });
     }
@@ -108,6 +152,12 @@ impl Patch {
     /// bus has to be attached for anything it decodes to be seen.
     pub fn is_tail(&self, id: u64) -> bool {
         !self.links.iter().any(|l| matches!(l.from, Source::Stage(f, _) if f == id))
+    }
+
+    /// Whether a stage is still there to be wired to. The receiver's own
+    /// stages always are; they are not the patch's to delete.
+    fn exists(&self, id: u64) -> bool {
+        builtin::is(id) || self.stage(id).is_some()
     }
 }
 

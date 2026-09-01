@@ -264,6 +264,9 @@ pub struct Receiver {
     logged: u64,
     center: Hz,
     rate: f64,
+    /// Rate at the spectrum's own input, which is the span's unless the
+    /// operator has put something in front of it.
+    spectrum_rate: f64,
     /// Channels that could not be built, for the status line.
     pub refused: Option<String>,
 }
@@ -355,6 +358,7 @@ impl Receiver {
             logged: 0,
             center: plan.center,
             rate: plan.rate,
+            spectrum_rate: plan.eff_rate(),
             refused: None,
         };
         rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new))?;
@@ -469,26 +473,62 @@ impl Receiver {
             head = id;
         }
 
-        // Added before the decoders so it runs before them. Nodes are executed
-        // in the order they were added once their inputs are ready, and the
-        // ring has to hold a burst before whatever decodes it says so: a
-        // recording that starts when a decoder finishes has already missed the
-        // packet.
+        // Added before the decoders so it runs before them. Nodes are
+        // executed in the order they were added once their inputs are ready,
+        // and the ring has to hold a burst before whatever decodes it says
+        // so: a recording that starts when a decoder finishes has already
+        // missed the packet. Its input is connected further down, once the
+        // stage it may have been told to read exists.
         let mut record = None;
         if plan.record {
             if let Some(r) = ring {
                 let id = b.add_labeled("Recorder", Box::new(nodes::RingNode::new(r)));
-                b.connect(head.o(), id.i());
+                b.set_tag(id, crate::patch::builtin::RECORDER);
                 roles.push(Role::Record);
                 record = Some(id);
             }
+        }
+
+        let mut refused = None;
+        let mut patch_packets: Vec<NodeId> = Vec::new();
+        let mut patch_ids: HashMap<u64, NodeId> = HashMap::new();
+        if let Some(patch) = &plan.patch {
+            match add_patch(&mut b, &mut roles, &mut pool, head, patch) {
+                Ok((packets, ids)) => {
+                    patch_packets = packets;
+                    patch_ids = ids;
+                }
+                Err(e) => refused = Some(format!("the patch cannot be built: {e}")),
+            }
+        }
+        // What one of the receiver's own stages reads: the head of the chain,
+        // unless a wire says otherwise and the stage it names is running.
+        let tap = |id: u64| -> Out {
+            plan.patch
+                .as_ref()
+                .and_then(|p| p.tap(id))
+                .and_then(|s| match s {
+                    crate::patch::Source::Span => None,
+                    crate::patch::Source::Stage(f, port) => {
+                        patch_ids.get(&f).map(|n| n.out(port))
+                    }
+                })
+                .unwrap_or(head.o())
+        };
+
+        if let Some(id) = record {
+            b.connect(tap(crate::patch::builtin::RECORDER), id.i());
         }
 
         let spectrum = match pool.remove(&Role::Spectrum) {
             Some(p) => b.add_existing(p),
             None => b.add_labeled("Spectrum", Box::new(SpectrumNode::new(plan.fft))),
         };
-        b.connect(head.o(), spectrum.i());
+        b.connect(tap(crate::patch::builtin::SPECTRUM), spectrum.i());
+        // Named so the view can offer its input as somewhere to drop a wire:
+        // putting a stage between the head and the spectrum is the whole
+        // reason a tap exists.
+        b.set_tag(spectrum, crate::patch::builtin::SPECTRUM);
         roles.push(Role::Spectrum);
 
         // The front ends the scanner table put on this span, rather than a
@@ -496,7 +536,6 @@ impl Receiver {
         // frequency is configuration, not structure: see `scanners.rs`.
         let (mut modes, mut ais, mut aprs, mut pocsag) = (None, None, None, None);
         let mut banks = Vec::new();
-        let mut refused = None;
         // Everything that is not a bank, in the order the table listed it, so
         // the bus can be connected to all of them without asking which kinds
         // happen to be running.
@@ -648,12 +687,7 @@ impl Receiver {
             }
         }
 
-        if let Some(patch) = &plan.patch {
-            match add_patch(&mut b, &mut roles, &mut pool, head, patch) {
-                Ok(packets) => narrowband.extend(packets),
-                Err(e) => refused = Some(format!("the patch cannot be built: {e}")),
-            }
-        }
+        narrowband.extend(patch_packets);
 
         let mut chans: Vec<Chan> = Vec::new();
         for spec in &plan.channels {
@@ -780,7 +814,13 @@ impl Receiver {
             b.output(c.tail);
         }
 
+        let spectrum_src = tap(crate::patch::builtin::SPECTRUM);
         let mut graph = b.build()?;
+        // What the spectrum is actually seeing, which is the head unless a
+        // patch stage was put in front of it. The axis is drawn from this, so
+        // a decimator between the two has to narrow the span on screen as
+        // well as in the arithmetic.
+        self.spectrum_rate = graph.spec_of(spectrum_src).map(|s| s.frame_rate()).unwrap_or(0.0);
         for c in chans.iter_mut() {
             let spec = graph.spec_of(c.tail).unwrap_or(input);
             c.audio_rate = spec.frame_rate();
@@ -1066,6 +1106,11 @@ impl Receiver {
     }
 
     /// Delay to a channel's audio, in milliseconds.
+    /// The rate the spectrum's frames cover, for the axis under them.
+    pub fn spectrum_rate(&self) -> f64 {
+        self.spectrum_rate
+    }
+
     pub fn latency_ms(&self, i: usize) -> f64 {
         let Some(c) = self.chans.get(i) else { return 0.0 };
         self.graph.latency_of(c.tail) as f64 / c.audio_rate.max(1.0) * 1e3
@@ -1303,7 +1348,9 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 #[allow(clippy::too_many_arguments)]
 /// Build the operator's own stages onto the head of the chain.
 ///
-/// Returns the ones that produce packets, for the bus to collect.
+/// Returns the ones that produce packets, for the bus to collect, and where
+/// each stage ended up, for the receiver's own stages that were told to read
+/// one of them.
 ///
 /// A stage whose inputs are not all fed is left out rather than built. The
 /// graph refuses an unconnected input port, and refusing the whole receiver
@@ -1319,7 +1366,7 @@ fn add_patch(
     pool: &mut HashMap<Role, NodePart>,
     head: NodeId,
     patch: &crate::patch::Patch,
-) -> Result<Vec<NodeId>> {
+) -> Result<(Vec<NodeId>, HashMap<u64, NodeId>)> {
     use crate::patch::Source;
     let reg = nodes::registry();
     let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
@@ -1404,7 +1451,7 @@ fn add_patch(
             }
         }
     }
-    Ok(packets)
+    Ok((packets, ids))
 }
 
 fn extract(
@@ -1848,6 +1895,33 @@ mod tests {
             bus.inputs.iter().any(|(s, _)| detector.outputs.iter().any(|(o, _)| o == s)),
             "the bursts have to arrive somewhere"
         );
+    }
+
+    #[test]
+    fn a_stage_can_be_put_between_the_head_and_the_spectrum() {
+        // The receiver's own stages read the head of the chain by default,
+        // and the reason to draw a graph at all is usually to put something
+        // in that gap. A patch that could only hang off the side would leave
+        // the one edit anybody wants impossible.
+        use crate::patch::{builtin, Source};
+        let mut patch = crate::patch::Patch::default();
+        let dec = patch.add("decimate");
+        patch.stages_mut()[0].settings.insert("factor".into(), pipeline::ParamValue::Int(4));
+        patch.connect(Source::Span, (dec, 0));
+        patch.connect(Source::Stage(dec, 0), (builtin::SPECTRUM, 0));
+        let plan = manual(patch);
+        let rx = Receiver::build(&plan, Default::default()).expect("a tapped spectrum");
+        let topo = rx.topology();
+        let decim = topo.nodes.iter().find(|n| n.tag == Some(dec)).expect("the stage runs");
+        let spectrum =
+            topo.nodes.iter().find(|n| n.tag == Some(builtin::SPECTRUM)).expect("a spectrum");
+        assert!(
+            spectrum.inputs.iter().any(|(s, _)| decim.outputs.iter().any(|(o, _)| o == s)),
+            "the spectrum should read the stage, not the head"
+        );
+        // And the axis has to follow it, or every signal is drawn at four
+        // times the offset it arrived on.
+        assert_eq!(rx.spectrum_rate(), plan.eff_rate() / 4.0);
     }
 
     #[test]
