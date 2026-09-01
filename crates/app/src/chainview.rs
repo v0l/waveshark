@@ -379,23 +379,28 @@ pub fn draw(
     }
 
     for (i, node) in topo.nodes.iter().enumerate() {
-        let to = rects[i];
-        for (slot, spec) in &node.inputs {
+        for (k, (slot, spec)) in node.inputs.iter().enumerate() {
+            let to = port(rects[i], k, node.inputs.len(), Side::In);
+            // Which of the producer's outputs this is, so two streams out of
+            // one stage leave it at two different points rather than crossing
+            // inside the box.
             let from = match topo.producer(*slot) {
-                Some(prod) => topo
-                    .nodes
-                    .iter()
-                    .position(|x| x.id == prod.id)
-                    .map(|j| rects[j])
-                    .unwrap_or(src),
+                Some(prod) => {
+                    let j = topo.nodes.iter().position(|x| x.id == prod.id);
+                    let out = prod.outputs.iter().position(|(s, _)| s == slot).unwrap_or(0);
+                    match j {
+                        Some(j) => port(rects[j], out, prod.outputs.len(), Side::Out),
+                        None => port(src, 0, 1, Side::Out),
+                    }
+                }
                 // No producer means it reads the graph input directly.
-                None => src,
+                None => port(src, 0, 1, Side::Out),
             };
             // Labelled once per node, and not at all on a node that gathers
             // many inputs: a bus with six wires into it would stack six
             // identical labels on the same three pixels.
             let label = node.inputs.len() <= 2 && slot == &node.inputs[0].0;
-            edge(&p, from.center_bottom(), to.center_top(), spec, label);
+            edge(&p, from, to, spec, label);
         }
     }
 
@@ -417,6 +422,17 @@ pub fn draw(
             // Clicking the selected stage again closes the inspector, so the
             // panel is not a thing you have to hunt for a way out of.
             act.selected = if on { None } else { Some(node.id.0) };
+        }
+        // The ports themselves, so where a wire may be attached is visible
+        // rather than inferred from where the ones already there happen to
+        // land.
+        for k in 0..node.inputs.len() {
+            p.circle_filled(port(r, k, node.inputs.len(), Side::In), 2.5, theme::ETCH);
+        }
+        if !node.sink {
+            for k in 0..node.outputs.len() {
+                p.circle_filled(port(r, k, node.outputs.len(), Side::Out), 2.5, theme::ETCH);
+            }
         }
         if !node.params.is_empty() {
             // A dot for a stage that has settings, so which boxes are worth
@@ -528,21 +544,51 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
     );
 }
 
-/// A labelled arrow carrying what the link actually contains.
+/// Which edge of a box a port sits on.
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    In,
+    Out,
+}
+
+/// Where one port sits: inputs along the top edge, outputs along the bottom,
+/// spread evenly so a stage with several of either shows which is which.
+fn port(r: Rect, i: usize, n: usize, side: Side) -> Pos2 {
+    let n = n.max(1);
+    let step = r.width() / (n + 1) as f32;
+    let y = if side == Side::In { r.top() } else { r.bottom() };
+    Pos2::new(r.left() + step * (i + 1) as f32, y)
+}
+
+/// A labelled wire carrying what the link actually contains.
+///
+/// Curved rather than routed around corners. Once stages can be dragged
+/// anywhere, an orthogonal route has no good answer for a wire that runs
+/// upwards or sideways: it doubles back through the boxes it is trying to
+/// avoid. A curve leaving the producer downwards and arriving at the consumer
+/// from above says the same thing about direction and stays readable wherever
+/// the two ends are.
 fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec, label: bool) {
     let col = Color32::from_rgb(0x4A, 0x55, 0x60);
-    // Down out of the producer, across, then down into the consumer, so a
-    // branch reads as a branch rather than a diagonal crossing other boxes.
-    let mid = (from.y + to.y) / 2.0;
-    let a = Pos2::new(from.x, mid);
-    let b = Pos2::new(to.x, mid);
-    p.line_segment([from, a], Stroke::new(1.0, col));
-    if (from.x - to.x).abs() > 0.5 {
-        p.line_segment([a, b], Stroke::new(1.0, col));
-    }
-    p.line_segment([b, to], Stroke::new(1.0, col));
+    let stroke = Stroke::new(1.0, col);
+    // Enough slack that the curve leaves and arrives vertically, and more of
+    // it when the ends are far apart or the wire runs back up the graph.
+    let drop = ((to.y - from.y).abs() * 0.5).clamp(26.0, 90.0)
+        + if to.y < from.y { (from.y - to.y) * 0.5 } else { 0.0 };
+    let pts = [
+        from,
+        Pos2::new(from.x, from.y + drop),
+        Pos2::new(to.x, to.y - drop),
+        to,
+    ];
+    p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        pts,
+        false,
+        Color32::TRANSPARENT,
+        stroke,
+    ));
     for d in [-4.0, 4.0] {
-        p.line_segment([Pos2::new(to.x + d, to.y - 6.0), to], Stroke::new(1.0, col));
+        p.line_segment([Pos2::new(to.x + d, to.y - 6.0), to], stroke);
     }
     if label {
         // Above the stage it feeds and centred on it, so the label stays
