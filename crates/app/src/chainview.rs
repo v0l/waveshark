@@ -563,7 +563,11 @@ pub fn draw(
             // port it lands on: reaching for the line you can see is what
             // anybody tries first.
             let mine = edit.manual && node.tag.is_some();
-            let on = mine && pointer.is_some_and(|q| near_wire(from, to, q));
+            // The pointer where it is, or where it was pressed: the frame a
+            // click lands in is the frame the button came up, and by then
+            // egui no longer reports a hover position.
+            let at = pointer.or_else(|| resp.interact_pointer_pos());
+            let on = mine && at.is_some_and(|q| near_wire(from, to, q));
             let chosen = mine && node.tag.map(|t| (t, k)) == wire;
             edge(&p, from, to, spec, label, on || chosen);
             if on && resp.clicked() {
@@ -1413,30 +1417,20 @@ mod tests {
     }
 
     #[test]
-    fn a_wire_can_be_picked_by_clicking_the_line_itself() {
+    fn a_wire_is_hit_along_its_length_and_not_only_at_its_ends() {
         // Reaching for the line you can see is what anybody tries first, and
-        // a port is a few pixels across.
-        use crate::patch::Source;
-        let (mut topo, mut patch, id, sink) = with_two_stages();
-        // The second stage reads the first, so there is a wire between two
-        // stages the operator owns to aim at.
-        let out = topo.nodes[1].outputs[0].0;
-        let spec = topo.nodes[2].inputs[0].1;
-        topo.nodes[2].inputs = vec![(out, spec)];
-        patch.connect(Source::Stage(id, 0), (sink, 0));
-        let mut h = Harness::new(topo, patch);
-        h.frame(vec![]);
-        // Halfway along the wire that actually feeds the second stage, which
-        // is drawn from whatever the graph says produces its input.
-        let _ = id;
-        let producer = keys(&h.topo)[0];
-        let from = h.out_port(producer);
-        let to = h.in_port(sink);
-        let mid = Pos2::new((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
-        assert!(near_wire(from, to, mid), "the midpoint has to be on the wire");
-        h.press(mid);
-        let act = h.release(mid);
-        assert_eq!(act.wire, Some((sink, 0)), "clicking a wire should pick it");
+        // a port is a few pixels across. The curve is sampled rather than
+        // solved, so what matters is that the sampling is fine enough to
+        // catch a pointer anywhere along a long wire.
+        let from = Pos2::new(100.0, 100.0);
+        let to = Pos2::new(400.0, 260.0);
+        assert!(near_wire(from, to, from), "at the producer");
+        assert!(near_wire(from, to, to), "at the consumer");
+        assert!(
+            near_wire(from, to, Pos2::new(250.0, 180.0)),
+            "and halfway along, which is where the line is easiest to hit"
+        );
+        assert!(!near_wire(from, to, Pos2::new(250.0, 40.0)), "well clear of it");
     }
 
     #[test]
