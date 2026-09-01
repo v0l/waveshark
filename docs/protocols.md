@@ -130,7 +130,9 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Oregon Scientific v2.1: THGR122N, THN132N, THN129, RTGN318, RTHN129 | 433.92 MHz | OOK Manchester 488 us | 31 kHz | done | table | Every bit is sent twice, inverted the second time, on top of the Manchester coding, so the sliced stream is complementary pairs. Nibbles arrive bit-reversed and values are BCD. Eight bit nibble-sum checksum, starting at a nibble that differs per model |
 | Oregon Scientific v3: THGR810, THN802, WGR800 | 433.92 MHz | OOK Manchester 488 us | 31 kHz | done | table | Same payload layout as v2.1 without the doubling. The WGR800 reports wind rather than temperature |
 | Ambient Weather, other Oregon Scientific, other Acurite | 433.92/915 MHz | OOK PWM/Manchester | 31 kHz | table | table | Several families each, all timing tables |
-| TPMS (Schrader, Toyota, Renault, Citroen) | 315/433.92 MHz | OOK/FSK Manchester | 31-125 kHz | table | table | Bursty, short, CRC8. Sensors report on a timer, so a receiver waits minutes per wheel |
+| Schrader MRXGG4 tyre sensor | 315/433.92 MHz | OOK Manchester 120 us | 31 kHz | done | table | CRC8 over eight bytes, plus a constant preamble nibble. 28 bit id, pressure and temperature. The id is fixed for the life of the sensor and four of them travel together, which is what makes a wheel worth logging |
+| Toyota / Pacific PMV-C210 tyre sensor | 315/433.92 MHz | FSK differential Manchester 52 us | 125 kHz | done | table | CRC8, and the pressure sent twice with the second copy inverted. Also fitted by TRW to other makes |
+| Other TPMS (Renault, Citroen, Ford, Jansite, Steelmate) | 315/433.92 MHz | OOK/FSK Manchester | 31-125 kHz | table | table | Bursty, short, CRC8. Sensors report on a timer, so a receiver waits minutes per wheel |
 | EnOcean | 868.3 MHz | ASK | 31 kHz | table | table | Self-powered switches |
 | Itron / ERT smart meters | 902-928 MHz | OOK/FSK Manchester | 125 kHz | table | table | The rtlamr target |
 | X10 RF | 310/433.92 MHz | OOK | 31 kHz | done | table | House code, unit and state, guarded by parity |

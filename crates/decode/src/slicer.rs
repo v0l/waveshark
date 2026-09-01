@@ -322,6 +322,56 @@ pub fn manchester_decode(raw: &BitBuffer, start: usize) -> BitBuffer {
     out
 }
 
+/// Differential Manchester (biphase mark) decode of a half-symbol stream,
+/// rtl_433's `bitbuffer_differential_manchester_decode`.
+///
+/// Here the bit is carried by whether the symbol *starts* with a transition
+/// rather than by which way the mid-symbol edge goes: a symbol whose two
+/// halves are equal is a 1, one whose halves differ is a 0, and the clock is
+/// the transition between symbols. A missing clock transition ends the frame,
+/// because from there on nothing can be trusted to be aligned.
+///
+/// The first loop finds the phase: the stream may start half a symbol out and
+/// the only evidence of that is the first long run.
+pub fn differential_manchester_decode(raw: &BitBuffer, start: usize, max_bits: usize) -> BitBuffer {
+    let mut out = BitBuffer::with_capacity(max_bits);
+    let end = raw.len().min(start + max_bits * 2);
+    let mut i = start;
+    let mut prev = false;
+
+    while i + 2 < end {
+        let (b1, b2, b3) = (raw.get(i), raw.get(i + 1), raw.get(i + 2));
+        let (Some(b1), Some(b2), Some(b3)) = (b1, b2, b3) else { break };
+        i += 2;
+        if b1 != b2 {
+            if b2 != b3 {
+                out.push(false);
+            } else {
+                prev = b1;
+                i -= 1;
+                break;
+            }
+        } else {
+            prev = !b1;
+            i -= 2;
+            break;
+        }
+    }
+
+    while i + 1 < end && out.len() < max_bits {
+        let Some(b1) = raw.get(i) else { break };
+        i += 1;
+        if b1 == prev {
+            break; // clock transition missing
+        }
+        let Some(b2) = raw.get(i) else { break };
+        i += 1;
+        prev = b2;
+        out.push(b1 == b2);
+    }
+    out
+}
+
 /// Number of half-symbols a mark or gap spans. A run narrower than half a
 /// symbol (including the zero-width edge some envelope detectors emit) spans
 /// nothing; manufacturing a level for it would turn a spurious pulse into a

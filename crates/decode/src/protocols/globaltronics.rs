@@ -47,7 +47,12 @@ impl Protocol for GtWt02 {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let b = find_frame_bits(bits, WT02_BITS, |b| {
-            b[..5].iter().any(|v| *v != 0) && nibble_sum(b) == ((b[3] & 1) << 5) + (b[4] >> 3)
+            // rtl_433 refuses an all-zero frame; a zero id is refused here as
+            // well, because a six bit checksum passes on one window in
+            // sixty-four and this decoder gets offered far more windows than
+            // rtl_433's does. Observed claiming a Schrader tyre sensor's burst
+            // as a sensor with no id reading 0.1 C.
+            b[0] != 0 && nibble_sum(b) == ((b[3] & 1) << 5) + (b[4] >> 3)
         })
         .ok_or(match bits.len() {
             n if n < WT02_BITS => DecodeError::WrongLength { got: n, want: WT02_BITS },

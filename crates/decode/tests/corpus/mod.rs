@@ -549,6 +549,26 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Schrader",
+        ours: "Schrader",
+        fields: &[
+            ("id", "id", Text),
+            ("flags", "flags", Text),
+            ("pressure_kPa", "pressure_kpa", Num),
+            ("temperature_C", "temperature_c", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "Toyota",
+        ours: "Toyota",
+        fields: &[
+            ("id", "id", Text),
+            ("status", "status", Num),
+            ("pressure_PSI", "pressure_psi", Num),
+            ("temperature_C", "temperature_c", Num),
+        ],
+    },
+    ModelSpec {
         rtl: "Somfy-RTS",
         ours: "Somfy-RTS",
         fields: &[

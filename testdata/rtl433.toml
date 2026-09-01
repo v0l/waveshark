@@ -319,3 +319,42 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "bbfcb560dc9919ab69a8a7ab2d58aa9305db9aec26a9535517115f7a256b6008"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/WGR800X/01/WGR800X-g007_433.92M_250k.json"
 description = "A second WGR800 with wind on both the average and the gust"
+[[sample]]
+name = "tpms_schrader_a_433.92M_250k.cu8"
+sha256 = "dbf11a4d8527a7e3927f05a43869f9ff51804ba0db6c40192a1eb3933be9ec88"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile001.cu8"
+reference_sha256 = "4273350467d327c6820857db75b211d1e5990578627a997d1e9daa257aadab66"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile001.json"
+description = "Schrader MRXGG4 reporting an unpressurised wheel"
+
+[[sample]]
+name = "tpms_schrader_b_433.92M_250k.cu8"
+sha256 = "89b869c67941f61db87a20583d96ef09775c627927fcf434c16ed9b4e0257480"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile002.cu8"
+reference_sha256 = "2132df50cbe7e2f2628bb771793e3de7ceccf96e15d1dee7bfbd1d0fe1273e73"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile002.json"
+description = "The same sensor at 205 kPa"
+
+[[sample]]
+name = "tpms_schrader_c_433.92M_250k.cu8"
+sha256 = "7a734ef442a9f3dac7080e25dbdc71dfadeb737666dff2ac3dbd3abeff97ee86"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile004.cu8"
+reference_sha256 = "0579a650ab69ad2332aba6b644187588a94548ba907318fddd70bddca0fe4b58"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Schrader/01/gfile004.json"
+description = "A third pressure and another set of flags. This burst is also the one that caught the GT-WT02 decoder claiming a wheel as a weather sensor"
+
+[[sample]]
+name = "tpms_toyota_a_433.92M_250k.cu8"
+sha256 = "5837b36d265d7d30476fe15cee31afee45b9dfe02fd0fd9eee74279ba28cff73"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Toyota_TPMS/02/0d5aee3_g007_433.92M_250k.cu8"
+reference_sha256 = "690c3d368f7395eb4528297282a8af8fbc5b6998dd7959b3e300408156d3c217"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Toyota_TPMS/02/0d5aee3_g007_433.92M_250k.json"
+description = "Toyota, which is FSK and differential Manchester where the Schrader is OOK and plain"
+
+[[sample]]
+name = "tpms_toyota_b_433.92M_250k.cu8"
+sha256 = "7fa9d90a99a1026f2ba6b2859054934c618f51c2fcf1be1e891b7fd22d392efa"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Toyota_TPMS/gfile006.cu8"
+reference_sha256 = "99034a8237a81d66fb428b298612ffb01707dc4fed31ab783ad92ffabdcd4644"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Toyota_TPMS/gfile006.json"
+description = "A second Toyota wheel, another id and pressure"

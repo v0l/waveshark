@@ -164,6 +164,8 @@ impl Protocols {
         p.add(Box::new(Linear));
         p.add(Box::new(LinearDelta3));
         p.add(Box::new(SomfyRts));
+        p.add(Box::new(SchraderTpms));
+        p.add(Box::new(ToyotaTpms));
         p
     }
 
