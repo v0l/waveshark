@@ -246,6 +246,10 @@ pub struct Interaction {
     /// apart from `selected` because a stage waiting to be wired up is not in
     /// the running graph and so has no node to inspect.
     pub picked: Option<u64>,
+    /// A wire that was clicked, named by the end that is unique: an input
+    /// takes one producer, so the stage and port it lands on says which wire
+    /// is meant.
+    pub wire: Option<(u64, usize)>,
 }
 
 /// The selected node's settings, as controls.
@@ -377,6 +381,7 @@ fn unit(p: &pipeline::param::Param) -> String {
     if p.unit.is_empty() { String::new() } else { format!(" {}", p.unit) }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut egui::Ui,
     topo: &Topology,
@@ -384,6 +389,7 @@ pub fn draw(
     selected: Option<usize>,
     edit: &mut Edit,
     patch: Option<&crate::patch::Patch>,
+    wire: Option<(u64, usize)>,
 ) -> Interaction {
     let places = layout(topo);
     // Depth runs left to right and a branch takes a lane of its own down the
@@ -553,7 +559,16 @@ pub fn draw(
             // many inputs: a bus with six wires into it would stack six
             // identical labels on the same three pixels.
             let label = node.inputs.len() <= 2 && slot == &node.inputs[0].0;
-            edge(&p, from, to, spec, label);
+            // A wire can be taken hold of anywhere along it, not only at the
+            // port it lands on: reaching for the line you can see is what
+            // anybody tries first.
+            let mine = edit.manual && node.tag.is_some();
+            let on = mine && pointer.is_some_and(|q| near_wire(from, to, q));
+            let chosen = mine && node.tag.map(|t| (t, k)) == wire;
+            edge(&p, from, to, spec, label, on || chosen);
+            if on && resp.clicked() {
+                act.wire = node.tag.map(|t| (t, k));
+            }
         }
     }
 
@@ -1008,6 +1023,25 @@ fn wire_start(
         .unwrap_or(src.center_bottom())
 }
 
+/// Whether a point is on a wire, near enough to have meant it.
+///
+/// The curve is sampled rather than solved: a cubic is not worth inverting to
+/// answer a question about a pointer that is a few pixels wide.
+fn near_wire(from: Pos2, to: Pos2, q: Pos2) -> bool {
+    let reach = ((to.x - from.x).abs() * 0.5).clamp(26.0, 90.0)
+        + if to.x < from.x { (from.x - to.x) * 0.5 } else { 0.0 };
+    let (c1, c2) = (Pos2::new(from.x + reach, from.y), Pos2::new(to.x - reach, to.y));
+    (0..=16).any(|i| {
+        let t = i as f32 / 16.0;
+        let u = 1.0 - t;
+        let at = Pos2::new(
+            u * u * u * from.x + 3.0 * u * u * t * c1.x + 3.0 * u * t * t * c2.x + t * t * t * to.x,
+            u * u * u * from.y + 3.0 * u * u * t * c1.y + 3.0 * u * t * t * c2.y + t * t * t * to.y,
+        );
+        at.distance(q) <= 6.0
+    })
+}
+
 /// A ring round whatever a wire would attach to if it were let go now.
 fn target_ring(p: &egui::Painter, at: Rect) {
     p.rect_stroke(
@@ -1079,9 +1113,16 @@ fn port(r: Rect, i: usize, n: usize, side: Side) -> Pos2 {
 /// curve leaving the producer to the right and arriving at the consumer from
 /// the left says the same thing about direction and stays readable wherever
 /// the two ends are.
-fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec, label: bool) {
-    let col = Color32::from_rgb(0x4A, 0x55, 0x60);
-    let stroke = Stroke::new(1.0, col);
+fn edge(
+    p: &egui::Painter,
+    from: Pos2,
+    to: Pos2,
+    spec: &StreamSpec,
+    label: bool,
+    lit: bool,
+) {
+    let col = if lit { theme::READOUT } else { Color32::from_rgb(0x4A, 0x55, 0x60) };
+    let stroke = Stroke::new(if lit { 2.0 } else { 1.0 }, col);
     // Enough slack that the curve leaves and arrives horizontally, and more
     // of it when the ends are far apart or the wire runs back up the graph.
     let reach = ((to.x - from.x).abs() * 0.5).clamp(26.0, 90.0)
@@ -1225,7 +1266,7 @@ mod tests {
             let edit = &mut self.edit;
             let out = &mut act;
             let _ = self.ctx.run_ui(input, |ui| {
-                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch));
+                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch), None);
             });
             act
         }
@@ -1372,6 +1413,33 @@ mod tests {
     }
 
     #[test]
+    fn a_wire_can_be_picked_by_clicking_the_line_itself() {
+        // Reaching for the line you can see is what anybody tries first, and
+        // a port is a few pixels across.
+        use crate::patch::Source;
+        let (mut topo, mut patch, id, sink) = with_two_stages();
+        // The second stage reads the first, so there is a wire between two
+        // stages the operator owns to aim at.
+        let out = topo.nodes[1].outputs[0].0;
+        let spec = topo.nodes[2].inputs[0].1;
+        topo.nodes[2].inputs = vec![(out, spec)];
+        patch.connect(Source::Stage(id, 0), (sink, 0));
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        // Halfway along the wire that actually feeds the second stage, which
+        // is drawn from whatever the graph says produces its input.
+        let _ = id;
+        let producer = keys(&h.topo)[0];
+        let from = h.out_port(producer);
+        let to = h.in_port(sink);
+        let mid = Pos2::new((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
+        assert!(near_wire(from, to, mid), "the midpoint has to be on the wire");
+        h.press(mid);
+        let act = h.release(mid);
+        assert_eq!(act.wire, Some((sink, 0)), "clicking a wire should pick it");
+    }
+
+    #[test]
     fn a_wire_comes_away_in_the_hand_when_grabbed_at_its_input() {
         // Reaching for an existing connection is the first thing anyone does.
         // The wire has to leave the port it landed on and follow the pointer
@@ -1446,7 +1514,7 @@ mod tests {
         theme::install(&ctx);
         let frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
-                draw(ui, &topo, 0.0, None, edit, None);
+                draw(ui, &topo, 0.0, None, edit, None, None);
             });
         };
         frame(&mut edit);

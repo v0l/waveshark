@@ -142,6 +142,14 @@ pub struct App {
     chain_saved_at: Option<std::time::Instant>,
     /// The operator's own stage that is selected, by patch id.
     chain_pick: Option<u64>,
+    /// The wire that is selected, named by the input it lands on.
+    chain_wire: Option<(u64, usize)>,
+    /// Graphs as they were before each edit, and the ones undone since.
+    /// Snapshots rather than a list of operations: a patch is small, and an
+    /// operation log has to be kept correct against every future edit while a
+    /// snapshot is right by construction.
+    chain_undo: Vec<crate::patch::Patch>,
+    chain_redo: Vec<crate::patch::Patch>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
     /// Where the flight map is looking, and how far it reaches.
@@ -410,6 +418,9 @@ impl Default for App {
             chain_places: crate::patch::Places::new(),
             chain_saved_at: None,
             chain_pick: None,
+            chain_wire: None,
+            chain_undo: Vec::new(),
+            chain_redo: Vec::new(),
             country: String::new(),
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
@@ -2863,6 +2874,7 @@ impl App {
                     self.chain_sel,
                     &mut self.chain_edit,
                     Some(&self.chain_patch),
+                    self.chain_wire,
                 )
             })
             .inner;
@@ -2870,25 +2882,48 @@ impl App {
         if manual {
             if drawn.picked.is_some() {
                 self.chain_pick = drawn.picked;
+                self.chain_wire = None;
+            }
+            if drawn.wire.is_some() {
+                self.chain_wire = drawn.wire;
+            }
+            // Delete takes out whichever of the two is selected, which is
+            // what the key does in every editor.
+            let del = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            if del {
+                if let Some(to) = self.chain_wire.take() {
+                    self.edit_patch(|p| p.disconnect(to));
+                } else if let Some(id) = self.chain_pick.take() {
+                    self.edit_patch(|p| p.remove(id));
+                    self.chain_sel = None;
+                }
+            }
+            if ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
+            }) {
+                self.undo_patch();
+            }
+            if ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
+            }) {
+                self.redo_patch();
             }
             // Unwiring first: taking hold of a wire reports both in the same
             // frame when the drag is short, and doing it the other way round
             // would drop the wire that was just drawn.
-            let mut edited = false;
-            if let Some(to) = drawn.unlink {
-                self.chain_patch.disconnect(to);
-                edited = true;
-            }
-            if let Some(from) = drawn.unlink_out {
-                self.chain_patch.disconnect_from(from);
-                edited = true;
-            }
-            if let Some((from, to, port)) = drawn.link {
-                self.chain_patch.connect(from, (to, port));
-                edited = true;
-            }
-            if edited {
-                self.send_patch();
+            if drawn.unlink.is_some() || drawn.unlink_out.is_some() || drawn.link.is_some() {
+                let (unlink, unlink_out, link) = (drawn.unlink, drawn.unlink_out, drawn.link);
+                self.edit_patch(|p| {
+                    if let Some(to) = unlink {
+                        p.disconnect(to);
+                    }
+                    if let Some(from) = unlink_out {
+                        p.disconnect_from(from);
+                    }
+                    if let Some((from, to, port)) = link {
+                        p.connect(from, (to, port));
+                    }
+                });
             }
         }
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
@@ -2947,18 +2982,31 @@ impl App {
                 }
             });
         if ui.button("ADD").clicked() && !self.chain_add.is_empty() {
-            let id = self.chain_patch.add(&self.chain_add.clone());
-            self.chain_pick = Some(id);
-            self.send_patch();
+            let kind = self.chain_add.clone();
+            let mut added = None;
+            self.edit_patch(|p| added = Some(p.add(&kind)));
+            self.chain_pick = added;
         }
         let picked = self.chain_pick.filter(|id| self.chain_patch.stage(*id).is_some());
         if ui.add_enabled(picked.is_some(), egui::Button::new("REMOVE")).clicked() {
             if let Some(id) = picked {
-                self.chain_patch.remove(id);
+                self.edit_patch(|p| p.remove(id));
                 self.chain_pick = None;
                 self.chain_sel = None;
-                self.send_patch();
             }
+        }
+        if ui
+            .add_enabled(!self.chain_undo.is_empty(), egui::Button::new("UNDO"))
+            .on_hover_text("Ctrl+Z")
+            .clicked()
+        {
+            self.undo_patch();
+        }
+        if ui
+            .add_enabled(!self.chain_redo.is_empty(), egui::Button::new("REDO"))
+            .clicked()
+        {
+            self.redo_patch();
         }
         // Which gestures exist, and the one thing that is not editable. Only
         // the stages added here have live ports: the head of the chain, the
@@ -2970,6 +3018,42 @@ impl App {
             }
             None => "drag a port to wire, drag a wire off an input to move it".to_string(),
         }));
+    }
+
+    /// Change the graph, keeping what it was so the change can be taken back.
+    fn edit_patch(&mut self, f: impl FnOnce(&mut crate::patch::Patch)) {
+        let before = self.chain_patch.clone();
+        f(&mut self.chain_patch);
+        if self.chain_patch == before {
+            return;
+        }
+        self.chain_undo.push(before);
+        // Undoing and then drawing something else abandons what was undone,
+        // which is what makes redo mean anything: a branch nobody can reach
+        // is a trap rather than a history.
+        self.chain_redo.clear();
+        // A hundred edits is more than anybody backs out of in one sitting
+        // and small enough to keep in hand: a patch is a few dozen stages.
+        if self.chain_undo.len() > 100 {
+            self.chain_undo.remove(0);
+        }
+        self.send_patch();
+    }
+
+    fn undo_patch(&mut self) {
+        if let Some(was) = self.chain_undo.pop() {
+            self.chain_redo.push(std::mem::replace(&mut self.chain_patch, was));
+            self.chain_wire = None;
+            self.send_patch();
+        }
+    }
+
+    fn redo_patch(&mut self) {
+        if let Some(next) = self.chain_redo.pop() {
+            self.chain_undo.push(std::mem::replace(&mut self.chain_patch, next));
+            self.chain_wire = None;
+            self.send_patch();
+        }
     }
 
     /// Hand the patch to the radio thread, remembering what was sent so that
