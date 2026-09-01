@@ -344,6 +344,10 @@ pub enum Conv {
     FromF,
     /// Wind is quoted in km/h by rtl_433 and in m/s here.
     FromKmh,
+    /// Acurite's 3-in-1 quotes wind in miles an hour instead.
+    FromMph,
+    /// Rain counters are quoted in inches by rtl_433 and in millimetres here.
+    FromIn,
 }
 
 impl Conv {
@@ -355,6 +359,8 @@ impl Conv {
             Conv::Within => Want::Within(v.as_text()?),
             Conv::FromF => Want::Num(((v.as_num()? - 32.0) / 1.8 * 10.0).round() / 10.0),
             Conv::FromKmh => Want::Num((v.as_num()? / 3.6 * 100.0).round() / 100.0),
+            Conv::FromMph => Want::Num((v.as_num()? * 0.44704 * 100.0).round() / 100.0),
+            Conv::FromIn => Want::Num((v.as_num()? * 25.4 * 100.0).round() / 100.0),
         })
     }
 }
@@ -385,7 +391,7 @@ static OREGON_TH: &[(&str, &str, Conv)] = &[
     ("battery_ok", "battery_ok", Bool),
 ];
 
-use Conv::{Bool, FromF, FromKmh, Num, Text, Within};
+use Conv::{Bool, FromF, FromIn, FromKmh, FromMph, Num, Text, Within};
 
 /// Deliberately not exhaustive over rtl_433: a model missing from here means
 /// no decoder for it, and the reference lines naming it are ignored rather
@@ -438,6 +444,35 @@ pub static SPECS: &[ModelSpec] = &[
             ("temperature_C", "temperature_c", Num),
             ("humidity", "humidity_pct", Num),
             ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Acurite-5n1",
+        ours: "Acurite-5n1",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Text),
+            ("sequence_num", "sequence_num", Num),
+            ("message_type", "message_type", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("wind_avg_km_h", "wind_avg_ms", FromKmh),
+            ("wind_dir_deg", "wind_direction_deg", Num),
+            ("rain_in", "rain_total_mm", FromIn),
+            ("temperature_F", "temperature_c", FromF),
+            ("humidity", "humidity_pct", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "Acurite-3n1",
+        ours: "Acurite-3n1",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Text),
+            ("message_type", "message_type", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("wind_avg_mi_h", "wind_avg_ms", FromMph),
+            ("temperature_F", "temperature_c", FromF),
+            ("humidity", "humidity_pct", Num),
         ],
     },
     ModelSpec {

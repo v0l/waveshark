@@ -24,7 +24,7 @@ mod somfy_rts;
 mod tpms;
 mod x10;
 
-pub use acurite::{Acurite609Txc, AcuriteTower};
+pub use acurite::{Acurite609Txc, AcuriteTower, AcuriteWind};
 pub use bresser::Bresser3Ch;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
@@ -79,7 +79,10 @@ pub(crate) fn find_frame(
 ///
 /// The scan over every offset stays as a fallback, for the packages a detector
 /// hands over with no gap long enough to cut on, and there the repeat must sit
-/// exactly one frame away.
+/// exactly one frame away. Loosening that to a copy anywhere in the buffer was
+/// tried and reverted: a frame that is mostly zeros repeats at every offset,
+/// and rtl_433's Nexus recording promptly decoded as an Acurite sensor
+/// reading 0.0 C.
 pub(crate) fn find_frame_bits(
     bits: &BitBuffer,
     want: usize,
@@ -109,7 +112,17 @@ pub(crate) fn find_frame_bits(
         let corroborated = rows
             .iter()
             .any(|&at| at != start && bits.slice(at, want) == frame);
-        if alone || corroborated {
+        // Or the rows themselves repeating at this frame's own period, which
+        // is the same evidence without needing the copies to be identical.
+        // Acurite's weather stations number their repeats, so no two copies in
+        // a burst are ever the same and the test above cannot see a
+        // transmission that is plainly periodic. The slack is for the sync
+        // mark between repeats, which leaves the copies a bit further apart
+        // than the frame is long.
+        let periodic = rows
+            .iter()
+            .any(|&at| at != start && at.abs_diff(start).abs_diff(want) <= 2);
+        if alone || corroborated || periodic {
             return Some(frame.as_padded_bytes().to_vec());
         }
     }

@@ -29,6 +29,15 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
          frame it finds, so the second device in a package is lost",
     ),
     (
+        "acurite_5n1",
+        "sequence_num:1",
+        "the station numbers its three repeats and rtl_433 prints each one; \
+         a protocol here returns the first frame it finds in a package, so \
+         only the first number is reported. The reading itself is the same in \
+         all three",
+    ),
+    ("acurite_5n1", "sequence_num:2", "as above, the third repeat of the same reading"),
+    (
         "honeywell_5816",
         "id:231303",
         "recorded at close range, where the receiver's gain control never \

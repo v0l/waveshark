@@ -389,3 +389,26 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "00adc6820f8cd223e4b931269efc65fefe8f8fcccc0add8c4ac50cdfc409321d"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_5816/g001_344.975M_250k.json"
 description = "A 5816 recorded at close range. Listed as a known gap: the burst arrives saturated and the envelope detector reads it as one long mark"
+[[sample]]
+name = "acurite_5n1_a_433.92M_250k.cu8"
+sha256 = "c70950b03e04095cbf78133d5a3c4cacf2d999553ed385ca9e1334d5c663fb16"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_5-n-1/VN1TXC_02.cu8"
+reference_sha256 = "af74a92c1158461bf123bf3347f357e938ccd55238f2576776b81ff16ffbf6ed"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_5-n-1/VN1TXC_02.json"
+description = "Iris 5-in-1 weather station sending wind, direction and the rain counter. Each repeat carries a different sequence number, so no two copies in the burst are identical"
+
+[[sample]]
+name = "acurite_3n1_a_433.92M_250k.cu8"
+sha256 = "90c9d63a79a91049d7733afeea718f23f0db5b6308f828d99fceec261b071bc3"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_3-in-1/02/g005_433.92M_250k.cu8"
+reference_sha256 = "d63d10c349e1c32f02a1e817e030a869faa2efdd9da7a6adfd51e6d0c348ff71"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_3-in-1/02/g005_433.92M_250k.json"
+description = "Notos 3-in-1, which packs two more bits into its id and reports wind in whole miles an hour"
+
+[[sample]]
+name = "acurite_3n1_b_433.92M_250k.cu8"
+sha256 = "c17ecfa18548529f82a9956f78a6b221873bbf1f7c849db832f9f0a7e3fc3d31"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_3-in-1/02/g002_433.92M_250k.cu8"
+reference_sha256 = "a317379d208cd5622603b5bd89b5fde1399328143b58e2a37bc74c0de2ebddf0"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_3-in-1/02/g002_433.92M_250k.json"
+description = "The same station a few readings later"
