@@ -150,6 +150,48 @@ pub fn registry() -> Registry {
         },
     );
 
+    // Where everything that produces packets meets, and what hangs off the
+    // far side of it.
+    r.register(
+        StageDesc {
+            name: "packet_bus",
+            summary: "Gather bursts, frames and packets from every front end \
+                      into one stream, and write them to the log",
+            category: "sink",
+        },
+        |s: &Settings| {
+            Ok(Box::new(PacketBusNode::new(s.i64_or("inputs", 1).max(1) as usize))
+                as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "protocols",
+            summary: "Run every known protocol over everything on the bus, once",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(PacketDecodeNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "feed",
+            summary: "Packets from another receiver, over the network",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let kind = feed_kind(s.str_or("format", FEED_KINDS[0].name))
+                .ok_or_else(|| common::Error::other("no feed format of that name"))?;
+            let spec = FeedSpec::new(
+                s.str_or("host", "127.0.0.1"),
+                s.i64_or("port", kind.default_port as i64) as u16,
+                kind,
+            );
+            Ok(Box::new(FeedNode::new(spec)) as Box<dyn Node>)
+        },
+    );
+
     r.register(
         StageDesc {
             name: "dc_block",

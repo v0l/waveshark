@@ -119,7 +119,8 @@ const CW_FILTER_HZ: f64 = 500.0;
 ///
 /// Keyed by purpose rather than by position: the whole point is that a node
 /// keeps its state when the graph around it changes, and its position is
-/// exactly what changed.
+/// exactly what changed. Every node in the receiver is a patch stage now, so
+/// there is one kind of purpose left.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Role {
     /// A stage the operator drew, keyed by its patch id and what it is. The
@@ -127,12 +128,6 @@ enum Role {
     /// different one, and reusing an envelope detector as a mixer would hand
     /// the graph a node of the wrong type entirely.
     Patch(u64, String),
-    PacketBus,
-    PacketDecode,
-    /// A packet feed from another receiver, keyed by where it comes from so a
-    /// rebuild keeps the connection open rather than reconnecting.
-    Feed(String),
-    Flights,
 }
 
 
@@ -547,96 +542,12 @@ impl Receiver {
             });
         }
 
-        // Everything that produces packets meets here, and everything that
-        // consumes them hangs off the far side. One input per source, added
-        // after the sources so it runs once they have all had their say.
-        // A feed from another receiver is a front end like any other: it
-        // produces packets, so it belongs upstream of the bus rather than
-        // beside it. Added before the bus so its output exists to connect.
-        let mut feeds = Vec::new();
-        for spec in &plan.feeds {
-            let role = Role::Feed(spec.address());
-            let id = match pool.remove(&role) {
-                Some(part) => b.add_existing(part),
-                None => b.add_labeled(
-                    format!("{} {}", spec.kind.name, spec.address()),
-                    Box::new(nodes::FeedNode::new(spec.clone())),
-                ),
-            };
-            roles.push(role);
-            feeds.push(id);
-        }
-
-        let mut bus = None;
-        let sources: Vec<Out> = narrowband
-            .iter()
-            .map(|n| n.o())
-            .chain(feeds.iter().map(|f| f.o()))
-            .collect();
-        if !sources.is_empty() {
-            let id = match pool.remove(&Role::PacketBus) {
-                Some(mut part) => {
-                    // The set of front ends changes with the tuning, and the
-                    // bus is carried over rather than rebuilt so that it
-                    // keeps the file it is writing.
-                    if let Some(n) = part
-                        .node
-                        .as_any_mut()
-                        .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
-                    {
-                        n.set_inputs(sources.len());
-                    }
-                    b.add_existing(part)
-                }
-                None => b.add_labeled(
-                    "Packet log",
-                    Box::new(nodes::PacketBusNode::new(sources.len())),
-                ),
-            };
-            for (k, src) in sources.iter().enumerate() {
-                b.connect(*src, id.input(k));
-            }
-            roles.push(Role::PacketBus);
-            bus = Some(id);
-        }
-
-        // The protocols run here, once, over everything on the bus. They used
-        // to run inside every channel of every bank, which meant a hundred
-        // copies of the same tables, decodes that reached the rest of the
-        // program through whatever happened to collect them, and no decoding
-        // at all for a packet that arrived by any other route.
-        let mut decode = None;
-        if let Some(bus) = bus {
-            let id = match pool.remove(&Role::PacketDecode) {
-                Some(p) => b.add_existing(p),
-                None => b.add_labeled("Protocols", Box::new(nodes::PacketDecodeNode::default())),
-            };
-            b.connect(bus.o(), id.i());
-            roles.push(Role::PacketDecode);
-            decode = Some(id);
-        }
-
-        // The flight tracker is a consumer of the bus like any other, which
-        // is what stops every view being wired to the demodulator it happens
-        // to care about.
-        // Attached whenever anything could produce a frame it can track: the
-        // Mode S or AIS demodulators, or a feed from a receiver that has one.
-        // A feed is usually the reason to run this at all on a band that is
-        // neither 1090 nor 162.
-        let mut tracks = None;
-        let makes_tracks = patch
-            .stages()
-            .iter()
-            .any(|s| TRACK_SOURCES.contains(&s.kind.as_str()));
-        if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
-            let id = match pool.remove(&Role::Flights) {
-                Some(p) => b.add_existing(p),
-                None => b.add_labeled("Tracks", Box::new(crate::tracks::TracksNode::new())),
-            };
-            b.connect(bus.o(), id.i());
-            roles.push(Role::Flights);
-            tracks = Some(id);
-        }
+        // The bus, the protocols and the tracker are stages too now, so this
+        // is a matter of finding them: the parts of the receiver that talk to
+        // them need a node id, not a construction.
+        let bus = of_kind("packet_bus").first().copied();
+        let decode = of_kind("protocols").first().copied();
+        let tracks = of_kind("tracks").first().copied();
 
         // Some output has to be nominated and none of them is the output: a
         // receiver has as many as it has channels, and the spectrum and the
@@ -1061,10 +972,12 @@ impl Receiver {
     /// What each feed is doing, for the settings modal: where it points, and
     /// whether anything is coming from it.
     pub fn feed_status(&self) -> Vec<FeedStatus> {
+        // Found by what they are rather than by a role of their own: a feed
+        // is a stage in the graph like everything else now.
         self.roles
             .iter()
             .enumerate()
-            .filter(|(_, r)| matches!(r, Role::Feed(_)))
+            .filter(|(_, r)| matches!(r, Role::Patch(_, kind) if kind == "feed"))
             .filter_map(|(k, _)| downcast::<nodes::FeedNode>(&self.graph, NodeId(k)))
             .map(|n| FeedStatus {
                 spec: n.spec().clone(),
@@ -1250,6 +1163,9 @@ pub mod derived {
     pub const ZOOM: u64 = Patch::DERIVED_BASE + 2;
     pub const SPECTRUM: u64 = Patch::DERIVED_BASE + 3;
     pub const RING: u64 = Patch::DERIVED_BASE + 4;
+    pub const BUS: u64 = Patch::DERIVED_BASE + 5;
+    pub const PROTOCOLS: u64 = Patch::DERIVED_BASE + 6;
+    pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -1409,6 +1325,62 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             continue;
         }
         channel_stages(&mut p, head, spec, plan.eff_rate());
+    }
+
+    // A feed from another receiver is a front end like any other: it produces
+    // packets, so it belongs upstream of the bus rather than beside it.
+    for spec in &plan.feeds {
+        let mut s = Settings::new();
+        s.insert("format".into(), pipeline::ParamValue::Text(spec.kind.name.into()));
+        s.insert("host".into(), pipeline::ParamValue::Text(spec.host.clone()));
+        s.insert("port".into(), pipeline::ParamValue::Int(spec.port as i64));
+        s.insert(
+            "label".into(),
+            pipeline::ParamValue::Text(format!("{} {}", spec.kind.name, spec.address())),
+        );
+        let key = fnv(&spec.address());
+        p.add_derived(derived::at("feed", key, 0), "feed", s);
+    }
+
+    // Everything that produces packets meets at the bus, and everything that
+    // consumes them hangs off the far side. One input per source: the bus is
+    // the only stage whose shape follows the rest of the graph rather than
+    // its own settings.
+    let sources: Vec<u64> = p
+        .stages()
+        .iter()
+        .filter(|s| BUS_TAILS.contains(&s.kind.as_str()) || s.kind == "feed")
+        .map(|s| s.id)
+        .collect();
+    if !sources.is_empty() {
+        let mut s = Settings::new();
+        s.insert("inputs".into(), pipeline::ParamValue::Int(sources.len() as i64));
+        s.insert("label".into(), pipeline::ParamValue::Text("Packet log".into()));
+        let bus = p.add_derived(derived::BUS, "packet_bus", s);
+        for (k, from) in sources.iter().enumerate() {
+            p.connect(Source::Stage(*from, 0), (bus, k));
+        }
+
+        // The protocols run here, once, over everything on the bus. They used
+        // to run inside every channel of every bank, which meant a hundred
+        // copies of the same tables and no decoding at all for a packet that
+        // arrived by any other route.
+        let decode = p.add_derived(derived::PROTOCOLS, "protocols", Settings::new());
+        p.connect(Source::Stage(bus, 0), (decode, 0));
+
+        // The tracker is a consumer of the bus like any other, which is what
+        // stops every view being wired to the demodulator it happens to care
+        // about. Attached whenever anything could produce a frame it can
+        // resolve a position from: a feed is usually the reason to run one at
+        // all on a band that is neither 1090 nor 162.
+        let makes_tracks = p
+            .stages()
+            .iter()
+            .any(|s| TRACK_SOURCES.contains(&s.kind.as_str()) || s.kind == "feed");
+        if makes_tracks {
+            let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
+            p.connect(Source::Stage(bus, 0), (t, 0));
+        }
     }
     p
 }
@@ -1646,6 +1618,9 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "fsk_detect" => "FSK pulses".into(),
         "protocol_decode" => "Protocols".into(),
         "high_blend" => "High blend".into(),
+        "protocols" => "Protocols".into(),
+        "tracks" => "Tracks".into(),
+        "packet_bus" => "Packet log".into(),
         "wfm_demod" => "WFM demod".into(),
         "ssb_demod" => "SSB demodulator".into(),
         "mode_s" => "1090 Mode S".into(),
@@ -1669,6 +1644,25 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
 /// where every stage ended up, and which of them kept the node they had.
 type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>);
 
+/// Every stage type this receiver can build.
+///
+/// The node registry plus the ones that only make sense inside the
+/// application: the tracker folds positions together for the map, which is a
+/// view rather than a signal path, so it lives here.
+fn registry() -> pipeline::registry::Registry {
+    use pipeline::registry::StageDesc;
+    let mut r = nodes::registry();
+    r.register(
+        StageDesc {
+            name: "tracks",
+            summary: "Fold reported positions into tracks: aircraft, vessels and marks",
+            category: "sink",
+        },
+        |_s| Ok(Box::new(crate::tracks::TracksNode::new()) as Box<dyn pipeline::node::Node>),
+    );
+    r
+}
+
 /// Build every stage in a patch, wired as the patch says.
 ///
 /// Returns the ones that produce packets, for the bus to collect, and where
@@ -1690,7 +1684,7 @@ fn add_patch(
 ) -> Result<Built> {
     use crate::patch::Source;
     use pipeline::registry::SettingsExt;
-    let reg = nodes::registry();
+    let reg = registry();
     let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
     // Which stages came through the rebuild with the node they had. A channel
     // built from scratch has forgotten its station and its gain, and the
@@ -1738,6 +1732,16 @@ fn add_patch(
         if crate::patch::Patch::is_derived(st.id) {
             for (name, value) in &st.settings {
                 let _ = node.set_param(name, value.clone());
+            }
+        }
+        // The bus is the one stage whose shape follows the graph rather than
+        // its own settings: how many inputs it has is how many things feed
+        // it, and that changes with every retune. It is carried across
+        // rebuilds because it holds the open log file, so it has to be told.
+        if st.kind == "packet_bus" {
+            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+            {
+                n.set_inputs(st.settings.i64_or("inputs", 1).max(1) as usize);
             }
         }
         // A bank's band decides which of its channels get a decoder, and that
@@ -2062,8 +2066,11 @@ mod tests {
         let mut patch = crate::patch::Patch::default();
         let env = patch.add("envelope");
         let det = patch.add("pulse_detect");
+        // The bus is a stage too, so a graph drawn by hand carries its own.
+        let bus = patch.add("packet_bus");
         patch.connect(Source::Span, (env, 0));
         patch.connect(Source::Stage(env, 0), (det, 0));
+        patch.connect(Source::Stage(det, 0), (bus, 0));
         let rx = Receiver::build(&manual(patch), Default::default()).expect("an OOK patch");
         let topo = rx.topology();
         for id in [env, det] {
@@ -2072,7 +2079,7 @@ mod tests {
         let bus = topo
             .nodes
             .iter()
-            .find(|n| n.label == "Packet log")
+            .find(|n| n.tag == Some(bus))
             .expect("a detector needs a bus to detect into");
         let detector = topo.nodes.iter().find(|n| n.tag == Some(det)).unwrap();
         assert!(
@@ -2724,3 +2731,4 @@ mod extraction_tests {
         assert_eq!(mixers, 1, "{labels:?}");
     }
 }
+
