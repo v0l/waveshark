@@ -18,11 +18,19 @@ that turns radio into symbols, and there are only a few of those.
 | buffered envelope, `ask_detect` | mark/gap timings from shallow ASK | yes | no |
 | discriminator, `fsk_detect` | mark/gap timings from two-level FSK | yes | no |
 | pilot PLL, `wfm` | stereo audio, RDS | yes | no |
-| four-level slicer | 4-FSK symbols | no | no |
+| discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
 | coherent PSK/GMSK with timing recovery | soft symbols | no | no |
 | chirp correlator (dechirp then FFT) | LoRa symbols | no | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
+
+The four-level front end exists but nothing decodes through it yet, so every
+4-FSK protocol below still reads **demod**: what each now needs is a level to
+bit mapping, a sync word and a framer, not a demodulator. It differs from the
+other front ends in needing to be told the symbol rate, because a four-level
+eye cannot be opened without knowing where the symbol boundaries should be, and
+it emits numbered levels rather than mark/gap timings, because two like symbols
+in a row are one run and four levels give no rule for splitting it again.
 
 A protocol whose symbols reach the mark/gap layer costs a timing table and a
 payload parser, and nothing else: the slicers (PWM, PPM, Manchester, NRZ), the
@@ -194,7 +202,7 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
 | POCSAG | 137-174, 450-470, 929 MHz | 2-FSK 512/1200/2400 bps | 25 kHz | synthetic | table | `dsp::pocsag` and `decode::pocsag`. All three bit rates are demodulated at once, since nothing in the signal says which is in use, and both polarities are searched for. BCH(31,21) corrects up to two errors per codeword. The message layer is checked against a published off-air capture decoded by POC32; the demodulator in front of it has not met real RF. Amateur DAPNET networks run the same protocol |
-| FLEX | 929-932 MHz | 2/4-FSK 1600-6400 bps | 25 kHz | demod | mod | The four-level modes need a four-way slicer |
+| FLEX | 929-932 MHz | 2/4-FSK 1600-6400 bps | 25 kHz | demod | mod | The four-level front end reads the symbols; what is missing is the level to bit mapping, the sync words and the framing |
 | ERMES | 169 MHz | 4-FSK 6250 bps | 25 kHz | demod | mod | As FLEX |
 
 Pager traffic is unencrypted and often carries medical and personal detail.
