@@ -133,7 +133,6 @@ fn row_height(topo: &Topology, places: &[Place], depth: usize) -> f32 {
 ///
 /// Kept relative to the drawing's top left, so the arrangement survives the
 /// pane being resized or scrolled.
-#[derive(Default)]
 pub struct Edit {
     /// The operator owns the shape of the graph, so boxes can be dragged and
     /// wires drawn between ports.
@@ -141,6 +140,11 @@ pub struct Edit {
     /// Centre of each stage relative to the drawing's top left, by the key
     /// that survives a rebuild.
     pub pos: HashMap<u64, Pos2>,
+    /// Where each box was last drawn, in screen coordinates, and where the
+    /// source box was. Kept so that anything outside the drawing can point at
+    /// a stage without repeating the layout arithmetic.
+    pub drawn: HashMap<u64, Rect>,
+    pub drawn_src: Rect,
     /// What the pointer took hold of, if anything.
     drag: Option<Drag>,
 }
@@ -162,6 +166,18 @@ enum Drag {
 /// end so the two cannot collide.
 fn key(n: &pipeline::graph::TopoNode) -> u64 {
     n.tag.unwrap_or(u64::MAX - n.id.0 as u64)
+}
+
+impl Default for Edit {
+    fn default() -> Self {
+        Self {
+            manual: false,
+            pos: HashMap::new(),
+            drawn: HashMap::new(),
+            drawn_src: Rect::NOTHING,
+            drag: None,
+        }
+    }
 }
 
 impl Edit {
@@ -426,7 +442,8 @@ pub fn draw(
         edit.pos.retain(|k, _| {
             topo.nodes.iter().any(|n| key(n) == *k) || ghosts.iter().any(|(id, _)| id == k)
         });
-        interact(&resp, topo, &rects, &ghosts, src, rect.min, edit, &mut act, patch);
+        let press = ui.input(|i| i.pointer.press_origin());
+        interact(&resp, press, topo, &rects, &ghosts, src, rect.min, edit, &mut act, patch);
         for (i, node) in topo.nodes.iter().enumerate() {
             if let Some(p) = edit.pos.get(&key(node)) {
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
@@ -437,6 +454,15 @@ pub fn draw(
                 *r = Rect::from_center_size(rect.min + p.to_vec2(), r.size());
             }
         }
+    }
+
+    edit.drawn_src = src;
+    edit.drawn.clear();
+    for (i, node) in topo.nodes.iter().enumerate() {
+        edit.drawn.insert(key(node), rects[i]);
+    }
+    for (id, r) in &ghosts {
+        edit.drawn.insert(*id, *r);
     }
 
     for (i, node) in topo.nodes.iter().enumerate() {
@@ -629,6 +655,7 @@ const PORT_GRAB: f32 = 9.0;
 #[allow(clippy::too_many_arguments)]
 fn interact(
     resp: &egui::Response,
+    press: Option<Pos2>,
     topo: &Topology,
     rects: &[Rect],
     ghosts: &[(u64, Rect)],
@@ -652,8 +679,12 @@ fn interact(
         }
     }
 
+    // Where the button went down, not where the pointer is now. A drag is
+    // only reported once it has moved past egui's threshold, which is further
+    // than a port is wide: hit-testing the current position meant every drag
+    // that started on a port was read as a drag of the box behind it.
     if resp.drag_started() {
-        edit.drag = resp.interact_pointer_pos().and_then(|q| {
+        edit.drag = press.or_else(|| resp.interact_pointer_pos()).and_then(|q| {
             // Ports first: they sit on the edge of a box, so testing the box
             // first would mean a wire could never be started at all.
             if near(port(src, 0, 1, Side::Out), q) {
@@ -680,9 +711,20 @@ fn interact(
             // off the port at once and follows the pointer from its own
             // source, so dropping it somewhere else is one gesture.
             if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
-                if let Some(from) = patch.and_then(|p| p.feeding((tag, port))) {
-                    act.unlink = Some((tag, port));
-                    return Some(Drag::Wire(from, q));
+                match patch.and_then(|p| p.feeding((tag, port))) {
+                    Some(from) => {
+                        act.unlink = Some((tag, port));
+                        return Some(Drag::Wire(from, q));
+                    }
+                    // The receiver's own stages read the span unless they
+                    // have been told otherwise, and that wire is on screen
+                    // even though no link says so. Grabbing it has to work,
+                    // or the one connection everybody tries to edit first is
+                    // the one that cannot be.
+                    None if crate::patch::builtin::is(tag) => {
+                        return Some(Drag::Wire(Source::Span, q));
+                    }
+                    None => {}
                 }
             }
             if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
@@ -987,6 +1029,163 @@ mod tests {
         // down and directly underneath it.
         assert!(p[4].depth > p[3].depth);
         assert_eq!(p[4].col, p[3].col, "a chain should read as a straight line");
+    }
+
+    /// A view driven by pointer events, the way the operator drives it.
+    struct Harness {
+        ctx: egui::Context,
+        topo: Topology,
+        edit: Edit,
+        patch: crate::patch::Patch,
+        at: Pos2,
+    }
+
+    impl Harness {
+        fn new(topo: Topology, patch: crate::patch::Patch) -> Self {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            Self {
+                ctx,
+                topo,
+                edit: Edit { manual: true, ..Default::default() },
+                patch,
+                at: Pos2::ZERO,
+            }
+        }
+
+        /// One frame, with the pointer where it was left and any events.
+        fn frame(&mut self, events: Vec<egui::Event>) -> Interaction {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0))),
+                events,
+                ..Default::default()
+            };
+            let mut act = Interaction::default();
+            let topo = self.topo.clone();
+            let patch = self.patch.clone();
+            let edit = &mut self.edit;
+            let out = &mut act;
+            let _ = self.ctx.run_ui(input, |ui| {
+                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch));
+            });
+            act
+        }
+
+        fn press(&mut self, at: Pos2) -> Interaction {
+            self.at = at;
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ])
+        }
+
+        fn move_to(&mut self, at: Pos2) -> Interaction {
+            self.at = at;
+            self.frame(vec![egui::Event::PointerMoved(at)])
+        }
+
+        fn release(&mut self, at: Pos2) -> Interaction {
+            self.at = at;
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ])
+        }
+
+        /// Where a box's ports are on screen, by the key it is drawn under.
+        fn out_port(&self, k: u64) -> Pos2 {
+            port(self.edit.drawn[&k], 0, 1, Side::Out)
+        }
+
+        fn in_port(&self, k: u64) -> Pos2 {
+            port(self.edit.drawn[&k], 0, 1, Side::In)
+        }
+
+        fn source_port(&self) -> Pos2 {
+            port(self.edit.drawn_src, 0, 1, Side::Out)
+        }
+    }
+
+    /// A topology with one stage the operator drew, so there is something
+    /// with live ports to aim at.
+    fn with_patch_stage() -> (Topology, crate::patch::Patch, u64) {
+        let mut patch = crate::patch::Patch::default();
+        let id = patch.add("envelope");
+        let mut topo = branchy();
+        topo.nodes[1].tag = Some(id);
+        (topo, patch, id)
+    }
+
+    #[test]
+    fn a_wire_dragged_from_the_source_onto_a_stage_connects_it() {
+        // The whole point of manual mode. Tested through pointer events
+        // rather than by calling the handler, because everything that has
+        // gone wrong here was in the gesture rather than in the patch: a
+        // drag the scroll area swallowed, a port nothing could hit.
+        let (topo, patch, id) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let src_port = h.source_port();
+        let target = h.in_port(id);
+        h.press(src_port);
+        h.move_to(src_port + Vec2::new(0.0, 20.0));
+        assert!(h.edit.drag.is_some(), "a drag from a port has to start");
+        h.move_to(target);
+        let act = h.release(target);
+        assert_eq!(
+            act.link.map(|(_, to, port)| (to, port)),
+            Some((id, 0)),
+            "the wire should land on the stage's input"
+        );
+    }
+
+    #[test]
+    fn the_spectrums_own_wire_can_be_taken_hold_of() {
+        // It is drawn by the receiver rather than by a link, so nothing in
+        // the patch describes it. Reaching for it is the first thing anyone
+        // does, and it used to do nothing at all.
+        use crate::patch::builtin;
+        let (mut topo, patch, _) = with_patch_stage();
+        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let at = h.in_port(builtin::SPECTRUM);
+        h.press(at);
+        h.move_to(at + Vec2::new(0.0, 25.0));
+        assert!(
+            matches!(h.edit.drag, Some(Drag::Wire(crate::patch::Source::Span, _))),
+            "the wire the spectrum is drawn with has to come away in the hand"
+        );
+    }
+
+    #[test]
+    fn a_wire_lands_on_the_spectrum_when_dropped_on_its_box() {
+        // Ports are a few pixels across. Dropping on the stage means the
+        // stage, or the gesture is a test of aim rather than of intent.
+        use crate::patch::builtin;
+        let (mut topo, patch, id) = with_patch_stage();
+        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let from = h.out_port(id);
+        let onto = h.edit.drawn[&builtin::SPECTRUM].center();
+        h.press(from);
+        h.move_to(from + Vec2::new(0.0, 20.0));
+        let act = h.release(onto);
+        assert_eq!(
+            act.link.map(|(f, to, port)| (f, to, port)),
+            Some((crate::patch::Source::Stage(id, 0), builtin::SPECTRUM, 0)),
+        );
     }
 
     #[test]
