@@ -700,13 +700,20 @@ pub struct SquelchNode {
     measured: f32,
 }
 
+/// How long the mute takes to open or close, in milliseconds.
+///
+/// Five was a click on every transmission when the threshold sat near the
+/// signal's own level; twenty is short enough not to swallow the first
+/// syllable and long enough that the edge is a fade rather than a step.
+const RAMP_MS: f64 = 20.0;
+
 impl SquelchNode {
     pub fn new(kind: SquelchKind, threshold_db: f32) -> Self {
         Self {
             kind,
             threshold_db,
             hysteresis_db: 3.0,
-            squelch: Squelch::new(48_000.0, threshold_db, threshold_db - 3.0, 5.0),
+            squelch: Squelch::new(48_000.0, threshold_db, threshold_db - 3.0, RAMP_MS),
             meter: NoiseMeter::new(48_000.0, 4_000.0),
             open: false,
             measured: -120.0,
@@ -756,7 +763,7 @@ impl Simple for SquelchNode {
             i.spec.rate,
             self.threshold_db,
             self.threshold_db - self.hysteresis_db,
-            5.0,
+            RAMP_MS,
         );
         self.meter = NoiseMeter::new(i.spec.rate, 4_000.0);
         Ok(i.spec)
@@ -768,8 +775,11 @@ impl Simple for SquelchNode {
             SquelchKind::Noise => self.meter.measure(input),
             SquelchKind::Level => dsp::squelch::level_db(input),
         };
-        self.measured = measured;
         self.open = self.squelch.update(measured, input.len());
+        // The smoothed figure, not the raw one. The meter exists to set the
+        // threshold against, and a bar that jumps either side of a line the
+        // audio is not crossing makes the control look broken.
+        self.measured = self.squelch.level_db();
         let out = o.real_mut();
         out.extend_from_slice(input);
         self.squelch.apply(out);

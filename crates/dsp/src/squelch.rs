@@ -22,6 +22,21 @@ pub struct Squelch {
     open: bool,
     open_at: f32,
     close_at: f32,
+    /// The measurement after smoothing, which is what the decision is made on.
+    ///
+    /// A block's measurement wanders several dB on a marginal signal, and
+    /// comparing each one to the threshold is what makes a squelch set near
+    /// the signal chatter: one loud block opens it, the hang holds it open for
+    /// half a second, and the audio arrives in half-second slabs. Hysteresis
+    /// does not help, because the wobble is wider than any sensible gap
+    /// between the two thresholds.
+    level: f32,
+    primed: bool,
+    /// Smoothing time constants, in samples. Opening is quick so the first
+    /// syllable is not clipped; falling is slower so a dip inside a
+    /// transmission does not start the hang counting down.
+    rise_samples: f32,
+    fall_samples: f32,
     /// Hang counted in samples rather than in calls.
     ///
     /// It used to be in blocks, on the assumption that a block was 1024
@@ -49,6 +64,10 @@ impl Squelch {
             open: false,
             open_at,
             close_at: close_at.min(open_at),
+            level: 0.0,
+            primed: false,
+            rise_samples: (rate * 0.010) as f32,
+            fall_samples: (rate * 0.025) as f32,
             // Half a second of hang, so a pause for breath in the middle of a
             // transmission does not slam the squelch shut and clip the next
             // word.
@@ -68,12 +87,32 @@ impl Squelch {
         self.close_at = close_at.min(open_at);
     }
 
+    /// The smoothed measurement the decision is made on, in dB.
+    ///
+    /// Worth showing on a meter rather than the raw figure: a control set
+    /// against a number that is not the one being compared is a control that
+    /// appears to be lying whenever the two disagree.
+    pub fn level_db(&self) -> f32 {
+        self.level
+    }
+
     /// Feed one block's measurement, and how many samples it covered.
     pub fn update(&mut self, measured_db: f32, samples: usize) -> bool {
-        if measured_db >= self.open_at {
+        if !self.primed {
+            self.level = measured_db;
+            self.primed = true;
+        } else {
+            let tau = if measured_db > self.level { self.rise_samples } else { self.fall_samples };
+            // Per block rather than per sample, so the time constant means the
+            // same thing whatever size buffer the radio happens to deliver.
+            let a = 1.0 - (-(samples as f32) / tau.max(1.0)).exp();
+            self.level += (measured_db - self.level) * a;
+        }
+
+        if self.level >= self.open_at {
             self.open = true;
             self.hang = self.hang_samples;
-        } else if measured_db < self.close_at {
+        } else if self.level < self.close_at {
             self.hang = self.hang.saturating_sub(samples as u64);
             if self.hang == 0 {
                 self.open = false;
@@ -99,6 +138,7 @@ impl Squelch {
         self.open = false;
         self.hang = 0;
         self.ramp = 0.0;
+        self.primed = false;
     }
 }
 
@@ -243,6 +283,11 @@ mod tests {
         // It was counted in calls, on the assumption that a call was 1024
         // samples. The audio chain hands this whatever a radio read produced,
         // and half a second of hang quietly became nearly three.
+        //
+        // The measurement is smoothed before it is compared, so a signal that
+        // stops takes a few tens of milliseconds to read as stopped and the
+        // total is a little over the hang. What must not vary is the block
+        // size, which is what this is really testing.
         for block in [256usize, 1024, 5461, 16384] {
             let mut sq = Squelch::new(RATE, 9.0, 6.0, 5.0);
             sq.update(12.0, block);
@@ -251,11 +296,47 @@ mod tests {
                 sq.update(0.0, block);
                 silent += block as f64 / RATE;
             }
+            // The allowance is one block, which is the granularity of the
+            // decision, plus the tens of milliseconds the detector takes to
+            // read a stopped signal as stopped.
             assert!(
-                (silent - 0.5).abs() < block as f64 / RATE + 0.01,
+                (silent - 0.5).abs() < block as f64 / RATE + 0.06,
                 "a {block} sample block held the squelch open for {silent:.2} s"
             );
         }
+    }
+
+    #[test]
+    fn a_marginal_signal_does_not_gate_the_audio_in_slabs() {
+        // The complaint this exists for: with the threshold set into the
+        // signal's own level, one loud block opened the squelch, the hang held
+        // it open for half a second, and the audio arrived in half second
+        // slabs with hard edges. Smoothing the measurement is what stops a
+        // single block deciding anything.
+        let mut sq = Squelch::new(RATE, 9.0, 6.0, 5.0);
+        let mut opens = 0;
+        let mut was = false;
+        // A channel wobbling either side of the threshold, as a real one does.
+        for i in 0..600 {
+            let m = if i % 2 == 0 { 11.0 } else { 4.0 };
+            let now = sq.update(m, 1024);
+            if now && !was {
+                opens += 1;
+            }
+            was = now;
+        }
+        assert!(opens <= 1, "the gate opened {opens} times on one marginal signal");
+    }
+
+    #[test]
+    fn the_level_shown_is_the_level_decided_on() {
+        let mut sq = Squelch::new(RATE, 9.0, 6.0, 5.0);
+        sq.update(20.0, 1024);
+        assert_eq!(sq.level_db(), 20.0, "the first measurement is taken as it is");
+        for _ in 0..200 {
+            sq.update(0.0, 1024);
+        }
+        assert!(sq.level_db() < 1.0, "the meter kept reading a signal that had gone");
     }
 
     #[test]
