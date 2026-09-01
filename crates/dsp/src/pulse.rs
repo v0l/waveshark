@@ -65,6 +65,26 @@ pub struct PulseConfig {
     /// A Rayleigh envelope exceeds 3.5 times its mean with probability about
     /// 2e-6, so that is the default.
     pub noise_threshold_ratio: f32,
+    /// Take the floor under the threshold from the measured noise peak rather
+    /// than from `noise_threshold_ratio` times the mean. See `QuietPeak`.
+    ///
+    /// Off by default, and the reason is measured rather than cautious: on
+    /// rtl_433's corpus it moves the median noise floor from 6 dB to 3 dB and
+    /// takes the captures that still decode at 0 dB from 8 to 25, and it costs
+    /// the checksum-free protocols dearly, from 3 unverified claims across the
+    /// corpus to 27, with one that passes a CRC. It is a sensitivity control,
+    /// not an improvement, and which side of that trade is right depends on
+    /// the band.
+    pub measured_noise_floor: bool,
+    /// How far above the measured noise peak the floor sits. Larger is more
+    /// selective: 1.8 keeps most of the sensitivity at a third of the junk.
+    pub noise_floor_margin: f32,
+    /// Rejoin marks split by a dropout too short to be a symbol.
+    ///
+    /// See `Package::merge_dropouts`. Off gives the behaviour the corpus
+    /// numbers in `corpus_metrics` were first measured with, so the two can be
+    /// compared without rebuilding the harness.
+    pub merge_dropouts: bool,
 }
 
 /// Tracks the noise and signal levels of an envelope and says, per sample,
@@ -80,10 +100,101 @@ pub struct LevelGate {
     hysteresis: f32,
     min_ratio: f32,
     noise_threshold_ratio: f32,
+    noise_floor_margin: f32,
     noise: f32,
     signal: f32,
     high: bool,
     seeded: bool,
+    /// Measured peak of the quietest recent stretch, or `None` while the
+    /// window is still filling. See [`QuietPeak`].
+    quiet: Option<QuietPeak>,
+}
+
+/// The loudest sample in the quietest recent stretch of the envelope.
+///
+/// The floor under the detection threshold has to sit above what noise alone
+/// does, and there are two ways to get there. Ours was a Rayleigh
+/// calculation: the envelope of bandlimited Gaussian noise exceeds 3.5 times
+/// its mean about twice in a million samples, so put the floor there. That is
+/// right about Gaussian noise and says nothing about the noise a receiver
+/// actually has, which is not Gaussian near a switching supply, a spurious
+/// carrier or a neighbouring channel's skirt.
+///
+/// This measures it instead, the way Universal Radio Hacker does: cut the
+/// stream into chunks, take the mean of each, and read the peak sample out of
+/// the chunks whose means sit within a tenth of the quietest. Those chunks
+/// are the ones with nothing in them, so their peak is what noise alone
+/// reaches.
+#[derive(Clone, Debug)]
+pub struct QuietPeak {
+    chunk: usize,
+    /// Sum and peak of the chunk being accumulated.
+    sum: f64,
+    peak: f32,
+    filled: usize,
+    /// Mean and peak of each chunk in the window, oldest first.
+    window: std::collections::VecDeque<(f32, f32)>,
+    depth: usize,
+    estimate: Option<f32>,
+}
+
+impl QuietPeak {
+    /// `window_us` of history in chunks of `chunk_us`.
+    fn new(rate: f64, chunk_us: f32, window_us: f32) -> Self {
+        let chunk = ((chunk_us as f64 * rate / 1e6) as usize).max(16);
+        let depth = ((window_us / chunk_us).round() as usize).max(4);
+        Self {
+            chunk,
+            sum: 0.0,
+            peak: 0.0,
+            filled: 0,
+            window: std::collections::VecDeque::with_capacity(depth),
+            depth,
+            estimate: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.sum = 0.0;
+        self.peak = 0.0;
+        self.filled = 0;
+        self.window.clear();
+        self.estimate = None;
+    }
+
+    /// Feed one envelope sample, returning the current estimate if there is
+    /// one yet.
+    fn update(&mut self, v: f32) -> Option<f32> {
+        self.sum += v as f64;
+        self.peak = self.peak.max(v);
+        self.filled += 1;
+        if self.filled < self.chunk {
+            return self.estimate;
+        }
+        let mean = (self.sum / self.filled as f64) as f32;
+        if self.window.len() == self.depth {
+            self.window.pop_front();
+        }
+        self.window.push_back((mean, self.peak));
+        self.sum = 0.0;
+        self.peak = 0.0;
+        self.filled = 0;
+
+        // Only once there is enough history for a quiet stretch to be in it.
+        if self.window.len() >= self.depth / 2 {
+            let quietest = self.window.iter().map(|(m, _)| *m).fold(f32::MAX, f32::min);
+            let peak = self
+                .window
+                .iter()
+                .filter(|(m, _)| *m <= quietest * 1.1)
+                .map(|(_, p)| *p)
+                .fold(0.0f32, f32::max);
+            if peak > 0.0 {
+                self.estimate = Some(peak);
+            }
+        }
+        self.estimate
+    }
 }
 
 impl LevelGate {
@@ -94,11 +205,24 @@ impl LevelGate {
             hysteresis,
             min_ratio: 10f32.powf(min_snr_db / 20.0),
             noise_threshold_ratio: noise_ratio,
+            noise_floor_margin: 1.1,
             noise: 0.0,
             signal: 0.0,
             high: false,
             seeded: false,
+            quiet: None,
         }
+    }
+
+    /// Take the floor under the threshold from the measured noise peak rather
+    /// than from the Rayleigh assumption. See [`QuietPeak`].
+    pub fn with_measured_floor(mut self, rate: f64, margin: f32) -> Self {
+        self.noise_floor_margin = margin.max(1.0);
+        // A millisecond of envelope per chunk, a fifth of a second of window.
+        // The window has to hold silence either side of a transmission, and
+        // ISM bursts run to about a tenth of that.
+        self.quiet = Some(QuietPeak::new(rate, 1_000.0, 200_000.0));
+        self
     }
 
     pub fn noise_level(&self) -> f32 {
@@ -120,6 +244,9 @@ impl LevelGate {
     pub fn reset(&mut self) {
         self.high = false;
         self.seeded = false;
+        if let Some(q) = self.quiet.as_mut() {
+            q.reset();
+        }
     }
 
     /// Feed one envelope sample and return whether it is above threshold.
@@ -142,9 +269,18 @@ impl LevelGate {
             self.seeded = true;
         }
 
-        // Midpoint between the two estimates, but never closer to the noise
-        // than `noise_threshold_ratio` allows.
-        let mid = (0.5 * (self.noise + self.signal)).max(self.noise * self.noise_threshold_ratio);
+        // The floor under the threshold: measured if there is a measurement,
+        // else the Rayleigh figure.
+        let measured = self.quiet.as_mut().and_then(|q| q.update(v));
+        let floor = match measured {
+            // A little above the peak the noise reached, since a threshold
+            // exactly at it is crossed by the next sample as loud as the last
+            // one.
+            Some(peak) => peak * self.noise_floor_margin,
+            None => self.noise * self.noise_threshold_ratio,
+        };
+        // Midpoint between the two estimates, but never below the floor.
+        let mid = (0.5 * (self.noise + self.signal)).max(floor);
         let hyst = self.hysteresis * (self.signal - mid).max(0.0);
         let thresh = if self.high { mid - hyst } else { mid + hyst };
         let now_high = v > thresh;
@@ -188,6 +324,9 @@ impl Default for PulseConfig {
             tau_us: 500.0,
             min_snr_db: 6.0,
             noise_threshold_ratio: 3.5,
+            measured_noise_floor: false,
+            noise_floor_margin: 1.8,
+            merge_dropouts: true,
         }
     }
 }
@@ -229,6 +368,8 @@ pub struct PulseStats {
     pub rejected_low_snr: u64,
     /// Marks discarded for being shorter than `min_mark_us`.
     pub rejected_short_marks: u64,
+    /// Marks rejoined across a dropout too short to be a symbol.
+    pub rejoined_marks: u64,
     /// FSK only: bursts whose two frequency levels were too close together to
     /// be a keyed signal, which is what a plain carrier or an OOK burst looks
     /// like to a discriminator.
@@ -254,13 +395,20 @@ impl OokDetector {
             cfg,
             rate,
             us_per_sample,
-            gate: LevelGate::new(
-                rate,
-                cfg.tau_us,
-                cfg.hysteresis,
-                cfg.min_snr_db,
-                cfg.noise_threshold_ratio,
-            ),
+            gate: {
+                let g = LevelGate::new(
+                    rate,
+                    cfg.tau_us,
+                    cfg.hysteresis,
+                    cfg.min_snr_db,
+                    cfg.noise_threshold_ratio,
+                );
+                if cfg.measured_noise_floor {
+                    g.with_measured_floor(rate, cfg.noise_floor_margin)
+                } else {
+                    g
+                }
+            },
             high: false,
             run: 0,
             current: Package::default(),
@@ -367,6 +515,9 @@ impl OokDetector {
                         let mut p = std::mem::take(&mut self.current);
                         p.snr_db = snr;
                         p.rssi_dbfs = dbfs(self.gate.signal_level());
+                        if self.cfg.merge_dropouts {
+                            self.stats.rejoined_marks += p.merge_dropouts() as u64;
+                        }
                         out.push(p);
                         self.stats.accepted += 1;
                     } else {

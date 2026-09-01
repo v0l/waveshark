@@ -58,7 +58,19 @@ impl Protocol for Acurite609Txc {
         // zero. Seen on rtl_433's own X10 recording, which this decoder claimed
         // as a sensor reading 14.3 C at 0% humidity.
         let b = find_frame(bits, TXC_BYTES, |b| {
-            checksum8(&b[..4]) == b[4] && b[0] != 0 && b[..4] != [0; 4]
+            checksum8(&b[..4]) == b[4]
+                && b[0] != 0
+                && b[..4] != [0; 4]
+                // The status nibble is 0x2, or 0xa when the battery is low.
+                // rtl_433 documents it and every frame in its own corpus
+                // carries 2, but it does not test it, and a four byte sum is
+                // not a strong enough check to carry a decoder on its own:
+                // this one claimed a sensor reading 0.8 C at 0% humidity on
+                // rtl_433's Oregon WGR800 recording, with the checksum
+                // passing, from a frame of 08 00 08 00 10. Three quarters of
+                // such frames are refused by asking the status nibble to be
+                // what the sensor actually sends.
+                && (b[1] >> 4) & 0x7 == 0x2
         })
         .ok_or(match bits.len() {
             n if n < TXC_BYTES * 8 => DecodeError::WrongLength { got: n, want: TXC_BYTES * 8 },
@@ -429,7 +441,11 @@ mod tests {
         let raw = (temp_c * 10.0).round() as i16 & 0x0fff;
         let mut b = vec![0u8; TXC_BYTES];
         b[0] = id;
-        b[1] = (if battery_low { 0x80 } else { 0x20 }) | (raw >> 8) as u8;
+        // Status nibble 2 normally, a when the battery is low: the low
+        // battery bit is set *in addition to* the bit that is always there.
+        // The helper used to clear it, which made every battery low frame in
+        // these tests one the sensor never sends.
+        b[1] = (if battery_low { 0xa0 } else { 0x20 }) | (raw >> 8) as u8;
         b[2] = raw as u8;
         b[3] = humidity;
         b[4] = checksum8(&b[..4]);

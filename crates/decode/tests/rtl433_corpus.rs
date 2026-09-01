@@ -23,12 +23,6 @@ use corpus::{describe, fixtures};
 /// left on the list is how a limitation outlives the code that caused it.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
-        "acurite_tower_b",
-        "id:9884",
-        "two sensors transmit inside one burst and a protocol reports the first \
-         frame it finds, so the second device in a package is lost",
-    ),
-    (
         "acurite_5n1",
         "sequence_num:1",
         "the station numbers its three repeats and rtl_433 prints each one; \

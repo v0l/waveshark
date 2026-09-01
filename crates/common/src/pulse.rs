@@ -51,6 +51,74 @@ impl Package {
         self.pulses.len()
     }
 
+    /// Rejoin marks split by a dropout too short to be a symbol.
+    ///
+    /// A weak burst does not fail cleanly. Its envelope crosses back under the
+    /// threshold for a few microseconds in the middle of a mark, and what was
+    /// one symbol arrives as two marks with a sliver of gap between them. Every
+    /// timing measured after that is wrong, so a capture that is 20 dB above
+    /// the point where the bits stop being recoverable can still decode
+    /// nothing at all.
+    ///
+    /// The threshold for "too short" is taken from the burst rather than set
+    /// in advance, which is Universal Radio Hacker's trick: the shortest
+    /// widths that occur *often* are the symbol, so anything well under them is
+    /// damage. A constant cannot do this because the symbol width is what
+    /// varies between devices, by two orders of magnitude across this corpus.
+    ///
+    /// Returns how many joins were made.
+    pub fn merge_dropouts(&mut self) -> usize {
+        let Some(tol) = self.glitch_tolerance_us() else { return 0 };
+        let before = self.pulses.len();
+        let mut out: Vec<Pulse> = Vec::with_capacity(before);
+        for p in self.pulses.iter().copied() {
+            match out.last_mut() {
+                // The previous pulse's gap was a dropout, not a gap: the two
+                // marks and the sliver between them are one mark.
+                Some(prev) if prev.gap > 0 && prev.gap < tol => {
+                    prev.mark += prev.gap + p.mark;
+                    prev.gap = p.gap;
+                }
+                _ => out.push(p),
+            }
+        }
+        // A tolerance that swallows most of the burst was the wrong estimate,
+        // and half a burst rewritten is worse than a burst left alone.
+        if out.len() * 2 < before {
+            return 0;
+        }
+        self.pulses = out;
+        before - self.pulses.len()
+    }
+
+    /// Width below which a gap is damage rather than a symbol.
+    ///
+    /// An eighth of the median gap. The median is what the transmitter is
+    /// doing: a burst coming apart grows short fragments at both ends of the
+    /// distribution but its middle stays where it was, so the middle is the
+    /// only stable thing to measure against. The shortest width is not, which
+    /// is the trap: as a burst fragments, the shortest width is itself damage,
+    /// so a tolerance derived from it shrinks exactly when it needs to grow.
+    ///
+    /// An eighth is well under the ratio between the two symbols of every
+    /// coding here, which is two to one at its narrowest, so a real short
+    /// symbol is never mistaken for a dropout.
+    fn glitch_tolerance_us(&self) -> Option<u32> {
+        if self.pulses.len() < 3 {
+            return None;
+        }
+        // The final gap is the timeout that ended the burst rather than a gap
+        // the transmitter sent, so it is left out of the estimate.
+        let mut gaps: Vec<u32> =
+            self.pulses[..self.pulses.len() - 1].iter().map(|p| p.gap).collect();
+        gaps.retain(|g| *g > 0);
+        if gaps.len() < 2 {
+            return None;
+        }
+        gaps.sort_unstable();
+        Some((gaps[gaps.len() / 2] / 8).max(1))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pulses.is_empty()
     }
@@ -147,5 +215,57 @@ impl Packet {
             PacketBody::Frame(b) => Some(b),
             PacketBody::Pulses(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod dropout_tests {
+    use super::*;
+
+    fn pkg(pulses: &[(u32, u32)]) -> Package {
+        Package {
+            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dropout_inside_a_mark_is_rejoined() {
+        // 500 us marks on a 500 us raster, with one mark split by a 20 us dip.
+        let mut p = pkg(&[(500, 500), (240, 20), (240, 500), (500, 500)]);
+        assert_eq!(p.merge_dropouts(), 1);
+        assert_eq!(
+            p.pulses,
+            pkg(&[(500, 500), (500, 500), (500, 500)]).pulses,
+            "the split mark should read as one 500 us mark again"
+        );
+    }
+
+    #[test]
+    fn a_real_short_symbol_is_left_alone() {
+        // PWM: 250 and 500 us marks, 250 us gaps. Nothing here is damage, and
+        // a tolerance that ate the short symbol would destroy every bit.
+        let mut p = pkg(&[(250, 250), (500, 250), (250, 250), (500, 250)]);
+        assert_eq!(p.merge_dropouts(), 0);
+        assert_eq!(p.pulses.len(), 4);
+    }
+
+    #[test]
+    fn one_odd_reading_does_not_set_the_tolerance() {
+        // A single 8 us sliver must not make 8 us the yardstick: the estimate
+        // comes from the shortest width that repeats.
+        let mut p = pkg(&[(8, 500), (500, 500), (500, 500), (500, 500)]);
+        p.merge_dropouts();
+        assert!(p.pulses.len() >= 3);
+    }
+
+    #[test]
+    fn a_burst_that_would_be_mostly_rewritten_is_left_alone() {
+        // Every gap under the tolerance means the estimate was wrong, and
+        // collapsing the burst to one pulse invents a signal that was not sent.
+        let mut p = pkg(&[(100, 5), (100, 5), (100, 5), (100, 5), (100, 5)]);
+        let before = p.pulses.clone();
+        p.merge_dropouts();
+        assert_eq!(p.pulses, before);
     }
 }

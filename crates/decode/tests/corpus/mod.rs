@@ -202,7 +202,7 @@ fn windows(pkgs: &[Package], rate: f64, len: usize) -> Vec<(usize, usize)> {
 /// estimator, and during an OOK mark the signal *is* a single tone. On two
 /// level FSK it lands midway between the tones, which is exactly where the
 /// discriminator wants zero anyway.
-fn carrier_offset(iq: &[C32], rate: f64) -> f64 {
+pub fn carrier_offset(iq: &[C32], rate: f64) -> f64 {
     let peak = iq.iter().map(|c| c.norm_sqr()).fold(0.0f32, f32::max);
     if peak <= 0.0 {
         return 0.0;
@@ -243,7 +243,17 @@ fn detect(iq: &[C32], rate: f64, out: &mut Vec<Package>) {
         let rate = rate / decim as f64;
         let env: Vec<f32> = iq.iter().map(|c| c.norm()).collect();
         for reset_us in resets {
-            let ook = PulseConfig { reset_us, min_pulses: 8, ..Default::default() };
+            // Switchable so a change to the detector can be measured against
+            // the same corpus without two builds.
+            let merge = std::env::var("SR_MERGE_DROPOUTS").map(|v| v != "0").unwrap_or(true);
+            let floor = std::env::var("SR_MEASURED_FLOOR").map(|v| v != "0").unwrap_or(false);
+            let ook = PulseConfig {
+                reset_us,
+                min_pulses: 8,
+                merge_dropouts: merge,
+                measured_noise_floor: floor,
+                ..Default::default()
+            };
             OokDetector::new(rate, ook).process(&env, out);
             let fsk = FskConfig { reset_us, min_pulses: 8, ..Default::default() };
             FskDetector::new(rate, fsk).process(&iq, out);
