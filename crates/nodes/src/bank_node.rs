@@ -39,6 +39,14 @@ pub struct BankNode {
     hits: Vec<(Hz, Event)>,
     rate: f64,
     center: Hz,
+    /// The band actually wanted, when it is narrower than the input.
+    ///
+    /// A band is extracted by mixing and decimating, and the decimation is a
+    /// power of two, so what arrives here is up to twice the width that was
+    /// asked for. Channels outside the wanted band are real channels with real
+    /// decoders on them, so without this the receiver reports sensors from
+    /// outside the band a scanner block declared, and spends the CPU to do it.
+    band: Option<(f64, f64)>,
 }
 
 impl BankNode {
@@ -59,7 +67,49 @@ impl BankNode {
             hits: Vec::new(),
             rate: 0.0,
             center: Hz(0),
+            band: None,
         }
+    }
+
+    /// Limit the bank to a band inside its input, or `None` for all of it.
+    pub fn set_band(&mut self, band: Option<(f64, f64)>) {
+        if self.band != band {
+            self.band = band;
+            self.apply_band();
+        }
+    }
+
+    pub fn band(&self) -> Option<(f64, f64)> {
+        self.band
+    }
+
+    /// Drop the decoders on channels the wanted band does not reach.
+    ///
+    /// Their samples are still channelized, because the channelizer produces
+    /// every channel at once whether or not anything reads them, but nothing
+    /// downstream runs and nothing they hear is reported.
+    fn apply_band(&mut self) {
+        let Some((lo, hi)) = self.band else { return };
+        let half = self.bank.channel_bandwidth() / 2.0;
+        for ch in 0..self.bank.channels() {
+            let c = self.bank.channel_center(ch).as_f64();
+            if c + half <= lo || c - half >= hi {
+                self.bank.clear_chain(ch);
+            }
+        }
+    }
+
+    /// Channels with a decoder on them, which is what the bank is doing rather
+    /// than what it could do.
+    pub fn active_channels(&self) -> usize {
+        self.bank.active_chains()
+    }
+
+    /// Put a decoder back on every channel, then mask again.
+    fn rebuild_graphs(&mut self) -> Result<()> {
+        self.bank.set_all_graphs(&self.make)?;
+        self.apply_band();
+        Ok(())
     }
 
     /// Channels a span splits into at a given width.
@@ -102,8 +152,16 @@ impl BankNode {
     /// channels there are, so the bank is built again from nothing.
     fn configure(&mut self, rate: f64, center: Hz) -> Result<()> {
         if rate == self.rate {
+            let moved = self.bank.center() != center;
             self.bank.set_center(center);
             self.center = center;
+            if moved {
+                // The channels cover different frequencies now, so which of
+                // them are in the wanted band has changed with them. `reset`
+                // does not restore the chains this dropped, so a bank that
+                // moved has to be re-masked from a full set.
+                self.rebuild_graphs()?;
+            }
             return Ok(());
         }
         let channels = Self::channels_for(rate, self.width_hz);
@@ -117,6 +175,7 @@ impl BankNode {
         self.bank = bank;
         self.rate = rate;
         self.center = center;
+        self.apply_band();
         Ok(())
     }
 }

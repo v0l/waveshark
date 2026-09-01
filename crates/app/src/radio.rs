@@ -262,6 +262,10 @@ pub enum Cmd {
     GainStage(String, GainMode),
     /// Flip one of the radio's own switches: bias tee, digital AGC and so on.
     Toggle(String, bool),
+    /// Pick one of the radio's list settings, such as an antenna port.
+    Choice(String, String),
+    /// Set one parameter on one node of the running graph, by node id.
+    NodeParam(usize, String, pipeline::param::ParamValue),
     /// Reference oscillator correction, in parts per million.
     Ppm(f64),
     /// Narrow the span in software by decimating what the radio delivers.
@@ -685,6 +689,7 @@ pub struct Status {
 pub struct RadioControls {
     pub stages: Vec<(common::GainStage, GainMode)>,
     pub toggles: Vec<common::Toggle>,
+    pub choices: Vec<common::Choice>,
     pub ppm: f64,
 }
 
@@ -704,7 +709,7 @@ impl RadioControls {
                 (st.clone(), mode)
             })
             .collect();
-        Self { stages, toggles: dev.toggles(), ppm: dev.ppm() }
+        Self { stages, toggles: dev.toggles(), choices: dev.choices(), ppm: dev.ppm() }
     }
 }
 
@@ -1132,9 +1137,28 @@ fn run(
                     plan.rate = dev.rate().as_f64();
                     rebuild = true;
                 }
+                Cmd::NodeParam(id, name, value) => {
+                    match rx.set_node_param(id, &name, value) {
+                        // A parameter that changes the stream's shape needs
+                        // the graph negotiated again around it; the rest take
+                        // effect on the next block.
+                        Ok(true) => rebuild = true,
+                        Ok(false) => publish_chain(status, &rx),
+                        Err(e) => *status.error.lock() = Some(format!("{name}: {e}")),
+                    }
+                }
                 Cmd::Channels(specs) => {
                     plan.channels = specs;
-                    rebuild = true;
+                    // A squelch or gain change is a number on a node that is
+                    // already there. Rebuilding for it threw away the
+                    // spectrum's averaging and every channel's state, once per
+                    // frame for as long as the slider was held.
+                    if rx.params_only(&plan) {
+                        rx.apply_params(&plan);
+                        publish_chain(status, &rx);
+                    } else {
+                        rebuild = true;
+                    }
                 }
                 Cmd::Volume(v) => volume = v,
                 Cmd::Fft(n) => {
@@ -1172,6 +1196,33 @@ fn run(
                     status.set_radio(RadioControls::read(dev.as_ref()));
                     // Any of these changes the offset, and a stale estimate
                     // shows up as a spur that was not there a moment ago.
+                    rx.remeasure_dc();
+                }
+                Cmd::Choice(name, value) => {
+                    // Some of these describe the stream rather than a setting
+                    // on it: a LimeSDR's receive channel is a different stream
+                    // entirely, so it has to be torn down and set up again.
+                    if dev.choice_needs_restart(&name) {
+                        // Dropped rather than only stopped: the driver counts
+                        // a stopped stream as still holding the radio until
+                        // its handle is gone.
+                        stream.stop();
+                        drop(stream);
+                        if let Err(e) = dev.set_choice(&name, &value) {
+                            *status.error.lock() = Some(format!("{name}: {e}"));
+                        }
+                        match dev.start_rx() {
+                            Ok(s) => stream = s,
+                            Err(e) => {
+                                *status.error.lock() =
+                                    Some(format!("cannot restart after {name}: {e}"));
+                                return Ok(());
+                            }
+                        }
+                    } else if let Err(e) = dev.set_choice(&name, &value) {
+                        *status.error.lock() = Some(format!("{name}: {e}"));
+                    }
+                    status.set_radio(RadioControls::read(dev.as_ref()));
                     rx.remeasure_dc();
                 }
                 Cmd::Ppm(ppm) => {
@@ -1432,7 +1483,7 @@ fn fronts_here(
     scanners: &crate::scanners::Scanners,
     plan: &Plan,
     decode_on: bool,
-) -> Vec<crate::scanners::Front> {
+) -> Vec<crate::scanners::FrontAt> {
     if !decode_on {
         return Vec::new();
     }
@@ -1458,7 +1509,12 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         refresh_hz: 30.0,
         fft: 1024,
         channels: Vec::new(),
-        fronts: vec![crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())],
+        fronts: vec![crate::scanners::FrontAt {
+            front: crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()),
+            // The whole span: these tests are about the shape of the
+            // receiver, not about which band a block covers.
+            band: (0.0, f64::INFINITY),
+        }],
         record: false,
         log: false,
         feeds: Vec::new(),
@@ -1936,7 +1992,10 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&empty_buf(250_000.0, Hz::mhz(433)), None).unwrap();
         rx.process(&block(8192)).unwrap();
         let mut plan = plan_at(250_000.0, Hz::mhz(868));
-        plan.fronts = vec![crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())];
+        plan.fronts = vec![crate::scanners::FrontAt {
+            front: crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()),
+            band: (0.0, f64::INFINITY),
+        }];
         rx.rebuild(&plan).unwrap();
         rx.process(&block(8192)).unwrap();
         let out = rx.decodes(std::time::Instant::now());

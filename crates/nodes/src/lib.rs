@@ -128,6 +128,11 @@ pub fn registry() -> Registry {
                 hysteresis: s.f64_or("hysteresis", d.hysteresis as f64) as f32,
                 noise_threshold_ratio: s.f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64) as f32,
                 tau_us: s.f64_or("tau_us", d.tau_us as f64) as f32,
+                merge_dropouts: s.bool_or("merge_dropouts", d.merge_dropouts),
+                measured_noise_floor: s
+                    .bool_or("measured_noise_floor", d.measured_noise_floor),
+                noise_floor_margin: s.f64_or("noise_floor_margin", d.noise_floor_margin as f64)
+                    as f32,
             };
             Ok(Box::new(PulseDetectNode::new(cfg)) as Box<dyn Node>)
         },

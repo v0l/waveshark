@@ -122,6 +122,28 @@ impl Front {
     }
 }
 
+/// A front end together with the band its block was written about.
+///
+/// The band is what a channel bank is built over. Without it a bank
+/// channelizes the whole span, which at 60 MS/s means channels wider than the
+/// signals in an ISM band and a channel grid that slides under the receiver
+/// every time the dial moves.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FrontAt {
+    pub front: Front,
+    pub band: (f64, f64),
+}
+
+impl FrontAt {
+    /// The part of this band the span actually covers, or `None` when the two
+    /// do not overlap.
+    pub fn covered(&self, center: f64, rate: f64) -> Option<(f64, f64)> {
+        let (lo, hi) =
+            (self.band.0.max(center - rate / 2.0), self.band.1.min(center + rate / 2.0));
+        (hi > lo).then_some((lo, hi))
+    }
+}
+
 /// One scanner: where it applies and what it runs.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Scanner {
@@ -236,12 +258,28 @@ impl Scanners {
     /// Two blocks that ask for the same thing are one front end: a duplicate
     /// would be a second demodulator on the same channel producing the same
     /// packets twice.
-    pub fn fronts(&self, center: f64, rate: f64) -> Vec<Front> {
-        let mut out: Vec<Front> = Vec::new();
+    pub fn fronts(&self, center: f64, rate: f64) -> Vec<FrontAt> {
+        let mut out: Vec<FrontAt> = Vec::new();
         for s in self.active(center, rate) {
-            if !out.contains(&s.front) {
-                out.push(s.front.clone());
+            let band = (s.lo, s.hi);
+            let touching = |a: (f64, f64), b: (f64, f64)| a.0 <= b.1 && b.0 <= a.1;
+            if matches!(s.front, Front::Banks(_)) {
+                // Two blocks asking for the same channel width in bands that
+                // meet are one bank over both, not two banks decoding the
+                // overlap twice. Bands that do not meet stay separate, which
+                // is the case the band exists for: 433 and 868 are the same
+                // front end in two different places.
+                if let Some(e) =
+                    out.iter_mut().find(|e| e.front == s.front && touching(e.band, band))
+                {
+                    e.band.0 = e.band.0.min(band.0);
+                    e.band.1 = e.band.1.max(band.1);
+                    continue;
+                }
+            } else if out.iter().any(|e| e.front == s.front) {
+                continue;
             }
+            out.push(FrontAt { front: s.front.clone(), band });
         }
         out
     }
@@ -513,6 +551,12 @@ widths = 31.25 kHz, 125 kHz
 
 #[cfg(test)]
 mod tests {
+    /// The front ends alone, for the tests that are about which front end runs
+    /// rather than over what band.
+    fn kinds(v: &[FrontAt]) -> Vec<Front> {
+        v.iter().map(|f| f.front.clone()).collect()
+    }
+
     use super::*;
 
     #[test]
@@ -526,7 +570,9 @@ mod tests {
     #[test]
     fn the_defaults_put_each_front_end_where_it_belongs() {
         let s = Scanners::default();
-        let fronts = |c: f64, r: f64| s.fronts(c, r);
+        let fronts = |c: f64, r: f64| -> Vec<Front> {
+            s.fronts(c, r).into_iter().map(|f| f.front).collect()
+        };
         assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::ModeS]);
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
         assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
@@ -546,7 +592,7 @@ mod tests {
         // Widen that last span until it reaches the packet channel 700 kHz
         // away, though, and APRS runs: the receiver is sampling it either
         // way, and the dial is only where somebody is looking.
-        assert_eq!(s.fronts(145_500_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
+        assert_eq!(kinds(&s.fronts(145_500_000.0, 2_400_000.0)), [Front::Aprs(144_800_000.0)]);
     }
 
     /// A span too narrow for the front end is not that front end.
@@ -555,7 +601,7 @@ mod tests {
         let s = Scanners::default();
         // Mode S bits are 1 us wide and need 2 MS/s.
         assert!(s.fronts(1_090_000_000.0, 1_024_000.0).is_empty());
-        assert_eq!(s.fronts(1_090_000_000.0, 2_048_000.0), [Front::ModeS]);
+        assert_eq!(kinds(&s.fronts(1_090_000_000.0, 2_048_000.0)), [Front::ModeS]);
     }
 
     /// The channel test is what the AIS gate used to be: both channels have to
@@ -566,7 +612,7 @@ mod tests {
         // Centred on one channel with 60 kHz: the other is 50 kHz away and
         // the span reaches only 30 kHz, so it is outside.
         assert!(s.fronts(161_975_000.0, 60_000.0).is_empty());
-        assert_eq!(s.fronts(162_000_000.0, 200_000.0), [Front::Ais]);
+        assert_eq!(kinds(&s.fronts(162_000_000.0, 200_000.0)), [Front::Ais]);
     }
 
     /// The span decides, not the dial. A pager channel 200 kHz off the
@@ -577,9 +623,9 @@ mod tests {
         let s = Scanners::default();
         // Tuned 200 kHz below the DAPNET channel, which the old rule would
         // have refused because the dial sits outside the block's range.
-        assert_eq!(s.fronts(439_787_500.0, 2_400_000.0), [Front::Pocsag(439_987_500.0)]);
+        assert_eq!(kinds(&s.fronts(439_787_500.0, 2_400_000.0)), [Front::Pocsag(439_987_500.0)]);
         // And AIS from a dial parked on marine voice a megahertz away.
-        assert_eq!(s.fronts(161_000_000.0, 2_400_000.0), [Front::Ais]);
+        assert_eq!(kinds(&s.fronts(161_000_000.0, 2_400_000.0)), [Front::Ais]);
     }
 
     /// Everything the span covers runs. Which of two protocols a receiver
@@ -592,7 +638,7 @@ mod tests {
              [Packet]\nrange = 153.5 - 153.6 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 153.55 MHz\nmargin = 8 kHz\n",
         );
-        let fronts = s.fronts(153_450_000.0, 1_000_000.0);
+        let fronts = kinds(&s.fronts(153_450_000.0, 1_000_000.0));
         assert_eq!(fronts, [Front::Pocsag(153_350_000.0), Front::Aprs(153_550_000.0)]);
     }
 
@@ -606,7 +652,11 @@ mod tests {
              [B]\nrange = 433.5 - 434 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n",
         );
         assert_eq!(s.active(433_900_000.0, 1_000_000.0).len(), 2, "both blocks match");
-        assert_eq!(s.fronts(433_900_000.0, 1_000_000.0), [Front::Banks(vec![20_000.0])]);
+        let got = s.fronts(433_900_000.0, 1_000_000.0);
+        assert_eq!(got.len(), 1, "one bank, not two decoding the same signals");
+        assert_eq!(got[0].front, Front::Banks(vec![20_000.0]));
+        // The nested block widens nothing: the union is the outer range.
+        assert_eq!(got[0].band, (433e6, 435e6));
     }
 
     /// The case the file exists for.
@@ -633,7 +683,7 @@ mod tests {
             "[APRS]\nrange = 144.38 - 144.40 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
-        assert_eq!(s.fronts(144_390_000.0, 500_000.0), [Front::Aprs(144_390_000.0)]);
+        assert_eq!(kinds(&s.fronts(144_390_000.0, 500_000.0)), [Front::Aprs(144_390_000.0)]);
         assert!(s.fronts(144_800_000.0, 500_000.0).is_empty(), "the European one is gone");
     }
 

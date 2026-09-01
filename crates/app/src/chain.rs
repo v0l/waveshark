@@ -50,6 +50,69 @@ pub const FSK_CHANNEL_HZ: f64 = 125_000.0;
 /// Audio sample rate every channel branch aims for.
 const AUDIO_HZ: f64 = 48_000.0;
 
+/// Grid the extracted band's centre is snapped to.
+///
+/// The band a bank works in has to be the same band from one retune to the
+/// next, or the channel grid slides under the signals and every bank rebuilds
+/// itself. Snapping the centre means a band clipped slightly differently by
+/// the span edge still resolves to the same extraction, and it only moves when
+/// the clipping moves it by a whole step.
+const SUBBAND_GRID_HZ: f64 = 100_000.0;
+
+/// Room left above the wanted bandwidth for the decimator's transition band.
+const SUBBAND_HEADROOM: f64 = 1.15;
+
+/// A band cut out of the span for a bank to channelize.
+///
+/// Without this a bank divides the whole span, and the span is the wrong
+/// number twice over: at 60 MS/s the 1024 channel ceiling gives 60 kHz
+/// channels where a sensor needs 25, and the grid is anchored to the dial, so
+/// scrubbing moves every channel and resets every detector.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SubBand {
+    /// Centre of the extracted band, snapped to the grid.
+    center: f64,
+    /// Decimation from the span's rate. A power of two, so that a band whose
+    /// clipping changes slightly keeps the same rate.
+    factor: usize,
+    /// Bandwidth that has to survive the decimator.
+    need: f64,
+}
+
+impl SubBand {
+    /// `min_rate` is the slowest the front end behind this can work at: Mode S
+    /// needs 2 MS/s for its one microsecond bits, an FM channel needs enough
+    /// left for its own audio decimation to land on a whole number.
+    fn plan(band: (f64, f64), span_rate: f64, min_rate: f64) -> Self {
+        let (lo, hi) = band;
+        let center = ((lo + hi) / 2.0 / SUBBAND_GRID_HZ).round() * SUBBAND_GRID_HZ;
+        // Measured from the snapped centre, so the snap cannot push an edge
+        // of the wanted band outside what is kept.
+        let need = 2.0 * (lo - center).abs().max((hi - center).abs());
+        let floor = need * SUBBAND_HEADROOM.max(min_rate / need.max(1.0));
+        let mut factor = 1usize;
+        while span_rate / (factor * 2) as f64 >= floor && factor < 4096 {
+            factor *= 2;
+        }
+        Self { center, factor, need }
+    }
+
+    /// Rate the banks will see.
+    fn rate(&self, span_rate: f64) -> f64 {
+        span_rate / self.factor as f64
+    }
+
+    /// Identity for node reuse: the band, not the tuning.
+    fn key(&self) -> u64 {
+        self.center.max(0.0) as u64
+    }
+
+    /// Whether extracting this band is worth any nodes at all.
+    fn is_whole_span(&self, span_center: f64) -> bool {
+        self.factor == 1 && (self.center - span_center).abs() < 1.0
+    }
+}
+
 /// The narrow CW filter, in Hz.
 const CW_FILTER_HZ: f64 = 500.0;
 
@@ -73,8 +136,19 @@ enum Role {
     /// rather than keep one tuned where it was.
     Aprs(u64),
     Pocsag(u64),
-    /// Banks are distinguished by the channel width they were built for.
-    Bank(u32),
+    /// Banks are distinguished by the band they cover and the channel width
+    /// they were built for. Two scanner blocks can ask for the same width in
+    /// different bands, and they are not the same bank.
+    Bank(u64, u32),
+    /// The decimator feeding one band's banks, keyed by the band and the
+    /// factor: a different factor is a different filter.
+    SubBandDecimate(u64, usize),
+    /// The mixer in front of it. Never reused, because its shift follows the
+    /// dial and it is a phase accumulator rather than a filter to design, but
+    /// it still needs a role: `roles` is zipped with the graph's nodes to find
+    /// them again, so a node added without one shifts every role after it onto
+    /// the wrong node.
+    SubBandMix(u64),
     /// A stage of one listening channel.
     Stage(u64, Stage),
     PacketBus,
@@ -209,7 +283,7 @@ pub struct Plan {
     /// Several, because a span is wide: a couple of megahertz of VHF can hold
     /// a pager channel and a packet channel at once, and both are one
     /// narrowband demodulator each.
-    pub fronts: Vec<Front>,
+    pub fronts: Vec<crate::scanners::FrontAt>,
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
@@ -311,7 +385,7 @@ impl Receiver {
             }
             // A bank rebuilds itself internally on a retune and keeps its
             // chains, which is cheaper than building several hundred graphs.
-            Role::Bank(_) => true,
+            Role::Bank(..) => true,
             // The spectrum's FFT size can change, and the node cannot resize.
             Role::Spectrum => !retuned && self.fft_size() == plan.fft,
             _ => true,
@@ -426,14 +500,45 @@ impl Receiver {
         let fits = |hz: f64, width: f64| {
             (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width
         };
-        for front in &plan.fronts {
+        // One extraction per band, shared by whatever listens in it.
+        let mut extracts: HashMap<(u64, usize), NodeId> = HashMap::new();
+        for at in &plan.fronts {
+            let front = &at.front;
+            // Everything the scanner table puts on the span is fed a band cut
+            // out for it rather than the whole span. What each front end then
+            // does inside itself is a small residual shift at a low rate,
+            // instead of a mixer and a several-thousand-tap filter running at
+            // the radio's own rate where nothing could see them.
+            let want = front_band(front, at).and_then(|(band, min_rate)| {
+                let band = match front {
+                    // A bank takes what the span covers of its band; a
+                    // single-channel front end needs all of its channel or it
+                    // is refused outright below.
+                    Front::Banks(_) => at.covered(plan.center.as_f64(), plan.eff_rate())?,
+                    _ => band,
+                };
+                (band.1 > band.0).then(|| SubBand::plan(band, plan.eff_rate(), min_rate))
+            });
+            let src = match want {
+                Some(sub) => extract(
+                    &mut b,
+                    &mut roles,
+                    &mut pool,
+                    &mut extracts,
+                    head,
+                    plan.center.as_f64(),
+                    plan.eff_rate(),
+                    sub,
+                ),
+                None => head,
+            };
             match front {
             Front::ModeS => {
                 let id = match pool.remove(&Role::ModeS) {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
                 };
-                b.connect(head.o(), id.i());
+                b.connect(src.o(), id.i());
                 roles.push(Role::ModeS);
                 narrowband.push(id);
                 modes = Some(id);
@@ -443,7 +548,7 @@ impl Receiver {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
                 };
-                b.connect(head.o(), id.i());
+                b.connect(src.o(), id.i());
                 roles.push(Role::Ais);
                 narrowband.push(id);
                 ais = Some(id);
@@ -460,7 +565,7 @@ impl Receiver {
                         Box::new(nodes::AprsNode::new(*hz)),
                     ),
                 };
-                b.connect(head.o(), id.i());
+                b.connect(src.o(), id.i());
                 roles.push(role);
                 narrowband.push(id);
                 aprs = Some(id);
@@ -478,12 +583,24 @@ impl Receiver {
                         Box::new(nodes::PocsagNode::new(*hz)),
                     ),
                 };
-                b.connect(head.o(), id.i());
+                b.connect(src.o(), id.i());
                 roles.push(role);
                 narrowband.push(id);
                 pocsag = Some(id);
             }
             Front::Banks(widths) => {
+                // The band the block was written about, not the whole span.
+                // A bank handed 60 MS/s divides it into 1024 channels at best,
+                // which is 60 kHz each: far wider than the 25 kHz an OOK
+                // sensor occupies, so several devices share a channel and the
+                // detector sees one long burst instead of packets. The
+                // extraction above buys that resolution back, and costs less,
+                // because the channelizer then runs at the band's rate rather
+                // than the radio's.
+                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
+                    continue;
+                };
+                let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
                 for &width in widths {
                     // Which front end runs in a channel follows from its
                     // width: the narrow bank is where OOK is worth detecting
@@ -493,12 +610,28 @@ impl Receiver {
                     } else {
                         ("FSK bank", nodes::ism_fsk_graph as fn(_) -> _)
                     };
-                    let role = Role::Bank(width as u32);
+                    let role = Role::Bank(sub.key(), width as u32);
                     let id = match pool.remove(&role) {
-                        Some(p) => b.add_existing(p),
-                        None => b.add_labeled(label, Box::new(BankNode::new(label, width, make))),
+                        // Set before it goes back into the graph, because the
+                        // mask decides which channels get a decoder and that
+                        // happens while the graph negotiates.
+                        Some(mut p) => {
+                            if let Some(n) = p
+                                .node
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<BankNode>())
+                            {
+                                n.set_band(Some(band));
+                            }
+                            b.add_existing(p)
+                        }
+                        None => {
+                            let mut n = BankNode::new(label, width, make);
+                            n.set_band(Some(band));
+                            b.add_labeled(label, Box::new(n))
+                        }
                     };
-                    b.connect(head.o(), id.i());
+                    b.connect(src.o(), id.i());
                     roles.push(role);
                     banks.push((id, width));
                 }
@@ -612,7 +745,7 @@ impl Receiver {
         let makes_tracks = plan
             .fronts
             .iter()
-            .any(|f| matches!(f, Front::ModeS | Front::Ais | Front::Aprs(_)));
+            .any(|f| matches!(f.front, Front::ModeS | Front::Ais | Front::Aprs(_)));
         if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
@@ -720,7 +853,10 @@ impl Receiver {
                     .node(id)
                     .and_then(|n| n.as_any())
                     .and_then(|a| a.downcast_ref::<BankNode>())
-                    .map(|b| b.channels())
+                    // What is decoding, not what the channelizer produces:
+                    // the channels outside the wanted band have no decoder on
+                    // them and reporting them overstates what is being heard.
+                    .map(|b| b.active_channels())
                     .unwrap_or(0);
                 Bank { channels }
             })
@@ -764,6 +900,68 @@ impl Receiver {
 
     pub fn channels(&self) -> &[Chan] {
         &self.chans
+    }
+
+    /// Whether a plan differs from what is running only in settings that can
+    /// be handed to the nodes already there.
+    ///
+    /// Squelch, gain control and volume are numbers on existing nodes;
+    /// frequency, mode and rate are a different chain. Telling them apart
+    /// matters because a rebuild is not free and, dragged, it is not rare:
+    /// a slider sends one of these per displayed frame.
+    pub fn params_only(&self, plan: &Plan) -> bool {
+        self.rate == plan.rate
+            && self.center == plan.center
+            && self.fft_size() == plan.fft
+            && self.chans.len() == plan.channels.len()
+            && plan.channels.iter().zip(&self.chans).all(|(want, have)| {
+                want.id == have.spec.id && ChanKey::new(want, plan.eff_rate()) == have.key
+            })
+    }
+
+    /// Apply those settings in place. Only valid where [`Self::params_only`]
+    /// holds; anything else needs the graph rebuilt around it.
+    pub fn apply_params(&mut self, plan: &Plan) {
+        for (want, have) in plan.channels.iter().zip(self.chans.iter_mut()) {
+            have.spec = want.clone();
+        }
+        /// One channel's settable numbers, lifted out of `self.chans` so the
+        /// graph can be borrowed mutably while they are applied.
+        struct Update {
+            squelch: Option<NodeId>,
+            db: Option<f32>,
+            agc: Option<NodeId>,
+            on: bool,
+        }
+        let updates: Vec<Update> = self
+            .chans
+            .iter()
+            .map(|c| Update {
+                squelch: c.squelch,
+                db: c.spec.squelch_db,
+                agc: c.agc,
+                on: c.spec.agc,
+            })
+            .collect();
+        for Update { squelch, db, agc, on } in updates {
+            if let (Some(id), Some(db)) = (squelch, db) {
+                if let Some(sq) = self
+                    .graph
+                    .node_mut(id)
+                    .and_then(|n| n.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<SquelchNode>())
+                {
+                    sq.set_threshold_db(db);
+                }
+            }
+            if let Some(a) = agc
+                .and_then(|id| self.graph.node_mut(id))
+                .and_then(|n| n.as_any_mut())
+                .and_then(|a| a.downcast_mut::<AgcNode>())
+            {
+                a.set_enabled(on);
+            }
+        }
     }
 
     /// Audio from one channel, as the graph left it.
@@ -828,6 +1026,27 @@ impl Receiver {
     /// Shape of everything running, for the chain view.
     pub fn topology(&self) -> Topology {
         self.graph.topology()
+    }
+
+    /// Set one node's own parameter, by the id the topology gave it.
+    ///
+    /// Returns whether the change alters the stream's shape, which the caller
+    /// has to renegotiate around: a decimation factor is not a knob that can
+    /// be turned while everything downstream keeps its rate.
+    pub fn set_node_param(
+        &mut self,
+        id: usize,
+        name: &str,
+        value: pipeline::param::ParamValue,
+    ) -> Result<bool> {
+        let node = self
+            .graph
+            .node_mut(pipeline::graph::NodeId(id))
+            .ok_or_else(|| common::Error::other(format!("no node {id} in this chain")))?;
+        let affects_rate =
+            node.params().into_iter().find(|p| p.name == name).is_some_and(|p| p.affects_rate);
+        node.set_param(name, value)?;
+        Ok(affects_rate)
     }
 
     /// Delay to a channel's audio, in milliseconds.
@@ -1018,6 +1237,192 @@ impl Receiver {
 
 /// Bandwidth a Mode S transmission occupies, for the log's channel column.
 const MODES_BAND_HZ: f64 = 2_000_000.0;
+
+/// The band a front end needs, and the slowest rate it can be handed.
+///
+/// Every front end used to cut its own channel out of the full span with a
+/// mixer and a filter of its own, inside `process`, where nothing could see
+/// it: the chain view showed a pager node being fed 40 MS/s, which was true
+/// and told you nothing about what it did with them. Declaring the band here
+/// puts the extraction in the graph, lets two front ends in one band share it,
+/// and stops Mode S running its envelope detector across a whole 40 MHz span.
+fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64), f64)> {
+    match front {
+        // Mode S is 2 MHz wide and its detector refuses anything slower.
+        Front::ModeS => Some(((1_089_000_000.0, 1_091_000_000.0), 2_400_000.0)),
+        Front::Ais => {
+            let w = nodes::ais_nodes::CHANNEL_WIDTH_HZ;
+            Some((
+                (dsp::ais::CHANNEL_HZ[0] - w, dsp::ais::CHANNEL_HZ[1] + w),
+                // The detector mixes both channels itself and wants room
+                // between them, so this stays well above their separation.
+                600_000.0,
+            ))
+        }
+        Front::Aprs(hz) => {
+            let w = nodes::aprs_nodes::CHANNEL_WIDTH_HZ;
+            Some(((hz - w, hz + w), 192_000.0))
+        }
+        Front::Pocsag(hz) => {
+            let w = nodes::pocsag_nodes::CHANNEL_WIDTH_HZ;
+            Some(((hz - w, hz + w), 192_000.0))
+        }
+        Front::Banks(widths) => {
+            let band = at.band;
+            // Two channels is the least a channelizer will build, so the band
+            // has to arrive at least that wide.
+            let widest = widths.iter().cloned().fold(0.0f64, f64::max);
+            Some((band, widest * 2.0))
+        }
+    }
+}
+
+
+/// Build the mixer and decimator that cut one band out of the span.
+///
+/// Returns the node whose output the front end should read, which is the head
+/// itself when the band is the span and nothing needs doing. Cached by band
+/// and factor, so two front ends listening in the same place share one
+/// extraction instead of each running its own mixer over every sample.
+#[allow(clippy::too_many_arguments)]
+fn extract(
+    b: &mut GraphBuilder,
+    roles: &mut Vec<Role>,
+    pool: &mut HashMap<Role, NodePart>,
+    cache: &mut HashMap<(u64, usize), NodeId>,
+    head: NodeId,
+    span_center: f64,
+    span_rate: f64,
+    sub: SubBand,
+) -> NodeId {
+    if sub.is_whole_span(span_center) {
+        return head;
+    }
+    if let Some(id) = cache.get(&(sub.key(), sub.factor)) {
+        return *id;
+    }
+    // The mixer is built fresh every time: its shift follows the dial, and it
+    // is a phase accumulator rather than a filter worth keeping.
+    let mix = b.add_labeled(
+        format!("{:.4} MHz mixer", sub.center / 1e6),
+        Box::new(MixerNode::new(span_center - sub.center)),
+    );
+    roles.push(Role::SubBandMix(sub.key()));
+    b.connect(head.o(), mix.i());
+
+    let role = Role::SubBandDecimate(sub.key(), sub.factor);
+    let dec = match pool.remove(&role) {
+        Some(p) => b.add_existing(p),
+        None => {
+            let mut d = DecimateNode::new(sub.factor);
+            d.set_passband_hz(span_rate, sub.need / 2.0);
+            b.add_labeled(
+                format!("/{} to {}", sub.factor, hz_label(sub.rate(span_rate))),
+                Box::new(d),
+            )
+        }
+    };
+    roles.push(role);
+    b.connect(mix.o(), dec.i());
+    cache.insert((sub.key(), sub.factor), dec);
+    dec
+}
+
+/// A rate as a person reads it, for a node label.
+fn hz_label(hz: f64) -> String {
+    if hz >= 1e6 {
+        format!("{:.3} MHz", hz / 1e6)
+    } else {
+        format!("{:.1} kHz", hz / 1e3)
+    }
+}
+
+/// Where a front end is listening inside the current span, for drawing.
+///
+/// Derived from the same `SubBand` arithmetic the graph is built with rather
+/// than from a second guess at it: a marker that says the scanner is somewhere
+/// it is not is worse than no marker, because it is believed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScanMark {
+    /// One frequency a single-channel front end demodulates.
+    Channel { hz: f64, width: f64, label: String },
+    /// A band a bank channelizes, and the grid it channelizes it on.
+    ///
+    /// `origin` is a real channel centre, not the band edge: the grid is
+    /// anchored to the extraction's centre and the band is a window onto it,
+    /// so ticks stepped from `lo` would be up to half a channel out.
+    Band { lo: f64, hi: f64, origin: f64, spacing: f64, label: String },
+}
+
+/// What the scanner table is listening to on this span.
+pub fn scan_marks(
+    scanners: &crate::scanners::Scanners,
+    center: f64,
+    rate: f64,
+) -> Vec<ScanMark> {
+    let mut out = Vec::new();
+    for at in scanners.fronts(center, rate) {
+        match &at.front {
+            Front::ModeS => out.push(ScanMark::Channel {
+                hz: 1_090_000_000.0,
+                width: MODES_BAND_HZ,
+                label: "Mode S".into(),
+            }),
+            Front::Ais => {
+                for (i, hz) in dsp::ais::CHANNEL_HZ.iter().enumerate() {
+                    out.push(ScanMark::Channel {
+                        hz: *hz,
+                        width: nodes::ais_nodes::CHANNEL_WIDTH_HZ,
+                        label: format!("AIS {}", if i == 0 { "A" } else { "B" }),
+                    });
+                }
+            }
+            Front::Aprs(hz) => out.push(ScanMark::Channel {
+                hz: *hz,
+                width: nodes::aprs_nodes::CHANNEL_WIDTH_HZ,
+                label: "APRS".into(),
+            }),
+            Front::Pocsag(hz) => out.push(ScanMark::Channel {
+                hz: *hz,
+                width: nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
+                label: "POCSAG".into(),
+            }),
+            Front::Banks(widths) => {
+                let Some(band) = at.covered(center, rate) else { continue };
+                let sub = SubBand::plan(band, rate, 0.0);
+                let sub_rate = sub.rate(rate);
+                for &width in widths {
+                    let n = nodes::BankNode::channels_for(sub_rate, width);
+                    let spacing = sub_rate / n as f64;
+                    // The band asked for, not the band extracted. Decimation
+                    // is by powers of two, so what the bank is handed is up to
+                    // twice as wide; the channels out there have their
+                    // decoders taken off, and a marker over them would be
+                    // saying the receiver listens where it does not.
+                    let live = (band.1 - band.0).max(spacing);
+                    out.push(ScanMark::Band {
+                        lo: band.0,
+                        hi: band.1,
+                        // Channel 0 sits on the extraction's centre, so every
+                        // channel centre is that plus a whole number of
+                        // spacings, and a boundary is half a spacing off it.
+                        origin: sub.center,
+                        spacing,
+                        label: {
+                            let count = (live / spacing).round() as usize;
+                            if width <= OOK_CHANNEL_HZ {
+                                format!("OOK x{count}")
+                            } else {
+                                format!("FSK x{count}")
+                            }
+                        },
+                    });
+                }
+            }
+        }
+    }
+    out
+}
 
 fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
     // Mode S occupies the whole band it is transmitted in; there is no
@@ -1244,7 +1649,13 @@ fn add_channel(
 mod tests {
     use super::*;
 
-    fn plan(rate: f64, center: Hz) -> Plan {
+    /// A front end with no band of its own, which is what every front end
+    /// except a bank has: only a bank is built over a range.
+    pub(super) fn anywhere(front: Front) -> crate::scanners::FrontAt {
+        crate::scanners::FrontAt { front, band: (0.0, f64::INFINITY) }
+    }
+
+    pub(super) fn plan(rate: f64, center: Hz) -> Plan {
         Plan {
             center,
             rate,
@@ -1253,7 +1664,10 @@ mod tests {
             refresh_hz: 30.0,
             fft: 1024,
             channels: Vec::new(),
-            fronts: vec![Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec())],
+            fronts: vec![crate::scanners::FrontAt {
+                front: Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()),
+                band: (0.0, f64::INFINITY),
+            }],
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1403,7 +1817,7 @@ mod tests {
         // rebuilt for every new source, and would see nothing when the source
         // it knew about was not running.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.fronts = vec![Front::ModeS];
+        p.fronts = vec![anywhere(Front::ModeS)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1424,7 +1838,7 @@ mod tests {
     #[test]
     fn ais_reaches_the_tracker_through_the_bus_like_mode_s_does() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.fronts = vec![Front::Ais];
+        p.fronts = vec![anywhere(Front::Ais)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.ais_on(), "the AIS decoder is not running");
         let topo = rx.topology();
@@ -1453,7 +1867,7 @@ mod tests {
     #[test]
     fn two_front_ends_on_one_span_both_reach_the_bus() {
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![Front::Aprs(144_800_000.0), Front::Pocsag(153_350_000.0)];
+        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Pocsag(153_350_000.0))];
         // The pager channel is nine megahertz away, well outside this span,
         // so it is dropped rather than built into a node that would refuse
         // its own input and take the graph down.
@@ -1464,7 +1878,7 @@ mod tests {
 
         // Both inside the span now.
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![Front::Aprs(144_800_000.0), Front::Pocsag(145_000_000.0)];
+        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Pocsag(145_000_000.0))];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.aprs_on() && rx.pocsag_on(), "both front ends should run");
         let topo = rx.topology();
@@ -1489,7 +1903,7 @@ mod tests {
     #[test]
     fn the_ism_banks_do_not_run_on_the_ais_band() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.fronts = vec![Front::Ais];
+        p.fronts = vec![anywhere(Front::Ais)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         assert!(
@@ -1552,7 +1966,7 @@ mod tests {
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         p.center = Hz::mhz(1090);
         p.fronts.clear();
-        p.fronts = vec![Front::ModeS];
+        p.fronts = vec![anywhere(Front::ModeS)];
         rx.rebuild(&p).expect("a receiver that can retune onto 1090");
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -1564,11 +1978,112 @@ mod tests {
         // Turning the log off stops writing to disk; it must not disconnect
         // every view from the traffic.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.fronts = vec![Front::ModeS];
+        p.fronts = vec![anywhere(Front::ModeS)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));
         assert_eq!(rx.logged(), 0, "nothing was asked to be written");
+    }
+
+    /// A bank over a scanner's own band, at the width that band asked for.
+    fn ism_at(center_mhz: f64, rate: f64) -> Plan {
+        let mut p = plan(rate, Hz(( center_mhz * 1e6) as u64));
+        p.fronts = vec![crate::scanners::FrontAt {
+            front: Front::Banks(vec![OOK_CHANNEL_HZ]),
+            band: (433.05e6, 434.79e6),
+        }];
+        p
+    }
+
+    #[test]
+    fn a_wide_span_does_not_coarsen_the_channels_in_a_scanner_band() {
+        // The complaint this was written for. At 60 MS/s a bank over the whole
+        // span hits its 1024 channel ceiling and every channel is 60 kHz, far
+        // wider than the 25 to 30 kHz an ISM sensor occupies, so several
+        // devices share one channel and the detector sees one long burst
+        // instead of packets.
+        let p = ism_at(433.92, 60_000_000.0);
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let ch = rx.bank_channels();
+        assert_eq!(ch.len(), 1, "one bank");
+        // The band is under 2 MHz, so whatever the span, the channels are the
+        // width the block asked for rather than the span divided by 1024.
+        let width = 2_000_000.0 / ch[0] as f64;
+        assert!(
+            width < OOK_CHANNEL_HZ * 1.5,
+            "{} channels over the band is {width:.0} Hz each",
+            ch[0]
+        );
+    }
+
+    #[test]
+    fn scrubbing_the_dial_does_not_disturb_a_bank() {
+        // A bank anchored to the receiver's centre moves every channel and
+        // resets every detector on each retune, which is what a drag on the
+        // tuner is a hundred of. Anchored to the band, the retune is a change
+        // of mixer shift and nothing else.
+        let mut p = ism_at(433.92, 10_000_000.0);
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let before = rx.bank_channels();
+        let labels = |t: &pipeline::graph::Topology| -> Vec<String> {
+            t.nodes.iter().map(|n| n.label.clone()).collect()
+        };
+        let shape = labels(&rx.topology());
+        // Well inside the span, so the band stays fully covered.
+        p.center = Hz((434.5e6) as u64);
+        rx.rebuild(&p).unwrap();
+        assert_eq!(rx.bank_channels(), before, "the channel grid changed under a retune");
+        assert_eq!(labels(&rx.topology()), shape, "the graph was rebuilt differently");
+    }
+
+    #[test]
+    fn a_bank_decodes_the_band_asked_for_and_not_the_margin_around_it() {
+        // The extraction decimates by powers of two, so the bank is handed up
+        // to twice the width the block asked for. Those extra channels are
+        // real, and left alone they report sensors from outside the band and
+        // spend the CPU doing it.
+        let p = ism_at(433.92, 10_000_000.0);
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let live = rx.bank_channels()[0];
+        let marks = scan_marks_of(&p);
+        let ScanMark::Band { lo, hi, spacing, origin, .. } = &marks[0] else {
+            panic!("{marks:?}")
+        };
+        // The grid the ticks are drawn on has to be the grid the channels are
+        // on: a channel centre is the origin plus a whole number of spacings.
+        let k = (433.92e6 - origin) / spacing;
+        assert!((k - k.round()).abs() < 0.001 || (433.92e6 - origin).abs() < *spacing);
+        let asked = ((hi - lo) / spacing).round() as usize;
+        assert!(
+            live.abs_diff(asked) <= 2,
+            "{live} channels are decoding over a band {asked} channels wide"
+        );
+        assert!(*lo >= 433.0e6 && *hi <= 434.85e6, "the mark covers {lo} to {hi}");
+    }
+
+    /// The marks the interface would draw for a plan, for tests about them.
+    fn scan_marks_of(p: &Plan) -> Vec<ScanMark> {
+        let mut s = crate::scanners::Scanners { list: Vec::new() };
+        s.list.push(crate::scanners::Scanner {
+            name: "ISM 433".into(),
+            lo: 433.05e6,
+            hi: 434.79e6,
+            min_rate: 250_000.0,
+            channels: Vec::new(),
+            margin_hz: 0.0,
+            front: Front::Banks(vec![OOK_CHANNEL_HZ]),
+        });
+        scan_marks(&s, p.center.as_f64(), p.eff_rate())
+    }
+
+    #[test]
+    fn a_band_the_span_has_moved_off_stops_being_channelized() {
+        // Nothing to extract, so nothing to run: a bank over a band the radio
+        // is no longer sampling would be channelizing the anti-alias filter.
+        let mut p = ism_at(433.92, 2_000_000.0);
+        p.center = Hz::mhz(868);
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.bank_channels().is_empty());
     }
 
     #[test]
@@ -1631,5 +2146,104 @@ mod tests {
         let bank = order.iter().position(|l| l == "OOK bank").expect("a bank");
         assert!(ring < bank, "the recorder runs after the decoders: {order:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scan_mark_tests {
+    use super::*;
+
+    #[test]
+    fn the_ism_band_is_marked_where_the_bank_is_looking() {
+        let s = crate::scanners::Scanners::default();
+        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0);
+        let band = marks
+            .iter()
+            .find_map(|m| match m {
+                ScanMark::Band { lo, hi, spacing, label, .. } => {
+                    Some((*lo, *hi, *spacing, label.clone()))
+                }
+                _ => None,
+            })
+            .expect("the ISM block should mark a band");
+        assert!(band.0 >= 432.0e6 && band.1 <= 435.5e6, "{band:?}");
+        assert!(band.2 > 0.0 && band.2 < 200_000.0, "{band:?}");
+    }
+
+    #[test]
+    fn a_pager_channel_is_marked_at_its_frequency() {
+        let s = crate::scanners::Scanners::default();
+        let marks = scan_marks(&s, 439_987_500.0, 500_000.0);
+        assert!(marks.iter().any(|m| matches!(m, ScanMark::Channel { hz, .. } if (*hz - 439_987_500.0).abs() < 1.0)), "{marks:?}");
+    }
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::tests::{anywhere, plan};
+    use super::*;
+
+    fn topo_labels(p: &Plan) -> Vec<String> {
+        let rx = Receiver::build(p, Sinks::default()).unwrap();
+        rx.topology().nodes.iter().map(|n| n.label.clone()).collect()
+    }
+
+    #[test]
+    fn a_pager_on_a_wide_span_is_mixed_down_before_it_sees_anything() {
+        // It used to be handed the whole span and cut its own channel out
+        // inside `process`, with a mixer over every sample and a filter of
+        // several thousand taps, none of it visible in the chain.
+        let mut p = plan(20_000_000.0, Hz::mhz(440));
+        p.fronts = vec![anywhere(Front::Pocsag(439_987_500.0))];
+        let labels = topo_labels(&p);
+        assert!(labels.iter().any(|l| l.contains("mixer")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with('/')), "{labels:?}");
+    }
+
+    #[test]
+    fn mode_s_sees_two_megahertz_rather_than_the_whole_span() {
+        // Its detector measures an envelope. Over 20 MHz that envelope is
+        // every carrier in the span added together, which lifts the floor its
+        // preamble threshold is measured against and invents edges.
+        let mut p = plan(20_000_000.0, Hz::mhz(1090));
+        p.fronts = vec![anywhere(Front::ModeS)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        let modes = topo.nodes.iter().find(|n| n.kind == "mode_s").expect("a mode s node");
+        let rate = modes.inputs[0].1.rate;
+        assert!(rate <= 5_000_000.0, "mode s was handed {rate} S/s");
+        assert!(rate >= 2_000_000.0, "mode s needs 2 MS/s and got {rate}");
+    }
+
+    #[test]
+    fn even_a_narrow_span_is_cut_down_before_the_front_end() {
+        // Worth doing at 2.4 MS/s too: the mixer replaces the one the node ran
+        // internally, and what follows it is a 12.5 kHz channel filtered at
+        // 300 kHz instead of at the radio's rate.
+        let mut p = plan(2_400_000.0, Hz(439_987_500));
+        p.fronts = vec![anywhere(Front::Pocsag(439_987_500.0))];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        let pager = topo.nodes.iter().find(|n| n.kind == "pocsag").expect("a pager node");
+        assert!(pager.inputs[0].1.rate <= 400_000.0, "{} S/s", pager.inputs[0].1.rate);
+    }
+
+    #[test]
+    fn a_band_that_is_already_the_span_adds_no_nodes() {
+        // A mixer that shifts by nothing and a decimator that divides by one
+        // are two passes over every sample to achieve nothing.
+        let mut p = plan(2_400_000.0, Hz::mhz(1090));
+        p.fronts = vec![anywhere(Front::ModeS)];
+        let labels = topo_labels(&p);
+        assert!(!labels.iter().any(|l| l.contains("mixer")), "{labels:?}");
+    }
+
+    #[test]
+    fn two_front_ends_in_one_band_share_one_extraction() {
+        let mut p = plan(20_000_000.0, Hz::mhz(145));
+        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Aprs(144_800_000.0))];
+        let labels = topo_labels(&p);
+        let mixers = labels.iter().filter(|l| l.contains("mixer")).count();
+        assert_eq!(mixers, 1, "{labels:?}");
     }
 }
