@@ -1332,14 +1332,16 @@ fn run(
                 Cmd::Manual(on) => {
                     manual = on;
                     status.manual.store(on, Ordering::Relaxed);
-                    // Entering manual mode empties the span of front ends:
-                    // what runs is now what has been drawn, and nothing has
-                    // been drawn yet. Keeping the scanner table's front ends
-                    // and letting the patch add to them would leave a set of
-                    // decoders on the graph that the view cannot edit and the
-                    // operator did not ask for.
-                    plan.fronts = Vec::new();
-                    plan.patch = on.then(|| patch.clone()).flatten();
+                    // Manual mode starts from the graph that is running, not
+                    // from an empty canvas: the receiver draws one for itself
+                    // out of what it is doing, and taking it over means
+                    // taking that over. The scanner table's front ends stay
+                    // where they are, frozen, until they are drawn too.
+                    plan.patch = if on {
+                        Some(patch.clone().unwrap_or_else(|| rx.patch().clone()))
+                    } else {
+                        None
+                    };
                     status.set_patch(plan.patch.clone());
                     rebuild = true;
                 }
@@ -1436,6 +1438,11 @@ fn run(
                 r.retune(plan.eff_rate(), plan.center);
             }
             status.logged.store(rx.logged(), Ordering::Relaxed);
+            // What is running, described the way the view draws it. Published
+            // whether or not anybody is editing: in automatic mode it is the
+            // graph the receiver derived, and that is what the chain view
+            // shows.
+            status.set_patch(Some(rx.patch().clone()));
             publish_chain(status, &rx);
             rebuild = false;
         }

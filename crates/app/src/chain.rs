@@ -123,12 +123,6 @@ const CW_FILTER_HZ: f64 = 500.0;
 /// exactly what changed.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Role {
-    DcBlock,
-    /// The software zoom decimator, keyed by its factor: a different factor is
-    /// a different filter.
-    Zoom(usize),
-    Spectrum,
-    Record,
     ModeS,
     Ais,
     /// Keyed by the channel, like the pager one and for the same reason: a
@@ -235,10 +229,14 @@ pub struct Receiver {
     /// What each node is, indexed by `NodeId`, so a rebuild can hand the same
     /// nodes to the new graph.
     roles: Vec<Role>,
-    dc: NodeId,
-    /// Last node of the head chain, whose output every branch reads.
-    head: NodeId,
-    spectrum: NodeId,
+    /// The DC blocker, when the graph has one: it is a stage like any other
+    /// and can be taken out.
+    dc: Option<NodeId>,
+    /// What the parts of the receiver that are not drawn yet read.
+    head: Out,
+    spectrum: Option<NodeId>,
+    /// The graph as a description: what is running, in the operator's terms.
+    patch: crate::patch::Patch,
     record: Option<NodeId>,
     modes: Option<NodeId>,
     ais: Option<NodeId>,
@@ -342,9 +340,10 @@ impl Receiver {
             // rebuilding the interesting case.
             graph: Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
             roles: Vec::new(),
-            dc: NodeId(0),
-            head: NodeId(0),
-            spectrum: NodeId(0),
+            dc: None,
+            head: pipeline::graph::GRAPH_INPUT,
+            spectrum: None,
+            patch: crate::patch::Patch::default(),
             record: None,
             modes: None,
             ais: None,
@@ -404,8 +403,12 @@ impl Receiver {
             // A bank rebuilds itself internally on a retune and keeps its
             // chains, which is cheaper than building several hundred graphs.
             Role::Bank(..) => true,
-            // The spectrum's FFT size can change, and the node cannot resize.
-            Role::Spectrum => !retuned && self.fft_size() == plan.fft,
+            // The spectrum's FFT size can change and the node cannot resize,
+            // and one holding an average of another band is worse than one
+            // starting empty.
+            Role::Patch(_, kind) if kind == "spectrum" => {
+                !retuned && self.fft_size() == plan.fft
+            }
             _ => true,
         });
 
@@ -413,9 +416,10 @@ impl Receiver {
         // short of being switched off, and a newly started one is waiting
         // here for its place in the graph.
         let ring = self.pending_record.take().or_else(|| {
-            self.record
-                .and_then(|_| pool.remove(&Role::Record))
-                .and_then(|p| RecordRing::from_part(p.node))
+            // The ring is a stage like any other, so it comes back out of the
+            // pool by the same name it went in under.
+            let role = Role::Patch(derived::RING, RING.to_string());
+            pool.remove(&role).and_then(|p| RecordRing::from_part(p.node))
         });
 
         self.record = None;
@@ -430,8 +434,8 @@ impl Receiver {
     }
 
     fn fft_size(&self) -> usize {
-        self.graph
-            .node(self.spectrum)
+        self.spectrum
+            .and_then(|id| self.graph.node(id))
             .and_then(|n| n.as_any())
             .and_then(|a| a.downcast_ref::<SpectrumNode>())
             .map(|s| s.size())
@@ -448,93 +452,47 @@ impl Receiver {
         let mut b = Graph::builder(input);
         let mut roles: Vec<Role> = Vec::new();
 
-        // The head of the chain: what every branch downstream agrees the
-        // samples are. Both stages belong here rather than in the caller,
-        // because a branch that saw the spur or the full rate would disagree
-        // with the others about what arrived.
-        let dc = match pool.remove(&Role::DcBlock) {
-            Some(p) => b.add_existing(p),
-            None => b.add_labeled("DC block", Box::new(nodes::DcBlockNode::new())),
+        // Everything at the head of the chain is a stage in a patch now: the
+        // DC block, the zoom decimator, the spectrum and the recorder's ring.
+        // The receiver draws that patch for itself from what it is doing,
+        // unless the operator has taken it over, and then it is theirs.
+        let mut refused = None;
+        let mut ring = ring;
+        let patch = match &plan.patch {
+            Some(p) => p.clone(),
+            None => derived_patch(plan),
         };
-        b.source(dc.i());
-        roles.push(Role::DcBlock);
-
-        let mut head = dc;
-        if plan.zoom > 1 {
-            let role = Role::Zoom(plan.zoom);
-            let id = match pool.remove(&role) {
-                Some(p) => b.add_existing(p),
-                None => {
-                    // Passband just inside the new Nyquist: the whole point is
-                    // that what is left is clean, since anything folded in
-                    // cannot be told from a signal afterwards.
-                    let mut d = DecimateNode::new(plan.zoom);
-                    d.set_passband_hz(plan.rate, plan.eff_rate() * 0.45);
-                    b.add_labeled(format!("Zoom /{}", plan.zoom), Box::new(d))
+        let (patch_packets, patch_ids) =
+            match add_patch(&mut b, &mut roles, &mut pool, pipeline::graph::GRAPH_INPUT, &patch, &mut ring)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    refused = Some(format!("the patch cannot be built: {e}"));
+                    (Vec::new(), HashMap::new())
                 }
             };
-            b.connect(head.o(), id.i());
-            roles.push(role);
-            head = id;
-        }
 
-        // Added before the decoders so it runs before them. Nodes are
-        // executed in the order they were added once their inputs are ready,
-        // and the ring has to hold a burst before whatever decodes it says
-        // so: a recording that starts when a decoder finishes has already
-        // missed the packet. Its input is connected further down, once the
-        // stage it may have been told to read exists.
-        let mut record = None;
-        if plan.record {
-            if let Some(r) = ring {
-                let id = b.add_labeled("Recorder", Box::new(nodes::RingNode::new(r)));
-                b.set_tag(id, crate::patch::builtin::RECORDER);
-                roles.push(Role::Record);
-                record = Some(id);
-            }
-        }
-
-        let mut refused = None;
-        let mut patch_packets: Vec<NodeId> = Vec::new();
-        let mut patch_ids: HashMap<u64, NodeId> = HashMap::new();
-        if let Some(patch) = &plan.patch {
-            match add_patch(&mut b, &mut roles, &mut pool, head, patch) {
-                Ok((packets, ids)) => {
-                    patch_packets = packets;
-                    patch_ids = ids;
-                }
-                Err(e) => refused = Some(format!("the patch cannot be built: {e}")),
-            }
-        }
-        // What one of the receiver's own stages reads: the head of the chain,
-        // unless a wire says otherwise and the stage it names is running.
-        let tap = |id: u64| -> Out {
-            plan.patch
-                .as_ref()
-                .and_then(|p| p.tap(id))
-                .and_then(|s| match s {
-                    crate::patch::Source::Span => None,
-                    crate::patch::Source::Stage(f, port) => {
-                        patch_ids.get(&f).map(|n| n.out(port))
-                    }
-                })
-                .unwrap_or(head.o())
+        // What the parts that are not drawn yet read. They followed the DC
+        // block when it was built here; now they follow whatever the patch
+        // says is the head, and the raw span if it says nothing.
+        let head: Out = patch
+            .tap(crate::patch::builtin::HEAD)
+            .and_then(|s| match s {
+                crate::patch::Source::Span => None,
+                crate::patch::Source::Stage(f, port) => patch_ids.get(&f).map(|n| n.out(port)),
+            })
+            .unwrap_or(pipeline::graph::GRAPH_INPUT);
+        let stage_of = |kind: &str| -> Option<NodeId> {
+            patch
+                .stages()
+                .iter()
+                .find(|s| s.kind == kind)
+                .and_then(|s| patch_ids.get(&s.id))
+                .copied()
         };
-
-        if let Some(id) = record {
-            b.connect(tap(crate::patch::builtin::RECORDER), id.i());
-        }
-
-        let spectrum = match pool.remove(&Role::Spectrum) {
-            Some(p) => b.add_existing(p),
-            None => b.add_labeled("Spectrum", Box::new(SpectrumNode::new(plan.fft))),
-        };
-        b.connect(tap(crate::patch::builtin::SPECTRUM), spectrum.i());
-        // Named so the view can offer its input as somewhere to drop a wire:
-        // putting a stage between the head and the spectrum is the whole
-        // reason a tap exists.
-        b.set_tag(spectrum, crate::patch::builtin::SPECTRUM);
-        roles.push(Role::Spectrum);
+        let dc = stage_of("dc_block");
+        let spectrum = stage_of("spectrum");
+        let record = stage_of(RING);
 
         // The front ends the scanner table put on this span, rather than a
         // chain of band tests here. Which demodulator belongs on which
@@ -591,7 +549,7 @@ impl Receiver {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
                 };
-                b.connect(src.o(), id.i());
+                b.connect(src, id.i());
                 roles.push(Role::ModeS);
                 narrowband.push(id);
                 modes = Some(id);
@@ -601,7 +559,7 @@ impl Receiver {
                     Some(p) => b.add_existing(p),
                     None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
                 };
-                b.connect(src.o(), id.i());
+                b.connect(src, id.i());
                 roles.push(Role::Ais);
                 narrowband.push(id);
                 ais = Some(id);
@@ -618,7 +576,7 @@ impl Receiver {
                         Box::new(nodes::AprsNode::new(*hz)),
                     ),
                 };
-                b.connect(src.o(), id.i());
+                b.connect(src, id.i());
                 roles.push(role);
                 narrowband.push(id);
                 aprs = Some(id);
@@ -636,7 +594,7 @@ impl Receiver {
                         Box::new(nodes::PocsagNode::new(*hz)),
                     ),
                 };
-                b.connect(src.o(), id.i());
+                b.connect(src, id.i());
                 roles.push(role);
                 narrowband.push(id);
                 pocsag = Some(id);
@@ -684,7 +642,7 @@ impl Receiver {
                             b.add_labeled(label, Box::new(n))
                         }
                     };
-                    b.connect(src.o(), id.i());
+                    b.connect(src, id.i());
                     roles.push(role);
                     banks.push((id, width));
                 }
@@ -830,13 +788,23 @@ impl Receiver {
                     .collect()
             })
             .unwrap_or_default();
-        let spectrum_src = tap(crate::patch::builtin::SPECTRUM);
+        let spectrum_src = spectrum.map(|s| s.o());
         let mut graph = b.build()?;
         // What the spectrum is actually seeing, which is the head unless a
         // patch stage was put in front of it. The axis is drawn from this, so
         // a decimator between the two has to narrow the span on screen as
         // well as in the arithmetic.
-        self.spectrum_rate = graph.spec_of(spectrum_src).map(|s| s.frame_rate()).unwrap_or(0.0);
+        // What the spectrum is seeing, which is whatever was wired into it.
+        self.spectrum_rate = spectrum
+            .and_then(|id| {
+                graph
+                    .node(id)
+                    .and_then(|n| n.as_any())
+                    .and_then(|a| a.downcast_ref::<SpectrumNode>())
+                    .map(|s| s.rate())
+            })
+            .unwrap_or(0.0);
+        let _ = spectrum_src;
         for c in chans.iter_mut() {
             let spec = graph.spec_of(c.tail).unwrap_or(input);
             c.audio_rate = spec.frame_rate();
@@ -863,15 +831,15 @@ impl Receiver {
         // once the graph they belong to exists. A reused node arrives holding
         // whatever it was last told, which is not necessarily what the plan
         // now says.
-        if let Some(n) = graph
-            .node_mut(dc)
+        if let Some(n) = dc
+            .and_then(|id| graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
         {
             n.set_enabled(plan.dc_block);
         }
-        if let Some(n) = graph
-            .node_mut(spectrum)
+        if let Some(n) = spectrum
+            .and_then(|id| graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<SpectrumNode>())
         {
@@ -902,6 +870,7 @@ impl Receiver {
         self.graph = graph;
         self.dc = dc;
         self.head = head;
+        self.patch = patch;
         self.roles = roles;
         self.spectrum = spectrum;
         self.record = record;
@@ -1047,16 +1016,14 @@ impl Receiver {
 
     /// Whether the spectrum completed a frame this block.
     pub fn spectrum_ready(&self) -> bool {
-        downcast::<SpectrumNode>(&self.graph, self.spectrum).map(|s| s.is_fresh()).unwrap_or(false)
+        self.spectrum
+            .and_then(|id| downcast::<SpectrumNode>(&self.graph, id))
+            .map(|s| s.is_fresh())
+            .unwrap_or(false)
     }
 
     pub fn power_db(&mut self) -> &[f32] {
-        self.graph
-            .node_mut(self.spectrum)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<SpectrumNode>())
-            .map(|s| s.power_db())
-            .unwrap_or(&[])
+        self.spectrum_mut().map(|s| s.power_db()).unwrap_or(&[])
     }
 
     pub fn modes_on(&self) -> bool {
@@ -1122,6 +1089,12 @@ impl Receiver {
     }
 
     /// Delay to a channel's audio, in milliseconds.
+    /// The graph as a description: what is running, in the terms the view
+    /// draws and the operator edits.
+    pub fn patch(&self) -> &crate::patch::Patch {
+        &self.patch
+    }
+
     /// The rate the spectrum's frames cover, for the axis under them.
     pub fn spectrum_rate(&self) -> f64 {
         self.spectrum_rate
@@ -1167,8 +1140,8 @@ impl Receiver {
     }
 
     fn spectrum_mut(&mut self) -> Option<&mut SpectrumNode> {
-        self.graph
-            .node_mut(self.spectrum)
+        self.spectrum
+            .and_then(|id| self.graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<SpectrumNode>())
     }
@@ -1187,8 +1160,8 @@ impl Receiver {
     }
 
     fn dc_mut(&mut self) -> Option<&mut nodes::DcBlockNode> {
-        self.graph
-            .node_mut(self.dc)
+        self.dc
+            .and_then(|id| self.graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
     }
@@ -1327,7 +1300,7 @@ impl Receiver {
     /// actually sees.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn zoomed_samples(&self) -> &[C32] {
-        self.graph.buf(self.head.o()).and_then(|p| p.as_iq()).unwrap_or(&[])
+        self.graph.buf(self.head).and_then(|p| p.as_iq()).unwrap_or(&[])
     }
 
 }
@@ -1382,7 +1355,105 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 /// and factor, so two front ends listening in the same place share one
 /// extraction instead of each running its own mixer over every sample.
 #[allow(clippy::too_many_arguments)]
-/// Build the operator's own stages onto the head of the chain.
+/// Patch stages whose output the packet bus accepts.
+const BUS_TAILS: [&str; 3] = ["pulse_detect", "ask_detect", "fsk_detect"];
+
+/// What a stage is called on screen and in the latency accounting.
+///
+/// A registry name is a key, not a label: "dc_block" and "/8 to 300.0 kHz"
+/// are the same kind of thing to the builder and not to a reader.
+fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
+    use pipeline::registry::SettingsExt;
+    match kind {
+        "dc_block" => "DC block".into(),
+        "spectrum" => "Spectrum".into(),
+        RING => "Recorder".into(),
+        "decimate" | "real_decimate" => {
+            let n = settings.i64_or("factor", 1).max(1);
+            if settings.get("passband_hz").is_some() {
+                format!("Zoom /{n}")
+            } else {
+                format!("Decimate /{n}")
+            }
+        }
+        "mixer" => "Mixer".into(),
+        "envelope" => "Envelope".into(),
+        "fm_demod" => "FM discriminator".into(),
+        "deemphasis" => "De-emphasis".into(),
+        "agc" => "AGC".into(),
+        "squelch" => "Squelch".into(),
+        "pulse_detect" => "OOK pulses".into(),
+        "ask_detect" => "ASK pulses".into(),
+        "fsk_detect" => "FSK pulses".into(),
+        "protocol_decode" => "Protocols".into(),
+        "ssb_demod" => "SSB demodulator".into(),
+        other => other.to_string(),
+    }
+}
+
+/// The recorder's ring, which is a stage in the graph but owns an open file
+/// and so cannot be built from a description alone.
+const RING: &str = "ring";
+
+/// Ids the receiver gives the stages it derives for itself.
+mod derived {
+    pub const DC: u64 = 1;
+    pub const ZOOM: u64 = 2;
+    pub const SPECTRUM: u64 = 3;
+    pub const RING: u64 = 4;
+}
+
+/// The graph the receiver would draw for itself, from what it is doing.
+///
+/// This is what runs when nobody has taken the graph over, and it is also
+/// where manual mode starts: an operator editing the chain begins from the
+/// chain that was running, not from an empty canvas.
+pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
+    use crate::patch::{builtin, Source};
+    use pipeline::registry::Settings;
+    let mut p = crate::patch::Patch::default();
+    let mut settings = Settings::new();
+
+    // The head of the chain: what every branch downstream agrees the samples
+    // are. A branch that saw the spur or the full rate would disagree with
+    // the others about what arrived.
+    let mut head = Source::Span;
+    if plan.dc_block {
+        p.add_derived(derived::DC, "dc_block", Settings::new());
+        p.connect(head, (derived::DC, 0));
+        head = Source::Stage(derived::DC, 0);
+    }
+    if plan.zoom > 1 {
+        settings.insert("factor".into(), pipeline::ParamValue::Int(plan.zoom as i64));
+        // Passband just inside the new Nyquist: the whole point is that what
+        // is left is clean, since anything folded in cannot be told from a
+        // signal afterwards.
+        settings.insert(
+            "passband_hz".into(),
+            pipeline::ParamValue::Float(plan.eff_rate() * 0.45),
+        );
+        settings.insert("input_rate_hz".into(), pipeline::ParamValue::Float(plan.rate));
+        p.add_derived(derived::ZOOM, "decimate", settings.clone());
+        p.connect(head, (derived::ZOOM, 0));
+        head = Source::Stage(derived::ZOOM, 0);
+    }
+    // What the front ends and the listening channels read. They are not
+    // drawn yet, so they follow a marker rather than a box.
+    p.connect(head, (builtin::HEAD, 0));
+
+    let mut spectrum = Settings::new();
+    spectrum.insert("size".into(), pipeline::ParamValue::Int(plan.fft as i64));
+    p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
+    p.connect(head, (derived::SPECTRUM, 0));
+
+    if plan.record {
+        p.add_derived(derived::RING, RING, Settings::new());
+        p.connect(head, (derived::RING, 0));
+    }
+    p
+}
+
+/// Build every stage in a patch, wired as the patch says.
 ///
 /// Returns the ones that produce packets, for the bus to collect, and where
 /// each stage ended up, for the receiver's own stages that were told to read
@@ -1393,15 +1464,13 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 /// because a stage has just been dropped on the canvas and not yet wired up
 /// would make the obvious way to work impossible: nobody draws a chain
 /// backwards from its last wire.
-/// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 3] = ["pulse_detect", "ask_detect", "fsk_detect"];
-
 fn add_patch(
     b: &mut GraphBuilder,
     roles: &mut Vec<Role>,
     pool: &mut HashMap<Role, NodePart>,
-    head: NodeId,
+    span: Out,
     patch: &crate::patch::Patch,
+    ring: &mut Option<RecordRing>,
 ) -> Result<(Vec<NodeId>, HashMap<u64, NodeId>)> {
     use crate::patch::Source;
     let reg = nodes::registry();
@@ -1412,7 +1481,30 @@ fn add_patch(
         // detector's noise floor on every other stage in the patch.
         let node = match pool.remove(&role) {
             Some(p) => p.node,
-            None => reg.build(&st.kind, &st.settings)?,
+            // The recorder owns an open file, so it is handed in rather than
+            // constructed from a description. A patch that asks for one when
+            // nothing is recording gets nothing, and the stage waits.
+            None if st.kind == RING => match ring.take() {
+                Some(r) => Box::new(nodes::RingNode::new(r)) as Box<dyn pipeline::node::Node>,
+                None => continue,
+            },
+            None => {
+                let mut node = reg.build(&st.kind, &st.settings)?;
+                // A decimator's passband is designed rather than set, so it
+                // is not something the registry can take as a number without
+                // the rate it was designed against.
+                if let (Some(pb), Some(rate)) = (
+                    st.settings.get("passband_hz").and_then(|v| v.as_f64()),
+                    st.settings.get("input_rate_hz").and_then(|v| v.as_f64()),
+                ) {
+                    if let Some(d) =
+                        node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
+                    {
+                        d.set_passband_hz(rate, pb);
+                    }
+                }
+                node
+            }
         };
         made.push((st.id, st.kind.clone(), node));
     }
@@ -1444,7 +1536,11 @@ fn add_patch(
     let mut packets = Vec::new();
     for (id, kind, node) in made.into_iter().filter(|(id, ..)| live.contains(id)) {
         let ins = node.num_inputs();
-        let nid = b.add(node);
+        let label = patch
+            .stage(id)
+            .map(|s| stage_label(&s.kind, &s.settings))
+            .unwrap_or_else(|| kind.clone());
+        let nid = b.add_labeled(label, node);
         // Tagged with the patch's own id, which is how the view knows which
         // box on screen is the stage that asked for it.
         b.set_tag(nid, id);
@@ -1453,7 +1549,7 @@ fn add_patch(
         for p in 0..ins {
             match patch.feeding((id, p)) {
                 Some(Source::Span) => {
-                    b.connect(head.o(), nid.input(p));
+                    b.connect(span, nid.input(p));
                 }
                 Some(Source::Stage(f, port)) => {
                     if let Some(from) = ids.get(&f) {
@@ -1495,16 +1591,16 @@ fn extract(
     roles: &mut Vec<Role>,
     pool: &mut HashMap<Role, NodePart>,
     cache: &mut HashMap<(u64, usize), NodeId>,
-    head: NodeId,
+    head: Out,
     span_center: f64,
     span_rate: f64,
     sub: SubBand,
-) -> NodeId {
+) -> Out {
     if sub.is_whole_span(span_center) {
         return head;
     }
     if let Some(id) = cache.get(&(sub.key(), sub.factor)) {
-        return *id;
+        return id.o();
     }
     // The mixer is built fresh every time: its shift follows the dial, and it
     // is a phase accumulator rather than a filter worth keeping.
@@ -1513,7 +1609,7 @@ fn extract(
         Box::new(MixerNode::new(span_center - sub.center)),
     );
     roles.push(Role::SubBandMix(sub.key()));
-    b.connect(head.o(), mix.i());
+    b.connect(head, mix.i());
 
     let role = Role::SubBandDecimate(sub.key(), sub.factor);
     let dec = match pool.remove(&role) {
@@ -1530,7 +1626,7 @@ fn extract(
     roles.push(role);
     b.connect(mix.o(), dec.i());
     cache.insert((sub.key(), sub.factor), dec);
-    dec
+    dec.o()
 }
 
 /// A rate as a person reads it, for a node label.
@@ -1709,7 +1805,7 @@ fn add_channel(
     b: &mut GraphBuilder,
     roles: &mut Vec<Role>,
     pool: &mut HashMap<Role, NodePart>,
-    head: NodeId,
+    head: Out,
     spec: &ChannelSpec,
     rate: f64,
 ) -> Chan {
@@ -1752,7 +1848,7 @@ fn add_channel(
     let mut dec = DecimateNode::new(if_dec);
     dec.set_passband_hz(rate, mode.bandwidth() / 2.0);
     let ifd = take(b, roles, Stage::IfDecimate, "IF decimator", Box::new(dec));
-    b.connect(head.o(), mix.i());
+    b.connect(head, mix.i());
     b.connect(mix.o(), ifd.i());
 
     let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
@@ -1939,18 +2035,20 @@ mod tests {
         // and the reason to draw a graph at all is usually to put something
         // in that gap. A patch that could only hang off the side would leave
         // the one edit anybody wants impossible.
-        use crate::patch::{builtin, Source};
-        let mut patch = crate::patch::Patch::default();
+        use crate::patch::Source;
+        let mut patch = derived_patch(&manual(crate::patch::Patch::default()));
+        let view = derived::SPECTRUM;
         let dec = patch.add("decimate");
-        patch.stages_mut()[0].settings.insert("factor".into(), pipeline::ParamValue::Int(4));
+        let n = patch.stages().iter().position(|s| s.id == dec).unwrap();
+        patch.stages_mut()[n].settings.insert("factor".into(), pipeline::ParamValue::Int(4));
         patch.connect(Source::Span, (dec, 0));
-        patch.connect(Source::Stage(dec, 0), (builtin::SPECTRUM, 0));
+        patch.connect(Source::Stage(dec, 0), (view, 0));
         let plan = manual(patch);
         let rx = Receiver::build(&plan, Default::default()).expect("a tapped spectrum");
         let topo = rx.topology();
         let decim = topo.nodes.iter().find(|n| n.tag == Some(dec)).expect("the stage runs");
         let spectrum =
-            topo.nodes.iter().find(|n| n.tag == Some(builtin::SPECTRUM)).expect("a spectrum");
+            topo.nodes.iter().find(|n| n.tag == Some(view)).expect("a spectrum");
         assert!(
             spectrum.inputs.iter().any(|(s, _)| decim.outputs.iter().any(|(o, _)| o == s)),
             "the spectrum should read the stage, not the head"
@@ -1968,7 +2066,8 @@ mod tests {
         let mut patch = crate::patch::Patch::default();
         let dec = patch.add("decimate");
         let view = patch.add("spectrum");
-        patch.stages_mut()[0].settings.insert("factor".into(), pipeline::ParamValue::Int(8));
+        let n = patch.stages().iter().position(|s| s.id == dec).unwrap();
+        patch.stages_mut()[n].settings.insert("factor".into(), pipeline::ParamValue::Int(8));
         patch.connect(Source::Span, (dec, 0));
         patch.connect(Source::Stage(dec, 0), (view, 0));
         let plan = manual(patch);

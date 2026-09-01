@@ -23,12 +23,13 @@ use pipeline::registry::Settings;
 /// second kind of link so that a wire is a wire: the view, the patch and the
 /// builder all treat them like any other target.
 pub mod builtin {
-    /// The spectrum behind the waterfall.
-    pub const SPECTRUM: u64 = u64::MAX;
-    /// The recorder's ring.
-    pub const RECORDER: u64 = u64::MAX - 1;
-    /// The span itself: the samples every branch reads. Not a stage, but it
-    /// is a box on screen and it is dragged and wired like one.
+    /// What the parts of the receiver that are not drawn yet read: the front
+    /// ends from the scanner table and the listening channels. A marker
+    /// rather than a stage, so that the head of the chain can be edited
+    /// without those losing track of where the samples come from.
+    pub const HEAD: u64 = u64::MAX;
+    /// The span itself: the samples as the radio delivered them. Not a stage,
+    /// but it is a box on screen and it is dragged and wired like one.
     pub const SPAN: u64 = u64::MAX - 2;
 
     /// Ids at or above this belong to the receiver rather than to the patch.
@@ -103,12 +104,25 @@ impl Patch {
         self.feeding((builtin, 0))
     }
 
+    /// Ids below this belong to the graph the receiver draws for itself, so
+    /// that one stays recognisable across the rebuilds that derive it again.
+    pub const DERIVED: u64 = 100;
+
     /// Add a stage, unconnected. Wiring it up is a separate decision, since a
     /// stage dropped onto the canvas has no obvious input until one is drawn.
     pub fn add(&mut self, kind: &str) -> u64 {
-        self.next += 1;
+        self.next = self.next.max(Self::DERIVED) + 1;
         let id = self.next;
         self.stages.push(Stage { id, kind: kind.to_string(), settings: Settings::new() });
+        id
+    }
+
+    /// Add a stage the receiver derives from what it is doing, under an id it
+    /// chooses. Reusing the id across rebuilds is what lets the node itself,
+    /// and the box it is drawn in, stay where they were.
+    pub fn add_derived(&mut self, id: u64, kind: &str, settings: Settings) -> u64 {
+        self.stages.retain(|s| s.id != id);
+        self.stages.push(Stage { id, kind: kind.to_string(), settings });
         id
     }
 

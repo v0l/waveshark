@@ -2833,7 +2833,7 @@ impl App {
                     self.chain_latency,
                     self.chain_sel,
                     &mut self.chain_edit,
-                    manual.then_some(&self.chain_patch),
+                    Some(&self.chain_patch),
                 )
             })
             .inner;
@@ -2957,13 +2957,10 @@ impl App {
             self.chain_edit.arrange();
             self.chain_pick = None;
         }
+        // Not followed by a patch of our own: the radio thread answers with
+        // the graph it is running, which is what taking it over means.
+        self.chain_patch_sent = None;
         self.send(Cmd::Manual(on));
-        if on {
-            // The radio thread keeps the last patch, and this one is the
-            // interface's: sending it makes sure both mean the same graph
-            // after a restart or a device change.
-            self.send_patch();
-        }
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {

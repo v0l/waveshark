@@ -81,6 +81,16 @@ pub fn registry() -> Registry {
 
     r.register(
         StageDesc {
+            name: "dc_block",
+            summary: "Remove the centre spur a direct-conversion receiver \
+                      produces, by measuring it rather than notching it out",
+            category: "filter",
+        },
+        |_s: &Settings| Ok(Box::new(DcBlockNode::new()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
             name: "spectrum",
             summary: "An FFT display of whatever is wired into it, drawn \
                       alongside the receiver's own",

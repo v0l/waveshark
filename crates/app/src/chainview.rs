@@ -1285,14 +1285,22 @@ mod tests {
         }
     }
 
-    /// A topology with one stage the operator drew, so there is something
-    /// with live ports to aim at.
+    /// A topology with stages the operator drew, so there is something with
+    /// live ports to aim at. The second stands in for a stage further down,
+    /// such as the spectrum: everything in the graph is a patch stage now.
     fn with_patch_stage() -> (Topology, crate::patch::Patch, u64) {
+        let (topo, patch, id, _) = with_two_stages();
+        (topo, patch, id)
+    }
+
+    fn with_two_stages() -> (Topology, crate::patch::Patch, u64, u64) {
         let mut patch = crate::patch::Patch::default();
         let id = patch.add("envelope");
+        let sink = patch.add("spectrum");
         let mut topo = branchy();
         topo.nodes[1].tag = Some(id);
-        (topo, patch, id)
+        topo.nodes[2].tag = Some(sink);
+        (topo, patch, id, sink)
     }
 
     #[test]
@@ -1358,9 +1366,7 @@ mod tests {
         // by patch id. When those two schemes met in the middle, the DC block
         // was drawn underneath the spectrum and every wire in the graph
         // appeared to converge on one box.
-        use crate::patch::builtin;
-        let (mut topo, patch, _) = with_patch_stage();
-        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let (topo, patch, _, _) = with_two_stages();
         let mut h = Harness::new(topo, patch);
         h.frame(vec![]);
         let mut seen: Vec<Pos2> = Vec::new();
@@ -1376,25 +1382,27 @@ mod tests {
     }
 
     #[test]
-    fn the_spectrums_own_wire_can_be_taken_hold_of() {
-        // It is drawn by the receiver rather than by a link, so nothing in
-        // the patch describes it. Reaching for it is the first thing anyone
-        // does, and it used to do nothing at all.
-        use crate::patch::builtin;
-        let (mut topo, patch, _) = with_patch_stage();
-        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+    fn a_wire_comes_away_in_the_hand_when_grabbed_at_its_input() {
+        // Reaching for an existing connection is the first thing anyone does.
+        // The wire has to leave the port it landed on and follow the pointer
+        // from its own source, or moving a connection means deleting it and
+        // drawing it again from memory.
+        use crate::patch::Source;
+        let (topo, mut patch, _, sink) = with_two_stages();
+        patch.connect(Source::Span, (sink, 0));
         let mut h = Harness::new(topo, patch);
         h.frame(vec![]);
-        let at = h.in_port(builtin::SPECTRUM);
+        let at = h.in_port(sink);
         h.press(at);
-        h.move_to(at + Vec2::new(0.0, 25.0));
+        let act = h.move_to(at + Vec2::new(0.0, 25.0));
         assert!(
             matches!(
                 h.edit.drag,
-                Some(Drag::Wire { from: Some(crate::patch::Source::Span), .. })
+                Some(Drag::Wire { from: Some(Source::Span), to: Some((_, 0)), .. })
             ),
-            "the wire the spectrum is drawn with has to come away in the hand"
+            "the wire should be in hand, still attached to what it came from"
         );
+        let _ = act;
     }
 
     #[test]
@@ -1403,19 +1411,18 @@ mod tests {
         // spectrum's end: drag its wire away and drop it on what should feed
         // it now. The other direction works too, and which one somebody
         // reaches for is not something a view gets to decide.
-        use crate::patch::{builtin, Source};
-        let (mut topo, patch, id) = with_patch_stage();
-        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        use crate::patch::Source;
+        let (topo, patch, id, sink) = with_two_stages();
         let mut h = Harness::new(topo, patch);
         h.frame(vec![]);
-        let at = h.in_port(builtin::SPECTRUM);
+        let at = h.in_port(sink);
         let onto = h.out_port(id);
         h.press(at);
         h.move_to(at + Vec2::new(0.0, -20.0));
         let act = h.release(onto);
         assert_eq!(
             act.link,
-            Some((Source::Stage(id, 0), builtin::SPECTRUM, 0)),
+            Some((Source::Stage(id, 0), sink, 0)),
             "the spectrum should end up reading the stage"
         );
     }
@@ -1424,19 +1431,17 @@ mod tests {
     fn a_wire_lands_on_the_spectrum_when_dropped_on_its_box() {
         // Ports are a few pixels across. Dropping on the stage means the
         // stage, or the gesture is a test of aim rather than of intent.
-        use crate::patch::builtin;
-        let (mut topo, patch, id) = with_patch_stage();
-        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let (topo, patch, id, sink) = with_two_stages();
         let mut h = Harness::new(topo, patch);
         h.frame(vec![]);
         let from = h.out_port(id);
-        let onto = h.edit.drawn[&builtin::SPECTRUM].center();
+        let onto = h.edit.drawn[&sink].center();
         h.press(from);
         h.move_to(from + Vec2::new(0.0, 20.0));
         let act = h.release(onto);
         assert_eq!(
             act.link.map(|(f, to, port)| (f, to, port)),
-            Some((crate::patch::Source::Stage(id, 0), builtin::SPECTRUM, 0)),
+            Some((crate::patch::Source::Stage(id, 0), sink, 0)),
         );
     }
 
