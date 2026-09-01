@@ -426,7 +426,7 @@ pub fn draw(
         edit.pos.retain(|k, _| {
             topo.nodes.iter().any(|n| key(n) == *k) || ghosts.iter().any(|(id, _)| id == k)
         });
-        interact(&resp, topo, &rects, &ghosts, src, rect.min, edit, &mut act);
+        interact(&resp, topo, &rects, &ghosts, src, rect.min, edit, &mut act, patch);
         for (i, node) in topo.nodes.iter().enumerate() {
             if let Some(p) = edit.pos.get(&key(node)) {
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
@@ -505,8 +505,8 @@ pub fn draw(
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,
         );
-        p.circle_filled(port(*r, 0, 1, Side::In), 2.5, theme::READOUT);
-        p.circle_filled(port(*r, 0, 1, Side::Out), 2.5, theme::READOUT);
+        knob(&p, port(*r, 0, 1, Side::In), true, pointer);
+        knob(&p, port(*r, 0, 1, Side::Out), true, pointer);
         if pointer.is_some_and(|q| r.contains(q)) && resp.clicked() {
             act.picked = Some(*id);
         }
@@ -534,13 +534,17 @@ pub fn draw(
         }
         // The ports themselves, so where a wire may be attached is visible
         // rather than inferred from where the ones already there happen to
-        // land.
+        // land. A port that can be dragged is lit; one on a stage the
+        // receiver built for itself is not, because its wiring is not the
+        // patch's to change and a port that looks live but refuses every drag
+        // is worse than one that never invited the attempt.
+        let live = edit.manual && node.tag.is_some();
         for k in 0..node.inputs.len() {
-            p.circle_filled(port(r, k, node.inputs.len(), Side::In), 2.5, theme::ETCH);
+            knob(&p, port(r, k, node.inputs.len(), Side::In), live, pointer);
         }
         if !node.sink {
             for k in 0..node.outputs.len() {
-                p.circle_filled(port(r, k, node.outputs.len(), Side::Out), 2.5, theme::ETCH);
+                knob(&p, port(r, k, node.outputs.len(), Side::Out), live, pointer);
             }
         }
         if !node.params.is_empty() {
@@ -614,7 +618,7 @@ pub fn draw(
 
 /// How near a port the pointer has to be for the drag to be about that port
 /// rather than about the box it sits on.
-const PORT_GRAB: f32 = 7.0;
+const PORT_GRAB: f32 = 9.0;
 
 /// Move a stage, draw a wire, or pull one off.
 ///
@@ -632,6 +636,7 @@ fn interact(
     origin: Pos2,
     edit: &mut Edit,
     act: &mut Interaction,
+    patch: Option<&crate::patch::Patch>,
 ) {
     use crate::patch::Source;
 
@@ -670,6 +675,16 @@ fn interact(
                     return Some(Drag::Wire(Source::Stage(*id, 0), q));
                 }
             }
+            // Taking hold of a wire where it lands, which is how a connection
+            // is moved rather than deleted and drawn again. The wire comes
+            // off the port at once and follows the pointer from its own
+            // source, so dropping it somewhere else is one gesture.
+            if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
+                if let Some(from) = patch.and_then(|p| p.feeding((tag, port))) {
+                    act.unlink = Some((tag, port));
+                    return Some(Drag::Wire(from, q));
+                }
+            }
             if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
                 return Some(Drag::Node(*id, r.center() - q));
             }
@@ -691,7 +706,13 @@ fn interact(
         // one that visibly did not.
         if resp.drag_stopped() {
             if let Drag::Wire(from, _) = drag {
-                if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
+                // Dropped on a box rather than exactly on one of its ports
+                // counts as its first input: a five pixel target is not a
+                // reasonable thing to ask of a pointer, and a stage has one
+                // input nearly always.
+                let landed = input_at(topo, rects, ghosts, q)
+                    .or_else(|| body_input(topo, rects, ghosts, q));
+                if let Some((tag, port)) = landed {
                     act.link = Some((from, tag, port));
                 }
             }
@@ -705,6 +726,17 @@ fn interact(
 
 fn near(p: Pos2, q: Pos2) -> bool {
     p.distance(q) <= PORT_GRAB
+}
+
+/// One port, lit if a wire can be dragged from or to it, and larger under the
+/// pointer so that what will be grabbed is known before the drag starts.
+fn knob(p: &egui::Painter, at: Pos2, live: bool, pointer: Option<Pos2>) {
+    let hot = live && pointer.is_some_and(|q| near(at, q));
+    let col = if live { theme::READOUT } else { theme::ETCH };
+    p.circle_filled(at, if hot { 4.5 } else { 2.5 }, col);
+    if hot {
+        p.circle_stroke(at, 7.0, Stroke::new(1.0, theme::READOUT));
+    }
 }
 
 /// The operator's stage and input port under a point, if there is one.
@@ -731,6 +763,30 @@ fn input_at(
         .iter()
         .find(|(_, r)| near(port(*r, 0, 1, Side::In), q))
         .map(|(id, _)| (*id, 0))
+}
+
+/// The operator's stage whose box a point is inside, and the input port
+/// nearest to where the wire was let go.
+fn body_input(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    q: Pos2,
+) -> Option<(u64, usize)> {
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let Some(tag) = node.tag else { continue };
+        if rects[i].contains(q) {
+            let n = node.inputs.len().max(1);
+            let k = (0..n)
+                .min_by(|a, b| {
+                    let d = |k: &usize| port(rects[i], *k, n, Side::In).distance(q);
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap_or(0);
+            return Some((tag, k));
+        }
+    }
+    ghosts.iter().find(|(_, r)| r.contains(q)).map(|(id, _)| (*id, 0))
 }
 
 /// Where a wire being drawn starts on screen.

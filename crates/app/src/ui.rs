@@ -2837,13 +2837,16 @@ impl App {
             if drawn.picked.is_some() {
                 self.chain_pick = drawn.picked;
             }
+            // Unwiring first: taking hold of a wire reports both in the same
+            // frame when the drag is short, and doing it the other way round
+            // would drop the wire that was just drawn.
             let mut edited = false;
-            if let Some((from, to, port)) = drawn.link {
-                self.chain_patch.connect(from, (to, port));
-                edited = true;
-            }
             if let Some(to) = drawn.unlink {
                 self.chain_patch.disconnect(to);
+                edited = true;
+            }
+            if let Some((from, to, port)) = drawn.link {
+                self.chain_patch.connect(from, (to, port));
                 edited = true;
             }
             if edited {
@@ -2918,9 +2921,15 @@ impl App {
                 self.send_patch();
             }
         }
+        // Which gestures exist, and the one thing that is not editable. Only
+        // the stages added here have live ports: the head of the chain, the
+        // spectrum and the listening channels are the receiver's own wiring.
         ui.label(legend(&match picked.and_then(|id| self.chain_patch.stage(id)) {
-            Some(s) => format!("{} selected; drag a port to wire it up", s.kind),
-            None => "drag from a port to wire, right-click an input to unwire".to_string(),
+            Some(s) => format!("{} selected; drag its ports to wire it up", s.kind),
+            None if self.chain_patch.stages().is_empty() => {
+                "add a stage: only stages added here can be wired".to_string()
+            }
+            None => "drag a port to wire, drag a wire off an input to move it".to_string(),
         }));
     }
 
