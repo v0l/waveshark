@@ -77,7 +77,34 @@ pub const KIND_PULSES: u8 = 1;
 /// Bytes from a demodulator that produces frames directly, such as Mode S.
 pub const KIND_BYTES: u8 = 2;
 
-/// Bytes before the body of a record: kind, flags, count, time, frequency,
+/// How the burst was keyed, in the record's second byte.
+///
+/// That byte was written as zero and never read, which is what makes this a
+/// compatible change rather than a version bump: an older file says nothing
+/// about the keying, and nothing is exactly what it knew.
+fn keying_code(m: Option<&'static str>) -> u8 {
+    match m {
+        Some("OOK") => 1,
+        Some("ASK") => 2,
+        Some("FSK") => 3,
+        Some("4-FSK") => 4,
+        Some("MSK") => 5,
+        _ => 0,
+    }
+}
+
+fn keying_from_code(c: u8) -> Option<&'static str> {
+    match c {
+        1 => Some("OOK"),
+        2 => Some("ASK"),
+        3 => Some("FSK"),
+        4 => Some("4-FSK"),
+        5 => Some("MSK"),
+        _ => None,
+    }
+}
+
+/// Bytes before the body of a record: kind, keying, count, time, frequency,
 /// bandwidth, level and noise.
 const HEAD_LEN: usize = 1 + 1 + 2 + 8 + 8 + 4 + 4 + 4;
 
@@ -268,7 +295,7 @@ impl nodes::PacketSink for PacketLog {
 fn put_head(out: &mut Vec<u8>, kind: u8, count: u16, body_len: usize, p: &Packet) {
     out.extend_from_slice(&((HEAD_LEN + body_len) as u32).to_le_bytes());
     out.push(kind);
-    out.push(0);
+    out.push(keying_code(p.modulation));
     out.extend_from_slice(&count.to_le_bytes());
     out.extend_from_slice(&p.at_us.to_le_bytes());
     out.extend_from_slice(&p.center_hz.to_le_bytes());
@@ -333,6 +360,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             bandwidth_hz: get32(20),
             rssi_dbfs: getf(24),
             snr_db: getf(28),
+            modulation: keying_from_code(r[1]),
             body: packet_body,
         });
     }
@@ -374,6 +402,7 @@ mod tests {
             bandwidth_hz: 31_250,
             rssi_dbfs: -21.25,
             snr_db: 18.5,
+            modulation: Some("OOK"),
             body: PacketBody::Pulses(vec![
                 Pulse { mark: 500, gap: 1500 },
                 Pulse { mark: 1500, gap: 500 },
@@ -389,6 +418,7 @@ mod tests {
             bandwidth_hz: 2_000_000,
             rssi_dbfs: f32::NAN,
             snr_db: f32::NAN,
+            modulation: None,
             body: PacketBody::Frame(bytes.to_vec()),
         }
     }

@@ -263,13 +263,19 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
                 bandwidth_hz: bank.channel_bandwidth() as u32,
                 rssi_dbfs: p.rssi_dbfs,
                 snr_db: p.snr_db,
+                modulation: p.modulation,
                 body: PacketBody::Pulses(p.pulses.clone()),
             })
             .collect();
         for d in decode_packets(&mut decoder, packets) {
-            // Bursts nothing claims are reported too, and on this recording
-            // the repeated transmission produces some. They are counted
+            // Bursts nothing claims are still reported, and they are counted
             // rather than matched: the point here is the decode.
+            //
+            // There used to be several on this recording, and there are none
+            // now. They were the FSK front end's reading of an on-off keyed
+            // transmission, which is a burst the classifier no longer sends
+            // it. A phantom reading of a real packet is the one kind of
+            // unknown worth losing.
             if d.protocol == "unknown" {
                 unknown += 1;
                 continue;
@@ -277,7 +283,7 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
             found.push((d.center.0, d.text.clone().unwrap_or_default()));
         }
     }
-    assert!(unknown > 0, "unclaimed bursts should be reported, not dropped");
+    assert_eq!(unknown, 0, "the only bursts here are the transmission, and it decodes");
 
     let mut channels: Vec<usize> = found.iter().map(|(hz, _)| bank.channel_for(Hz(*hz))).collect();
     channels.sort_unstable();
@@ -308,15 +314,19 @@ fn decode_packets(
     node.hits().to_vec()
 }
 
-/// Both branches must be live, or the graph is an OOK chain with extra steps.
+/// The channel graph must measure the burst rather than assume it, or the
+/// bank is an OOK chain with extra steps.
 #[test]
-fn the_automatic_chain_runs_an_ook_and_an_fsk_branch() {
+fn the_automatic_chain_measures_the_burst_before_choosing_a_front_end() {
     let bank = make_bank();
     let g = nodes::ism_decode_graph(bank.channel_spec(0)).expect("build graph");
     let t = g.topology();
     let kinds: Vec<&str> = t.nodes.iter().map(|n| n.kind.as_str()).collect();
-    assert!(kinds.contains(&"pulse_detect"), "{kinds:?}");
-    assert!(kinds.contains(&"fsk_detect"), "{kinds:?}");
+    assert!(kinds.contains(&"burst_route"), "{kinds:?}");
+    // The front ends are inside it, one per burst rather than all of them per
+    // sample. Which one runs is `dsp::route`'s business and is tested there.
+    assert!(!kinds.contains(&"pulse_detect"), "{kinds:?}");
+    assert!(!kinds.contains(&"fsk_detect"), "{kinds:?}");
     // No decoder here: a channel finds bursts, and the protocols run once
     // on the packet bus over everything every front end produced.
     assert!(

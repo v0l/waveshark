@@ -1724,8 +1724,10 @@ pub(crate) mod tests {
     fn each_bank_splits_the_span_to_the_width_its_front_end_wants() {
         for rate in [250_000.0, 1_024_000.0, 2_400_000.0, 20_000_000.0] {
             for (want, lo, hi) in [
+                (12_500.0, 6_000.0, 30_000.0),
                 (OOK_CHANNEL_HZ, 15_000.0, 70_000.0),
                 (FSK_CHANNEL_HZ, 60_000.0, 260_000.0),
+                (500_000.0, 240_000.0, 1_100_000.0),
             ] {
                 let n = nodes::BankNode::channels_for(rate, want);
                 assert_eq!(n % 2, 0, "{rate} at {want} Hz gave an odd count {n}");
@@ -1739,14 +1741,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_ook_bank_is_the_narrower_of_the_two() {
-        // The whole reason for two banks. Measured on the Fine Offset capture,
-        // a 31 kHz channel decodes it down to 12.3 dB peak-to-noise where a
-        // 125 kHz channel needs 22.9 dB.
+    fn the_tiers_run_narrowest_first() {
+        // The whole reason for more than one bank. Measured on the Fine Offset
+        // capture, a 31 kHz channel decodes it down to 12.3 dB peak-to-noise
+        // where a 125 kHz channel needs 22.9 dB, and a chirp needs the widest
+        // tier or it is measured through a filter that removed most of it.
         let rx = replay_receiver(&empty_buf(2_400_000.0, Hz::mhz(868)), None).unwrap();
         let chans = rx.bank_channels();
-        let (narrow, wide) = (chans[0], chans[1]);
-        assert!(narrow > wide, "{narrow} narrow against {wide} wide");
+        assert!(chans.len() >= 2, "one tier is not a set of tiers: {chans:?}");
+        assert!(
+            chans.windows(2).all(|w| w[0] > w[1]),
+            "a narrower tier has more channels, so the counts must fall: {chans:?}"
+        );
     }
 
     #[test]
@@ -2026,12 +2032,9 @@ pub(crate) mod tests {
         let audio_secs = blocks as f64 * b.len() as f64 / rate;
         let x = audio_secs / secs;
         let chans = rx.bank_channels();
-        let (narrow, wide) = (chans[0], chans[1]);
-        eprintln!("scanner: {x:.1}x real time on {narrow} narrow + {wide} wide channels");
-        assert!(
-            x > 1.0,
-            "the scanner ran at only {x:.2}x real time ({narrow} narrow + {wide} wide)"
-        );
+        let total: usize = chans.iter().sum();
+        eprintln!("scanner: {x:.1}x real time on {total} channels across {chans:?}");
+        assert!(x > 1.0, "the scanner ran at only {x:.2}x real time across {chans:?}");
     }
 
     #[test]

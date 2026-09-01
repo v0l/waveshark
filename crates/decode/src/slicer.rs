@@ -419,6 +419,7 @@ mod tests {
             rssi_dbfs: -12.0,
             start_sample: 0,
             center_hz: 0,
+            modulation: None,
         }
     }
 
@@ -575,6 +576,7 @@ mod tests {
             rssi_dbfs: -12.0,
             center_hz: 0,
             start_sample: 0,
+            modulation: None,
         }
     }
 

@@ -244,6 +244,7 @@ impl AskDetector {
                 // Stamped by the node that owns this detector, which is where
                 // the stream's centre frequency is known.
                 center_hz: 0,
+                modulation: Some("ASK"),
             });
             self.stats.accepted += 1;
         } else if !pulses.is_empty() {

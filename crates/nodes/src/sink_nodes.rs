@@ -407,6 +407,7 @@ impl pipeline::node::Node for PacketBusNode {
                             bandwidth_hz,
                             rssi_dbfs: p.rssi_dbfs,
                             snr_db: p.snr_db,
+                            modulation: p.modulation,
                             body: common::PacketBody::Pulses(p.pulses.clone()),
                         });
                     }
@@ -423,6 +424,7 @@ impl pipeline::node::Node for PacketBusNode {
                             // already accepted, with no level to report.
                             rssi_dbfs: f32::NAN,
                             snr_db: f32::NAN,
+                            modulation: None,
                             body: common::PacketBody::Frame(f.clone()),
                         });
                     }

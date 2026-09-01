@@ -7,7 +7,7 @@
 //! the registry the way a user-configured chain would be.
 
 use common::Hz;
-use nodes::{build_chain, ook_chain, registry, NodeSpec};
+use nodes::{build_chain, registry, NodeSpec};
 use pipeline::event::Event;
 use pipeline::{ParamValue, StreamSpec};
 use sources::FileSource;

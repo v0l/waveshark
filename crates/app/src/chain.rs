@@ -601,15 +601,26 @@ impl Receiver {
                     continue;
                 };
                 let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
+                // Two tiers that come out the same width are one tier. A
+                // channelizer has a floor of two channels, so every tier wider
+                // than half the band degenerates to that floor and duplicates
+                // whichever tier got there first: on a 250 kHz capture the
+                // 125 kHz tier and the 500 kHz one are both two channels of
+                // 125 kHz, and the burst is then decoded twice, identically,
+                // and logged as two receptions of one transmission.
+                let mut built: Vec<usize> = Vec::new();
                 for &width in widths {
-                    // Which front end runs in a channel follows from its
-                    // width: the narrow bank is where OOK is worth detecting
-                    // and the wide one is where FSK's two tones both fit.
-                    let (label, make) = if width <= OOK_CHANNEL_HZ {
-                        ("OOK bank", nodes::ism_ook_graph as fn(_) -> _)
-                    } else {
-                        ("FSK bank", nodes::ism_fsk_graph as fn(_) -> _)
-                    };
+                    let channels = BankNode::channels_for(sub.rate(plan.eff_rate()), width);
+                    if built.contains(&channels) {
+                        continue;
+                    }
+                    built.push(channels);
+                    // Named by width rather than by keying. Every tier runs
+                    // the same graph now that the burst is measured instead of
+                    // assumed, so "the OOK bank" would be a claim about what a
+                    // channel hears that nothing checks: the wide tier carries
+                    // on-off keyed sensors, and always did.
+                    let label = bank_label(width);
                     let role = Role::Bank(sub.key(), width as u32);
                     let id = match pool.remove(&role) {
                         // Set before it goes back into the graph, because the
@@ -626,7 +637,8 @@ impl Receiver {
                             b.add_existing(p)
                         }
                         None => {
-                            let mut n = BankNode::new(label, width, make);
+                            let mut n =
+                                BankNode::new(label.clone(), width, nodes::ism_decode_graph);
                             n.set_band(Some(band));
                             b.add_labeled(label, Box::new(n))
                         }
@@ -1235,6 +1247,15 @@ impl Receiver {
 
 }
 
+/// What a bank tier is called, which is its channel width.
+pub fn bank_label(width_hz: f64) -> String {
+    if width_hz >= 1e6 {
+        format!("{:.1} MHz bank", width_hz / 1e6)
+    } else {
+        format!("{:.0} kHz bank", width_hz / 1e3)
+    }
+}
+
 /// Bandwidth a Mode S transmission occupies, for the log's channel column.
 const MODES_BAND_HZ: f64 = 2_000_000.0;
 
@@ -1429,19 +1450,14 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
     // channel to speak of, and nothing else is near enough to be confused
     // with it. Anything from a bank was heard through one of its channels,
     // and which bank is what its keying says.
-    let channel_hz = match d.modulation {
-        Some("PPM") => MODES_BAND_HZ,
-        // AIS is heard through one 25 kHz marine channel, whichever of the
-        // two carried the frame.
-        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
-        // A pager is keyed FSK like an 868 MHz sensor and heard through a
-        // channel a tenth the width, so the keying alone does not say which
-        // front end produced it.
-        Some("FSK") if d.protocol.starts_with("POCSAG") => {
-            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
-        }
-        Some("FSK") => FSK_CHANNEL_HZ,
-        _ => OOK_CHANNEL_HZ,
+    // The width the packet was actually heard through, when the chain that
+    // produced it knows. The match below is the fallback for the chains that
+    // do not carry one, and it is a guess: it reads the width off the keying,
+    // which stops being a proxy for the bank tier as soon as anything measures
+    // the keying properly.
+    let channel_hz = match d.bandwidth_hz {
+        Some(hz) if hz > 0.0 => hz,
+        _ => channel_hz_from_keying(d),
     };
     DecodeRecord {
         at,
@@ -1456,6 +1472,23 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         snr_db: d.snr_db.unwrap_or(f32::NAN),
         bytes: d.payload.clone(),
         crc: d.crc_ok,
+    }
+}
+
+fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
+    match d.modulation {
+        Some("PPM") => MODES_BAND_HZ,
+        // AIS is heard through one 25 kHz marine channel, whichever of the
+        // two carried the frame.
+        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
+        // A pager is keyed FSK like an 868 MHz sensor and heard through a
+        // channel a tenth the width, so the keying alone does not say which
+        // front end produced it.
+        Some("FSK") if d.protocol.starts_with("POCSAG") => {
+            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
+        }
+        Some("FSK") => FSK_CHANNEL_HZ,
+        _ => OOK_CHANNEL_HZ,
     }
 }
 
@@ -1705,7 +1738,7 @@ mod tests {
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let labels: Vec<String> =
             rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
-        for want in ["DC block", "Spectrum", "OOK bank", "FSK bank", "Mixer"] {
+        for want in ["DC block", "Spectrum", "31 kHz bank", "125 kHz bank", "Mixer"] {
             assert!(labels.iter().any(|l| l == want), "{want} is not in {labels:?}");
         }
     }
@@ -1714,9 +1747,11 @@ mod tests {
     fn a_bank_shows_the_chain_its_channels_run() {
         let rx = Receiver::build(&plan(2_400_000.0, Hz::mhz(433)), Sinks::default()).unwrap();
         let topo = rx.topology();
-        let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").expect("the OOK bank");
+        let bank = topo.nodes.iter().find(|n| n.label == "31 kHz bank").expect("the 31 kHz bank");
         let inner = bank.inner.as_ref().expect("what a channel runs");
-        assert!(inner.nodes.iter().any(|n| n.label.contains("Envelope")));
+        // One stage per channel now, where there were two: it measures the
+        // burst and then runs whichever front end reads it.
+        assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
         assert!(bank.inner_count > 1, "a bank of one channel is not a bank");
         // What a bank passes on is the bursts its channels detected, decoded
         // or not, which is what a log or an analyser attaches to.
@@ -1779,7 +1814,7 @@ mod tests {
         // Everything downstream sees the narrowed rate, which is the whole
         // reason the zoom is a node rather than something the caller does to
         // the buffer first.
-        let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").unwrap();
+        let bank = topo.nodes.iter().find(|n| n.label == "31 kHz bank").unwrap();
         assert_eq!(bank.inputs[0].1.rate, 300_000.0);
     }
 
@@ -1802,7 +1837,11 @@ mod tests {
         .unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a packet bus");
-        assert_eq!(bus.inputs.len(), 2, "both banks feed it");
+        assert_eq!(
+            bus.inputs.len(),
+            crate::scanners::DEFAULT_WIDTHS.len(),
+            "every bank tier feeds it"
+        );
         // Every input carries detected bursts rather than decoded frames.
         assert!(bus.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Pulses));
         // And what leaves it is one stream, whatever produced it.
@@ -2143,7 +2182,7 @@ mod tests {
             Receiver::build(&p, Sinks { recorder: Some(rec), ..Default::default() }).unwrap();
         let order: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
         let ring = order.iter().position(|l| l == "Recorder").expect("a recorder");
-        let bank = order.iter().position(|l| l == "OOK bank").expect("a bank");
+        let bank = order.iter().position(|l| l == "31 kHz bank").expect("a bank");
         assert!(ring < bank, "the recorder runs after the decoders: {order:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -399,12 +399,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fifth_of_a_second_of_history_is_not_enough() {
+    fn a_tenth_of_a_second_of_history_is_not_enough() {
         // The reason PRE_ROLL is what it is. A packet takes time to send, the
         // detector waits for silence after it, and the filters add latency, so
         // by the time a decode is reported the burst is long past. If this
         // ever starts passing, the pipeline got faster and the constant can
         // come down; if the round trip test starts failing, look here first.
+        //
+        // It did start passing at a fifth of a second, which is what routing
+        // the burst instead of running both front ends over it bought: one
+        // gate decides where the burst was, and the package is stamped from
+        // there rather than from wherever the second front end's own gate had
+        // got to. The margin here is now a tenth of a second.
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/fineoffset_wh1080_433.92M_250k.cu8");
         if !p.exists() {
@@ -414,7 +420,7 @@ mod tests {
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let dir = std::env::temp_dir().join(format!("sr-short-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.2);
+        let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.1);
         crate::radio::scan_with_recorder(&buf, rec);
 
         let decoded = std::fs::read_dir(&dir)
@@ -424,7 +430,7 @@ mod tests {
             .any(|f| {
                 crate::radio::replay(f).unwrap().iter().any(|r| r.model.contains("Fineoffset"))
             });
-        assert!(!decoded, "0.2 s now catches the burst; PRE_ROLL can be reduced");
+        assert!(!decoded, "0.1 s now catches the burst; PRE_ROLL can be reduced again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
