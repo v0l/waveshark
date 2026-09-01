@@ -358,3 +358,34 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "99034a8237a81d66fb428b298612ffb01707dc4fed31ab783ad92ffabdcd4644"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Toyota_TPMS/gfile006.json"
 description = "A second Toyota wheel, another id and pressure"
+[[sample]]
+name = "honeywell_2gig_a_344.975M_250k.cu8"
+sha256 = "6c211de8db7844f928bbc7ccffcc8ce73406fdfcf963b8f1ec70db833821b9bf"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/2Gig-DW10/g001_344.975M_250k.cu8"
+reference_sha256 = "ccd8f05525a844eacd17fc51f8f33f0f679974ef9bfa964642849f1acc29335c"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/2Gig-DW10/g001_344.975M_250k.json"
+description = "2Gig DW10 door sensor opening, on a 2Gig channel and so the 0x8050 CRC"
+
+[[sample]]
+name = "honeywell_2gig_b_344.975M_250k.cu8"
+sha256 = "40e0dc18bdf8a2f1db8c46db6d4bb22477524671f4339b485dabbf4229f32757"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/2Gig-DW10/g004_344.975M_250k.cu8"
+reference_sha256 = "bfb2a6413524b7ca19dea103d972b5f3a034bf7812a95255eef19b58db466b37"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/2Gig-DW10/g004_344.975M_250k.json"
+description = "The same sensor with the reed switch reading differently"
+
+[[sample]]
+name = "honeywell_re208_a_344.975M_250k.cu8"
+sha256 = "ffa75a6a2381e8e69fdfff2455c335d600f85d14d2a1fe5c032b0b8c20e51cba"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/RE208/g011_344.975M_250k.cu8"
+reference_sha256 = "0d1d6c84d380da1275c8a172bda0c60fc2324793f8b2c1888a0490dc25f3a960"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell/RE208/g011_344.975M_250k.json"
+description = "RE208 wire-to-air repeater on a Honeywell channel, and so the other CRC polynomial"
+
+[[sample]]
+name = "honeywell_5816_a_344.975M_250k.cu8"
+sha256 = "6b5a4f6b3e538ba11d5b0a31e8450f690d361e79b523db19e62d7b28ccbe4d05"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_5816/g001_344.975M_250k.cu8"
+reference_sha256 = "00adc6820f8cd223e4b931269efc65fefe8f8fcccc0add8c4ac50cdfc409321d"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_5816/g001_344.975M_250k.json"
+description = "A 5816 recorded at close range. Listed as a known gap: the burst arrives saturated and the envelope detector reads it as one long mark"

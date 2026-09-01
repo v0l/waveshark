@@ -21,12 +21,23 @@ use corpus::{describe, fixtures};
 /// Checked in both directions: an entry that starts decoding fails the test as
 /// loudly as a decode that stops working, because a gap quietly closed and
 /// left on the list is how a limitation outlives the code that caused it.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
-    "acurite_tower_b",
-    "id:9884",
-    "two sensors transmit inside one burst and a protocol reports the first \
-     frame it finds, so the second device in a package is lost",
-)];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[
+    (
+        "acurite_tower_b",
+        "id:9884",
+        "two sensors transmit inside one burst and a protocol reports the first \
+         frame it finds, so the second device in a package is lost",
+    ),
+    (
+        "honeywell_5816",
+        "id:231303",
+        "recorded at close range, where the receiver's gain control never \
+         settled: the burst arrives saturated and the envelope detector reads \
+         nearly all of it as one long mark, leaving no pulses to slice. The \
+         same sensor family decodes from the 2Gig and RE208 recordings, so \
+         this is the detector's threshold rather than the protocol",
+    ),
+];
 
 /// Every decode rtl_433 found must also be found here, with the same values.
 #[test]

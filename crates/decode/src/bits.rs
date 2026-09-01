@@ -200,6 +200,18 @@ pub fn crc8(data: &[u8], poly: u8, init: u8) -> u8 {
     crc
 }
 
+/// MSB-first CRC-16, `poly` in its normal representation.
+pub fn crc16(data: &[u8], poly: u16, init: u16) -> u16 {
+    let mut crc = init;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ poly } else { crc << 1 };
+        }
+    }
+    crc
+}
+
 /// Simple additive checksum, truncated to 8 bits.
 pub fn checksum8(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |a, b| a.wrapping_add(*b))

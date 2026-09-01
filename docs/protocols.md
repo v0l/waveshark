@@ -133,6 +133,8 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Schrader MRXGG4 tyre sensor | 315/433.92 MHz | OOK Manchester 120 us | 31 kHz | done | table | CRC8 over eight bytes, plus a constant preamble nibble. 28 bit id, pressure and temperature. The id is fixed for the life of the sensor and four of them travel together, which is what makes a wheel worth logging |
 | Toyota / Pacific PMV-C210 tyre sensor | 315/433.92 MHz | FSK differential Manchester 52 us | 125 kHz | done | table | CRC8, and the pressure sent twice with the second copy inverted. Also fitted by TRW to other makes |
 | Other TPMS (Renault, Citroen, Ford, Jansite, Steelmate) | 315/433.92 MHz | OOK/FSK Manchester | 31-125 kHz | table | table | Bursty, short, CRC8. Sensors report on a timer, so a receiver waits minutes per wheel |
+| Honeywell / Ademco door and window sensors, 2Gig DW10 and DW11, RE208, 2GIG-GB1 | 345 MHz | OOK Manchester 136 us | 31 kHz | done | table | CRC16, with the polynomial chosen by the channel field. Reports the serial engraved on the sensor, whether the contact is open, whether the case has been opened and whether the battery is low, all unencrypted |
+| Interlogix / GE / UTC security sensors | 319.5 MHz | OOK PPM | 31 kHz | table | table | Two parity bits and a device-type enum are the whole integrity check, so it needs the corroboration rules the checksum-free remotes use |
 | EnOcean | 868.3 MHz | ASK | 31 kHz | table | table | Self-powered switches |
 | Itron / ERT smart meters | 902-928 MHz | OOK/FSK Manchester | 125 kHz | table | table | The rtlamr target |
 | X10 RF | 310/433.92 MHz | OOK | 31 kHz | done | table | House code, unit and state, guarded by parity |

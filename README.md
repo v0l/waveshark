@@ -21,12 +21,12 @@ per protocol. Nothing in the current tree keys a radio.
 Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
 with RDS, and ADS-B decodes aircraft off the air. AIS, APRS and POCSAG decode
-too. What is missing is protocols: twenty-nine ISM device decoders are
+too. What is missing is protocols: thirty ISM device decoders are
 implemented where the goal is hundreds.
 
-Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 43 recordings
+Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 47 recordings
 from rtl_433's own test corpus and asserts every decode matches the reference
-JSON rtl_433 25.02 produced for that file, field for field. Twenty-two device
+JSON rtl_433 25.02 produced for that file, field for field. Twenty-three device
 models are covered, plus ADS-B against dump1090 over a shared recording. The
 expected values come from separate implementations, so agreement is evidence
 rather than a restatement of our own assumptions.

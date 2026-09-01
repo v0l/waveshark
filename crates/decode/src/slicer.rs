@@ -305,18 +305,21 @@ pub fn slice_manchester_half(pkg: &Package, t: &Timing) -> Result<BitBuffer, Sli
 /// Manchester-decode a half-symbol stream (`mark=1`, `gap=0`) starting at
 /// `start`, the rtl_433 `bitbuffer_manchester_decode` equivalent: read a bit
 /// from each pair, where a level transition means the second half carries the
-/// bit (bit 1 = low-then-high, bit 0 = the reverse). A same-level pair is not
-/// a Manchester symbol, so it is dropped rather than guessed.
+/// bit (bit 1 = low-then-high, bit 0 = the reverse).
+///
+/// A same-level pair is not a Manchester symbol and ends the stream, as it
+/// does in rtl_433. Skipping it instead would keep decoding at an alignment
+/// nothing supports any more, and hand a checksum a frame assembled from two
+/// halves of different symbols.
 pub fn manchester_decode(raw: &BitBuffer, start: usize) -> BitBuffer {
     let mut out = BitBuffer::with_capacity(raw.len() / 2);
     let mut i = start;
     while i + 1 < raw.len() {
-        let (a, b) = (raw.get(i), raw.get(i + 1));
-        if let (Some(a), Some(second)) = (a, b) {
-            if a != second {
-                out.push(second);
-            }
+        let (Some(a), Some(second)) = (raw.get(i), raw.get(i + 1)) else { break };
+        if a == second {
+            break;
         }
+        out.push(second);
         i += 2;
     }
     out
@@ -382,17 +385,23 @@ fn manchester_halves(width_us: u32, half: u32) -> usize {
 
 fn slice_nrz(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     let sym = t.short_us.max(1);
+    let max_zeros = (t.reset_us / sym).max(1) as usize;
     let mut b = BitBuffer::with_capacity(64);
-    for (i, p) in pkg.pulses.iter().enumerate() {
+    for p in pkg.pulses.iter() {
         let m = (p.mark as f32 / sym as f32).round() as usize;
         for _ in 0..m {
             b.push(true);
         }
-        if i + 1 < pkg.pulses.len() {
-            let g = (p.gap as f32 / sym as f32).round() as usize;
-            for _ in 0..g {
-                b.push(false);
-            }
+        // Every gap counts, including the last one, capped at the number of
+        // symbols the reset gap spans. rtl_433 caps it the same way, and the
+        // cap is what makes counting the final gap safe: a frame whose last
+        // symbol is a zero ends with the carrier already off, so dropping the
+        // trailing gap hands the checksum a frame one bit short. Seen on
+        // Honeywell door sensors, where the missing bit is the bottom bit of
+        // the CRC.
+        let g = ((p.gap as f32 / sym as f32).round() as usize).min(max_zeros);
+        for _ in 0..g {
+            b.push(false);
         }
     }
     Ok(b)
@@ -604,12 +613,13 @@ mod tests {
 
     #[test]
     fn nrz_expands_multi_symbol_runs() {
-        let t = Timing { coding: Coding::Nrz, ..Timing::pwm(100, 100, 5000) };
-        // 2 symbols high, 1 low, then 1 high. The trailing 300 us gap is the
-        // terminating timeout, so it contributes no bits.
+        let t = Timing { coding: Coding::Nrz, ..Timing::pwm(100, 100, 500) };
+        // 2 symbols high, 1 low, 1 high, then a 300 us tail. The tail is
+        // silence and silence is zeros, so it becomes three of them, capped by
+        // the reset gap as rtl_433 caps it.
         let p = pkg(&[(200, 100), (100, 300)]);
         let b = slice(&p, &t).unwrap();
-        assert_eq!(b.len(), 4, "terminating gap must not become bits");
-        assert_eq!(b.extract(0, 4), Some(0b1101));
+        assert_eq!(b.len(), 7);
+        assert_eq!(b.extract(0, 7), Some(0b1101000));
     }
 }

@@ -79,10 +79,11 @@ fn the_fsk_chain_recovers_the_transmitted_bits() {
     };
     let got = slice(&pkgs[0], &t).expect("slice");
 
-    // Two bits are lost at the edges and both are structural, not error: the
-    // burst opens on a mark, so the leading low run has no pulse to belong to,
-    // and it ends on a space, which becomes the terminating gap.
-    let want: Vec<bool> = bits[1..bits.len() - 1].iter().map(|b| *b != 0).collect();
+    // One bit is lost at the leading edge, and it is structural rather than
+    // error: the burst opens on a mark, so the low run before it has no pulse
+    // to belong to. The trailing low survives, because the slicer counts the
+    // final gap up to the reset rather than discarding it.
+    let want: Vec<bool> = bits[1..].iter().map(|b| *b != 0).collect();
     let recovered: Vec<bool> = (0..got.len()).map(|i| got.get(i).unwrap()).collect();
     assert_eq!(recovered, want, "bits did not survive the chain");
 }

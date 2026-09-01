@@ -549,6 +549,22 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Honeywell-Security",
+        ours: "Honeywell-Security",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("event", "event", Num),
+            ("state", "state", Text),
+            ("contact_open", "contact_open", Bool),
+            ("reed_open", "reed_open", Bool),
+            ("alarm", "alarm", Bool),
+            ("tamper", "tamper", Bool),
+            ("battery_ok", "battery_ok", Bool),
+            ("heartbeat", "heartbeat", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "Schrader",
         ours: "Schrader",
         fields: &[
