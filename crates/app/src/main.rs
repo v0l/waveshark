@@ -6,6 +6,9 @@ mod wheel;
 mod chain;
 mod bands;
 mod devices;
+mod i18n;
+mod icons;
+mod locale;
 mod dial;
 mod tracks;
 mod map;
@@ -17,6 +20,7 @@ mod radio;
 mod record;
 mod scanners;
 mod session;
+mod shutdown;
 mod ui;
 mod waterfall;
 

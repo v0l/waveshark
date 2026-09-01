@@ -34,10 +34,20 @@ pub struct Session {
     pub gains: Vec<(String, GainMode)>,
     /// Named switches: bias tee, digital AGC and so on.
     pub toggles: Vec<(String, bool)>,
+    /// List settings by driver name and the option chosen, such as which
+    /// antenna port the cable is in.
+    pub choices: Vec<(String, String)>,
     pub ppm: f64,
     /// Where the receiver is, in degrees. Used to resolve an aircraft's
     /// position from a single frame instead of waiting for a matching pair.
     pub location: Option<(f64, f64)>,
+    /// Interface language as a BCP 47 code, empty for the system default.
+    pub language: String,
+    /// ISO 3166-1 country code, empty when it has never been set.
+    pub country: String,
+    /// Band plan identifier. Held separately from the country because it is
+    /// overridable: a country sets it once and then stops having an opinion.
+    pub band_plan: String,
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
@@ -55,8 +65,12 @@ impl Default for Session {
             fft: 2048,
             gains: Vec::new(),
             toggles: Vec::new(),
+            choices: Vec::new(),
             ppm: 0.0,
             location: None,
+            language: String::new(),
+            country: String::new(),
+            band_plan: String::new(),
             dc_block: true,
             decode_on: true,
             volume: 0.5,
@@ -98,6 +112,7 @@ impl Session {
         let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
         let mut gains = Vec::new();
         let mut toggles = Vec::new();
+        let mut choices = Vec::new();
         let mut feeds = Vec::new();
         for line in text.lines() {
             let line = line.trim();
@@ -112,6 +127,8 @@ impl Session {
                 }
             } else if let Some(name) = k.strip_prefix("toggle.") {
                 toggles.push((name.to_string(), v == "true"));
+            } else if let Some(name) = k.strip_prefix("choice.") {
+                choices.push((name.to_string(), v.to_string()));
             } else if k == "feed" {
                 if let Some(f) = parse_feed(v) {
                     feeds.push(f);
@@ -130,11 +147,15 @@ impl Session {
             fft: kv.get("fft").and_then(|v| v.parse().ok()).unwrap_or(d.fft),
             gains,
             toggles,
+            choices,
             ppm: f("ppm", d.ppm),
             location: match (kv.get("lat"), kv.get("lon")) {
                 (Some(a), Some(o)) => a.parse().ok().zip(o.parse().ok()),
                 _ => None,
             },
+            language: kv.get("language").map(|v| v.to_string()).unwrap_or_default(),
+            country: kv.get("country").map(|v| v.to_string()).unwrap_or_default(),
+            band_plan: kv.get("band_plan").map(|v| v.to_string()).unwrap_or_default(),
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
@@ -155,6 +176,15 @@ impl Session {
         if let Some((lat, lon)) = self.location {
             s.push_str(&format!("lat = {lat}\nlon = {lon}\n"));
         }
+        for (k, v) in [
+            ("language", &self.language),
+            ("country", &self.country),
+            ("band_plan", &self.band_plan),
+        ] {
+            if !v.is_empty() {
+                s.push_str(&format!("{k} = {v}\n"));
+            }
+        }
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("volume = {}\n", self.volume));
@@ -163,6 +193,9 @@ impl Session {
         }
         for (name, on) in &self.toggles {
             s.push_str(&format!("toggle.{name} = {on}\n"));
+        }
+        for (name, value) in &self.choices {
+            s.push_str(&format!("choice.{name} = {value}\n"));
         }
         for f in &self.feeds {
             s.push_str(&format!("feed = {} {}\n", f.kind.name, f.address()));
@@ -211,8 +244,12 @@ mod tests {
                 ("lna".into(), GainMode::Auto),
             ],
             toggles: vec![("bias_tee".into(), true)],
+            choices: vec![("antenna".into(), "LNAH".into())],
             ppm: -3.5,
             location: Some((53.5137, -6.2431)),
+            language: "en".into(),
+            country: "IE".into(),
+            band_plan: "europe".into(),
             dc_block: false,
             decode_on: false,
             volume: 0.25,
