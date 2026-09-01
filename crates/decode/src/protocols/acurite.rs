@@ -51,8 +51,14 @@ impl Protocol for Acurite609Txc {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
+        // A byte-wide sum over four bytes is weak enough that a burst of
+        // something else passes it every few hundred windows, so the sanity
+        // rules carry as much weight as the checksum. A zero id is one: the
+        // sensor draws it at random when the batteries go in and never reports
+        // zero. Seen on rtl_433's own X10 recording, which this decoder claimed
+        // as a sensor reading 14.3 C at 0% humidity.
         let b = find_frame(bits, TXC_BYTES, |b| {
-            checksum8(&b[..4]) == b[4] && b[..4] != [0; 4]
+            checksum8(&b[..4]) == b[4] && b[0] != 0 && b[..4] != [0; 4]
         })
         .ok_or(match bits.len() {
             n if n < TXC_BYTES * 8 => DecodeError::WrongLength { got: n, want: TXC_BYTES * 8 },

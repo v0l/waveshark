@@ -1,0 +1,242 @@
+# Captures from rtl_433's own test corpus, with the output rtl_433 produces
+# for each one.
+#
+# https://github.com/merbanan/rtl_433_tests, pinned to a commit so the bytes
+# behind a URL cannot change under the expected decodes. Fetched by
+# testdata/fetch.sh, into testdata/rtl433/, and never committed: the corpus is
+# a gigabyte of contributed recordings under no stated licence, so this project
+# points at it rather than copying it.
+#
+# Each entry names a .cu8 and the .json beside it. The JSON is the reference:
+# one line per decode rtl_433 25.02 found in that capture, which
+# crates/decode/tests/rtl433_corpus.rs compares against field by field.
+#
+# The local name is not the upstream one. Half the corpus predates rtl_433
+# putting the frequency and sample rate in the filename, and `sources::FileSource`
+# needs the rate: guessing it wrong rescales every pulse and breaks every
+# decoder downstream in a way that looks like a protocol bug.
+
+[[sample]]
+name = "fineoffset_whx080_a_433.92M_250k.cu8"
+sha256 = "b985b84fc9e039473798c1f05d13aac7bfd51dc5eaf7dc5f428d7c62305c8a20"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/04/gfile004.cu8"
+reference_sha256 = "c12b5ba9c9ea8a733a3a739e327d22007aee8c789286fcc87796181dd4e5ab4e"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/04/gfile004.json"
+description = "WH1080 weather station, the family the first verified capture in this project came from"
+
+[[sample]]
+name = "fineoffset_whx080_b_433.92M_250k.cu8"
+sha256 = "35458ac64152ab71fd5482355bfb267a10d2f7323b8d4168a9f7d7c7ed5fe397"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/01/gfile031.cu8"
+reference_sha256 = "d05fa3d66316381df8840eef584ad5089625eada27c0d447a531b1df863a5afd"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/01/gfile031.json"
+description = "The same family sending its DCF77 clock message instead of weather, which is a different frame layout behind the same CRC"
+
+[[sample]]
+name = "fineoffset_whx080_c_433.92M_250k.cu8"
+sha256 = "d3b16713575bed9de88eef2ef73d1d0b32172b51a660d0d762cd6535d69d1b39"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/03/gfile052.cu8"
+reference_sha256 = "87ab899b09e2e420ce08f94e551e550562175f6ca6eaca2491e6f97eb32c36a6"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh1080/03/gfile052.json"
+description = "A third WH1080, another station id and another set of readings"
+
+[[sample]]
+name = "fineoffset_wh51_a_433.872M_250k.cu8"
+sha256 = "e906997c47b97aa82d0039edd7909c3c690dfe540302e00ce564f044a5956e39"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh51/01/g004_433.872M_250k.cu8"
+reference_sha256 = "8e432016d759f4a4eeb91ba859459582b4a54e6166d8dbd7ee4053fc8ec8d81b"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh51/01/g004_433.872M_250k.json"
+description = "WH51 soil moisture probe, recorded 48 kHz off the nominal channel"
+
+[[sample]]
+name = "fineoffset_wh51_b_433.872M_250k.cu8"
+sha256 = "f5d4237eec4cbea7fbd7a93f7db5c0aed7fb68172bf3ce4731818ba9eca46c82"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh51/01/g005_433.872M_250k.cu8"
+reference_sha256 = "46eea2c62c5c1d1e50e63a113cd36ce5cb30b86acd502995252d7ebd039dc448"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/fineoffset/fineoffset_wh51/01/g005_433.872M_250k.json"
+description = "A second WH51 transmission from the same sensor"
+
+[[sample]]
+name = "acurite_609txc_a_433.92M_250k.cu8"
+sha256 = "8bb09845f733df26affe056d6a8f9b981d3f47de348e5faaa68f97a928cb37db"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_609A1TX/acurite_th_609_001.cu8"
+reference_sha256 = "74ddcc446ae6fd763b1033a8f87dbb205f88eff049ff7c30d70b762c65b6b683"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_609A1TX/acurite_th_609_001.json"
+description = "Acurite 609TXC, an eight bit sum and nothing else, so also a test of the sanity rules around it"
+
+[[sample]]
+name = "acurite_609txc_b_433.92M_250k.cu8"
+sha256 = "fcc5014751e26809d67acf13884478caec1816b9acafb8bf8b3ba074fa6a6c2f"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_609A1TX/acurite_th_609_002.cu8"
+reference_sha256 = "94615d37281317259a5bd98b87ed6001b3a07e4b5c3d484ce7da6c59aab317d6"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_609A1TX/acurite_th_609_002.json"
+description = "A second 609TXC transmission"
+
+[[sample]]
+name = "acurite_tower_a_433.92M_250k.cu8"
+sha256 = "07e7686a2aa60545d12870d0f15d1d115f3d89698bb64ab39399ceff7896482c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_592TXR/acurite-592txr-003.cu8"
+reference_sha256 = "e8ffdf5aa85cdb2c65c79f666e72ea19f4bf3874d708f3cb9eebdc5da511c22a"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_592TXR/acurite-592txr-003.json"
+description = "Acurite 592TXR tower sensor, per byte parity as well as a checksum"
+
+[[sample]]
+name = "acurite_tower_b_433.92M_250k.cu8"
+sha256 = "24f3ddfaa6cee3f7493b5f35a5452f40afc256ead8cc4f6b1f2eecc43fcc13be"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_592TXR/acurite-592txr-low-batt.cu8"
+reference_sha256 = "a40ef253bf956dcc08b58b171d5bee5dfb709df4ce2a86c2594187bb72db9dcf"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_592TXR/acurite-592txr-low-batt.json"
+description = "Two 592TXR sensors transmitting inside one burst, one of them with a flat battery"
+
+[[sample]]
+name = "bresser_3ch_a_433.92M_250k.cu8"
+sha256 = "cfa9af3899e29b031ce155e1b563043b4cace4f8dda65bb5285778a5a2038585"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/bresser_3ch/dm-7511/gfile001.cu8"
+reference_sha256 = "8453bcb92e295e65376c7dad0e1d921c35f7f4d8f71a25c3358f2a44c7208b81"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/bresser_3ch/dm-7511/gfile001.json"
+description = "Renkforce DM-7511, a Bresser 3CH rebrand whose preamble is 1012 us where the published figure is 750, and 52 kHz off centre"
+
+[[sample]]
+name = "bresser_3ch_b_433.92M_250k.cu8"
+sha256 = "5e96bc952ef3de3ebc3d1b37e655a4594ef43b7a057912038de61e814657ff9f"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/bresser_3ch/dm-7511/gfile002.cu8"
+reference_sha256 = "bcd83bf98fcacba5aceb5dde1bf5d37eda848fbb13e88ef477ddde73dc3b24da"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/bresser_3ch/dm-7511/gfile002.json"
+description = "A second DM-7511 transmission, weaker: 7.7 dB SNR"
+
+[[sample]]
+name = "gtwt02_a_433.92M_250k.cu8"
+sha256 = "8ea2cc931e9e52bcf48b43907e87dec51b82b7fca6fade1f8050d94ba038dc72"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-02/02/g170_433.92M_250k.cu8"
+reference_sha256 = "508342a7a889731213e8391ab0a46d7dd48512cb3fe1a6797cc0384fd4e00842"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-02/02/g170_433.92M_250k.json"
+description = "Globaltronics GT-WT-02, 92 kHz off centre, and the capture that showed a misaligned frame passing its nibble sum"
+
+[[sample]]
+name = "gtwt02_b_433.92M_250k.cu8"
+sha256 = "bcff9d0ad94b8103addbbf42018fba62fe066814a148d94e7fedbba8a97a2a74"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-02/03/g573_433.92M_250k.cu8"
+reference_sha256 = "7ce44dd1e21166375e0ac1841069b5edb369e8a2ac94515c41b78e699feded45"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-02/03/g573_433.92M_250k.json"
+description = "A second GT-WT-02, a different sensor"
+
+[[sample]]
+name = "gtwt03_a_433.92M_250k.cu8"
+sha256 = "0e3048d18f63bd0b8dcc52ba035abbb23d4644cead7680cccd94ee0e05c107cc"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-03/01/g001_433.92M_250k.cu8"
+reference_sha256 = "6cc7fbb3ab2ef1551ad4604d1bf2ce93468101f2ce77ea8cf333c51930da647a"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-03/01/g001_433.92M_250k.json"
+description = "Globaltronics GT-WT-03, whose checksum is a rolling key rather than a CRC or a sum"
+
+[[sample]]
+name = "gtwt03_b_434.101M_250k.cu8"
+sha256 = "ffe2731c863162b149760862417820656b4b2262a406fbdf85d1f081181689c1"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-03/02/g010_434.101M_250k.cu8"
+reference_sha256 = "ca694e5960cc992d98dd8561d8843fdf7208a9e9c03764a00fc230c82cb0feb9"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Globaltronics/GT-WT-03/02/g010_434.101M_250k.json"
+description = "A GT-WT-03 recorded at 434.101 MHz, 181 kHz above the nominal channel"
+
+[[sample]]
+name = "lacrosse_tx141thbv2_a_433.92M_250k.cu8"
+sha256 = "7a74865b17dde9835df70a65c0df69bf01343c58114c769599054e09643c66e5"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/04/gfile001.cu8"
+reference_sha256 = "4f32cffc20c16e1ec1be230bce57cf92a0542844bf806e3fc0b07e92e0fc196e"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/04/gfile001.json"
+description = "LaCrosse TX141TH-Bv2, an LFSR digest rather than a CRC"
+
+[[sample]]
+name = "lacrosse_tx141thbv2_b_433.92M_250k.cu8"
+sha256 = "7cb59f7ec0ce4806a340ad848e71fb2c00fb1cd0e6e56856012b757729fcbf5a"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/04/gfile002.cu8"
+reference_sha256 = "1dbabcdde1447de1acadce4ce029f10a3d0e4c00a8787a4f5d1c8476119078c2"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/04/gfile002.json"
+description = "A second TX141TH-Bv2 transmission"
+
+[[sample]]
+name = "lacrosse_tx29it_a_868.2M_250k.cu8"
+sha256 = "c66616e75dd538fc33e32b89a4d15e69dd98ffc208540882f13f33cc38716a6c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx29_868.2M_250k.cu8"
+reference_sha256 = "12c33ea4bbfd008715621677e9f11ca8b20a4150c4beadffb716e1fab94974ca"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx29_868.2M_250k.json"
+description = "LaCrosse TX29-IT on 868 MHz: FSK, so the other front end, and 110 kHz between its tones"
+
+[[sample]]
+name = "lacrosse_tx29it_b_868.2M_1000k.cu8"
+sha256 = "ff70c47610f40c4a4fcc9b56b4ede0f781e701248481e62ae04bb73e303f6c6c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx29-about-zero_868.2M_1000k.cu8"
+reference_sha256 = "0303c42307e3b294423875d81e6a400ae6e6267e20a89e441c3732eace496590"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx29-about-zero_868.2M_1000k.json"
+description = "The same sensor around zero degrees, recorded at 1 MS/s rather than 250 kS/s"
+
+[[sample]]
+name = "lacrosse_tx35dthit_a_868.2M_250k.cu8"
+sha256 = "60c146c333a50a8cb62f0cdf8438881dc44b0abf418209ecaaa90dd60d2ccd37"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx35dth-it_868.2M_250k.cu8"
+reference_sha256 = "c8447a67e6c8ee3298c8a2ae51255cd1623c57a60fe2d4581ebd329ef6a3beef"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/lacrosse/tx29-it_tx35dth-it/tx35dth-it_868.2M_250k.json"
+description = "A TX35DTH-IT and a TX29-IT in one capture, which differ only in bit period"
+
+[[sample]]
+name = "nexus_th_a_433.92M_250k.cu8"
+sha256 = "c537b7416cc710dfd0d666cd8ff406ef24b5c57ea36a3d3a62cff4e12119002a"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/nexus/03/g027_433.92M_250k.cu8"
+reference_sha256 = "cf95775fb1c335e4c53ac9bbd67ce7eabf04559fde27fd54a7c1d9d8af2b3aba"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/nexus/03/g027_433.92M_250k.json"
+description = "Nexus TH, no integrity check at all: one constant nibble and rtl_433's sanity rules"
+
+[[sample]]
+name = "nexus_th_b_433.92M_250k.cu8"
+sha256 = "e4a27a908b69e20fc416d84492608226b42db77f53a3f6d9dd5c3b4c951c2598"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/nexus/01/gfile001.cu8"
+reference_sha256 = "e30caf616c3448044be9a118b36e77b650b8897fc3c93221e7c161b376ffffc1"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/nexus/01/gfile001.json"
+description = "A second Nexus sensor"
+
+[[sample]]
+name = "rubicson_a_433.92M_250k.cu8"
+sha256 = "65d0e7d21d7b0561c723fb868adf53f199482694ba7834a8cc7de11d6fe3af9a"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/rubicson/02/ch1-26.8-433.92M_250k.cu8"
+reference_sha256 = "495f8b38c1410081d39bed1a54255e5727d659270b9e184f04d3d7bcc3a6386c"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/rubicson/02/ch1-26.8-433.92M_250k.json"
+description = "Rubicson thermometer, whose repeats sit 38 bits apart for a 36 bit frame"
+
+[[sample]]
+name = "rubicson_b_433.92M_250k.cu8"
+sha256 = "40681c9a2b8a7325225638fb69f86692352f8cb5e6db01bad9841d27b317738a"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/rubicson/02/ch1-27.1-433.92M_250k.cu8"
+reference_sha256 = "cbeb363419e5139758085c7b3469e3d037be1e13417cc59c4491591ee4c85cb1"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/rubicson/02/ch1-27.1-433.92M_250k.json"
+description = "The same sensor three tenths of a degree later"
+
+[[sample]]
+name = "somfy_rts_a_433.414M_250k.cu8"
+sha256 = "e223c8acb325d2384da990d7186de374b0004328f2657bd0e418e9dffc7b495b"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/somfy/situo_5_rts_pure_ii/01/g006_433.414M_250k.cu8"
+reference_sha256 = "d5cc6c57dde1e2292945bb3dfc1d06c0e389e96d4ed1f8f095119df0f47f3047"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/somfy/situo_5_rts_pure_ii/01/g006_433.414M_250k.json"
+description = "Somfy RTS blind remote, Manchester with the sync word inside the half symbol stream"
+
+[[sample]]
+name = "somfy_rts_b_433.414M_250k.cu8"
+sha256 = "3b6b3e1a99aa87a8c6ad8a2215f28d2b07015dd97d55bd5c4d55e1ca5387b9f1"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/somfy/situo_5_rts_pure_ii/01/g015_433.414M_250k.cu8"
+reference_sha256 = "6b331ba25d8a66d75201bdd60573f96dd6704cbee81ab506640a37ff4a52d329"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/somfy/situo_5_rts_pure_ii/01/g015_433.414M_250k.json"
+description = "A second Somfy RTS press, a different rolling counter"
+
+[[sample]]
+name = "x10_rf_a_310M_250k.cu8"
+sha256 = "f997afe8467f6b48c7402f26c8a37fd59f5faf2d6b4b2ff7eadc7cdaa8d2e81e"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/x10/01/record-x10-b1-on-001.cu8"
+reference_sha256 = "f05808cfb6462c485b60b2928005bc2091be4cf7cf6bab4d0fc02bc678582e9c"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/x10/01/record-x10-b1-on-001.json"
+description = "X10 RF on 310 MHz, house code B"
+
+[[sample]]
+name = "x10_rf_b_310M_250k.cu8"
+sha256 = "ff83f18ab056425f622cbf08e80e4d87b8f6864f6155a0afe623c192d3c99448"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/x10/01/record-x10-b1-on-002.cu8"
+reference_sha256 = "7ba6aa3fe8db92e24513736df5eb3f2fdbf7184a46842a3a0e8a317b1a551c01"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/x10/01/record-x10-b1-on-002.json"
+description = "A second X10 press"
+

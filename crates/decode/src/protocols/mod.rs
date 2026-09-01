@@ -64,8 +64,18 @@ pub(crate) fn find_frame(
 /// which is most of them: 36, 37 and 41 bit frames are all common. The bytes
 /// handed to `ok` are zero padded on the right, as rtl_433's rows are.
 ///
-/// The frame length is also the repeat spacing, so a trailing stop bit has to
-/// be counted in it or the repeat check looks one bit off and finds nothing.
+/// Where the slicer found row boundaries those are tried first, because a row
+/// starts where the transmitter stopped, and that is real evidence about
+/// alignment rather than a guess. It matters more than it sounds: in a burst of
+/// twelve copies every bit offset repeats at the row period, so a misaligned
+/// window is corroborated exactly as well as the right one and only the
+/// checksum stands between a six bit sum and an invented reading. Observed on
+/// rtl_433's own GT-WT02 recording, which decoded as a different sensor at a
+/// different temperature until the row starts were kept.
+///
+/// The scan over every offset stays as a fallback, for the packages a detector
+/// hands over with no gap long enough to cut on, and there the repeat must sit
+/// exactly one frame away.
 pub(crate) fn find_frame_bits(
     bits: &BitBuffer,
     want: usize,
@@ -77,6 +87,29 @@ pub(crate) fn find_frame_bits(
     // Room for a whole second copy is what makes a repeat check meaningful;
     // below that the buffer is one frame plus slicer slop.
     let alone = bits.len() < want * 2;
+
+    let rows: Vec<usize> = bits
+        .rows()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .filter(|s| s + want <= bits.len())
+        .collect();
+    for &start in &rows {
+        let frame = bits.slice(start, want);
+        if !ok(frame.as_padded_bytes()) {
+            continue;
+        }
+        // Another copy at another row start, which noise does not produce and
+        // a misread row cannot fake.
+        let corroborated = rows
+            .iter()
+            .any(|&at| at != start && bits.slice(at, want) == frame);
+        if alone || corroborated {
+            return Some(frame.as_padded_bytes().to_vec());
+        }
+    }
+
     for start in 0..=(bits.len() - want) {
         let frame = bits.slice(start, want);
         if !ok(frame.as_padded_bytes()) {

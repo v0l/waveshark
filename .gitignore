@@ -7,3 +7,8 @@ testdata/*.cs8
 testdata/*.cs16
 testdata/*.cf32
 testdata/*.xz
+
+# rtl_433's test corpus, captures and the reference decodes beside them. Same
+# reason, plus it belongs to the people who contributed it: testdata/rtl433.toml
+# points at the upstream copy rather than vendoring one.
+testdata/rtl433/

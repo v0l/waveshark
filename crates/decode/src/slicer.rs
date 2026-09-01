@@ -131,17 +131,44 @@ fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
         return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
+    // In PWM the gap is fixed, so one much longer than the symbol it should be
+    // is the space between repeats. Fine Offset sends its gaps at 1 ms and
+    // leaves 8 ms between copies.
+    let row_break = t.long_us * 2 + t.tol();
     let mut b = BitBuffer::with_capacity(pkg.pulses.len());
     for (i, p) in pkg.pulses.iter().enumerate() {
-        // Reject anything far outside both symbols rather than forcing it to
+        if i > 0 && pkg.pulses[i - 1].gap > row_break {
+            b.mark_row();
+        }
+        // Reject anything shorter than both symbols rather than forcing it to
         // the nearer one; a wildly wrong width means the package is not this
         // protocol, and guessing would manufacture plausible-looking rubbish.
+        //
+        // A mark *longer* than both is the preamble, but only for a protocol
+        // that says it has one. Its width varies far more between rebrands of
+        // the same sensor than the data symbols do: rtl_433's Bresser 3CH
+        // publishes a 750 us sync and the DM-7511 in its own corpus sends 1012,
+        // so matching the published width within a tolerance throws that
+        // recording away. Taking any over-long mark as a row start reads it,
+        // and the frame's checksum still has to pass afterwards.
+        //
+        // For a protocol declaring no sync the same leniency is not affordable.
+        // The fixed-code gate remotes have no checksum at all, so the timing
+        // table is the whole of their evidence, and accepting a stray long mark
+        // is how one of them claims a weather station's burst.
         let lo = t.short_us.saturating_sub(t.tol() * 2);
         let hi = t.long_us + t.tol() * 2;
+        if t.sync_us > 0 && p.mark > hi {
+            b.mark_row();
+            continue;
+        }
         if t.sync_us > 0 && p.mark.abs_diff(t.sync_us) <= t.tol() {
             continue;
         }
-        if p.mark < lo || p.mark > hi {
+        if p.mark > hi {
+            return Err(SliceError::BadWidth { index: i, width_us: p.mark });
+        }
+        if p.mark < lo {
             return Err(SliceError::BadWidth { index: i, width_us: p.mark });
         }
         b.push(p.mark < mid);
@@ -154,10 +181,24 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
         return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
+    // A gap well past the long symbol is the space between repeats, not a bit.
+    // rtl_433 calls this the gap limit and starts a new row at it. The bits
+    // stay in one buffer here, with the boundary recorded, because a decoder
+    // wants both: where each copy starts, and the freedom to read a frame that
+    // straddles a boundary the detector put in the wrong place. Turning that
+    // space into a bit instead is what used to break the repeat check in
+    // `find_frame_bits`, since every copy then sat a bit further along than the
+    // frame length and a burst of twelve identical frames corroborated none of
+    // them.
+    let row_break = t.long_us + t.tol() * 2;
     let mut b = BitBuffer::with_capacity(pkg.pulses.len());
     // The final gap is the terminating timeout and carries no bit.
     for p in &pkg.pulses[..pkg.pulses.len() - 1] {
-        b.push(p.gap >= mid);
+        if p.gap <= row_break {
+            b.push(p.gap >= mid);
+        } else {
+            b.mark_row();
+        }
     }
     Ok(b)
 }

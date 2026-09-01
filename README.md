@@ -9,14 +9,21 @@ Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
 with RDS, and ADS-B decodes aircraft off the air. AIS, APRS and POCSAG decode
 too. What is missing is protocols: twenty-five ISM device decoders are
-implemented where the goal is hundreds, and only Fine Offset and ADS-B have
-been checked against real recordings.
+implemented where the goal is hundreds.
 
-Proof it works: `crates/decode/tests/fineoffset_capture.rs` decodes a real
-recorded 433.92 MHz weather-station transmission and asserts the result matches
-`rtl_433` 25.02 field for field, CRC included. The expected values come from a
-separate implementation, so agreement is evidence rather than a restatement of
-our own assumptions.
+Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 28 recordings
+from rtl_433's own test corpus and asserts every decode matches the reference
+JSON rtl_433 25.02 produced for that file, field for field. Twelve device
+families are covered, plus ADS-B against dump1090 over a shared recording. The
+expected values come from separate implementations, so agreement is evidence
+rather than a restatement of our own assumptions.
+
+That corpus earned its place immediately. Four decoders that passed every
+synthetic test in this repository decoded nothing at all off real RF, and one
+reported the wrong sensor at the wrong temperature with its checksum passing.
+The causes were in the shared layers rather than in any one protocol: the
+slicers were throwing away the gap between repeats, which is the only evidence
+of where a frame begins.
 
 ## Layout
 
@@ -171,6 +178,25 @@ would bloat history permanently.
 
 Tests that need a fixture skip cleanly when it is missing, so a fresh clone
 builds and passes without network access.
+
+The same script fetches the rtl_433 corpus samples listed in
+`testdata/rtl433.toml`: a capture and the reference decode beside it, straight
+from `merbanan/rtl_433_tests` at a pinned commit. Those recordings were
+contributed by their owners under no stated licence, so this repository points
+at them rather than copying them.
+
+To see what the corpus covers and what each capture decodes to:
+
+```sh
+cargo test --release -p decode --test rtl433_corpus -- --ignored --nocapture
+```
+
+Adding a protocol is worth pairing with a capture from that corpus. Pick one
+whose reference JSON names the device, add it to `testdata/rtl433.toml` with
+the frequency and sample rate in the local filename, and the existing test
+picks it up: it compares every field, and separately requires that nothing
+reporting a passing integrity check claims a burst rtl_433 read as something
+else.
 
 ### Making your own
 

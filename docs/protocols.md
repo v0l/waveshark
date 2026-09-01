@@ -77,6 +77,31 @@ that is the operator's call, not this file's. The one place it becomes a code
 concern is duty cycle: parts of 868 MHz are capped at 1%, and a scheduler that
 enforces the cap is easier to trust than an operator who has to remember it.
 
+## How a status is earned
+
+A **done** here means a recording of the real device decodes to the same
+fields another implementation got from the same bytes.
+`crates/decode/tests/rtl433_corpus.rs` replays captures from rtl_433's own test
+corpus and compares against the JSON rtl_433 25.02 emitted for each one, field
+by field. `testdata/rtl433.toml` lists them, and `testdata/fetch.sh` pulls them
+from the upstream repository at a pinned commit.
+
+Two things are checked, and the second matters as much as the first. Every
+decode rtl_433 found must be found here with the same values, and nothing
+reporting a passing integrity check may claim a burst rtl_433 read as something
+else. A receiver meant to identify unknown signals is not helped by a decoder
+that finds the right sensor and three imaginary ones.
+
+Known gaps, listed in the test so that closing one fails until the note is
+removed:
+
+- Two sensors transmitting inside one burst yield one decode, because a
+  protocol returns the first frame it finds in a package. rtl_433 reads its
+  rows separately and reports both.
+- Oregon Scientific v2.1 (THGR122N, THN132N, RTGN318, WGR800) is most of what
+  the corpus holds for that brand, and the decoder here covers v3 only, so none
+  of those recordings is used.
+
 ## ISM sensors, remotes and telemetry
 
 The rtl_433 and Flipper sub-GHz domain: roughly 250 device decoders in
@@ -85,25 +110,26 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| Fine Offset WH1080 family | 433.92 MHz | OOK PWM 544/1524 us | 31 kHz | done | table | CRC8, matches rtl_433 25.02 field for field |
+| Fine Offset WH1080 family | 433.92 MHz | OOK PWM 544/1524 us | 31 kHz | done | table | CRC8, matches rtl_433 25.02 field for field, including the DCF77 clock message the station sends around minute 59 |
+| Fine Offset WH51 soil moisture | 433.92/868/915 MHz | FSK 58 us | 125 kHz | done | table | CRC8 and a checksum, moisture as a raw AD count and a percentage |
 | PT2262 / EV1527 / HS1527 fixed code | 315/433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Garage doors, doorbells, cheap sensors. The most common thing on 433. No integrity check at all, so a burst is only claimed when it is exactly one frame long |
-| Princeton, Holtek, CAME 12/24, Ansonic, Bett, Nice Flo, Linear, Holtek HT12x, Linear Delta3 | 315/433.92 MHz | OOK PWM | 31 kHz | done | table | Flipper's fixed-code gate remotes, ported from Momentum-Firmware. No checksum, so a frame is only claimed when it repeats or the package is plainly one frame, and degenerate all-0/all-1 frames are refused |
+| Princeton, Holtek, CAME 12/24, Ansonic, Bett, Nice Flo, Linear, Holtek HT12x, Linear Delta3 | 315/433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Flipper's fixed-code gate remotes, ported from Momentum-Firmware. No checksum, so a frame is only claimed when it repeats or the package is plainly one frame, and degenerate all-0/all-1 frames are refused. On rtl_433's recordings several of them still claim bursts belonging to weather sensors, reporting no integrity check as they do so. Not verified: the corpus has no capture of one of these remotes that rtl_433 itself reads as more than an unknown code |
 | Chamberlain / Security+ 1.0 and 2.0 | 310/315/390 MHz | OOK PWM | 31 kHz | table | table | Rolling code: readable, not cloneable |
-| Somfy RTS | 433.42 MHz | OOK Manchester 604 us | 31 kHz | synthetic | table | Rolling code: readable, not cloneable. The sync word lives in the half-symbol stream and its odd length breaks naive pairing, so the decoder searches the raw halves for the sync and only then pairs, the way rtl_433 does. 56 bits, descrambled by XOR with the previous byte, guarded by a nibble-XOR checksum |
+| Somfy RTS | 433.42 MHz | OOK Manchester 604 us | 31 kHz | done | table | Rolling code: readable, not cloneable. The sync word lives in the half-symbol stream and its odd length breaks naive pairing, so the decoder searches the raw halves for the sync and only then pairs, the way rtl_433 does. 56 bits, descrambled by XOR with the previous byte, guarded by a nibble-XOR checksum |
 | KeeLoq, FAAC SLH, Star Line | 433.42/433.92 MHz | OOK PWM/Manchester | 31 kHz | table | table | Frames read fine; the payload is encrypted, so a replay is all a transmitter can do with one. No captures yet, so these wait on real RF before being ported rather than shipping an unverifiable decoder |
-| Acurite 609TXC, 592TXR tower | 433.92 MHz | OOK PPM/PWM | 31 kHz | synthetic | table | Checksum, and per-byte parity on the tower family |
-| LaCrosse TX141TH-Bv2 | 433.92 MHz | OOK PWM | 31 kHz | synthetic | table | LFSR digest, not a CRC |
-| LaCrosse TX29-IT, TX35DTH-IT | 868.24 MHz | FSK NRZ 55/105 us | 125 kHz | synthetic | table | Sync word 0x2dd4, CRC8, BCD temperature |
-| Nexus, FreeTec, Solight, TFA 30.3209 | 433.92 MHz | OOK PPM | 31 kHz | synthetic | table | No checksum: one constant nibble and rtl_433's sanity rules |
-| Rubicson, TFA 30.3197, inFactory PT-310 | 433.92 MHz | OOK PPM | 31 kHz | synthetic | table | CRC8 over a nibble-padded frame. Shares its layout with Nexus, which defers to it |
-| Bresser Thermo-/Hygro 3CH, Renkforce DM-7511 | 433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Additive checksum. Measures in Fahrenheit, reported in Celsius |
-| Globaltronics GT-WT-02 (Aldi) | 433.92 MHz | OOK PPM, ms symbols | 31 kHz | synthetic | table | Nibble-sum checksum, LL/HH humidity sentinels |
-| Globaltronics GT-WT-03 (Aldi, Lidl) | 433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Rolling-key checksum, neither a CRC nor a sum |
+| Acurite 609TXC, 592TXR tower | 433.92 MHz | OOK PPM/PWM | 31 kHz | done | table | Checksum, and per-byte parity on the tower family. The 609's sum is eight bits over four bytes, weak enough that the sanity rules around it matter as much: it claimed an X10 remote's burst as a sensor reading 14.3 C until a zero id was refused |
+| LaCrosse TX141TH-Bv2 | 433.92 MHz | OOK PWM | 31 kHz | done | table | LFSR digest, not a CRC |
+| LaCrosse TX29-IT, TX35DTH-IT | 868.24 MHz | FSK NRZ 55/105 us | 125 kHz | done | table | Sync word 0x2dd4, CRC8, BCD temperature. A frame ending in zero bits ends with the carrier already off, so the tail is padded with the zeros silence stands for and the CRC checked across the padding |
+| Nexus, FreeTec, Solight, TFA 30.3209 | 433.92 MHz | OOK PPM | 31 kHz | done | table | No checksum: one constant nibble and rtl_433's sanity rules |
+| Rubicson, TFA 30.3197, inFactory PT-310 | 433.92 MHz | OOK PPM | 31 kHz | done | table | CRC8 over a nibble-padded frame. Shares its layout with Nexus, which defers to it |
+| Bresser Thermo-/Hygro 3CH, Renkforce DM-7511 | 433.92 MHz | OOK PWM | 31 kHz | done | table | Additive checksum. Measures in Fahrenheit, reported in Celsius. The DM-7511 sends a 1012 us preamble where Bresser publishes 750, which is why an over-long mark is read as a row start rather than matched against a published width |
+| Globaltronics GT-WT-02 (Aldi) | 433.92 MHz | OOK PPM, ms symbols | 31 kHz | done | table | Nibble-sum checksum, LL/HH humidity sentinels |
+| Globaltronics GT-WT-03 (Aldi, Lidl) | 433.92 MHz | OOK PWM | 31 kHz | done | table | Rolling-key checksum, neither a CRC nor a sum |
 | Ambient Weather, Oregon Scientific, other Acurite | 433.92/915 MHz | OOK PWM/Manchester | 31 kHz | table | table | Several families each, all timing tables |
 | TPMS (Schrader, Toyota, Renault, Citroen) | 315/433.92 MHz | OOK/FSK Manchester | 31-125 kHz | table | table | Bursty, short, CRC8. Sensors report on a timer, so a receiver waits minutes per wheel |
 | EnOcean | 868.3 MHz | ASK | 31 kHz | table | table | Self-powered switches |
 | Itron / ERT smart meters | 902-928 MHz | OOK/FSK Manchester | 125 kHz | table | table | The rtlamr target |
-| X10 RF | 310/433.92 MHz | OOK | 31 kHz | table | table | |
+| X10 RF | 310/433.92 MHz | OOK | 31 kHz | done | table | House code, unit and state, guarded by parity |
 | Homematic | 868.3 MHz | GFSK 10 kbps | 125 kHz | framing | mod | Sync word plus whitening |
 | Radiosondes (RS41, DFM, M10) | 400-406 MHz | GFSK 4800 bps | 125 kHz | framing | mod | Reed-Solomon, and a GPS position worth having |
 | nRF24 ShockBurst | 2.4 GHz | GFSK 1-2 Mbps | 2 MHz | demod | mod | HackRF only. Flipper does this with a separate module |

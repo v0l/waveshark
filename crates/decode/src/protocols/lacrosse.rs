@@ -135,14 +135,19 @@ impl Protocol for LacrosseIt {
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let at = bits.find(&IT_SYNC, 24).ok_or(DecodeError::NotThisProtocol)?;
         let start = at + IT_SYNC_LEAD;
-        if start + IT_BYTES * 8 > bits.len() {
-            return Err(DecodeError::WrongLength {
-                got: bits.len() - start,
-                want: IT_BYTES * 8,
-            });
+        // A frame whose last bits are zeros ends with the carrier already off,
+        // and a detector cannot see how long silence was meant to last: the
+        // final gap it reports is its own reset timeout. So the tail is padded
+        // with the zeros silence stands for, at most one byte of them, and the
+        // CRC still has to hold across the padding. Without this a TX29 frame
+        // ending in two zero bits is thrown away, which is what rtl_433's own
+        // recording of one does.
+        let have = bits.len().saturating_sub(start);
+        if have + 8 < IT_BYTES * 8 {
+            return Err(DecodeError::WrongLength { got: have, want: IT_BYTES * 8 });
         }
         let frame = bits.slice(start, IT_BYTES * 8);
-        let b = frame.as_bytes();
+        let b = frame.as_padded_bytes();
         if crc8(&b[..4], 0x31, 0x00) != b[4] {
             return Err(DecodeError::CrcFailed);
         }

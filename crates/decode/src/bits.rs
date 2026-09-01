@@ -6,11 +6,32 @@
 /// layout like `ff FI IT TT` can be read straight out of `as_bytes()` without
 /// mental reversal. Getting this backwards is a classic source of decoders
 /// that almost work.
-#[derive(Clone, Default, PartialEq, Eq)]
+/// Row starts are carried alongside the bits because they are the only
+/// evidence of where a frame begins. A burst holds a transmission repeated ten
+/// or twelve times, separated by a gap far longer than any symbol, and that gap
+/// is where each copy starts. Without it a decoder has to search every bit
+/// offset and trust a checksum to reject the wrong ones, which for the many
+/// protocols carrying six or eight bits of checksum it will not reliably do:
+/// a misaligned window that happens to sum correctly reports a real-looking
+/// device with an invented temperature. rtl_433 avoids that by cutting the
+/// burst into rows at its `gap_limit`; this is the same information.
+#[derive(Clone, Default)]
 pub struct BitBuffer {
     bytes: Vec<u8>,
     len: usize,
+    rows: Vec<usize>,
 }
+
+/// Rows are metadata about how the bits were found, not part of the value, so
+/// two buffers holding the same bits are equal whatever their row structure.
+/// Frame comparison depends on this.
+impl PartialEq for BitBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.as_padded_bytes() == other.as_padded_bytes()
+    }
+}
+
+impl Eq for BitBuffer {}
 
 impl BitBuffer {
     pub fn new() -> Self {
@@ -18,11 +39,11 @@ impl BitBuffer {
     }
 
     pub fn with_capacity(bits: usize) -> Self {
-        Self { bytes: Vec::with_capacity(bits.div_ceil(8)), len: 0 }
+        Self { bytes: Vec::with_capacity(bits.div_ceil(8)), len: 0, rows: Vec::new() }
     }
 
     pub fn from_bytes(b: &[u8]) -> Self {
-        Self { bytes: b.to_vec(), len: b.len() * 8 }
+        Self { bytes: b.to_vec(), len: b.len() * 8, rows: Vec::new() }
     }
 
     /// Number of bits held.
@@ -47,6 +68,20 @@ impl BitBuffer {
     pub fn clear(&mut self) {
         self.bytes.clear();
         self.len = 0;
+        self.rows.clear();
+    }
+
+    /// Record that a new row starts at the next bit pushed.
+    pub fn mark_row(&mut self) {
+        if self.rows.last() != Some(&self.len) {
+            self.rows.push(self.len);
+        }
+    }
+
+    /// Bit offsets where a row starts, empty when the slicer found no row
+    /// structure. The first row is included only if it was marked.
+    pub fn rows(&self) -> &[usize] {
+        &self.rows
     }
 
     pub fn push(&mut self, bit: bool) {
@@ -95,7 +130,7 @@ impl BitBuffer {
         if pattern_bits == 0 || pattern_bits > self.len {
             return None;
         }
-        let pat = BitBuffer { bytes: pattern.to_vec(), len: pattern_bits };
+        let pat = BitBuffer { bytes: pattern.to_vec(), len: pattern_bits, rows: Vec::new() };
         'outer: for start in 0..=(self.len - pattern_bits) {
             for i in 0..pattern_bits {
                 if self.get(start + i) != pat.get(i) {
@@ -129,6 +164,7 @@ impl BitBuffer {
         BitBuffer {
             bytes: self.bytes.iter().map(|b| !b).collect(),
             len: self.len,
+            rows: self.rows.clone(),
         }
     }
 
