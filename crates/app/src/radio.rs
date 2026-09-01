@@ -305,6 +305,9 @@ pub enum Cmd {
     /// and the decode switch no longer decide what is built, so an edited
     /// graph is not thrown away by the next retune.
     Manual(bool),
+    /// The graph the operator drew, as the whole thing: it is a description
+    /// rather than a list of edits, for the same reason the scanner table is.
+    Patch(crate::patch::Patch),
     Stop,
 }
 
@@ -504,6 +507,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         channels: Vec::new(),
         fronts,
         feeds: Vec::new(),
+        patch: None,
         record: rec.is_some(),
         log: false,
     };
@@ -683,6 +687,13 @@ pub struct Status {
     pub zoom: AtomicU64,
     /// Whether the operator owns the shape of the graph.
     pub manual: AtomicBool,
+    /// The patch the receiver is actually running, which is not always the
+    /// one last sent: an edit that will not build is refused and the previous
+    /// one goes back.
+    patch: parking_lot::Mutex<Option<crate::patch::Patch>>,
+    /// Bumped whenever the radio thread replaces it, so the interface can
+    /// tell its own edit from one being handed back.
+    pub patch_rev: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
     pub logged: AtomicU64,
 }
@@ -770,11 +781,24 @@ impl Default for Status {
             pocsag_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
             manual: AtomicBool::new(false),
+            patch: parking_lot::Mutex::new(None),
+            patch_rev: AtomicU64::new(0),
         }
     }
 }
 
 impl Status {
+    /// Publish the patch the receiver is running.
+    fn set_patch(&self, p: Option<crate::patch::Patch>) {
+        *self.patch.lock() = p;
+        self.patch_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The patch the receiver is running, and which revision it is.
+    pub fn patch(&self) -> (u64, Option<crate::patch::Patch>) {
+        (self.patch_rev.load(Ordering::Relaxed), self.patch.lock().clone())
+    }
+
     pub fn blend(&self) -> f32 {
         f32::from_bits(self.blend.load(Ordering::Relaxed))
     }
@@ -983,6 +1007,7 @@ impl Audio {
             fft: 1024,
             channels: vec![spec],
             fronts: Vec::new(),
+            patch: None,
             record: false,
             log: false,
             feeds: Vec::new(),
@@ -1082,6 +1107,7 @@ fn run(
         channels: Vec::new(),
         // Resolved from the scanner table below, once the tuning is known.
         fronts: Vec::new(),
+        patch: None,
         record: false,
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
@@ -1102,8 +1128,13 @@ fn run(
     let mut hits = 0u64;
     let mut volume = 0.5f32;
     let mut scan_on = true;
-    // Whether the operator is holding the shape of the graph.
+    // Whether the operator is holding the shape of the graph, and the graph
+    // they drew. Held across a switch back to automatic so that turning
+    // manual mode on again returns to the patch rather than to nothing.
     let mut manual = false;
+    let mut patch: Option<crate::patch::Patch> = None;
+    // The last patch that built, to fall back on when an edit does not.
+    let mut last_patch: Option<Option<crate::patch::Patch>> = None;
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
     let gap = tune_gap();
@@ -1288,9 +1319,24 @@ fn run(
                 Cmd::Manual(on) => {
                     manual = on;
                     status.manual.store(on, Ordering::Relaxed);
-                    // Leaving manual mode puts the scanner table back in
-                    // charge; entering it keeps whatever is running now.
-                    rebuild = !on;
+                    // Entering manual mode empties the span of front ends:
+                    // what runs is now what has been drawn, and nothing has
+                    // been drawn yet. Keeping the scanner table's front ends
+                    // and letting the patch add to them would leave a set of
+                    // decoders on the graph that the view cannot edit and the
+                    // operator did not ask for.
+                    plan.fronts = Vec::new();
+                    plan.patch = on.then(|| patch.clone()).flatten();
+                    status.set_patch(plan.patch.clone());
+                    rebuild = true;
+                }
+                Cmd::Patch(p) => {
+                    patch = Some(p.clone());
+                    if manual {
+                        plan.patch = Some(p);
+                        status.set_patch(plan.patch.clone());
+                        rebuild = true;
+                    }
                 }
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
@@ -1340,8 +1386,25 @@ fn run(
             }
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
-                *status.error.lock() = Some(format!("cannot build the chain: {e}"));
-                return Ok(());
+                // A patch is drawn wire by wire, so most of the time it is
+                // half a graph, and a type mismatch between two stages is an
+                // ordinary step rather than a fault. Going back to the last
+                // shape that built keeps the receiver running while it is
+                // said; without this an edit could stop the radio dead.
+                let Some(good) = last_patch.clone() else {
+                    *status.error.lock() = Some(format!("cannot build the chain: {e}"));
+                    return Ok(());
+                };
+                *status.error.lock() = Some(format!("the patch was refused: {e}"));
+                plan.patch = good;
+                if let Err(e) = rx.rebuild(&plan) {
+                    *status.error.lock() = Some(format!("cannot build the chain: {e}"));
+                    return Ok(());
+                }
+                status.set_patch(plan.patch.clone());
+            } else {
+                // Only a shape that built is worth going back to.
+                last_patch = Some(plan.patch.clone());
             }
             *status.error.lock() = rx.refused.clone();
             // A channel that was rebuilt has lost its RDS state, and its old
@@ -1540,6 +1603,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
             // receiver, not about which band a block covers.
             band: (0.0, f64::INFINITY),
         }],
+        patch: None,
         record: false,
         log: false,
         feeds: Vec::new(),

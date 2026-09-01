@@ -72,6 +72,13 @@ const INPUT_SLOT: Slot = 0;
 struct Entry {
     node: Box<dyn Node>,
     label: String,
+    /// The caller's own name for this node, carried through the build.
+    ///
+    /// A `NodeId` is a position in the built graph and the graph is rebuilt
+    /// whenever its shape changes, so an interface that edits a graph cannot
+    /// use ids to say which node it meant. The tag is whatever the caller
+    /// wants to recognise a node by afterwards, and nothing here reads it.
+    tag: Option<u64>,
     /// Slot feeding each input port.
     in_slots: Vec<Slot>,
     /// Slot each output port writes to.
@@ -82,6 +89,8 @@ pub struct GraphBuilder {
     input: StreamSpec,
     nodes: Vec<Box<dyn Node>>,
     labels: Vec<String>,
+    /// The caller's own name for each node, if it gave one.
+    tags: Vec<Option<u64>>,
     /// Consumer end -> producer end. One producer per input port; fan-out is
     /// many inputs referencing the same `Out`.
     edges: HashMap<In, Out>,
@@ -99,6 +108,7 @@ impl GraphBuilder {
             input,
             nodes: Vec::new(),
             labels: Vec::new(),
+            tags: Vec::new(),
             edges: HashMap::new(),
             input_consumers: Vec::new(),
             output: None,
@@ -109,7 +119,17 @@ impl GraphBuilder {
         let label = node.name().to_string();
         self.nodes.push(node);
         self.labels.push(label);
+        self.tags.push(None);
         NodeId(self.nodes.len() - 1)
+    }
+
+    /// Name a node in the caller's own terms, so it can be found again in the
+    /// topology after a rebuild has renumbered everything.
+    pub fn set_tag(&mut self, id: NodeId, tag: u64) -> &mut Self {
+        if let Some(slot) = self.tags.get_mut(id.0) {
+            *slot = Some(tag);
+        }
+        self
     }
 
     /// Add a node taken out of a previous graph, keeping its label.
@@ -183,6 +203,9 @@ pub struct NodePart {
 #[derive(Clone, Debug)]
 pub struct TopoNode {
     pub id: NodeId,
+    /// What the caller called this node, when it named one. Stable across the
+    /// rebuilds that change every `id`.
+    pub tag: Option<u64>,
     pub label: String,
     /// The node type's own name, which is what a registry would call it.
     pub kind: String,
@@ -357,6 +380,7 @@ impl Graph {
             g.entries.push(Entry {
                 node,
                 label: b.labels[k].clone(),
+                tag: b.tags[k],
                 in_slots: in_slots[k].clone(),
                 out_slots: (0..outs).map(|p| out_slot_base[k] + p).collect(),
             });
@@ -472,6 +496,7 @@ impl Graph {
             let e = &self.entries[k];
             nodes.push(TopoNode {
                 id: NodeId(k),
+                tag: e.tag,
                 label: e.label.clone(),
                 kind: e.node.name().to_string(),
                 latency: self.latency[e.out_slots[0]],

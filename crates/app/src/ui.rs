@@ -118,6 +118,18 @@ pub struct App {
     chain_sel: Option<usize>,
     /// Manual mode and where the stages have been dragged to.
     chain_edit: crate::chainview::Edit,
+    /// The graph the operator has drawn, when manual mode is on.
+    chain_patch: crate::patch::Patch,
+    /// Which revision of it the radio thread last published, so an edit it
+    /// refused can be noticed and taken back.
+    chain_patch_rev: u64,
+    /// The last patch handed to the radio thread. What comes back matches it
+    /// when the edit built, and is the previous graph when it did not.
+    chain_patch_sent: Option<crate::patch::Patch>,
+    /// The stage the palette will add next.
+    chain_add: String,
+    /// The operator's own stage that is selected, by patch id.
+    chain_pick: Option<u64>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
     /// Where the flight map is looking, and how far it reaches.
@@ -377,6 +389,11 @@ impl Default for App {
             location: None,
             chain_sel: None,
             chain_edit: crate::chainview::Edit::default(),
+            chain_patch: crate::patch::Patch::default(),
+            chain_patch_rev: 0,
+            chain_patch_sent: None,
+            chain_add: String::new(),
+            chain_pick: None,
             country: String::new(),
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
@@ -717,6 +734,20 @@ impl App {
         // long as the drag lasted.
         self.chain_topo = radio.status.chain();
         self.chain_latency = radio.status.chain_latency();
+        // An edit that will not build is refused and the last one that did
+        // goes back, so what is on screen has to be what the receiver is
+        // running rather than what was last asked for.
+        let (rev, running) = radio.status.patch();
+        if rev != self.chain_patch_rev {
+            self.chain_patch_rev = rev;
+            let running = running.unwrap_or_default();
+            // Only when it is not the edit that was just sent. Adopting our
+            // own patch back would undo anything drawn in the meantime, since
+            // the receiver is a rebuild behind the pointer.
+            if self.chain_patch_sent.as_ref() != Some(&running) {
+                self.chain_patch = running;
+            }
+        }
         let mut batches = Vec::new();
         while let Ok(batch) = radio.decodes.try_recv() {
             batches.push(batch);
@@ -2756,7 +2787,7 @@ impl App {
         // hides half of that.
         let mut act = crate::chainview::Interaction {
             selected: self.chain_sel,
-            changed: None,
+            ..Default::default()
         };
         if self.chain_sel.is_some() {
             Panel::right("chain-inspector")
@@ -2797,27 +2828,46 @@ impl App {
                     self.chain_latency,
                     self.chain_sel,
                     &mut self.chain_edit,
+                    manual.then_some(&self.chain_patch),
                 )
             })
             .inner;
         self.chain_sel = drawn.selected;
+        if manual {
+            if drawn.picked.is_some() {
+                self.chain_pick = drawn.picked;
+            }
+            let mut edited = false;
+            if let Some((from, to, port)) = drawn.link {
+                self.chain_patch.connect(from, (to, port));
+                edited = true;
+            }
+            if let Some(to) = drawn.unlink {
+                self.chain_patch.disconnect(to);
+                edited = true;
+            }
+            if edited {
+                self.send_patch();
+            }
+        }
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.send(Cmd::NodeParam(id, name, value));
         }
     }
 
-    /// The switch that decides who owns the shape of the graph.
+    /// The switch that decides who owns the shape of the graph, and the
+    /// palette that edits it once it does.
     fn chain_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let mut manual = self.chain_edit.manual;
             if ui.checkbox(&mut manual, "MANUAL").clicked() {
                 self.set_manual_chain(manual);
             }
-            ui.label(legend(if self.chain_edit.manual {
-                "the graph is yours: the scanner table and the decode switch no longer rebuild it"
+            if self.chain_edit.manual {
+                self.chain_palette(ui);
             } else {
-                "built from the scanner table for this span"
-            }));
+                ui.label(legend("built from the scanner table for this span"));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(self.chain_edit.moved(), egui::Button::new("ARRANGE"))
@@ -2831,14 +2881,71 @@ impl App {
         ui.add_space(4.0);
     }
 
+    /// Which stages can be added, and what to do with the one selected.
+    ///
+    /// The list comes from the node registry rather than from anything
+    /// written here, so a decoder added to the build appears in it without
+    /// this file being touched.
+    fn chain_palette(&mut self, ui: &mut egui::Ui) {
+        let reg = nodes::registry();
+        let kinds: Vec<(String, String)> =
+            reg.list().map(|d| (d.name.to_string(), d.summary.to_string())).collect();
+        if self.chain_add.is_empty() {
+            if let Some((name, _)) = kinds.first() {
+                self.chain_add = name.clone();
+            }
+        }
+        egui::ComboBox::from_id_salt("chain-add")
+            .selected_text(self.chain_add.clone())
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for (name, summary) in &kinds {
+                    ui.selectable_value(&mut self.chain_add, name.clone(), name)
+                        .on_hover_text(summary);
+                }
+            });
+        if ui.button("ADD").clicked() && !self.chain_add.is_empty() {
+            let id = self.chain_patch.add(&self.chain_add.clone());
+            self.chain_pick = Some(id);
+            self.send_patch();
+        }
+        let picked = self.chain_pick.filter(|id| self.chain_patch.stage(*id).is_some());
+        if ui.add_enabled(picked.is_some(), egui::Button::new("REMOVE")).clicked() {
+            if let Some(id) = picked {
+                self.chain_patch.remove(id);
+                self.chain_pick = None;
+                self.chain_sel = None;
+                self.send_patch();
+            }
+        }
+        ui.label(legend(&match picked.and_then(|id| self.chain_patch.stage(id)) {
+            Some(s) => format!("{} selected; drag a port to wire it up", s.kind),
+            None => "drag from a port to wire, right-click an input to unwire".to_string(),
+        }));
+    }
+
+    /// Hand the patch to the radio thread, remembering what was sent so that
+    /// one handed back after a refusal can be told apart from an echo.
+    fn send_patch(&mut self) {
+        self.chain_patch_sent = Some(self.chain_patch.clone());
+        self.send(Cmd::Patch(self.chain_patch.clone()));
+    }
+
     /// Hand the shape of the graph to the operator, or give it back to the
     /// scanner table.
     pub fn set_manual_chain(&mut self, on: bool) {
         self.chain_edit.manual = on;
         if !on {
             self.chain_edit.arrange();
+            self.chain_pick = None;
         }
         self.send(Cmd::Manual(on));
+        if on {
+            // The radio thread keeps the last patch, and this one is the
+            // interface's: sending it makes sure both mean the same graph
+            // after a restart or a device change.
+            self.send_patch();
+        }
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {

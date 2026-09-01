@@ -135,12 +135,33 @@ fn row_height(topo: &Topology, places: &[Place], depth: usize) -> f32 {
 /// pane being resized or scrolled.
 #[derive(Default)]
 pub struct Edit {
-    /// The operator owns the shape of the graph, so boxes can be dragged.
+    /// The operator owns the shape of the graph, so boxes can be dragged and
+    /// wires drawn between ports.
     pub manual: bool,
-    /// Centre of each stage, by node id, relative to the drawing's top left.
-    pub pos: HashMap<usize, Pos2>,
-    /// The stage being dragged, and where in it the pointer took hold.
-    drag: Option<(usize, Vec2)>,
+    /// Centre of each stage relative to the drawing's top left, by the key
+    /// that survives a rebuild.
+    pub pos: HashMap<u64, Pos2>,
+    /// What the pointer took hold of, if anything.
+    drag: Option<Drag>,
+}
+
+/// What a drag in progress is doing.
+#[derive(Clone, Copy)]
+enum Drag {
+    /// Moving a box: which one, and where in it the pointer took hold.
+    Node(u64, Vec2),
+    /// Drawing a wire out of a port, with the loose end following the
+    /// pointer.
+    Wire(crate::patch::Source, Pos2),
+}
+
+/// How a node is recognised between one rebuild and the next.
+///
+/// A stage the operator drew carries its patch id as a tag; everything the
+/// receiver builds for itself has none, and is keyed by position from the far
+/// end so the two cannot collide.
+fn key(n: &pipeline::graph::TopoNode) -> u64 {
+    n.tag.unwrap_or(u64::MAX - n.id.0 as u64)
 }
 
 impl Edit {
@@ -163,6 +184,15 @@ pub struct Interaction {
     pub selected: Option<usize>,
     /// A parameter that was changed: node id, name, new value.
     pub changed: Option<(usize, String, pipeline::param::ParamValue)>,
+    /// A wire drawn: where it comes from, and the stage and input port it
+    /// was dropped on.
+    pub link: Option<(crate::patch::Source, u64, usize)>,
+    /// A wire pulled off an input port.
+    pub unlink: Option<(u64, usize)>,
+    /// The operator's own stage that was last clicked, by patch id. Kept
+    /// apart from `selected` because a stage waiting to be wired up is not in
+    /// the running graph and so has no node to inspect.
+    pub picked: Option<u64>,
 }
 
 /// The selected node's settings, as controls.
@@ -300,6 +330,7 @@ pub fn draw(
     latency_ms: f64,
     selected: Option<usize>,
     edit: &mut Edit,
+    patch: Option<&crate::patch::Patch>,
 ) -> Interaction {
     let places = layout(topo);
     let rows = places.iter().map(|p| p.depth + 1).max().unwrap_or(0);
@@ -320,7 +351,7 @@ pub fn draw(
     );
     let p = ui.painter_at(rect);
     let cx = rect.center().x;
-    let mut act = Interaction { selected, changed: None };
+    let mut act = Interaction { selected, ..Default::default() };
     let pointer = resp.hover_pos();
 
     p.text(
@@ -359,21 +390,51 @@ pub fn draw(
         // reflow around the gap it left, which reads as the graph rearranging
         // itself in response to being touched.
         let centre = if edit.manual {
-            rect.min + edit.pos.entry(node.id.0).or_insert(auto - rect.min.to_vec2()).to_vec2()
+            rect.min + edit.pos.entry(key(node)).or_insert(auto - rect.min.to_vec2()).to_vec2()
         } else {
             auto
         };
         rects.push(Rect::from_center_size(centre, Vec2::new(box_w, BOX_H)));
     }
 
+    // Stages that have been added but are not running: a stage whose inputs
+    // are not all fed is left out of the built graph, so without these the
+    // one thing you cannot do is wire up a stage you just added.
+    let mut ghosts: Vec<(u64, Rect)> = Vec::new();
     if edit.manual {
-        // A rebuild renumbers the graph, so an id that is no longer there is
-        // a position for a stage that no longer exists.
-        edit.pos.retain(|id, _| topo.nodes.iter().any(|n| n.id.0 == *id));
-        drag(&resp, topo, &rects, rect.min, edit);
+        if let Some(patch) = patch {
+            for (n, st) in patch
+                .stages()
+                .iter()
+                .filter(|s| !topo.nodes.iter().any(|t| t.tag == Some(s.id)))
+                .enumerate()
+            {
+                // Down the left margin, out of the way of the automatic
+                // chain, until it is dragged somewhere better.
+                let seed = Pos2::new(12.0 + box_w / 2.0, 40.0 + n as f32 * (BOX_H + GAP));
+                let at = *edit.pos.entry(st.id).or_insert(seed);
+                ghosts.push((
+                    st.id,
+                    Rect::from_center_size(rect.min + at.to_vec2(), Vec2::new(box_w, BOX_H)),
+                ));
+            }
+        }
+    }
+
+    if edit.manual {
+        // A stage that is neither running nor waiting is no longer anywhere.
+        edit.pos.retain(|k, _| {
+            topo.nodes.iter().any(|n| key(n) == *k) || ghosts.iter().any(|(id, _)| id == k)
+        });
+        interact(&resp, topo, &rects, &ghosts, src, rect.min, edit, &mut act);
         for (i, node) in topo.nodes.iter().enumerate() {
-            if let Some(p) = edit.pos.get(&node.id.0) {
+            if let Some(p) = edit.pos.get(&key(node)) {
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
+            }
+        }
+        for (id, r) in ghosts.iter_mut() {
+            if let Some(p) = edit.pos.get(id) {
+                *r = Rect::from_center_size(rect.min + p.to_vec2(), r.size());
             }
         }
     }
@@ -404,6 +465,53 @@ pub fn draw(
         }
     }
 
+    // Wires into a stage that is not running yet. The graph cannot show these
+    // because it does not contain them, and they are most of what the
+    // operator is looking at while wiring something up.
+    if let Some(patch) = patch.filter(|_| edit.manual) {
+        for (id, r) in &ghosts {
+            for l in patch.links().iter().filter(|l| l.to.0 == *id) {
+                let from = wire_start(topo, &rects, &ghosts, src, l.from);
+                loose(&p, from, port(*r, l.to.1, 1, Side::In));
+            }
+        }
+    }
+
+    // The wire being drawn, with its loose end on the pointer. Drawn like any
+    // other so that what it will look like once dropped is what is on screen
+    // while deciding where to drop it.
+    if let Some(Drag::Wire(from, at)) = edit.drag {
+        let start = wire_start(topo, &rects, &ghosts, src, from);
+        loose(&p, start, at);
+    }
+
+    for (id, r) in &ghosts {
+        let kind = patch
+            .and_then(|p| p.stage(*id))
+            .map(|s| s.kind.clone())
+            .unwrap_or_default();
+        p.rect(*r, 3.0, theme::WELL, Stroke::new(1.0, theme::READOUT), StrokeKind::Inside);
+        p.text(
+            Pos2::new(r.center().x, r.top() + 9.0),
+            egui::Align2::CENTER_TOP,
+            &kind,
+            FontId::new(12.0, FontFamily::Proportional),
+            theme::VALUE,
+        );
+        p.text(
+            Pos2::new(r.center().x, r.top() + 26.0),
+            egui::Align2::CENTER_TOP,
+            "not connected",
+            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::LEGEND,
+        );
+        p.circle_filled(port(*r, 0, 1, Side::In), 2.5, theme::READOUT);
+        p.circle_filled(port(*r, 0, 1, Side::Out), 2.5, theme::READOUT);
+        if pointer.is_some_and(|q| r.contains(q)) && resp.clicked() {
+            act.picked = Some(*id);
+        }
+    }
+
     for (i, node) in topo.nodes.iter().enumerate() {
         let r = rects[i];
         let x = r.center().x;
@@ -422,6 +530,7 @@ pub fn draw(
             // Clicking the selected stage again closes the inspector, so the
             // panel is not a thing you have to hunt for a way out of.
             act.selected = if on { None } else { Some(node.id.0) };
+            act.picked = node.tag;
         }
         // The ports themselves, so where a wire may be attached is visible
         // rather than inferred from where the ones already there happen to
@@ -503,26 +612,165 @@ pub fn draw(
     act
 }
 
-/// Move whichever stage the drag took hold of.
+/// How near a port the pointer has to be for the drag to be about that port
+/// rather than about the box it sits on.
+const PORT_GRAB: f32 = 7.0;
+
+/// Move a stage, draw a wire, or pull one off.
 ///
-/// The whole drawing is one response rather than a widget per box, so the
-/// stage being dragged has to be remembered: hit-testing again each frame
-/// would hand the drag to whatever the pointer passed over.
-fn drag(resp: &egui::Response, topo: &Topology, rects: &[Rect], origin: Pos2, edit: &mut Edit) {
-    if resp.drag_started() {
-        edit.drag = resp.interact_pointer_pos().and_then(|q| {
-            let i = rects.iter().position(|r| r.contains(q))?;
-            Some((topo.nodes[i].id.0, rects[i].center() - q))
-        });
-    }
-    if let (Some((id, grab)), Some(q)) = (edit.drag, resp.interact_pointer_pos()) {
-        if resp.dragged() {
-            edit.pos.insert(id, q + grab - origin.to_vec2());
+/// The whole drawing is one response rather than a widget per box, so what a
+/// drag is about has to be decided when it starts and then remembered:
+/// hit-testing again each frame would hand the drag to whatever the pointer
+/// happened to pass over.
+#[allow(clippy::too_many_arguments)]
+fn interact(
+    resp: &egui::Response,
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    src: Rect,
+    origin: Pos2,
+    edit: &mut Edit,
+    act: &mut Interaction,
+) {
+    use crate::patch::Source;
+
+    // Pulling a wire off an input, which is the only way to leave a stage
+    // deliberately unconnected. A stage with an input port hanging is left
+    // out of the built graph rather than refused, so this is an edit like any
+    // other rather than a way to break the receiver.
+    if resp.secondary_clicked() {
+        if let Some((tag, port)) =
+            resp.interact_pointer_pos().and_then(|q| input_at(topo, rects, ghosts, q))
+        {
+            act.unlink = Some((tag, port));
         }
     }
+
+    if resp.drag_started() {
+        edit.drag = resp.interact_pointer_pos().and_then(|q| {
+            // Ports first: they sit on the edge of a box, so testing the box
+            // first would mean a wire could never be started at all.
+            if near(port(src, 0, 1, Side::Out), q) {
+                return Some(Drag::Wire(Source::Span, q));
+            }
+            for (i, node) in topo.nodes.iter().enumerate() {
+                let Some(tag) = node.tag else { continue };
+                if node.sink {
+                    continue;
+                }
+                for k in 0..node.outputs.len() {
+                    if near(port(rects[i], k, node.outputs.len(), Side::Out), q) {
+                        return Some(Drag::Wire(Source::Stage(tag, k), q));
+                    }
+                }
+            }
+            for (id, r) in ghosts {
+                if near(port(*r, 0, 1, Side::Out), q) {
+                    return Some(Drag::Wire(Source::Stage(*id, 0), q));
+                }
+            }
+            if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
+                return Some(Drag::Node(*id, r.center() - q));
+            }
+            let i = rects.iter().position(|r| r.contains(q))?;
+            Some(Drag::Node(key(&topo.nodes[i]), rects[i].center() - q))
+        });
+    }
+
+    if let (Some(drag), Some(q)) = (edit.drag, resp.interact_pointer_pos()) {
+        match drag {
+            Drag::Node(k, grab) if resp.dragged() => {
+                edit.pos.insert(k, q + grab - origin.to_vec2());
+            }
+            Drag::Wire(from, _) if resp.dragged() => edit.drag = Some(Drag::Wire(from, q)),
+            _ => {}
+        }
+        // Dropped on an input port, which is where a wire ends. Anywhere else
+        // and the wire is abandoned: an edit that half happens is worse than
+        // one that visibly did not.
+        if resp.drag_stopped() {
+            if let Drag::Wire(from, _) = drag {
+                if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
+                    act.link = Some((from, tag, port));
+                }
+            }
+        }
+    }
+
     if resp.drag_stopped() {
         edit.drag = None;
     }
+}
+
+fn near(p: Pos2, q: Pos2) -> bool {
+    p.distance(q) <= PORT_GRAB
+}
+
+/// The operator's stage and input port under a point, if there is one.
+///
+/// Only a stage the operator drew: the head of the chain, the spectrum and
+/// the listening channels are the receiver's own wiring, and a wire dropped
+/// on one of them would describe a graph the patch cannot express.
+fn input_at(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    q: Pos2,
+) -> Option<(u64, usize)> {
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let Some(tag) = node.tag else { continue };
+        let n = node.inputs.len().max(1);
+        for k in 0..n {
+            if near(port(rects[i], k, n, Side::In), q) {
+                return Some((tag, k));
+            }
+        }
+    }
+    ghosts
+        .iter()
+        .find(|(_, r)| near(port(*r, 0, 1, Side::In), q))
+        .map(|(id, _)| (*id, 0))
+}
+
+/// Where a wire being drawn starts on screen.
+fn wire_start(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    src: Rect,
+    from: crate::patch::Source,
+) -> Pos2 {
+    let tag = match from {
+        crate::patch::Source::Span => return port(src, 0, 1, Side::Out),
+        crate::patch::Source::Stage(tag, _) => tag,
+    };
+    let k = match from {
+        crate::patch::Source::Stage(_, k) => k,
+        crate::patch::Source::Span => 0,
+    };
+    if let Some(i) = topo.nodes.iter().position(|n| n.tag == Some(tag)) {
+        let n = &topo.nodes[i];
+        return port(rects[i], k, n.outputs.len().max(1), Side::Out);
+    }
+    ghosts
+        .iter()
+        .find(|(id, _)| *id == tag)
+        .map(|(_, r)| port(*r, 0, 1, Side::Out))
+        .unwrap_or(src.center_bottom())
+}
+
+/// The wire that is being drawn but has not landed anywhere yet.
+fn loose(p: &egui::Painter, from: Pos2, to: Pos2) {
+    let stroke = Stroke::new(1.5, theme::READOUT);
+    let drop = ((to.y - from.y).abs() * 0.5).clamp(26.0, 90.0);
+    p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        [from, Pos2::new(from.x, from.y + drop), Pos2::new(to.x, to.y - drop), to],
+        false,
+        Color32::TRANSPARENT,
+        stroke,
+    ));
+    p.circle_filled(to, 3.0, theme::READOUT);
 }
 
 fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
@@ -636,6 +884,7 @@ mod tests {
         let s = StreamSpec::iq(2_400_000.0, Hz::mhz(433));
         TopoNode {
             id: NodeId(id),
+            tag: None,
             label: label.into(),
             kind: label.into(),
             latency: 0,
@@ -695,7 +944,7 @@ mod tests {
         theme::install(&ctx);
         let mut frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
-                draw(ui, &topo, 0.0, None, edit);
+                draw(ui, &topo, 0.0, None, edit, None);
             });
         };
         frame(&mut edit);
@@ -706,9 +955,10 @@ mod tests {
         // what makes the arrangement worth anything: a parameter change
         // rebuilds the graph and redraws this several times a second.
         let put = Pos2::new(11.0, 500.0);
-        edit.pos.insert(0, put);
+        let first = key(&topo.nodes[0]);
+        edit.pos.insert(first, put);
         frame(&mut edit);
-        assert_eq!(edit.pos[&0], put);
+        assert_eq!(edit.pos[&first], put);
 
         edit.arrange();
         assert!(!edit.moved(), "arranging hands the layout back to the graph");

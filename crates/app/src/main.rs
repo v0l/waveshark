@@ -14,6 +14,7 @@ mod tracks;
 mod map;
 mod airports;
 mod packetlog;
+mod patch;
 mod chainview;
 mod theme;
 mod radio;

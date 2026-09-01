@@ -151,6 +151,11 @@ enum Role {
     SubBandMix(u64),
     /// A stage of one listening channel.
     Stage(u64, Stage),
+    /// A stage the operator drew, keyed by its patch id and what it is. The
+    /// kind is in the key because editing a patch can replace a stage with a
+    /// different one, and reusing an envelope detector as a mixer would hand
+    /// the graph a node of the wrong type entirely.
+    Patch(u64, String),
     PacketBus,
     PacketDecode,
     /// A packet feed from another receiver, keyed by where it comes from so a
@@ -284,6 +289,10 @@ pub struct Plan {
     /// a pager channel and a packet channel at once, and both are one
     /// narrowband demodulator each.
     pub fronts: Vec<crate::scanners::FrontAt>,
+    /// The graph the operator drew, when they have taken the front ends over.
+    /// The automatic head is built either way: the spectrum, the recorder and
+    /// the listening channels are not the patch's to remove.
+    pub patch: Option<crate::patch::Patch>,
     pub record: bool,
     /// Log every burst the front ends detect.
     pub log: bool,
@@ -636,6 +645,13 @@ impl Receiver {
                     banks.push((id, width));
                 }
             }
+            }
+        }
+
+        if let Some(patch) = &plan.patch {
+            match add_patch(&mut b, &mut roles, &mut pool, head, patch) {
+                Ok(packets) => narrowband.extend(packets),
+                Err(e) => refused = Some(format!("the patch cannot be built: {e}")),
             }
         }
 
@@ -1285,6 +1301,112 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 /// and factor, so two front ends listening in the same place share one
 /// extraction instead of each running its own mixer over every sample.
 #[allow(clippy::too_many_arguments)]
+/// Build the operator's own stages onto the head of the chain.
+///
+/// Returns the ones that produce packets, for the bus to collect.
+///
+/// A stage whose inputs are not all fed is left out rather than built. The
+/// graph refuses an unconnected input port, and refusing the whole receiver
+/// because a stage has just been dropped on the canvas and not yet wired up
+/// would make the obvious way to work impossible: nobody draws a chain
+/// backwards from its last wire.
+/// Patch stages whose output the packet bus accepts.
+const BUS_TAILS: [&str; 3] = ["pulse_detect", "ask_detect", "fsk_detect"];
+
+fn add_patch(
+    b: &mut GraphBuilder,
+    roles: &mut Vec<Role>,
+    pool: &mut HashMap<Role, NodePart>,
+    head: NodeId,
+    patch: &crate::patch::Patch,
+) -> Result<Vec<NodeId>> {
+    use crate::patch::Source;
+    let reg = nodes::registry();
+    let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
+    for st in patch.stages() {
+        let role = Role::Patch(st.id, st.kind.clone());
+        // Reused where it can be, so editing one wire does not reset the
+        // detector's noise floor on every other stage in the patch.
+        let node = match pool.remove(&role) {
+            Some(p) => p.node,
+            None => reg.build(&st.kind, &st.settings)?,
+        };
+        made.push((st.id, st.kind.clone(), node));
+    }
+
+    // Dropping one stage can leave the next with nothing feeding it, so this
+    // settles rather than passing over the list once.
+    let mut live: Vec<u64> = made.iter().map(|(id, ..)| *id).collect();
+    loop {
+        let fed = |id: &u64, ins: usize, live: &Vec<u64>| {
+            (0..ins).all(|p| match patch.feeding((*id, p)) {
+                Some(Source::Span) => true,
+                Some(Source::Stage(f, _)) => live.contains(&f),
+                None => false,
+            })
+        };
+        let drop: Vec<u64> = made
+            .iter()
+            .filter(|(id, ..)| live.contains(id))
+            .filter(|(id, _, n)| !fed(id, n.num_inputs(), &live))
+            .map(|(id, ..)| *id)
+            .collect();
+        if drop.is_empty() {
+            break;
+        }
+        live.retain(|id| !drop.contains(id));
+    }
+
+    let mut ids: HashMap<u64, NodeId> = HashMap::new();
+    let mut packets = Vec::new();
+    for (id, kind, node) in made.into_iter().filter(|(id, ..)| live.contains(id)) {
+        let ins = node.num_inputs();
+        let nid = b.add(node);
+        // Tagged with the patch's own id, which is how the view knows which
+        // box on screen is the stage that asked for it.
+        b.set_tag(nid, id);
+        roles.push(Role::Patch(id, kind.clone()));
+        ids.insert(id, nid);
+        for p in 0..ins {
+            match patch.feeding((id, p)) {
+                Some(Source::Span) => {
+                    b.connect(head.o(), nid.input(p));
+                }
+                Some(Source::Stage(f, port)) => {
+                    if let Some(from) = ids.get(&f) {
+                        b.connect(from.out(port), nid.input(p));
+                    }
+                }
+                None => {}
+            }
+        }
+        // A burst detector is where a patch meets the rest of the receiver:
+        // the bus takes bursts and the protocols run once, centrally, over
+        // everything on it. Anything else at the end of a patch is a chain
+        // that is not finished, and wiring it to the bus would hand the bus a
+        // stream of the wrong type.
+        if BUS_TAILS.contains(&kind.as_str()) && patch.is_tail(id) {
+            packets.push(nid);
+        }
+    }
+
+    // A stage added out of dependency order is fed by one that has not been
+    // given its `NodeId` yet, so the wires are made again once every stage
+    // has one. Connecting an input twice replaces the earlier edge, which is
+    // exactly what is wanted here.
+    for st in patch.stages().iter().filter(|s| live.contains(&s.id)) {
+        let Some(&nid) = ids.get(&st.id) else { continue };
+        for l in patch.links().iter().filter(|l| l.to.0 == st.id) {
+            if let Source::Stage(f, port) = l.from {
+                if let Some(from) = ids.get(&f) {
+                    b.connect(from.out(port), nid.input(l.to.1));
+                }
+            }
+        }
+    }
+    Ok(packets)
+}
+
 fn extract(
     b: &mut GraphBuilder,
     roles: &mut Vec<Role>,
@@ -1657,6 +1779,7 @@ mod tests {
 
     pub(super) fn plan(rate: f64, center: Hz) -> Plan {
         Plan {
+            patch: None,
             center,
             rate,
             zoom: 1,
@@ -1672,6 +1795,78 @@ mod tests {
             log: false,
             feeds: Vec::new(),
         }
+    }
+
+    /// A plan with nothing on the span but what the operator drew.
+    fn manual(patch: crate::patch::Patch) -> Plan {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts.clear();
+        p.patch = Some(patch);
+        p
+    }
+
+    #[test]
+    fn a_patch_stage_that_is_not_fed_yet_is_left_out_rather_than_fatal() {
+        // A chain is drawn one wire at a time, so a stage with nothing into
+        // it is the ordinary state of an edit in progress. The graph refuses
+        // an unconnected input port, and refusing the whole receiver for one
+        // would make the obvious way to work impossible.
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let mix = patch.add("mixer");
+        let env = patch.add("envelope");
+        patch.connect(Source::Span, (mix, 0));
+        let rx = Receiver::build(&manual(patch), Default::default()).expect("a half-drawn patch");
+        let topo = rx.topology();
+        assert!(topo.nodes.iter().any(|n| n.tag == Some(mix)), "the wired stage runs");
+        assert!(!topo.nodes.iter().any(|n| n.tag == Some(env)), "the unwired one waits");
+    }
+
+    #[test]
+    fn a_patch_that_decodes_reaches_the_packet_bus() {
+        // Everything that produces packets meets at the bus, and a decoder
+        // the operator wired up by hand is not a special case: without this
+        // it would decode into nothing and the packet log would stay empty.
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let env = patch.add("envelope");
+        let det = patch.add("pulse_detect");
+        patch.connect(Source::Span, (env, 0));
+        patch.connect(Source::Stage(env, 0), (det, 0));
+        let rx = Receiver::build(&manual(patch), Default::default()).expect("an OOK patch");
+        let topo = rx.topology();
+        for id in [env, det] {
+            assert!(topo.nodes.iter().any(|n| n.tag == Some(id)), "{id} should be running");
+        }
+        let bus = topo
+            .nodes
+            .iter()
+            .find(|n| n.label == "Packet log")
+            .expect("a detector needs a bus to detect into");
+        let detector = topo.nodes.iter().find(|n| n.tag == Some(det)).unwrap();
+        assert!(
+            bus.inputs.iter().any(|(s, _)| detector.outputs.iter().any(|(o, _)| o == s)),
+            "the bursts have to arrive somewhere"
+        );
+    }
+
+    #[test]
+    fn a_patch_survives_a_rebuild_with_its_nodes() {
+        // The receiver rebuilds on every retune. Building the patch again
+        // from its description each time would reset each stage, which for a
+        // burst detector means losing the noise floor it measured.
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let env = patch.add("envelope");
+        patch.connect(Source::Span, (env, 0));
+        let plan = manual(patch);
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a patch");
+        rx.rebuild(&plan).expect("a retune");
+        assert_eq!(
+            rx.topology().nodes.iter().filter(|n| n.tag == Some(env)).count(),
+            1,
+            "the stage should come through the rebuild once, not twice or not at all"
+        );
     }
 
     fn chan(id: u64, offset: f64, demod: Demod) -> ChannelSpec {
