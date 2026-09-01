@@ -43,6 +43,7 @@ pub fn list() -> Vec<Entry> {
             rates: HACKRF_RATES,
         });
     }
+    #[cfg(feature = "limesdr")]
     for e in limesdr::enumerate() {
         v.push(Entry {
             kind: DriverKind::LimeSdr,
@@ -64,6 +65,7 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
     match e.kind {
         DriverKind::RtlSdr => Ok(Box::new(rtlsdr::RtlSdr::open(e.index as u32)?)),
         DriverKind::HackRf => Ok(Box::new(hackrf::HackRfDevice::open(e.index)?)),
+        #[cfg(feature = "limesdr")]
         DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
         other => Err(Error::other(format!("{} cannot be opened live", other.as_str()))),
     }

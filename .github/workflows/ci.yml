@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            librtlsdr-dev pkg-config libclang-dev \
+            librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
             libasound2-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev

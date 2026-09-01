@@ -17,7 +17,7 @@ dsp.workspace = true
 audio.workspace = true
 rtlsdr.workspace = true
 hackrf.workspace = true
-limesdr.workspace = true
+limesdr = { workspace = true, optional = true }
 sources.workspace = true
 nodes.workspace = true
 decode.workspace = true
@@ -31,3 +31,26 @@ parking_lot.workspace = true
 libc = "0.2"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+
+[features]
+# LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
+# the Windows build is made without this. Everything else here works with the
+# driver absent: the device simply never appears in the list.
+default = ["limesdr"]
+limesdr = ["dep:limesdr"]
+
+[[example]]
+name = "lime"
+required-features = ["limesdr"]
+
+[[example]]
+name = "limediag"
+required-features = ["limesdr"]
+
+[[example]]
+name = "limerate"
+required-features = ["limesdr"]
+
+[[example]]
+name = "limesweep"
+required-features = ["limesdr"]

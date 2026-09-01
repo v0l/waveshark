@@ -33,6 +33,7 @@ jobs:
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
+            features: --no-default-features
 
     steps:
       - uses: actions/checkout@v4
@@ -45,14 +46,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            librtlsdr-dev pkg-config libclang-dev \
+            librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
             libasound2-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
       - name: macOS libraries
         if: runner.os == 'macOS'
-        run: brew install librtlsdr pkg-config
+        run: brew install librtlsdr limesuite pkg-config
 
       # rtlsdr-sys takes an explicit path in preference to pkg-config, which is
       # the way in on Windows: vcpkg ships the library and headers but getting
@@ -77,8 +78,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # LimeSuite has no vcpkg port, so the Windows binary is built without
+      # the LimeSDR driver. Nothing else changes: the device simply never
+      # appears in the list.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p app
+        run: cargo build --release --target ${{ matrix.target }} -p app ${{ matrix.features }}
 
       - name: Stage (unix)
         if: runner.os != 'Windows'
