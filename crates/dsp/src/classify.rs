@@ -109,9 +109,27 @@ impl Modulation {
 pub struct Features {
     pub samples: usize,
     pub duration_us: f64,
-    /// Ratio of the 10th to the 90th percentile of the envelope. Near zero for
-    /// on-off keying, near one for anything constant envelope.
+    /// Ratio of the lower envelope level to the upper one. Near zero for
+    /// on-off keying, near one for anything constant envelope. Measured from
+    /// the levels themselves, so it does not move with the duty cycle.
     pub envelope_ratio: f32,
+    /// Levels found in the envelope: one for a constant envelope, two for
+    /// anything keyed on amplitude.
+    pub envelope_modes: u8,
+    /// Fraction of the burst spent at the upper envelope level. A packet is
+    /// mostly silence and a constant-envelope transmission is not, which is
+    /// what stops a window of mostly noise being read as a modulation.
+    pub duty: f32,
+    /// Median length of a run at the upper envelope level, in symbols.
+    ///
+    /// This is what tells amplitude keying from a keyed carrier that happens
+    /// to be transmitted in bursts. On-off keying holds its level for a symbol
+    /// or three, because that is what it is keying; a frequency-keyed packet
+    /// holds it for the whole packet, and the gaps in the window are between
+    /// transmissions rather than inside one. Duty cycle alone cannot see the
+    /// difference: a window holding three FSK repeats is 30% on, and so is an
+    /// OOK burst.
+    pub level_run_symbols: f32,
     /// Occupied bandwidth holding 99% of the power, in hertz.
     pub bandwidth_hz: f32,
     /// Occupied bandwidth as a fraction of the channel. Above about 0.8 the
@@ -120,6 +138,13 @@ pub struct Features {
     /// Geometric over arithmetic mean of the spectrum inside the occupied
     /// band. Near one for noise and OFDM, well below for anything with tones.
     pub flatness: f32,
+    /// Share of the power in the strongest three bins. Near one for a bare
+    /// carrier, near zero for anything spread across its channel.
+    ///
+    /// Flatness cannot answer this: a carrier occupies three bins and is
+    /// perfectly flat across the three, so measuring inside the occupied band
+    /// makes the narrowest signal there is look like noise.
+    pub peakiness: f32,
     /// Peaks found in the histogram of instantaneous frequency: 1, 2, 4 or 0
     /// when there is no structure to count.
     pub tones: u8,
@@ -215,6 +240,8 @@ pub struct Classifier {
     /// counting and sweep fitting want those and nothing else.
     freq_hi: Vec<f32>,
     amp: Vec<f32>,
+    /// The envelope in decibels, for the level histogram.
+    db: Vec<f32>,
     /// Where the burst changed, at one entry per sample gap.
     trans: Vec<f32>,
     scratch: Vec<f32>,
@@ -234,6 +261,7 @@ impl Classifier {
             freq: Vec::new(),
             freq_hi: Vec::new(),
             amp: Vec::new(),
+            db: Vec::new(),
             trans: Vec::new(),
             scratch: Vec::new(),
             fft_buf: Vec::new(),
@@ -252,6 +280,43 @@ impl Classifier {
     /// Measure without judging. Exposed because the features are worth logging
     /// for a burst the hypotheses all reject.
     pub fn features(&mut self, iq: &[C32]) -> Features {
+        // Trim to where the carrier was actually on, then measure that.
+        //
+        // Without this every packet is amplitude keyed, because a burst
+        // handed over by a detector has silence at both ends and the envelope
+        // has two levels whatever the transmitter did with them. What
+        // separates on-off keying from a frequency-keyed packet is that the
+        // amplitude changes *during* the transmission, and that question can
+        // only be asked once the transmission's edges are known.
+        let (a, b) = self.extent(iq);
+        if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
+            let trimmed = iq[a..b].to_vec();
+            let mut f = self.measure(&trimmed);
+            f.samples = iq.len();
+            f.duration_us = iq.len() as f64 * 1e6 / self.rate;
+            return f;
+        }
+        self.measure(iq)
+    }
+
+    /// First and last sample with a carrier, with a symbol either side.
+    fn extent(&mut self, iq: &[C32]) -> (usize, usize) {
+        self.amp.clear();
+        self.amp.extend(iq.iter().map(|c| c.norm()));
+        let (_, modes, top, _) = envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
+        if modes < 2 {
+            return (0, iq.len());
+        }
+        let floor = top * 0.3;
+        let first = self.amp.iter().position(|v| *v >= floor).unwrap_or(0);
+        let last = self.amp.iter().rposition(|v| *v >= floor).map_or(iq.len(), |i| i + 1);
+        if last <= first {
+            return (0, iq.len());
+        }
+        (first, last)
+    }
+
+    fn measure(&mut self, iq: &[C32]) -> Features {
         let mut f = Features {
             samples: iq.len(),
             duration_us: iq.len() as f64 * 1e6 / self.rate,
@@ -263,13 +328,23 @@ impl Classifier {
 
         self.amp.clear();
         self.amp.extend(iq.iter().map(|c| c.norm()));
-        f.envelope_ratio = envelope_ratio(&mut self.scratch, &self.amp);
+        let (ratio, modes, top, duty) =
+            envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
+        f.envelope_ratio = ratio;
+        f.envelope_modes = modes;
+        f.duty = duty;
         f.kurtosis = kurtosis(&self.amp);
 
         self.spectrum(iq);
-        let (bw, flat) = occupied(&self.spec, self.rate as f32);
+        let (bw, flat) = {
+            let spec = std::mem::take(&mut self.spec);
+            let r = occupied(&spec, &mut self.scratch, self.rate as f32);
+            self.spec = spec;
+            r
+        };
         f.bandwidth_hz = bw;
         f.flatness = flat;
+        f.peakiness = peakiness(&self.spec);
         f.channel_fill = if self.cfg.channel_hz > 0.0 { bw / self.cfg.channel_hz } else { 0.0 };
 
         // The frequency track only means anything where there is a signal to
@@ -278,7 +353,10 @@ impl Classifier {
         // tones out of silence. Holding the last measured value across a gap
         // keeps the track the same length as the burst without inventing a
         // transition at each end of the silence.
-        let floor = 0.5 * percentile(&mut self.scratch, &self.amp, 0.9);
+        // Half the upper envelope level. A percentile would be the noise floor
+        // on a burst that is mostly gaps, and every gap's phase would then
+        // reach the tone histogram as if it were a signal.
+        let floor = 0.5 * top;
         self.freq.clear();
         self.freq_hi.clear();
         let hz_per_rad = (self.rate / std::f64::consts::TAU) as f32;
@@ -314,6 +392,18 @@ impl Classifier {
         f.baud_line = line;
 
         let sps = if baud > 0.0 { (self.rate as f32 / baud) as usize } else { 0 };
+
+        // Runs measured on a smoothed envelope. Sample by sample the envelope
+        // crosses its own threshold constantly on noise alone, and the median
+        // run is then one sample for every signal there is.
+        let run = {
+            let mut amp = std::mem::take(&mut self.amp);
+            boxcar(&mut amp, (sps / 4).clamp(1, 64));
+            let r = median_high_run(&amp, top * ratio.max(0.05).sqrt());
+            self.amp = amp;
+            r
+        };
+        f.level_run_symbols = if sps > 0 { run / sps as f32 } else { 0.0 };
         let smooth = (sps / 4).clamp(1, 64);
         boxcar(&mut self.freq_hi, smooth);
 
@@ -538,6 +628,28 @@ impl Classifier {
     }
 }
 
+/// Median length of a run of samples above `level`, in samples.
+fn median_high_run(amp: &[f32], level: f32) -> f32 {
+    let mut runs: Vec<usize> = Vec::new();
+    let mut run = 0usize;
+    for &v in amp {
+        if v >= level {
+            run += 1;
+        } else if run > 0 {
+            runs.push(run);
+            run = 0;
+        }
+    }
+    if run > 0 {
+        runs.push(run);
+    }
+    if runs.is_empty() {
+        return 0.0;
+    }
+    runs.sort_unstable();
+    runs[runs.len() / 2] as f32
+}
+
 /// Add the normalised absolute differences of `src` into `dst`.
 ///
 /// Normalised by the mean jump, so a frequency track measured in tens of
@@ -598,35 +710,48 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
     }
 
     let keyed_amplitude = 1.0 - f.envelope_ratio;
-    let constant_envelope = ramp(f.envelope_ratio, 0.4, 0.75);
-    // A keyed envelope is bimodal and a constant one in noise is not, which is
-    // the difference between shallow amplitude keying and a clean signal ten
-    // decibels over the floor. Both spread the envelope over the same range;
-    // only one of them puts the samples at two ends of it. Kurtosis is the
-    // cheapest statistic that sees the difference: about 1.4 for a keyed
-    // envelope, above 2 for a noisy constant one.
-    let bimodal_envelope = 1.0 - ramp(f.kurtosis, 1.6, 2.0);
+    let constant_envelope = ramp(f.envelope_ratio, 0.4, 0.75).max(f32::from(f.envelope_modes == 1));
+    // Two levels in the envelope, which is what amplitude keying means and
+    // what a constant-envelope signal in noise still does not have. Kurtosis
+    // was the first attempt at this and it measures the duty cycle instead: a
+    // real packet is mostly gaps, so its envelope is spiky whatever it keys.
+    // Two levels in the envelope, held for about a symbol each. The second
+    // half is what stops a frequency-keyed packet, which is one long run of
+    // carrier with silence around it, being read as amplitude keying.
+    // Two levels in the envelope, each held for about a symbol, and not on for
+    // nearly the whole burst. The second and third conditions are what stop a
+    // frequency-keyed packet being read as amplitude keying: it is one long run
+    // of carrier, and the gaps in the window around it are between
+    // transmissions rather than inside one.
+    let two_levels = f32::from(f.envelope_modes >= 2)
+        * (1.0 - ramp(f.level_run_symbols, 4.0, 12.0))
+        * (1.0 - ramp(f.duty, 0.8, 0.92));
+    // A modulation fills its burst. A window that is mostly silence with a
+    // packet in it does not, and the difference is what stops an empty channel
+    // being classified as a wideband transmission.
+    let filled = ramp(f.duty, 0.5, 0.8);
     // A symbol clock is what separates a modulated signal from a steady one,
     // and the line is weak for minimum-shift keying even when it is there, so
     // the ramp starts low.
-    let has_clock = ramp(f.baud_line, 2.5, 5.0);
-    // Exactly one peak. Zero means the histogram had no structure worth
-    // counting, which is a different statement and must not be read as one.
+    // The ramp is low because a real burst's line is weaker than a generated
+    // one's: on rtl_433's recordings the on-off keyed sensors come in between
+    // 3 and 4, where every signal this module generates for its own tests is
+    // above 4.5. Tuned against the corpus, which is the only place the number
+    // could have come from.
+    let has_clock = ramp(f.baud_line, 2.0, 4.0);
     let unimodal = f32::from(f.tones == 1);
     let sweeping = ramp(f.chirp_fit, 0.55, 0.85);
 
     let scores = [
-        // Amplitude keyed to nothing, which is most of the ISM band.
-        (Modulation::Ook, ramp(keyed_amplitude, 0.6, 0.85) * has_clock * bimodal_envelope),
+        // Amplitude keyed all the way down to the noise.
+        (Modulation::Ook, two_levels * ramp(keyed_amplitude, 0.6, 0.85) * has_clock),
         // Amplitude keyed, but the low level is still a signal.
-        (
-            Modulation::Ask,
-            band(f.envelope_ratio, 0.25, 0.45, 0.7, 0.8) * has_clock * bimodal_envelope,
-        ),
+        (Modulation::Ask, two_levels * band(f.envelope_ratio, 0.25, 0.45, 0.7, 0.8) * has_clock),
         // Two tones, far enough apart to threshold.
         (
             Modulation::Fsk2,
             constant_envelope
+                * filled
                 * f32::from(f.tones == 2)
                 * ramp(f.mod_index, 0.8, 1.4)
                 * (1.0 - sweeping),
@@ -634,19 +759,20 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
         // Two tones so close that the eye needs a matched receiver.
         (
             Modulation::Msk,
-            constant_envelope * f32::from(f.tones == 2) * band(f.mod_index, 0.25, 0.4, 0.7, 0.95),
+            constant_envelope * filled * f32::from(f.tones == 2) * band(f.mod_index, 0.25, 0.4, 0.7, 0.95),
         ),
-        (Modulation::Fsk4, constant_envelope * f32::from(f.tones == 4) * (1.0 - sweeping)),
+        (Modulation::Fsk4, constant_envelope * filled * f32::from(f.tones == 4) * (1.0 - sweeping)),
         // Both power laws collapse two phases onto one, so binary phase keying
         // shows a line in each. Four phases survive squaring, which is what
         // separates the two: a strong fourth-power line and no squared one.
         (
             Modulation::Psk2,
-            constant_envelope * unimodal * has_clock * ramp(f.square_line, 0.2, 0.5),
+            constant_envelope * filled * unimodal * has_clock * ramp(f.square_line, 0.2, 0.5),
         ),
         (
             Modulation::Psk4,
             constant_envelope
+                * filled
                 * unimodal
                 * has_clock
                 * ramp(f.quartic_line, 0.2, 0.5)
@@ -654,18 +780,32 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
         ),
         // A sweep is the one class whose evidence is the frequency track's
         // slope rather than its histogram.
-        (Modulation::Chirp, constant_envelope * sweeping),
-        // Everything modulated that has no keying structure at all.
+        (Modulation::Chirp, constant_envelope * filled * sweeping),
+        // Everything modulated that has no keying structure at all. It has to
+        // fill the burst: an empty channel is flat and Gaussian too, and the
+        // difference between the two is that noise is not on for the whole
+        // window at a level of its own.
         (
             Modulation::NoiseLike,
-            ramp(f.flatness, 0.3, 0.6) * ramp(f.kurtosis, 2.2, 2.6) * (1.0 - has_clock) * (1.0 - sweeping),
+            filled
+                * f32::from(f.envelope_modes == 1)
+                * ramp(f.flatness, 0.3, 0.6)
+                * ramp(f.kurtosis, 2.2, 2.6)
+                * (1.0 - ramp(f.peakiness, 0.1, 0.3))
+                * (1.0 - has_clock)
+                * (1.0 - sweeping),
         ),
         // Present, steady, and saying nothing. A carrier has a squared line as
         // strong as any phase-keyed signal, so what identifies it is the
         // absence of a symbol clock rather than the absence of a line.
         (
             Modulation::Carrier,
-            constant_envelope * unimodal * (1.0 - has_clock) * (1.0 - sweeping),
+            constant_envelope
+                * filled
+                * unimodal
+                * (1.0 - has_clock)
+                * (1.0 - sweeping)
+                * ramp(f.peakiness, 0.1, 0.3),
         ),
     ];
 
@@ -712,19 +852,6 @@ fn percentile(scratch: &mut Vec<f32>, samples: &[f32], q: f32) -> f32 {
     scratch[(((scratch.len() - 1) as f32) * q).round() as usize]
 }
 
-/// Low percentile over high percentile of the envelope.
-///
-/// Percentiles rather than min over max because one dropout sample would make
-/// every signal on the band read as on-off keyed.
-fn envelope_ratio(scratch: &mut Vec<f32>, amp: &[f32]) -> f32 {
-    let hi = percentile(scratch, amp, 0.9);
-    if hi <= 0.0 {
-        return 1.0;
-    }
-    let lo = percentile(scratch, amp, 0.1);
-    (lo / hi).clamp(0.0, 1.0)
-}
-
 fn kurtosis(amp: &[f32]) -> f32 {
     let n = amp.len() as f32;
     if n < 4.0 {
@@ -744,10 +871,26 @@ fn kurtosis(amp: &[f32]) -> f32 {
 /// The narrowest window containing the power, not the distance between the
 /// outermost bins that hold any: a single spur at the channel edge would
 /// otherwise report a signal ten times its real width.
-fn occupied(spec: &[f32], rate: f32) -> (f32, f32) {
+fn occupied(spec: &[f32], scratch: &mut Vec<f32>, rate: f32) -> (f32, f32) {
     let n = spec.len();
-    let total: f32 = spec.iter().sum();
-    if total <= 0.0 || n < 8 {
+    if n < 8 {
+        return (0.0, 1.0);
+    }
+
+    // Against the noise floor, not against the total. A burst detector hands
+    // over a window in which the signal occupies part of the channel and noise
+    // occupies all of it, so 99% of the raw power is 99% of the channel and
+    // every signal measures the same width: the whole span. Subtracting the
+    // median bin, which is noise wherever the signal is narrower than half the
+    // channel, is what makes the number mean anything.
+    scratch.clear();
+    scratch.extend_from_slice(spec);
+    scratch.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = scratch[n / 2];
+
+    let excess = |i: usize| (spec[i] - floor).max(0.0);
+    let total: f32 = (0..n).map(excess).sum();
+    if total <= 0.0 {
         return (0.0, 1.0);
     }
     let target = total * 0.99;
@@ -756,9 +899,9 @@ fn occupied(spec: &[f32], rate: f32) -> (f32, f32) {
     let mut best = n;
     let mut best_lo = 0usize;
     for hi in 0..n {
-        sum += spec[hi];
-        while sum - spec[lo] >= target && lo < hi {
-            sum -= spec[lo];
+        sum += excess(hi);
+        while sum - excess(lo) >= target && lo < hi {
+            sum -= excess(lo);
             lo += 1;
         }
         if sum >= target && hi - lo + 1 < best {
@@ -781,6 +924,19 @@ fn occupied(spec: &[f32], rate: f32) -> (f32, f32) {
     (bw, flatness.clamp(0.0, 1.0))
 }
 
+/// Share of the power held by the strongest three adjacent bins.
+fn peakiness(spec: &[f32]) -> f32 {
+    let total: f32 = spec.iter().sum();
+    if total <= 0.0 || spec.len() < 8 {
+        return 0.0;
+    }
+    let mut best = 0.0f32;
+    for i in 1..spec.len() - 1 {
+        best = best.max(spec[i - 1] + spec[i] + spec[i + 1]);
+    }
+    best / total
+}
+
 /// Count the peaks in the histogram of instantaneous frequency, and measure
 /// how far apart the outermost two are.
 ///
@@ -788,27 +944,45 @@ fn occupied(spec: &[f32], rate: f32) -> (f32, f32) {
 /// sends, so a count of three means the histogram is being read wrong and the
 /// honest answer is 0: no structure found.
 fn tone_peaks(scratch: &mut Vec<f32>, freq: &[f32]) -> (u8, f32) {
-    if freq.len() < 64 {
-        return (0, 0.0);
+    let peaks = histogram_peaks(scratch, freq, 0.25);
+    match peaks.len() {
+        1 => (1, 0.0),
+        2 => (2, peaks[1] - peaks[0]),
+        4 => (4, peaks[3] - peaks[0]),
+        _ => (0, 0.0),
     }
-    // Trim the discriminator's spikes before setting the histogram's range,
-    // or one sample near a zero crossing spreads the bins over megahertz.
-    let lo = percentile(scratch, freq, 0.01);
-    let hi = percentile(scratch, freq, 0.99);
+}
+
+/// Where the clusters are in a set of samples, as values rather than counts.
+///
+/// A histogram, smoothed, with every local maximum that clears `floor` times
+/// the tallest peak and is not adjacent to a taller one. `floor` is the caller's
+/// because the two uses want different things from it: frequency levels are
+/// sent about equally often, so a quarter is a safe cut, while an on-off keyed
+/// envelope spends most of a burst in the gaps and its transmitting level is a
+/// small fraction of the tallest bin.
+fn histogram_peaks(scratch: &mut Vec<f32>, samples: &[f32], floor: f32) -> Vec<f32> {
+    if samples.len() < 64 {
+        return Vec::new();
+    }
+    // Trim the outliers before setting the range. One discriminator spike near
+    // a zero crossing would otherwise spread the bins over megahertz.
+    let lo = percentile(scratch, samples, 0.01);
+    let hi = percentile(scratch, samples, 0.99);
     if hi <= lo || !(hi - lo).is_finite() {
-        return (1, 0.0);
+        return vec![lo];
     }
 
     const BINS: usize = 48;
     let mut hist = [0f32; BINS];
     let width = (hi - lo) / BINS as f32;
-    for &v in freq {
+    for &v in samples {
         if v >= lo && v <= hi {
             let b = (((v - lo) / width) as usize).min(BINS - 1);
             hist[b] += 1.0;
         }
     }
-    // Three-bin smoothing: without it, shot noise splits one tone in two.
+    // Three-bin smoothing: without it, shot noise splits one cluster in two.
     let mut smooth = [0f32; BINS];
     for i in 0..BINS {
         let a = hist[i.saturating_sub(1)];
@@ -818,31 +992,75 @@ fn tone_peaks(scratch: &mut Vec<f32>, freq: &[f32]) -> (u8, f32) {
     }
     let peak = smooth.iter().cloned().fold(0.0f32, f32::max);
     if peak <= 0.0 {
-        return (0, 0.0);
+        return Vec::new();
     }
 
-    // A peak has to clear a quarter of the tallest and be a local maximum over
-    // a window wide enough that one tone cannot supply two.
     let guard = 2usize;
-    let mut peaks: Vec<usize> = Vec::new();
+    let mut bins: Vec<usize> = Vec::new();
+    let mut last: Option<usize> = None;
     for i in 0..BINS {
-        if smooth[i] < peak * 0.25 {
+        if smooth[i] < peak * floor {
             continue;
         }
         let from = i.saturating_sub(guard);
         let to = (i + guard).min(BINS - 1);
-        if (from..=to).all(|j| smooth[j] <= smooth[i]) && peaks.last().is_none_or(|&p| i - p > guard) {
-            peaks.push(i);
+        if (from..=to).all(|j| smooth[j] <= smooth[i]) && last.is_none_or(|p| i - p > guard) {
+            bins.push(i);
+            last = Some(i);
         }
     }
 
-    let sep = |a: usize, b: usize| (b as f32 - a as f32) * width;
-    match peaks.len() {
-        1 => (1, 0.0),
-        2 => (2, sep(peaks[0], peaks[1])),
-        4 => (4, sep(peaks[0], peaks[3])),
-        _ => (0, 0.0),
+    // Two bumps are two clusters only if something separates them. Noise
+    // spread alone produces several local maxima on one cluster, and calling
+    // those two levels is how a clean constant-envelope signal ends up read as
+    // amplitude keying. A real valley drops to half the shorter of the two.
+    let mut merged: Vec<usize> = Vec::new();
+    for b in bins {
+        match merged.last().copied() {
+            Some(prev) => {
+                let valley = smooth[prev..=b].iter().cloned().fold(f32::INFINITY, f32::min);
+                if valley > 0.5 * smooth[prev].min(smooth[b]) {
+                    if smooth[b] > smooth[prev] {
+                        *merged.last_mut().unwrap() = b;
+                    }
+                } else {
+                    merged.push(b);
+                }
+            }
+            None => merged.push(b),
+        }
     }
+    merged.iter().map(|&i| lo + (i as f32 + 0.5) * width).collect()
+}
+
+/// The envelope's two levels, how far apart they are, and how much of the
+/// burst is spent at the upper one.
+///
+/// Measured from the histogram of the envelope in decibels rather than from
+/// percentiles, because percentiles answer a question about duty cycle and the
+/// question here is about levels. A packet is mostly silence: a tenth of an
+/// on-off keyed burst is transmitting, so its tenth percentile is the noise
+/// floor, and so is a frequency-keyed burst's, and the two then look alike
+/// while being opposites. Decibels rather than volts because the two clusters
+/// are decades apart in amplitude and a linear histogram puts both of them in
+/// the bottom two bins.
+///
+/// Returns the ratio of the levels in amplitude, the number of levels found,
+/// the upper level, and the fraction of samples at or above the midpoint.
+fn envelope_levels(scratch: &mut Vec<f32>, amp: &[f32], db: &mut Vec<f32>) -> (f32, u8, f32, f32) {
+    db.clear();
+    db.extend(amp.iter().map(|v| 20.0 * v.max(1e-9).log10()));
+    let peaks = histogram_peaks(scratch, db, 0.05);
+    let hi_db = peaks.last().copied().unwrap_or(0.0);
+    let hi = 10f32.powf(hi_db / 20.0);
+    if peaks.len() < 2 {
+        let duty = amp.iter().filter(|v| **v >= hi * 0.5).count() as f32 / amp.len().max(1) as f32;
+        return (1.0, peaks.len().max(1) as u8, hi, duty);
+    }
+    let lo = 10f32.powf(peaks[0] / 20.0);
+    let mid = (lo * hi).sqrt();
+    let duty = amp.iter().filter(|v| **v >= mid).count() as f32 / amp.len().max(1) as f32;
+    (lo / hi, peaks.len().min(255) as u8, hi, duty)
 }
 
 /// How much of the burst sweeps at one steady rate, and what that rate is.
