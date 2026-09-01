@@ -133,9 +133,25 @@ makes it fast: one polyphase channelizer, one tiled transpose, one burst
 detector, then a rayon sweep of the channels worth running. It reports what its
 channels run, so the view shows the decoder rather than an opaque box.
 
-The chain view draws that graph's topology rather than a diagram kept alongside
-it, which is the only way it can be trusted: documentation that has drifted is
-worse than none, because it is believed.
+The graph is built from a description rather than by hand. The receiver draws
+one for itself out of what it is doing (`chain::derived_patch`): the DC block
+and the zoom decimator, the spectrum, the recorder's ring, the band extractions
+and front ends the scanner table asks for, eight stages per listening channel,
+the packet bus and the protocols and the tracker. Every one of them is a
+registry stage with settings and wires, named by an id computed from what it is
+for, which is what lets a node keep its state across the rebuild that changed
+the shape around it.
+
+The chain view draws that description, and in manual mode it edits it. Stages
+can be added from the registry, deleted, dragged, and wired by pulling a wire
+from either end onto a port or a box; a stage whose inputs are not all fed yet
+is left out of the built graph rather than refusing the whole receiver, and an
+edit that will not build is refused and the last graph that did build goes back,
+so a wrong wire cannot stop the radio. While manual mode is on, the scanner
+table and the decode switch no longer rebuild the graph: it is yours.
+
+Either way what is drawn is what runs, which is the only way it can be trusted:
+documentation that has drifted is worse than none, because it is believed.
 
 It is also where a stage is set by hand. Every node already describes its own
 knobs as data, which is what lets a chain be saved and reloaded without each

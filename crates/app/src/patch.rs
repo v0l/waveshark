@@ -23,10 +23,10 @@ use pipeline::registry::Settings;
 /// second kind of link so that a wire is a wire: the view, the patch and the
 /// builder all treat them like any other target.
 pub mod builtin {
-    /// What the parts of the receiver that are not drawn yet read: the front
-    /// ends from the scanner table and the listening channels. A marker
-    /// rather than a stage, so that the head of the chain can be edited
-    /// without those losing track of where the samples come from.
+    /// Which stage the receiver considers the head of the chain: the samples
+    /// after the DC block and the zoom, which is what everything derived from
+    /// the dial is drawn against. A marker rather than a stage, because it
+    /// names one rather than being one.
     pub const HEAD: u64 = u64::MAX;
     /// The span itself: the samples as the radio delivered them. Not a stage,
     /// but it is a box on screen and it is dragged and wired like one.
