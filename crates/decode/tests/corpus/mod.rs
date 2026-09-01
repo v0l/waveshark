@@ -375,6 +375,16 @@ pub fn spec_for(model: &str) -> Option<&'static ModelSpec> {
     SPECS.iter().find(|s| s.rtl == model)
 }
 
+/// Every Oregon Scientific thermo-hygro sensor reports the same five fields,
+/// and the ones without a humidity element simply omit it on both sides.
+static OREGON_TH: &[(&str, &str, Conv)] = &[
+    ("id", "id", Num),
+    ("channel", "channel", Num),
+    ("temperature_C", "temperature_c", Num),
+    ("humidity", "humidity_pct", Num),
+    ("battery_ok", "battery_ok", Bool),
+];
+
 use Conv::{Bool, FromF, FromKmh, Num, Text, Within};
 
 /// Deliberately not exhaustive over rtl_433: a model missing from here means
@@ -515,6 +525,27 @@ pub static SPECS: &[ModelSpec] = &[
             ("channel", "channel", Num),
             ("temperature_C", "temperature_c", Num),
             ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Oregon-THGR122N",
+        ours: "Oregon-THGR122N",
+        fields: OREGON_TH,
+    },
+    ModelSpec { rtl: "Oregon-THN132N", ours: "Oregon-THN132N", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-RTGN318", ours: "Oregon-RTGN318", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-RTHN129", ours: "Oregon-RTHN129", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-THN129", ours: "Oregon-THN129", fields: OREGON_TH },
+    ModelSpec {
+        rtl: "Oregon-WGR800",
+        ours: "Oregon-WGR800",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("wind_max_m_s", "wind_gust_ms", Num),
+            ("wind_avg_m_s", "wind_avg_ms", Num),
+            ("wind_dir_deg", "wind_direction_deg", Num),
         ],
     },
     ModelSpec {

@@ -20,14 +20,14 @@ pub enum Coding {
     /// bit. Short gap is 0, long gap is 1, again matching rtl_433, whose PPM
     /// slicer uses the opposite polarity to its PWM one.
     Ppm,
-    /// Manchester: each bit is a transition at mid-symbol. The signal is read
-    /// as alternating half-symbol runs; a full-length mark or gap is two
-    /// half-bits. This is the rtl_433 convention (plain IEEE Manchester),
-    /// where a bit is a low-then-high or high-then-low half-pair. The slicer
-    /// pairs from the package's first mark, so it is aligned when that mark is
-    /// the first half of a symbol; a decoder finds its sync across the
-    /// produced stream (it may start a half-symbol in), the way
-    /// `OregonV3::decode` searches for its sync word.
+    /// Manchester: each bit is a transition at mid-symbol, falling for a 1 and
+    /// rising for a 0, which is rtl_433's convention. The slicer emits a bit
+    /// per data edge rather than pairing half symbols, so it holds
+    /// synchronisation through a mistimed pulse, and it opens each row with
+    /// the zero standing for the edge the detector triggered on. A decoder
+    /// still finds its own sync in the stream, the way `OregonV3::decode`
+    /// does, because where a package starts says nothing about where a frame
+    /// does.
     Manchester,
     /// Non-return-to-zero: mark and gap lengths are integer multiples of one
     /// symbol period, marks being 1 and gaps 0.
@@ -203,9 +203,79 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     Ok(b)
 }
 
+/// Manchester by data edges, which is rtl_433's `manchester_zerobit` slicer.
+///
+/// The obvious implementation, expanding every mark and gap into half symbols
+/// and pairing them, throws the frame away as soon as one width rounds to the
+/// wrong number of halves: every later pair is shifted by a half and the
+/// stream is noise from there on. Tracking the time since the last data edge
+/// instead means a mistimed edge costs one bit rather than the rest of the
+/// transmission, which on rtl_433's own Oregon recordings is the difference
+/// between decoding a capture and decoding none of it.
+///
+/// A bit is emitted at each mid-symbol transition: a falling edge is a 1 and a
+/// rising edge a 0. The first rising edge is counted as a zero, as rtl_433
+/// does, because the transmitter's first half symbol is the one the detector
+/// triggered on and is not in the pulse list.
 fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
-    let raw = slice_manchester_half(pkg, t)?;
-    Ok(manchester_decode(&raw, 0))
+    if pkg.pulses.len() < 4 {
+        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
+    }
+    let half = t.short_us.max(1);
+    // One and a half half-symbols: past this, the edge is a data edge rather
+    // than the halfway point of a run of two.
+    let edge = half + half / 2;
+    // rtl_433 applies its width check only where a protocol asked for a
+    // tolerance, so this reads the field rather than the default from `tol()`.
+    let tolerance = t.tolerance_us;
+    // Zero means the protocol named no reset gap, so nothing short of the end
+    // of the package breaks a row.
+    let reset = if t.reset_us == 0 { u32::MAX } else { t.reset_us };
+    let last = pkg.pulses.len() - 1;
+
+    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
+    // Each row opens with the zero standing for the edge that started it, and
+    // it is written only once the row turns out to have content, so a package
+    // ending on a row break does not end with an invented bit.
+    let mut pending_zero = true;
+    let mut since = 0u32;
+    let push = |b: &mut BitBuffer, bit: bool, pending: &mut bool| {
+        if *pending {
+            b.push(false);
+            *pending = false;
+        }
+        b.push(bit);
+    };
+    for (n, p) in pkg.pulses.iter().enumerate() {
+        let out_of_range = |w: u32| w + tolerance < half || w > half * 2 + tolerance;
+        if tolerance > 0 && (out_of_range(p.mark) || out_of_range(p.gap)) {
+            // A mark of nearly two half-symbols ends on a data edge even
+            // though the pulse is malformed, so the bit it carries is kept.
+            if p.mark > edge && p.mark <= half * 2 + tolerance {
+                push(&mut b, true, &mut pending_zero);
+            }
+            b.mark_row();
+            pending_zero = true;
+            since = 0;
+        } else if p.mark + since > edge {
+            push(&mut b, true, &mut pending_zero);
+            since = 0;
+        } else {
+            since += p.mark;
+        }
+
+        if n == last || p.gap > reset {
+            b.mark_row();
+            pending_zero = true;
+            since = 0;
+        } else if p.gap + since > edge {
+            push(&mut b, false, &mut pending_zero);
+            since = 0;
+        } else {
+            since += p.gap;
+        }
+    }
+    Ok(b)
 }
 
 /// Slice a package into its raw half-symbol level stream: each bit is one
@@ -390,15 +460,15 @@ mod tests {
         );
     }
 
-    // Build a Package from a bit stream using plain IEEE Manchester: bit 1 is
-    // a low-then-high half-pair (rising at the symbol center), bit 0 is
-    // high-then-low. Consecutive halves alternate as on the wire; a same-level
-    // boundary (a long run) appears where equal bits meet.
-    fn manchester_ieee(bits: &[bool], half: u32) -> Package {
+    // Build a Package from a bit stream in the convention the slicer uses,
+    // which is rtl_433's: the bit is carried by the mid-symbol edge, falling
+    // for a 1 and rising for a 0. Consecutive halves alternate as on the wire;
+    // a same-level boundary (a long run) appears where equal bits meet.
+    fn manchester_wave(bits: &[bool], half: u32) -> Package {
         let mut lv: Vec<bool> = Vec::new();
         for &b in bits {
-            lv.push(!b); // first half
-            lv.push(b);  // second half
+            lv.push(b); // first half
+            lv.push(!b); // second half
         }
         let mut runs: Vec<(bool, u32)> = Vec::new();
         for &level in &lv {
@@ -450,13 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn manchester_recovers_ieee_bits_when_aligned() {
-        // The slicer pairs from the package's first mark, so it is aligned when
-        // that mark is the first half of a symbol, i.e. the first bit is 0
-        // (high-then-low). Both alternating bits (boundary transitions) and
-        // equal bits (long runs) must come back intact.
+    fn manchester_recovers_its_bits_when_aligned() {
+        // A frame starting with a 0 begins with a half symbol the envelope
+        // detector never sees, so the package starts at that bit's own data
+        // edge and the slicer's leading zero stands in for it. Both
+        // alternating bits (edge at every boundary) and equal bits (long runs)
+        // must come back intact.
         let bits: Vec<bool> = vec![false, true, true, false, true, false, false, true];
-        let p = manchester_ieee(&bits, 640);
+        let p = manchester_wave(&bits, 640);
         let t = Timing { coding: Coding::Manchester, short_us: 640, long_us: 1280, ..Timing::pwm(640, 1280, 0) };
         let out = slice(&p, &t).unwrap();
         assert_eq!(out.len(), bits.len(), "bit count");
@@ -471,7 +542,7 @@ mod tests {
         // level and therefore no bit, not a fabricated one.
         let t = Timing { coding: Coding::Manchester, short_us: 640, long_us: 1280, ..Timing::pwm(640, 1280, 0) };
         let bits = vec![false, true, true, false, true, false, false, true];
-        let mut p = manchester_ieee(&bits, 640);
+        let mut p = manchester_wave(&bits, 640);
         let clean = slice(&p, &t).unwrap();
         assert_eq!(clean.len(), 8);
         // Prepend a degenerate pulse (zero mark and zero gap): it must

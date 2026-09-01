@@ -98,9 +98,11 @@ removed:
 - Two sensors transmitting inside one burst yield one decode, because a
   protocol returns the first frame it finds in a package. rtl_433 reads its
   rows separately and reports both.
-- Oregon Scientific v2.1 (THGR122N, THN132N, RTGN318, WGR800) is most of what
-  the corpus holds for that brand, and the decoder here covers v3 only, so none
-  of those recordings is used.
+- The THR228N is reported as a THN132N. They share a sensor id and a frame
+  layout, and rtl_433 tells them apart by message length, which is not
+  measurable here: a burst runs one copy straight into the preamble of the
+  next, and that preamble unpacks as valid Manchester pairs, so the frame never
+  ends where the transmitter stopped. Both sensors report the same fields.
 
 ## ISM sensors, remotes and telemetry
 
@@ -125,7 +127,9 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Bresser Thermo-/Hygro 3CH, Renkforce DM-7511 | 433.92 MHz | OOK PWM | 31 kHz | done | table | Additive checksum. Measures in Fahrenheit, reported in Celsius. The DM-7511 sends a 1012 us preamble where Bresser publishes 750, which is why an over-long mark is read as a row start rather than matched against a published width |
 | Globaltronics GT-WT-02 (Aldi) | 433.92 MHz | OOK PPM, ms symbols | 31 kHz | done | table | Nibble-sum checksum, LL/HH humidity sentinels |
 | Globaltronics GT-WT-03 (Aldi, Lidl) | 433.92 MHz | OOK PWM | 31 kHz | done | table | Rolling-key checksum, neither a CRC nor a sum |
-| Ambient Weather, Oregon Scientific, other Acurite | 433.92/915 MHz | OOK PWM/Manchester | 31 kHz | table | table | Several families each, all timing tables |
+| Oregon Scientific v2.1: THGR122N, THN132N, THN129, RTGN318, RTHN129 | 433.92 MHz | OOK Manchester 488 us | 31 kHz | done | table | Every bit is sent twice, inverted the second time, on top of the Manchester coding, so the sliced stream is complementary pairs. Nibbles arrive bit-reversed and values are BCD. Eight bit nibble-sum checksum, starting at a nibble that differs per model |
+| Oregon Scientific v3: THGR810, THN802, WGR800 | 433.92 MHz | OOK Manchester 488 us | 31 kHz | done | table | Same payload layout as v2.1 without the doubling. The WGR800 reports wind rather than temperature |
+| Ambient Weather, other Oregon Scientific, other Acurite | 433.92/915 MHz | OOK PWM/Manchester | 31 kHz | table | table | Several families each, all timing tables |
 | TPMS (Schrader, Toyota, Renault, Citroen) | 315/433.92 MHz | OOK/FSK Manchester | 31-125 kHz | table | table | Bursty, short, CRC8. Sensors report on a timer, so a receiver waits minutes per wheel |
 | EnOcean | 868.3 MHz | ASK | 31 kHz | table | table | Self-powered switches |
 | Itron / ERT smart meters | 902-928 MHz | OOK/FSK Manchester | 125 kHz | table | table | The rtlamr target |

@@ -240,3 +240,82 @@ reference_sha256 = "7ba6aa3fe8db92e24513736df5eb3f2fdbf7184a46842a3a0e8a317b1a55
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/x10/01/record-x10-b1-on-002.json"
 description = "A second X10 press"
 
+[[sample]]
+name = "oregon_thgr122n_a_433.92M_250k.cu8"
+sha256 = "432f7471caaee99e9c052911f5eca55ea33df5cc9aca0e3297c02bcbe0c7c6bf"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thgr122n/01/THGR122N_-550_30_ch1.cu8"
+reference_sha256 = "253e7b89ac74784cb10ded363ec694a1a2db0a976f16eab0f707787ac6f4de7f"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thgr122n/01/THGR122N_-550_30_ch1.json"
+description = "THGR122N at -5.5 C, the sign bit and a burst rtl_433 reads twice"
+
+[[sample]]
+name = "oregon_thgr122n_b_433.92M_250k.cu8"
+sha256 = "a1e7c276a1c8d5ed88205e191fc502c9289a11ef0398e659f0b96e8bcc0a2806"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thgr122n/01/THGR122N_206_58_ch1.cu8"
+reference_sha256 = "e1c15ccc21277029f770065fcfe03268a6581747d496909255c93925aa211b63"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thgr122n/01/THGR122N_206_58_ch1.json"
+description = "A second THGR122N reading from the same sensor"
+
+[[sample]]
+name = "oregon_thn132n_a_433.92M_250k.cu8"
+sha256 = "04515a6b50be6340b97bfb9560f54106851486d7e7a888a7535d0a5e55c289ee"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/THN132N/THN132N_-940_ch1.cu8"
+reference_sha256 = "4645719d6c4dcf6d0d784501189b512054077c02a70cf0751757a0ca7da893e3"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/THN132N/THN132N_-940_ch1.json"
+description = "THN132N below freezing: temperature only, and the shorter v2.1 frame"
+
+[[sample]]
+name = "oregon_thn132n_b_433.92M_250k.cu8"
+sha256 = "f4144370a7a6ee33d8b50e7d53569cf44317d6959dbd43e5b029be217c5c7e07"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/THN132N/THN132N_180_ch3.cu8"
+reference_sha256 = "fd596358fdd0668091b87586ab12a78013cbfab7595b4c44ac088a9799545327"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/THN132N/THN132N_180_ch3.json"
+description = "The same sensor on another channel"
+
+[[sample]]
+name = "oregon_rtgn318_a_433.92M_250k.cu8"
+sha256 = "d77d8dcba27492bb2645ed3dc08c7c872ca54520db71c9cb1c5d7186791ffd37"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/RTGN318/gfile002.cu8"
+reference_sha256 = "8b5cd699839a76207d5fd6947fce7a5d2584926d90c5f9820f18b013eef4cc36"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/RTGN318/gfile002.json"
+description = "RTGN318, whose id varies in its top nibble and is matched on the low twelve bits"
+
+[[sample]]
+name = "oregon_rtgn318_b_433.92M_250k.cu8"
+sha256 = "f72fad99eaee9feca5f1056974df062fe2226772e4ac762f59d18517714bdec0"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/RTGN318/gfile011.cu8"
+reference_sha256 = "976ad4ffe2c2d818d565376214b588e71f551cf99f65fef8d4786bfa852940fc"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/RTGN318/gfile011.json"
+description = "A second RTGN318, another channel and another house code"
+
+[[sample]]
+name = "oregon_rthn129_a_433.92M_250k.cu8"
+sha256 = "dc2b1c6b7bdb3131794bb5df86702674f250bd1657c19d5dfb349c636762607c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/rthn129/g001_433.92M_250k.cu8"
+reference_sha256 = "533e58a90f3af7df49b6a83943b685b5431cc5d3842557d411775a185adb4e10"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/rthn129/g001_433.92M_250k.json"
+description = "RTHN129, a 68 bit frame where the others are 64 or 76"
+
+[[sample]]
+name = "oregon_thn129_a_433.92M_250k.cu8"
+sha256 = "df03860e24b248e95574b2a3161a6f1b0ff47d73fecd8afbfe6d9dd1a7f034cb"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thn129/gfile006.cu8"
+reference_sha256 = "ba1810767bbb0e4e75e47b19e8f03a1c12ec06971a571222bccd64a8d825e6ef"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/thn129/gfile006.json"
+description = "THN129, the RTHN129's fixed-id sibling"
+
+[[sample]]
+name = "oregon_wgr800_c_433.92M_250k.cu8"
+sha256 = "569b292c4827cf4204ed4e35a0cf97a964fa8ec8779f3f8b0574ac0411e9214e"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/WGR800X/01/WGR800X-g003_433.92M_250k.cu8"
+reference_sha256 = "32a897bdb8cfd7713eccf9929dd88ef246f1f1c41e445df00087c834ea7fd2ef"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/WGR800X/01/WGR800X-g003_433.92M_250k.json"
+description = "WGR800 wind meter, v3 rather than v2.1, reporting a gust"
+
+[[sample]]
+name = "oregon_wgr800_f_433.92M_250k.cu8"
+sha256 = "d61d424132b57a51a59ab9b0bb6c64cd146e7d0fe2196e30d6788c3b7859d908"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/WGR800X/01/WGR800X-g007_433.92M_250k.cu8"
+reference_sha256 = "bbfcb560dc9919ab69a8a7ab2d58aa9305db9aec26a9535517115f7a256b6008"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/oregon_scientific/WGR800X/01/WGR800X-g007_433.92M_250k.json"
+description = "A second WGR800 with wind on both the average and the gust"

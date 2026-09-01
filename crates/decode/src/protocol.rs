@@ -150,6 +150,7 @@ impl Protocols {
         p.add(Box::new(GtWt03));
         p.add(Box::new(FineOffsetWh51));
         p.add(Box::new(OregonV3));
+        p.add(Box::new(OregonV2));
         p.add(Box::new(X10Rf));
         p.add(Box::new(Ev1527));
         p.add(Box::new(Princeton));

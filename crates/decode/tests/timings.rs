@@ -301,10 +301,12 @@ fn an_oregon_v3_burst_decodes_from_manchester_timings() {
     msg[7] = sum & 0x0f;
     msg[8] = sum & 0xf0;
 
-    let mut bits: Vec<bool> = vec![true; 24];
-    bits.extend([true, false, true, false]);
+    let mut bits: Vec<bool> = vec![false; 24];
+    bits.extend([false, true, false, true]);
     for b in msg {
-        let wire = b.rotate_left(4);
+        // Every nibble goes out with its bits reversed.
+        let r = |n: u8| ((n & 1) << 3) | ((n & 2) << 1) | ((n & 4) >> 1) | ((n & 8) >> 3);
+        let wire = (r(b >> 4) << 4) | r(b & 0x0f);
         for i in 0..8 {
             bits.push(wire & (0x80 >> i) != 0);
         }

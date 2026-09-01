@@ -21,13 +21,13 @@ per protocol. Nothing in the current tree keys a radio.
 Working receiver, narrow coverage. The signal path runs end to end against real
 off-air RF, there is an egui front end, and FM broadcast decodes to stereo audio
 with RDS, and ADS-B decodes aircraft off the air. AIS, APRS and POCSAG decode
-too. What is missing is protocols: twenty-five ISM device decoders are
+too. What is missing is protocols: twenty-seven ISM device decoders are
 implemented where the goal is hundreds.
 
-Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 28 recordings
+Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 38 recordings
 from rtl_433's own test corpus and asserts every decode matches the reference
-JSON rtl_433 25.02 produced for that file, field for field. Twelve device
-families are covered, plus ADS-B against dump1090 over a shared recording. The
+JSON rtl_433 25.02 produced for that file, field for field. Twenty device
+models are covered, plus ADS-B against dump1090 over a shared recording. The
 expected values come from separate implementations, so agreement is evidence
 rather than a restatement of our own assumptions.
 
@@ -37,6 +37,14 @@ reported the wrong sensor at the wrong temperature with its checksum passing.
 The causes were in the shared layers rather than in any one protocol: the
 slicers were throwing away the gap between repeats, which is the only evidence
 of where a frame begins.
+
+The Manchester slicer went the same way later. It expanded each mark and gap
+into half symbols and paired them, which loses the whole frame as soon as one
+width rounds to the wrong number of halves, and on rtl_433's Oregon Scientific
+recordings that was half of them: fourteen captures out of twenty-eight
+decoded, with a correct decoder in front of them. Tracking the time since the
+last data edge instead, the way rtl_433 does, costs one bit per mistimed edge
+rather than the rest of the transmission, and all twenty-eight decode.
 
 ## Layout
 

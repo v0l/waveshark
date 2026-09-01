@@ -30,7 +30,7 @@ pub use globaltronics::{GtWt02, GtWt03};
 pub use keyfob::{Ansonic, Bett, came12_bit, came24_bit, Holtek, HoltekHt12x, Linear, LinearDelta3, NiceFlo, Princeton};
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
-pub use oregon::OregonV3;
+pub use oregon::{OregonV2, OregonV3};
 pub use rubicson::Rubicson;
 pub use somfy_rts::SomfyRts;
 pub use x10::X10Rf;
