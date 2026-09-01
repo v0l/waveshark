@@ -1649,7 +1649,7 @@ type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>);
 /// The node registry plus the ones that only make sense inside the
 /// application: the tracker folds positions together for the map, which is a
 /// view rather than a signal path, so it lives here.
-fn registry() -> pipeline::registry::Registry {
+pub fn registry() -> pipeline::registry::Registry {
     use pipeline::registry::StageDesc;
     let mut r = nodes::registry();
     r.register(

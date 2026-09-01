@@ -129,8 +129,6 @@ pub struct App {
     /// The last patch handed to the radio thread. What comes back matches it
     /// when the edit built, and is the previous graph when it did not.
     chain_patch_sent: Option<crate::patch::Patch>,
-    /// The stage the palette will add next.
-    chain_add: String,
     /// The graph as last drawn by hand, which is not the same as the one
     /// running: in automatic mode the receiver derives its own and this is
     /// what taking it over goes back to.
@@ -413,7 +411,6 @@ impl Default for App {
             chain_patch: crate::patch::Patch::default(),
             chain_patch_rev: 0,
             chain_patch_sent: None,
-            chain_add: String::new(),
             chain_drawn: None,
             chain_places: crate::patch::Places::new(),
             chain_saved_at: None,
@@ -2850,7 +2847,14 @@ impl App {
                     });
                 });
         }
-        self.chain_header(ui);
+        Panel::left("chain-palette")
+            .default_size(190.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(10, 10)),
+            )
+            .show(ui, |ui| self.chain_palette(ui));
         // Dragged, not only scrolled: the graph is wider and taller than the
         // pane on any real chain, and reaching for a scrollbar to see a branch
         // is not how anyone reads a diagram. In manual mode a drag moves a
@@ -2932,92 +2936,111 @@ impl App {
         self.save_places();
     }
 
-    /// The switch that decides who owns the shape of the graph, and the
-    /// palette that edits it once it does.
-    fn chain_header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let mut manual = self.chain_edit.manual;
-            if ui.checkbox(&mut manual, "MANUAL").clicked() {
-                self.set_manual_chain(manual);
-            }
-            if self.chain_edit.manual {
-                self.chain_palette(ui);
-            } else {
-                ui.label(legend("built from the scanner table for this span"));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(self.chain_edit.moved(), egui::Button::new("ARRANGE"))
-                    .on_hover_text("Lay the stages out again from the graph")
-                    .clicked()
-                {
-                    self.chain_edit.arrange();
-                }
-            });
-        });
-        ui.add_space(4.0);
-    }
-
-    /// Which stages can be added, and what to do with the one selected.
+    /// The column beside the graph: what owns its shape, what can be added to
+    /// it, and what to do with what is selected.
     ///
-    /// The list comes from the node registry rather than from anything
-    /// written here, so a decoder added to the build appears in it without
-    /// this file being touched.
+    /// A list rather than a menu. Adding a stage is the ordinary thing to do
+    /// in here, and a dropdown makes it two clicks and a hidden inventory:
+    /// which stages exist at all is worth being able to read.
     fn chain_palette(&mut self, ui: &mut egui::Ui) {
-        let reg = nodes::registry();
-        let kinds: Vec<(String, String)> =
-            reg.list().map(|d| (d.name.to_string(), d.summary.to_string())).collect();
-        if self.chain_add.is_empty() {
-            if let Some((name, _)) = kinds.first() {
-                self.chain_add = name.clone();
+        let mut manual = self.chain_edit.manual;
+        if ui.checkbox(&mut manual, "MANUAL").clicked() {
+            self.set_manual_chain(manual);
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.chain_edit.moved(), egui::Button::new("ARRANGE"))
+                .on_hover_text("Lay the stages out again from the graph")
+                .clicked()
+            {
+                self.chain_edit.arrange();
+            }
+            let picked = self.chain_pick.filter(|id| self.chain_patch.stage(*id).is_some());
+            if ui
+                .add_enabled(
+                    self.chain_edit.manual && (picked.is_some() || self.chain_wire.is_some()),
+                    egui::Button::new("REMOVE"),
+                )
+                .on_hover_text("Delete")
+                .clicked()
+            {
+                if let Some(to) = self.chain_wire.take() {
+                    self.edit_patch(|p| p.disconnect(to));
+                } else if let Some(id) = picked {
+                    self.edit_patch(|p| p.remove(id));
+                    self.chain_pick = None;
+                    self.chain_sel = None;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.chain_undo.is_empty(), egui::Button::new("UNDO"))
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
+                self.undo_patch();
+            }
+            if ui
+                .add_enabled(!self.chain_redo.is_empty(), egui::Button::new("REDO"))
+                .on_hover_text("Ctrl+Shift+Z")
+                .clicked()
+            {
+                self.redo_patch();
+            }
+        });
+
+        ui.add_space(8.0);
+        // Which gestures exist, and the one thing that is not editable: only
+        // the stages added here have live ports.
+        let hint = if !self.chain_edit.manual {
+            "built from the scanner table for this span"
+        } else if self.chain_wire.is_some() {
+            "wire selected; DELETE removes it"
+        } else if self.chain_patch.stages().is_empty() {
+            "add a stage: only stages added here can be wired"
+        } else {
+            "drag a port to wire, drag a wire off an input to move it"
+        };
+        ui.label(legend(hint));
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // The list comes from the node registry rather than from anything
+        // written here, so a decoder added to the build appears in it without
+        // this file being touched.
+        let reg = crate::chain::registry();
+        let mut by_category: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+        for d in reg.list() {
+            match by_category.iter_mut().find(|(c, _)| *c == d.category) {
+                Some((_, v)) => v.push((d.name, d.summary)),
+                None => by_category.push((d.category, vec![(d.name, d.summary)])),
             }
         }
-        egui::ComboBox::from_id_salt("chain-add")
-            .selected_text(self.chain_add.clone())
-            .width(150.0)
-            .show_ui(ui, |ui| {
-                for (name, summary) in &kinds {
-                    ui.selectable_value(&mut self.chain_add, name.clone(), name)
-                        .on_hover_text(summary);
+        let manual = self.chain_edit.manual;
+        let mut add: Option<String> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (category, stages) in &by_category {
+                ui.label(legend(category));
+                for (name, summary) in stages {
+                    let w = egui::Button::new(egui::RichText::new(*name).size(12.0))
+                        .fill(theme::WELL)
+                        .min_size(egui::Vec2::new(ui.available_width(), 20.0));
+                    if ui.add_enabled(manual, w).on_hover_text(*summary).clicked() {
+                        add = Some(name.to_string());
+                    }
                 }
-            });
-        if ui.button("ADD").clicked() && !self.chain_add.is_empty() {
-            let kind = self.chain_add.clone();
+                ui.add_space(6.0);
+            }
+        });
+        if let Some(kind) = add {
             let mut added = None;
             self.edit_patch(|p| added = Some(p.add(&kind)));
             self.chain_pick = added;
+            self.chain_wire = None;
         }
-        let picked = self.chain_pick.filter(|id| self.chain_patch.stage(*id).is_some());
-        if ui.add_enabled(picked.is_some(), egui::Button::new("REMOVE")).clicked() {
-            if let Some(id) = picked {
-                self.edit_patch(|p| p.remove(id));
-                self.chain_pick = None;
-                self.chain_sel = None;
-            }
-        }
-        if ui
-            .add_enabled(!self.chain_undo.is_empty(), egui::Button::new("UNDO"))
-            .on_hover_text("Ctrl+Z")
-            .clicked()
-        {
-            self.undo_patch();
-        }
-        if ui
-            .add_enabled(!self.chain_redo.is_empty(), egui::Button::new("REDO"))
-            .clicked()
-        {
-            self.redo_patch();
-        }
-        // Which gestures exist, and the one thing that is not editable. Only
-        // the stages added here have live ports: the head of the chain, the
-        // spectrum and the listening channels are the receiver's own wiring.
-        ui.label(legend(&match picked.and_then(|id| self.chain_patch.stage(id)) {
-            Some(s) => format!("{} selected; drag its ports to wire it up", s.kind),
-            None if self.chain_patch.stages().is_empty() => {
-                "add a stage: only stages added here can be wired".to_string()
-            }
-            None => "drag a port to wire, drag a wire off an input to move it".to_string(),
-        }));
     }
 
     /// Change the graph, keeping what it was so the change can be taken back.
