@@ -695,7 +695,8 @@ the trip.
 
 ## Reference implementations
 
-Decoders worth reading before writing our own, all MIT and all pure Rust:
+Decoders worth reading before writing our own, all MIT and all pure Rust, so
+anything borrowed from them can be relicensed into this one:
 
 | crate | covers |
 |---|---|
@@ -708,3 +709,23 @@ Decoders worth reading before writing our own, all MIT and all pure Rust:
 
 They share the Desperado workspace with `rs-hackrf`, which this repo already
 depends on for HackRF USB support.
+
+## Licence
+
+GPL-3.0-or-later. The full text is in [`LICENSE`](LICENSE).
+
+This is where the rest of the band already sits: rtl_433 is GPLv2 or later,
+GNU Radio and SDRangel are GPLv3, and the Flipper firmware is GPLv3. A receiver
+whose whole value is knowing how a hundred protocols are framed is built out of
+other people's reverse engineering, and returning it on the same terms is the
+arrangement that produced the knowledge in the first place.
+
+It is also the correct licence rather than merely the sociable one. The
+fixed-code gate remotes in `decode::protocols::keyfob` are ports of
+Momentum-Firmware's `lib/subghz/protocols`, which is GPLv3, so the code was
+already carrying that obligation while the manifest claimed MIT or Apache.
+
+Everything this links against is compatible: the Rust dependencies are all
+MIT or Apache-2.0, and librtlsdr is GPLv2 *or later*, which GPLv3 satisfies.
+Test data fetched from rtl_433 or the Flipper firmware is neither modified nor
+redistributed here, so a manifest pointing at it raises no question either way.
