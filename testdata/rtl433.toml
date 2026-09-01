@@ -412,3 +412,18 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "a317379d208cd5622603b5bd89b5fde1399328143b58e2a37bc74c0de2ebddf0"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_3-in-1/02/g002_433.92M_250k.json"
 description = "The same station a few readings later"
+[[sample]]
+name = "acurite_606tx_a_433.92M_250k.cu8"
+sha256 = "0562297543d27a06a23c40964a327c347b3e5d3af8e71cf07bfaafc1eb2f509a"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_606TX/05/gfile001.cu8"
+reference_sha256 = "0e939705b37c5b4cee674a60aec4072956f1500f4745bbfc8043d478b31f8d6f"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_606TX/05/gfile001.json"
+description = "606TX temperature sensor, whose four byte frame is guarded by an LFSR digest rather than a sum"
+
+[[sample]]
+name = "acurite_606tx_b_433.92M_250k.cu8"
+sha256 = "1c0c7ed8f95140789666f052343dbc1fddb60e5b756cabcf0406726aecb29a40"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_606TX/05/gfile005.cu8"
+reference_sha256 = "aac525a8456d08fb7c86fdeaa62c5b9146dbceb3f6ab0ba1f96a4cacdd86fe17"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_606TX/05/gfile005.json"
+description = "The same sensor just below freezing. Its symbols are close enough to the GT-WT-02's to slice the same way, which is how this recording caught a Globaltronics decode of an Acurite burst"

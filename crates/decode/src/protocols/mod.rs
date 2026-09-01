@@ -24,7 +24,7 @@ mod somfy_rts;
 mod tpms;
 mod x10;
 
-pub use acurite::{Acurite609Txc, AcuriteTower, AcuriteWind};
+pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, AcuriteWind};
 pub use bresser::Bresser3Ch;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
@@ -64,6 +64,43 @@ pub(crate) fn find_frame(
     find_frame_bits(bits, bytes * 8, ok)
 }
 
+/// Frames the slicer's own row marks bracket, least significant bit first.
+///
+/// For protocols whose row length is itself part of the specification: a
+/// candidate is only offered where a row starts, and only where that row is as
+/// long as the protocol says its frames are. That is a far stronger filter
+/// than a checksum over every bit offset, and it is what rtl_433 gets for free
+/// by decoding row by row.
+///
+/// Bytes come back reflected, because the protocols that need this are the
+/// ones transmitting least significant bit first.
+pub(crate) fn rows_of(
+    bits: &BitBuffer,
+    want: usize,
+    row_bits: std::ops::RangeInclusive<usize>,
+) -> impl Iterator<Item = Vec<u8>> + '_ {
+    let starts: Vec<usize> = bits.rows().to_vec();
+    let ends: Vec<usize> = starts
+        .iter()
+        .skip(1)
+        .copied()
+        .chain(std::iter::once(bits.len()))
+        .collect();
+    starts
+        .into_iter()
+        .zip(ends)
+        .filter(move |(start, end)| {
+            row_bits.contains(&(end - start)) && start + want <= bits.len()
+        })
+        .map(move |(start, _)| {
+            bits.slice(start, want)
+                .as_padded_bytes()
+                .iter()
+                .map(|b| crate::bits::reflect8(*b))
+                .collect()
+        })
+}
+
 /// [`find_frame`] for a frame whose length is not a whole number of bytes,
 /// which is most of them: 36, 37 and 41 bit frames are all common. The bytes
 /// handed to `ok` are zero padded on the right, as rtl_433's rows are.
@@ -91,9 +128,13 @@ pub(crate) fn find_frame_bits(
     if bits.len() < want {
         return None;
     }
-    // Room for a whole second copy is what makes a repeat check meaningful;
-    // below that the buffer is one frame plus slicer slop.
-    let alone = bits.len() < want * 2;
+    // A buffer barely longer than the frame is the detector agreeing with the
+    // frame's own boundaries, and that is corroboration in itself. The margin
+    // is a quarter of a frame rather than a whole one: at a whole frame's slack
+    // a 52 bit buffer counts as holding one 37 bit frame alone, and rtl_433's
+    // Acurite 606TX recording duly decoded as a Globaltronics sensor, the two
+    // protocols being close enough in timing to slice the same way.
+    let alone = bits.len() < want + want / 4;
 
     let rows: Vec<usize> = bits
         .rows()

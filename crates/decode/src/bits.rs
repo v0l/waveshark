@@ -256,6 +256,40 @@ pub fn lfsr_digest8_reflect(data: &[u8], gen: u8, key: u8) -> u8 {
     sum
 }
 
+/// Galois LFSR digest, as rtl_433's `lfsr_digest8`.
+///
+/// The same construction as [`lfsr_digest8_reflect`] with every direction
+/// turned around: bytes first to last, bits MSB first, and the key rolling
+/// right. Acurite's 606TX uses it where its siblings use a sum.
+pub fn lfsr_digest8(data: &[u8], gen: u8, key: u8) -> u8 {
+    let mut sum = 0u8;
+    let mut key = key;
+    for &byte in data {
+        for i in (0..8).rev() {
+            if byte >> i & 1 != 0 {
+                sum ^= key;
+            }
+            key = if key & 1 != 0 { (key >> 1) ^ gen } else { key >> 1 };
+        }
+    }
+    sum
+}
+
+/// LSB-first CRC-8, rtl_433's `crc8le`: the same polynomial division as
+/// [`crc8`] run through the byte from the other end, which is what a device
+/// that transmits its bits least significant first computes.
+pub fn crc8le(data: &[u8], poly: u8, init: u8) -> u8 {
+    let poly = reflect8(poly);
+    let mut crc = reflect8(init);
+    for &b in data {
+        crc ^= b;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ poly } else { crc >> 1 };
+        }
+    }
+    crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

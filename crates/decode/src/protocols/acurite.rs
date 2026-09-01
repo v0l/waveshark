@@ -32,8 +32,8 @@
 //! - `K` sum of the preceding six bytes
 //! - `p` even parity over bytes 2 to 5
 
-use crate::bits::{checksum8, even_parity, BitBuffer};
-use crate::protocols::find_frame;
+use crate::bits::{checksum8, crc8le, even_parity, lfsr_digest8, BitBuffer};
+use crate::protocols::{find_frame, rows_of};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::Timing;
 
@@ -275,6 +275,134 @@ impl Protocol for AcuriteWind {
     }
 }
 
+/// The 606TX, sold as the Technoline TX960 as well: temperature only, and the
+/// cheapest thing Acurite make.
+///
+/// PPM at 2 and 4 ms, four bytes, and an LFSR digest rather than the sum its
+/// siblings use:
+///
+/// ```text
+/// IIII IIII  BUCC TTTT  TTTT TTTT  KKKK KKKK
+/// ```
+///
+/// - `I` id, redrawn at random whenever the batteries come out
+/// - `B` battery good, `U` the pairing button, `C` channel
+/// - `T` temperature, 12 bit signed, tenths of a degree
+/// - `K` LFSR digest over the first three bytes
+pub struct Acurite606Tx;
+
+const TX606_BYTES: usize = 4;
+
+impl Protocol for Acurite606Tx {
+    fn name(&self) -> &'static str {
+        "Acurite-606TX"
+    }
+
+    fn timing(&self) -> Timing {
+        Timing::ppm(2000, 4000, 10_000)
+    }
+
+    fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
+        let b = find_frame(bits, TX606_BYTES, |b| {
+            b[..3] != [0; 3] && lfsr_digest8(&b[..3], 0x98, 0xf1) == b[3]
+        })
+        .ok_or(match bits.len() {
+            n if n < TX606_BYTES * 8 => {
+                DecodeError::WrongLength { got: n, want: TX606_BYTES * 8 }
+            }
+            _ => DecodeError::CrcFailed,
+        })?;
+
+        let raw = (((b[1] as u16 & 0x0f) << 8) | b[2] as u16) as i16;
+        let temperature = ((raw << 4) >> 4) as f64 * 0.1;
+        if !(-40.0..=70.0).contains(&temperature) {
+            return Err(DecodeError::Implausible("temperature out of range"));
+        }
+
+        let mut r = Report::new(self.name());
+        r.crc_valid = Some(true);
+        r.raw = b.clone();
+        Ok(r
+            .int("id", b[0] as i64)
+            .int("channel", ((b[1] >> 4) & 0x03) as i64 + 1)
+            .float("temperature_c", round1(temperature))
+            .bool("battery_ok", b[1] & 0x80 != 0)
+            .bool("button", b[1] & 0x40 != 0))
+    }
+}
+
+/// The 986 refrigerator and freezer thermometer: two probes, one display, and
+/// the only Acurite here that sends its bits least significant first.
+///
+/// PPM at 520 and 880 us, five bytes once each is reversed:
+///
+/// ```text
+/// TTTT TTTT  IIII IIII  IIII IIII  SSSS SSSN  KKKK KKKK
+/// ```
+///
+/// - `T` temperature in Fahrenheit, sign and magnitude rather than two's
+///   complement, which is why -5 F is 0x85
+/// - `I` sensor id, `N` which of the two probes sent this, `S` status with the
+///   low battery flag in its bottom bit
+/// - `K` CRC8 computed least significant bit first
+pub struct Acurite986;
+
+const A986_BYTES: usize = 5;
+
+impl Protocol for Acurite986 {
+    fn name(&self) -> &'static str {
+        "Acurite-986"
+    }
+
+    fn timing(&self) -> Timing {
+        Timing::ppm(520, 880, 4000)
+    }
+
+    fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
+        // Only frames the slicer's own row breaks bracket are considered, and
+        // only where the row is the length rtl_433 expects. Eight bits of CRC
+        // over every offset of a long buffer is not a filter at all: without
+        // the row test this decoder claimed bursts from three other sensors in
+        // the corpus, all of them reading 0 F.
+        let f = rows_of(bits, A986_BYTES * 8, 39..=43)
+            .find(|f| {
+                if f[..3] == [0; 3] || f[..3] == [0xff; 3] {
+                    return false;
+                }
+                crc8le(&f[..4], 0x07, 0) == f[4]
+            })
+            .ok_or(match bits.len() {
+                n if n < A986_BYTES * 8 => {
+                    DecodeError::WrongLength { got: n, want: A986_BYTES * 8 }
+                }
+                _ => DecodeError::CrcFailed,
+            })?;
+
+        let magnitude = (f[0] & 0x7f) as f64;
+        let fahrenheit = if f[0] & 0x80 != 0 { -magnitude } else { magnitude };
+        // A fridge or a freezer, so the useful range is small and anything
+        // outside it is a frame that found the CRC by luck.
+        if !(-40.0..=90.0).contains(&fahrenheit) {
+            return Err(DecodeError::Implausible("temperature out of range"));
+        }
+        let probe = f[3] & 0x01;
+        let status = f[3] >> 1;
+
+        let mut r = Report::new(self.name());
+        r.crc_valid = Some(true);
+        r.raw = f.clone();
+        Ok(r
+            .int("id", ((f[1] as i64) << 8) | f[2] as i64)
+            // The display calls probe one the fridge and probe two the
+            // freezer, and labels them that way, so the label is what a user
+            // will be looking for.
+            .text("channel", if probe == 1 { "2F" } else { "1R" })
+            .float("temperature_c", round1((fahrenheit - 32.0) / 1.8))
+            .int("status", status as i64)
+            .bool("battery_ok", status & 1 == 0))
+    }
+}
+
 /// The sensor's range in Fahrenheit, refused outside it, converted to Celsius.
 fn fahrenheit_to_c(f: f64) -> Result<f64, DecodeError> {
     if !(-40.0..=158.0).contains(&f) {
@@ -294,6 +422,7 @@ fn round2(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bits::reflect8;
     use crate::protocol::Value;
 
     fn txc(id: u8, temp_c: f64, humidity: u8, battery_low: bool) -> Vec<u8> {
@@ -503,6 +632,105 @@ mod tests {
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(43)));
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(-1.0)));
         assert_eq!(r.get("wind_avg_ms"), Some(&Value::Float(2.24)));
+    }
+
+    fn tx606(id: u8, channel: u8, temp_c: f64, battery_ok: bool, button: bool) -> Vec<u8> {
+        let raw = ((temp_c * 10.0).round() as i16) & 0x0fff;
+        let mut b = vec![0u8; TX606_BYTES];
+        b[0] = id;
+        b[1] = (if battery_ok { 0x80 } else { 0 })
+            | (if button { 0x40 } else { 0 })
+            | ((channel - 1) << 4)
+            | (raw >> 8) as u8;
+        b[2] = raw as u8;
+        b[3] = lfsr_digest8(&b[..3], 0x98, 0xf1);
+        b
+    }
+
+    #[test]
+    fn decodes_a_606tx_frame() {
+        let f = tx606(163, 1, 10.1, true, false);
+        let r = Acurite606Tx.decode(&BitBuffer::from_bytes(&f)).unwrap();
+        assert_eq!(r.get("id"), Some(&Value::Int(163)));
+        assert_eq!(r.get("channel"), Some(&Value::Int(1)));
+        assert_eq!(r.get("temperature_c"), Some(&Value::Float(10.1)));
+        assert_eq!(r.get("battery_ok"), Some(&Value::Bool(true)));
+        assert_eq!(r.crc_valid, Some(true));
+    }
+
+    #[test]
+    fn a_606tx_reads_below_zero() {
+        let f = tx606(163, 1, -0.3, true, false);
+        let r = Acurite606Tx.decode(&BitBuffer::from_bytes(&f)).unwrap();
+        assert_eq!(r.get("temperature_c"), Some(&Value::Float(-0.3)));
+    }
+
+    #[test]
+    fn a_corrupt_606tx_frame_fails_its_digest() {
+        let mut f = tx606(163, 1, 10.1, true, false);
+        f[2] ^= 0x04;
+        assert_eq!(
+            Acurite606Tx.decode(&BitBuffer::from_bytes(&f)),
+            Err(DecodeError::CrcFailed)
+        );
+    }
+
+    /// A 986 transmission: two rows, each 40 bits, sent least significant bit
+    /// first, which is what the decoder's row test and its reflection expect.
+    fn a986_bits(fahrenheit: i8, id: u16, probe: u8, battery_low: bool) -> BitBuffer {
+        let mut f = [0u8; A986_BYTES];
+        f[0] = if fahrenheit < 0 { 0x80 | (-fahrenheit) as u8 } else { fahrenheit as u8 };
+        f[1] = (id >> 8) as u8;
+        f[2] = id as u8;
+        f[3] = ((if battery_low { 1 } else { 0 }) << 1) | probe;
+        f[4] = crc8le(&f[..4], 0x07, 0);
+
+        let mut b = BitBuffer::new();
+        for _ in 0..2 {
+            b.mark_row();
+            for byte in f {
+                let wire = reflect8(byte);
+                for i in 0..8 {
+                    b.push(wire & (0x80 >> i) != 0);
+                }
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn decodes_a_986_freezer_reading() {
+        let r = Acurite986.decode(&a986_bits(-5, 0x10ac, 0, true)).unwrap();
+        assert_eq!(r.get("id"), Some(&Value::Int(0x10ac)));
+        assert_eq!(r.get("channel"), Some(&Value::Text("1R".into())));
+        // -5 F, which the display shows as -20.6 C.
+        assert_eq!(r.get("temperature_c"), Some(&Value::Float(-20.6)));
+        assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn a_986_frame_outside_a_row_is_not_claimed() {
+        // The row length is most of this decoder's integrity check, so a
+        // buffer with no row structure must yield nothing at all.
+        let bits = a986_bits(51, 0x427d, 0, false);
+        let flat = bits.slice(0, bits.len());
+        assert_eq!(Acurite986.decode(&flat), Err(DecodeError::CrcFailed));
+    }
+
+    #[test]
+    fn a_corrupt_986_frame_fails_its_crc() {
+        // The same bit in both copies: one good repeat is enough to decode, so
+        // corrupting only one would prove nothing.
+        let mut b = BitBuffer::new();
+        let good = a986_bits(51, 0x427d, 0, false);
+        for i in 0..good.len() {
+            if good.rows().contains(&i) {
+                b.mark_row();
+            }
+            let flip = i % 40 == 12;
+            b.push(if flip { !good.get(i).unwrap() } else { good.get(i).unwrap() });
+        }
+        assert_eq!(Acurite986.decode(&b), Err(DecodeError::CrcFailed));
     }
 
     #[test]

@@ -141,6 +141,8 @@ impl Protocols {
         p.add(Box::new(Acurite609Txc));
         p.add(Box::new(AcuriteTower));
         p.add(Box::new(AcuriteWind));
+        p.add(Box::new(Acurite606Tx));
+        p.add(Box::new(Acurite986));
         p.add(Box::new(LacrosseTx141thBv2));
         p.add(Box::new(LacrosseIt::tx29()));
         p.add(Box::new(LacrosseIt::tx35()));

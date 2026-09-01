@@ -447,6 +447,17 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Acurite-606TX",
+        ours: "Acurite-606TX",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("button", "button", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "Acurite-5n1",
         ours: "Acurite-5n1",
         fields: &[
