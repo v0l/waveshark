@@ -174,8 +174,36 @@ enum Drag {
 /// block put the DC block and the spectrum on the same key, and two boxes
 /// with one position are drawn on top of each other with every wire in the
 /// graph converging on the pile.
-fn key(n: &pipeline::graph::TopoNode) -> u64 {
-    n.tag.unwrap_or(crate::patch::builtin::FIRST - 1 - n.id.0 as u64)
+fn keys(topo: &Topology) -> Vec<u64> {
+    let mut seen: HashMap<(String, String), u32> = HashMap::new();
+    topo.nodes
+        .iter()
+        .map(|n| match n.tag {
+            Some(t) => t,
+            None => {
+                let nth = seen.entry((n.label.clone(), n.kind.clone())).or_insert(0);
+                *nth += 1;
+                stable_key(&n.label, &n.kind, *nth)
+            }
+        })
+        .collect()
+}
+
+/// A name for a node the receiver built for itself.
+///
+/// From what it is rather than where it is. A `NodeId` is a position, and
+/// every patch edit renumbers them, so keying by id meant the whole automatic
+/// chain jumped to a fresh layout each time a stage was added: the view
+/// looked broken because it was redrawing the same graph under new names.
+fn stable_key(label: &str, kind: &str, nth: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    label.hash(&mut h);
+    kind.hash(&mut h);
+    nth.hash(&mut h);
+    // Clear of the patch's own ids, which count up from one, and of the
+    // block the receiver's stages are named in.
+     1_000_000 + h.finish() % (crate::patch::builtin::FIRST - 2_000_000)
 }
 
 impl Default for Edit {
@@ -422,8 +450,9 @@ pub fn draw(
     // stage it crosses, and a bank's inner chain ends up with a wire through
     // the middle of it.
     let span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
+    let node_keys = keys(topo);
     let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
-    for (node, pl) in topo.nodes.iter().zip(&places) {
+    for ((i, _node), pl) in topo.nodes.iter().enumerate().zip(&places) {
         let x = cx - span / 2.0 + pl.col as f32 * (box_w + COL_GAP) + box_w / 2.0;
         let auto = Pos2::new(x, row_top[pl.depth] + BOX_H / 2.0);
         // Entering manual mode pins every stage where the automatic layout
@@ -431,7 +460,7 @@ pub fn draw(
         // reflow around the gap it left, which reads as the graph rearranging
         // itself in response to being touched.
         let centre = if edit.manual {
-            rect.min + edit.pos.entry(key(node)).or_insert(auto - rect.min.to_vec2()).to_vec2()
+            rect.min + edit.pos.entry(node_keys[i]).or_insert(auto - rect.min.to_vec2()).to_vec2()
         } else {
             auto
         };
@@ -466,13 +495,25 @@ pub fn draw(
         // A stage that is neither running nor waiting is no longer anywhere.
         edit.pos.retain(|k, _| {
             *k == crate::patch::builtin::SPAN
-                || topo.nodes.iter().any(|n| key(n) == *k)
+                || node_keys.contains(k)
                 || ghosts.iter().any(|(id, _)| id == k)
         });
         let press = ui.input(|i| i.pointer.press_origin());
-        interact(&resp, press, topo, &rects, &ghosts, src, rect.min, edit, &mut act, patch);
-        for (i, node) in topo.nodes.iter().enumerate() {
-            if let Some(p) = edit.pos.get(&key(node)) {
+        interact(
+            &resp,
+            press,
+            topo,
+            &node_keys,
+            &rects,
+            &ghosts,
+            src,
+            rect.min,
+            edit,
+            &mut act,
+            patch,
+        );
+        for i in 0..topo.nodes.len() {
+            if let Some(p) = edit.pos.get(&node_keys[i]) {
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
             }
         }
@@ -486,8 +527,8 @@ pub fn draw(
     edit.drawn_src = src;
     edit.drawn.clear();
     edit.drawn.insert(crate::patch::builtin::SPAN, src);
-    for (i, node) in topo.nodes.iter().enumerate() {
-        edit.drawn.insert(key(node), rects[i]);
+    for i in 0..topo.nodes.len() {
+        edit.drawn.insert(node_keys[i], rects[i]);
     }
     for (id, r) in &ghosts {
         edit.drawn.insert(*id, *r);
@@ -719,6 +760,7 @@ fn interact(
     resp: &egui::Response,
     press: Option<Pos2>,
     topo: &Topology,
+    node_keys: &[u64],
     rects: &[Rect],
     ghosts: &[(u64, Rect)],
     src: Rect,
@@ -779,7 +821,7 @@ fn interact(
                 return Some(Drag::Node(crate::patch::builtin::SPAN, src.center() - q));
             }
             let i = rects.iter().position(|r| r.contains(q))?;
-            Some(Drag::Node(key(&topo.nodes[i]), rects[i].center() - q))
+            Some(Drag::Node(node_keys[i], rects[i].center() - q))
         });
     }
 
@@ -1277,6 +1319,40 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_stage_does_not_move_the_stages_already_there() {
+        // Every patch edit rebuilds the receiver and renumbers its nodes. A
+        // view that keyed positions by that number redrew the whole automatic
+        // chain in a new place each time a stage was added, which is the
+        // single thing that made this feel broken.
+        let (topo, patch, _) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let before: Vec<(u64, Pos2)> =
+            h.edit.drawn.iter().map(|(k, r)| (*k, r.center())).collect();
+
+        // The same graph with another stage in it, as a rebuild would hand
+        // it over: one more node, and every id after it shifted.
+        let extra = h.patch.add("mixer");
+        let mut grown = h.topo.clone();
+        let mut node = grown.nodes[0].clone();
+        node.id = pipeline::graph::NodeId(99);
+        node.tag = Some(extra);
+        node.label = "Mixer".into();
+        grown.nodes.insert(0, node);
+        for (i, n) in grown.nodes.iter_mut().enumerate() {
+            if n.tag.is_none() {
+                n.id = pipeline::graph::NodeId(i);
+            }
+        }
+        h.topo = grown;
+        h.frame(vec![]);
+        for (k, was) in before {
+            let now = h.edit.drawn.get(&k).map(|r| r.center());
+            assert_eq!(now, Some(was), "a stage that was already there has moved");
+        }
+    }
+
+    #[test]
     fn no_two_boxes_land_on_the_same_position() {
         // The receiver's own stages are keyed by position and the operator's
         // by patch id. When those two schemes met in the middle, the DC block
@@ -1386,7 +1462,7 @@ mod tests {
         // what makes the arrangement worth anything: a parameter change
         // rebuilds the graph and redraws this several times a second.
         let put = Pos2::new(11.0, 500.0);
-        let first = key(&topo.nodes[0]);
+        let first = keys(&topo)[0];
         edit.pos.insert(first, put);
         frame(&mut edit);
         assert_eq!(edit.pos[&first], put);
