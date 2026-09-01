@@ -29,8 +29,7 @@ use crate::scanners::Front;
 use common::{Hz, Result, C32};
 use dsp::rds::Station;
 use nodes::{
-    AgcNode, BankNode, DeemphasisNode, DecimateNode, EnvelopeNode, FmDemodNode, HighBlendNode,
-    MixerNode, RealDecimateNode, SpectrumNode, SquelchNode, SsbDemodNode, WfmDemodNode,
+    AgcNode, BankNode, DecimateNode, SpectrumNode, SquelchNode, WfmDemodNode,
 };
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
@@ -123,8 +122,6 @@ const CW_FILTER_HZ: f64 = 500.0;
 /// exactly what changed.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Role {
-    /// A stage of one listening channel.
-    Stage(u64, Stage),
     /// A stage the operator drew, keyed by its patch id and what it is. The
     /// kind is in the key because editing a patch can replace a stage with a
     /// different one, and reusing an envelope detector as a mixer would hand
@@ -138,17 +135,6 @@ enum Role {
     Flights,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Stage {
-    Mixer,
-    IfDecimate,
-    Demod,
-    Squelch,
-    AudioDecimate,
-    Deemphasis,
-    Agc,
-    Blend,
-}
 
 /// What a channel branch was built for. A branch is only reused while all of
 /// this is unchanged, since every one of these decides a filter's
@@ -369,17 +355,13 @@ impl Receiver {
             roles.into_iter().zip(graph.into_parts()).collect();
 
         // A channel whose mixer shift or filter design would differ is not
-        // the same channel; drop its nodes rather than reuse coefficients
-        // computed for something else.
+        // the same channel, and it does not have to be caught here any more:
+        // everything a filter was designed against is in the id the stage is
+        // derived under, so a channel that changed asks for stages that were
+        // never in the pool.
         let retuned = plan.center != old_center || plan.rate != old_rate;
+        let _ = &old_keys;
         pool.retain(|role, _| match role {
-            Role::Stage(id, _) => {
-                let want = plan.channels.iter().find(|c| c.id == *id);
-                match (want, old_keys.get(id)) {
-                    (Some(w), Some(k)) => ChanKey::new(w, plan.eff_rate()) == *k,
-                    _ => false,
-                }
-            }
             // A bank rebuilds itself internally on a retune and keeps its
             // chains, which is cheaper than building several hundred graphs.
             Role::Patch(_, kind) if kind == "bank" => true,
@@ -442,15 +424,20 @@ impl Receiver {
             Some(p) => p.clone(),
             None => derived_patch(plan),
         };
-        let (patch_packets, patch_ids) =
-            match add_patch(&mut b, &mut roles, &mut pool, pipeline::graph::GRAPH_INPUT, &patch, &mut ring)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    refused = Some(format!("the patch cannot be built: {e}"));
-                    (Vec::new(), HashMap::new())
-                }
-            };
+        let (patch_packets, patch_ids, reused) = match add_patch(
+            &mut b,
+            &mut roles,
+            &mut pool,
+            pipeline::graph::GRAPH_INPUT,
+            &patch,
+            &mut ring,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                refused = Some(format!("the patch cannot be built: {e}"));
+                (Vec::new(), HashMap::new(), Vec::new())
+            }
+        };
 
         // What the parts that are not drawn yet read. They followed the DC
         // block when it was built here; now they follow whatever the patch
@@ -508,12 +495,12 @@ impl Receiver {
 
         narrowband.extend(patch_packets);
 
+        // The listening channels are stages in the patch too, so this is a
+        // matter of finding them rather than building them. What each one is
+        // doing still has to be gathered up: the interface asks a channel for
+        // its gain, its squelch and its station, not the graph for a node.
         let mut chans: Vec<Chan> = Vec::new();
         for spec in &plan.channels {
-            // A channel the span no longer covers cannot be demodulated: the
-            // mixer would shift a frequency the radio never sampled down to
-            // baseband, and the chain would produce noise that sounds like a
-            // dead station rather than silence.
             if spec.offset_hz.abs() > plan.eff_rate() / 2.0 {
                 refused = Some(format!(
                     "{:.4} MHz is outside the span",
@@ -530,7 +517,34 @@ impl Receiver {
                 ));
                 continue;
             }
-            chans.push(add_channel(&mut b, &mut roles, &mut pool, head, spec, plan.eff_rate()));
+            let of = |what: &str| -> Option<NodeId> {
+                patch_ids.get(&chan_stage_id(what, spec, plan.eff_rate())).copied()
+            };
+            let Some(tail) = of("chan_blend") else { continue };
+            let stereo = patch
+                .stage(chan_stage_id("chan_demod", spec, plan.eff_rate()))
+                .is_some_and(|s| s.kind == "wfm_demod");
+            chans.push(Chan {
+                spec: spec.clone(),
+                // A channel came through intact when every stage of it did.
+                kept: ["chan_mix", "chan_ifdec", "chan_demod", "chan_blend"]
+                    .iter()
+                    .all(|w| reused.contains(&chan_stage_id(w, spec, plan.eff_rate()))),
+                key: ChanKey::new(spec, plan.eff_rate()),
+                tail: tail.o(),
+                agc: of("chan_agc"),
+                squelch: of("chan_squelch"),
+                wfm: stereo.then(|| of("chan_demod")).flatten(),
+                audio_rate: AUDIO_HZ,
+                channels: if stereo { 2 } else { 1 },
+                detail: String::new(),
+                agc_gain_db: 0.0,
+                squelch_open: false,
+                squelch_db: 0.0,
+                blend: 0.0,
+                station: Station::default(),
+                rds_stats: (0, 0, false),
+            });
         }
 
         // Everything that produces packets meets here, and everything that
@@ -1383,7 +1397,167 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             }
         }
     }
+
+    // The channels being listened to. A channel the span no longer covers
+    // cannot be demodulated: the mixer would shift a frequency the radio
+    // never sampled down to baseband, and the chain would produce noise that
+    // sounds like a dead station rather than silence.
+    for spec in &plan.channels {
+        if spec.offset_hz.abs() > plan.eff_rate() / 2.0
+            || plan.eff_rate() < spec.demod.if_rate()
+        {
+            continue;
+        }
+        channel_stages(&mut p, head, spec, plan.eff_rate());
+    }
     p
+}
+
+/// One listening channel, as stages.
+///
+/// The same arithmetic the hand-built chain used, saying what to build rather
+/// than building it. Every stage of it is a box in the view now, so a channel
+/// is something an operator can look inside, retune a filter in, or take
+/// apart, rather than eight nodes that only existed as a side effect of
+/// asking for a frequency.
+fn channel_stages(
+    p: &mut crate::patch::Patch,
+    head: crate::patch::Source,
+    spec: &ChannelSpec,
+    rate: f64,
+) -> u64 {
+    use crate::patch::Source;
+    use pipeline::registry::Settings;
+    use pipeline::ParamValue as V;
+
+    let mode = spec.demod;
+    let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
+    let if_rate = rate / if_dec as f64;
+    let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
+    let at = |p: &mut crate::patch::Patch, what: &str, kind: &str, s: Settings| -> u64 {
+        p.add_derived(chan_stage_id(what, spec, rate), kind, s)
+    };
+
+    // CW is tuned low by the pitch so the dial reads the carrier rather than
+    // the note; every other mode is tuned to what it listens to.
+    let mut mix = Settings::new();
+    mix.insert("shift_hz".into(), V::Float(-(spec.offset_hz - mode.cw_pitch())));
+    let m = at(p, "chan_mix", "mixer", mix);
+    p.connect(head, (m, 0));
+
+    // Sized from the signal's bandwidth, not from the decimation factor: the
+    // stopband has to land where the first alias folds down.
+    let mut ifd = Settings::new();
+    ifd.insert("factor".into(), V::Int(if_dec as i64));
+    ifd.insert("passband_hz".into(), V::Float(mode.bandwidth() / 2.0));
+    ifd.insert("input_rate_hz".into(), V::Float(rate));
+    ifd.insert("label".into(), V::Text("IF decimator".into()));
+    let i = at(p, "chan_ifdec", "decimate", ifd);
+    p.connect(Source::Stage(m, 0), (i, 0));
+
+    let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
+    let mut d = Settings::new();
+    let demod_kind = if stereo {
+        d.insert("label".into(), V::Text("WFM demod".into()));
+        "wfm_demod"
+    } else if mode == Demod::Am {
+        d.insert("label".into(), V::Text("AM envelope".into()));
+        "envelope"
+    } else if mode.is_ssb() {
+        let lsb = mode.sideband() == dsp::ssb::Sideband::Lower;
+        d.insert("sideband".into(), V::Text(if lsb { "lsb" } else { "usb" }.into()));
+        if mode == Demod::Cw {
+            d.insert("pitch_hz".into(), V::Float(mode.cw_pitch()));
+            d.insert("width_hz".into(), V::Float(CW_FILTER_HZ));
+            d.insert("label".into(), V::Text("CW filter".into()));
+        } else {
+            d.insert("label".into(), V::Text("Sideband filter".into()));
+        }
+        "ssb_demod"
+    } else {
+        d.insert("deviation_hz".into(), V::Float(mode.deviation()));
+        "fm_demod"
+    };
+    let dem = at(p, "chan_demod", demod_kind, d);
+    p.connect(Source::Stage(i, 0), (dem, 0));
+
+    // The squelch goes here, on the demodulator's raw output, and not later
+    // where the audio is. An FM noise squelch works by measuring the hiss
+    // above the speech band, and the audio filter's whole job is to remove
+    // that: measured on an empty 2 m channel, a squelch after the filter saw
+    // a clean signal and held itself open on pure noise.
+    let mut tail = Source::Stage(dem, 0);
+    if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
+        let mut s = Settings::new();
+        s.insert(
+            "kind".into(),
+            V::Text(if mode == Demod::Nfm { "noise" } else { "level" }.into()),
+        );
+        s.insert("threshold_db".into(), V::Float(db as f64));
+        let sq = at(p, "chan_squelch", "squelch", s);
+        p.connect(tail, (sq, 0));
+        tail = Source::Stage(sq, 0);
+    }
+
+    let mut ad = Settings::new();
+    ad.insert("factor".into(), V::Int(au_dec as i64));
+    ad.insert("passband_hz".into(), V::Float(mode.audio_bw()));
+    ad.insert("input_rate_hz".into(), V::Float(if_rate));
+    ad.insert("label".into(), V::Text("Audio decimator".into()));
+    let aud = at(p, "chan_audiodec", "real_decimate", ad);
+    p.connect(tail, (aud, 0));
+    tail = Source::Stage(aud, 0);
+
+    if !(mode == Demod::Am || mode.is_ssb()) {
+        // De-emphasis is an FM thing: it undoes the pre-emphasis the
+        // transmitter applied. Applying it to AM or SSB would just be a
+        // treble cut nobody asked for.
+        let mut de = Settings::new();
+        de.insert("tau_us".into(), V::Float(50.0));
+        let d = at(p, "chan_deemph", "deemphasis", de);
+        p.connect(tail, (d, 0));
+        tail = Source::Stage(d, 0);
+    }
+
+    // The gain control comes after the squelch, so what it sees is either a
+    // signal or silence. The other order lets the AGC lift the noise on a
+    // dead channel up to the threshold and hold the squelch open.
+    let preset = match mode {
+        Demod::Cw => Some("cw"),
+        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some("voice"),
+        Demod::Wfm => None,
+    };
+    if let Some(preset) = preset {
+        let mut a = Settings::new();
+        a.insert("preset".into(), V::Text(preset.into()));
+        let agc = at(p, "chan_agc", "agc", a);
+        p.connect(tail, (agc, 0));
+        tail = Source::Stage(agc, 0);
+    }
+
+    let hb = at(p, "chan_blend", "high_blend", Settings::new());
+    p.connect(tail, (hb, 0));
+    hb
+}
+
+/// The id one stage of one channel is derived under.
+///
+/// Everything a filter in this chain was designed against goes into it: a
+/// channel whose mode, offset or rate changed is not the same channel, and
+/// reusing a filter designed for the old one would be reusing the wrong
+/// coefficients rather than saving work.
+fn chan_stage_id(what: &str, spec: &ChannelSpec, rate: f64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (spec.demod as u8).hash(&mut h);
+    spec.offset_hz.to_bits().hash(&mut h);
+    rate.to_bits().hash(&mut h);
+    derived::at(what, spec.id, h.finish() ^ fnv(what))
+}
+
+/// A small stable number from a name, to keep one channel's stages apart.
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 /// The mixer and decimator that cut one band out of the span, as stages.
@@ -1471,6 +1645,8 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "ask_detect" => "ASK pulses".into(),
         "fsk_detect" => "FSK pulses".into(),
         "protocol_decode" => "Protocols".into(),
+        "high_blend" => "High blend".into(),
+        "wfm_demod" => "WFM demod".into(),
         "ssb_demod" => "SSB demodulator".into(),
         "mode_s" => "1090 Mode S".into(),
         "ais" => "162 AIS".into(),
@@ -1488,6 +1664,10 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         other => other.to_string(),
     }
 }
+
+/// What building a patch produced: the stages that put packets on the bus,
+/// where every stage ended up, and which of them kept the node they had.
+type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>);
 
 /// Build every stage in a patch, wired as the patch says.
 ///
@@ -1507,17 +1687,24 @@ fn add_patch(
     span: Out,
     patch: &crate::patch::Patch,
     ring: &mut Option<RecordRing>,
-) -> Result<(Vec<NodeId>, HashMap<u64, NodeId>)> {
+) -> Result<Built> {
     use crate::patch::Source;
     use pipeline::registry::SettingsExt;
     let reg = nodes::registry();
     let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
+    // Which stages came through the rebuild with the node they had. A channel
+    // built from scratch has forgotten its station and its gain, and the
+    // interface has to know not to keep showing them.
+    let mut reused: Vec<u64> = Vec::new();
     for st in patch.stages() {
         let role = Role::Patch(st.id, st.kind.clone());
         // Reused where it can be, so editing one wire does not reset the
         // detector's noise floor on every other stage in the graph.
         let mut node = match pool.remove(&role) {
-            Some(p) => p.node,
+            Some(p) => {
+                reused.push(st.id);
+                p.node
+            }
             // The recorder owns an open file, so it is handed in rather than
             // constructed from a description. A patch that asks for one when
             // nothing is recording gets nothing, and the stage waits.
@@ -1640,7 +1827,7 @@ fn add_patch(
             }
         }
     }
-    Ok((packets, ids))
+    Ok((packets, ids, reused))
 }
 
 /// A rate as a person reads it, for a node label.
@@ -1808,155 +1995,6 @@ impl nodes::Ring for RecordRing {
         if let Some(r) = self.rec.as_mut() {
             r.push(iq);
         }
-    }
-}
-
-/// Build one listening channel's branch onto the graph.
-///
-/// The same construction the receiver has always used, lifted out so the one
-/// graph and the single-channel test harness cannot drift apart.
-fn add_channel(
-    b: &mut GraphBuilder,
-    roles: &mut Vec<Role>,
-    pool: &mut HashMap<Role, NodePart>,
-    head: Out,
-    spec: &ChannelSpec,
-    rate: f64,
-) -> Chan {
-    let mode = spec.demod;
-    let id = spec.id;
-    let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
-    let if_rate = rate / if_dec as f64;
-    let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
-
-    // Set false by the first stage that has to be built rather than reused.
-    let mut kept = true;
-    let mut take = |b: &mut GraphBuilder,
-                    roles: &mut Vec<Role>,
-                    stage: Stage,
-                    label: &str,
-                    make: Box<dyn pipeline::node::Node>| {
-        let role = Role::Stage(id, stage);
-        let nid = match pool.remove(&role) {
-            Some(p) => b.add_existing(p),
-            None => {
-                kept = false;
-                b.add_labeled(label, make)
-            }
-        };
-        roles.push(role);
-        nid
-    };
-
-    // CW is tuned low by the pitch so the dial reads the carrier rather than
-    // the note; every other mode is tuned to what it listens to.
-    let mix = take(
-        b,
-        roles,
-        Stage::Mixer,
-        "Mixer",
-        Box::new(MixerNode::new(-(spec.offset_hz - mode.cw_pitch()))),
-    );
-    // Sized from the signal's bandwidth, not from the decimation factor: the
-    // stopband has to land where the first alias folds down.
-    let mut dec = DecimateNode::new(if_dec);
-    dec.set_passband_hz(rate, mode.bandwidth() / 2.0);
-    let ifd = take(b, roles, Stage::IfDecimate, "IF decimator", Box::new(dec));
-    b.connect(head, mix.i());
-    b.connect(mix.o(), ifd.i());
-
-    let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
-    let mut wfm = None;
-    let demod = if stereo {
-        let d = take(b, roles, Stage::Demod, "WFM demod", Box::new(WfmDemodNode::new()));
-        wfm = Some(d);
-        d
-    } else if mode == Demod::Am {
-        take(b, roles, Stage::Demod, "AM envelope", Box::new(EnvelopeNode))
-    } else if mode.is_ssb() {
-        let node = if mode == Demod::Cw {
-            SsbDemodNode::cw(mode.sideband(), mode.cw_pitch(), CW_FILTER_HZ)
-        } else {
-            SsbDemodNode::voice(mode.sideband())
-        };
-        let label = if mode == Demod::Cw { "CW filter" } else { "Sideband filter" };
-        take(b, roles, Stage::Demod, label, Box::new(node))
-    } else {
-        take(
-            b,
-            roles,
-            Stage::Demod,
-            "FM discriminator",
-            Box::new(FmDemodNode::new(mode.deviation())),
-        )
-    };
-    b.connect(ifd.o(), demod.i());
-
-    // The squelch goes here, on the demodulator's raw output, and not later
-    // where the audio is. An FM noise squelch works by measuring the hiss
-    // above the speech band, and the audio filter's whole job is to remove
-    // that: measured on an empty 2 m channel, a squelch after the filter saw a
-    // clean signal and held itself open on pure noise.
-    let mut tail = demod;
-    let mut squelch = None;
-    if let Some(sq) = crate::radio::squelch_for(mode) {
-        let s = take(b, roles, Stage::Squelch, "Squelch", Box::new(sq));
-        b.connect(tail.o(), s.i());
-        squelch = Some(s);
-        tail = s;
-    }
-
-    let mut ad = RealDecimateNode::new(au_dec);
-    ad.set_passband_hz(if_rate, mode.audio_bw());
-    let aud = take(b, roles, Stage::AudioDecimate, "Audio decimator", Box::new(ad));
-    b.connect(tail.o(), aud.i());
-    tail = aud;
-
-    if !(mode == Demod::Am || mode.is_ssb()) {
-        // De-emphasis is an FM thing: it undoes the pre-emphasis the
-        // transmitter applied. Applying it to AM or SSB would just be a treble
-        // cut nobody asked for.
-        let de =
-            take(b, roles, Stage::Deemphasis, "De-emphasis", Box::new(DeemphasisNode::new(50.0)));
-        b.connect(tail.o(), de.i());
-        tail = de;
-    }
-
-    // The gain control comes after the squelch, so what it sees is either a
-    // signal or silence. The other order lets the AGC lift the noise on a dead
-    // channel up to the threshold and hold the squelch open.
-    let mut agc = None;
-    if let Some(node) = crate::radio::agc_for(mode) {
-        let a = take(b, roles, Stage::Agc, "AGC", Box::new(node));
-        b.connect(tail.o(), a.i());
-        agc = Some(a);
-        tail = a;
-    }
-
-    let hb = take(b, roles, Stage::Blend, "High blend", Box::new(HighBlendNode::new()));
-    b.connect(tail.o(), hb.i());
-
-    Chan {
-        spec: spec.clone(),
-        kept,
-        key: ChanKey::new(spec, rate),
-        tail: hb.o(),
-        agc,
-        squelch,
-        wfm,
-        audio_rate: AUDIO_HZ,
-        channels: if stereo { 2 } else { 1 },
-        detail: format!(
-            "if /{if_dec} to {:.0} kHz, audio /{au_dec}{}",
-            if_rate / 1e3,
-            if stereo { ", stereo" } else { "" }
-        ),
-        agc_gain_db: 0.0,
-        squelch_open: true,
-        squelch_db: 0.0,
-        blend: 0.0,
-        station: Station::default(),
-        rds_stats: (0, 0, false),
     }
 }
 

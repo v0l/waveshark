@@ -5,9 +5,6 @@ use audio::AudioPlayer;
 use crate::chain::Plan;
 use common::{GainMode, Hz, Sps, C32};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use nodes::{
-    AgcNode, SquelchKind, SquelchNode,
-};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
@@ -953,36 +950,6 @@ impl Drop for Radio {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-    }
-}
-
-/// The squelch a mode wants, if any.
-///
-/// Broadcast FM is never squelched: the signal is either there or the
-/// listener has tuned to the wrong place, and muting a station during a quiet
-/// passage would be a fault. AM aircraft and SSB get a level squelch because
-/// neither has a capture effect to measure noise against, and both are
-/// routinely listened to with the squelch off, which is why the threshold
-/// starts low enough to pass almost anything.
-pub(crate) fn squelch_for(mode: Demod) -> Option<SquelchNode> {
-    let db = mode.default_squelch_db()?;
-    Some(match mode {
-        Demod::Nfm => SquelchNode::new(SquelchKind::Noise, db),
-        _ => SquelchNode::new(SquelchKind::Level, db),
-    })
-}
-
-/// The gain control a mode wants.
-///
-/// Broadcast FM arrives already levelled by the station and its own limiter,
-/// so an AGC on top of that only compresses what the broadcaster spent money
-/// deciding. The rest of the modes have no level control at the far end at
-/// all: that is what makes an AGC the difference between usable and not.
-pub(crate) fn agc_for(mode: Demod) -> Option<AgcNode> {
-    match mode {
-        Demod::Cw => Some(AgcNode::cw()),
-        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(AgcNode::voice()),
-        Demod::Wfm => None,
     }
 }
 

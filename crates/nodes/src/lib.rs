@@ -298,6 +298,15 @@ pub fn registry() -> Registry {
                 "lsb" | "LSB" => dsp::ssb::Sideband::Lower,
                 _ => dsp::ssb::Sideband::Upper,
             };
+            // A CW filter is the same stage with its passband put around the
+            // pitch the operator hears rather than around speech.
+            if s.get("pitch_hz").is_some() {
+                return Ok(Box::new(SsbDemodNode::cw(
+                    sideband,
+                    s.f64_or("pitch_hz", 700.0),
+                    s.f64_or("width_hz", 500.0),
+                )) as Box<dyn Node>);
+            }
             Ok(Box::new(SsbDemodNode::new(
                 sideband,
                 s.f64_or("low_hz", 300.0),
@@ -308,16 +317,41 @@ pub fn registry() -> Registry {
 
     r.register(
         StageDesc {
+            name: "wfm_demod",
+            summary: "Broadcast FM with stereo and RDS, from a wide IF",
+            category: "demod",
+        },
+        |_s: &Settings| Ok(Box::new(WfmDemodNode::new()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "high_blend",
+            summary: "Roll the top off audio in proportion to the noise on it, \
+                      so a weak channel hisses less",
+            category: "audio",
+        },
+        |_s: &Settings| Ok(Box::new(HighBlendNode::new()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
             name: "agc",
             summary: "Hold audio at a usable level without riding the volume control",
             category: "audio",
         },
         |s: &Settings| {
-            let mut n = AgcNode::new(
-                s.f64_or("attack_ms", 5.0),
-                s.f64_or("release_ms", 500.0),
-                s.f64_or("hang_ms", 300.0),
-            );
+            // The presets a mode asks for, so a derived chain does not have
+            // to restate three time constants to say "the one for speech".
+            let mut n = match s.str_or("preset", "") {
+                "voice" => AgcNode::voice(),
+                "cw" => AgcNode::cw(),
+                _ => AgcNode::new(
+                    s.f64_or("attack_ms", 5.0),
+                    s.f64_or("release_ms", 500.0),
+                    s.f64_or("hang_ms", 300.0),
+                ),
+            };
             if let Some(v) = s.get("max_gain_db") {
                 pipeline::node::Node::set_param(&mut n, "max_gain_db", v.clone())?;
             }
