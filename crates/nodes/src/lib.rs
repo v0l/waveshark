@@ -81,6 +81,21 @@ pub fn registry() -> Registry {
 
     r.register(
         StageDesc {
+            name: "spectrum",
+            summary: "An FFT display of whatever is wired into it, drawn \
+                      alongside the receiver's own",
+            category: "sink",
+        },
+        |s: &Settings| {
+            let size = s.i64_or("size", 1024).clamp(64, 32_768) as usize;
+            // A power of two, because that is what the transform takes.
+            let size = 1usize << (usize::BITS - 1 - size.leading_zeros()) as usize;
+            Ok(Box::new(SpectrumNode::new(size)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
             name: "envelope",
             summary: "Complex magnitude; the input an OOK pulse detector needs",
             category: "demod",

@@ -267,6 +267,10 @@ pub struct Receiver {
     /// Rate at the spectrum's own input, which is the span's unless the
     /// operator has put something in front of it.
     spectrum_rate: f64,
+    /// Spectrum stages the operator added, by patch id. Each is a display of
+    /// its own: a patch can watch a decimated band and the whole span at the
+    /// same time, which is most of the reason to draw one.
+    patch_spectra: Vec<(u64, NodeId)>,
     /// Channels that could not be built, for the status line.
     pub refused: Option<String>,
 }
@@ -359,6 +363,7 @@ impl Receiver {
             center: plan.center,
             rate: plan.rate,
             spectrum_rate: plan.eff_rate(),
+            patch_spectra: Vec::new(),
             refused: None,
         };
         rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new))?;
@@ -814,6 +819,17 @@ impl Receiver {
             b.output(c.tail);
         }
 
+        self.patch_spectra = plan
+            .patch
+            .as_ref()
+            .map(|p| {
+                p.stages()
+                    .iter()
+                    .filter(|s| s.kind == "spectrum")
+                    .filter_map(|s| patch_ids.get(&s.id).map(|id| (s.id, *id)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let spectrum_src = tap(crate::patch::builtin::SPECTRUM);
         let mut graph = b.build()?;
         // What the spectrum is actually seeing, which is the head unless a
@@ -1109,6 +1125,26 @@ impl Receiver {
     /// The rate the spectrum's frames cover, for the axis under them.
     pub fn spectrum_rate(&self) -> f64 {
         self.spectrum_rate
+    }
+
+    /// What every spectrum stage the operator added is seeing: its patch id,
+    /// its powers in dBFS, and the band they cover.
+    pub fn patch_spectra(&mut self) -> Vec<(u64, Vec<f32>, f64, f64)> {
+        let ids = self.patch_spectra.clone();
+        let mut out = Vec::with_capacity(ids.len());
+        for (tag, id) in ids {
+            let Some(n) = self
+                .graph
+                .node_mut(id)
+                .and_then(|n| n.as_any_mut())
+                .and_then(|a| a.downcast_mut::<SpectrumNode>())
+            else {
+                continue;
+            };
+            let (rate, center) = (n.rate(), n.center().as_f64());
+            out.push((tag, n.power_db().to_vec(), center, rate));
+        }
+        out
     }
 
     pub fn latency_ms(&self, i: usize) -> f64 {
@@ -1922,6 +1958,27 @@ mod tests {
         // And the axis has to follow it, or every signal is drawn at four
         // times the offset it arrived on.
         assert_eq!(rx.spectrum_rate(), plan.eff_rate() / 4.0);
+    }
+
+    #[test]
+    fn a_patch_can_carry_a_spectrum_of_its_own() {
+        // Watching a decimated band and the whole span at once is most of
+        // the reason to draw a graph rather than read one.
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let dec = patch.add("decimate");
+        let view = patch.add("spectrum");
+        patch.stages_mut()[0].settings.insert("factor".into(), pipeline::ParamValue::Int(8));
+        patch.connect(Source::Span, (dec, 0));
+        patch.connect(Source::Stage(dec, 0), (view, 0));
+        let plan = manual(patch);
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a second spectrum");
+        let seen = rx.patch_spectra();
+        assert_eq!(seen.len(), 1, "the stage should report a spectrum of its own");
+        assert_eq!(seen[0].0, view);
+        // Its own band, not the span's: a strip drawn from the dial's rate
+        // would put every signal in it at eight times the offset.
+        assert_eq!(seen[0].3, plan.eff_rate() / 8.0);
     }
 
     #[test]

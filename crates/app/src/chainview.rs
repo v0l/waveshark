@@ -215,6 +215,8 @@ pub struct Interaction {
     pub link: Option<(crate::patch::Source, u64, usize)>,
     /// A wire pulled off an input port.
     pub unlink: Option<(u64, usize)>,
+    /// Every wire pulled off an output port.
+    pub unlink_out: Option<crate::patch::Source>,
     /// The operator's own stage that was last clicked, by patch id. Kept
     /// apart from `selected` because a stage waiting to be wired up is not in
     /// the running graph and so has no node to inspect.
@@ -392,7 +394,20 @@ pub fn draw(
     let top = rect.top() + 16.0;
     let widest_span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
     let src_x = cx - widest_span / 2.0 + box_w / 2.0;
-    let src = Rect::from_center_size(Pos2::new(src_x, top + BOX_H / 2.0), Vec2::new(box_w, BOX_H));
+    let src_auto = Pos2::new(src_x, top + BOX_H / 2.0);
+    // The span is a box like any other in manual mode: it can be dragged, and
+    // it is where every wire that reads the receiver's own samples starts.
+    let src_centre = if edit.manual {
+        rect.min
+            + edit
+                .pos
+                .entry(crate::patch::builtin::SPAN)
+                .or_insert(src_auto - rect.min.to_vec2())
+                .to_vec2()
+    } else {
+        src_auto
+    };
+    let src = Rect::from_center_size(src_centre, Vec2::new(box_w, BOX_H));
     stage(&p, src, "Source", "device", true);
 
     let mut row_top = vec![0.0f32; rows];
@@ -450,7 +465,9 @@ pub fn draw(
     if edit.manual {
         // A stage that is neither running nor waiting is no longer anywhere.
         edit.pos.retain(|k, _| {
-            topo.nodes.iter().any(|n| key(n) == *k) || ghosts.iter().any(|(id, _)| id == k)
+            *k == crate::patch::builtin::SPAN
+                || topo.nodes.iter().any(|n| key(n) == *k)
+                || ghosts.iter().any(|(id, _)| id == k)
         });
         let press = ui.input(|i| i.pointer.press_origin());
         interact(&resp, press, topo, &rects, &ghosts, src, rect.min, edit, &mut act, patch);
@@ -468,6 +485,7 @@ pub fn draw(
 
     edit.drawn_src = src;
     edit.drawn.clear();
+    edit.drawn.insert(crate::patch::builtin::SPAN, src);
     for (i, node) in topo.nodes.iter().enumerate() {
         edit.drawn.insert(key(node), rects[i]);
     }
@@ -711,15 +729,17 @@ fn interact(
 ) {
     use crate::patch::Source;
 
-    // Pulling a wire off an input, which is the only way to leave a stage
-    // deliberately unconnected. A stage with an input port hanging is left
-    // out of the built graph rather than refused, so this is an edit like any
-    // other rather than a way to break the receiver.
+    // Right-click takes wires off a port: an input loses the one wire it can
+    // have, an output loses all of them. A stage with an input port hanging
+    // is left out of the built graph rather than refused, so this is an edit
+    // like any other rather than a way to break the receiver.
     if resp.secondary_clicked() {
-        if let Some((tag, port)) =
-            resp.interact_pointer_pos().and_then(|q| input_at(topo, rects, ghosts, q))
-        {
-            act.unlink = Some((tag, port));
+        if let Some(q) = resp.interact_pointer_pos() {
+            if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
+                act.unlink = Some((tag, port));
+            } else if let Some(from) = output_at(topo, rects, ghosts, src, q) {
+                act.unlink_out = Some(from);
+            }
         }
     }
 
@@ -754,6 +774,9 @@ fn interact(
             }
             if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
                 return Some(Drag::Node(*id, r.center() - q));
+            }
+            if src.contains(q) {
+                return Some(Drag::Node(crate::patch::builtin::SPAN, src.center() - q));
             }
             let i = rects.iter().position(|r| r.contains(q))?;
             Some(Drag::Node(key(&topo.nodes[i]), rects[i].center() - q))
@@ -1272,7 +1295,8 @@ mod tests {
             );
             seen.push(r.center());
         }
-        assert_eq!(seen.len(), h.topo.nodes.len());
+        // The span's own box counts: it is dragged and wired like any other.
+        assert_eq!(seen.len(), h.topo.nodes.len() + 1);
     }
 
     #[test]
@@ -1355,7 +1379,7 @@ mod tests {
             });
         };
         frame(&mut edit);
-        assert_eq!(edit.pos.len(), topo.nodes.len());
+        assert_eq!(edit.pos.len(), topo.nodes.len() + 1, "every stage and the span itself");
         assert!(edit.moved());
 
         // A stage moved by hand stays put across the next frame, which is

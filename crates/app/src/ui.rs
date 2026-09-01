@@ -118,6 +118,9 @@ pub struct App {
     chain_sel: Option<usize>,
     /// Manual mode and where the stages have been dragged to.
     chain_edit: crate::chainview::Edit,
+    /// Spectrum stages the operator added, from the last frame. Each covers
+    /// whatever was wired into it rather than the span.
+    extra_spectra: Vec<crate::radio::Spectrum>,
     /// The graph the operator has drawn, when manual mode is on.
     chain_patch: crate::patch::Patch,
     /// Which revision of it the radio thread last published, so an edit it
@@ -389,6 +392,7 @@ impl Default for App {
             location: None,
             chain_sel: None,
             chain_edit: crate::chainview::Edit::default(),
+            extra_spectra: Vec::new(),
             chain_patch: crate::patch::Patch::default(),
             chain_patch_rev: 0,
             chain_patch_sent: None,
@@ -787,6 +791,7 @@ impl App {
                 self.wf_last = Some(std::time::Instant::now());
             }
             self.db = f.db;
+            self.extra_spectra = f.extra;
         }
     }
 
@@ -2845,6 +2850,10 @@ impl App {
                 self.chain_patch.disconnect(to);
                 edited = true;
             }
+            if let Some(from) = drawn.unlink_out {
+                self.chain_patch.disconnect_from(from);
+                edited = true;
+            }
             if let Some((from, to, port)) = drawn.link {
                 self.chain_patch.connect(from, (to, port));
                 edited = true;
@@ -2958,7 +2967,29 @@ impl App {
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {
-        let full = ui.available_rect_before_wrap();
+        let mut full = ui.available_rect_before_wrap();
+        // A spectrum stage the operator added gets a strip of its own under
+        // everything else. They cover a band rather than the span, so they
+        // cannot share the main plot's axis, and stacking them is what makes
+        // watching a decimated band and the whole span at once worth the
+        // stage.
+        if !self.extra_spectra.is_empty() {
+            let each = (full.height() * 0.22).clamp(60.0, 140.0);
+            let n = self.extra_spectra.len().min(3);
+            let strips = Rect::from_min_max(
+                Pos2::new(full.left(), full.bottom() - each * n as f32),
+                full.max,
+            );
+            full = Rect::from_min_max(full.min, Pos2::new(full.right(), strips.top()));
+            let p = ui.painter_at(strips).to_owned();
+            for (i, s) in self.extra_spectra.iter().take(n).enumerate() {
+                let r = Rect::from_min_size(
+                    Pos2::new(strips.left(), strips.top() + each * i as f32),
+                    Vec2::new(strips.width(), each),
+                );
+                self.extra_plot(&p, &r, s);
+            }
+        }
         let ribbon_h = 16.0;
         let usable = (full.height() - ribbon_h - SPLIT_GRIP_H).max(1.0);
         let plot_h = usable * self.plot_frac.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
@@ -3284,6 +3315,50 @@ impl App {
         }
         let a = a as usize;
         Some((a, (b.clamp(0.0, n as f64) as usize).max(a + 1).min(n)))
+    }
+
+    /// One extra spectrum, with its own band under it.
+    ///
+    /// Drawn from its own centre and rate rather than the dial's: what is
+    /// wired into it decides what it covers, and that is the whole point of
+    /// having more than one.
+    fn extra_plot(&self, p: &egui::Painter, r: &Rect, s: &crate::radio::Spectrum) {
+        p.rect_filled(*r, 0.0, theme::WELL);
+        p.line_segment(
+            [r.left_top(), r.right_top()],
+            Stroke::new(1.0, theme::ETCH),
+        );
+        let plot = Rect::from_min_max(Pos2::new(r.left(), r.top() + 12.0), r.max);
+        let span = (self.ceil - self.floor).max(1.0);
+        let n = s.db.len();
+        if n >= 2 {
+            let cols = plot.width().max(1.0) as usize;
+            let mut pts = Vec::with_capacity(cols);
+            for c in 0..cols {
+                let a = c * n / cols.max(1);
+                let b = (((c + 1) * n) / cols.max(1)).max(a + 1).min(n);
+                let v = s.db[a..b].iter().copied().fold(f32::MIN, f32::max);
+                let t = ((v - self.floor) / span).clamp(0.0, 1.0);
+                pts.push(Pos2::new(plot.left() + c as f32, plot.bottom() - t * plot.height()));
+            }
+            p.add(egui::Shape::line(pts, Stroke::new(1.0, theme::TRACE)));
+        }
+        let name = self
+            .chain_patch
+            .stage(s.tag)
+            .map(|st| st.kind.clone())
+            .unwrap_or_else(|| "spectrum".into());
+        p.text(
+            Pos2::new(r.left() + 6.0, r.top() + 1.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{name}   {:.4} MHz   {:.3} MS/s",
+                s.center / 1e6,
+                s.rate / 1e6
+            ),
+            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::LEGEND,
+        );
     }
 
     fn trace(&self, p: &egui::Painter, plot: &Rect) {

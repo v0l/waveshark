@@ -27,6 +27,9 @@ pub mod builtin {
     pub const SPECTRUM: u64 = u64::MAX;
     /// The recorder's ring.
     pub const RECORDER: u64 = u64::MAX - 1;
+    /// The span itself: the samples every branch reads. Not a stage, but it
+    /// is a box on screen and it is dragged and wired like one.
+    pub const SPAN: u64 = u64::MAX - 2;
 
     /// Ids at or above this belong to the receiver rather than to the patch.
     pub const FIRST: u64 = u64::MAX - 15;
@@ -142,6 +145,11 @@ impl Patch {
 
     pub fn disconnect(&mut self, to: (u64, usize)) {
         self.links.retain(|l| l.to != to);
+    }
+
+    /// Take every wire off one output port.
+    pub fn disconnect_from(&mut self, from: Source) {
+        self.links.retain(|l| l.from != from);
     }
 
     pub fn feeding(&self, to: (u64, usize)) -> Option<Source> {

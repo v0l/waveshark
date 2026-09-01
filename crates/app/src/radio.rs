@@ -346,6 +346,19 @@ pub struct Frame {
     pub db: Vec<f32>,
     pub center: f64,
     pub rate: f64,
+    /// Spectrum stages the operator added, each covering whatever was wired
+    /// into it rather than the span.
+    pub extra: Vec<Spectrum>,
+}
+
+/// One extra spectrum, as the interface draws it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spectrum {
+    /// The patch stage it belongs to.
+    pub tag: u64,
+    pub db: Vec<f32>,
+    pub center: f64,
+    pub rate: f64,
 }
 
 /// One decoded packet, as the UI logs and draws it.
@@ -1460,10 +1473,16 @@ fn run(
             // an axis drawn from the wrong one puts every signal in the
             // wrong place.
             let seen = rx.spectrum_rate();
+            let extra = rx
+                .patch_spectra()
+                .into_iter()
+                .map(|(tag, db, center, rate)| Spectrum { tag, db, center, rate })
+                .collect();
             let f = Frame {
                 db: rx.power_db().to_vec(),
                 center: plan.center.as_f64(),
                 rate: if seen > 0.0 { seen } else { plan.eff_rate() },
+                extra,
             };
             // Drop rather than block: the radio must never stall waiting for
             // the UI, and a stale spectrum is worthless anyway.
