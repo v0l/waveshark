@@ -37,30 +37,54 @@ fn load(paths: &[&str]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
 }
 
+/// Bind a named family, preferring the first system font that exists but always
+/// falling back to egui's embedded stack. The family must exist unconditionally:
+/// egui panics when a `FontFamily::Name` is not bound, and none of these paths
+/// exist off Linux.
+fn register(
+    fonts: &mut egui::FontDefinitions,
+    name: &'static str,
+    fallback: FontFamily,
+    paths: &[&str],
+) {
+    let mut stack = fonts.families.get(&fallback).cloned().unwrap_or_default();
+    if let Some(d) = load(paths) {
+        fonts.font_data.insert(name.into(), egui::FontData::from_owned(d).into());
+        stack.insert(0, name.into());
+    }
+    fonts.families.insert(FontFamily::Name(name.into()), stack);
+}
+
 pub fn install(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // Tabular figures for the dial: the readout must not reflow as digits change.
-    if let Some(d) = load(&[
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf",
-    ]) {
-        fonts.font_data.insert(READOUT_FONT.into(), egui::FontData::from_owned(d).into());
-        fonts
-            .families
-            .insert(FontFamily::Name(READOUT_FONT.into()), vec![READOUT_FONT.into()]);
-    }
+    register(
+        &mut fonts,
+        READOUT_FONT,
+        FontFamily::Monospace,
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+            "C:\\Windows\\Fonts\\consolab.ttf",
+            "C:\\Windows\\Fonts\\consola.ttf",
+        ],
+    );
 
-    if let Some(d) = load(&[
-        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
-    ]) {
-        fonts.font_data.insert(LEGEND_FONT.into(), egui::FontData::from_owned(d).into());
-        fonts
-            .families
-            .insert(FontFamily::Name(LEGEND_FONT.into()), vec![LEGEND_FONT.into()]);
-    }
+    register(
+        &mut fonts,
+        LEGEND_FONT,
+        FontFamily::Proportional,
+        &[
+            "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf",
+            "C:\\Windows\\Fonts\\ARIALNB.TTF",
+            "C:\\Windows\\Fonts\\segoeuib.ttf",
+        ],
+    );
 
     if let Some(d) = load(&["/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"]) {
         fonts.font_data.insert("body".into(), egui::FontData::from_owned(d).into());
