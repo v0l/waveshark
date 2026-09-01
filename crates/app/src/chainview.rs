@@ -169,10 +169,13 @@ enum Drag {
 /// How a node is recognised between one rebuild and the next.
 ///
 /// A stage the operator drew carries its patch id as a tag; everything the
-/// receiver builds for itself has none, and is keyed by position from the far
-/// end so the two cannot collide.
+/// receiver builds for itself has none and is keyed by its position, from
+/// below the block the receiver's own stages are named in. Overlapping that
+/// block put the DC block and the spectrum on the same key, and two boxes
+/// with one position are drawn on top of each other with every wire in the
+/// graph converging on the pile.
 fn key(n: &pipeline::graph::TopoNode) -> u64 {
-    n.tag.unwrap_or(u64::MAX - n.id.0 as u64)
+    n.tag.unwrap_or(crate::patch::builtin::FIRST - 1 - n.id.0 as u64)
 }
 
 impl Default for Edit {
@@ -1248,6 +1251,28 @@ mod tests {
             Some((id, 0)),
             "the wire should land on the stage's input"
         );
+    }
+
+    #[test]
+    fn no_two_boxes_land_on_the_same_position() {
+        // The receiver's own stages are keyed by position and the operator's
+        // by patch id. When those two schemes met in the middle, the DC block
+        // was drawn underneath the spectrum and every wire in the graph
+        // appeared to converge on one box.
+        use crate::patch::builtin;
+        let (mut topo, patch, _) = with_patch_stage();
+        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let mut seen: Vec<Pos2> = Vec::new();
+        for r in h.edit.drawn.values() {
+            assert!(
+                !seen.iter().any(|p| p.distance(r.center()) < 1.0),
+                "two stages are drawn in the same place"
+            );
+            seen.push(r.center());
+        }
+        assert_eq!(seen.len(), h.topo.nodes.len());
     }
 
     #[test]
