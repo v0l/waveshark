@@ -24,6 +24,15 @@ with RDS, and ADS-B decodes aircraft off the air. AIS, APRS and POCSAG decode
 too. What is missing is protocols: thirty-three ISM device decoders are
 implemented where the goal is hundreds.
 
+Each channel now measures a burst before demodulating it, rather than running
+every front end over every sample and letting the wrong ones produce nothing.
+The measurement names on-off keying, shallow ASK, two-level and four-level FSK,
+minimum-shift keying, binary and quadrature phase keying, chirp, a bare carrier
+and noise-like, and it refuses when nothing fits, in which case the burst goes
+to both pulse front ends exactly as it always did. Scored against rtl_433's
+recordings it puts 46 of 52 in the right family, and the six it misses are
+listed by name in the test.
+
 Proof it works: `crates/decode/tests/rtl433_corpus.rs` replays 52 recordings
 from rtl_433's own test corpus and asserts every decode matches the reference
 JSON rtl_433 25.02 produced for that file, field for field. Twenty-six device

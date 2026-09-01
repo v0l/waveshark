@@ -63,7 +63,7 @@ use std::path::PathBuf;
 /// The cost is the channel count, and it is not free: at 2.4 MS/s these four
 /// are 192 + 78 + 20 + 5 channels against the 78 + 20 that came before.
 /// Measured by `the_scanner_keeps_up_with_the_stream` on a 48 core machine,
-/// that is 6.9x real time against 12.3x for the two tiers, so half the
+/// that is 6.1x real time against 10.7x for the two tiers, so half the
 /// headroom buys the narrow and wide ends of the band. A slower receiver
 /// should drop a tier in this file rather than run out of headroom.
 pub const DEFAULT_WIDTHS: [f64; 4] = [12_500.0, 31_250.0, 125_000.0, 500_000.0];
