@@ -61,6 +61,8 @@ rather than the rest of the transmission, and all twenty-eight decode.
 | `rtlsdr-sys` | bindgen FFI to librtlsdr |
 | `hackrf` | HackRF One, adapting `rs-hackrf` to the `Device` trait |
 | `rtlsdr` | safe driver with an async streaming thread |
+| `limesdr-sys` | bindgen FFI to LimeSuite's LMS API |
+| `limesdr` | LimeSDR-USB and Mini, 100 kHz to 3.8 GHz |
 
 Named `common` rather than `core` because a workspace crate called `core`
 shadows the Rust sysroot crate.
@@ -135,6 +137,14 @@ The chain view draws that graph's topology rather than a diagram kept alongside
 it, which is the only way it can be trusted: documentation that has drifted is
 worse than none, because it is believed.
 
+It is also where a stage is set by hand. Every node already describes its own
+knobs as data, which is what lets a chain be saved and reloaded without each
+stage writing serialisation glue; the same description renders the controls, so
+a decoder the interface has never heard of gets a working panel. A dot on a box
+means that stage has something to set, clicking it opens the inspector beside
+the graph, and a parameter that changes the shape of the stream says so and
+renegotiates the chain when it is moved. Drag anywhere to pan.
+
 ## Measured throughput
 
 512 channels, each running a full envelope / pulse-detect / protocol-decode
@@ -149,6 +159,21 @@ chain, on a 48-thread machine. `x real` above 1.0 keeps up with a live radio.
 | 200 MS/s | 0.33x | 0.55x | 0.82x | 1.03x |
 
 Reproduce with `cargo run --release -p nodes --example bench -- 50000000`, in Hz.
+
+Those numbers are for a bank over the whole input. A bank is not given the
+whole input any more: each one is mixed and decimated down to the band its
+scanner block declares, so a 1.7 MHz ISM band costs the same whether the radio
+is at 2.4 MS/s or 61.44. That is the difference between the channelizer being
+the expensive thing on a wide span and it being free.
+
+It is also the difference between the channels being the width that was asked
+for and not. A bank tops out at 1024 channels, so at 61.44 MS/s a span-wide
+bank gives 60 kHz channels where an OOK sensor needs about 25, and several
+devices land in one channel where the detector sees a single long burst rather
+than packets. Anchoring the bank to the band also anchors its channel grid: it
+no longer slides under the signals every time the dial moves, and a drag across
+the spectrum costs one mixer shift instead of a rebuilt channelizer, a reset
+detector and a lost half-packet per frame.
 
 Real-time ceiling is a little over 200 MS/s at 512 channels. More channels is
 cheaper, not dearer: 8 to 512 channels is three times *faster* at every input
@@ -172,9 +197,12 @@ guessing, and each initially wrong:
 ## Building
 
 ```sh
-sudo apt install librtlsdr-dev     # or rtl-sdr-devel / rtl-sdr
+sudo apt install librtlsdr-dev liblimesuite-dev
 cargo test --workspace
 ```
+
+On Fedora those are `rtl-sdr-devel` and `LimeSuite-devel`, on Arch `rtl-sdr`
+and `limesuite`, on macOS `librtlsdr` and `limesuite` from Homebrew.
 
 Run the tests in release. Several of them assert the audio chain keeps ahead of
 real time, and a debug build misses by enough that the numbers mean nothing.
@@ -286,7 +314,35 @@ The top bar carries only what you change while tuning: frequency, band,
 bandwidth, view, gain, the device with its start and stop, and the fault lamps.
 Everything else lives behind a cog in the corner of the pane it affects, because
 spectrum and waterfall settings are unrelated and a single settings screen makes
-both harder to find.
+both harder to find. SETUP on the right is the exception: it holds the settings
+that are true of the installation rather than the session.
+
+### Setup
+
+Language, country, band plan and station position. Asked once, kept in the
+session file, and unchanged by swapping radios.
+
+The band plan is the one that earns its place. Allocations differ by ITU region
+and by regulator inside one, so a table that is right in Dublin is wrong in
+Denver: 915 MHz is the licence-free band an American sees key fobs and weather
+sensors in, and the GSM uplink a European sees phones in. Three tables ship,
+Europe, the Americas as the FCC divides them, and Asia-Pacific with the
+Japanese allocations where they differ, and the plan decides both the band
+names under the spectrum and the channel spacing a frequency snaps to. The
+American FM raster is the odd tenths from 88.1, so snapping to 100 kHz there
+would put every station on a guard channel.
+
+Choosing a country sets the plan and gives the map somewhere to open, then
+stops having an opinion, so an override afterwards sticks. With nothing saved
+the country comes from `LC_ALL`, `LC_MESSAGES` or `LANG`: a locale of `en_IE`
+is enough to pick the right table. A bare `en` is not, and is ignored rather
+than guessed at.
+
+English is the only language catalogue in the build, and the selector lists
+only what is installed, so it cannot offer a language the binary has no strings
+for. Band and protocol names stay as they are on the air in every language: a
+translated "POCSAG" is worse than an untranslated one, because it cannot be
+searched for.
 
 Stopping releases the USB claim without quitting, which is the only way to hand
 the radio to another program: a held claim is what makes the next process fail
@@ -389,8 +445,10 @@ Spans narrower than 48 kHz are not offered: that is the rate the narrowband
 audio chain runs at, and a span narrower than the demodulator's own IF cannot
 be listened to. Asking for one anyway reports which mode needs what.
 
-GAIN opens the radio's own controls, separately from anything the software
-does to the samples afterwards. Each gain stage the device reports gets a
+SETTINGS beside the device opens the radio's own controls, separately from
+anything the software does to the samples afterwards. Gain is most of it, but
+not all: the radio's switches, its antenna and channel choices and the crystal
+correction are there too. Each gain stage the device reports gets a
 slider that snaps to the steps the hardware actually has: an R820T takes 29
 discrete values and nothing between them, and a HackRF's LNA moves in 8 dB
 steps while its VGA moves in 2. The values shown are read back from the driver
@@ -400,6 +458,24 @@ A HackRF's three stages appear separately rather than as one number. They do
 different jobs: the LNA sets the noise figure, the VGA drives the converter,
 and the front end amp costs noise figure and overloads on a crowded band, so
 which one you raise matters as much as the total.
+
+A LimeSDR is the exception and shows one number for 0 to 73 dB. Its LNA, TIA
+and PGA are split by a table inside LimeSuite, and reimplementing that split
+through register writes to draw three sliders would change the noise figure in
+ways nothing here could account for.
+
+It also gets two dropdowns, because a switch cannot say which of six sockets
+the cable is in. The board has an H, L and W port on each of two receivers,
+separately matched, and Auto picks L below 1.5 GHz and H above. That is the
+right guess and the wrong one for anyone wired to a single port: a cable in
+RX2_H hears almost nothing at 100 MHz, which looks exactly like a dead radio
+rather than like the receiver listening to a socket with no antenna in it.
+
+`cargo run --release --example limediag` answers that question directly. It
+plays the chip's internal test tone to prove the converter and the path back
+to the host, then sweeps the gain: a live analogue front end has a noise floor
+that climbs with RF gain once it beats the converter's own noise, and a dead
+one does not.
 
 The switches a device offers appear there too, each with what it costs: the
 RTL2832U's digital AGC, which rescues a weak signal and ruins any wideband
