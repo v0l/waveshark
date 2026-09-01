@@ -13,19 +13,15 @@ decoded or not.
 
 ## What it identifies
 
-Thirty-three ISM device decoders on 433, 868 and 915 MHz, from rtl_433's
-family: weather stations, thermometers, TPMS, door contacts, gate remotes. Most
-carry a device ID that stays put, which is what turns bursts into an inventory.
-Anything unclaimed is reported with its coding inferred and bits sliced out, so
-the same unknown device can be recognised again and reverse engineered.
-
-ADS-B and Mode S on 1090 MHz feed a flight table and map. AIS does the same for
-shipping. APRS on 144.800 (144.390 in North America, 144.640 in Japan) covers
-packet stations and vehicle trackers, Mic-E included. POCSAG pagers decode at
-512, 1200 and 2400 bit/s, in clear.
-
-For listening: WFM with stereo and RDS, NFM, AM, USB, LSB and CW, several
-channels at once with their own volume and squelch.
+| | where | what you get |
+|---|---|---|
+| ISM devices | 433, 868, 915 MHz | 33 decoders from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, mostly with a stable device ID |
+| Unknown bursts | anywhere | coding inferred and bits sliced out, enough to recognise the same device again and reverse engineer it |
+| Aircraft | 1090 MHz | ADS-B and Mode S into a flight table and map: callsign, altitude, speed, track, position |
+| Shipping | marine VHF | AIS positions and vessel identity on the same map |
+| APRS | 144.800, 144.390 US, 144.640 JP | packet stations and vehicle trackers, Mic-E included |
+| Pagers | wherever you point it | POCSAG at 512, 1200 and 2400 bit/s, message text in clear |
+| Voice | any band | WFM with stereo and RDS, NFM, AM, USB, LSB, CW, several channels at once |
 
 Receive only. Nothing here keys a radio. [`docs/protocols.md`](docs/protocols.md)
 is the roadmap.
