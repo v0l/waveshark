@@ -123,7 +123,150 @@ fn row_height(topo: &Topology, places: &[Place], depth: usize) -> f32 {
     BOX_H + GAP + extra
 }
 
-pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
+/// What the operator did to the chain view this frame.
+#[derive(Default)]
+pub struct Interaction {
+    /// The node now selected, or `None` if the click was on empty space.
+    pub selected: Option<usize>,
+    /// A parameter that was changed: node id, name, new value.
+    pub changed: Option<(usize, String, pipeline::param::ParamValue)>,
+}
+
+/// The selected node's settings, as controls.
+///
+/// Every stage already describes its own knobs as data, so this renders a
+/// decoder it has never heard of. That is the point of the parameter
+/// description existing at all: without it, each stage would need its own
+/// panel written by hand and the ones nobody wrote would be unreachable.
+pub fn inspector(
+    ui: &mut egui::Ui,
+    topo: &Topology,
+    selected: usize,
+) -> Option<(usize, String, pipeline::param::ParamValue)> {
+    use pipeline::param::{ParamRange, ParamValue};
+    let node = topo.nodes.iter().find(|n| n.id.0 == selected)?;
+    let mut out = None;
+
+    ui.label(theme::legend(&node.label));
+    ui.label(
+        egui::RichText::new(&node.kind)
+            .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+            .color(theme::LEGEND),
+    );
+    ui.add_space(6.0);
+    for (slot, spec) in &node.inputs {
+        ui.label(
+            egui::RichText::new(format!("in  {}  {}", kind_label(spec.kind), rate_label(spec)))
+                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                .color(theme::LEGEND),
+        );
+        let _ = slot;
+    }
+    if !node.sink {
+        for (_, spec) in &node.outputs {
+            ui.label(
+                egui::RichText::new(format!(
+                    "out {}  {}",
+                    kind_label(spec.kind),
+                    rate_label(spec)
+                ))
+                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                .color(theme::TRACE),
+            );
+        }
+    }
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    if node.params.is_empty() {
+        ui.label(
+            egui::RichText::new("This stage has nothing to set.")
+                .size(11.0)
+                .color(theme::LEGEND),
+        );
+        return None;
+    }
+
+    for prm in &node.params {
+        let name = if prm.label.is_empty() { prm.name.clone() } else { prm.label.clone() };
+        ui.label(theme::legend(&name));
+        match (&prm.value, &prm.range) {
+            (ParamValue::Float(v), ParamRange::Float { range, log }) => {
+                let mut x = *v;
+                let mut w = egui::Slider::new(&mut x, range.clone()).suffix(unit(prm));
+                if *log {
+                    w = w.logarithmic(true);
+                }
+                if ui.add(w).changed() {
+                    out = Some((node.id.0, prm.name.clone(), ParamValue::Float(x)));
+                }
+            }
+            (ParamValue::Int(v), ParamRange::Int { range }) => {
+                let mut x = *v;
+                if ui.add(egui::Slider::new(&mut x, range.clone()).suffix(unit(prm))).changed() {
+                    out = Some((node.id.0, prm.name.clone(), ParamValue::Int(x)));
+                }
+            }
+            (ParamValue::Bool(v), _) => {
+                let mut x = *v;
+                if ui.checkbox(&mut x, "").changed() {
+                    out = Some((node.id.0, prm.name.clone(), ParamValue::Bool(x)));
+                }
+            }
+            (ParamValue::Choice(i), ParamRange::Choices(choices)) => {
+                let mut pick = *i;
+                egui::ComboBox::from_id_salt((node.id.0, &prm.name))
+                    .selected_text(choices.get(pick).cloned().unwrap_or_default())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (k, c) in choices.iter().enumerate() {
+                            ui.selectable_value(&mut pick, k, c);
+                        }
+                    });
+                if pick != *i {
+                    out = Some((node.id.0, prm.name.clone(), ParamValue::Choice(pick)));
+                }
+            }
+            (ParamValue::Text(s), _) => {
+                let mut t = s.clone();
+                let r = ui.add(egui::TextEdit::singleline(&mut t).desired_width(f32::INFINITY));
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
+                }
+            }
+            // A value whose range says something else about it: show the
+            // number rather than a control that would write the wrong type.
+            (v, _) => {
+                ui.label(
+                    egui::RichText::new(format!("{v:?}"))
+                        .size(11.0)
+                        .color(theme::VALUE),
+                );
+            }
+        }
+        if prm.affects_rate {
+            ui.label(
+                egui::RichText::new("changing this rebuilds the chain")
+                    .size(10.0)
+                    .color(theme::LEGEND),
+            );
+        }
+        ui.add_space(8.0);
+    }
+    out
+}
+
+fn unit(p: &pipeline::param::Param) -> String {
+    if p.unit.is_empty() { String::new() } else { format!(" {}", p.unit) }
+}
+
+pub fn draw(
+    ui: &mut egui::Ui,
+    topo: &Topology,
+    latency_ms: f64,
+    selected: Option<usize>,
+) -> Interaction {
     let places = layout(topo);
     let rows = places.iter().map(|p| p.depth + 1).max().unwrap_or(0);
     let widest = places.iter().map(|p| p.col + 1).max().unwrap_or(1).max(1);
@@ -137,10 +280,14 @@ pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
         .clamp(MIN_BOX_W, BOX_W);
     let width = (widest as f32 * (box_w + COL_GAP) + 24.0).max(avail);
 
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(width, height.max(ui.available_height())), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(width, height.max(ui.available_height())),
+        Sense::click(),
+    );
     let p = ui.painter_at(rect);
     let cx = rect.center().x;
+    let mut act = Interaction { selected, changed: None };
+    let pointer = resp.hover_pos();
 
     p.text(
         Pos2::new(rect.left() + 12.0, rect.top() + 4.0),
@@ -164,16 +311,69 @@ pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
         y += h;
     }
 
-    let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
+    // Places first, then edges, then the boxes on top of them. Drawn the
+    // other way round, an edge that has to cross a column is painted over the
+    // stage it crosses, and a bank's inner chain ends up with a wire through
+    // the middle of it.
     let span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
-    for (node, pl) in topo.nodes.iter().zip(&places) {
+    let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
+    for (_, pl) in topo.nodes.iter().zip(&places) {
         let x = cx - span / 2.0 + pl.col as f32 * (box_w + COL_GAP) + box_w / 2.0;
-        let r = Rect::from_center_size(
+        rects.push(Rect::from_center_size(
             Pos2::new(x, row_top[pl.depth] + BOX_H / 2.0),
             Vec2::new(box_w, BOX_H),
-        );
-        rects.push(r);
+        ));
+    }
+
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let to = rects[i];
+        for (slot, spec) in &node.inputs {
+            let from = match topo.producer(*slot) {
+                Some(prod) => topo
+                    .nodes
+                    .iter()
+                    .position(|x| x.id == prod.id)
+                    .map(|j| rects[j])
+                    .unwrap_or(src),
+                // No producer means it reads the graph input directly.
+                None => src,
+            };
+            // Labelled once per node, and not at all on a node that gathers
+            // many inputs: a bus with six wires into it would stack six
+            // identical labels on the same three pixels.
+            let label = node.inputs.len() <= 2 && slot == &node.inputs[0].0;
+            edge(&p, from.center_bottom(), to.center_top(), spec, label);
+        }
+    }
+
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let r = rects[i];
+        let x = r.center().x;
+        let hot = pointer.is_some_and(|q| r.contains(q));
+        let on = selected == Some(node.id.0);
         stage(&p, r, &node.label, &node.kind, false);
+        if on || hot {
+            p.rect_stroke(
+                r.expand(1.0),
+                4.0,
+                Stroke::new(if on { 1.5 } else { 1.0 }, theme::READOUT),
+                StrokeKind::Outside,
+            );
+        }
+        if hot && resp.clicked() {
+            // Clicking the selected stage again closes the inspector, so the
+            // panel is not a thing you have to hunt for a way out of.
+            act.selected = if on { None } else { Some(node.id.0) };
+        }
+        if !node.params.is_empty() {
+            // A dot for a stage that has settings, so which boxes are worth
+            // clicking is visible without clicking all of them.
+            p.circle_filled(
+                Pos2::new(r.right() - 7.0, r.top() + 7.0),
+                2.0,
+                if on { theme::READOUT } else { theme::LEGEND },
+            );
+        }
 
         // A composite draws what it runs inside itself, so a bank is not an
         // opaque box with several hundred decoders hidden in it.
@@ -200,24 +400,7 @@ pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
                 iy += INNER_H + INNER_GAP;
             }
         }
-    }
 
-    // Edges last, so they sit under nothing and above the background.
-    for (i, node) in topo.nodes.iter().enumerate() {
-        let to = rects[i];
-        for (slot, spec) in &node.inputs {
-            let from = match topo.producer(*slot) {
-                Some(prod) => topo
-                    .nodes
-                    .iter()
-                    .position(|x| x.id == prod.id)
-                    .map(|j| rects[j])
-                    .unwrap_or(src),
-                // No producer means it reads the graph input directly.
-                None => src,
-            };
-            edge(&p, from.center_bottom(), to.center_top(), spec);
-        }
         // A leaf that carries a stream says where it goes. A sink writes no
         // buffer at all, so labelling one with a rate would invent an output
         // that does not exist.
@@ -226,12 +409,14 @@ pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
         });
         if !feeds_anything && !node.sink {
             if let Some((_, spec)) = node.outputs.first() {
-                let below = to.bottom()
-                    + node.inner.as_ref().map(|t| {
-                        INNER_GAP + t.nodes.len() as f32 * (INNER_H + INNER_GAP)
-                    }).unwrap_or(0.0);
+                let below = r.bottom()
+                    + node
+                        .inner
+                        .as_ref()
+                        .map(|t| INNER_GAP + t.nodes.len() as f32 * (INNER_H + INNER_GAP))
+                        .unwrap_or(0.0);
                 p.text(
-                    Pos2::new(to.center().x, below + 6.0),
+                    Pos2::new(x, below + 6.0),
                     egui::Align2::CENTER_TOP,
                     format!("out  {}  {}", kind_label(spec.kind), rate_label(spec)),
                     FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
@@ -240,6 +425,13 @@ pub fn draw(ui: &mut egui::Ui, topo: &Topology, latency_ms: f64) {
             }
         }
     }
+
+    // A click that hit no box clears the selection, which is the only way out
+    // of the inspector that does not need a button to be found.
+    if resp.clicked() && !rects.iter().any(|r| pointer.is_some_and(|q| r.contains(q))) {
+        act.selected = None;
+    }
+    act
 }
 
 fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
@@ -262,7 +454,7 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
 }
 
 /// A labelled arrow carrying what the link actually contains.
-fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec) {
+fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec, label: bool) {
     let col = Color32::from_rgb(0x4A, 0x55, 0x60);
     // Down out of the producer, across, then down into the consumer, so a
     // branch reads as a branch rather than a diagonal crossing other boxes.
@@ -277,13 +469,18 @@ fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec) {
     for d in [-4.0, 4.0] {
         p.line_segment([Pos2::new(to.x + d, to.y - 6.0), to], Stroke::new(1.0, col));
     }
-    p.text(
-        Pos2::new(to.x + 8.0, (mid + to.y) / 2.0),
-        egui::Align2::LEFT_CENTER,
-        format!("{}  {}", kind_label(spec.kind), rate_label(spec)),
-        FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
-        theme::LEGEND,
-    );
+    if label {
+        // Above the stage it feeds and centred on it, so the label stays
+        // inside that stage's own column. Off to the right it drifted over
+        // whatever the next column was drawing.
+        p.text(
+            Pos2::new(to.x, to.y - 7.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("{}  {}", kind_label(spec.kind), rate_label(spec)),
+            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::LEGEND,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +523,7 @@ mod tests {
             inner: None,
             inner_count: 1,
             sink: false,
+            params: Vec::new(),
         }
     }
 

@@ -195,6 +195,13 @@ pub struct TopoNode {
     pub inner_count: usize,
     /// Whether the node ends the stream rather than passing one on.
     pub sink: bool,
+    /// The node's own settings, as it describes them.
+    ///
+    /// Carried in the topology rather than fetched separately because the
+    /// topology is the snapshot the interface draws from: a control built from
+    /// one snapshot and a value read from another shows a number the node is
+    /// not using.
+    pub params: Vec<crate::param::Param>,
 }
 
 /// The built graph's shape, in execution order.
@@ -477,6 +484,7 @@ impl Graph {
                 inner: e.node.subgraph().map(Box::new),
                 inner_count: e.node.subgraph_count(),
                 sink: e.node.is_sink(),
+                params: e.node.params(),
             });
         }
         Topology { input: self.specs[INPUT_SLOT], nodes, output_slot: self.output_slot }
