@@ -2257,28 +2257,50 @@ mod zoom_tests {
         crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain")
     }
 
+    /// How long one chain takes to eat a second of signal.
+    fn seconds_to_process(rx: &mut crate::chain::Receiver, sig: &[C32]) -> f64 {
+        rx.process(&sig[..1024]).unwrap();
+        let t = std::time::Instant::now();
+        rx.process(sig).unwrap();
+        t.elapsed().as_secs_f64()
+    }
+
     // Timing, so it needs optimisation to mean anything.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
     fn narrowing_costs_little_enough_to_run_alongside_everything_else() {
         // It runs at the head of the graph, ahead of the spectrum, the banks
         // and the audio, so anything near real time here stalls all three.
+        //
+        // Measured against the same span with no narrowing in it rather than
+        // against the clock. An absolute figure says as much about the machine
+        // as about the code: this desktop runs it at ten times real time and a
+        // shared CI runner managed two, while running the other two hundred
+        // tests on the same cores, so a threshold in real time has to be set
+        // so low it would miss a regression. A ratio survives that, because
+        // whatever slows one side slows the other.
+        //
+        // Narrowing is not free and is not meant to be: the decimator costs
+        // its tap count per output sample, where the chain it is compared
+        // against is one FFT. That comes out at 6.6 to 6.8 across every zoom
+        // factor here, so the bar is twelve.
         let native = 2_400_000.0;
         let sig = tone(native, 30_000.0, 2_400_000);
+        let flat = seconds_to_process(&mut zoomed(native, 1), &sig);
         for zoom in [2usize, 8, 32] {
-            let mut rx = zoomed(native, zoom);
-            rx.process(&sig[..1024]).unwrap();
-            let t = std::time::Instant::now();
-            rx.process(&sig).unwrap();
-            let x = 1.0 / t.elapsed().as_secs_f64();
-            eprintln!("zoom /{zoom}: {x:.0}x real time");
-            // The bar is what the stage is for, not what a fast machine does
-            // with it: narrowing must not cost real time, since it runs ahead
-            // of the spectrum, the banks and the audio. This desktop manages
-            // 10x and a shared CI runner 3.5x, so a threshold set near the
-            // desktop figure measures the runner's neighbours rather than
-            // this code.
-            assert!(x > 2.5, "narrowing by {zoom} only ran at {x:.1}x real time");
+            let took = seconds_to_process(&mut zoomed(native, zoom), &sig);
+            let ratio = took / flat.max(1e-9);
+            eprintln!(
+                "zoom /{zoom}: {:.0}x real time, {ratio:.2} times the unzoomed chain",
+                1.0 / took
+            );
+            assert!(
+                ratio < 12.0,
+                "narrowing by {zoom} costs {ratio:.1} times the chain without it"
+            );
+            // And a floor against the catastrophic case, loose enough that no
+            // runner can trip it on contention alone.
+            assert!(took < 1.0, "narrowing by {zoom} took {took:.2} s for one second of signal");
         }
     }
 
