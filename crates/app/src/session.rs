@@ -53,6 +53,9 @@ pub struct Session {
     pub volume: f32,
     /// Packet feeds from other receivers, as `format host:port`.
     pub feeds: Vec<nodes::FeedSpec>,
+    /// Whether the operator owns the shape of the graph. The graph itself is
+    /// in its own file: it is a drawing, not a setting.
+    pub manual_chain: bool,
 }
 
 impl Default for Session {
@@ -75,6 +78,7 @@ impl Default for Session {
             decode_on: true,
             volume: 0.5,
             feeds: Vec::new(),
+            manual_chain: false,
         }
     }
 }
@@ -160,6 +164,7 @@ impl Session {
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
             feeds,
+            manual_chain: kv.get("manual_chain").map(|v| *v == "true").unwrap_or(false),
         }
     }
 
@@ -188,6 +193,9 @@ impl Session {
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("volume = {}\n", self.volume));
+        if self.manual_chain {
+            s.push_str("manual_chain = true\n");
+        }
         for (name, mode) in &self.gains {
             s.push_str(&format!("gain.{name} = {}\n", render_gain(*mode)));
         }
@@ -253,6 +261,7 @@ mod tests {
             dc_block: false,
             decode_on: false,
             volume: 0.25,
+            manual_chain: true,
             feeds: vec![
                 nodes::FeedSpec::new("10.100.2.249", 30005, &nodes::feed_nodes::BEAST),
                 nodes::FeedSpec::new("pi.local", 30002, &nodes::feed_nodes::AVR),

@@ -190,9 +190,192 @@ impl Patch {
     }
 }
 
+/// Where a stage was put on screen, by the id it is drawn under.
+///
+/// Saved with the graph rather than beside it: an arrangement that came back
+/// without its stages, or stages that came back in a heap, would both be
+/// worse than starting from the automatic layout.
+pub type Places = std::collections::BTreeMap<u64, (f32, f32)>;
+
+impl Patch {
+    /// `$XDG_CONFIG_HOME/waveshark/patch`, beside the session and the scanner
+    /// table.
+    pub fn path() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })?;
+        Some(base.join("waveshark").join("patch"))
+    }
+
+    /// Written as plain lines rather than through a serialisation crate, for
+    /// the same reason the session is: a graph that will not load is exactly
+    /// the situation where being able to read and fix the file matters.
+    pub fn render(&self, places: &Places) -> String {
+        let mut s = String::from("# waveshark patch: the graph as drawn\n");
+        for st in &self.stages {
+            s.push_str(&format!("\nstage {} {}\n", st.id, st.kind));
+            for (name, value) in &st.settings {
+                s.push_str(&format!("set {name} {}\n", render_value(value)));
+            }
+        }
+        s.push('\n');
+        for l in &self.links {
+            let from = match l.from {
+                Source::Span => "span:0".to_string(),
+                Source::Stage(id, port) => format!("{id}:{port}"),
+            };
+            s.push_str(&format!("link {from} {}:{}\n", l.to.0, l.to.1));
+        }
+        s.push('\n');
+        for (id, (x, y)) in places {
+            s.push_str(&format!("at {id} {x:.0} {y:.0}\n"));
+        }
+        s
+    }
+
+    pub fn parse(text: &str) -> (Self, Places) {
+        let mut p = Patch::default();
+        let mut places = Places::new();
+        let mut last: Option<u64> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut w = line.split_whitespace();
+            match w.next() {
+                Some("stage") => {
+                    let id: u64 = match w.next().and_then(|v| v.parse().ok()) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let Some(kind) = w.next() else { continue };
+                    p.stages.push(Stage {
+                        id,
+                        kind: kind.to_string(),
+                        settings: Settings::new(),
+                    });
+                    // Ids handed out later must not land on one already in
+                    // the file, or a new stage inherits its wires.
+                    if !Self::is_derived(id) {
+                        p.next = p.next.max(id);
+                    }
+                    last = Some(id);
+                }
+                Some("set") => {
+                    let (Some(name), Some(kind), Some(id)) = (w.next(), w.next(), last) else {
+                        continue;
+                    };
+                    let rest: Vec<&str> = w.collect();
+                    if let Some(v) = parse_value(kind, &rest.join(" ")) {
+                        if let Some(st) = p.stages.iter_mut().find(|s| s.id == id) {
+                            st.settings.insert(name.to_string(), v);
+                        }
+                    }
+                }
+                Some("link") => {
+                    let (Some(from), Some(to)) = (w.next(), w.next()) else { continue };
+                    let (Some(from), Some(to)) = (parse_source(from), parse_port(to)) else {
+                        continue;
+                    };
+                    p.links.push(Link { from, to });
+                }
+                Some("at") => {
+                    let vals: Vec<&str> = w.collect();
+                    if let [id, x, y] = vals[..] {
+                        if let (Ok(id), Ok(x), Ok(y)) = (id.parse(), x.parse(), y.parse()) {
+                            places.insert(id, (x, y));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        (p, places)
+    }
+
+    pub fn save(&self, places: &Places) {
+        let Some(path) = Self::path() else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, self.render(places));
+    }
+
+    /// The graph last drawn, or nothing when none has been.
+    pub fn load() -> Option<(Self, Places)> {
+        let text = std::fs::read_to_string(Self::path()?).ok()?;
+        let (p, places) = Self::parse(&text);
+        (!p.stages.is_empty()).then_some((p, places))
+    }
+}
+
+fn render_value(v: &pipeline::param::ParamValue) -> String {
+    use pipeline::param::ParamValue as V;
+    match v {
+        V::Float(x) => format!("f {x}"),
+        V::Int(x) => format!("i {x}"),
+        V::Bool(x) => format!("b {x}"),
+        V::Text(x) => format!("t {x}"),
+        V::Choice(x) => format!("c {x}"),
+    }
+}
+
+fn parse_value(kind: &str, rest: &str) -> Option<pipeline::param::ParamValue> {
+    use pipeline::param::ParamValue as V;
+    Some(match kind {
+        "f" => V::Float(rest.parse().ok()?),
+        "i" => V::Int(rest.parse().ok()?),
+        "b" => V::Bool(rest == "true"),
+        "t" => V::Text(rest.to_string()),
+        "c" => V::Choice(rest.parse().ok()?),
+        _ => return None,
+    })
+}
+
+fn parse_source(s: &str) -> Option<Source> {
+    if let Some(port) = s.strip_prefix("span:") {
+        let _ = port;
+        return Some(Source::Span);
+    }
+    let (id, port) = parse_port(s)?;
+    Some(Source::Stage(id, port))
+}
+
+fn parse_port(s: &str) -> Option<(u64, usize)> {
+    let (id, port) = s.split_once(':')?;
+    Some((id.parse().ok()?, port.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drawn_graph_round_trips_through_its_file() {
+        // A graph that came back missing a wire would be worse than one that
+        // did not come back at all: the receiver would run, quietly, as
+        // something else.
+        let mut p = Patch::default();
+        let mix = p.add("mixer");
+        let env = p.add("envelope");
+        p.stages_mut()[0]
+            .settings
+            .insert("shift_hz".into(), pipeline::ParamValue::Float(-125_000.0));
+        p.connect(Source::Span, (mix, 0));
+        p.connect(Source::Stage(mix, 0), (env, 0));
+        let mut places = Places::new();
+        places.insert(mix, (120.0, 340.0));
+        let (back, back_places) = Patch::parse(&p.render(&places));
+        assert_eq!(back, p);
+        assert_eq!(back_places, places);
+        // And a stage added afterwards cannot take an id the file already
+        // used, which would hand it another stage's wires.
+        let mut back = back;
+        assert!(back.add("envelope") > env);
+    }
 
     #[test]
     fn deleting_a_stage_takes_its_wires_with_it() {

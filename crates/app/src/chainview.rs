@@ -17,9 +17,6 @@ use pipeline::port::{PortKind, StreamSpec};
 use std::collections::HashMap;
 
 const BOX_W: f32 = 190.0;
-/// Narrower than this and a label stops being readable, so the view scrolls
-/// sideways instead of shrinking further.
-const MIN_BOX_W: f32 = 118.0;
 const BOX_H: f32 = 46.0;
 const GAP: f32 = 34.0;
 const COL_GAP: f32 = 16.0;
@@ -106,13 +103,13 @@ fn layout(topo: &Topology) -> Vec<Place> {
     (0..n).map(|i| Place { depth: depth[i], col: col[i] }).collect()
 }
 
-/// How tall a row is, allowing for any composite node's inner chain.
-fn row_height(topo: &Topology, places: &[Place], depth: usize) -> f32 {
+/// How tall a lane is, allowing for any composite node's inner chain.
+fn lane_height(topo: &Topology, places: &[Place], lane: usize) -> f32 {
     let inner = topo
         .nodes
         .iter()
         .zip(places)
-        .filter(|(_, p)| p.depth == depth)
+        .filter(|(_, p)| p.col == lane)
         .map(|(n, _)| n.inner.as_ref().map(|t| t.nodes.len()).unwrap_or(0))
         .max()
         .unwrap_or(0);
@@ -389,24 +386,23 @@ pub fn draw(
     patch: Option<&crate::patch::Patch>,
 ) -> Interaction {
     let places = layout(topo);
-    let rows = places.iter().map(|p| p.depth + 1).max().unwrap_or(0);
-    let widest = places.iter().map(|p| p.col + 1).max().unwrap_or(1).max(1);
+    // Depth runs left to right and a branch takes a lane of its own down the
+    // screen, which is the way every flowgraph editor draws a graph.
+    let columns = places.iter().map(|p| p.depth + 1).max().unwrap_or(0);
+    let lanes = places.iter().map(|p| p.col + 1).max().unwrap_or(1).max(1);
 
-    let heights: Vec<f32> = (0..rows).map(|d| row_height(topo, &places, d)).collect();
-    let height = BOX_H + GAP + heights.iter().sum::<f32>() + 24.0;
-    // Boxes shrink to fit a branchy graph, down to the point where the labels
-    // stop being readable; past that the view scrolls sideways.
-    let avail = ui.available_width();
-    let box_w = ((avail - 24.0 - (widest - 1) as f32 * COL_GAP) / widest as f32)
-        .clamp(MIN_BOX_W, BOX_W);
-    let width = (widest as f32 * (box_w + COL_GAP) + 24.0).max(avail);
+    let box_w = BOX_W;
+    // A lane is as tall as the tallest thing in it, which for a bank is its
+    // own inner chain drawn underneath it.
+    let lane_h: Vec<f32> = (0..lanes).map(|l| lane_height(topo, &places, l)).collect();
+    let height = (lane_h.iter().sum::<f32>() + 40.0).max(ui.available_height());
+    let width = ((columns + 1) as f32 * (box_w + COL_GAP) + 24.0).max(ui.available_width());
 
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(width, height.max(ui.available_height())),
         if edit.manual { Sense::click_and_drag() } else { Sense::click() },
     );
     let p = ui.painter_at(rect);
-    let cx = rect.center().x;
     let mut act = Interaction { selected, ..Default::default() };
     let pointer = resp.hover_pos();
 
@@ -418,11 +414,10 @@ pub fn draw(
         theme::LEGEND,
     );
 
-    // The source, then a row per depth.
-    let top = rect.top() + 16.0;
-    let widest_span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
-    let src_x = cx - widest_span / 2.0 + box_w / 2.0;
-    let src_auto = Pos2::new(src_x, top + BOX_H / 2.0);
+    // The source on the left, then a column per depth.
+    let top = rect.top() + 24.0;
+    let left = rect.left() + 12.0;
+    let src_auto = Pos2::new(left + box_w / 2.0, top + BOX_H / 2.0);
     // The span is a box like any other in manual mode: it can be dragged, and
     // it is where every wire that reads the receiver's own samples starts.
     let src_centre = if edit.manual {
@@ -438,23 +433,22 @@ pub fn draw(
     let src = Rect::from_center_size(src_centre, Vec2::new(box_w, BOX_H));
     stage(&p, src, "Source", "device", true);
 
-    let mut row_top = vec![0.0f32; rows];
-    let mut y = top + BOX_H + GAP;
-    for (d, h) in heights.iter().enumerate() {
-        row_top[d] = y;
+    let mut lane_top = vec![0.0f32; lanes];
+    let mut y = top;
+    for (l, h) in lane_h.iter().enumerate() {
+        lane_top[l] = y;
         y += h;
     }
 
     // Places first, then edges, then the boxes on top of them. Drawn the
-    // other way round, an edge that has to cross a column is painted over the
+    // other way round, an edge that has to cross a lane is painted over the
     // stage it crosses, and a bank's inner chain ends up with a wire through
     // the middle of it.
-    let span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
     let node_keys = keys(topo);
     let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
     for ((i, _node), pl) in topo.nodes.iter().enumerate().zip(&places) {
-        let x = cx - span / 2.0 + pl.col as f32 * (box_w + COL_GAP) + box_w / 2.0;
-        let auto = Pos2::new(x, row_top[pl.depth] + BOX_H / 2.0);
+        let x = left + (pl.depth + 1) as f32 * (box_w + COL_GAP) + box_w / 2.0;
+        let auto = Pos2::new(x, lane_top[pl.col] + BOX_H / 2.0);
         // Entering manual mode pins every stage where the automatic layout
         // had just put it. Without that, moving one box would let the rest
         // reflow around the gap it left, which reads as the graph rearranging
@@ -479,9 +473,12 @@ pub fn draw(
                 .filter(|s| !topo.nodes.iter().any(|t| t.tag == Some(s.id)))
                 .enumerate()
             {
-                // Down the left margin, out of the way of the automatic
-                // chain, until it is dragged somewhere better.
-                let seed = Pos2::new(12.0 + box_w / 2.0, 40.0 + n as f32 * (BOX_H + GAP));
+                // Under the source, out of the way of the chain that is
+                // running, until it is dragged somewhere better.
+                let seed = Pos2::new(
+                    12.0 + box_w / 2.0,
+                    height - 40.0 - n as f32 * (BOX_H + GAP),
+                );
                 let at = *edit.pos.entry(st.id).or_insert(seed);
                 ghosts.push((
                     st.id,
@@ -720,15 +717,9 @@ pub fn draw(
         });
         if !feeds_anything && !node.sink {
             if let Some((_, spec)) = node.outputs.first() {
-                let below = r.bottom()
-                    + node
-                        .inner
-                        .as_ref()
-                        .map(|t| INNER_GAP + t.nodes.len() as f32 * (INNER_H + INNER_GAP))
-                        .unwrap_or(0.0);
                 p.text(
-                    Pos2::new(x, below + 6.0),
-                    egui::Align2::CENTER_TOP,
+                    Pos2::new(r.right() + 8.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
                     format!("out  {}  {}", kind_label(spec.kind), rate_label(spec)),
                     FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
                     theme::TRACE,
@@ -1030,9 +1021,9 @@ fn target_ring(p: &egui::Painter, at: Rect) {
 /// The wire that is being drawn but has not landed anywhere yet.
 fn loose(p: &egui::Painter, from: Pos2, to: Pos2) {
     let stroke = Stroke::new(1.5, theme::READOUT);
-    let drop = ((to.y - from.y).abs() * 0.5).clamp(26.0, 90.0);
+    let reach = ((to.x - from.x).abs() * 0.5).clamp(26.0, 90.0);
     p.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        [from, Pos2::new(from.x, from.y + drop), Pos2::new(to.x, to.y - drop), to],
+        [from, Pos2::new(from.x + reach, from.y), Pos2::new(to.x - reach, to.y), to],
         false,
         Color32::TRANSPARENT,
         stroke,
@@ -1066,36 +1057,36 @@ enum Side {
     Out,
 }
 
-/// Where one port sits: inputs along the top edge, outputs along the bottom,
+/// Where one port sits: inputs down the left edge, outputs down the right,
 /// spread evenly so a stage with several of either shows which is which.
+///
+/// Signal flows left to right here, the way it does in every flowgraph editor
+/// anybody has used. It used to run downwards, which came from this being a
+/// diagram to read rather than a graph to edit: a wire arriving at the top of
+/// a box says nothing about which end of it is the input.
 fn port(r: Rect, i: usize, n: usize, side: Side) -> Pos2 {
     let n = n.max(1);
-    let step = r.width() / (n + 1) as f32;
-    let y = if side == Side::In { r.top() } else { r.bottom() };
-    Pos2::new(r.left() + step * (i + 1) as f32, y)
+    let step = r.height() / (n + 1) as f32;
+    let x = if side == Side::In { r.left() } else { r.right() };
+    Pos2::new(x, r.top() + step * (i + 1) as f32)
 }
 
 /// A labelled wire carrying what the link actually contains.
 ///
 /// Curved rather than routed around corners. Once stages can be dragged
 /// anywhere, an orthogonal route has no good answer for a wire that runs
-/// upwards or sideways: it doubles back through the boxes it is trying to
-/// avoid. A curve leaving the producer downwards and arriving at the consumer
-/// from above says the same thing about direction and stays readable wherever
+/// backwards: it doubles back through the boxes it is trying to avoid. A
+/// curve leaving the producer to the right and arriving at the consumer from
+/// the left says the same thing about direction and stays readable wherever
 /// the two ends are.
 fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec, label: bool) {
     let col = Color32::from_rgb(0x4A, 0x55, 0x60);
     let stroke = Stroke::new(1.0, col);
-    // Enough slack that the curve leaves and arrives vertically, and more of
-    // it when the ends are far apart or the wire runs back up the graph.
-    let drop = ((to.y - from.y).abs() * 0.5).clamp(26.0, 90.0)
-        + if to.y < from.y { (from.y - to.y) * 0.5 } else { 0.0 };
-    let pts = [
-        from,
-        Pos2::new(from.x, from.y + drop),
-        Pos2::new(to.x, to.y - drop),
-        to,
-    ];
+    // Enough slack that the curve leaves and arrives horizontally, and more
+    // of it when the ends are far apart or the wire runs back up the graph.
+    let reach = ((to.x - from.x).abs() * 0.5).clamp(26.0, 90.0)
+        + if to.x < from.x { (from.x - to.x) * 0.5 } else { 0.0 };
+    let pts = [from, Pos2::new(from.x + reach, from.y), Pos2::new(to.x - reach, to.y), to];
     p.add(egui::epaint::CubicBezierShape::from_points_stroke(
         pts,
         false,
@@ -1103,15 +1094,14 @@ fn edge(p: &egui::Painter, from: Pos2, to: Pos2, spec: &StreamSpec, label: bool)
         stroke,
     ));
     for d in [-4.0, 4.0] {
-        p.line_segment([Pos2::new(to.x + d, to.y - 6.0), to], stroke);
+        p.line_segment([Pos2::new(to.x - 6.0, to.y + d), to], stroke);
     }
     if label {
-        // Above the stage it feeds and centred on it, so the label stays
-        // inside that stage's own column. Off to the right it drifted over
-        // whatever the next column was drawing.
+        // Just before the stage it feeds, so the label stays in the gap
+        // between two boxes rather than over either of them.
         p.text(
-            Pos2::new(to.x, to.y - 7.0),
-            egui::Align2::CENTER_BOTTOM,
+            Pos2::new(to.x - 8.0, to.y - 2.0),
+            egui::Align2::RIGHT_BOTTOM,
             format!("{}  {}", kind_label(spec.kind), rate_label(spec)),
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,
@@ -1487,9 +1477,10 @@ mod tests {
         t.nodes[2].inner = Some(Box::new(inner));
         t.nodes[2].inner_count = 74;
         let places = layout(&t);
-        let with = row_height(&t, &places, 1);
+        let lane = places[2].col;
+        let with = lane_height(&t, &places, lane);
         t.nodes[2].inner = None;
-        let without = row_height(&t, &places, 1);
+        let without = lane_height(&t, &places, lane);
         assert!(with > without, "a bank's channel chain has to fit somewhere");
     }
 }

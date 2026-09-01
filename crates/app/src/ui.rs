@@ -131,6 +131,15 @@ pub struct App {
     chain_patch_sent: Option<crate::patch::Patch>,
     /// The stage the palette will add next.
     chain_add: String,
+    /// The graph as last drawn by hand, which is not the same as the one
+    /// running: in automatic mode the receiver derives its own and this is
+    /// what taking it over goes back to.
+    chain_drawn: Option<crate::patch::Patch>,
+    /// Where the stages were when the graph was last written out, so that
+    /// dragging one is saved without writing the file on every frame of the
+    /// drag.
+    chain_places: crate::patch::Places,
+    chain_saved_at: Option<std::time::Instant>,
     /// The operator's own stage that is selected, by patch id.
     chain_pick: Option<u64>,
     /// ISO country code, or empty when nothing has chosen one.
@@ -397,6 +406,9 @@ impl Default for App {
             chain_patch_rev: 0,
             chain_patch_sent: None,
             chain_add: String::new(),
+            chain_drawn: None,
+            chain_places: crate::patch::Places::new(),
+            chain_saved_at: None,
             chain_pick: None,
             country: String::new(),
             map: MapView::default(),
@@ -465,6 +477,15 @@ impl App {
             pending_radio: Some(s),
             ..Default::default()
         };
+        // The graph as it was left, if it was ever drawn by hand. Loaded
+        // whether or not manual mode is on, so that turning it on comes back
+        // to the drawing rather than to the automatic chain.
+        if let Some((patch, places)) = crate::patch::Patch::load() {
+            app.chain_drawn = Some(patch);
+            app.chain_edit.pos =
+                places.iter().map(|(k, (x, y))| (*k, egui::Pos2::new(*x, *y))).collect();
+            app.chain_places = places;
+        }
         // The settings show where the log is going, so they start from where
         // it is actually going.
         app.log_dir = app.packet_log.clone();
@@ -506,6 +527,7 @@ impl App {
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.volume,
+            manual_chain: self.chain_edit.manual,
         }
     }
 
@@ -567,6 +589,13 @@ impl App {
         }
         if !want.decode_on {
             self.send(Cmd::Decode(false));
+        }
+        // A graph that was drawn by hand is the receiver's shape, so it has
+        // to go back before anything else settles: the alternative is a
+        // receiver that runs the automatic chain for a moment and then
+        // rebuilds into the one that was saved.
+        if want.manual_chain && self.chain_drawn.is_some() {
+            self.set_manual_chain(true);
         }
     }
 
@@ -2865,6 +2894,7 @@ impl App {
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.send(Cmd::NodeParam(id, name, value));
         }
+        self.save_places();
     }
 
     /// The switch that decides who owns the shape of the graph, and the
@@ -2945,8 +2975,37 @@ impl App {
     /// Hand the patch to the radio thread, remembering what was sent so that
     /// one handed back after a refusal can be told apart from an echo.
     fn send_patch(&mut self) {
+        self.chain_drawn = Some(self.chain_patch.clone());
         self.chain_patch_sent = Some(self.chain_patch.clone());
         self.send(Cmd::Patch(self.chain_patch.clone()));
+        self.save_patch();
+    }
+
+    /// Write the graph out, with where its stages were put.
+    fn save_patch(&mut self) {
+        self.chain_places =
+            self.chain_edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        self.chain_patch.save(&self.chain_places);
+        self.chain_saved_at = Some(std::time::Instant::now());
+    }
+
+    /// Write it out again when a stage has been moved and the pointer has
+    /// settled. Dragging changes a position on every frame, and a file
+    /// written sixty times a second to record where a box ended up is a lot
+    /// of writes for one arrangement.
+    fn save_places(&mut self) {
+        if !self.chain_edit.manual {
+            return;
+        }
+        let now: crate::patch::Places =
+            self.chain_edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        if now == self.chain_places {
+            return;
+        }
+        let due = self.chain_saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.0);
+        if due {
+            self.save_patch();
+        }
     }
 
     /// Hand the shape of the graph to the operator, or give it back to the
@@ -2957,10 +3016,22 @@ impl App {
             self.chain_edit.arrange();
             self.chain_pick = None;
         }
-        // Not followed by a patch of our own: the radio thread answers with
-        // the graph it is running, which is what taking it over means.
-        self.chain_patch_sent = None;
-        self.send(Cmd::Manual(on));
+        match (on, self.chain_drawn.clone()) {
+            // Back to the graph that was drawn, which is what a saved
+            // drawing is for. Turning manual mode off and on again is not a
+            // request to throw it away.
+            (true, Some(drawn)) => {
+                self.chain_patch = drawn;
+                self.send(Cmd::Manual(true));
+                self.send_patch();
+            }
+            // Nothing drawn yet, so the radio thread answers with the graph
+            // it is running: taking it over means taking that over.
+            _ => {
+                self.chain_patch_sent = None;
+                self.send(Cmd::Manual(on));
+            }
+        }
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {
