@@ -39,15 +39,34 @@
 
 use std::path::PathBuf;
 
-/// The 31.25 kHz OOK bank and the 125 kHz FSK one, which is what "banks"
-/// means unless a block says otherwise.
+/// The bank tiers, which is what "banks" means unless a block says otherwise.
 ///
-/// The widths are measured rather than chosen: a 1.5 kbit/s OOK sensor
+/// Four channelizers over the same span, because a channel width is a
+/// trade-off with no single right answer: too narrow and it cuts a tone or a
+/// sideband off, too wide and it integrates noise the signal never occupied.
+/// Every tier hears every burst; what differs is how much of the burst
+/// survives and how much noise arrives with it.
+///
+/// The middle two are measured rather than chosen. A 1.5 kbit/s OOK sensor
 /// survives to 12.3 dB peak-to-noise in a 31 kHz channel and needs 22.9 dB in
 /// a 125 kHz one, because a wide channel integrates noise across its whole
-/// width while the signal occupies a sliver. FSK wants the opposite, since
-/// its two tones are tens of kHz apart and a narrow channel cuts one off.
-pub const DEFAULT_WIDTHS: [f64; 2] = [31_250.0, 125_000.0];
+/// width while the signal occupies a sliver. FSK wants the opposite, since its
+/// two tones are tens of kHz apart and a narrow channel cuts one off.
+///
+/// The outer two are for what the middle two cannot hold. 12.5 kHz is the
+/// channel spacing the four-level voice protocols use, and the width a slow
+/// narrowband signal wants for the same reason the OOK tier is narrower than
+/// the FSK one. 500 kHz is what a chirp needs: LoRa occupies 125 to 500 kHz by
+/// spreading factor, and a signal wider than its channel is measured through a
+/// filter that removed most of it.
+///
+/// The cost is the channel count, and it is not free: at 2.4 MS/s these four
+/// are 192 + 78 + 20 + 5 channels against the 78 + 20 that came before.
+/// Measured by `the_scanner_keeps_up_with_the_stream` on a 48 core machine,
+/// that is 6.9x real time against 12.3x for the two tiers, so half the
+/// headroom buys the narrow and wide ends of the band. A slower receiver
+/// should drop a tier in this file rather than run out of headroom.
+pub const DEFAULT_WIDTHS: [f64; 4] = [12_500.0, 31_250.0, 125_000.0, 500_000.0];
 
 /// Which demodulator a block asks for.
 #[derive(Clone, PartialEq, Debug)]
@@ -534,19 +553,19 @@ margin   = 12.5 kHz
 range  = 433.05 - 434.79 MHz
 span   = 250 kHz
 front  = banks
-widths = 31.25 kHz, 125 kHz
+widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
 
 [ISM 868]
 range  = 862 - 876 MHz
 span   = 250 kHz
 front  = banks
-widths = 31.25 kHz, 125 kHz
+widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
 
 [ISM 315]
 range  = 314 - 316 MHz
 span   = 250 kHz
 front  = banks
-widths = 31.25 kHz, 125 kHz
+widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
 ";
 
 #[cfg(test)]

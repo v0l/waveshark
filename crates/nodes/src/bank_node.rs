@@ -239,7 +239,7 @@ mod tests {
     use pipeline::node::Node;
 
     fn bank() -> BankNode {
-        BankNode::new("OOK bank", 31_250.0, crate::ism_ook_graph)
+        BankNode::new("31 kHz bank", 31_250.0, crate::ism_decode_graph)
     }
 
     fn spec(rate: f64) -> PortSpec {

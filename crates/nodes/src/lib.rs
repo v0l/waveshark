@@ -387,50 +387,20 @@ pub fn ism_detector_config() -> dsp::DetectorConfig {
 /// ```
 ///
 /// One gate and one classifier, and then whichever of the on-off, shallow
-/// ASK, two-level FSK or four-level front ends the burst was measured to need.
-/// See [`dsp::route`] for why, and for what happens to a burst the classifier
-/// will not name: it goes to the on-off and two-level front ends both, which
-/// is what this graph used to do with every burst unconditionally.
+/// ASK, two-level FSK or four-level front ends the burst was measured to
+/// need. See [`dsp::route`] for why, and for what happens to a burst the
+/// classifier will not name: it goes to the on-off and two-level front ends
+/// both, which is what this graph used to do with every burst unconditionally.
 ///
-/// That unconditional pair is what this replaces. Running both was the right
-/// answer while nothing measured the burst, because which one a device uses is
-/// not knowable in advance and is not visible in a waterfall either, and
-/// rtl_433 runs both demodulators over every sample for the same reason.
+/// The same graph runs in every bank tier. It used to come in an OOK flavour
+/// and an FSK one, chosen by the channel width, because the width was the only
+/// evidence available about what a channel would hear. It is not evidence: a
+/// 125 kHz channel carries on-off keyed sensors all day. What the width really
+/// decides is how much noise comes with the signal, and the classifier reads
+/// that from the channel it is given.
 pub fn ism_decode_graph(input: StreamSpec) -> Result<Graph> {
-    ism_graph(input, true, true)
-}
-
-/// The OOK half alone, for a bank of channels narrow enough to suit it.
-pub fn ism_ook_graph(input: StreamSpec) -> Result<Graph> {
-    ism_graph(input, true, false)
-}
-
-/// The FSK half alone, for a bank wide enough to hold a whole deviation.
-pub fn ism_fsk_graph(input: StreamSpec) -> Result<Graph> {
-    ism_graph(input, false, true)
-}
-
-/// A channel's front end: find the bursts, and stop there.
-///
-/// The protocols used to run here, once per channel. They run once, on the
-/// packet bus, because a decoder per channel meant a hundred copies of the
-/// same tables, decodes that reached the rest of the program through whatever
-/// happened to collect them, and no decoding at all for a burst that arrived
-/// by another route. What a channel produces is what it heard.
-fn ism_graph(input: StreamSpec, ook: bool, fsk: bool) -> Result<Graph> {
     let mut b = Graph::builder(input);
-    // The tiers still differ in which front ends can reach them: a 31.25 kHz
-    // channel cuts one tone off a wideband FSK signal, and a 125 kHz one
-    // integrates ten times the noise an OOK sensor needs. What changes is that
-    // the classifier is told, rather than the graph being shaped around it.
-    let mut cfg = dsp::RouterConfig::default();
-    if !fsk {
-        cfg.classify.min_score = cfg.classify.min_score.max(0.45);
-    }
-    if !ook {
-        cfg.ook.min_pulses = cfg.ook.min_pulses.max(8);
-    }
-    let node = b.add_labeled("Classify and route", Box::new(BurstRouteNode::new(cfg)));
+    let node = b.add_labeled("Classify and route", Box::new(BurstRouteNode::default_ism()));
     b.source(node.i());
     b.output(node.o());
     b.build()

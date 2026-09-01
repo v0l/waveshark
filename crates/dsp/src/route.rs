@@ -39,8 +39,13 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RouterConfig {
-    /// Silence that ends a burst, in microseconds. Wider than any one
-    /// protocol's inter-symbol gap, or a packet arrives in pieces.
+    /// Silence that ends a burst, in microseconds.
+    ///
+    /// Wider than any one protocol's inter-symbol gap, and wider than its gap
+    /// between repeats, or a transmission arrives in pieces. Fine Offset's
+    /// symbol gaps run near 1 ms and its repeats near 8, which is what sets
+    /// this: at 4 ms that station's three repeats are three bursts, and three
+    /// rows in a log that should hold one.
     pub reset_us: u32,
     /// Samples kept either side of the burst, in microseconds, so the front
     /// ends have noise to measure against and a gap to end the package with.
@@ -62,7 +67,7 @@ pub struct RouterConfig {
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
-            reset_us: 4_000,
+            reset_us: 10_000,
             margin_us: 2_000,
             max_burst_us: 500_000,
             tau_us: 500.0,
@@ -130,6 +135,16 @@ pub struct BurstRouter {
 impl BurstRouter {
     pub fn new(rate: f64, cfg: RouterConfig) -> Self {
         let margin = ((cfg.margin_us as f64 * rate / 1e6) as usize).max(1);
+        // The burst is the package. Whatever gap the gate held across is the
+        // gap the front end must hold across too: letting it end a package
+        // earlier splits a transmission's repeats into separate packages, and
+        // nothing downstream can tell those from separate transmissions. The
+        // Fine Offset stations make the point, sending the same frame three
+        // times with 8 ms between repeats.
+        let mut cfg = cfg;
+        cfg.ook.reset_us = cfg.ook.reset_us.max(cfg.reset_us);
+        cfg.ask.reset_us = cfg.ask.reset_us.max(cfg.reset_us);
+        cfg.fsk.reset_us = cfg.fsk.reset_us.max(cfg.reset_us);
         Self {
             cfg,
             rate,
