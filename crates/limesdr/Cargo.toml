@@ -1,0 +1,11 @@
+[package]
+name = "limesdr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+limesdr-sys.workspace = true
+common.workspace = true
+num-complex.workspace = true
+tracing.workspace = true

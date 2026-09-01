@@ -8,6 +8,8 @@ members = [
     "crates/hackrf",
     "crates/rtlsdr-sys",
     "crates/rtlsdr",
+    "crates/limesdr-sys",
+    "crates/limesdr",
     "crates/sources",
     "crates/decode",
     "crates/app",
@@ -31,6 +33,8 @@ audio = { path = "crates/audio" }
 hackrf = { path = "crates/hackrf" }
 rtlsdr = { path = "crates/rtlsdr" }
 rtlsdr-sys = { path = "crates/rtlsdr-sys" }
+limesdr = { path = "crates/limesdr" }
+limesdr-sys = { path = "crates/limesdr-sys" }
 sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
 

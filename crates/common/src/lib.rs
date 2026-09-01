@@ -12,7 +12,7 @@ pub mod value;
 pub mod units;
 
 pub use device::{
-    Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
+    Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};

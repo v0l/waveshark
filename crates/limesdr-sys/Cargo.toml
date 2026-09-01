@@ -1,0 +1,13 @@
+[package]
+name = "limesdr-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "LimeSuite"
+description = "Generated FFI bindings to LimeSuite (LMS API)"
+
+[dependencies]
+
+[build-dependencies]
+bindgen.workspace = true
+pkg-config.workspace = true

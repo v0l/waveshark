@@ -12,6 +12,7 @@ use std::ops::RangeInclusive;
 pub enum DriverKind {
     RtlSdr,
     HackRf,
+    LimeSdr,
     File,
     Synthetic,
 }
@@ -21,6 +22,7 @@ impl DriverKind {
         match self {
             Self::RtlSdr => "rtlsdr",
             Self::HackRf => "hackrf",
+            Self::LimeSdr => "limesdr",
             Self::File => "file",
             Self::Synthetic => "synthetic",
         }
@@ -134,6 +136,21 @@ pub struct Toggle {
     pub on: bool,
 }
 
+/// A device setting picked from a fixed list of named options.
+///
+/// A toggle cannot express which of three antenna ports the cable is in, and
+/// a driver that guesses gets it wrong for every user who wired it the other
+/// way. Like [`Toggle`], the interface renders it without knowing what any of
+/// the options mean.
+#[derive(Clone, Debug)]
+pub struct Choice {
+    pub name: String,
+    pub label: String,
+    pub help: String,
+    pub options: Vec<String>,
+    pub selected: String,
+}
+
 /// How gain is being controlled for one stage.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GainMode {
@@ -204,6 +221,25 @@ pub trait Device: Send {
 
     fn set_toggle(&mut self, _name: &str, _on: bool) -> Result<()> {
         Ok(())
+    }
+
+    /// Settings this device picks from a list, such as an antenna port.
+    fn choices(&self) -> Vec<Choice> {
+        Vec::new()
+    }
+
+    /// Select one option by the name it was offered under.
+    fn set_choice(&mut self, _name: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether changing this setting needs the stream stopped and started.
+    ///
+    /// Switching a LimeSDR to its other receive channel is a different stream,
+    /// not a different setting on the running one, and the caller is the only
+    /// one holding the stream.
+    fn choice_needs_restart(&self, _name: &str) -> bool {
+        false
     }
 
     /// Correction in parts per million applied to the reference oscillator.

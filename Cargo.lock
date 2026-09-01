@@ -292,6 +292,8 @@ dependencies = [
  "egui",
  "hackrf",
  "image",
+ "libc",
+ "limesdr",
  "nodes",
  "parking_lot",
  "pipeline",
@@ -2117,6 +2119,24 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.9.3",
+]
+
+[[package]]
+name = "limesdr"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "limesdr-sys",
+ "num-complex",
+ "tracing",
+]
+
+[[package]]
+name = "limesdr-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "pkg-config",
 ]
 
 [[package]]
