@@ -595,3 +595,143 @@ impl Simple for ProtocolDecodeNode {
         Ok(())
     }
 }
+
+/// Classify each burst, then run the one front end that can read it.
+///
+/// Replaces the pair of unconditional front ends the ISM graph used to run
+/// over every channel. See [`dsp::route`] for why the order inverts and what a
+/// refusal costs.
+///
+/// The routing is inside one node rather than spread across a branch per front
+/// end because the decision is made from the burst, and a graph edge cannot
+/// carry "this burst, to that node": the pipeline's ports are streams. What
+/// the chain view loses in visible structure it gains in a stage that reports
+/// what it decided, which is the `modulation` tag on every burst.
+pub struct BurstRouteNode {
+    cfg: dsp::RouterConfig,
+    router: dsp::BurstRouter,
+    bursts: Vec<dsp::RoutedBurst>,
+}
+
+impl BurstRouteNode {
+    pub fn new(cfg: dsp::RouterConfig) -> Self {
+        Self { cfg, router: dsp::BurstRouter::new(1.0, cfg), bursts: Vec::new() }
+    }
+
+    pub fn default_ism() -> Self {
+        Self::new(dsp::RouterConfig::default())
+    }
+}
+
+impl Simple for BurstRouteNode {
+    fn name(&self) -> &str {
+        "burst_route"
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Iq {
+            return Err(common::Error::other(
+                "burst_route needs IQ: it classifies the burst before deciding whether \
+                 the envelope or the discriminator reads it, so it needs both",
+            ));
+        }
+        self.cfg.classify.channel_hz = i.spec.rate as f32;
+        self.router = dsp::BurstRouter::new(i.spec.rate, self.cfg);
+        let mut out = i.spec.with_kind(PortKind::Pulses);
+        out.rate = 0.0;
+        Ok(out)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+        self.bursts.clear();
+        self.router.process(i.as_iq().unwrap(), &mut self.bursts);
+
+        let center = c.inputs[0].spec.center.0;
+        let pkgs = o.pulses_mut();
+        for b in &self.bursts {
+            // What it was measured to be, whether or not anything read it.
+            // A burst nothing decodes is still evidence, and this is most of
+            // what makes it useful.
+            c.tag(Tag::new(
+                b.start_sample,
+                "modulation",
+                TagValue::Text(b.class.modulation.label().into()),
+            ));
+            c.tag(Tag::new(
+                b.start_sample,
+                "modulation_confidence",
+                TagValue::Float(b.class.confidence as f64),
+            ));
+            if b.class.features.bandwidth_hz > 0.0 {
+                c.tag(Tag::new(
+                    b.start_sample,
+                    "bandwidth_hz",
+                    TagValue::Float(b.class.features.bandwidth_hz as f64),
+                ));
+            }
+            if b.class.features.baud > 0.0 {
+                c.tag(Tag::new(b.start_sample, "baud", TagValue::Float(b.class.features.baud as f64)));
+            }
+            for p in &b.packages {
+                c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+                let mut p = p.clone();
+                p.center_hz = center;
+                pkgs.push(p);
+            }
+        }
+
+        let s = self.router.take_stats();
+        if s.no_front_end > 0 {
+            c.emit(Event::Warning {
+                stage: "burst_route".into(),
+                message: format!(
+                    "{} burst(s) named as something no front end here reads",
+                    s.no_front_end
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.router.reset();
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float("reset_us", self.cfg.reset_us as f64, 500.0..=100_000.0)
+                .unit("us")
+                .label("Silence that ends a burst")
+                .log(),
+            Param::float("margin_us", self.cfg.margin_us as f64, 100.0..=20_000.0)
+                .unit("us")
+                .label("Samples kept either side"),
+            Param::float("min_snr_db", self.cfg.min_snr_db as f64, 3.0..=40.0)
+                .unit("dB")
+                .label("Minimum SNR"),
+            Param::float("min_score", self.cfg.classify.min_score as f64, 0.1..=0.9)
+                .label("Score below which the burst is unnamed"),
+            Param::float("min_margin", self.cfg.classify.min_margin as f64, 0.0..=0.5)
+                .label("Margin over the runner-up required"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        let f = v.as_f64().unwrap_or_default();
+        match name {
+            "reset_us" => self.cfg.reset_us = f.max(1.0) as u32,
+            "margin_us" => self.cfg.margin_us = f.max(1.0) as u32,
+            "min_snr_db" => self.cfg.min_snr_db = f as f32,
+            "min_score" => self.cfg.classify.min_score = f as f32,
+            "min_margin" => self.cfg.classify.min_margin = f as f32,
+            _ => {
+                return Err(common::Error::other(format!(
+                    "burst_route: unknown parameter {name:?}"
+                )))
+            }
+        }
+        let rate = self.cfg.classify.channel_hz as f64;
+        self.router = dsp::BurstRouter::new(rate.max(1.0), self.cfg);
+        Ok(())
+    }
+}

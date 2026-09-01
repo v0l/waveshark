@@ -734,17 +734,20 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
     // and the line is weak for minimum-shift keying even when it is there, so
     // the ramp starts low.
     // The ramp is low because a real burst's line is weaker than a generated
-    // one's: on rtl_433's recordings the on-off keyed sensors come in between
-    // 3 and 4, where every signal this module generates for its own tests is
-    // above 4.5. Tuned against the corpus, which is the only place the number
-    // could have come from.
+    // one's: on rtl_433's recordings the sensors come in between 3 and 4 where
+    // a generated signal is above 4.5, and an on-off keyed burst with random
+    // data barely clears 1.6 because its transitions are impulses and an
+    // impulse train at random times is mostly white. That is why the amplitude
+    // classes do not require a clock at all: what identifies them is two
+    // envelope levels held for about a symbol each, and demanding a clock on
+    // top of that rejected real bursts to no benefit.
     let has_clock = ramp(f.baud_line, 2.0, 4.0);
     let unimodal = f32::from(f.tones == 1);
     let sweeping = ramp(f.chirp_fit, 0.55, 0.85);
 
     let scores = [
         // Amplitude keyed all the way down to the noise.
-        (Modulation::Ook, two_levels * ramp(keyed_amplitude, 0.6, 0.85) * has_clock),
+        (Modulation::Ook, two_levels * ramp(keyed_amplitude, 0.6, 0.85)),
         // Amplitude keyed, but the low level is still a signal.
         (Modulation::Ask, two_levels * band(f.envelope_ratio, 0.25, 0.45, 0.7, 0.8) * has_clock),
         // Two tones, far enough apart to threshold.

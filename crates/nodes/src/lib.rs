@@ -21,7 +21,9 @@ pub mod wfm;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
-pub use decode_nodes::{AskDetectNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode};
+pub use decode_nodes::{
+    AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
+};
 pub use ais_nodes::AisNode;
 pub use aprs_nodes::AprsNode;
 pub use pocsag_nodes::PocsagNode;
@@ -193,6 +195,30 @@ pub fn registry() -> Registry {
 
     r.register(
         StageDesc {
+            name: "burst_route",
+            summary: "Measure each burst, then run the one front end that reads it: \
+                      on-off, shallow ASK, two-level FSK or four-level",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let d = dsp::RouterConfig::default();
+            let cfg = dsp::RouterConfig {
+                reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
+                margin_us: s.f64_or("margin_us", d.margin_us as f64) as u32,
+                min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
+                classify: dsp::ClassifyConfig {
+                    min_score: s.f64_or("min_score", d.classify.min_score as f64) as f32,
+                    min_margin: s.f64_or("min_margin", d.classify.min_margin as f64) as f32,
+                    ..d.classify
+                },
+                ..d
+            };
+            Ok(Box::new(BurstRouteNode::new(cfg)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
             name: "ssb_demod",
             summary: "Demodulate one sideband, or a narrow slice of it for CW",
             category: "demod",
@@ -354,25 +380,22 @@ pub fn ism_detector_config() -> dsp::DetectorConfig {
     dsp::DetectorConfig { open_db: 6.0, close_db: 3.0, ..Default::default() }
 }
 
-/// Everything an ISM channel needs, in one graph: OOK and FSK at once.
+/// Everything an ISM channel needs, in one graph.
 ///
 /// ```text
-///   IQ ---> envelope ---> pulse_detect --\
-///     \                                   >--> protocol_decode (one each)
-///      \--> fsk_detect ------------------/
+///   IQ ---> burst_route ---> packages
 /// ```
 ///
-/// Two branches rather than a choice between them, because which one a device
-/// uses is not knowable in advance and is not visible in a spectrum either: an
-/// OOK burst and an FSK burst look alike in a waterfall. rtl_433 runs both
-/// demodulators over every sample for the same reason. The branches share the
-/// channelizer and the channel's IQ, which is where nearly all the cost is,
-/// and each protocol below them is integer work on complete bursts only.
+/// One gate and one classifier, and then whichever of the on-off, shallow
+/// ASK, two-level FSK or four-level front ends the burst was measured to need.
+/// See [`dsp::route`] for why, and for what happens to a burst the classifier
+/// will not name: it goes to the on-off and two-level front ends both, which
+/// is what this graph used to do with every burst unconditionally.
 ///
-/// Shallow-ASK detection is deliberately *not* a third branch. It only earns
-/// its place when `pulse_detect` is latching, which is rare, and adding it
-/// everywhere would buy a third of the CPU budget a case that mostly does not
-/// arise. `ask_detect` is there to be swapped in on a channel that needs it.
+/// That unconditional pair is what this replaces. Running both was the right
+/// answer while nothing measured the burst, because which one a device uses is
+/// not knowable in advance and is not visible in a waterfall either, and
+/// rtl_433 runs both demodulators over every sample for the same reason.
 pub fn ism_decode_graph(input: StreamSpec) -> Result<Graph> {
     ism_graph(input, true, true)
 }
@@ -396,30 +419,20 @@ pub fn ism_fsk_graph(input: StreamSpec) -> Result<Graph> {
 /// by another route. What a channel produces is what it heard.
 fn ism_graph(input: StreamSpec, ook: bool, fsk: bool) -> Result<Graph> {
     let mut b = Graph::builder(input);
-    let mut last = None;
-
-    if ook {
-        let env = b.add_labeled("Envelope", Box::new(EnvelopeNode));
-        // Eight pulses, not the detector's default four. Scanning a whole band
-        // turns up short bursts constantly, and four pulses is at most a few
-        // bits: not enough to identify anything, and enough of them to bury
-        // the packets that are. Every real ISM frame is tens of pulses long.
-        let mut ook_det = PulseDetectNode::default_ook();
-        ook_det.set_min_pulses(8);
-        let det = b.add_labeled("OOK pulses", Box::new(ook_det));
-        b.source(env.i());
-        b.link(env, det);
-        last = Some(det);
+    // The tiers still differ in which front ends can reach them: a 31.25 kHz
+    // channel cuts one tone off a wideband FSK signal, and a 125 kHz one
+    // integrates ten times the noise an OOK sensor needs. What changes is that
+    // the classifier is told, rather than the graph being shaped around it.
+    let mut cfg = dsp::RouterConfig::default();
+    if !fsk {
+        cfg.classify.min_score = cfg.classify.min_score.max(0.45);
     }
-
-    if fsk {
-        let det = b.add_labeled("FSK pulses", Box::new(FskDetectNode::default_fsk()));
-        b.source(det.i());
-        last = last.or(Some(det));
+    if !ook {
+        cfg.ook.min_pulses = cfg.ook.min_pulses.max(8);
     }
-
-    let out = last.ok_or_else(|| common::Error::other("an ISM graph needs a front end"))?;
-    b.output(out.o());
+    let node = b.add_labeled("Classify and route", Box::new(BurstRouteNode::new(cfg)));
+    b.source(node.i());
+    b.output(node.o());
     b.build()
 }
 

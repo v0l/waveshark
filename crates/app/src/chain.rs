@@ -1429,19 +1429,14 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
     // channel to speak of, and nothing else is near enough to be confused
     // with it. Anything from a bank was heard through one of its channels,
     // and which bank is what its keying says.
-    let channel_hz = match d.modulation {
-        Some("PPM") => MODES_BAND_HZ,
-        // AIS is heard through one 25 kHz marine channel, whichever of the
-        // two carried the frame.
-        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
-        // A pager is keyed FSK like an 868 MHz sensor and heard through a
-        // channel a tenth the width, so the keying alone does not say which
-        // front end produced it.
-        Some("FSK") if d.protocol.starts_with("POCSAG") => {
-            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
-        }
-        Some("FSK") => FSK_CHANNEL_HZ,
-        _ => OOK_CHANNEL_HZ,
+    // The width the packet was actually heard through, when the chain that
+    // produced it knows. The match below is the fallback for the chains that
+    // do not carry one, and it is a guess: it reads the width off the keying,
+    // which stops being a proxy for the bank tier as soon as anything measures
+    // the keying properly.
+    let channel_hz = match d.bandwidth_hz {
+        Some(hz) if hz > 0.0 => hz,
+        _ => channel_hz_from_keying(d),
     };
     DecodeRecord {
         at,
@@ -1456,6 +1451,23 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         snr_db: d.snr_db.unwrap_or(f32::NAN),
         bytes: d.payload.clone(),
         crc: d.crc_ok,
+    }
+}
+
+fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
+    match d.modulation {
+        Some("PPM") => MODES_BAND_HZ,
+        // AIS is heard through one 25 kHz marine channel, whichever of the
+        // two carried the frame.
+        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
+        // A pager is keyed FSK like an 868 MHz sensor and heard through a
+        // channel a tenth the width, so the keying alone does not say which
+        // front end produced it.
+        Some("FSK") if d.protocol.starts_with("POCSAG") => {
+            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
+        }
+        Some("FSK") => FSK_CHANNEL_HZ,
+        _ => OOK_CHANNEL_HZ,
     }
 }
 
@@ -1716,7 +1728,9 @@ mod tests {
         let topo = rx.topology();
         let bank = topo.nodes.iter().find(|n| n.label == "OOK bank").expect("the OOK bank");
         let inner = bank.inner.as_ref().expect("what a channel runs");
-        assert!(inner.nodes.iter().any(|n| n.label.contains("Envelope")));
+        // One stage per channel now, where there were two: it measures the
+        // burst and then runs whichever front end reads it.
+        assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
         assert!(bank.inner_count > 1, "a bank of one channel is not a bank");
         // What a bank passes on is the bursts its channels detected, decoded
         // or not, which is what a log or an analyser attaches to.

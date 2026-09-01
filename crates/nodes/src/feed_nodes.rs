@@ -307,6 +307,7 @@ fn read_loop(
                 bandwidth_hz: spec.kind.bandwidth_hz,
                 rssi_dbfs: f.rssi_dbfs,
                 snr_db: f32::NAN,
+                modulation: None,
                 body: PacketBody::Frame(f.bytes),
             };
             if tx.send(packet).is_err() {

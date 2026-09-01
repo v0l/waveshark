@@ -502,34 +502,49 @@ impl OokDetector {
 
             // A long silence terminates the package.
             if !self.high && self.run > reset_samples {
-                if self.pending_mark >= self.cfg.min_mark_us {
-                    self.current
-                        .pulses
-                        .push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
-                }
-                self.pending_mark = 0;
-                self.gap_accum = 0;
-                if self.current.pulses.len() >= self.cfg.min_pulses {
-                    let snr = self.snr_db();
-                    if snr >= self.cfg.min_snr_db {
-                        let mut p = std::mem::take(&mut self.current);
-                        p.snr_db = snr;
-                        p.rssi_dbfs = dbfs(self.gate.signal_level());
-                        if self.cfg.merge_dropouts {
-                            self.stats.rejoined_marks += p.merge_dropouts() as u64;
-                        }
-                        out.push(p);
-                        self.stats.accepted += 1;
-                    } else {
-                        self.stats.rejected_low_snr += 1;
-                    }
-                } else if !self.current.pulses.is_empty() {
-                    self.stats.rejected_too_few_pulses += 1;
-                }
-                self.current.pulses.clear();
+                self.close(out);
                 self.run = 0;
             }
         }
+    }
+
+    /// Emit the package still being collected.
+    ///
+    /// Needed wherever the silence that would have ended it never arrives: the
+    /// end of a file, and a burst handed over on its own by
+    /// [`crate::route::BurstRouter`], which trims the silence off before
+    /// passing it on precisely because that silence is what makes a
+    /// measurement of the burst read as a measurement of an empty channel.
+    pub fn flush(&mut self, out: &mut Vec<Package>) {
+        self.close(out);
+    }
+
+    fn close(&mut self, out: &mut Vec<Package>) {
+        if self.pending_mark >= self.cfg.min_mark_us {
+            self.current
+                .pulses
+                .push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
+        }
+        self.pending_mark = 0;
+        self.gap_accum = 0;
+        if self.current.pulses.len() >= self.cfg.min_pulses {
+            let snr = self.snr_db();
+            if snr >= self.cfg.min_snr_db {
+                let mut p = std::mem::take(&mut self.current);
+                p.snr_db = snr;
+                p.rssi_dbfs = dbfs(self.gate.signal_level());
+                if self.cfg.merge_dropouts {
+                    self.stats.rejoined_marks += p.merge_dropouts() as u64;
+                }
+                out.push(p);
+                self.stats.accepted += 1;
+            } else {
+                self.stats.rejected_low_snr += 1;
+            }
+        } else if !self.current.pulses.is_empty() {
+            self.stats.rejected_too_few_pulses += 1;
+        }
+        self.current.pulses.clear();
     }
 }
 
