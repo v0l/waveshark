@@ -154,9 +154,16 @@ pub struct Edit {
 enum Drag {
     /// Moving a box: which one, and where in it the pointer took hold.
     Node(u64, Vec2),
-    /// Drawing a wire out of a port, with the loose end following the
-    /// pointer.
-    Wire(crate::patch::Source, Pos2),
+    /// Drawing a wire, which can be started at either end: from an output
+    /// looking for something to feed, or from an input looking for something
+    /// to read. Both are how people reach for a connection, and a view that
+    /// only accepts one of them feels broken to whoever reached the other
+    /// way.
+    Wire {
+        from: Option<crate::patch::Source>,
+        to: Option<(u64, usize)>,
+        at: Pos2,
+    },
 }
 
 /// How a node is recognised between one rebuild and the next.
@@ -506,9 +513,43 @@ pub fn draw(
     // The wire being drawn, with its loose end on the pointer. Drawn like any
     // other so that what it will look like once dropped is what is on screen
     // while deciding where to drop it.
-    if let Some(Drag::Wire(from, at)) = edit.drag {
-        let start = wire_start(topo, &rects, &ghosts, src, from);
-        loose(&p, start, at);
+    if let Some(Drag::Wire { from, to, at }) = edit.drag {
+        let anchor = match (from, to) {
+            (Some(from), _) => wire_start(topo, &rects, &ghosts, src, from),
+            // Pulled off an input that had nothing on it: the wire hangs from
+            // the port it is looking for a source for.
+            (None, Some((tag, k))) => edit
+                .drawn
+                .get(&tag)
+                .map(|r| port(*r, k, 1, Side::In))
+                .unwrap_or(at),
+            (None, None) => at,
+        };
+        loose(&p, anchor, at);
+        // What it would attach to, marked while the pointer is over it. A
+        // wire that quietly does nothing when let go is the whole reason
+        // this view felt broken.
+        // Mirrors what letting go would do: a wire held by its input end is
+        // looking for something to read, and one drawn out of an output is
+        // looking for something to feed.
+        let onto = match to {
+            Some(_) => match output_at(topo, &rects, &ghosts, src, at)
+                .or_else(|| body_output(topo, &rects, &ghosts, src, at))
+            {
+                Some(crate::patch::Source::Stage(tag, _)) => Some(tag),
+                Some(crate::patch::Source::Span) => None,
+                None if from.is_some() => input_at(topo, &rects, &ghosts, at)
+                    .or_else(|| body_input(topo, &rects, &ghosts, at))
+                    .map(|(tag, _)| tag),
+                None => None,
+            },
+            None => input_at(topo, &rects, &ghosts, at)
+                .or_else(|| body_input(topo, &rects, &ghosts, at))
+                .map(|(tag, _)| tag),
+        };
+        if let Some(r) = onto.and_then(|tag| edit.drawn.get(&tag)) {
+            target_ring(&p, *r);
+        }
     }
 
     for (id, r) in &ghosts {
@@ -687,45 +728,26 @@ fn interact(
         edit.drag = press.or_else(|| resp.interact_pointer_pos()).and_then(|q| {
             // Ports first: they sit on the edge of a box, so testing the box
             // first would mean a wire could never be started at all.
-            if near(port(src, 0, 1, Side::Out), q) {
-                return Some(Drag::Wire(Source::Span, q));
-            }
-            for (i, node) in topo.nodes.iter().enumerate() {
-                let Some(tag) = node.tag else { continue };
-                if node.sink {
-                    continue;
-                }
-                for k in 0..node.outputs.len() {
-                    if near(port(rects[i], k, node.outputs.len(), Side::Out), q) {
-                        return Some(Drag::Wire(Source::Stage(tag, k), q));
-                    }
-                }
-            }
-            for (id, r) in ghosts {
-                if near(port(*r, 0, 1, Side::Out), q) {
-                    return Some(Drag::Wire(Source::Stage(*id, 0), q));
-                }
+            if let Some(from) = output_at(topo, rects, ghosts, src, q) {
+                return Some(Drag::Wire { from: Some(from), to: None, at: q });
             }
             // Taking hold of a wire where it lands, which is how a connection
-            // is moved rather than deleted and drawn again. The wire comes
-            // off the port at once and follows the pointer from its own
-            // source, so dropping it somewhere else is one gesture.
+            // is moved rather than deleted and drawn again.
             if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
-                match patch.and_then(|p| p.feeding((tag, port))) {
+                let from = match patch.and_then(|p| p.feeding((tag, port))) {
                     Some(from) => {
                         act.unlink = Some((tag, port));
-                        return Some(Drag::Wire(from, q));
+                        Some(from)
                     }
                     // The receiver's own stages read the span unless they
                     // have been told otherwise, and that wire is on screen
                     // even though no link says so. Grabbing it has to work,
                     // or the one connection everybody tries to edit first is
                     // the one that cannot be.
-                    None if crate::patch::builtin::is(tag) => {
-                        return Some(Drag::Wire(Source::Span, q));
-                    }
-                    None => {}
-                }
+                    None if crate::patch::builtin::is(tag) => Some(Source::Span),
+                    None => None,
+                };
+                return Some(Drag::Wire { from, to: Some((tag, port)), at: q });
             }
             if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
                 return Some(Drag::Node(*id, r.center() - q));
@@ -740,22 +762,40 @@ fn interact(
             Drag::Node(k, grab) if resp.dragged() => {
                 edit.pos.insert(k, q + grab - origin.to_vec2());
             }
-            Drag::Wire(from, _) if resp.dragged() => edit.drag = Some(Drag::Wire(from, q)),
+            Drag::Wire { from, to, .. } if resp.dragged() => {
+                edit.drag = Some(Drag::Wire { from, to, at: q })
+            }
             _ => {}
         }
-        // Dropped on an input port, which is where a wire ends. Anywhere else
-        // and the wire is abandoned: an edit that half happens is worse than
-        // one that visibly did not.
+        // Where the wire lands decides what it means: on an input, whatever
+        // it came from now feeds that input; on an output, that output now
+        // feeds whichever input the wire was pulled off. Anywhere else and
+        // the wire is abandoned, because an edit that half happens is worse
+        // than one that visibly did not.
         if resp.drag_stopped() {
-            if let Drag::Wire(from, _) = drag {
-                // Dropped on a box rather than exactly on one of its ports
-                // counts as its first input: a five pixel target is not a
-                // reasonable thing to ask of a pointer, and a stage has one
-                // input nearly always.
-                let landed = input_at(topo, rects, ghosts, q)
-                    .or_else(|| body_input(topo, rects, ghosts, q));
-                if let Some((tag, port)) = landed {
-                    act.link = Some((from, tag, port));
+            if let Drag::Wire { from, to, .. } = drag {
+                let on_in =
+                    input_at(topo, rects, ghosts, q).or_else(|| body_input(topo, rects, ghosts, q));
+                let on_out = output_at(topo, rects, ghosts, src, q)
+                    .or_else(|| body_output(topo, rects, ghosts, src, q));
+                match to {
+                    // Pulled off an input: whatever it is dropped on is what
+                    // that input reads now. Dropping it on another input
+                    // instead moves the wire across, which is what a wire
+                    // held by its end looks like it should do.
+                    Some(to) => match (on_out, from, on_in) {
+                        (Some(from), _, _) => act.link = Some((from, to.0, to.1)),
+                        (None, Some(from), Some(landed)) => {
+                            act.link = Some((from, landed.0, landed.1))
+                        }
+                        _ => {}
+                    },
+                    // Drawn out of an output: it has to land on an input.
+                    None => {
+                        if let (Some(from), Some(landed)) = (from, on_in) {
+                            act.link = Some((from, landed.0, landed.1));
+                        }
+                    }
                 }
             }
         }
@@ -807,6 +847,57 @@ fn input_at(
         .map(|(id, _)| (*id, 0))
 }
 
+/// The output port under a point, as something a wire can start at or land
+/// on: a stage the operator drew, or the span itself.
+fn output_at(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    src: Rect,
+    q: Pos2,
+) -> Option<crate::patch::Source> {
+    use crate::patch::Source;
+    if near(port(src, 0, 1, Side::Out), q) || src.contains(q) {
+        return Some(Source::Span);
+    }
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let Some(tag) = node.tag else { continue };
+        if node.sink || crate::patch::builtin::is(tag) {
+            continue;
+        }
+        for k in 0..node.outputs.len() {
+            if near(port(rects[i], k, node.outputs.len(), Side::Out), q) {
+                return Some(Source::Stage(tag, k));
+            }
+        }
+    }
+    ghosts
+        .iter()
+        .find(|(_, r)| near(port(*r, 0, 1, Side::Out), q))
+        .map(|(id, _)| Source::Stage(*id, 0))
+}
+
+/// The stage whose box a point is inside, as something a wire can read.
+fn body_output(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[(u64, Rect)],
+    src: Rect,
+    q: Pos2,
+) -> Option<crate::patch::Source> {
+    use crate::patch::Source;
+    if src.contains(q) {
+        return Some(Source::Span);
+    }
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let Some(tag) = node.tag else { continue };
+        if !node.sink && !crate::patch::builtin::is(tag) && rects[i].contains(q) {
+            return Some(Source::Stage(tag, 0));
+        }
+    }
+    ghosts.iter().find(|(_, r)| r.contains(q)).map(|(id, _)| Source::Stage(*id, 0))
+}
+
 /// The operator's stage whose box a point is inside, and the input port
 /// nearest to where the wire was let go.
 fn body_input(
@@ -856,6 +947,16 @@ fn wire_start(
         .find(|(id, _)| *id == tag)
         .map(|(_, r)| port(*r, 0, 1, Side::Out))
         .unwrap_or(src.center_bottom())
+}
+
+/// A ring round whatever a wire would attach to if it were let go now.
+fn target_ring(p: &egui::Painter, at: Rect) {
+    p.rect_stroke(
+        at.expand(2.0),
+        4.0,
+        Stroke::new(1.5, theme::READOUT),
+        StrokeKind::Outside,
+    );
 }
 
 /// The wire that is being drawn but has not landed anywhere yet.
@@ -1163,8 +1264,34 @@ mod tests {
         h.press(at);
         h.move_to(at + Vec2::new(0.0, 25.0));
         assert!(
-            matches!(h.edit.drag, Some(Drag::Wire(crate::patch::Source::Span, _))),
+            matches!(
+                h.edit.drag,
+                Some(Drag::Wire { from: Some(crate::patch::Source::Span), .. })
+            ),
             "the wire the spectrum is drawn with has to come away in the hand"
+        );
+    }
+
+    #[test]
+    fn the_spectrums_wire_can_be_pulled_onto_a_stages_output() {
+        // Putting a stage in front of the spectrum, reached for from the
+        // spectrum's end: drag its wire away and drop it on what should feed
+        // it now. The other direction works too, and which one somebody
+        // reaches for is not something a view gets to decide.
+        use crate::patch::{builtin, Source};
+        let (mut topo, patch, id) = with_patch_stage();
+        topo.nodes[2].tag = Some(builtin::SPECTRUM);
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let at = h.in_port(builtin::SPECTRUM);
+        let onto = h.out_port(id);
+        h.press(at);
+        h.move_to(at + Vec2::new(0.0, -20.0));
+        let act = h.release(onto);
+        assert_eq!(
+            act.link,
+            Some((Source::Stage(id, 0), builtin::SPECTRUM, 0)),
+            "the spectrum should end up reading the stage"
         );
     }
 
