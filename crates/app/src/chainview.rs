@@ -14,6 +14,7 @@ use crate::theme;
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use pipeline::graph::Topology;
 use pipeline::port::{PortKind, StreamSpec};
+use std::collections::HashMap;
 
 const BOX_W: f32 = 190.0;
 /// Narrower than this and a label stops being readable, so the view scrolls
@@ -121,6 +122,38 @@ fn row_height(topo: &Topology, places: &[Place], depth: usize) -> f32 {
         INNER_GAP + inner as f32 * (INNER_H + INNER_GAP)
     };
     BOX_H + GAP + extra
+}
+
+/// Where the operator has put the stages, when they have moved any.
+///
+/// Positions are held here rather than worked out from the graph because in
+/// manual mode they are no longer a function of it: the point of moving a box
+/// is that it stays where it was put, including across the rebuild that a
+/// parameter change causes.
+///
+/// Kept relative to the drawing's top left, so the arrangement survives the
+/// pane being resized or scrolled.
+#[derive(Default)]
+pub struct Edit {
+    /// The operator owns the shape of the graph, so boxes can be dragged.
+    pub manual: bool,
+    /// Centre of each stage, by node id, relative to the drawing's top left.
+    pub pos: HashMap<usize, Pos2>,
+    /// The stage being dragged, and where in it the pointer took hold.
+    drag: Option<(usize, Vec2)>,
+}
+
+impl Edit {
+    /// Forget the arrangement, so the automatic layout draws it again.
+    pub fn arrange(&mut self) {
+        self.pos.clear();
+        self.drag = None;
+    }
+
+    /// Whether anything has been moved by hand.
+    pub fn moved(&self) -> bool {
+        !self.pos.is_empty()
+    }
 }
 
 /// What the operator did to the chain view this frame.
@@ -266,6 +299,7 @@ pub fn draw(
     topo: &Topology,
     latency_ms: f64,
     selected: Option<usize>,
+    edit: &mut Edit,
 ) -> Interaction {
     let places = layout(topo);
     let rows = places.iter().map(|p| p.depth + 1).max().unwrap_or(0);
@@ -282,7 +316,7 @@ pub fn draw(
 
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(width, height.max(ui.available_height())),
-        Sense::click(),
+        if edit.manual { Sense::click_and_drag() } else { Sense::click() },
     );
     let p = ui.painter_at(rect);
     let cx = rect.center().x;
@@ -317,12 +351,31 @@ pub fn draw(
     // the middle of it.
     let span = widest as f32 * box_w + (widest.saturating_sub(1)) as f32 * COL_GAP;
     let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
-    for (_, pl) in topo.nodes.iter().zip(&places) {
+    for (node, pl) in topo.nodes.iter().zip(&places) {
         let x = cx - span / 2.0 + pl.col as f32 * (box_w + COL_GAP) + box_w / 2.0;
-        rects.push(Rect::from_center_size(
-            Pos2::new(x, row_top[pl.depth] + BOX_H / 2.0),
-            Vec2::new(box_w, BOX_H),
-        ));
+        let auto = Pos2::new(x, row_top[pl.depth] + BOX_H / 2.0);
+        // Entering manual mode pins every stage where the automatic layout
+        // had just put it. Without that, moving one box would let the rest
+        // reflow around the gap it left, which reads as the graph rearranging
+        // itself in response to being touched.
+        let centre = if edit.manual {
+            rect.min + edit.pos.entry(node.id.0).or_insert(auto - rect.min.to_vec2()).to_vec2()
+        } else {
+            auto
+        };
+        rects.push(Rect::from_center_size(centre, Vec2::new(box_w, BOX_H)));
+    }
+
+    if edit.manual {
+        // A rebuild renumbers the graph, so an id that is no longer there is
+        // a position for a stage that no longer exists.
+        edit.pos.retain(|id, _| topo.nodes.iter().any(|n| n.id.0 == *id));
+        drag(&resp, topo, &rects, rect.min, edit);
+        for (i, node) in topo.nodes.iter().enumerate() {
+            if let Some(p) = edit.pos.get(&node.id.0) {
+                rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
+            }
+        }
     }
 
     for (i, node) in topo.nodes.iter().enumerate() {
@@ -360,7 +413,7 @@ pub fn draw(
                 StrokeKind::Outside,
             );
         }
-        if hot && resp.clicked() {
+        if hot && resp.clicked() && edit.drag.is_none() {
             // Clicking the selected stage again closes the inspector, so the
             // panel is not a thing you have to hunt for a way out of.
             act.selected = if on { None } else { Some(node.id.0) };
@@ -432,6 +485,28 @@ pub fn draw(
         act.selected = None;
     }
     act
+}
+
+/// Move whichever stage the drag took hold of.
+///
+/// The whole drawing is one response rather than a widget per box, so the
+/// stage being dragged has to be remembered: hit-testing again each frame
+/// would hand the drag to whatever the pointer passed over.
+fn drag(resp: &egui::Response, topo: &Topology, rects: &[Rect], origin: Pos2, edit: &mut Edit) {
+    if resp.drag_started() {
+        edit.drag = resp.interact_pointer_pos().and_then(|q| {
+            let i = rects.iter().position(|r| r.contains(q))?;
+            Some((topo.nodes[i].id.0, rects[i].center() - q))
+        });
+    }
+    if let (Some((id, grab)), Some(q)) = (edit.drag, resp.interact_pointer_pos()) {
+        if resp.dragged() {
+            edit.pos.insert(id, q + grab - origin.to_vec2());
+        }
+    }
+    if resp.drag_stopped() {
+        edit.drag = None;
+    }
 }
 
 fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
@@ -561,6 +636,36 @@ mod tests {
         // down and directly underneath it.
         assert!(p[4].depth > p[3].depth);
         assert_eq!(p[4].col, p[3].col, "a chain should read as a straight line");
+    }
+
+    #[test]
+    fn manual_mode_pins_every_stage_where_the_layout_had_it() {
+        // Otherwise moving one box lets the rest reflow into the space it
+        // left, and the graph appears to rearrange itself because a stage was
+        // touched.
+        let topo = branchy();
+        let mut edit = Edit { manual: true, ..Default::default() };
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut frame = |edit: &mut Edit| {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                draw(ui, &topo, 0.0, None, edit);
+            });
+        };
+        frame(&mut edit);
+        assert_eq!(edit.pos.len(), topo.nodes.len());
+        assert!(edit.moved());
+
+        // A stage moved by hand stays put across the next frame, which is
+        // what makes the arrangement worth anything: a parameter change
+        // rebuilds the graph and redraws this several times a second.
+        let put = Pos2::new(11.0, 500.0);
+        edit.pos.insert(0, put);
+        frame(&mut edit);
+        assert_eq!(edit.pos[&0], put);
+
+        edit.arrange();
+        assert!(!edit.moved(), "arranging hands the layout back to the graph");
     }
 
     #[test]

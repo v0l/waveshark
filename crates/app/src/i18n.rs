@@ -118,6 +118,7 @@ const EN: &[(&str, &str)] = &[
     ("ui.decode", "decode"),
     ("ui.decode_all", "Decode everything in the span"),
     ("ui.log", "Packet log"),
+    ("ui.manual_locked", "The chain is in manual mode, so this no longer rebuilds it"),
     ("ui.radio", "radio"),
     ("ui.scan", "Scanners: which decoder runs where"),
     ("ui.set", "SET"),

@@ -299,6 +299,12 @@ pub enum Cmd {
     /// the graph is rebuilt from a plan, so a change is the new table rather
     /// than an instruction to edit one row of it.
     Scanners(crate::scanners::Scanners),
+    /// Hand the shape of the graph to the operator, or take it back.
+    ///
+    /// While this is on the front ends stay as they are: the scanner table
+    /// and the decode switch no longer decide what is built, so an edited
+    /// graph is not thrown away by the next retune.
+    Manual(bool),
     Stop,
 }
 
@@ -675,6 +681,8 @@ pub struct Status {
     pub pocsag_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
+    /// Whether the operator owns the shape of the graph.
+    pub manual: AtomicBool,
     /// Bursts written to the packet log since the receiver started.
     pub logged: AtomicU64,
 }
@@ -761,6 +769,7 @@ impl Default for Status {
             aprs_on: AtomicBool::new(false),
             pocsag_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
+            manual: AtomicBool::new(false),
         }
     }
 }
@@ -1093,6 +1102,8 @@ fn run(
     let mut hits = 0u64;
     let mut volume = 0.5f32;
     let mut scan_on = true;
+    // Whether the operator is holding the shape of the graph.
+    let mut manual = false;
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
     let gap = tune_gap();
@@ -1266,11 +1277,20 @@ fn run(
                 Cmd::Scanners(table) => {
                     // A different table can mean a different front end on the
                     // frequency the dial is already on, so this rebuilds
-                    // rather than waiting for the next retune.
+                    // rather than waiting for the next retune. In manual mode
+                    // it is kept for later instead: rebuilding from the table
+                    // is exactly what manual mode exists to stop.
                     if table != scanners {
                         scanners = table;
-                        rebuild = true;
+                        rebuild = !manual;
                     }
+                }
+                Cmd::Manual(on) => {
+                    manual = on;
+                    status.manual.store(on, Ordering::Relaxed);
+                    // Leaving manual mode puts the scanner table back in
+                    // charge; entering it keeps whatever is running now.
+                    rebuild = !on;
                 }
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
@@ -1287,7 +1307,7 @@ fn run(
                 }
                 Cmd::Decode(on) => {
                     scan_on = on;
-                    rebuild = true;
+                    rebuild = !manual;
                 }
             }
         }
@@ -1312,7 +1332,12 @@ fn run(
             let _t = tracing::info_span!("rebuild").entered();
             // The banks understand nothing on either wideband band, so
             // running them there only spends CPU inventing unknown bursts.
-            plan.fronts = fronts_here(&scanners, &plan, scan_on);
+            // Left alone in manual mode: the front ends are the operator's
+            // then, and recomputing them here would undo every edit on the
+            // next retune.
+            if !manual {
+                plan.fronts = fronts_here(&scanners, &plan, scan_on);
+            }
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
                 *status.error.lock() = Some(format!("cannot build the chain: {e}"));

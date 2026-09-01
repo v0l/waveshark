@@ -116,6 +116,8 @@ pub struct App {
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
     chain_sel: Option<usize>,
+    /// Manual mode and where the stages have been dragged to.
+    chain_edit: crate::chainview::Edit,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
     /// Where the flight map is looking, and how far it reaches.
@@ -374,6 +376,7 @@ impl Default for App {
             tracks: Vec::new(),
             location: None,
             chain_sel: None,
+            chain_edit: crate::chainview::Edit::default(),
             country: String::new(),
             map: MapView::default(),
             tiles: crate::map::Tiles::new(),
@@ -1782,10 +1785,19 @@ impl App {
                 // Saving writes the file and hands the table to the radio
                 // thread, which rebuilds: a change to what runs on this
                 // frequency has to take effect without a retune.
+                // Saved either way, since the table is configuration. It only
+                // reaches the graph when the graph is the table's to build.
                 if ui.add_enabled(dirty, egui::Button::new("SAVE")).clicked() {
                     let _ = table.save();
                     self.scanners = table.clone();
                     self.send(Cmd::Scanners(table.clone()));
+                }
+                if self.chain_edit.manual {
+                    ui.label(
+                        egui::RichText::new(crate::i18n::t("ui.manual_locked"))
+                            .color(theme::LEGEND)
+                            .size(11.0),
+                    );
                 }
                 if ui.add_enabled(dirty, egui::Button::new("REVERT")).clicked() {
                     rows = self.scanners.list.iter().map(ScannerRow::from_scanner).collect();
@@ -2762,22 +2774,71 @@ impl App {
                     });
                 });
         }
+        self.chain_header(ui);
         // Dragged, not only scrolled: the graph is wider and taller than the
         // pane on any real chain, and reaching for a scrollbar to see a branch
-        // is not how anyone reads a diagram.
+        // is not how anyone reads a diagram. In manual mode a drag moves a
+        // stage instead, since dragging is how the graph is edited and the
+        // two cannot both own the gesture.
+        let manual = self.chain_edit.manual;
         let drawn = egui::ScrollArea::both()
             .scroll_source(egui::containers::scroll_area::ScrollSource {
-                drag: egui::containers::scroll_area::DragScroll::Always,
+                drag: if manual {
+                    egui::containers::scroll_area::DragScroll::Never
+                } else {
+                    egui::containers::scroll_area::DragScroll::Always
+                },
                 ..Default::default()
             })
             .show(ui, |ui| {
-                crate::chainview::draw(ui, &topo, self.chain_latency, self.chain_sel)
+                crate::chainview::draw(
+                    ui,
+                    &topo,
+                    self.chain_latency,
+                    self.chain_sel,
+                    &mut self.chain_edit,
+                )
             })
             .inner;
         self.chain_sel = drawn.selected;
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.send(Cmd::NodeParam(id, name, value));
         }
+    }
+
+    /// The switch that decides who owns the shape of the graph.
+    fn chain_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let mut manual = self.chain_edit.manual;
+            if ui.checkbox(&mut manual, "MANUAL").clicked() {
+                self.set_manual_chain(manual);
+            }
+            ui.label(legend(if self.chain_edit.manual {
+                "the graph is yours: the scanner table and the decode switch no longer rebuild it"
+            } else {
+                "built from the scanner table for this span"
+            }));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(self.chain_edit.moved(), egui::Button::new("ARRANGE"))
+                    .on_hover_text("Lay the stages out again from the graph")
+                    .clicked()
+                {
+                    self.chain_edit.arrange();
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
+    /// Hand the shape of the graph to the operator, or give it back to the
+    /// scanner table.
+    pub fn set_manual_chain(&mut self, on: bool) {
+        self.chain_edit.manual = on;
+        if !on {
+            self.chain_edit.arrange();
+        }
+        self.send(Cmd::Manual(on));
     }
 
     fn scope(&mut self, ui: &mut egui::Ui) {
@@ -4026,11 +4087,15 @@ impl App {
             // span at once is the expensive thing this app does, so it stays a
             // one-click switch rather than a line in a settings modal, and it
             // sits beside the legend that reports what it did.
+            // Off while the graph is the operator's: the switch rebuilds the
+            // whole front end, which is the one thing manual mode promises
+            // will not happen behind your back.
+            let auto = !self.chain_edit.manual;
             if crate::icons::icon_button(
                 ui,
                 crate::icons::Icon::Decode,
-                crate::i18n::t("ui.decode_all"),
-                true,
+                crate::i18n::t(if auto { "ui.decode_all" } else { "ui.manual_locked" }),
+                auto,
                 self.decode_on,
             )
             .clicked()
@@ -4105,7 +4170,11 @@ impl App {
                 // drawn: it sits in a row of named buttons with room for a
                 // word, and no glyph says "the table deciding what decodes
                 // where" without being learned first.
-                if ui.button("SCANNERS").clicked() {
+                if ui
+                    .add_enabled(auto, egui::Button::new("SCANNERS"))
+                    .on_disabled_hover_text(crate::i18n::t("ui.manual_locked"))
+                    .clicked()
+                {
                     self.open = Some(Settings::Scanners);
                 }
             });
