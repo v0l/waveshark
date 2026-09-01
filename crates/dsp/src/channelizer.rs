@@ -1,6 +1,6 @@
 //! Polyphase filter bank channelizer.
 //!
-//! This is the reason super-radio can decode dozens of signals at once. A naive
+//! This is the reason waveshark can decode dozens of signals at once. A naive
 //! design would run one mixer, one lowpass and one decimator per channel, so
 //! cost grows linearly with the number of channels. The polyphase bank splits
 //! one prototype lowpass into `M` branches and follows it with a single

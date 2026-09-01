@@ -189,12 +189,12 @@ impl Default for Scanners {
 }
 
 impl Scanners {
-    /// `$XDG_CONFIG_HOME/super-radio/scanners`, beside the session.
+    /// `$XDG_CONFIG_HOME/waveshark/scanners`, beside the session.
     pub fn path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("super-radio").join("scanners"))
+        Some(base.join("waveshark").join("scanners"))
     }
 
     /// Load, writing the defaults out first if there is no file yet.
@@ -421,7 +421,7 @@ fn num(v: f64) -> String {
 /// The header the interface writes above the blocks, which is also the
 /// format's documentation.
 pub const HEADER: &str = "\
-# super-radio scanners: what to run, and where.
+# waveshark scanners: what to run, and where.
 #
 # Every block the tuned span covers runs, and a block is covered when the
 # frequencies it demodulates are inside the span. Edit here or in the
@@ -442,7 +442,7 @@ pub const HEADER: &str = "\
 /// This doubles as the documentation for the format, which is why it carries
 /// its own comments rather than being built from struct literals.
 pub const DEFAULT_TEXT: &str = "\
-# super-radio scanners: what to run, and where.
+# waveshark scanners: what to run, and where.
 #
 # Written once when this file was missing, and only read afterwards, so it is
 # safe to edit. Delete a block to stop it running; add one to scan somewhere

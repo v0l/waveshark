@@ -1,5 +1,5 @@
 //! Ansonic: a 12-bit fixed-code remote whose short mark is a `1` and long
-//! mark a `0`, the same polarity super-radio's slicer already produces, so
+//! mark a `0`, the same polarity waveshark's slicer already produces, so
 //! (unlike most keyfobs) the frame is found without inversion.
 //!
 //! ```text

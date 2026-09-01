@@ -36,7 +36,7 @@ fn main() {
                      Or point at a custom build with RTLSDR_LIB_DIR and \
                      RTLSDR_INCLUDE_DIR.\n\
                      \n\
-                     To build super-radio without RTL-SDR support, disable the \
+                     To build waveshark without RTL-SDR support, disable the \
                      `rtlsdr` feature."
                 );
             }

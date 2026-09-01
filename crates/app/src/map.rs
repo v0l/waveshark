@@ -17,9 +17,9 @@ pub const TILE_PX: f64 = 256.0;
 /// OSM's tile usage policy asks for an identifying agent with contact
 /// information, and blocks clients that send a default or absent one.
 const AGENT: &str = concat!(
-    "super-radio/",
+    "waveshark/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/v0l/super-radio)"
+    " (https://github.com/v0l/waveshark)"
 );
 
 const URL: &str = "https://tile.openstreetmap.org";
@@ -139,7 +139,7 @@ fn cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let dir = base.join("super-radio").join("tiles");
+    let dir = base.join("waveshark").join("tiles");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }

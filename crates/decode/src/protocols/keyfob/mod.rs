@@ -13,7 +13,7 @@
 //!
 //! Frame layouts and timings are transcribed from the Flipper's own
 //! `SubGhzBlockConst` and decoder state machines; where a decoder reads the
-//! opposite bit polarity from super-radio's slicer, `find_and_parse` is told
+//! opposite bit polarity from waveshark's slicer, `find_and_parse` is told
 //! to invert.
 
 pub mod shared;

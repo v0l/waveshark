@@ -432,7 +432,7 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
 
 fn replay(path: &str) -> anyhow::Result<()> {
     let path = std::path::Path::new(path);
-    if path.extension().and_then(|s| s.to_str()) == Some("srpkt") {
+    if path.extension().and_then(|s| s.to_str()) == Some("wspkt") {
         return replay_log(path);
     }
     let mut files: Vec<std::path::PathBuf> = if path.is_dir() {
@@ -506,7 +506,7 @@ pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "super-radio", about = "Software defined radio receiver", version)]
+#[command(name = "waveshark", about = "Wideband SDR receiver and RF protocol analyser", version)]
 struct Args {
     /// Start tuned to this frequency, in MHz, and listening to it. Repeat it
     /// to open several channels at once, which are mixed together
@@ -559,7 +559,7 @@ struct Args {
     record: Option<PathBuf>,
 
     /// Where decoded packets are appended as JSON lines. Defaults to
-    /// $XDG_DATA_HOME/super-radio/packets
+    /// $XDG_DATA_HOME/waveshark/packets
     #[arg(long, value_name = "DIR")]
     packet_log: Option<PathBuf>,
 
@@ -685,11 +685,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(if args.shot.is_some() { [1400.0, 860.0] } else { [1280.0, 800.0] })
             .with_min_inner_size([800.0, 500.0])
-            .with_title("super-radio"),
+            .with_title("waveshark"),
         ..Default::default()
     };
     eframe::run_native(
-        "super-radio",
+        "waveshark",
         opts,
         Box::new(move |cc| {
             let mut app = ui::App::new(cc);

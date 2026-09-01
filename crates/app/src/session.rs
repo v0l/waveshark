@@ -66,12 +66,12 @@ impl Default for Session {
 }
 
 impl Session {
-    /// `$XDG_CONFIG_HOME/super-radio/session`, or `~/.config` when unset.
+    /// `$XDG_CONFIG_HOME/waveshark/session`, or `~/.config` when unset.
     pub fn path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("super-radio").join("session"))
+        Some(base.join("waveshark").join("session"))
     }
 
     /// Load, falling back to defaults for anything missing or unreadable.
@@ -143,7 +143,7 @@ impl Session {
     }
 
     pub fn render(&self) -> String {
-        let mut s = String::from("# super-radio session, rewritten as settings change\n");
+        let mut s = String::from("# waveshark session, rewritten as settings change\n");
         if let Some(d) = &self.device {
             s.push_str(&format!("device = {d}\n"));
         }

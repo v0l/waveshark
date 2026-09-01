@@ -1,7 +1,20 @@
-# super-radio
+<img src="assets/logo/waveshark-horizontal.svg" alt="WaveShark" width="420">
 
-A wideband SDR receiver in Rust: channelize a wide span once, then detect and
-decode every signal in it in parallel.
+Wireshark for the radio spectrum. A wideband SDR receiver in Rust that
+channelizes a wide span once, then detects and decodes every signal in it in
+parallel, logging what it hears in a form that can be decoded again later.
+
+The target is the same job Wireshark does on a wire: capture everything on the
+medium, dissect what is recognised, keep the bytes of what is not. That makes
+it an OSINT instrument as much as a radio. What is on the air around you (which
+sensors, which vehicles, which pagers, which aircraft and ships) is answered by
+leaving a band running rather than by tuning to a frequency someone already
+told you about.
+
+Transmit is on the roadmap and not implemented. Almost every decoder here is a
+timing table, and a table runs backwards once a transmit chain exists;
+[`docs/protocols.md`](docs/protocols.md) carries a TX column with that estimate
+per protocol. Nothing in the current tree keys a radio.
 
 ## Status
 
@@ -204,8 +217,8 @@ else.
 not, as an ordinary rtl_433 style capture:
 
 ```sh
-super-radio --tune 868.3 --record captures
-super-radio --replay captures
+waveshark --tune 868.3 --record captures
+waveshark --replay captures
 ```
 
 The recorder keeps the last three quarters of a second of signal in memory and
@@ -274,7 +287,7 @@ to open it at all.
 Where it was pointing last time is where it starts: device, centre frequency,
 span and zoom, every gain stage, the radio's switches, the crystal correction,
 and whether decoding was on. They are written to
-`$XDG_CONFIG_HOME/super-radio/session` as plain `key = value` lines, a couple of
+`$XDG_CONFIG_HOME/waveshark/session` as plain `key = value` lines, a couple of
 seconds after the last change and again on exit, so the file is editable by hand
 and a corrupt one costs the settings rather than the startup. With nothing saved
 it opens on 433.92 MHz, where the devices this thing decodes actually are.
@@ -417,7 +430,7 @@ matters depends on what is being looked for, so none of the three is fixed.
 ### Packet log
 
 Every burst the front ends detect is appended to
-`$XDG_DATA_HOME/super-radio/packets`, one file per day. It is on by default and
+`$XDG_DATA_HOME/waveshark/packets`, one file per day. It is on by default and
 has no switch in the interface, because the value of a log like this is in
 already having it: the interesting transmission is always the one that happened
 before anyone thought to press record. A receiver left on a band overnight is a
@@ -449,7 +462,7 @@ source was not running. Attaching them to the bus means a map, a chart or a
 meter view is a node with one input and nothing to say about front ends.
 
 The file is optional and the bus is not: turning the log off stops writing to
-disk rather than disconnecting every view from the traffic. `--replay <file>.srpkt` runs the current decoders back over a log:
+disk rather than disconnecting every view from the traffic. `--replay <file>.wspkt` runs the current decoders back over a log:
 
 ```
 15:55:47   433.9200 MHz    88 pulses   22.5 dB  Fineoffset-WHx080  temperature_c=18 humidity_pct=61

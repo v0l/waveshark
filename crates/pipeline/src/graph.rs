@@ -7,7 +7,7 @@
 //! per-node thread and no scheduler.
 //!
 //! That is the deliberate opposite of GNU Radio, and it is the central design
-//! choice in super-radio. GNU Radio gives every block its own thread, which is
+//! choice in waveshark. GNU Radio gives every block its own thread, which is
 //! reasonable when a flowgraph has twenty blocks and unworkable when it has a
 //! thousand: at 512 channels times five nodes, thread-per-block means 2560
 //! threads fighting over 48 cores, and the context switching would cost more

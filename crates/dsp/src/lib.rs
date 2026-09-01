@@ -1,4 +1,4 @@
-//! Signal processing primitives for super-radio.
+//! Signal processing primitives for waveshark.
 //!
 //! All hot paths take slices and reuse buffers; nothing here allocates per
 //! sample. Parallelism is the caller's business, so these types are `Send` but

@@ -137,7 +137,7 @@ rather than a map crate's: slippy tiles are a URL template and a Mercator
 projection, and every map widget for egui brings a HTTP stack, an async
 runtime and an image pipeline to do what `crates/app/src/map.rs` does in two
 hundred lines against the PNG decoder the app already had. Tiles are cached
-under `$XDG_CACHE_HOME/super-radio/tiles`, fetched on one thread, and a
+under `$XDG_CACHE_HOME/waveshark/tiles`, fetched on one thread, and a
 failure is said out loud on the map rather than left looking like empty sky.
 
 A position drawn hollow came from a single frame read against the station

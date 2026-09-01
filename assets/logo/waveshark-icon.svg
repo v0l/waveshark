@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="t d">
+  <title id="t">WaveShark</title>
+  <desc id="d">A spectrum trace whose peak is the dorsal fin of a shark, cutting a noise floor, with waterfall history beneath it.</desc>
+  <rect width="64" height="64" rx="14" fill="#0B1014"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 39.5h56" stroke="#22333D" stroke-width="1.5"/>
+    <path d="M40 45.5h-18M43 51h-15M37 56h-7"
+          stroke="#2FD3E1" stroke-width="3" opacity=".8"/>
+    <path d="M45 45.5h3M47 51h2" stroke="#FFB020" stroke-width="3" opacity=".6"/>
+    <path d="M3.5 38 7 36 10 39 13.5 36.5 17 39 19.5 37.5 C 24 34 30 26 40.5 8 C 39.5 20 41.5 30 47 38.5 L 51 40.5 54.5 37.5 58 40 61 38" stroke="#2FD3E1" stroke-width="3.2"/>
+  </g>
+</svg>

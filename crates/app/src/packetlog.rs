@@ -26,7 +26,7 @@
 //! A little-endian binary stream, one file per day, appended:
 //!
 //! ```text
-//! file   := "SRPKT\0" u16 version
+//! file   := "WSPKT\0" u16 version
 //! record := u32 body_len, u8 kind, u8 flags, u16 pulses_or_bytes,
 //!           u64 at_us, u64 center_hz, u32 bandwidth_hz,
 //!           f32 rssi_dbfs, f32 snr_db, body
@@ -56,7 +56,7 @@ use common::{Packet, PacketBody, Pulse};
 /// guard, not a budget, and it can be raised or lifted in the settings.
 pub const DEFAULT_MAX_BYTES: u64 = 512 << 20;
 
-const MAGIC: &[u8; 6] = b"SRPKT\0";
+const MAGIC: &[u8; 6] = b"WSPKT\0";
 const VERSION: u16 = 1;
 
 /// Timings from a front end that detects bursts.
@@ -82,12 +82,12 @@ pub struct PacketLog {
 }
 
 impl PacketLog {
-    /// `$XDG_DATA_HOME/super-radio/packets`, or `~/.local/share` when unset.
+    /// `$XDG_DATA_HOME/waveshark/packets`, or `~/.local/share` when unset.
     pub fn default_dir() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join("super-radio").join("packets"))
+        Some(base.join("waveshark").join("packets"))
     }
 
     pub fn new(dir: PathBuf) -> Self {
@@ -121,7 +121,7 @@ impl PacketLog {
                 self.full = true;
                 return None;
             }
-            let path = self.dir.join(format!("{day}.srpkt"));
+            let path = self.dir.join(format!("{day}.wspkt"));
             let fresh = !path.exists();
             let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
                 self.full = true;
@@ -339,7 +339,7 @@ mod tests {
         let p = burst(433_920_000);
         log.write(&p);
 
-        let got = read(d.join("2026-08-31.srpkt")).unwrap();
+        let got = read(d.join("2026-08-31.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], p, "what came back is not what was heard");
         // And it is a package again, ready for a decoder that did not exist
@@ -357,7 +357,7 @@ mod tests {
         let bytes = [0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3];
         log.write(&frame(AT, &bytes));
 
-        let got = read(d.join("2026-08-31.srpkt")).unwrap();
+        let got = read(d.join("2026-08-31.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].frame(), Some(&bytes[..]));
         assert_eq!(got[0].center_hz, 1_090_000_000);
@@ -373,7 +373,7 @@ mod tests {
         for _ in 0..3 {
             log.write(&burst(868_300_000));
         }
-        let path = d.join("2026-08-31.srpkt");
+        let path = d.join("2026-08-31.wspkt");
         let mut raw = std::fs::read(&path).unwrap();
         raw.truncate(raw.len() - 9);
         assert_eq!(parse(&raw).len(), 2, "a torn tail took a good record with it");
@@ -388,8 +388,8 @@ mod tests {
         let mut tomorrow = burst(433_920_000);
         tomorrow.at_us += 86_400_000_000;
         log.write(&tomorrow);
-        assert!(d.join("2026-08-31.srpkt").exists());
-        assert!(d.join("2026-09-01.srpkt").exists());
+        assert!(d.join("2026-08-31.wspkt").exists());
+        assert!(d.join("2026-09-01.wspkt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

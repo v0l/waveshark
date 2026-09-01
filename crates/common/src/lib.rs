@@ -1,4 +1,4 @@
-//! Core vocabulary shared by every layer of super-radio.
+//! Core vocabulary shared by every layer of waveshark.
 //!
 //! Named `common` rather than `core` because a crate called `core` shadows the
 //! Rust sysroot crate. Nothing in here does DSP or I/O: it defines sample

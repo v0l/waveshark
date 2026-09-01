@@ -85,10 +85,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p stage
-          cp target/${{ matrix.target }}/release/super-radio stage/
+          cp target/${{ matrix.target }}/release/waveshark stage/
           cp README.md LICENSE* stage/ 2>/dev/null || true
           cat > stage/RUNNING.txt <<'EOF'
-          super-radio links librtlsdr at run time rather than bundling it,
+          waveshark links librtlsdr at run time rather than bundling it,
           because the copy that matches your udev rules and your USB stack is
           the one already on your machine.
 
@@ -105,7 +105,7 @@ jobs:
           rtl-sdr package usually installs the udev rules that grant it; if
           the radio is only visible as root, that is what is missing.
           EOF
-          tar -C stage -czf super-radio-${{ matrix.name }}.tar.gz .
+          tar -C stage -czf waveshark-${{ matrix.name }}.tar.gz .
 
       # The DLLs go in the zip: there is no system package to point a Windows
       # user at, so an executable on its own would not start.
@@ -114,25 +114,25 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\super-radio.exe" stage\
+          Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" stage\
           Copy-Item "$env:VCPKG_BIN\*.dll" stage\ -ErrorAction SilentlyContinue
           Copy-Item README.md stage\ -ErrorAction SilentlyContinue
           @"
-          Plug the radio in before starting super-radio.
+          Plug the radio in before starting waveshark.
 
           Windows needs WinUSB bound to the device rather than the DVB-T
           driver it ships with. Use Zadig (https://zadig.akeo.ie) and replace
           the driver on the RTL2832U interface with WinUSB. Without this the
           device enumerates but cannot be opened.
           "@ | Out-File -Encoding utf8 stage\RUNNING.txt
-          Compress-Archive -Path stage\* -DestinationPath super-radio-${{ matrix.name }}.zip
+          Compress-Archive -Path stage\* -DestinationPath waveshark-${{ matrix.name }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: super-radio-${{ matrix.name }}
+          name: waveshark-${{ matrix.name }}
           path: |
-            super-radio-*.tar.gz
-            super-radio-*.zip
+            waveshark-*.tar.gz
+            waveshark-*.zip
           if-no-files-found: error
 
   release:

@@ -1,4 +1,4 @@
-//! The super-radio flow graph.
+//! The waveshark flow graph.
 //!
 //! A DAG of typed, rate-negotiated nodes, in the spirit of GNU Radio but with
 //! three deliberate departures:
