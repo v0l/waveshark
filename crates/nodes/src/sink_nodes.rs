@@ -252,6 +252,13 @@ pub trait PacketSink: Send + 'static {
     fn full(&self) -> bool {
         false
     }
+
+    /// A chance to put buffered work somewhere durable, called once per
+    /// block whether or not any packets arrived.
+    ///
+    /// A sink that batches needs a tick from outside it: the last burst
+    /// before a band goes quiet has nothing following it to push it out.
+    fn flush(&mut self) {}
 }
 
 /// The packet bus: where everything that produces packets meets everything
@@ -431,6 +438,7 @@ impl pipeline::node::Node for PacketBusNode {
             for p in out.iter() {
                 sink.write(p);
             }
+            sink.flush();
         }
         Ok(())
     }

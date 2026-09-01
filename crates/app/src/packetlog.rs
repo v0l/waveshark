@@ -59,6 +59,19 @@ pub const DEFAULT_MAX_BYTES: u64 = 512 << 20;
 const MAGIC: &[u8; 6] = b"WSPKT\0";
 const VERSION: u16 = 1;
 
+/// Write buffer per open day file. A pulse record is a few hundred bytes and
+/// 1090 MHz can produce thousands of frames a second, so this is sized to
+/// hold a busy second rather than a single burst.
+const BUF_BYTES: usize = 256 << 10;
+
+/// How long a record may sit in the buffer before it reaches the disk.
+///
+/// The buffer is what makes a high packet rate cheap, and the deadline is
+/// what stops it costing an evening of captures when the receiver is killed:
+/// at most this much is ever in flight, no matter how quiet or how busy the
+/// band is.
+const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Timings from a front end that detects bursts.
 pub const KIND_PULSES: u8 = 1;
 /// Bytes from a demodulator that produces frames directly, such as Mode S.
@@ -79,6 +92,9 @@ pub struct PacketLog {
     written: u64,
     /// Size at which a day's file stops growing, or `None` for no limit.
     cap: Option<u64>,
+    /// Records written into the buffer since the last flush.
+    dirty: bool,
+    last_flush: std::time::Instant,
 }
 
 impl PacketLog {
@@ -91,7 +107,16 @@ impl PacketLog {
     }
 
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, open: None, bytes: 0, full: false, written: 0, cap: Some(DEFAULT_MAX_BYTES) }
+        Self {
+            dir,
+            open: None,
+            bytes: 0,
+            full: false,
+            written: 0,
+            cap: Some(DEFAULT_MAX_BYTES),
+            dirty: false,
+            last_flush: std::time::Instant::now(),
+        }
     }
 
     /// Change the runaway guard. `None` lifts it, which is what a receiver
@@ -117,6 +142,9 @@ impl PacketLog {
         }
         let day = day_of(at_us);
         if self.open.as_ref().is_none_or(|(d, _)| *d != day) {
+            // The old day's buffer goes out before its writer does, or a
+            // midnight roll silently truncates the file it just closed.
+            self.flush();
             if std::fs::create_dir_all(&self.dir).is_err() {
                 self.full = true;
                 return None;
@@ -127,7 +155,7 @@ impl PacketLog {
                 self.full = true;
                 return None;
             };
-            let mut w = std::io::BufWriter::new(f);
+            let mut w = std::io::BufWriter::with_capacity(BUF_BYTES, f);
             self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
             if fresh || self.bytes == 0 {
                 if w.write_all(MAGIC).is_err() || w.write_all(&VERSION.to_le_bytes()).is_err() {
@@ -147,15 +175,47 @@ impl PacketLog {
             self.full = true;
             return;
         }
-        // Flushed every record rather than left to the buffer: a receiver is
-        // usually killed rather than closed, and an unflushed buffer is the
-        // bursts nobody has.
-        let _ = w.flush();
+        self.dirty = true;
         self.bytes += rec.len() as u64;
         self.written += 1;
         if self.cap.is_some_and(|c| self.bytes >= c) {
             self.full = true;
         }
+        self.flush_due();
+    }
+
+    /// Push the buffer to the disk if it has been waiting long enough.
+    ///
+    /// A per-record flush turns every burst into a write syscall, and on a
+    /// band that produces thousands a second that is the receiver's time
+    /// spent on a convenience. Batching by deadline keeps the syscall rate
+    /// bounded by the clock rather than by the traffic.
+    fn flush_due(&mut self) {
+        if self.dirty && self.last_flush.elapsed() >= FLUSH_EVERY {
+            self.flush();
+        }
+    }
+
+    /// Put everything buffered on the disk now.
+    pub fn flush(&mut self) {
+        self.last_flush = std::time::Instant::now();
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        if let Some((_, w)) = self.open.as_mut() {
+            if w.flush().is_err() {
+                self.full = true;
+            }
+        }
+    }
+}
+
+/// A closed receiver keeps its last bursts. `BufWriter` drops silently, and
+/// silently is exactly how the tail of an overnight capture goes missing.
+impl Drop for PacketLog {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
@@ -196,6 +256,12 @@ impl nodes::PacketSink for PacketLog {
 
     fn written(&self) -> u64 {
         self.written
+    }
+
+    /// Called between blocks whether or not anything arrived, so a band that
+    /// went quiet still gets its last burst on the disk.
+    fn flush(&mut self) {
+        self.flush_due();
     }
 }
 
@@ -338,6 +404,7 @@ mod tests {
         let mut log = PacketLog::new(d.clone());
         let p = burst(433_920_000);
         log.write(&p);
+        log.flush();
 
         let got = read(d.join("2026-08-31.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
@@ -356,6 +423,7 @@ mod tests {
         let mut log = PacketLog::new(d.clone());
         let bytes = [0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3];
         log.write(&frame(AT, &bytes));
+        log.flush();
 
         let got = read(d.join("2026-08-31.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
@@ -373,6 +441,7 @@ mod tests {
         for _ in 0..3 {
             log.write(&burst(868_300_000));
         }
+        log.flush();
         let path = d.join("2026-08-31.wspkt");
         let mut raw = std::fs::read(&path).unwrap();
         raw.truncate(raw.len() - 9);
@@ -388,8 +457,52 @@ mod tests {
         let mut tomorrow = burst(433_920_000);
         tomorrow.at_us += 86_400_000_000;
         log.write(&tomorrow);
+        log.flush();
         assert!(d.join("2026-08-31.wspkt").exists());
         assert!(d.join("2026-09-01.wspkt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_days_roll_carries_the_buffer_with_it() {
+        // Buffered records belong to the file they were written for, and the
+        // roll is where a forgotten flush loses a whole day.
+        let d = dir("roll-flush");
+        let mut log = PacketLog::new(d.clone());
+        log.write(&burst(433_920_000));
+        let mut tomorrow = burst(433_920_000);
+        tomorrow.at_us += 86_400_000_000;
+        log.write(&tomorrow);
+        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1, "yesterday was lost");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_dropped_log_still_has_its_last_burst() {
+        // How a receiver ends: the log goes out of scope with records still
+        // in the buffer.
+        let d = dir("drop");
+        let mut log = PacketLog::new(d.clone());
+        log.write(&burst(433_920_000));
+        drop(log);
+        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_burst_of_packets_costs_one_write() {
+        // The reason for the buffer: a thousand packets arriving inside the
+        // flush deadline must not be a thousand syscalls.
+        let d = dir("batch");
+        let mut log = PacketLog::new(d.clone());
+        for _ in 0..1000 {
+            log.write(&burst(868_300_000));
+        }
+        // Nothing has reached the disk yet beyond what overflowed the buffer,
+        // and the count on screen is still honest about what was accepted.
+        assert_eq!(log.written(), 1000);
+        log.flush();
+        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1000);
         let _ = std::fs::remove_dir_all(&d);
     }
 
