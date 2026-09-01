@@ -79,6 +79,77 @@ pub fn registry() -> Registry {
         },
     );
 
+    // The front ends the scanner table puts on a span. Registered like any
+    // other stage so that the graph the receiver derives for itself is a
+    // description rather than a special case, and so an operator can put one
+    // anywhere rather than only where the table would have.
+    r.register(
+        StageDesc {
+            name: "mode_s",
+            summary: "1090 MHz ADS-B: preamble search and pulse-position bits",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(ModeSNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "ais",
+            summary: "Both marine AIS channels: GMSK demodulation and HDLC framing",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "aprs",
+            summary: "One APRS channel: narrowband FM, Bell 202 AFSK, AX.25",
+            category: "decode",
+        },
+        |s: &Settings| {
+            Ok(Box::new(AprsNode::new(s.f64_or("channel_hz", 144_800_000.0))) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "pocsag",
+            summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
+            category: "decode",
+        },
+        |s: &Settings| {
+            Ok(Box::new(PocsagNode::new(s.f64_or("channel_hz", 153_350_000.0))) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "bank",
+            summary: "Channelize a band and run a burst front end in every \
+                      channel of it at once",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let width = s.f64_or("channel_hz", 31_250.0).max(1.0);
+            // Which front end runs in a channel follows from its width: the
+            // narrow bank is where OOK is worth detecting and the wide one is
+            // where FSK's two tones both fit.
+            let fsk = s.bool_or("fsk", width > 31_250.0);
+            let (label, make) = if fsk {
+                ("FSK bank", ism_fsk_graph as fn(_) -> _)
+            } else {
+                ("OOK bank", ism_ook_graph as fn(_) -> _)
+            };
+            let mut n = BankNode::new(label, width, make);
+            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
+            if hi > lo {
+                n.set_band(Some((lo, hi)));
+            }
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
     r.register(
         StageDesc {
             name: "dc_block",

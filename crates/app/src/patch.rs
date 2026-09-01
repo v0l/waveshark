@@ -104,14 +104,21 @@ impl Patch {
         self.feeding((builtin, 0))
     }
 
-    /// Ids below this belong to the graph the receiver draws for itself, so
-    /// that one stays recognisable across the rebuilds that derive it again.
-    pub const DERIVED: u64 = 100;
+    /// Ids at or above this belong to the graph the receiver derives for
+    /// itself. Derived ids are computed from what a stage is for, so that one
+    /// keeps its node, its box and its wires across the rebuilds that derive
+    /// it again; ids the operator's own stages take count up from one and
+    /// cannot reach this far.
+    pub const DERIVED_BASE: u64 = 1 << 40;
+
+    pub fn is_derived(id: u64) -> bool {
+        id >= Self::DERIVED_BASE && !builtin::is(id)
+    }
 
     /// Add a stage, unconnected. Wiring it up is a separate decision, since a
     /// stage dropped onto the canvas has no obvious input until one is drawn.
     pub fn add(&mut self, kind: &str) -> u64 {
-        self.next = self.next.max(Self::DERIVED) + 1;
+        self.next += 1;
         let id = self.next;
         self.stages.push(Stage { id, kind: kind.to_string(), settings: Settings::new() });
         id

@@ -30,7 +30,7 @@ use common::{Hz, Result, C32};
 use dsp::rds::Station;
 use nodes::{
     AgcNode, BankNode, DeemphasisNode, DecimateNode, EnvelopeNode, FmDemodNode, HighBlendNode,
-    MixerNode, ModeSNode, RealDecimateNode, SpectrumNode, SquelchNode, SsbDemodNode, WfmDemodNode,
+    MixerNode, RealDecimateNode, SpectrumNode, SquelchNode, SsbDemodNode, WfmDemodNode,
 };
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
@@ -123,26 +123,6 @@ const CW_FILTER_HZ: f64 = 500.0;
 /// exactly what changed.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Role {
-    ModeS,
-    Ais,
-    /// Keyed by the channel, like the pager one and for the same reason: a
-    /// scanner table pointed at another frequency has to rebuild the node
-    /// rather than keep one tuned where it was.
-    Aprs(u64),
-    Pocsag(u64),
-    /// Banks are distinguished by the band they cover and the channel width
-    /// they were built for. Two scanner blocks can ask for the same width in
-    /// different bands, and they are not the same bank.
-    Bank(u64, u32),
-    /// The decimator feeding one band's banks, keyed by the band and the
-    /// factor: a different factor is a different filter.
-    SubBandDecimate(u64, usize),
-    /// The mixer in front of it. Never reused, because its shift follows the
-    /// dial and it is a phase accumulator rather than a filter to design, but
-    /// it still needs a role: `roles` is zipped with the graph's nodes to find
-    /// them again, so a node added without one shifts every role after it onto
-    /// the wrong node.
-    SubBandMix(u64),
     /// A stage of one listening channel.
     Stage(u64, Stage),
     /// A stage the operator drew, keyed by its patch id and what it is. The
@@ -402,7 +382,7 @@ impl Receiver {
             }
             // A bank rebuilds itself internally on a retune and keeps its
             // chains, which is cheaper than building several hundred graphs.
-            Role::Bank(..) => true,
+            Role::Patch(_, kind) if kind == "bank" => true,
             // The spectrum's FFT size can change and the node cannot resize,
             // and one holding an average of another band is worse than one
             // starting empty.
@@ -494,161 +474,37 @@ impl Receiver {
         let spectrum = stage_of("spectrum");
         let record = stage_of(RING);
 
-        // The front ends the scanner table put on this span, rather than a
-        // chain of band tests here. Which demodulator belongs on which
-        // frequency is configuration, not structure: see `scanners.rs`.
-        let (mut modes, mut ais, mut aprs, mut pocsag) = (None, None, None, None);
-        let mut banks = Vec::new();
-        // Everything that is not a bank, in the order the table listed it, so
-        // the bus can be connected to all of them without asking which kinds
-        // happen to be running.
+        // The front ends are stages in the patch now, so what runs is what
+        // the graph says rather than a second reading of the scanner table.
         let mut narrowband: Vec<NodeId> = Vec::new();
-        // A single-channel front end whose channel does not clear the span
-        // edge by its own bandwidth is dropped rather than built. The node
-        // would refuse it at negotiation and take the whole graph down with
-        // it, and one badly placed block should cost its own front end, not
-        // the receiver.
-        let fits = |hz: f64, width: f64| {
-            (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width
+        let of_kind = |kind: &str| -> Vec<NodeId> {
+            patch
+                .stages()
+                .iter()
+                .filter(|s| s.kind == kind)
+                .filter_map(|s| patch_ids.get(&s.id))
+                .copied()
+                .collect()
         };
-        // One extraction per band, shared by whatever listens in it.
-        let mut extracts: HashMap<(u64, usize), NodeId> = HashMap::new();
+        // A front end the table asked for and the span cannot hold is left
+        // out of the derived graph, and the interface has to be told why
+        // rather than left wondering where its pager channel went.
         for at in &plan.fronts {
-            let front = &at.front;
-            // Everything the scanner table puts on the span is fed a band cut
-            // out for it rather than the whole span. What each front end then
-            // does inside itself is a small residual shift at a low rate,
-            // instead of a mixer and a several-thousand-tap filter running at
-            // the radio's own rate where nothing could see them.
-            let want = front_band(front, at).and_then(|(band, min_rate)| {
-                let band = match front {
-                    // A bank takes what the span covers of its band; a
-                    // single-channel front end needs all of its channel or it
-                    // is refused outright below.
-                    Front::Banks(_) => at.covered(plan.center.as_f64(), plan.eff_rate())?,
-                    _ => band,
-                };
-                (band.1 > band.0).then(|| SubBand::plan(band, plan.eff_rate(), min_rate))
-            });
-            let src = match want {
-                Some(sub) => extract(
-                    &mut b,
-                    &mut roles,
-                    &mut pool,
-                    &mut extracts,
-                    head,
-                    plan.center.as_f64(),
-                    plan.eff_rate(),
-                    sub,
-                ),
-                None => head,
+            let (hz, width, what) = match at.front {
+                Front::Aprs(hz) => (hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ, "aprs"),
+                Front::Pocsag(hz) => (hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ, "pocsag"),
+                _ => continue,
             };
-            match front {
-            Front::ModeS => {
-                let id = match pool.remove(&Role::ModeS) {
-                    Some(p) => b.add_existing(p),
-                    None => b.add_labeled("1090 Mode S", Box::new(ModeSNode::default())),
-                };
-                b.connect(src, id.i());
-                roles.push(Role::ModeS);
-                narrowband.push(id);
-                modes = Some(id);
-            }
-            Front::Ais => {
-                let id = match pool.remove(&Role::Ais) {
-                    Some(p) => b.add_existing(p),
-                    None => b.add_labeled("162 AIS", Box::new(nodes::AisNode::default())),
-                };
-                b.connect(src, id.i());
-                roles.push(Role::Ais);
-                narrowband.push(id);
-                ais = Some(id);
-            }
-            Front::Aprs(hz) if !fits(*hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ) => {
-                refused = Some(format!("{:.4} MHz is too near the span edge for aprs", hz / 1e6));
-            }
-            Front::Aprs(hz) => {
-                let role = Role::Aprs(*hz as u64);
-                let id = match pool.remove(&role) {
-                    Some(p) => b.add_existing(p),
-                    None => b.add_labeled(
-                        format!("{:.3} APRS", hz / 1e6),
-                        Box::new(nodes::AprsNode::new(*hz)),
-                    ),
-                };
-                b.connect(src, id.i());
-                roles.push(role);
-                narrowband.push(id);
-                aprs = Some(id);
-            }
-            Front::Pocsag(hz) if !fits(*hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ) => {
+            if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - width {
                 refused =
-                    Some(format!("{:.4} MHz is too near the span edge for pocsag", hz / 1e6));
-            }
-            Front::Pocsag(hz) => {
-                let role = Role::Pocsag(*hz as u64);
-                let id = match pool.remove(&role) {
-                    Some(p) => b.add_existing(p),
-                    None => b.add_labeled(
-                        format!("{:.4} pager", hz / 1e6),
-                        Box::new(nodes::PocsagNode::new(*hz)),
-                    ),
-                };
-                b.connect(src, id.i());
-                roles.push(role);
-                narrowband.push(id);
-                pocsag = Some(id);
-            }
-            Front::Banks(widths) => {
-                // The band the block was written about, not the whole span.
-                // A bank handed 60 MS/s divides it into 1024 channels at best,
-                // which is 60 kHz each: far wider than the 25 kHz an OOK
-                // sensor occupies, so several devices share a channel and the
-                // detector sees one long burst instead of packets. The
-                // extraction above buys that resolution back, and costs less,
-                // because the channelizer then runs at the band's rate rather
-                // than the radio's.
-                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
-                    continue;
-                };
-                let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
-                for &width in widths {
-                    // Which front end runs in a channel follows from its
-                    // width: the narrow bank is where OOK is worth detecting
-                    // and the wide one is where FSK's two tones both fit.
-                    let (label, make) = if width <= OOK_CHANNEL_HZ {
-                        ("OOK bank", nodes::ism_ook_graph as fn(_) -> _)
-                    } else {
-                        ("FSK bank", nodes::ism_fsk_graph as fn(_) -> _)
-                    };
-                    let role = Role::Bank(sub.key(), width as u32);
-                    let id = match pool.remove(&role) {
-                        // Set before it goes back into the graph, because the
-                        // mask decides which channels get a decoder and that
-                        // happens while the graph negotiates.
-                        Some(mut p) => {
-                            if let Some(n) = p
-                                .node
-                                .as_any_mut()
-                                .and_then(|a| a.downcast_mut::<BankNode>())
-                            {
-                                n.set_band(Some(band));
-                            }
-                            b.add_existing(p)
-                        }
-                        None => {
-                            let mut n = BankNode::new(label, width, make);
-                            n.set_band(Some(band));
-                            b.add_labeled(label, Box::new(n))
-                        }
-                    };
-                    b.connect(src, id.i());
-                    roles.push(role);
-                    banks.push((id, width));
-                }
-            }
+                    Some(format!("{:.4} MHz is too near the span edge for {what}", hz / 1e6));
             }
         }
+        let modes = of_kind("mode_s").first().copied();
+        let ais = of_kind("ais").first().copied();
+        let aprs = of_kind("aprs").first().copied();
+        let pocsag = of_kind("pocsag").first().copied();
+        let banks: Vec<NodeId> = of_kind("bank");
 
         narrowband.extend(patch_packets);
 
@@ -698,10 +554,9 @@ impl Receiver {
         }
 
         let mut bus = None;
-        let sources: Vec<Out> = banks
+        let sources: Vec<Out> = narrowband
             .iter()
-            .map(|(id, _)| id.o())
-            .chain(narrowband.iter().map(|n| n.o()))
+            .map(|n| n.o())
             .chain(feeds.iter().map(|f| f.o()))
             .collect();
         if !sources.is_empty() {
@@ -755,10 +610,10 @@ impl Receiver {
         // A feed is usually the reason to run this at all on a band that is
         // neither 1090 nor 162.
         let mut tracks = None;
-        let makes_tracks = plan
-            .fronts
+        let makes_tracks = patch
+            .stages()
             .iter()
-            .any(|f| matches!(f.front, Front::ModeS | Front::Ais | Front::Aprs(_)));
+            .any(|s| TRACK_SOURCES.contains(&s.kind.as_str()));
         if let (Some(bus), true) = (bus, makes_tracks || !plan.feeds.is_empty()) {
             let id = match pool.remove(&Role::Flights) {
                 Some(p) => b.add_existing(p),
@@ -888,7 +743,7 @@ impl Receiver {
         self.modes = modes;
         self.banks = banks
             .into_iter()
-            .map(|(id, _width)| {
+            .map(|id| {
                 let channels = self
                     .graph
                     .node(id)
@@ -1348,15 +1203,240 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 }
 
 
-/// Build the mixer and decimator that cut one band out of the span.
-///
-/// Returns the node whose output the front end should read, which is the head
-/// itself when the band is the span and nothing needs doing. Cached by band
-/// and factor, so two front ends listening in the same place share one
-/// extraction instead of each running its own mixer over every sample.
-#[allow(clippy::too_many_arguments)]
+
 /// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 3] = ["pulse_detect", "ask_detect", "fsk_detect"];
+const BUS_TAILS: [&str; 8] = [
+    "pulse_detect",
+    "ask_detect",
+    "fsk_detect",
+    "bank",
+    "mode_s",
+    "ais",
+    "aprs",
+    "pocsag",
+];
+
+/// Stages that report something a position can be resolved from, so the
+/// tracker is worth attaching to the bus.
+const TRACK_SOURCES: [&str; 3] = ["mode_s", "ais", "aprs"];
+
+/// The recorder's ring, which is a stage in the graph but owns an open file
+/// and so cannot be built from a description alone.
+const RING: &str = "ring";
+
+/// Ids the receiver gives the stages it derives for itself.
+///
+/// Fixed for the stages there is only ever one of, and computed from what it
+/// is for otherwise: a bank keeps its channels and a detector its noise floor
+/// across a rebuild only if the same stage comes back under the same name.
+pub mod derived {
+    use crate::patch::Patch;
+
+    pub const DC: u64 = Patch::DERIVED_BASE + 1;
+    pub const ZOOM: u64 = Patch::DERIVED_BASE + 2;
+    pub const SPECTRUM: u64 = Patch::DERIVED_BASE + 3;
+    pub const RING: u64 = Patch::DERIVED_BASE + 4;
+
+    /// A stage that belongs to one band or one channel: the extraction in
+    /// front of a front end, the front end itself, one bank of a set.
+    pub fn at(what: &str, key: u64, nth: u64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        what.hash(&mut h);
+        key.hash(&mut h);
+        nth.hash(&mut h);
+        // Clear of the fixed ids above and of the markers at the top of the
+        // range, which are what `builtin` uses.
+        Patch::DERIVED_BASE + 16 + h.finish() % ((1 << 39) - 16)
+    }
+}
+
+/// The graph the receiver would draw for itself, from what it is doing.
+///
+/// This is what runs when nobody has taken the graph over, and it is also
+/// where manual mode starts: an operator editing the chain begins from the
+/// chain that was running, not from an empty canvas.
+pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
+    use crate::patch::{builtin, Source};
+    use pipeline::registry::Settings;
+    let mut p = crate::patch::Patch::default();
+
+    // The head of the chain: what every branch downstream agrees the samples
+    // are. A branch that saw the spur or the full rate would disagree with
+    // the others about what arrived.
+    let mut head = Source::Span;
+    if plan.dc_block {
+        p.add_derived(derived::DC, "dc_block", Settings::new());
+        p.connect(head, (derived::DC, 0));
+        head = Source::Stage(derived::DC, 0);
+    }
+    if plan.zoom > 1 {
+        let mut zoom = Settings::new();
+        zoom.insert("factor".into(), pipeline::ParamValue::Int(plan.zoom as i64));
+        // Passband just inside the new Nyquist: the whole point is that what
+        // is left is clean, since anything folded in cannot be told from a
+        // signal afterwards.
+        zoom.insert(
+            "passband_hz".into(),
+            pipeline::ParamValue::Float(plan.eff_rate() * 0.45),
+        );
+        zoom.insert("input_rate_hz".into(), pipeline::ParamValue::Float(plan.rate));
+        p.add_derived(derived::ZOOM, "decimate", zoom);
+        p.connect(head, (derived::ZOOM, 0));
+        head = Source::Stage(derived::ZOOM, 0);
+    }
+    // What the parts of the receiver that are not drawn yet read. They are
+    // not boxes, so they follow a marker rather than a wire.
+    p.connect(head, (builtin::HEAD, 0));
+
+    let mut spectrum = Settings::new();
+    spectrum.insert("size".into(), pipeline::ParamValue::Int(plan.fft as i64));
+    p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
+    p.connect(head, (derived::SPECTRUM, 0));
+
+    if plan.record {
+        p.add_derived(derived::RING, RING, Settings::new());
+        p.connect(head, (derived::RING, 0));
+    }
+
+    // The front ends the scanner table put on this span. Which demodulator
+    // belongs on which frequency is configuration rather than structure, so
+    // the table decides what is drawn here and the drawing is what runs.
+    let mut extracts: HashMap<(u64, usize), Source> = HashMap::new();
+    for at in &plan.fronts {
+        let front = &at.front;
+        // Everything the table puts on the span is fed a band cut out for it
+        // rather than the whole span. What each front end then does inside
+        // itself is a small residual shift at a low rate, instead of a mixer
+        // and a several-thousand-tap filter running at the radio's own rate
+        // where nothing could see them.
+        let want = front_band(front, at).and_then(|(band, min_rate)| {
+            let band = match front {
+                Front::Banks(_) => at.covered(plan.center.as_f64(), plan.eff_rate())?,
+                _ => band,
+            };
+            (band.1 > band.0).then(|| SubBand::plan(band, plan.eff_rate(), min_rate))
+        });
+        let src = match want {
+            Some(sub) => extract_stages(&mut p, &mut extracts, head, plan, sub),
+            None => head,
+        };
+        // A single-channel front end whose channel does not clear the span
+        // edge by its own bandwidth is left out rather than drawn: the node
+        // would refuse it at negotiation and take the whole graph down with
+        // it, and one badly placed block should cost its own front end rather
+        // than the receiver.
+        let fits =
+            |hz: f64, width: f64| (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width;
+        match front {
+            Front::ModeS => {
+                let id = p.add_derived(derived::at("mode_s", 0, 0), "mode_s", Settings::new());
+                p.connect(src, (id, 0));
+            }
+            Front::Ais => {
+                let id = p.add_derived(derived::at("ais", 0, 0), "ais", Settings::new());
+                p.connect(src, (id, 0));
+            }
+            Front::Aprs(hz) if fits(*hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ) => {
+                let mut s = Settings::new();
+                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
+                s.insert(
+                    "label".into(),
+                    pipeline::ParamValue::Text(format!("{:.3} APRS", hz / 1e6)),
+                );
+                let id = p.add_derived(derived::at("aprs", *hz as u64, 0), "aprs", s);
+                p.connect(src, (id, 0));
+            }
+            Front::Pocsag(hz) if fits(*hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ) => {
+                let mut s = Settings::new();
+                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
+                s.insert(
+                    "label".into(),
+                    pipeline::ParamValue::Text(format!("{:.4} pager", hz / 1e6)),
+                );
+                let id = p.add_derived(derived::at("pocsag", *hz as u64, 0), "pocsag", s);
+                p.connect(src, (id, 0));
+            }
+            Front::Aprs(_) | Front::Pocsag(_) => {}
+            Front::Banks(widths) => {
+                // The band the block was written about, not the whole span. A
+                // bank handed 60 MS/s divides it into 1024 channels at best,
+                // which is 60 kHz each: far wider than the 25 kHz an OOK
+                // sensor occupies, so several devices share a channel and the
+                // detector sees one long burst instead of packets. The
+                // extraction above buys that resolution back, and costs less,
+                // because the channelizer then runs at the band's rate.
+                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
+                    continue;
+                };
+                let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
+                for &width in widths {
+                    let mut s = Settings::new();
+                    s.insert("channel_hz".into(), pipeline::ParamValue::Float(width));
+                    s.insert("fsk".into(), pipeline::ParamValue::Bool(width > OOK_CHANNEL_HZ));
+                    s.insert("band_lo_hz".into(), pipeline::ParamValue::Float(band.0));
+                    s.insert("band_hi_hz".into(), pipeline::ParamValue::Float(band.1));
+                    let id =
+                        p.add_derived(derived::at("bank", sub.key(), width as u64), "bank", s);
+                    p.connect(src, (id, 0));
+                }
+            }
+        }
+    }
+    p
+}
+
+/// The mixer and decimator that cut one band out of the span, as stages.
+///
+/// Shared by band and factor, so two front ends listening in the same place
+/// read one extraction instead of each running its own mixer over every
+/// sample.
+fn extract_stages(
+    p: &mut crate::patch::Patch,
+    cache: &mut HashMap<(u64, usize), crate::patch::Source>,
+    head: crate::patch::Source,
+    plan: &Plan,
+    sub: SubBand,
+) -> crate::patch::Source {
+    use crate::patch::Source;
+    use pipeline::registry::Settings;
+    if sub.is_whole_span(plan.center.as_f64()) {
+        return head;
+    }
+    if let Some(src) = cache.get(&(sub.key(), sub.factor)) {
+        return *src;
+    }
+    let mut mix = Settings::new();
+    mix.insert(
+        "shift_hz".into(),
+        pipeline::ParamValue::Float(plan.center.as_f64() - sub.center),
+    );
+    mix.insert(
+        "label".into(),
+        pipeline::ParamValue::Text(format!("{:.4} MHz mixer", sub.center / 1e6)),
+    );
+    let m = p.add_derived(derived::at("submix", sub.key(), 0), "mixer", mix);
+    p.connect(head, (m, 0));
+
+    let mut dec = Settings::new();
+    dec.insert("factor".into(), pipeline::ParamValue::Int(sub.factor as i64));
+    dec.insert("passband_hz".into(), pipeline::ParamValue::Float(sub.need / 2.0));
+    dec.insert("input_rate_hz".into(), pipeline::ParamValue::Float(plan.eff_rate()));
+    dec.insert(
+        "label".into(),
+        pipeline::ParamValue::Text(format!(
+            "/{} to {}",
+            sub.factor,
+            hz_label(sub.rate(plan.eff_rate()))
+        )),
+    );
+    let d = p.add_derived(derived::at("subdec", sub.key(), sub.factor as u64), "decimate", dec);
+    p.connect(Source::Stage(m, 0), (d, 0));
+
+    let out = Source::Stage(d, 0);
+    cache.insert((sub.key(), sub.factor), out);
+    out
+}
 
 /// What a stage is called on screen and in the latency accounting.
 ///
@@ -1364,6 +1444,11 @@ const BUS_TAILS: [&str; 3] = ["pulse_detect", "ask_detect", "fsk_detect"];
 /// are the same kind of thing to the builder and not to a reader.
 fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
     use pipeline::registry::SettingsExt;
+    // A derived stage can carry the name the old hand-written code gave it,
+    // which says which band or which frequency it belongs to.
+    if let Some(l) = settings.get("label").and_then(|v| v.as_str()) {
+        return l.to_string();
+    }
     match kind {
         "dc_block" => "DC block".into(),
         "spectrum" => "Spectrum".into(),
@@ -1387,77 +1472,28 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "fsk_detect" => "FSK pulses".into(),
         "protocol_decode" => "Protocols".into(),
         "ssb_demod" => "SSB demodulator".into(),
+        "mode_s" => "1090 Mode S".into(),
+        "ais" => "162 AIS".into(),
+        "aprs" => "APRS".into(),
+        "pocsag" => "Pager".into(),
+        "bank" => {
+            let w = settings.f64_or("channel_hz", 0.0);
+            if settings.bool_or("fsk", false) {
+                "FSK bank".into()
+            } else {
+                let _ = w;
+                "OOK bank".into()
+            }
+        }
         other => other.to_string(),
     }
-}
-
-/// The recorder's ring, which is a stage in the graph but owns an open file
-/// and so cannot be built from a description alone.
-const RING: &str = "ring";
-
-/// Ids the receiver gives the stages it derives for itself.
-mod derived {
-    pub const DC: u64 = 1;
-    pub const ZOOM: u64 = 2;
-    pub const SPECTRUM: u64 = 3;
-    pub const RING: u64 = 4;
-}
-
-/// The graph the receiver would draw for itself, from what it is doing.
-///
-/// This is what runs when nobody has taken the graph over, and it is also
-/// where manual mode starts: an operator editing the chain begins from the
-/// chain that was running, not from an empty canvas.
-pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
-    use crate::patch::{builtin, Source};
-    use pipeline::registry::Settings;
-    let mut p = crate::patch::Patch::default();
-    let mut settings = Settings::new();
-
-    // The head of the chain: what every branch downstream agrees the samples
-    // are. A branch that saw the spur or the full rate would disagree with
-    // the others about what arrived.
-    let mut head = Source::Span;
-    if plan.dc_block {
-        p.add_derived(derived::DC, "dc_block", Settings::new());
-        p.connect(head, (derived::DC, 0));
-        head = Source::Stage(derived::DC, 0);
-    }
-    if plan.zoom > 1 {
-        settings.insert("factor".into(), pipeline::ParamValue::Int(plan.zoom as i64));
-        // Passband just inside the new Nyquist: the whole point is that what
-        // is left is clean, since anything folded in cannot be told from a
-        // signal afterwards.
-        settings.insert(
-            "passband_hz".into(),
-            pipeline::ParamValue::Float(plan.eff_rate() * 0.45),
-        );
-        settings.insert("input_rate_hz".into(), pipeline::ParamValue::Float(plan.rate));
-        p.add_derived(derived::ZOOM, "decimate", settings.clone());
-        p.connect(head, (derived::ZOOM, 0));
-        head = Source::Stage(derived::ZOOM, 0);
-    }
-    // What the front ends and the listening channels read. They are not
-    // drawn yet, so they follow a marker rather than a box.
-    p.connect(head, (builtin::HEAD, 0));
-
-    let mut spectrum = Settings::new();
-    spectrum.insert("size".into(), pipeline::ParamValue::Int(plan.fft as i64));
-    p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
-    p.connect(head, (derived::SPECTRUM, 0));
-
-    if plan.record {
-        p.add_derived(derived::RING, RING, Settings::new());
-        p.connect(head, (derived::RING, 0));
-    }
-    p
 }
 
 /// Build every stage in a patch, wired as the patch says.
 ///
 /// Returns the ones that produce packets, for the bus to collect, and where
-/// each stage ended up, for the receiver's own stages that were told to read
-/// one of them.
+/// each stage ended up, so the rest of the receiver can find the ones it has
+/// to talk to.
 ///
 /// A stage whose inputs are not all fed is left out rather than built. The
 /// graph refuses an unconnected input port, and refusing the whole receiver
@@ -1473,13 +1509,14 @@ fn add_patch(
     ring: &mut Option<RecordRing>,
 ) -> Result<(Vec<NodeId>, HashMap<u64, NodeId>)> {
     use crate::patch::Source;
+    use pipeline::registry::SettingsExt;
     let reg = nodes::registry();
     let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
     for st in patch.stages() {
         let role = Role::Patch(st.id, st.kind.clone());
         // Reused where it can be, so editing one wire does not reset the
-        // detector's noise floor on every other stage in the patch.
-        let node = match pool.remove(&role) {
+        // detector's noise floor on every other stage in the graph.
+        let mut node = match pool.remove(&role) {
             Some(p) => p.node,
             // The recorder owns an open file, so it is handed in rather than
             // constructed from a description. A patch that asks for one when
@@ -1491,14 +1528,13 @@ fn add_patch(
             None => {
                 let mut node = reg.build(&st.kind, &st.settings)?;
                 // A decimator's passband is designed rather than set, so it
-                // is not something the registry can take as a number without
-                // the rate it was designed against.
+                // is not something a number alone can carry: the design needs
+                // the rate it is being cut from.
                 if let (Some(pb), Some(rate)) = (
                     st.settings.get("passband_hz").and_then(|v| v.as_f64()),
                     st.settings.get("input_rate_hz").and_then(|v| v.as_f64()),
                 ) {
-                    if let Some(d) =
-                        node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
+                    if let Some(d) = node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
                     {
                         d.set_passband_hz(rate, pb);
                     }
@@ -1506,6 +1542,28 @@ fn add_patch(
                 node
             }
         };
+        // A stage the receiver derived is described by its settings, so one
+        // that came back out of the pool is brought up to date rather than
+        // left holding what the last rebuild wanted. A mixer whose shift
+        // still followed the old dial put a whole band in the wrong place.
+        // Settings a node cannot take as a parameter, such as a filter's
+        // designed passband, are refused here and belong to the id instead.
+        if crate::patch::Patch::is_derived(st.id) {
+            for (name, value) in &st.settings {
+                let _ = node.set_param(name, value.clone());
+            }
+        }
+        // A bank's band decides which of its channels get a decoder, and that
+        // is settled while the graph negotiates: it has to be set before the
+        // node goes in, on a reused node as much as a fresh one, because the
+        // span has usually moved under it since it was last built.
+        if st.kind == "bank" {
+            let (lo, hi) =
+                (st.settings.f64_or("band_lo_hz", 0.0), st.settings.f64_or("band_hi_hz", 0.0));
+            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<BankNode>()) {
+                n.set_band((hi > lo).then_some((lo, hi)));
+            }
+        }
         made.push((st.id, st.kind.clone(), node));
     }
 
@@ -1559,11 +1617,10 @@ fn add_patch(
                 None => {}
             }
         }
-        // A burst detector is where a patch meets the rest of the receiver:
-        // the bus takes bursts and the protocols run once, centrally, over
-        // everything on it. Anything else at the end of a patch is a chain
-        // that is not finished, and wiring it to the bus would hand the bus a
-        // stream of the wrong type.
+        // Everything that produces packets meets at the bus, where the
+        // protocols run once over all of it. Anything else at the end of a
+        // chain is one the operator has not finished, and wiring it to the
+        // bus would hand the bus a stream of the wrong type.
         if BUS_TAILS.contains(&kind.as_str()) && patch.is_tail(id) {
             packets.push(nid);
         }
@@ -1584,49 +1641,6 @@ fn add_patch(
         }
     }
     Ok((packets, ids))
-}
-
-fn extract(
-    b: &mut GraphBuilder,
-    roles: &mut Vec<Role>,
-    pool: &mut HashMap<Role, NodePart>,
-    cache: &mut HashMap<(u64, usize), NodeId>,
-    head: Out,
-    span_center: f64,
-    span_rate: f64,
-    sub: SubBand,
-) -> Out {
-    if sub.is_whole_span(span_center) {
-        return head;
-    }
-    if let Some(id) = cache.get(&(sub.key(), sub.factor)) {
-        return id.o();
-    }
-    // The mixer is built fresh every time: its shift follows the dial, and it
-    // is a phase accumulator rather than a filter worth keeping.
-    let mix = b.add_labeled(
-        format!("{:.4} MHz mixer", sub.center / 1e6),
-        Box::new(MixerNode::new(span_center - sub.center)),
-    );
-    roles.push(Role::SubBandMix(sub.key()));
-    b.connect(head, mix.i());
-
-    let role = Role::SubBandDecimate(sub.key(), sub.factor);
-    let dec = match pool.remove(&role) {
-        Some(p) => b.add_existing(p),
-        None => {
-            let mut d = DecimateNode::new(sub.factor);
-            d.set_passband_hz(span_rate, sub.need / 2.0);
-            b.add_labeled(
-                format!("/{} to {}", sub.factor, hz_label(sub.rate(span_rate))),
-                Box::new(d),
-            )
-        }
-    };
-    roles.push(role);
-    b.connect(mix.o(), dec.i());
-    cache.insert((sub.key(), sub.factor), dec);
-    dec.o()
 }
 
 /// A rate as a person reads it, for a node label.
