@@ -285,6 +285,25 @@ impl RxStream for HackRfStream {
     }
 }
 
+/// Let the streaming thread finish before its handle joins it.
+///
+/// `AsyncReadHandle::drop` joins the USB thread while still holding the
+/// receiving end of the channel that thread sends into. The send is blocking
+/// and the channel is bounded, so a thread that is mid-send when the receiver
+/// stops reading waits for a read that will never come, and the join waits
+/// for the thread: the process hangs on exit with the window already gone,
+/// which is what makes a receiver look like it ignores SIGTERM.
+///
+/// Draining until the sender is gone breaks the cycle. The stop flag is only
+/// looked at between transfers, so the thread has to be let through its
+/// current send before it can notice it.
+impl Drop for HackRfStream {
+    fn drop(&mut self) {
+        self.handle.stop();
+        while self.handle.recv().is_some() {}
+    }
+}
+
 impl HackRfStream {
     /// Chunks dropped by the driver since the stream started.
     pub fn dropped_chunks(&self) -> u64 {
