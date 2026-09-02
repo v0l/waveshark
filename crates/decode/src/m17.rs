@@ -299,6 +299,9 @@ pub fn packet_protocol(id: u8) -> Option<&'static str> {
     })
 }
 
+/// Bytes in one stream frame's payload.
+pub const PAYLOAD_BYTES: usize = 16;
+
 /// What a transmission amounts to, once its frames have been put together.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -309,8 +312,17 @@ pub enum Event {
     /// A complete packet whose CRC checked.
     Packet { lsf: Option<Lsf>, data: Vec<u8> },
     /// A stream ended, either because the transmitter said so or because it
-    /// stopped being heard.
+    /// stopped being heard. The conclusion drawn from the frames below.
     Stream { lsf: Option<Lsf>, frames: u32, complete: bool },
+    /// One frame of a stream, as it arrived: its number, and the payload it
+    /// carried, which for a voice stream is 40 ms of the vocoder's own
+    /// bitstream.
+    ///
+    /// Reported per frame because that is what was on the air. A log holding
+    /// only "M0ABC talked for nine seconds" cannot reproduce the nine
+    /// seconds, and at 3200 bit/s the frames it would need are 400 bytes a
+    /// second: less than the row describing them.
+    StreamFrame { lsf: Option<Lsf>, number: u16, payload: [u8; PAYLOAD_BYTES] },
 }
 
 impl Event {
@@ -324,6 +336,11 @@ impl Event {
                 let mut v = frames.to_be_bytes().to_vec();
                 v.push(u8::from(*complete));
                 (3, lsf.as_ref(), v)
+            }
+            Event::StreamFrame { lsf, number, payload } => {
+                let mut v = number.to_be_bytes().to_vec();
+                v.extend_from_slice(payload);
+                (4, lsf.as_ref(), v)
             }
         };
         let mut out = vec![tag, u8::from(lsf.is_some())];
@@ -362,6 +379,11 @@ impl Event {
                 lsf,
                 frames: u32::from_be_bytes(rest[..4].try_into().ok()?),
                 complete: rest[4] == 1,
+            },
+            (4, n) if n == 2 + PAYLOAD_BYTES => Event::StreamFrame {
+                lsf,
+                number: u16::from_be_bytes(rest[..2].try_into().ok()?),
+                payload: rest[2..].try_into().ok()?,
             },
             _ => return None,
         })
@@ -431,7 +453,7 @@ impl Assembler {
                     self.announced = true;
                 }
             }
-            Body::Stream { lich, number, last, .. } => {
+            Body::Stream { lich, number, last, payload, .. } => {
                 let cnt = (lich[5] >> 5) as usize;
                 if cnt < 6 {
                     let mut chunk = [0u8; 5];
@@ -439,6 +461,14 @@ impl Assembler {
                     self.chunks[cnt] = Some(chunk);
                 }
                 self.frames += 1;
+                // Reported whatever the stream turns out to be: this decoder
+                // does not read every mode, and the payload is the evidence
+                // for the ones it does not.
+                out.push(Event::StreamFrame {
+                    lsf: self.lsf.clone(),
+                    number: *number,
+                    payload: *payload,
+                });
                 if !self.announced {
                     if let Some(lsf) = self.rebuild() {
                         out.push(Event::LinkSetup { lsf: lsf.clone(), late: true });
@@ -719,9 +749,45 @@ mod tests {
         let (got, late) = setup.expect("the link setup was never rebuilt");
         assert_eq!(got, lsf);
         assert!(late, "a rebuilt link setup should say it was rebuilt");
-        // Rebuilt at the sixth frame, not the twelfth.
-        assert_eq!(events.len(), 2, "{events:?}");
-        assert!(matches!(events[1], Event::Stream { frames: 12, complete: true, .. }));
+        // Rebuilt at the sixth frame, not the twelfth: the setup and the
+        // closing summary are the conclusions, and every frame is reported
+        // beside them as the evidence for it.
+        let summaries: Vec<&Event> = events
+            .iter()
+            .filter(|e| !matches!(e, Event::StreamFrame { .. }))
+            .collect();
+        assert_eq!(summaries.len(), 2, "{summaries:?}");
+        assert!(matches!(summaries[1], Event::Stream { frames: 12, complete: true, .. }));
+    }
+
+    /// Every frame reaches the bus with its payload, which is what makes a
+    /// transmission replayable from a log rather than only summarised in it.
+    #[test]
+    fn every_stream_frame_is_reported_with_its_payload() {
+        let lsf = lsf_of("ALL", "M0ABC", 1 | 2 << 1, &[]);
+        let mut a = Assembler::new(48_000.0);
+        let mut events = Vec::new();
+        for n in 0..4u16 {
+            let mut f = stream_frame(&lsf, (n % 6) as u8, n, n == 3, 1920 * u64::from(n));
+            if let Body::Stream { payload, .. } = &mut f.body {
+                payload.fill(n as u8 + 1);
+            }
+            events.extend(a.push(&f));
+        }
+        let frames: Vec<(u16, [u8; PAYLOAD_BYTES])> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::StreamFrame { number, payload, .. } => Some((*number, *payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 4, "one event per frame heard");
+        assert_eq!(frames[2].0, 2);
+        assert_eq!(frames[2].1, [3u8; PAYLOAD_BYTES], "the payload arrived as it was sent");
+
+        // And it survives the trip over the bus, which is what the log holds.
+        let e = &events[2];
+        assert_eq!(Event::parse(&e.to_bytes()).as_ref(), Some(e));
     }
 
     #[test]

@@ -58,6 +58,9 @@ struct Member {
     graph: Graph,
     pulses: Vec<Out>,
     frames: Vec<Out>,
+    /// Front ends that build their own packets, because what they produce is
+    /// more than bytes: an M17 voice stream carries speech beside them.
+    packets: Vec<Out>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -70,8 +73,9 @@ impl Member {
         let graph = build_chain(spec, &[settings], reg)?;
         let pulses = taps(&graph, PortKind::Pulses);
         let frames = taps(&graph, PortKind::Frames);
+        let packets = taps(&graph, PortKind::Packets);
         let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
-        Ok(Self { name, graph, pulses, frames, router })
+        Ok(Self { name, graph, pulses, frames, packets, router })
     }
 
     /// Run one block through and collect what came out as packets.
@@ -166,6 +170,12 @@ impl Member {
                     iq: None,
                 });
             }
+        }
+        for t in &self.packets {
+            let Some(pk) = self.graph.buf(*t).and_then(|p| p.as_packets()) else { continue };
+            // Taken as they are: a front end that builds its own packet has
+            // said everything about it, including what it sounded like.
+            out.extend(pk.iter().cloned());
         }
         for t in &self.frames {
             let spec = self.graph.spec_of(*t);
@@ -381,6 +391,15 @@ impl AutoNode {
             }
             if fits(crate::aprs_nodes::CHANNEL_WIDTH_HZ) {
                 if let Ok(m) = Member::build("aprs", spec, NodeSpec::new("aprs").f("channel_hz", hz), &self.reg) {
+                    members.push(m);
+                }
+            }
+            // M17 belongs here for the same reason the other two do: it is a
+            // 12.5 kHz channel wherever an amateur puts it, its sync words
+            // and CRC decide whether the bits are its own, and a receiver
+            // that has to be told the frequency is not detecting.
+            if fits(crate::m17_nodes::CHANNEL_WIDTH_HZ) {
+                if let Ok(m) = Member::build("m17", spec, NodeSpec::new("m17").f("channel_hz", hz), &self.reg) {
                     members.push(m);
                 }
             }

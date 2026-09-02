@@ -298,13 +298,21 @@ impl Simple for M17Node {
     }
 }
 
+/// Payload bytes as hex, so a row carries what was on the air in a form that
+/// can be pasted into another decoder.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The row a transmission becomes.
 pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
     let event = Event::parse(bytes)?;
     let lsf = match &event {
         Event::LinkSetup { lsf, .. } => Some(lsf),
-        Event::Packet { lsf, .. } | Event::Stream { lsf, .. } => lsf.as_ref(),
+        Event::Packet { lsf, .. }
+        | Event::Stream { lsf, .. }
+        | Event::StreamFrame { lsf, .. } => lsf.as_ref(),
     };
     let mut fields: Vec<(String, Value)> = lsf.map(m17::fields).unwrap_or_default();
     let mut text = None;
@@ -336,6 +344,18 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 text = Some(s);
             }
             "M17-Packet"
+        }
+        // One frame of a stream, which is what the log holds and what the
+        // audio is rebuilt from. The row is deliberately thin: a list showing
+        // twenty-five of these a second is a list nobody reads, and the
+        // interface folds them into the transmission they belong to.
+        Event::StreamFrame { number, payload, .. } => {
+            fields.push(("frame".into(), Value::Int(i64::from(*number))));
+            fields.push(("payload".into(), Value::Text(hex(payload))));
+            match lsf.map(|l| l.data_type()) {
+                Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
+                _ => "M17-Stream",
+            }
         }
         Event::Stream { frames, complete, .. } => {
             fields.push(("frames".into(), Value::Int(i64::from(*frames))));
@@ -466,9 +486,17 @@ mod tests {
         // A kilohertz off frequency, because a handheld is.
         let iq = modulate(&symbols, rate, 1_000.0);
         let frames = run(&iq, rate, center);
-        let rows: Vec<Decoded> =
+        let all: Vec<Decoded> =
             frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
+        // Every frame is on the bus as evidence; these are the two rows that
+        // describe the transmission as a whole.
+        let rows: Vec<Decoded> = all
+            .iter()
+            .filter(|d| !d.fields.iter().any(|(k, _)| k == "frame"))
+            .cloned()
+            .collect();
         assert_eq!(rows.len(), 2, "expected a setup row and a stream row: {rows:?}");
+        assert_eq!(all.len(), 27, "25 frames, a setup and a summary: {}", all.len());
 
         assert_eq!(rows[0].protocol, "M17-Setup");
         let get = |d: &Decoded, k: &str| {

@@ -229,3 +229,84 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     let at = *hz as f64 - center.as_f64();
     assert!((at - offset).abs() < 20_000.0, "measured at {at:+.0} Hz, sent at {offset:+.0}");
 }
+
+/// M17 has no home frequency: it runs wherever an amateur puts it, so being
+/// told a channel is not detection. The front end is one demodulator on one
+/// channel, and what makes it general is that the source detector finds the
+/// transmission first and hands it a stream centred on it.
+#[test]
+fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
+    use decode::m17::Address;
+    use dsp::m17::{fec, frame_symbols, preamble_symbols, Kind, BAUD, DEVIATION_HZ};
+
+    let rate = 2_400_000.0;
+    let center = Hz::hz(433_000_000);
+    // Nowhere near the calling channel, and not on any grid.
+    let offset = 417_300.0;
+
+    let mut lsf = [0u8; 30];
+    lsf[..6].copy_from_slice(&Address::encode("ALL").to_be_bytes()[2..]);
+    lsf[6..12].copy_from_slice(&Address::encode("M0ABC").to_be_bytes()[2..]);
+    lsf[12..14].copy_from_slice(&(1u16 | 2 << 1).to_be_bytes());
+    let crc = fec::crc16(&lsf[..28]);
+    lsf[28..].copy_from_slice(&crc.to_be_bytes());
+
+    let mut symbols = preamble_symbols();
+    symbols.extend(frame_symbols(Kind::Lsf, &lsf, 0, &[0; 6]));
+    for n in 0..25u16 {
+        let cnt = (n % 6) as usize;
+        let mut lich = [0u8; 6];
+        lich[..5].copy_from_slice(&lsf[cnt * 5..cnt * 5 + 5]);
+        lich[5] = (cnt as u8) << 5;
+        symbols.extend(frame_symbols(Kind::Stream, &[0x5au8; 16], n, &lich));
+    }
+
+    // With noise, as the pager test does: the detector estimates its floor
+    // from the quietest recent frames, and a span of exact zeros has no
+    // floor to estimate.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut noise = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let u1 = ((seed >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let u2 = (seed >> 11) as f64 / (1u64 << 53) as f64;
+        let r = (-2.0 * u1.ln()).sqrt();
+        C32::new(
+            (r * (std::f64::consts::TAU * u2).cos()) as f32 * 0.02,
+            (r * (std::f64::consts::TAU * u2).sin()) as f32 * 0.02,
+        )
+    };
+    let sps = (rate / BAUD) as usize;
+    let mut iq: Vec<C32> = (0..600_000).map(|_| noise()).collect();
+    let mut phase = 0.0f64;
+    for &s in &symbols {
+        let f = offset + f64::from(s) / 3.0 * DEVIATION_HZ;
+        for _ in 0..sps {
+            phase += std::f64::consts::TAU * f / rate;
+            iq.push(C32::new(0.3 * phase.cos() as f32, 0.3 * phase.sin() as f32) + noise());
+        }
+    }
+    iq.extend((0..600_000).map(|_| noise()));
+
+    let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
+    let rows: Vec<pipeline::event::Decoded> = pk
+        .iter()
+        .filter_map(|p| match &p.body {
+            PacketBody::Frame(b) => nodes::m17_nodes::m17_decoded(b, Hz(p.center_hz)),
+            _ => None,
+        })
+        .collect();
+    let setup = rows.iter().find(|d| d.protocol == "M17-Setup");
+    assert!(setup.is_some(), "nothing read as M17; {} packets", pk.len());
+    let from = setup
+        .unwrap()
+        .fields
+        .iter()
+        .find(|(k, _)| k == "from")
+        .map(|(_, v)| v.to_string());
+    assert_eq!(from.as_deref(), Some("M0ABC"));
+}
