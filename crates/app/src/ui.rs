@@ -5054,8 +5054,12 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let cols = (rect.width() as usize).max(1);
     // Frequency resolution: enough rows to separate tens of kilohertz in a
     // few hundred kilohertz of span, and no more than the height can show.
-    let rows = (rect.height() as usize).clamp(64, 256).next_power_of_two();
+    // The transform's frequency detail is fixed; the image is built at the
+    // panel's own pixel height so the texture is drawn one-to-one and not
+    // stretched. Rows are mapped to pixels below.
+    let rows = 512usize;
     let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows);
+    let n = img.len() / cols;
     // The floor is the median cell; the top is the peak. A fixed range would
     // wash out a weak burst or clip a strong one, and the burst is all there
     // is on screen so its own range is the right one.
@@ -5063,23 +5067,27 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let floor = sorted.get(sorted.len() / 2).copied().unwrap_or(-60.0);
     let span = (0.0 - floor).max(6.0);
-    let n = img.len() / cols;
-    let mut pixels = vec![Color32::BLACK; cols * n];
-    for r in 0..n {
-        // Row zero of the image is the lowest frequency; the screen has the
-        // highest at the top, so the image is drawn upside down.
-        let dst = (n - 1 - r) * cols;
+    // One image row per screen pixel: the highest frequency at the top, so
+    // pixel y reads bin `(pix_h - 1 - y)` scaled into the transform's rows.
+    let pix_h = (rect.height() as usize).max(1);
+    let mut pixels = vec![Color32::BLACK; cols * pix_h];
+    for y in 0..pix_h {
+        let r = (pix_h - 1 - y) * n / pix_h;
+        let src = r * cols;
+        let dst = y * cols;
         for c in 0..cols {
-            let v = ((img[r * cols + c] - floor) / span).clamp(0.0, 1.0);
+            let v = ((img[src + c] - floor) / span).clamp(0.0, 1.0);
             pixels[dst + c] = crate::waterfall::colormap(v);
         }
     }
     let image = ColorImage {
-        size: [cols, n],
+        size: [cols, pix_h],
         pixels,
-        source_size: egui::Vec2::new(cols as f32, n as f32),
+        source_size: egui::Vec2::new(cols as f32, pix_h as f32),
     };
-    let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::LINEAR);
+    // The image is already the panel's size, so nearest sampling keeps the
+    // tone lines crisp rather than smearing them across pixels.
+    let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::NEAREST);
     p.image(
         tex.id(),
         rect,
