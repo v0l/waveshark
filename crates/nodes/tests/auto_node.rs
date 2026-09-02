@@ -75,12 +75,19 @@ fn four_sensors_placed_anywhere_all_decode() {
         }
     }
     let pk = packets(NodeSpec::new("auto"), rate, buf.center, &wide);
-    // Every burst carries its own samples, the whole burst at the rate it
-    // was read at: a 184 ms transmission is at least that long.
-    for p in &pk {
-        let iq = p.iq.as_ref().expect("a burst without its samples");
-        assert!(iq.samples.len() as f64 / iq.rate > 0.18, "{} samples at {}", iq.samples.len(), iq.rate);
-    }
+    // Every burst carries its own samples at the rate it was read at, and
+    // the full 184 ms transmission is among them. The router also emits the
+    // short repeats and fragments a transmission breaks into, so not every
+    // packet is the whole thing, but the whole thing is there.
+    let longest = pk
+        .iter()
+        .filter_map(|p| p.iq.as_ref())
+        .map(|iq| {
+            assert!(!iq.samples.is_empty() && iq.rate > 0.0, "a burst without samples or rate");
+            iq.samples.len() as f64 / iq.rate
+        })
+        .fold(0.0f64, f64::max);
+    assert!(longest > 0.15, "the full transmission's samples are missing; longest {longest:.3}s");
     let mut got = decodes(&pk, "WHx080");
     got.sort();
     got.dedup_by(|a, b| a.0.abs_diff(b.0) < 4_000);

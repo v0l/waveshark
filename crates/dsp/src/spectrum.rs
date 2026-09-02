@@ -105,6 +105,54 @@ impl Spectrum {
     }
 }
 
+/// A spectrogram of one burst, for a view that shows what it is: `cols`
+/// columns across its length and `rows` frequency bins from the lowest
+/// frequency at index zero to the highest, each cell the power in decibels
+/// below the burst's peak.
+///
+/// This is the view a burst is read from, the way inspectrum and Universal
+/// Radio Hacker show one: a two-tone signal is two lines, a chirp a ramp,
+/// on-off keying a broken bar, a multi-carrier signal a filled band. `rows`
+/// is rounded up to a power of two for the transform.
+pub fn spectrogram(samples: &[C32], cols: usize, rows: usize) -> Vec<f32> {
+    let n = rows.max(16).next_power_of_two();
+    let cols = cols.max(1);
+    let mut out = vec![-120.0f32; cols * n];
+    if samples.len() < 4 {
+        return out;
+    }
+    let fft = FftPlanner::new().plan_fft_forward(n);
+    let win = window::hann(n);
+    let mut buf = vec![C32::default(); n];
+    let mut scratch = vec![C32::default(); fft.get_inplace_scratch_len()];
+    let half = n / 2;
+    let mut peak = 1e-20f32;
+    // One column per pixel, its window centred on the column's place in the
+    // burst so the first and last columns are the burst's ends, not silence
+    // beyond them.
+    for c in 0..cols {
+        let centre = (c as f64 + 0.5) / cols as f64 * samples.len() as f64;
+        let start = (centre as isize - half as isize).max(0) as usize;
+        for i in 0..n {
+            let s = samples.get(start + i).copied().unwrap_or(C32::new(0.0, 0.0));
+            buf[i] = s * win[i];
+        }
+        fft.process_with_scratch(&mut buf, &mut scratch);
+        for r in 0..n {
+            // Shift so the lowest frequency is at row zero.
+            let bin = (r + half) % n;
+            let power = buf[bin].norm_sqr();
+            peak = peak.max(power);
+            out[r * cols + c] = power;
+        }
+    }
+    let scale = 1.0 / peak;
+    for v in &mut out {
+        *v = 10.0 * (*v * scale + 1e-12).log10();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +237,34 @@ mod tests {
         }
         let peak = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
         assert!((peak + 3.0).abs() < 2.0, "expected about -3 dBFS, got {peak:.2}");
+    }
+
+    #[test]
+    fn a_spectrogram_of_two_tones_lights_two_rows() {
+        // A signal that spends its first half at one tone and its second at
+        // another, as two-level keying does. The two show as two rows, well
+        // apart, and each only where its half of the burst is.
+        let rate = 1_000_000.0;
+        let n = 20_000usize;
+        let sig: Vec<C32> = (0..n)
+            .map(|i| {
+                let hz = if i < n / 2 { -100_000.0 } else { 100_000.0 };
+                let ph = std::f64::consts::TAU * hz * i as f64 / rate;
+                C32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        let (cols, rows) = (64usize, 128usize);
+        let img = spectrogram(&sig, cols, rows);
+        // Row of -100 kHz is below centre, +100 kHz above; find the loudest
+        // row in the first and last columns.
+        let loudest = |col: usize| {
+            (0..rows).max_by(|&a, &b| img[a * cols + col].partial_cmp(&img[b * cols + col]).unwrap()).unwrap()
+        };
+        let lo = loudest(4);
+        let hi = loudest(cols - 5);
+        assert!(lo < rows / 2, "first tone should sit below centre, row {lo}");
+        assert!(hi > rows / 2, "second tone should sit above centre, row {hi}");
+        assert!(hi.abs_diff(lo) > rows / 8, "the tones should be well apart: {lo} vs {hi}");
     }
 
     #[test]

@@ -92,7 +92,10 @@ impl Member {
                 .node(id)
                 .and_then(|n| n.as_any())
                 .and_then(|a| a.downcast_ref::<crate::BurstRouteNode>());
-            let rate = spec.map(|s| s.rate).unwrap_or(0.0);
+            // The samples are at the rate the router was fed, which is the
+            // source's extraction rate; the router's own output port is a
+            // packet stream and carries no rate.
+            let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
                 let m = crate::decode_nodes::measure_of(b, center_hz as f64);
                 let iq = Some(std::sync::Arc::new(common::IqBurst {

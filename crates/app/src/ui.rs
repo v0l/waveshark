@@ -10,7 +10,7 @@ use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
-use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Vec2};
 
 pub struct App {
     radio: Option<Radio>,
@@ -5033,92 +5033,119 @@ fn burst_columns(samples: &[common::C32], rate: f64, cols: usize) -> Vec<(f32, f
 /// frequency ramping across the width.
 fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let secs = iq.samples.len() as f64 / iq.rate.max(1.0);
+    let half_span = iq.rate / 2.0;
     ui.label(legend(&format!(
-        "burst  {:.1} ms  {} samples at {:.1} kS/s  around {:.4} MHz",
+        "burst  {:.2} ms  {} samples at {:.0} kS/s  {:.4} MHz +/-{:.0} kHz",
         secs * 1e3,
         iq.samples.len(),
         iq.rate / 1e3,
-        iq.center_hz as f64 / 1e6
+        iq.center_hz as f64 / 1e6,
+        half_span / 1e3,
     )));
     let width = ui.available_width().max(200.0);
-    let (resp, p) = ui.allocate_painter(Vec2::new(width, height), Sense::hover());
+    // A strip of envelope under the spectrogram: the two together are the
+    // amplitude and the frequency of the burst, which between them show what
+    // any of the classes looks like.
+    let env_h = (height * 0.22).clamp(18.0, 48.0);
+    let spec_h = (height - env_h - 2.0).max(24.0);
+    let (resp, p) = ui.allocate_painter(Vec2::new(width, spec_h), Sense::hover());
     let rect = resp.rect;
     p.rect_filled(rect, 2.0, theme::WELL);
-    let cols = burst_columns(&iq.samples, iq.rate, rect.width() as usize);
-    if cols.is_empty() {
-        return;
-    }
-    let peak = cols.iter().map(|(e, _)| *e).fold(1e-6f32, f32::max);
-    // The frequency scale is the burst's own: what it reached, either way,
-    // so a 5 kHz keyed carrier and a 250 kHz chirp both fill the height.
-    let fmax = cols
-        .iter()
-        .map(|(_, hz)| hz.abs())
-        .fold(0.0f32, f32::max)
-        .max(1.0);
-    let x_of = |c: usize| rect.left() + c as f32 + 0.5;
-    // Envelope, filled to the floor.
-    for (c, (env, _)) in cols.iter().enumerate() {
-        let h = (env / peak) * (rect.height() - 6.0);
-        p.line_segment(
-            [Pos2::new(x_of(c), rect.bottom() - 2.0), Pos2::new(x_of(c), rect.bottom() - 2.0 - h)],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(theme::TRACE.r(), theme::TRACE.g(), theme::TRACE.b(), 150)),
-        );
-    }
-    // Frequency, centred on the middle line, only where there is signal to
-    // measure it on: in a gap the phase step is noise.
-    let mid = rect.center().y;
-    let half = (rect.height() - 8.0) / 2.0;
-    p.line_segment(
-        [Pos2::new(rect.left(), mid), Pos2::new(rect.right(), mid)],
-        Stroke::new(1.0, theme::ETCH),
-    );
-    let mut pts: Vec<Pos2> = Vec::new();
-    for (c, (env, hz)) in cols.iter().enumerate() {
-        if *env < peak * 0.25 {
-            if pts.len() > 1 {
-                p.add(egui::Shape::line(std::mem::take(&mut pts), Stroke::new(1.2, theme::READOUT)));
-            }
-            pts.clear();
-            continue;
+    let cols = (rect.width() as usize).max(1);
+    // Frequency resolution: enough rows to separate tens of kilohertz in a
+    // few hundred kilohertz of span, and no more than the height can show.
+    let rows = (rect.height() as usize).clamp(64, 256).next_power_of_two();
+    let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows);
+    // The floor is the median cell; the top is the peak. A fixed range would
+    // wash out a weak burst or clip a strong one, and the burst is all there
+    // is on screen so its own range is the right one.
+    let mut sorted: Vec<f32> = img.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let floor = sorted.get(sorted.len() / 2).copied().unwrap_or(-60.0);
+    let span = (0.0 - floor).max(6.0);
+    let n = img.len() / cols;
+    let mut pixels = vec![Color32::BLACK; cols * n];
+    for r in 0..n {
+        // Row zero of the image is the lowest frequency; the screen has the
+        // highest at the top, so the image is drawn upside down.
+        let dst = (n - 1 - r) * cols;
+        for c in 0..cols {
+            let v = ((img[r * cols + c] - floor) / span).clamp(0.0, 1.0);
+            pixels[dst + c] = crate::waterfall::colormap(v);
         }
-        pts.push(Pos2::new(x_of(c), mid - (hz / fmax) * half));
     }
-    if pts.len() > 1 {
-        p.add(egui::Shape::line(pts, Stroke::new(1.2, theme::READOUT)));
-    }
+    let image = ColorImage {
+        size: [cols, n],
+        pixels,
+        source_size: egui::Vec2::new(cols as f32, n as f32),
+    };
+    let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::LINEAR);
+    p.image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+
     let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
     p.text(
-        Pos2::new(rect.left() + 4.0, rect.top() + 3.0),
+        Pos2::new(rect.left() + 4.0, rect.top() + 2.0),
         Align2::LEFT_TOP,
-        format!("{:+.1} kHz", fmax / 1e3),
+        format!("+{:.0} kHz", half_span / 1e3),
         font.clone(),
-        theme::READOUT,
+        theme::LEGEND,
     );
     p.text(
-        Pos2::new(rect.left() + 4.0, rect.bottom() - 3.0),
+        Pos2::new(rect.left() + 4.0, rect.bottom() - 2.0),
         Align2::LEFT_BOTTOM,
-        format!("{:+.1} kHz", -fmax / 1e3),
+        format!("-{:.0} kHz", half_span / 1e3),
         font.clone(),
-        theme::READOUT,
+        theme::LEGEND,
     );
     p.text(
-        Pos2::new(rect.right() - 4.0, rect.top() + 3.0),
+        Pos2::new(rect.right() - 4.0, rect.top() + 2.0),
         Align2::RIGHT_TOP,
-        format!("{:.1} ms", secs * 1e3),
+        format!("{:.2} ms", secs * 1e3),
+        font.clone(),
+        theme::LEGEND,
+    );
+    // DC line, so a reader knows where zero frequency sits.
+    let mid = rect.center().y;
+    p.line_segment(
+        [Pos2::new(rect.left(), mid), Pos2::new(rect.right(), mid)],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x8B, 0x92, 0x9C, 40)),
+    );
+
+    // The envelope beneath, filled from its own floor.
+    ui.add_space(2.0);
+    let (eresp, ep) = ui.allocate_painter(Vec2::new(width, env_h), Sense::hover());
+    let erect = eresp.rect;
+    ep.rect_filled(erect, 2.0, theme::WELL);
+    let env = burst_columns(&iq.samples, iq.rate, erect.width() as usize);
+    let peak = env.iter().map(|(e, _)| *e).fold(1e-6f32, f32::max);
+    for (c, (e, _)) in env.iter().enumerate() {
+        let h = (e / peak) * (erect.height() - 3.0);
+        let x = erect.left() + c as f32 + 0.5;
+        ep.line_segment(
+            [Pos2::new(x, erect.bottom() - 1.0), Pos2::new(x, erect.bottom() - 1.0 - h)],
+            Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(theme::TRACE.r(), theme::TRACE.g(), theme::TRACE.b(), 150),
+            ),
+        );
+    }
+    ep.text(
+        Pos2::new(erect.left() + 4.0, erect.top() + 1.0),
+        Align2::LEFT_TOP,
+        "envelope",
         font,
         theme::LEGEND,
     );
-    // Where the pointer is, in the burst's own time.
+
     if let Some(pos) = resp.hover_pos() {
-        let t = (pos.x - rect.left()) as f64 / rect.width() as f64 * secs;
-        let c = ((pos.x - rect.left()) as usize).min(cols.len() - 1);
-        resp.on_hover_text(format!(
-            "{:.2} ms   level {:.2}   {:+.1} kHz",
-            t * 1e3,
-            cols[c].0 / peak,
-            cols[c].1 / 1e3
-        ));
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * secs;
+        let hz = (mid - pos.y) / (rect.height() / 2.0) * half_span as f32;
+        resp.on_hover_text(format!("{:.3} ms   {:+.1} kHz", t * 1e3, hz / 1e3));
     }
 }
 
