@@ -278,12 +278,12 @@ pub enum Cmd {
     Zoom(usize),
     /// Decode every channel in the span, or stop doing so.
     Decode(bool),
-    /// Listen to voice as it is decoded, at this volume, or stop.
-    ///
-    /// Separate from the channel strips because a call is not a channel: it
-    /// arrives already demodulated by the front end watching that channel,
-    /// and it comes and goes with whoever is talking.
-    CallAudio { on: bool, volume: f32 },
+    /// What to listen to on the call bus, as the whole set of standing
+    /// instructions rather than an edit to them: the same bargain the
+    /// scanner table and the feeds make.
+    CallSubs(Vec<crate::callbus::Subscription>),
+    /// Stop a replay part way through.
+    StopPlay,
     /// Play a transmission that has already been decoded, once.
     ///
     /// The sink belongs to this thread, so replaying from the packet list is
@@ -785,10 +785,16 @@ pub struct Status {
     pub patch_rev: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
     pub logged: AtomicU64,
-    /// Whether voice is being monitored as it decodes, and whether a
-    /// recorded transmission is playing.
+    /// Whether anything is subscribed on the call bus, whether a recorded
+    /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
     pub replaying: AtomicBool,
+    pub call_heard: parking_lot::Mutex<Option<String>>,
+    /// Peak of what the call bus put into the mix last block, as f32 bits.
+    /// A meter beside the subscriptions: it separates "nothing was decoded"
+    /// from "it was decoded and you still cannot hear it", which are two
+    /// different faults and look identical from the speaker.
+    call_peak: AtomicU32,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -853,6 +859,8 @@ impl Default for Status {
             audio_backlog: AtomicU64::new(0),
             call_audio: AtomicBool::new(false),
             replaying: AtomicBool::new(false),
+            call_heard: parking_lot::Mutex::new(None),
+            call_peak: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
@@ -902,6 +910,11 @@ impl Status {
     }
 
     /// The radio's gain stages and switches, as they currently are.
+    /// Peak level the call bus last mixed, 0 to 1.
+    pub fn call_peak(&self) -> f32 {
+        f32::from_bits(self.call_peak.load(Ordering::Relaxed))
+    }
+
     pub fn radio(&self) -> RadioControls {
         self.radio.lock().clone()
     }
@@ -1206,14 +1219,8 @@ fn run(
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
     let mut last_chain = std::time::Instant::now();
-    // Voice from the call front ends: whether anybody is listening, how loud,
-    // the resampler that lifts the codec's 8 kHz to the output rate, and a
-    // queue holding a transmission being replayed.
-    let mut call_listen = false;
-    let mut call_volume = 0.8f32;
-    let mut voice_up = audio::Resampler::new(nodes::m17_nodes::VOICE_HZ, 48_000.0, 4);
-    let mut voice_pcm: Vec<f32> = Vec::new();
-    let mut replay: std::collections::VecDeque<f32> = std::collections::VecDeque::new();
+    // Where voice from every front end meets what the operator asked to hear.
+    let mut calls = crate::callbus::CallBus::new(48_000.0);
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
 
@@ -1434,23 +1441,9 @@ fn run(
                     scan_on = on;
                     rebuild = !manual;
                 }
-                Cmd::CallAudio { on, volume } => {
-                    call_listen = on;
-                    call_volume = volume.clamp(0.0, 2.0);
-                    if !on {
-                        voice_up.reset();
-                    }
-                }
-                Cmd::Play(speech) => {
-                    // Resampled here, once, rather than while it plays: a
-                    // transmission is at most a couple of minutes and the
-                    // audio thread must not be given work that can grow.
-                    let mut rs = audio::Resampler::new(speech.rate, 48_000.0, 4);
-                    let mut out = Vec::with_capacity(speech.pcm.len() * 6);
-                    rs.process(&speech.pcm, &mut out);
-                    replay.clear();
-                    replay.extend(out);
-                }
+                Cmd::CallSubs(subs) => calls.set_subscriptions(subs),
+                Cmd::StopPlay => calls.stop_replay(),
+                Cmd::Play(speech) => calls.play(&speech),
             }
         }
 
@@ -1691,29 +1684,32 @@ fn run(
             }
             status.set_channel_states(states);
 
-            // Voice from a call front end, live and replayed. Both are mono
-            // at the output rate by the time they get here, and both are
-            // mixed rather than switched: a replay while somebody is talking
-            // should not silence the person talking.
-            if call_listen {
-                voice_pcm.clear();
-                voice_up.process(rx.m17_voice(), &mut voice_pcm);
-                if !voice_pcm.is_empty() {
-                    let gain = call_volume * volume;
-                    frames = frames.max(mix_gain_into(&mut mix, &voice_pcm, false, gain));
-                }
+            // Voice, live and replayed, through the call bus: what reaches
+            // the speaker is what somebody subscribed to, and a replay is
+            // mixed rather than switched in so it cannot silence a live call.
+            for v in rx.voice_now() {
+                calls.push(crate::callbus::Voice {
+                    system: &v.system,
+                    channel_hz: v.channel_hz,
+                    to: &v.to,
+                    from: v.from.as_deref(),
+                    pcm: &v.pcm,
+                    rate: v.rate,
+                });
             }
-            if !replay.is_empty() {
-                // A block's worth, so a replay runs at its own speed rather
-                // than arriving as one enormous buffer.
-                let want = if frames > 0 { frames } else { (rate / 50.0) as usize };
-                let take = want.min(replay.len());
-                voice_pcm.clear();
-                voice_pcm.extend(replay.drain(..take));
-                frames = frames.max(mix_gain_into(&mut mix, &voice_pcm, false, volume));
+            let voice = calls.take(frames);
+            if !voice.is_empty() {
+                let peak = voice.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                status.call_peak.store(peak.to_bits(), Ordering::Relaxed);
+                let n = mix_gain_into(&mut mix, voice, false, volume);
+                frames = frames.max(n);
+            } else {
+                status.call_peak.store(0f32.to_bits(), Ordering::Relaxed);
             }
-            status.call_audio.store(call_listen, Ordering::Relaxed);
-            status.replaying.store(!replay.is_empty(), Ordering::Relaxed);
+            calls.clear();
+            status.call_audio.store(calls.listening(), Ordering::Relaxed);
+            status.replaying.store(calls.replaying(), Ordering::Relaxed);
+            *status.call_heard.lock() = calls.last_heard().map(str::to_string);
 
             if frames > 0 {
                 clip(&mut mix[..frames * 2]);

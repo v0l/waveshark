@@ -131,10 +131,9 @@ pub struct App {
     /// names a destination. Held here rather than in the graph because it is
     /// assembled from the same records the packet list shows.
     calls: crate::calls::Calls,
-    /// Whether decoded speech is being played as it arrives, and how loudly.
-    /// The call strip is what this draws as.
-    call_listen: bool,
-    call_volume: f32,
+    /// What the call bus is subscribed to, as the interface holds it. The
+    /// radio thread is sent the whole set whenever it changes.
+    call_subs: Vec<crate::callbus::Subscription>,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
@@ -505,8 +504,7 @@ impl Default for App {
             dc_block: true,
             view: View::Spectrum,
             calls: crate::calls::Calls::new(),
-            call_listen: false,
-            call_volume: 0.8,
+            call_subs: Vec::new(),
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
@@ -2031,7 +2029,6 @@ impl App {
                 });
 
                 ui.add_space(8.0);
-                self.call_strip(ui);
 
                 if self.channels.is_empty() {
                     ui.label(

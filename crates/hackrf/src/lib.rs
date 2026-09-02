@@ -225,9 +225,14 @@ impl Device for HackRfDevice {
         let dev = self.dev.take().ok_or(Error::Disconnected)?;
         let handle = dev.into_streaming_reader(0, 0).map_err(map_err)?;
         self.ctrl = Some(handle.control_handle());
-        // Gain is set on the device before streaming, but the control handle
-        // is the only route once the device has been consumed.
-        let _ = self.apply_gain();
+        // Entering receive mode re-initialises the front end, so the tune and
+        // the gains set before streaming do not survive it: at 95.8 MHz the
+        // floor reads 3 LSB rms without this and 23 with it, the difference
+        // between hearing the FM band and hearing the converter.
+        if let Some(c) = &self.ctrl {
+            c.tune(self.center.0).map_err(map_err)?;
+        }
+        self.apply_gain()?;
         Ok(Box::new(HackRfStream {
             handle,
             center: self.center,

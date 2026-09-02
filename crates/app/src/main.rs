@@ -5,6 +5,7 @@ mod prof;
 mod wheel;
 mod chain;
 mod bands;
+mod callbus;
 mod calls;
 mod devices;
 mod i18n;

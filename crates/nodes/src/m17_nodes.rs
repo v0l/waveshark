@@ -73,6 +73,9 @@ pub struct M17Node {
     /// 128 bits of something else, and running the vocoder over it produces
     /// noise that sounds like a fault.
     voice_stream: bool,
+    /// Who is talking and who to, from the link setup of the transmission in
+    /// progress. What a listener subscribes by.
+    talking: Option<(String, String)>,
     /// Audio samples since the node started, which is the clock the assembler
     /// closes a transmission on.
     samples: u64,
@@ -103,6 +106,7 @@ impl M17Node {
             voice: Vec::new(),
             voice_now: Vec::new(),
             voice_stream: false,
+            talking: None,
             samples: 0,
             accepted: 0,
         }
@@ -118,6 +122,17 @@ impl M17Node {
     /// Empty when nothing is transmitting or when the stream is not voice.
     pub fn voice_now(&self) -> &[f32] {
         &self.voice_now
+    }
+
+    /// The channel this node is listening on.
+    pub fn channel_hz(&self) -> f64 {
+        self.channel_hz
+    }
+
+    /// The source and destination of the transmission being heard, while one
+    /// is in progress.
+    pub fn talking(&self) -> Option<(&str, &str)> {
+        self.talking.as_ref().map(|(f, t)| (f.as_str(), t.as_str()))
     }
 
     /// Decode both Codec 2 frames in one stream payload.
@@ -219,6 +234,9 @@ impl Simple for M17Node {
                     self.voice.clear();
                     self.voice_stream = lsf.is_stream()
                         && matches!(lsf.data_type(), DataType::Voice | DataType::VoiceData);
+                    self.talking = self
+                        .voice_stream
+                        .then(|| (lsf.source().to_string(), lsf.destination().to_string()));
                 }
                 events.push(e);
             }
@@ -242,6 +260,12 @@ impl Simple for M17Node {
             let audio = matches!(e, Event::Stream { .. })
                 .then(|| self.take_voice())
                 .flatten();
+            if matches!(e, Event::Stream { .. }) {
+                // The transmission ended, so there is nobody to subscribe to
+                // until the next link setup.
+                self.talking = None;
+                self.voice_stream = false;
+            }
             out.push(common::Packet {
                 at_us,
                 center_hz,
@@ -261,6 +285,7 @@ impl Simple for M17Node {
     }
 
     fn reset(&mut self) {
+        self.talking = None;
         self.voice.clear();
         self.voice_now.clear();
         self.voice_stream = false;

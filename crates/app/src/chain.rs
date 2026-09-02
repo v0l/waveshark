@@ -193,6 +193,17 @@ pub struct LiveSource {
     pub snr_db: f32,
 }
 
+/// Speech from one source in one block, on its way to the call bus.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceBlock {
+    pub system: String,
+    pub channel_hz: f64,
+    pub to: String,
+    pub from: Option<String>,
+    pub pcm: Vec<f32>,
+    pub rate: f64,
+}
+
 pub struct Receiver {
     graph: Graph,
     /// What each node is, indexed by `NodeId`, so a rebuild can hand the same
@@ -843,17 +854,30 @@ impl Receiver {
         self.pocsag.is_some()
     }
 
-    /// Speech the M17 front end decoded in this block, at its codec's rate.
+    /// Speech decoded in this block by every front end that carries voice,
+    /// labelled with who is talking and to whom.
     ///
-    /// Empty unless somebody is transmitting voice on the channel it watches.
-    /// Read like the spectrum rather than carried on a port: audio at 8 kHz
-    /// has no business in a graph negotiated for the sample rate the radio is
-    /// running at, and only the mixer wants it.
-    pub fn m17_voice(&self) -> &[f32] {
-        self.m17
-            .and_then(|id| downcast::<nodes::m17_nodes::M17Node>(&self.graph, id))
-            .map(|n| n.voice_now())
-            .unwrap_or(&[])
+    /// Read like the spectrum rather than carried on a port: audio at the
+    /// codec's own rate has no business in a graph negotiated for the rate
+    /// the radio is running at, and only the mixer wants it.
+    pub fn voice_now(&self) -> Vec<VoiceBlock> {
+        let mut out = Vec::new();
+        if let Some(n) =
+            self.m17.and_then(|id| downcast::<nodes::m17_nodes::M17Node>(&self.graph, id))
+        {
+            let pcm = n.voice_now();
+            if let (false, Some((from, to))) = (pcm.is_empty(), n.talking()) {
+                out.push(VoiceBlock {
+                    system: "M17".to_string(),
+                    channel_hz: n.channel_hz(),
+                    to: to.to_string(),
+                    from: Some(from.to_string()),
+                    pcm: pcm.to_vec(),
+                    rate: nodes::m17_nodes::VOICE_HZ,
+                });
+            }
+        }
+        out
     }
 
     pub fn m17_on(&self) -> bool {
