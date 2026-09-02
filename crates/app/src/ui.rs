@@ -167,6 +167,8 @@ pub struct App {
     feeds: Vec<nodes::FeedSpec>,
     /// The feed being typed into the settings modal.
     feed_host: String,
+    /// The remote radio being created, while that dialog is open.
+    remote: Option<RemoteEdit>,
     /// Where the packet log writes, as typed, and the size limit in
     /// megabytes per day, or `None` for no limit.
     /// The scanner file as text, while it is being edited. Held apart from
@@ -205,6 +207,66 @@ pub enum Settings {
     /// Everything about where this receiver is rather than what it is doing:
     /// language, country, band plan, station position.
     App,
+}
+
+/// A radio reached over the network, as the dialog that creates one asks for
+/// it.
+///
+/// The protocol is a choice rather than an assumption: rtl_tcp and airspy's
+/// own network server are the same shape of thing, and the dialog is where
+/// they will be offered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKind {
+    IqStream,
+}
+
+impl RemoteKind {
+    pub const ALL: &'static [RemoteKind] = &[RemoteKind::IqStream];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::IqStream => "iqstream",
+        }
+    }
+
+    fn help(self) -> &'static str {
+        match self {
+            Self::IqStream => {
+                "One tuner shared with many readers, so a dongle already feeding a decoder \
+                 elsewhere can still be listened to here. The frequency and the span belong \
+                 to whoever owns that tuner and cannot be changed from this end."
+            }
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::IqStream => "host, or host:port (1234)",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteEdit {
+    kind: RemoteKind,
+    host: String,
+    /// What to call it in the radio list. Optional, and worth having: an
+    /// address says which machine and nothing about which aerial.
+    label: String,
+    /// Why the last attempt was refused, kept beside the field it belongs to
+    /// rather than in the status line under the dial.
+    err: Option<String>,
+}
+
+impl Default for RemoteEdit {
+    fn default() -> Self {
+        Self {
+            kind: RemoteKind::IqStream,
+            host: String::new(),
+            label: String::new(),
+            err: None,
+        }
+    }
 }
 
 /// A decode, as shown in the packet log.
@@ -448,6 +510,7 @@ impl Default for App {
             tiles: crate::map::Tiles::new(),
             feeds: Vec::new(),
             feed_host: String::new(),
+            remote: None,
             feed_kind: nodes::FEED_KINDS[0],
             scanner_edit: None,
             scanners: crate::scanners::Scanners::default(),
@@ -466,9 +529,15 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         crate::shutdown::install(cc.egui_ctx.clone());
-        let devices = crate::devices::list();
         let mut s = crate::session::Session::load();
         apply_locale(&mut s);
+        // A radio on the network cannot be found by looking at the bus, so the
+        // saved servers have to be registered before the list is built. Added
+        // rather than set: the command line may already have put one there.
+        for (addr, name) in &s.streams {
+            crate::devices::add_stream(addr, name);
+        }
+        let devices = crate::devices::list();
         // The saved radio may not be plugged in any more, in which case the
         // rest of the session still applies to whatever is.
         let device = s
@@ -557,6 +626,10 @@ impl App {
             country: self.country.clone(),
             band_plan: crate::bands::plan().id().to_string(),
             feeds: self.feeds.clone(),
+            streams: crate::devices::streams()
+                .into_iter()
+                .map(|r| (r.addr, r.label))
+                .collect(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.volume,
@@ -767,6 +840,13 @@ impl App {
         if self.device.as_ref() == Some(&e) {
             return;
         }
+        // A remote tuner is pinned to one frequency, so the dial goes there
+        // rather than the samples arriving under whatever it was last on.
+        if let Some(f) = e.pinned {
+            self.center = f.as_f64();
+            self.wf_center = self.center;
+            self.db_center = self.center;
+        }
         self.device = Some(e);
         self.listening = None;
         self.connect(ctx);
@@ -791,6 +871,11 @@ impl App {
         let mut frames: Vec<Frame> = Vec::new();
         while let Ok(f) = radio.frames.try_recv() {
             frames.push(f);
+        }
+        // A pinned radio cannot be retuned, and a dial left wherever it was
+        // dragged would label every frequency on screen wrongly.
+        if let Some(f) = self.device.as_ref().and_then(|d| d.pinned) {
+            self.center = f.as_f64();
         }
         // Every frame is peak-held into the pending row, not just the one that
         // happens to be last in the queue. Folding only the last of each batch
@@ -1199,6 +1284,16 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
 }
 
+/// Explanatory text in a dialog, a size up from [`hint`].
+///
+/// A hint sits under a control whose meaning is already on screen. This is
+/// prose somebody has to read to answer a question, and 11 px is too small to
+/// ask that of anyone.
+fn note(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(theme::LEGEND)).wrap());
+}
+
 /// A squelch control that shows what it is deciding against.
 ///
 /// A threshold with no meter beside it is a number to guess at: the operator
@@ -1371,6 +1466,7 @@ impl eframe::App for App {
                 });
         }
         self.settings_modal(ui.ctx());
+        self.remote_modal(ui.ctx());
         self.restore_radio_settings();
         self.save_session();
     }
@@ -1495,28 +1591,62 @@ impl App {
                             .unwrap_or_else(|| "none".into());
                         let mut pick = None;
                         let mut rescan = false;
+                        let mut forget = None;
+                        let mut add_remote = false;
                         egui::ComboBox::from_id_salt("device")
                             .selected_text(cur)
                             .width(190.0)
                             .show_ui(ui, |ui| {
                                 for d in &self.devices {
                                     let on = self.device.as_ref() == Some(d);
-                                    if ui.selectable_label(on, &d.label).clicked() {
-                                        pick = Some(d.clone());
+                                    // A remote radio was created here rather
+                                    // than plugged in, so it is dropped here
+                                    // too: nothing else in the interface knows
+                                    // it exists.
+                                    match &d.addr {
+                                        Some(addr) => {
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_label(on, &d.label).clicked() {
+                                                    pick = Some(d.clone());
+                                                }
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if ui.small_button("×").clicked() {
+                                                            forget = Some(addr.clone());
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                        }
+                                        None => {
+                                            if ui.selectable_label(on, &d.label).clicked() {
+                                                pick = Some(d.clone());
+                                            }
+                                        }
                                     }
                                 }
                                 ui.separator();
                                 if ui.selectable_label(false, "Rescan").clicked() {
                                     rescan = true;
                                 }
+                                if ui.selectable_label(false, "Add remote…").clicked() {
+                                    add_remote = true;
+                                }
                             });
+                        if add_remote {
+                            self.remote = Some(RemoteEdit::default());
+                        }
+                        if let Some(addr) = forget {
+                            crate::devices::remove_stream(&addr);
+                            let c = ui.ctx().clone();
+                            self.rescan(&c);
+                        }
                         if rescan {
-                            self.devices = crate::devices::list();
-                            if self.device.is_none() {
-                                self.device = self.devices.first().cloned();
-                                let c = ui.ctx().clone();
-                                self.connect(&c);
-                            }
+                            let c = ui.ctx().clone();
+                            self.rescan(&c);
                         }
                         if let Some(d) = pick {
                             let c = ui.ctx().clone();
@@ -2205,6 +2335,160 @@ impl App {
             self.station_edit = None;
         }
         hint(ui, t("settings.position.help"));
+    }
+
+    /// Create a radio that is not on this machine.
+    ///
+    /// Nothing on the bus reveals a receiver on the network, so a remote radio
+    /// is made rather than found: the address is the device. It is created
+    /// where every other radio is chosen, because from the dial's point of
+    /// view that is all it is.
+    fn remote_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.remote.take() else { return };
+        let (mut close, mut add) = (false, false);
+        let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                // A dialog is read once, by somebody typing an address into
+                // it, so it is set larger than the panel legends: those label
+                // a control that is already understood, this asks a question.
+                ui.label(
+                    egui::RichText::new("Add remote radio")
+                        .font(FontId::proportional(16.0))
+                        .color(theme::VALUE),
+                );
+                ui.add_space(12.0);
+
+                ui.label(legend("protocol").size(12.0));
+                egui::ComboBox::from_id_salt("remote-kind")
+                    .selected_text(edit.kind.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for k in RemoteKind::ALL {
+                            ui.selectable_value(&mut edit.kind, *k, k.label());
+                        }
+                    });
+                note(ui, edit.kind.help());
+                ui.add_space(12.0);
+
+                ui.label(legend("address").size(12.0));
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut edit.host)
+                        .desired_width(ui.available_width())
+                        .font(FontId::proportional(15.0))
+                        .margin(egui::Margin::symmetric(8, 6))
+                        .hint_text(edit.kind.placeholder()),
+                );
+                ui.add_space(12.0);
+
+                ui.label(legend("name").size(12.0));
+                let name = ui.add(
+                    egui::TextEdit::singleline(&mut edit.label)
+                        .desired_width(ui.available_width())
+                        .font(FontId::proportional(15.0))
+                        .margin(egui::Margin::symmetric(8, 6))
+                        .hint_text("loft dongle"),
+                );
+                if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    add = true;
+                }
+                note(
+                    ui,
+                    "What the radio list calls it. An address says which machine and nothing \
+                     about which aerial.",
+                );
+                // Focused so the address can be typed straight away, but only
+                // while nothing else holds it: taking it back every frame
+                // would fight the buttons below.
+                if ui.memory(|m| m.focused().is_none()) {
+                    field.request_focus();
+                }
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    add = true;
+                }
+                if let Some(e) = &edit.err {
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(e).size(12.0).color(theme::FAULT),
+                        )
+                        .wrap(),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("ADD").clicked() {
+                            add = true;
+                        }
+                        if ui.button(crate::i18n::t("ui.close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if add {
+            match self.add_remote(ctx, &edit) {
+                Ok(()) => close = true,
+                Err(e) => edit.err = Some(e),
+            }
+        }
+        if !close {
+            self.remote = Some(edit);
+        }
+    }
+
+    /// Register the server, list it, and tune to it.
+    ///
+    /// The server is asked what it is streaming before it is kept, because a
+    /// remote radio that does not answer is an entry in a list with nothing
+    /// behind it, and the operator finds out at the point of adding rather
+    /// than later when the spectrum stays empty.
+    fn add_remote(
+        &mut self,
+        ctx: &egui::Context,
+        edit: &RemoteEdit,
+    ) -> std::result::Result<(), String> {
+        match edit.kind {
+            RemoteKind::IqStream => {
+                iqnet::probe(&edit.host).map_err(|e| e.to_string())?;
+            }
+        }
+        let addr = crate::devices::add_stream(&edit.host, &edit.label)
+            .ok_or_else(|| "expected host or host:port".to_string())?;
+        self.devices = crate::devices::list();
+        let found = self
+            .devices
+            .iter()
+            .find(|d| d.addr.as_deref() == Some(addr.as_str()))
+            .cloned()
+            .ok_or_else(|| format!("{addr} did not answer"))?;
+        self.select_device(ctx, found);
+        Ok(())
+    }
+
+    /// Build the device list again, keeping the chosen radio if it is still
+    /// there. Connects only when nothing was chosen, so a rescan cannot pull
+    /// the receiver off the radio it is running.
+    fn rescan(&mut self, ctx: &egui::Context) {
+        self.devices = crate::devices::list();
+        if self.device.as_ref().is_some_and(|c| !self.devices.iter().any(|d| d.label == c.label)) {
+            self.device = None;
+            self.radio = None;
+        }
+        if self.device.is_none() {
+            self.device = self.devices.first().cloned();
+            if self.device.is_some() {
+                self.connect(ctx);
+            }
+        }
     }
 
     /// Separate from the spectrum and waterfall settings because it is a

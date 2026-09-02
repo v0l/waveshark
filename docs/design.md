@@ -21,6 +21,7 @@ the [README](../README.md).
 | `rtlsdr` | safe driver with an async streaming thread |
 | `limesdr-sys` | bindgen FFI to LimeSuite's LMS API |
 | `limesdr` | LimeSDR-USB and Mini, 100 kHz to 3.8 GHz |
+| `iqnet` | a tuner on another machine, over iqstream: TCP control, UDP samples |
 
 Named `common` rather than `core` because a workspace crate called `core`
 shadows the Rust sysroot crate.

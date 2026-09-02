@@ -13,6 +13,8 @@ pub enum DriverKind {
     RtlSdr,
     HackRf,
     LimeSdr,
+    /// A tuner on another machine, reached over the network with iqstream.
+    IqStream,
     File,
     Synthetic,
 }
@@ -23,6 +25,7 @@ impl DriverKind {
             Self::RtlSdr => "rtlsdr",
             Self::HackRf => "hackrf",
             Self::LimeSdr => "limesdr",
+            Self::IqStream => "iqstream",
             Self::File => "file",
             Self::Synthetic => "synthetic",
         }

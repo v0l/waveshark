@@ -53,6 +53,10 @@ pub struct Session {
     pub volume: f32,
     /// Packet feeds from other receivers, as `format host:port`.
     pub feeds: Vec<nodes::FeedSpec>,
+    /// iqstream servers to offer as radios, as `host:port` and the name given
+    /// to that receiver. Configuration rather than discovery: nothing on the
+    /// bus says a tuner is on the network.
+    pub streams: Vec<(String, String)>,
     /// Whether the operator owns the shape of the graph. The graph itself is
     /// in its own file: it is a drawing, not a setting.
     pub manual_chain: bool,
@@ -78,6 +82,7 @@ impl Default for Session {
             decode_on: true,
             volume: 0.5,
             feeds: Vec::new(),
+            streams: Vec::new(),
             manual_chain: false,
         }
     }
@@ -118,6 +123,7 @@ impl Session {
         let mut toggles = Vec::new();
         let mut choices = Vec::new();
         let mut feeds = Vec::new();
+        let mut streams = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -136,6 +142,16 @@ impl Session {
             } else if k == "feed" {
                 if let Some(f) = parse_feed(v) {
                     feeds.push(f);
+                }
+            } else if k == "stream" {
+                // `host:port name of the receiver`, the name being everything
+                // after the first space and often absent.
+                match v.split_once(char::is_whitespace) {
+                    Some((addr, name)) => {
+                        streams.push((addr.to_string(), name.trim().to_string()))
+                    }
+                    None if !v.is_empty() => streams.push((v.to_string(), String::new())),
+                    None => {}
                 }
             } else {
                 kv.insert(k, v);
@@ -164,6 +180,7 @@ impl Session {
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
             feeds,
+            streams,
             manual_chain: kv.get("manual_chain").map(|v| *v == "true").unwrap_or(false),
         }
     }
@@ -207,6 +224,13 @@ impl Session {
         }
         for f in &self.feeds {
             s.push_str(&format!("feed = {} {}\n", f.kind.name, f.address()));
+        }
+        for (addr, name) in &self.streams {
+            if name.is_empty() {
+                s.push_str(&format!("stream = {addr}\n"));
+            } else {
+                s.push_str(&format!("stream = {addr} {name}\n"));
+            }
         }
         s
     }
@@ -265,6 +289,10 @@ mod tests {
             feeds: vec![
                 nodes::FeedSpec::new("10.100.2.249", 30005, &nodes::feed_nodes::BEAST),
                 nodes::FeedSpec::new("pi.local", 30002, &nodes::feed_nodes::AVR),
+            ],
+            streams: vec![
+                ("radarpi:1234".into(), "Loft dongle".into()),
+                ("10.0.0.5:1234".into(), String::new()),
             ],
         };
         assert_eq!(Session::parse(&s.render()), s);

@@ -1,0 +1,12 @@
+[package]
+name = "iqnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+iqstream = { git = "https://github.com/v0l/iqstream", default-features = false }
+tokio = { version = "1", features = ["rt", "net", "time"] }

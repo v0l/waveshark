@@ -15,6 +15,17 @@ pub struct Entry {
     /// device is opened. Not a constant per driver: a LimeSDR on a USB 2.0
     /// port cannot carry what the same board does on USB 3.0.
     pub rates: std::ops::RangeInclusive<Sps>,
+    /// Where to reach it, for a radio that is not on this machine.
+    pub addr: Option<String>,
+    /// The one frequency this device delivers, when the tuner is somebody
+    /// else's and cannot be moved from here.
+    pub pinned: Option<common::Hz>,
+}
+
+impl Entry {
+    fn local(kind: DriverKind, index: usize, label: String, rates: std::ops::RangeInclusive<Sps>) -> Self {
+        Self { kind, index, label, rates, addr: None, pinned: None }
+    }
 }
 
 /// Rates an RTL-SDR will accept. See `rtlsdr::RtlSdr::open` for why the
@@ -28,31 +39,108 @@ pub fn list() -> Vec<Entry> {
     for d in rtlsdr::enumerate() {
         let name = if d.product.is_empty() { d.name.clone() } else { d.product.clone() };
         let tail = short(&d.serial);
-        v.push(Entry {
-            kind: DriverKind::RtlSdr,
-            index: d.index as usize,
-            label: if tail.is_empty() { name } else { format!("{name} {tail}") },
-            rates: RTL_RATES,
-        });
+        v.push(Entry::local(
+            DriverKind::RtlSdr,
+            d.index as usize,
+            if tail.is_empty() { name } else { format!("{name} {tail}") },
+            RTL_RATES,
+        ));
     }
     for (i, serial) in hackrf::enumerate().into_iter().enumerate() {
-        v.push(Entry {
-            kind: DriverKind::HackRf,
-            index: i,
-            label: format!("HackRF One {}", short(&serial)),
-            rates: HACKRF_RATES,
-        });
+        v.push(Entry::local(
+            DriverKind::HackRf,
+            i,
+            format!("HackRF One {}", short(&serial)),
+            HACKRF_RATES,
+        ));
     }
     #[cfg(feature = "limesdr")]
     for e in limesdr::enumerate() {
-        v.push(Entry {
-            kind: DriverKind::LimeSdr,
-            index: e.index,
-            label: e.label(),
-            rates: Sps(1_000_000)..=e.rate_max(),
-        });
+        v.push(Entry::local(
+            DriverKind::LimeSdr,
+            e.index,
+            e.label(),
+            Sps(1_000_000)..=e.rate_max(),
+        ));
+    }
+    for (i, r) in streams().into_iter().enumerate() {
+        v.push(stream_entry(i, &r));
     }
     v
+}
+
+/// iqstream servers to offer alongside whatever is plugged in.
+///
+/// A network radio cannot be discovered by looking at the bus, so the list is
+/// configuration: it comes from the session file and the command line, and the
+/// settings pane edits it.
+static STREAMS: parking_lot::Mutex<Vec<Remote>> = parking_lot::Mutex::new(Vec::new());
+
+/// One configured server: where it is, and what its operator calls it.
+///
+/// The name is the point of having one. `radarpi:1234` says which machine and
+/// nothing about which receiver, and somebody with an aerial in the loft and
+/// one on the mast has to remember which host is which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub addr: String,
+    /// Empty when it has never been named, in which case the address is shown.
+    pub label: String,
+}
+
+pub fn streams() -> Vec<Remote> {
+    STREAMS.lock().clone()
+}
+
+/// Add one server, or rename one already there. Returns the address as it will
+/// be listed, which is not always what was typed: a bare host gains a port.
+pub fn add_stream(addr: &str, label: &str) -> Option<String> {
+    let a = iqnet::parse_addr(addr)?;
+    let label = label.trim().to_string();
+    let mut v = STREAMS.lock();
+    match v.iter_mut().find(|r| r.addr == a) {
+        // A name typed the second time is a rename, not a duplicate: the
+        // address is the identity.
+        Some(r) if !label.is_empty() => r.label = label,
+        Some(_) => {}
+        None => v.push(Remote { addr: a.clone(), label }),
+    }
+    Some(a)
+}
+
+pub fn remove_stream(addr: &str) {
+    STREAMS.lock().retain(|r| r.addr != addr);
+}
+
+/// Ask a server what it is streaming so the entry can carry its rate and its
+/// frequency, both of which are decided at the far end.
+///
+/// A server that does not answer is still listed. Dropping it would look like
+/// the setting had been lost, when what happened is that a receiver somewhere
+/// else is switched off.
+fn stream_entry(index: usize, r: &Remote) -> Entry {
+    let name = if r.label.is_empty() { r.addr.clone() } else { r.label.clone() };
+    match iqnet::probe(&r.addr) {
+        Ok(p) => Entry {
+            kind: DriverKind::IqStream,
+            index,
+            label: format!("{name} {:.3} MHz", p.center.as_f64() / 1e6),
+            rates: p.rate..=p.rate,
+            addr: Some(p.addr),
+            pinned: Some(p.center),
+        },
+        Err(e) => {
+            tracing::debug!("iqstream {}: {e}", r.addr);
+            Entry {
+                kind: DriverKind::IqStream,
+                index,
+                label: format!("{name} (offline)"),
+                rates: RTL_RATES,
+                addr: Some(r.addr.clone()),
+                pinned: None,
+            }
+        }
+    }
 }
 
 /// Serial tails identify a unit; the leading zeros do not.
@@ -67,6 +155,10 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::HackRf => Ok(Box::new(hackrf::HackRfDevice::open(e.index)?)),
         #[cfg(feature = "limesdr")]
         DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
+        DriverKind::IqStream => {
+            let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
+            Ok(Box::new(iqnet::IqNet::open(addr)?))
+        }
         other => Err(Error::other(format!("{} cannot be opened live", other.as_str()))),
     }
 }
@@ -107,6 +199,13 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
         .into_iter()
         .map(|(label, rate)| Span { label, rate, zoom: 1 })
         .collect();
+    // A device pinned to one rate is usually not on a round number, so none of
+    // the candidates fall inside it. Its own rate is then the only span there
+    // is, and offering nothing would leave the receiver unable to start.
+    if out.is_empty() {
+        let rate = range.end().as_f64();
+        out.push(Span { label: label(rate), rate, zoom: 1 });
+    }
     let Some(base) = out.first().map(|s| s.rate) else { return out };
     let mut zoom = 2;
     while base / zoom as f64 >= 48_000.0 && zoom <= 64 {
@@ -236,10 +335,34 @@ mod tests {
 
     #[test]
     fn the_same_index_on_two_drivers_is_not_the_same_device() {
-        let a =
-            Entry { kind: DriverKind::RtlSdr, index: 0, label: "a".into(), rates: RTL_RATES };
-        let b =
-            Entry { kind: DriverKind::HackRf, index: 0, label: "b".into(), rates: HACKRF_RATES };
+        let a = Entry::local(DriverKind::RtlSdr, 0, "a".into(), RTL_RATES);
+        let b = Entry::local(DriverKind::HackRf, 0, "b".into(), HACKRF_RATES);
         assert_ne!(a, b, "device identity must include the driver");
+    }
+
+    #[test]
+    fn a_network_radio_is_listed_from_configuration_rather_than_the_bus() {
+        // The same server written two ways is one server, or a session that
+        // saves what it loads grows a duplicate radio at every start.
+        assert_eq!(add_stream("radarpi.test", "Loft").as_deref(), Some("radarpi.test:1234"));
+        assert_eq!(add_stream("radarpi.test:1234", "Mast").as_deref(), Some("radarpi.test:1234"));
+        let mine: Vec<Remote> =
+            streams().into_iter().filter(|r| r.addr == "radarpi.test:1234").collect();
+        assert_eq!(mine.len(), 1);
+        // The second name renames the radio rather than adding another.
+        assert_eq!(mine[0].label, "Mast");
+        assert!(add_stream("  ", "").is_none());
+        remove_stream("radarpi.test:1234");
+        assert!(!streams().iter().any(|r| r.addr == "radarpi.test:1234"));
+    }
+
+    #[test]
+    fn a_span_list_can_be_built_for_a_rate_that_is_not_one_of_the_offered_ones() {
+        // A remote tuner runs at whatever the process feeding it chose, and
+        // an empty span list would leave the receiver with no bandwidth at all.
+        let odd = Sps(1_920_000);
+        let spans = spans_with_zoom(&(odd..=odd));
+        assert!(spans.iter().any(|s| (s.rate - 1_920_000.0).abs() < 1.0));
+        assert!(spans.iter().all(|s| (s.rate - 1_920_000.0).abs() < 1.0));
     }
 }

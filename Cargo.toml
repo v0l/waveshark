@@ -10,6 +10,7 @@ members = [
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
+    "crates/iqnet",
     "crates/sources",
     "crates/decode",
     "crates/app",
@@ -35,6 +36,7 @@ rtlsdr = { path = "crates/rtlsdr" }
 rtlsdr-sys = { path = "crates/rtlsdr-sys" }
 limesdr = { path = "crates/limesdr" }
 limesdr-sys = { path = "crates/limesdr-sys" }
+iqnet = { path = "crates/iqnet" }
 sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
 

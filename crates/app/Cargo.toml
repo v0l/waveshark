@@ -18,6 +18,7 @@ audio.workspace = true
 rtlsdr.workspace = true
 hackrf.workspace = true
 limesdr = { workspace = true, optional = true }
+iqnet.workspace = true
 sources.workspace = true
 nodes.workspace = true
 decode.workspace = true

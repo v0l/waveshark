@@ -613,6 +613,11 @@ struct Args {
     #[arg(long, value_name = "NAME")]
     device: Option<String>,
 
+    /// Offer an iqstream server as a radio, as host or host:port. Repeatable,
+    /// and added to whatever the session already holds
+    #[arg(long, value_name = "HOST")]
+    stream: Vec<String>,
+
     /// Write a PNG of the interface and exit
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "/tmp/shot.png")]
     shot: Option<String>,
@@ -739,6 +744,15 @@ impl From<Mode> for radio::Demod {
 
 fn main() -> eframe::Result<()> {
     let args = Args::parse();
+
+    // Registered before anything enumerates: a radio on the network is
+    // configuration, and nothing on the bus will reveal it.
+    for s in &args.stream {
+        if devices::add_stream(s, "").is_none() {
+            eprintln!("--stream {s}: expected host or host:port");
+            std::process::exit(1);
+        }
+    }
 
     if args.bench_pan {
         bench_pan();
