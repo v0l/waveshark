@@ -90,7 +90,19 @@ impl FileSource {
     /// Open a capture, taking centre frequency, rate and format from the
     /// filename where present.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_inner(path.as_ref().to_path_buf(), None)
+    }
+
+    /// Open a capture whose filename carries no sample rate, supplying one.
+    ///
+    /// A name that does carry a rate still wins, so this is a fallback rather
+    /// than an override: replaying a file at a rate its own name contradicts
+    /// is never what the caller meant.
+    pub fn open_with_rate(path: impl AsRef<Path>, rate: Sps) -> Result<Self> {
+        Self::open_inner(path.as_ref().to_path_buf(), Some(rate))
+    }
+
+    fn open_inner(path: PathBuf, fallback_rate: Option<Sps>) -> Result<Self> {
         if !path.exists() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -105,7 +117,7 @@ impl FileSource {
                 path.display()
             ))
         })?;
-        let rate = meta.rate.ok_or_else(|| {
+        let rate = meta.rate.or(fallback_rate).ok_or_else(|| {
             Error::other(format!(
                 "cannot tell the sample rate of {}; name it like \
                  <name>_<freq>_<rate>.<format>, e.g. capture_433.92M_250k.cu8, \

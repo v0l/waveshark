@@ -1,0 +1,242 @@
+# Off-air captures recorded for the signal identification model.
+#
+# Same arrangement as fixtures.toml and for the same reason: IQ is close to
+# incompressible and committing it would bloat history permanently. Fetch with
+# ./testdata/fetch.sh, into testdata/offair/.
+#
+# Each is stored at the resolution its radio actually has, cs8 for the HackRF's
+# eight-bit ADC and cs16 for the LimeSDR's twelve, rather than as the float the
+# recorder wrote. That is three times smaller for no lost information: the
+# HackRF files round-trip to the recorded floats exactly.
+#
+# `family` is the label, and it is only ever what the capture demonstrates. See
+# docs/amc.md for why an unverified label is worse than none.
+
+[[capture]]
+name = "fm_broadcast_95.8M_2000k.cs16"
+sha256 = "5666de52cd4031c71a0e5c41bfa61ffe29d7def894bd3833c6f604f051bf7fde"
+url = "https://nostr.download/5666de52cd4031c71a0e5c41bfa61ffe29d7def894bd3833c6f604f051bf7fde.xz"
+compression = "xz"
+center_hz = 95_800_000
+rate_sps = 2_000_000
+format = "cs16"
+family = "fm"
+receiver = "LimeSDR-USB, RX2/LNAL"
+description = """
+Broadcast FM, confirmed by what sits in the demodulated baseband rather than
+by the band it came from: a 19 kHz stereo pilot, the 38 kHz difference
+subcarrier and RDS at 57 kHz, all present together, which nothing but broadcast
+FM produces.
+
+Weak, at 6 to 8 dB over the local floor, because the antenna on this receiver
+is cut for 868 MHz. Usable as an FM example and not much else.
+"""
+
+[[capture]]
+name = "fsk_sensor_868.3M_2000k.cs16"
+sha256 = "1d14d5b165e6aa6f23feaf0267aeda1a308a37d550dc8f714bfa33877aedc0e4"
+url = "https://nostr.download/1d14d5b165e6aa6f23feaf0267aeda1a308a37d550dc8f714bfa33877aedc0e4.xz"
+compression = "xz"
+center_hz = 868_300_000
+rate_sps = 2_000_000
+format = "cs16"
+family = "fsk"
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+An unidentified 868 MHz sensor, one 11.8 ms burst keyed between two tones 54
+kHz apart. Nothing here decodes it, so the device is unknown and only the
+modulation is labelled. Cut from a 30 second dwell in which it was the only
+transmission.
+"""
+
+[[capture]]
+name = "gfsk_ble_2426M_20000k.cs8"
+sha256 = "76e9ad30ef850287433d3a8aef472cb066c7f9eb6d5cecf5be0de8fec42d96fb"
+url = "https://nostr.download/76e9ad30ef850287433d3a8aef472cb066c7f9eb6d5cecf5be0de8fec42d96fb.xz"
+compression = "xz"
+center_hz = 2_426_000_000
+rate_sps = 20_000_000
+format = "cs8"
+family = "msk_gmsk"
+receiver = "HackRF One, 2.4 GHz whip"
+burst_us = [80, 500]
+description = """
+Bluetooth Low Energy advertising on channel 38, two seconds at twenty
+megasamples.
+
+This replaces a four megasample capture of the same signal, and the reason is
+worth keeping. BLE is one megabit per second, so four megasamples is four
+samples a symbol, and at that spacing the per-sample frequency noise is larger
+than the deviation being measured: the symbol rate came out at 82 kbaud
+against a true 1000, the tone separation at 365 kHz against 500, and the
+modulation index at 1.25 where GFSK is 0.5. Every classifier read it as
+amplitude keying, and the fault was the sampling rather than the classifier.
+
+The same signal at twenty megasamples measures 996 kbaud, 467 kHz and h =
+0.47, and is read as MSK. A capture rate that is fine for seeing a signal is
+not automatically fine for measuring one, and an evaluation set that does not
+distinguish those two tests the recording instead of the code.
+"""
+
+[[capture]]
+name = "impulsive_noise_474M_12000k.cs16"
+sha256 = "f8d5ababad01b55dd0126c4269483a10e9784c5d3539b9450b322c0fbab64d6f"
+url = "https://nostr.download/f8d5ababad01b55dd0126c4269483a10e9784c5d3539b9450b322c0fbab64d6f.xz"
+compression = "xz"
+center_hz = 474_000_000
+rate_sps = 12_000_000
+format = "cs16"
+family = "noise"
+receiver = "LimeSDR-USB, RX2/LNAL"
+description = """
+Impulsive interference in the UHF television band, kept deliberately as a
+negative. It was recorded expecting a DVB-T multiplex and is not one: real-part
+kurtosis is 13.5 where OFDM sits near 3, and there is no cyclic-prefix
+structure at any DVB-T mode or guard interval.
+
+A classifier that has never been shown broadband noise with structure in it
+will confidently call this something.
+"""
+
+[[capture]]
+name = "lora_sf11_meshtastic_a_869.525M_2000k.cs16"
+sha256 = "f611e1b1cf53c90b011aff5010ce23308dd88b6894682315cfffd6cfe35ff27e"
+url = "https://nostr.download/f611e1b1cf53c90b011aff5010ce23308dd88b6894682315cfffd6cfe35ff27e.xz"
+compression = "xz"
+center_hz = 869_525_000
+rate_sps = 2_000_000
+format = "cs16"
+family = "chirp"
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+Meshtastic LongFast on the EU868 plan: LoRa at spreading factor 11 over 250
+kHz, one 641 ms packet from a node in the same building. The parameters are
+known rather than inferred, because the transmitter was configured by hand, and
+a dechirp against SF11/BW250 returns a peak-to-mean of 3319 where noise gives
+under 60.
+
+Energy detection never found this. LoRa is built to decode below the noise
+floor and the excursion inside the LoRa bandwidth stayed under 10 dB, so two
+earlier capture sessions were written off as empty until the detector was
+rewritten to dechirp and then validated against a synthetic chirp buried at
+-10 dB SNR.
+"""
+
+[[capture]]
+name = "lora_sf11_meshtastic_b_869.525M_2000k.cs16"
+sha256 = "5d91adfd2e6c5100cf1754ea08690ad986c9ad9c97ed1721c985edbb55bc2a86"
+url = "https://nostr.download/5d91adfd2e6c5100cf1754ea08690ad986c9ad9c97ed1721c985edbb55bc2a86.xz"
+compression = "xz"
+center_hz = 869_525_000
+rate_sps = 2_000_000
+format = "cs16"
+family = "chirp"
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+The second packet from the same node, 128 s after the first. Kept separately
+rather than as one file so that a model cannot be trained and tested on two
+halves of one transmission.
+"""
+
+[[capture]]
+name = "ofdm_lte_762M_12000k.cs16"
+sha256 = "f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510"
+url = "https://nostr.download/f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510.xz"
+compression = "xz"
+center_hz = 762_000_000
+rate_sps = 12_000_000
+format = "cs16"
+family = "ofdm"
+receiver = "LimeSDR-USB, RX2/LNAL"
+description = """
+LTE band 28 downlink, a continuous cell rather than a burst. Real-part
+kurtosis 3.30 and a cyclic-prefix peak of 1.23 to 1.28 at the LTE symbol
+period. Weaker and less clean than the Wi-Fi capture, which is why both are
+here: one OFDM signal is not evidence that a model learned OFDM.
+"""
+
+[[capture]]
+name = "ofdm_wifi_frames_2462M_20000k.cs8"
+# The excerpts are four milliseconds apart, so the two millisecond default
+# bridge glues neighbours together and forty-one frames arrive as two.
+bridge_us = 200
+sha256 = "9c97b3237f69ff5b8289571d77c2e9e8288efc71a9acf4fa635ab49dee6e132d"
+url = "https://nostr.download/9c97b3237f69ff5b8289571d77c2e9e8288efc71a9acf4fa635ab49dee6e132d.xz"
+compression = "xz"
+center_hz = 2_462_000_000
+rate_sps = 20_000_000
+format = "cs8"
+family = "ofdm"
+receiver = "HackRF One, 2.4 GHz whip"
+burst_us = [20, 500]
+occupancy_min = 0.25
+description = """
+Forty-one verified 802.11 OFDM frames, each with four milliseconds of the
+recording around it, cut from fifteen seconds at 2462 MHz and concatenated.
+
+Curated rather than continuous, and that is the point: in fifteen seconds of a
+busy channel only forty-one frames are OFDM. The rest is Bluetooth hopping
+through the band and 802.11b beacons at the 1 Mbps basic rate, which arrive
+every 102.4 ms because that is the beacon interval. A continuous recording
+labelled `ofdm` is therefore mostly not OFDM, and the first model trained
+against one scored 2 percent on it while being right about what the windows
+actually held.
+
+Selection is by occupied bandwidth, not duration: the Bluetooth bursts overlap
+802.11 frames in length and never in bandwidth, 1 MHz against 16.
+"""
+
+[[capture]]
+name = "ofdm_wifi_2462M_20000k.cs8"
+# Only the short frames carry the label. This capture also holds 3.4 ms bursts
+# that are constant envelope and unidentified, and they outweigh the OFDM by
+# time on air seventy to one.
+burst_us = [20, 200]
+# and must fill at least half the span, which is what separates an 802.11
+# frame from a Bluetooth hop of the same length in the same recording.
+occupancy_min = 0.25
+sha256 = "f9b51116cba27a78cffd0fcf16b4bf31a1d43aa595b201fb25cd6fc1a93407be"
+url = "https://nostr.download/f9b51116cba27a78cffd0fcf16b4bf31a1d43aa595b201fb25cd6fc1a93407be.xz"
+compression = "xz"
+center_hz = 2_462_000_000
+rate_sps = 20_000_000
+format = "cs8"
+family = "mixed"
+receiver = "HackRF One, 2.4 GHz whip"
+# Not scored: `family` is deliberately not a family. See below.
+description = """
+Not an evaluation capture. This is three systems sharing a channel, and no
+single label is true of it: Bluetooth hopping through the band, 802.11b
+beacons at the 1 Mbps basic rate every 102.4 ms, and the occasional OFDM
+frame. It was labelled `ofdm` when it was recorded and that was simply wrong,
+which cost a model 2 percent on the one family it did know and cost an
+afternoon finding out why. The forty-one verified frames were cut out of a
+longer recording into their own file; this one is kept for the open-set case
+and for the beacons, and scored against nothing.
+
+802.11 on channel 11, three seconds holding 49 bursts. The 51 us ones are
+OFDM and say so twice over: Gaussian sample statistics (real-part kurtosis 3.1
+to 3.25) and a cyclic-prefix correlation peak of 1.37 to 1.48 at the 802.11
+symbol of 4 us with an 0.8 us guard.
+
+The longer bursts in the same file, around 3.4 ms and 9.4 MHz wide, are not
+identified. They are not 802.11b DSSS as first assumed: the phase-step
+histogram is unimodal near zero rather than bimodal at 0 and pi. They are kept
+as open-set material rather than labelled on a guess.
+"""
+
+[[capture]]
+name = "quiet_ism_869.525M_2000k.cs16"
+sha256 = "5f06cd92331bdc2b2dda4774463540f0654da3af99838e80f446f861ec645a13"
+url = "https://nostr.download/5f06cd92331bdc2b2dda4774463540f0654da3af99838e80f446f861ec645a13.xz"
+compression = "xz"
+center_hz = 869_525_000
+rate_sps = 2_000_000
+format = "cs16"
+family = "noise"
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+Two seconds of the 869 MHz band with nothing transmitting, from the same
+session and the same gain setting as the LoRa captures. The receiver's own
+noise floor and spurs, which is what a burst detector has to not fire on.
+"""

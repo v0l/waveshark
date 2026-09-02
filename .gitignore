@@ -12,3 +12,12 @@ testdata/*.xz
 # reason, plus it belongs to the people who contributed it: testdata/rtl433.toml
 # points at the upstream copy rather than vendoring one.
 testdata/rtl433/
+
+# Off-air captures and generated datasets: fetched or regenerated, never
+# committed. See testdata/offair.toml and crates/amc-data.
+testdata/offair/
+out/
+
+# Python bytecode from the tools directory.
+__pycache__/
+*.pyc

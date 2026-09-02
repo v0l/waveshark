@@ -39,9 +39,46 @@
 //! it has looked at the frequency track, and the first mistake is unrecoverable
 //! because nothing downstream reconsiders it.
 
+mod amplitude;
+mod chirp;
+pub mod cyclo;
+mod frequency;
+pub mod hypothesis;
+mod dsss;
+pub mod mode;
+mod ofdm;
+mod phase;
+mod steady;
+mod tones;
+mod zoom;
+
+pub use hypothesis::{Evidence, Hypothesis};
+
 use crate::window;
 use common::C32;
 use rustfft::FftPlanner;
+
+/// Every hypothesis the classifier will consider.
+///
+/// Adding a modulation is adding a file and a line here. Nothing else in this
+/// module knows how many there are, and no hypothesis can see another's
+/// reasoning, so a fix to one is isolated to its own file by construction.
+pub fn hypotheses() -> &'static [&'static dyn Hypothesis] {
+    &[
+        &amplitude::Ook,
+        &amplitude::Ask,
+        &frequency::Fsk2,
+        &frequency::Msk,
+        &frequency::Fsk4,
+        &phase::Psk2,
+        &phase::Psk4,
+        &chirp::Chirp,
+        &ofdm::Ofdm,
+        &dsss::Dsss,
+        &steady::NoiseLike,
+        &steady::Carrier,
+    ]
+}
 
 /// What the burst was keyed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +103,12 @@ pub enum Modulation {
     Psk4,
     /// Frequency swept linearly, which is chirp spread spectrum and radar.
     Chirp,
+    /// Many carriers with a cyclic prefix. Told from the rest of the
+    /// noise-like family by the prefix repeating at one lag.
+    Ofdm,
+    /// A single carrier spread by a chip sequence, which repeats in the
+    /// envelope even though the data cancels it in the complex samples.
+    Dsss,
     /// Modulated, but with no keying structure to find: flat spectrum,
     /// Gaussian amplitude. OFDM and direct sequence spread spectrum both land
     /// here, and so does interference.
@@ -88,6 +131,8 @@ impl Modulation {
             Modulation::Psk2 => "BPSK",
             Modulation::Psk4 => "QPSK",
             Modulation::Chirp => "chirp",
+            Modulation::Ofdm => "OFDM",
+            Modulation::Dsss => "DSSS",
             Modulation::NoiseLike => "noise-like",
             Modulation::Carrier => "carrier",
             Modulation::Unknown => "unknown",
@@ -171,6 +216,29 @@ pub struct Features {
     /// near 3; a keyed single carrier sits well below.
     pub kurtosis: f32,
     pub snr_db: f32,
+
+    /// Strongest autocorrelation at a lag past the signal's own correlation
+    /// width, and how far it stands above the median across lags.
+    ///
+    /// This is what splits the noise-like class. A cyclic prefix repeats a
+    /// piece of every symbol verbatim, so it puts a *spike* at one lag; a
+    /// narrowband signal, a bare carrier or a DC offset correlate across a
+    /// plateau of them. Without the second number every narrowband burst in a
+    /// wide capture passes for OFDM, which is what happened when this was
+    /// tried with the peak alone.
+    pub cyclic: f32,
+    pub cyclic_ratio: f32,
+    /// The lag of that peak, in seconds. A symbol period, if it is real: 66.7
+    /// us for LTE's 15 kHz subcarriers, 4 us for 802.11a and its descendants.
+    pub cyclic_period_s: f32,
+    /// The same test on envelope power rather than on the complex samples.
+    ///
+    /// A spreading code repeats in the envelope, but its data flips the sign
+    /// of every symbol, and those flips cancel the complex autocorrelation
+    /// exactly. Squaring removes the sign. This is the feature that names
+    /// 802.11b beacons, which the complex test cannot see at all.
+    pub env_cyclic: f32,
+    pub env_cyclic_ratio: f32,
 }
 
 /// One classified burst.
@@ -204,6 +272,13 @@ pub struct ClassifyConfig {
     pub min_score: f32,
     /// Margin over the runner-up below which the verdict is unknown.
     pub min_margin: f32,
+    /// Occupied fraction of the span below which the burst is brought down to
+    /// its own bandwidth before measuring. See [`zoom`].
+    ///
+    /// Zero disables it, which is right for a channelized bank: there the
+    /// channel is already the signal's width, and halving further would throw
+    /// away the skirts that say what the keying is.
+    pub zoom_below: f32,
 }
 
 impl Default for ClassifyConfig {
@@ -214,6 +289,10 @@ impl Default for ClassifyConfig {
             fft_size: 1024,
             min_score: 0.45,
             min_margin: 0.05,
+            // Off by default, so a channelized bank behaves exactly as it did
+            // before this existed. A caller handing over wideband captures
+            // turns it on.
+            zoom_below: 0.0,
         }
     }
 }
@@ -277,6 +356,35 @@ impl Classifier {
         decide(&features, &self.cfg)
     }
 
+    /// Fraction of the span the signal occupies, and where its centre is.
+    ///
+    /// A cheap first pass whose only job is to decide whether the burst needs
+    /// bringing down to its own bandwidth before the real measurement.
+    fn survey(&mut self, iq: &[C32]) -> (f32, f64) {
+        self.spectrum(iq);
+        let spec = std::mem::take(&mut self.spec);
+        let (bw, _) = occupied(&spec, &mut self.scratch, self.rate as f32);
+        // Centre of mass of what stands above the noise floor.
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&spec);
+        self.scratch
+            .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let floor = self.scratch[spec.len() / 2];
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for (i, &v) in spec.iter().enumerate() {
+            let p = (v - floor).max(0.0) as f64;
+            num += p * (i as f64 - spec.len() as f64 / 2.0);
+            den += p;
+        }
+        let centre = if den > 0.0 {
+            num / den / spec.len() as f64 * self.rate
+        } else {
+            0.0
+        };
+        self.spec = spec;
+        ((bw / self.rate as f32).clamp(0.0, 1.0), centre)
+    }
+
     /// Measure without judging. Exposed because the features are worth logging
     /// for a burst the hypotheses all reject.
     pub fn features(&mut self, iq: &[C32]) -> Features {
@@ -289,27 +397,81 @@ impl Classifier {
         // amplitude changes *during* the transmission, and that question can
         // only be asked once the transmission's edges are known.
         let (a, b) = self.extent(iq);
-        if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
-            let trimmed = iq[a..b].to_vec();
-            let mut f = self.measure(&trimmed);
-            f.samples = iq.len();
-            f.duration_us = iq.len() as f64 * 1e6 / self.rate;
-            return f;
-        }
-        self.measure(iq)
+        let (trimmed, samples) = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
+            (iq[a..b].to_vec(), iq.len())
+        } else {
+            (iq.to_vec(), iq.len())
+        };
+
+        // Bring a signal that is a small part of its span down to its own
+        // bandwidth first. In the channel bank this never fires, because the
+        // channelizer has already done it; on a capture it is the difference
+        // between measuring the transmission and measuring the channel.
+        let (occ, centre) = self.survey(&trimmed);
+        let mut f = if occ < self.cfg.zoom_below && occ > 0.0 {
+            let (z, zrate) = zoom::to_signal(&trimmed, self.rate, centre, occ, self.cfg.zoom_below);
+            let outer = self.rate;
+            self.rate = zrate;
+            let f = self.measure(&z);
+            self.rate = outer;
+            f
+        } else {
+            self.measure(&trimmed)
+        };
+        f.samples = samples;
+        f.duration_us = samples as f64 * 1e6 / self.rate;
+        f
     }
 
     /// First and last sample with a carrier, with a symbol either side.
     fn extent(&mut self, iq: &[C32]) -> (usize, usize) {
         self.amp.clear();
         self.amp.extend(iq.iter().map(|c| c.norm()));
-        let (_, modes, top, _) = envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
+        let (ratio, modes, top, _) = envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
         if modes < 2 {
             return (0, iq.len());
         }
-        let floor = top * 0.3;
-        let first = self.amp.iter().position(|v| *v >= floor).unwrap_or(0);
-        let last = self.amp.iter().rposition(|v| *v >= floor).map_or(iq.len(), |i| i + 1);
+        // Halfway between the two levels the histogram found, in decibels,
+        // rather than at a fixed fraction of the upper one.
+        //
+        // A fixed fraction assumes how far below the carrier the silence sits,
+        // which is the signal to noise ratio, which is the one thing a burst
+        // handed over by a detector has not promised. At 0.3 of the top, any
+        // burst whose noise floor is within ten decibels of its carrier has
+        // every sample above the threshold: the extent is then the whole
+        // window, nothing is trimmed, and the measurement that follows is of
+        // the silence. That is what BLE packets do at thirteen decibels, and
+        // it is why they were read as amplitude keying.
+        let edges = |amp: &[f32], floor: f32| {
+            let first = amp.iter().position(|v| *v >= floor).unwrap_or(0);
+            let last = amp.iter().rposition(|v| *v >= floor).map_or(amp.len(), |i| i + 1);
+            (first, last)
+        };
+
+        // Three tenths of the upper level, which is what the corpus wants: its
+        // devices key all the way down, so a threshold well below the carrier
+        // still sits far above their silence.
+        let (first, last) = edges(&self.amp, top * 0.3);
+        if last > first && last - first < iq.len() * 9 / 10 {
+            return (first, last);
+        }
+
+        // Nothing was trimmed, so that threshold is below this burst's own
+        // noise: the silence around it is within ten decibels of its carrier.
+        // Halfway between the two levels the histogram found is the threshold
+        // that does not assume a signal to noise ratio. BLE packets at
+        // thirteen decibels land here, and were measured as amplitude keying
+        // until they did.
+        //
+        // Smoothed first, and only here. The first and last crossings are
+        // otherwise set by single samples, and a Rayleigh tail reaches far
+        // enough past its mean that one spike in the silence pins the extent
+        // back to the window edge. Smoothing the primary path instead moves
+        // every corpus burst's edges and costs five captures, so it stays out
+        // of the case that already works.
+        let span = (self.amp.len() / 256).clamp(4, 64);
+        boxcar(&mut self.amp, span);
+        let (first, last) = edges(&self.amp, top * ratio.max(1e-6).sqrt());
         if last <= first {
             return (0, iq.len());
         }
@@ -407,7 +569,27 @@ impl Classifier {
         let smooth = (sps / 4).clamp(1, 64);
         boxcar(&mut self.freq_hi, smooth);
 
-        let (tones, separation) = tone_peaks(&mut self.scratch, &self.freq_hi);
+        let (tones, mut separation) = tone_peaks(&mut self.scratch, &self.freq_hi);
+
+        // Two tones are most of the width they occupy. When the frequency
+        // track says otherwise, it is the track that is wrong: at a few
+        // samples per symbol its per-sample noise exceeds the deviation, and
+        // Bluetooth measured its 500 kHz pair as 72 kHz that way. The
+        // spectrum integrates a symbol into each bin and does not have that
+        // failure, so it takes over exactly where the track breaks down.
+        // Only where the track already found a pair. Asked about a burst it
+        // found no tones in, the spectrum answers with whatever structure the
+        // sidebands have, and on the corpus that turned amplitude keying into
+        // four-level frequency keying. The count stays the track's; what the
+        // spectrum corrects is how far apart it put them.
+        if tones >= 2 && f.bandwidth_hz > 0.0 && separation < 0.3 * f.bandwidth_hz {
+            let spec = std::mem::take(&mut self.spec);
+            let (st, ssep) = tones::from_spectrum(&spec, self.rate as f32, 6.0);
+            self.spec = spec;
+            if st == tones && ssep > separation {
+                separation = ssep;
+            }
+        }
         f.tones = tones;
         f.separation_hz = separation;
 
@@ -423,6 +605,35 @@ impl Classifier {
 
         f.square_line = self.power_line(iq, 2);
         f.quartic_line = self.power_line(iq, 4);
+
+        // Cyclostationarity last, because it needs the occupied fraction to
+        // know which lags are meaningful: inside a signal's own correlation
+        // width every burst correlates with itself, and a lag floor of a fixed
+        // number of samples measures the bandwidth instead of the structure.
+        let occupied = if self.rate > 0.0 {
+            (f.bandwidth_hz as f64 / self.rate).clamp(0.001, 1.0) as f32
+        } else {
+            1.0
+        };
+        let floor = cyclo::lag_floor(occupied);
+        let c = cyclo::complex(iq, floor);
+        let e = cyclo::envelope(iq, floor);
+        // Below the level noise alone reaches, a peak is not evidence of
+        // anything, and reporting it invites a hypothesis to believe it.
+        let bound = cyclo::noise_bound(iq.len());
+        // A repeat has to repeat: a lag longer than an eighth of the burst has
+        // been seen at most eight times, and one at the floor is the signal's
+        // own width rather than a period.
+        let credible = |k: usize| k >= 2 * floor && iq.len() >= 8 * k.max(1);
+        if c.peak > bound && credible(c.lag) {
+            f.cyclic = c.peak;
+            f.cyclic_ratio = c.ratio;
+            f.cyclic_period_s = c.lag as f32 / self.rate as f32;
+        }
+        if e.peak > 3.0 * bound && credible(e.lag) {
+            f.env_cyclic = e.peak;
+            f.env_cyclic_ratio = e.ratio;
+        }
         f
     }
 
@@ -709,108 +920,8 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
         return BurstClass { modulation: Modulation::Unknown, confidence: 0.0, score: 0.0, features: *f };
     }
 
-    let keyed_amplitude = 1.0 - f.envelope_ratio;
-    let constant_envelope = ramp(f.envelope_ratio, 0.4, 0.75).max(f32::from(f.envelope_modes == 1));
-    // Two levels in the envelope, which is what amplitude keying means and
-    // what a constant-envelope signal in noise still does not have. Kurtosis
-    // was the first attempt at this and it measures the duty cycle instead: a
-    // real packet is mostly gaps, so its envelope is spiky whatever it keys.
-    // Two levels in the envelope, held for about a symbol each. The second
-    // half is what stops a frequency-keyed packet, which is one long run of
-    // carrier with silence around it, being read as amplitude keying.
-    // Two levels in the envelope, each held for about a symbol, and not on for
-    // nearly the whole burst. The second and third conditions are what stop a
-    // frequency-keyed packet being read as amplitude keying: it is one long run
-    // of carrier, and the gaps in the window around it are between
-    // transmissions rather than inside one.
-    let two_levels = f32::from(f.envelope_modes >= 2)
-        * (1.0 - ramp(f.level_run_symbols, 4.0, 12.0))
-        * (1.0 - ramp(f.duty, 0.8, 0.92));
-    // A modulation fills its burst. A window that is mostly silence with a
-    // packet in it does not, and the difference is what stops an empty channel
-    // being classified as a wideband transmission.
-    let filled = ramp(f.duty, 0.5, 0.8);
-    // A symbol clock is what separates a modulated signal from a steady one,
-    // and the line is weak for minimum-shift keying even when it is there, so
-    // the ramp starts low.
-    // The ramp is low because a real burst's line is weaker than a generated
-    // one's: on rtl_433's recordings the sensors come in between 3 and 4 where
-    // a generated signal is above 4.5, and an on-off keyed burst with random
-    // data barely clears 1.6 because its transitions are impulses and an
-    // impulse train at random times is mostly white. That is why the amplitude
-    // classes do not require a clock at all: what identifies them is two
-    // envelope levels held for about a symbol each, and demanding a clock on
-    // top of that rejected real bursts to no benefit.
-    let has_clock = ramp(f.baud_line, 2.0, 4.0);
-    let unimodal = f32::from(f.tones == 1);
-    let sweeping = ramp(f.chirp_fit, 0.55, 0.85);
-
-    let scores = [
-        // Amplitude keyed all the way down to the noise.
-        (Modulation::Ook, two_levels * ramp(keyed_amplitude, 0.6, 0.85)),
-        // Amplitude keyed, but the low level is still a signal.
-        (Modulation::Ask, two_levels * band(f.envelope_ratio, 0.25, 0.45, 0.7, 0.8) * has_clock),
-        // Two tones, far enough apart to threshold.
-        (
-            Modulation::Fsk2,
-            constant_envelope
-                * filled
-                * f32::from(f.tones == 2)
-                * ramp(f.mod_index, 0.8, 1.4)
-                * (1.0 - sweeping),
-        ),
-        // Two tones so close that the eye needs a matched receiver.
-        (
-            Modulation::Msk,
-            constant_envelope * filled * f32::from(f.tones == 2) * band(f.mod_index, 0.25, 0.4, 0.7, 0.95),
-        ),
-        (Modulation::Fsk4, constant_envelope * filled * f32::from(f.tones == 4) * (1.0 - sweeping)),
-        // Both power laws collapse two phases onto one, so binary phase keying
-        // shows a line in each. Four phases survive squaring, which is what
-        // separates the two: a strong fourth-power line and no squared one.
-        (
-            Modulation::Psk2,
-            constant_envelope * filled * unimodal * has_clock * ramp(f.square_line, 0.2, 0.5),
-        ),
-        (
-            Modulation::Psk4,
-            constant_envelope
-                * filled
-                * unimodal
-                * has_clock
-                * ramp(f.quartic_line, 0.2, 0.5)
-                * (1.0 - ramp(f.square_line, 0.2, 0.5)),
-        ),
-        // A sweep is the one class whose evidence is the frequency track's
-        // slope rather than its histogram.
-        (Modulation::Chirp, constant_envelope * filled * sweeping),
-        // Everything modulated that has no keying structure at all. It has to
-        // fill the burst: an empty channel is flat and Gaussian too, and the
-        // difference between the two is that noise is not on for the whole
-        // window at a level of its own.
-        (
-            Modulation::NoiseLike,
-            filled
-                * f32::from(f.envelope_modes == 1)
-                * ramp(f.flatness, 0.3, 0.6)
-                * ramp(f.kurtosis, 2.2, 2.6)
-                * (1.0 - ramp(f.peakiness, 0.1, 0.3))
-                * (1.0 - has_clock)
-                * (1.0 - sweeping),
-        ),
-        // Present, steady, and saying nothing. A carrier has a squared line as
-        // strong as any phase-keyed signal, so what identifies it is the
-        // absence of a symbol clock rather than the absence of a line.
-        (
-            Modulation::Carrier,
-            constant_envelope
-                * filled
-                * unimodal
-                * (1.0 - has_clock)
-                * (1.0 - sweeping)
-                * ramp(f.peakiness, 0.1, 0.3),
-        ),
-    ];
+    let evidence = Evidence::from(f);
+    let scores = hypotheses().iter().map(|h| (h.modulation(), h.score(f, &evidence)));
 
     let mut best = (Modulation::Unknown, 0.0f32);
     let mut second = 0.0f32;
@@ -830,19 +941,6 @@ fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
         best.0
     };
     BurstClass { modulation, confidence: margin, score: best.1, features: *f }
-}
-
-/// 0 below `lo`, 1 above `hi`, straight line between.
-fn ramp(v: f32, lo: f32, hi: f32) -> f32 {
-    if hi <= lo {
-        return f32::from(v >= hi);
-    }
-    ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
-}
-
-/// A trapezoid: up between `lo0` and `lo1`, down between `hi0` and `hi1`.
-fn band(v: f32, lo0: f32, lo1: f32, hi0: f32, hi1: f32) -> f32 {
-    ramp(v, lo0, lo1).min(1.0 - ramp(v, hi0, hi1))
 }
 
 fn percentile(scratch: &mut Vec<f32>, samples: &[f32], q: f32) -> f32 {
@@ -1053,7 +1151,25 @@ fn histogram_peaks(scratch: &mut Vec<f32>, samples: &[f32], floor: f32) -> Vec<f
 fn envelope_levels(scratch: &mut Vec<f32>, amp: &[f32], db: &mut Vec<f32>) -> (f32, u8, f32, f32) {
     db.clear();
     db.extend(amp.iter().map(|v| 20.0 * v.max(1e-9).log10()));
-    let peaks = histogram_peaks(scratch, db, 0.05);
+    let mut peaks = histogram_peaks(scratch, db, 0.05);
+    // Two levels a decibel apart are not two levels. The valley test in
+    // `histogram_peaks` asks whether two bumps are separate clusters, which is
+    // a different question from whether they are separate *levels*: a tight
+    // cluster's own ripple splits into bumps with real valleys between them.
+    //
+    // Two decibels, not more, and the ceiling is measured: at three the
+    // corpus drops from 52 captures to 48, because shallow ASK devices key
+    // their two levels only a few decibels apart and merging those loses the
+    // keying entirely.
+    const MIN_LEVEL_DB: f32 = 2.0;
+    let mut kept: Vec<f32> = Vec::new();
+    for p in peaks.drain(..) {
+        match kept.last_mut() {
+            Some(prev) if (p - *prev).abs() < MIN_LEVEL_DB => *prev = prev.max(p),
+            _ => kept.push(p),
+        }
+    }
+    let peaks = kept;
     let hi_db = peaks.last().copied().unwrap_or(0.0);
     let hi = 10f32.powf(hi_db / 20.0);
     if peaks.len() < 2 {

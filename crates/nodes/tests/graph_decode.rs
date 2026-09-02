@@ -321,3 +321,79 @@ fn the_ask_detector_decodes_the_real_capture_too() {
     assert!(decodes[0].contains("temperature_c=16.2"), "{}", decodes[0]);
     assert!(decodes[0].contains("[CRC ok]"), "{}", decodes[0]);
 }
+
+/// A burst no front end reads must still reach the log.
+///
+/// Before this it left a tag on a sample index and a count in a warning,
+/// neither of which a packet list shows, so a chirp or a multi-carrier burst
+/// was indistinguishable from an empty channel. That is the opposite of what
+/// this receiver is for: the burst nobody decodes is the one worth seeing.
+#[test]
+fn an_unreadable_burst_is_still_reported() {
+    use common::C32;
+    use pipeline::event::Event;
+    use pipeline::node::{NodeCtx, PortSpec, Simple};
+    use pipeline::port::{Payload, PortKind};
+
+    let rate = 250_000.0;
+    // A linear sweep: named as a chirp, and there is no chirp front end.
+    let mut iq: Vec<C32> = vec![C32::new(0.0, 0.0); 2048];
+    let mut phase = 0.0f64;
+    for k in 0..24_000 {
+        let t = k as f64 / rate;
+        let f = -40_000.0 + 80_000.0 * (t / 0.096);
+        phase += std::f64::consts::TAU * f / rate;
+        iq.push(C32::new(phase.cos() as f32, phase.sin() as f32));
+    }
+    iq.extend(std::iter::repeat(C32::new(0.0, 0.0)).take(4096));
+
+    let mut node = nodes::decode_nodes::BurstRouteNode::default_ism();
+    let spec = pipeline::StreamSpec::iq(rate, common::Hz(433_920_000));
+    let port = PortSpec { spec, latency: 0 };
+    Simple::negotiate(&mut node, &port).expect("negotiate");
+
+    let mut events = Vec::new();
+    let mut tags = Vec::new();
+    let mut out = Payload::empty_of(PortKind::Pulses);
+    let inputs = [port];
+    let mut ctx = NodeCtx::new(0, &inputs, &[], &mut events, &mut tags);
+    let mut input = Payload::empty_of(PortKind::Iq);
+    input.iq_mut().extend_from_slice(&iq);
+    Simple::process(&mut node, &input, &mut out, &mut ctx).expect("process");
+
+    let reported: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Decoded(d) if d.protocol == "unidentified" => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !reported.is_empty(),
+        "a burst with no front end produced no log entry: {events:?}"
+    );
+    let d = reported[0];
+    assert!(d.modulation.is_some(), "reported without naming the modulation");
+    assert!(d.detail.is_some(), "reported without saying why nothing read it");
+
+    // And the other direction: an entry is a claim somebody reads, so a
+    // classifier that is unsure must stay quiet. Raising the bar above what
+    // any burst can reach has to silence it entirely, or the threshold is
+    // decorative.
+    let mut node = nodes::decode_nodes::BurstRouteNode::default_ism();
+    node.set_report_confidence(1.01);
+    let spec = pipeline::StreamSpec::iq(rate, common::Hz(433_920_000));
+    let port = PortSpec { spec, latency: 0 };
+    Simple::negotiate(&mut node, &port).expect("negotiate");
+    let mut events = Vec::new();
+    let mut tags = Vec::new();
+    let mut out = Payload::empty_of(PortKind::Pulses);
+    let inputs = [port];
+    let mut ctx = NodeCtx::new(0, &inputs, &[], &mut events, &mut tags);
+    Simple::process(&mut node, &input, &mut out, &mut ctx).expect("process");
+    let still: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unidentified"))
+        .collect();
+    assert!(still.is_empty(), "reported despite the confidence bar: {still:?}");
+}

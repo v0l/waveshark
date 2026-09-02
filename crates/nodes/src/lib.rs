@@ -49,6 +49,7 @@ use pipeline::{Graph, StreamSpec};
 pub fn registry() -> Registry {
     let mut r = Registry::new();
 
+
     r.register(
         StageDesc {
             name: "mixer",
@@ -392,7 +393,9 @@ pub fn registry() -> Registry {
                 },
                 ..d
             };
-            Ok(Box::new(BurstRouteNode::new(cfg)) as Box<dyn Node>)
+            let mut n = BurstRouteNode::new(cfg);
+            n.set_report_confidence(s.f64_or("report_confidence", 0.5) as f32);
+            Ok(Box::new(n) as Box<dyn Node>)
         },
     );
 

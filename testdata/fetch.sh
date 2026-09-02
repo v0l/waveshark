@@ -110,4 +110,25 @@ while IFS= read -r line; do
 done < rtl433.toml
 [[ -n "$name" ]] && fetch_pair "$name" "$sha" "$url" "$rsha" "$rurl"
 
+# Off-air captures for the signal identification model, into their own
+# directory: these are labelled by what the capture demonstrates rather than by
+# an independent decode, so they must never be mistaken for corpus material
+# that has one.
+mkdir -p offair
+
+name=""; sha=""; url=""; comp=""
+while IFS= read -r line; do
+    case "$line" in
+        '[[capture]]')
+            [[ -n "$name" ]] && fetch "offair/$name" "$sha" "$url" "$comp"
+            name=""; sha=""; url=""; comp="none"
+            ;;
+        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+    esac
+done < offair.toml
+[[ -n "$name" ]] && fetch "offair/$name" "$sha" "$url" "$comp"
+
 echo "done"

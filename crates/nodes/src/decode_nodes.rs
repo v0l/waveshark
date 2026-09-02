@@ -608,6 +608,21 @@ impl Simple for ProtocolDecodeNode {
 /// the chain view loses in visible structure it gains in a stage that reports
 /// what it decided, which is the `modulation` tag on every burst.
 pub struct BurstRouteNode {
+    /// Least confidence before a burst nothing demodulated is worth a log
+    /// entry.
+    ///
+    /// The router acts on a much lower bar, and should: sending a doubtful
+    /// burst to both front ends costs a little work and never loses a decode.
+    /// Reporting is the opposite trade. An entry is a claim somebody reads,
+    /// and a wrong one is worse than a missing one, so the bar for saying
+    /// something out loud is higher than the bar for trying to demodulate.
+    ///
+    /// Half, measured against the off-air captures: of the bursts the
+    /// classifier names there, the ones it gets right sit at a median
+    /// confidence of 0.88 and the ones it gets wrong at 0.24. Half keeps 23 of
+    /// the 25 correct and drops 43 of the 50 wrong, which is precision 0.33 to
+    /// 0.77 for four percent of the recall.
+    report_min_confidence: f32,
     cfg: dsp::RouterConfig,
     router: dsp::BurstRouter,
     bursts: Vec<dsp::RoutedBurst>,
@@ -615,7 +630,23 @@ pub struct BurstRouteNode {
 
 impl BurstRouteNode {
     pub fn new(cfg: dsp::RouterConfig) -> Self {
-        Self { cfg, router: dsp::BurstRouter::new(1.0, cfg), bursts: Vec::new() }
+        Self {
+            report_min_confidence: 0.5,
+            cfg,
+            router: dsp::BurstRouter::new(1.0, cfg),
+            bursts: Vec::new(),
+        }
+    }
+
+    /// Least confidence before an undemodulated burst is reported.
+    ///
+    /// Confidence is a margin in 0 to 1, so anything above one silences the
+    /// reporting entirely. That is deliberate and worth having: a wideband
+    /// tier over a noisy band produces these constantly, and "log none of
+    /// them" should be expressible without deleting the feature.
+    pub fn set_report_confidence(&mut self, c: f32) -> &mut Self {
+        self.report_min_confidence = c.max(0.0);
+        self
     }
 
     pub fn default_ism() -> Self {
@@ -678,6 +709,66 @@ impl Simple for BurstRouteNode {
                 p.center_hz = center;
                 pkgs.push(p);
             }
+
+            // A burst nothing here can demodulate is still a burst that
+            // happened, and until now it left only a tag on a sample index
+            // and a count in a warning: nothing a packet list could show. A
+            // chirp swept at 30 MHz per second is a more useful log line than
+            // silence, and it is the line somebody starts from when they go
+            // looking for a decoder to write.
+            if b.routed_to == "none" && b.class.confidence >= self.report_min_confidence {
+                let f = &b.class.features;
+                let mut fields: Vec<(String, common::Value)> = Vec::new();
+                if f.baud > 0.0 {
+                    fields.push(("baud".into(), common::Value::Float(f.baud as f64)));
+                }
+                if f.separation_hz > 0.0 {
+                    fields.push((
+                        "separation_hz".into(),
+                        common::Value::Float(f.separation_hz as f64),
+                    ));
+                }
+                if f.chirp_rate.abs() > 0.0 {
+                    fields.push((
+                        "sweep_hz_per_s".into(),
+                        common::Value::Float(f.chirp_rate as f64),
+                    ));
+                }
+                if f.cyclic_period_s > 0.0 {
+                    fields.push((
+                        "symbol_period_us".into(),
+                        common::Value::Float(f.cyclic_period_s as f64 * 1e6),
+                    ));
+                }
+                fields.push((
+                    "confidence".into(),
+                    common::Value::Float(b.class.confidence as f64),
+                ));
+
+                // Name the mode where the parameters place one. This is the
+                // only caller: the router needs a family to pick a front end
+                // and nothing more, but a log wants "LoRa SF11 BW250".
+                let mode = dsp::classify::mode::identify(
+                    b.class.modulation,
+                    &b.class.features,
+                    center as f64,
+                );
+                let at = b.start_sample as f64 / c.inputs[0].spec.rate.max(1.0);
+                let mut d = Decoded::bytes("unidentified", common::Hz(center), at, Vec::new())
+                    .with_modulation(b.class.modulation.label())
+                    .with_fields(fields);
+                if f.bandwidth_hz > 0.0 {
+                    d = d.with_bandwidth(f.bandwidth_hz as f64);
+                }
+                d = match mode {
+                    Some(m) => d.with_detail(format!("{} ({})", m.name, m.note)),
+                    None => d.with_detail(format!(
+                        "no front end reads {}",
+                        b.class.modulation.label()
+                    )),
+                };
+                c.emit(Event::Decoded(d));
+            }
         }
 
         let s = self.router.take_stats();
@@ -713,6 +804,10 @@ impl Simple for BurstRouteNode {
                 .label("Score below which the burst is unnamed"),
             Param::float("min_margin", self.cfg.classify.min_margin as f64, 0.0..=0.5)
                 .label("Margin over the runner-up required"),
+            // Past one on purpose: the top of the range means never, and a
+            // busy wideband tier wants that available without a rebuild.
+            Param::float("report_confidence", self.report_min_confidence as f64, 0.0..=1.01)
+                .label("Confidence before an undecodable burst is logged"),
         ]
     }
 
@@ -724,6 +819,12 @@ impl Simple for BurstRouteNode {
             "min_snr_db" => self.cfg.min_snr_db = f as f32,
             "min_score" => self.cfg.classify.min_score = f as f32,
             "min_margin" => self.cfg.classify.min_margin = f as f32,
+            // Reporting only: it does not touch the router, so it must not
+            // rebuild it below either.
+            "report_confidence" => {
+                self.report_min_confidence = f.max(0.0) as f32;
+                return Ok(());
+            }
             _ => {
                 return Err(common::Error::other(format!(
                     "burst_route: unknown parameter {name:?}"
