@@ -6,8 +6,15 @@
 
 use egui::{Color32, ColorImage, Pos2, TextureHandle, TextureOptions};
 
+/// Widest texture asked for. wgpu reports 8192 as the limit on the hardware
+/// this runs on, and the API refuses wider rather than clamping.
+const MAX_WIDTH: usize = 8192;
+
 pub struct Waterfall {
     width: usize,
+    /// Spectrum bins per column, above one only when a row is wider than a
+    /// texture may be.
+    factor: usize,
     height: usize,
     /// Ring of rows, newest at `cursor - 1`.
     pixels: Vec<Color32>,
@@ -25,6 +32,7 @@ impl Waterfall {
     pub fn new(height: usize) -> Self {
         Self {
             width: 0,
+            factor: 1,
             height,
             pixels: Vec::new(),
             cursor: 0,
@@ -45,12 +53,21 @@ impl Waterfall {
     }
 
     /// Add one spectrum row, mapping dB through the given display range.
+    ///
+    /// A row wider than a texture may be is folded down first, several bins
+    /// to a column with the loudest kept, since a narrow burst that falls in
+    /// one bin has to stay visible. The GPU's limit is 8192 columns on most
+    /// hardware, and a 16384-point spectrum asked for a texture that wide
+    /// and took the window down with a validation error.
     pub fn push(&mut self, db: &[f32], floor: f32, ceil: f32) {
         if db.is_empty() {
             return;
         }
-        if db.len() != self.width {
-            self.width = db.len();
+        let factor = db.len().div_ceil(MAX_WIDTH).max(1);
+        let width = db.len().div_ceil(factor);
+        if width != self.width || factor != self.factor {
+            self.width = width;
+            self.factor = factor;
             self.pixels = vec![Color32::BLACK; self.width * self.height];
             self.row_buf = vec![Color32::BLACK; self.width];
             self.cursor = 0;
@@ -60,7 +77,8 @@ impl Waterfall {
         }
         let span = (ceil - floor).max(1.0);
         let row = self.cursor * self.width;
-        for (i, &v) in db.iter().enumerate() {
+        for (i, chunk) in db.chunks(factor).enumerate() {
+            let v = chunk.iter().copied().fold(f32::MIN, f32::max);
             self.pixels[row + i] = colormap(((v - floor) / span).clamp(0.0, 1.0));
         }
         self.dirty_row = Some(self.cursor);
@@ -94,6 +112,8 @@ impl Waterfall {
     /// retune wipes the display continuously while the pointer is dragging,
     /// which looks like the waterfall has stopped.
     pub fn shift(&mut self, d: i32) {
+        // `d` is in spectrum bins; the columns may be coarser.
+        let d = d / self.factor.max(1) as i32;
         if d == 0 || self.width == 0 {
             return;
         }
@@ -344,6 +364,17 @@ mod tests {
         w.shift(-2);
         assert_eq!(w.pixels[4], before);
         assert_eq!(w.pixels[0], Color32::BLACK);
+    }
+
+    #[test]
+    fn a_row_wider_than_a_texture_is_folded_down() {
+        let mut w = Waterfall::new(16);
+        let mut db = vec![-90.0f32; 16384];
+        db[10_000] = -20.0;
+        w.push(&db, -100.0, 0.0);
+        assert_eq!(w.width, 8192, "two bins to a column");
+        // The loud bin survives the fold, in the column that holds it.
+        assert_ne!(w.pixels[5000], w.pixels[4999]);
     }
 
     #[test]

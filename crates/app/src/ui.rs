@@ -264,6 +264,8 @@ impl View {
 const DECODE_LOG_MAX: usize = 500;
 /// How many of the newest rows keep their burst's samples for the view.
 const IQ_KEEP: usize = 64;
+/// Height of the burst view in the packet detail, in pixels.
+const BURST_VIEW_H: f32 = 120.0;
 
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
 /// screen, which is about what a rooftop antenna hears.
@@ -4506,8 +4508,23 @@ impl App {
                     .selected
                     .and_then(|id| self.decodes.iter().find(|l| l.id == id))
                     .map(|l| l.rec.clone());
-                let dump_h = if selected.is_some() { 116.0 } else { 0.0 };
-                let list_h = (ui.available_height() - dump_h).max(24.0);
+                // The detail sits in a bottom sub-panel whose top edge drags,
+                // so its height is the operator's rather than fixed: a burst
+                // worth studying gets the room, and a glance at the bytes
+                // gives it back. Reserved before the list, so the list takes
+                // whatever is left.
+                if let Some(rec) = &selected {
+                    let want = if rec.iq.is_some() { 116.0 + BURST_VIEW_H + 24.0 } else { 116.0 };
+                    let avail = ui.available_height();
+                    Panel::bottom("packet_detail")
+                        .resizable(true)
+                        .default_size(want.min(avail - 40.0).max(64.0))
+                        .min_size(64.0)
+                        .max_size((avail - 40.0).max(80.0))
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 6, ..Default::default() }))
+                        .show_inside(ui, |ui| packet_detail(ui, rec));
+                }
+                let list_h = ui.available_height().max(24.0);
                 // Two nested scroll areas so the headings stay above the rows
                 // vertically but travel with them sideways, which is the only
                 // arrangement where a narrow window can still reach the last
@@ -4532,10 +4549,6 @@ impl App {
                         .id_salt("packet_rows")
                         .show(ui, |ui| self.log_rows(ui, w));
                 });
-                if let Some(rec) = selected {
-                    ui.separator();
-                    packet_detail(ui, &rec);
-                }
             });
     }
 
@@ -4719,11 +4732,18 @@ impl App {
         let t0 = self.decodes.first().map(|l| l.rec.at);
         let mut clicked = None;
 
-        for (n, log) in self.decodes.iter().enumerate() {
+        // Striping counts the rows actually drawn, not their place in the
+        // list: with unknowns hidden the drawn rows are not contiguous in
+        // it, and striping on the list index made the shading of a row jump
+        // as the hidden rows above it scrolled past.
+        let mut shown = 0usize;
+        for log in self.decodes.iter() {
             let rec = &log.rec;
             if !self.show_unknown && !rec.is_known() {
                 continue;
             }
+            let n = shown;
+            shown += 1;
             // Every row is the same height and every column the same width, so
             // nothing reflows as packets arrive or the pointer moves over
             // them. The whole row is one hit target, painted rather than built
@@ -4951,7 +4971,12 @@ fn row_color(rec: &DecodeRecord) -> Color32 {
 /// the fields, an image pane reads the bytes and the media type.
 fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
     if let Some(iq) = &rec.iq {
-        burst_view(ui, iq);
+        // The burst view takes up to half the room the panel was dragged to,
+        // never less than its natural height, so dragging the divider up
+        // grows the RF view and the bytes together rather than only the
+        // scrollback under them.
+        let h = (ui.available_height() * 0.5).clamp(BURST_VIEW_H, 320.0);
+        burst_view(ui, iq, h);
         ui.add_space(4.0);
     }
     if !rec.fields.is_empty() {
@@ -5006,7 +5031,7 @@ fn burst_columns(samples: &[common::C32], rate: f64, cols: usize) -> Vec<(f32, f
 /// unknown device is worked out from: a keyed carrier's marks and gaps, a
 /// two-tone signal's frequency stepping between its tones, a chirp's
 /// frequency ramping across the width.
-fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst) {
+fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let secs = iq.samples.len() as f64 / iq.rate.max(1.0);
     ui.label(legend(&format!(
         "burst  {:.1} ms  {} samples at {:.1} kS/s  around {:.4} MHz",
@@ -5016,7 +5041,7 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst) {
         iq.center_hz as f64 / 1e6
     )));
     let width = ui.available_width().max(200.0);
-    let (resp, p) = ui.allocate_painter(Vec2::new(width, 140.0), Sense::hover());
+    let (resp, p) = ui.allocate_painter(Vec2::new(width, height), Sense::hover());
     let rect = resp.rect;
     p.rect_filled(rect, 2.0, theme::WELL);
     let cols = burst_columns(&iq.samples, iq.rate, rect.width() as usize);

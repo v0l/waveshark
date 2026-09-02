@@ -52,6 +52,13 @@ pub struct RouterConfig {
     pub margin_us: u32,
     /// Longest burst held, in microseconds.
     pub max_burst_us: u32,
+    /// Shortest burst worth measuring, in microseconds, not counting the
+    /// margins. A gate that opened on a blip and shut again produced a
+    /// burst of nothing but its two margins, and the classifier then read
+    /// four milliseconds of noise as a carrier or as noise and reported it
+    /// with confidence; a row of those every few seconds was most of a
+    /// quiet band's list.
+    pub min_burst_us: u32,
     /// Envelope estimator time constant, in microseconds.
     pub tau_us: f32,
     /// Minimum SNR before a burst is opened at all.
@@ -70,6 +77,7 @@ impl Default for RouterConfig {
             reset_us: 10_000,
             margin_us: 2_000,
             max_burst_us: 500_000,
+            min_burst_us: 1_000,
             tau_us: 500.0,
             min_snr_db: 6.0,
             noise_threshold_ratio: 3.5,
@@ -131,6 +139,8 @@ pub struct BurstRouter {
     low_run: u64,
     sample: u64,
     burst_start: u64,
+    /// Where in `burst` the loud part began, past the leading margin.
+    body_start: usize,
     env: Vec<f32>,
     stats: RouterStats,
 }
@@ -161,6 +171,7 @@ impl BurstRouter {
             low_run: 0,
             sample: 0,
             burst_start: 0,
+            body_start: 0,
             env: Vec::new(),
             stats: RouterStats::default(),
         }
@@ -201,6 +212,7 @@ impl BurstRouter {
                     self.in_burst = true;
                     self.burst.clear();
                     self.burst.extend(self.pre.iter().copied());
+                    self.body_start = self.burst.len();
                     self.burst_start = self.sample.saturating_sub(self.pre.len() as u64 + 1);
                 }
                 self.tail = 0;
@@ -236,6 +248,10 @@ impl BurstRouter {
 
     fn finish(&mut self, out: &mut Vec<RoutedBurst>) {
         self.in_burst = false;
+        // What was loud, between the margins: a burst shorter than the least
+        // worth measuring is the gate opening on a blip, and is dropped.
+        let body = (self.burst.len() - self.tail).saturating_sub(self.body_start);
+        let min_body = (self.cfg.min_burst_us as f64 * self.rate / 1e6) as usize;
         // Keep a margin of the trailing silence and drop the rest: the gap
         // that ends the last package comes from it, and the rest is the empty
         // channel, which drags every measurement of the burst toward noise.
@@ -243,6 +259,10 @@ impl BurstRouter {
         self.burst.truncate(keep);
         self.low_run = 0;
         self.tail = 0;
+        if body < min_body {
+            self.burst.clear();
+            return;
+        }
 
         let burst = std::mem::take(&mut self.burst);
         let class = self.classifier.classify(&burst);
@@ -447,8 +467,18 @@ mod tests {
     #[test]
     fn a_burst_the_classifier_will_not_name_is_tried_both_ways() {
         // Under a millisecond of signal, which is fewer samples than any
-        // spectrum can be measured from. The cheapest way to get a refusal.
-        let (bursts, mut r) = route(&ook_burst(&[1, 0, 1, 0], 100));
+        // spectrum can be measured from. The cheapest way to get a refusal,
+        // and shorter than the router would normally measure at all, so
+        // that floor is lifted for the test.
+        let cfg = RouterConfig {
+            classify: ClassifyConfig { channel_hz: RATE as f32, ..Default::default() },
+            min_burst_us: 0,
+            ..Default::default()
+        };
+        let mut r = BurstRouter::new(RATE, cfg);
+        let mut bursts = Vec::new();
+        r.process(&ook_burst(&[1, 0, 1, 0], 100), &mut bursts);
+        r.flush(&mut bursts);
         assert_eq!(bursts.len(), 1);
         assert_eq!(bursts[0].class.modulation, Modulation::Unknown);
         assert_eq!(bursts[0].routed_to, "ook+fsk", "a refusal must not lose the burst");
