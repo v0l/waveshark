@@ -21,6 +21,7 @@
 
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
+use decode::bds;
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -187,6 +188,35 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
             fields.push(("type_code".into(), Value::Int(*type_code as i64)));
             "ADSB-Other"
         }
+        // A reply to a radar, which is where the weather is: an aircraft's
+        // wind and temperature go out in answer to an interrogation and never
+        // in a broadcast.
+        Message::CommB { altitude_ft, squawk, report } => {
+            if let Some(alt) = altitude_ft {
+                fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
+            }
+            if let Some(sq) = squawk {
+                fields.push(("squawk".into(), Value::Text(format!("{sq:04}"))));
+            }
+            match report {
+                Some(r) => {
+                    fields.push(("bds".into(), Value::Text(r.bds().to_string())));
+                    commb_fields(r, &mut fields);
+                    match r {
+                        bds::Report::Meteo(_) => "ModeS-Weather",
+                        bds::Report::Identification { .. } => "ModeS-Ident",
+                        bds::Report::TrackTurn { .. } => "ModeS-Track",
+                        bds::Report::HeadingSpeed { .. } => "ModeS-Speed",
+                        bds::Report::VerticalIntent { .. } => "ModeS-Intent",
+                        bds::Report::Capability { .. } => "ModeS-Capability",
+                    }
+                }
+                // The register is only a guess, and the frame is worth
+                // reporting without one: it still says this aircraft is up
+                // there and how high.
+                None => "ModeS-CommB",
+            }
+        }
         // A reply to an interrogation, which is most of what a busy sky
         // sounds like. Worth reporting: it says an aircraft is up there, and
         // its address is the only identity it gives.
@@ -206,6 +236,82 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
 
 fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
+}
+
+/// The fields of one Comm-B register, named the way the rest of the log names
+/// things: units in the key, so a row reads without a legend.
+fn commb_fields(r: &bds::Report, fields: &mut Vec<(String, common::Value)>) {
+    use common::Value;
+    fn num(fields: &mut Vec<(String, Value)>, k: &str, v: Option<f64>) {
+        if let Some(v) = v {
+            fields.push((k.to_string(), Value::Float(round1(v))));
+        }
+    }
+    let num = |fields: &mut Vec<(String, Value)>, k: &str, v: Option<f64>| num(fields, k, v);
+    match r {
+        bds::Report::Meteo(m) => {
+            num(fields, "wind_kt", m.wind_kt);
+            num(fields, "wind_dir_deg", m.wind_dir_deg);
+            num(fields, "temperature_c", Some(m.temp_c));
+            num(fields, "humidity_pct", m.humidity_pct);
+            if let Some(p) = m.pressure_hpa {
+                fields.push(("pressure_hpa".into(), Value::Int(p as i64)));
+            }
+            if let Some(t) = m.turbulence {
+                fields.push(("turbulence".into(), Value::Int(t as i64)));
+            }
+        }
+        bds::Report::Identification { callsign } => {
+            fields.push(("callsign".into(), Value::Text(callsign.clone())));
+        }
+        bds::Report::TrackTurn {
+            roll_deg,
+            track_deg,
+            ground_speed_kt,
+            track_rate_deg_s,
+            true_airspeed_kt,
+        } => {
+            num(fields, "roll_deg", *roll_deg);
+            num(fields, "track_deg", *track_deg);
+            num(fields, "ground_speed_kt", *ground_speed_kt);
+            num(fields, "track_rate_deg_s", *track_rate_deg_s);
+            num(fields, "true_airspeed_kt", *true_airspeed_kt);
+        }
+        bds::Report::HeadingSpeed {
+            heading_deg,
+            indicated_airspeed_kt,
+            mach,
+            baro_vertical_rate_fpm,
+            inertial_vertical_rate_fpm,
+        } => {
+            num(fields, "heading_deg", *heading_deg);
+            num(fields, "indicated_airspeed_kt", *indicated_airspeed_kt);
+            if let Some(m) = mach {
+                fields.push(("mach".into(), Value::Float((m * 100.0).round() / 100.0)));
+            }
+            for (k, v) in [
+                ("vertical_rate_fpm", baro_vertical_rate_fpm),
+                ("inertial_rate_fpm", inertial_vertical_rate_fpm),
+            ] {
+                if let Some(v) = v {
+                    fields.push((k.to_string(), Value::Int(*v as i64)));
+                }
+            }
+        }
+        bds::Report::VerticalIntent { selected_altitude_ft, fms_altitude_ft, qnh_mb } => {
+            for (k, v) in
+                [("selected_altitude_ft", selected_altitude_ft), ("fms_altitude_ft", fms_altitude_ft)]
+            {
+                if let Some(v) = v {
+                    fields.push((k.to_string(), Value::Int(*v as i64)));
+                }
+            }
+            num(fields, "qnh_mb", *qnh_mb);
+        }
+        bds::Report::Capability { subnetwork_version } => {
+            fields.push(("subnetwork".into(), Value::Int(*subnetwork_version as i64)));
+        }
+    }
 }
 
 #[cfg(test)]

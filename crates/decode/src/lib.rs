@@ -18,6 +18,7 @@ pub mod ais;
 pub mod aprs;
 pub mod ax25;
 pub mod analyze;
+pub mod bds;
 pub mod bits;
 pub mod m17;
 pub mod pocsag;

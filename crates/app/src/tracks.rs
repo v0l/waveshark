@@ -122,6 +122,14 @@ pub enum Detail {
     Aircraft {
         altitude_ft: Option<i32>,
         vertical_rate_fpm: Option<i32>,
+        /// The code the crew set, from a DF21 reply to a radar. Never in an
+        /// ADS-B broadcast, so an aircraft only has one here once something
+        /// has interrogated it within earshot.
+        squawk: Option<u16>,
+        /// Wind at the aircraft, in knots and degrees true, from BDS 4,4.
+        wind: Option<(f64, f64)>,
+        /// Static air temperature in Celsius, from the same register.
+        temp_c: Option<f64>,
     },
     Vessel {
         heading_deg: Option<f64>,
@@ -150,6 +158,17 @@ pub enum Detail {
 }
 
 impl Detail {
+    /// An aircraft nothing has been heard from yet.
+    pub fn new_aircraft() -> Self {
+        Detail::Aircraft {
+            altitude_ft: None,
+            vertical_rate_fpm: None,
+            squawk: None,
+            wind: None,
+            temp_c: None,
+        }
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Detail::Aircraft { .. } => Kind::Aircraft,
@@ -496,11 +515,7 @@ impl Tracks {
     /// Fold in one Mode S frame.
     pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
         let Some(icao) = frame.icao else { return };
-        let i = self.entry(
-            TrackId::Icao(icao),
-            Detail::Aircraft { altitude_ft: None, vertical_rate_fpm: None },
-            at,
-        );
+        let i = self.entry(TrackId::Icao(icao), Detail::new_aircraft(), at);
         let reference = self.reference;
         let e = &mut self.seen[i];
         e.track.messages += 1;
@@ -534,6 +549,48 @@ impl Tracks {
                     *altitude_ft = Some(0);
                 }
                 ((*lat_cpr, *lon_cpr), *odd)
+            }
+            // A reply to a radar. It carries no position, but its altitude is
+            // as good as a broadcast one and its callsign register names an
+            // aircraft that may never broadcast an identification at all.
+            adsb::Message::CommB { altitude_ft, squawk, report } => {
+                if let Detail::Aircraft { altitude_ft: a, squawk: s, wind, temp_c, .. } =
+                    &mut e.track.detail
+                {
+                    if let Some(alt) = altitude_ft {
+                        *a = Some(*alt);
+                    }
+                    if let Some(code) = squawk {
+                        *s = Some(*code);
+                    }
+                    // The weather this aircraft is flying through, which
+                    // nothing else on the band reports.
+                    if let Some(decode::bds::Report::Meteo(m)) = report {
+                        if let (Some(kt), Some(deg)) = (m.wind_kt, m.wind_dir_deg) {
+                            *wind = Some((kt, deg));
+                        }
+                        *temp_c = Some(m.temp_c);
+                    }
+                }
+                match report {
+                    Some(decode::bds::Report::Identification { callsign }) => {
+                        e.track.label = Some(callsign.clone());
+                    }
+                    Some(decode::bds::Report::TrackTurn {
+                        track_deg,
+                        ground_speed_kt,
+                        ..
+                    }) => {
+                        if let Some(v) = ground_speed_kt {
+                            e.track.speed_kt = Some(*v);
+                        }
+                        if let Some(v) = track_deg {
+                            e.track.course_deg = Some(*v);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
             }
             adsb::Message::Unsupported { .. } | adsb::Message::ShortReply => return,
         };
@@ -1032,7 +1089,7 @@ mod tests {
     fn a_contradicted_position_drops_the_trail_rather_than_drawing_to_it() {
         let mut a = Track::new(
             TrackId::Icao(0x4ca748),
-            Detail::Aircraft { altitude_ft: None, vertical_rate_fpm: None },
+            Detail::new_aircraft(),
             std::time::Instant::now(),
         );
         let t = std::time::Instant::now();
@@ -1041,6 +1098,32 @@ mod tests {
         assert_eq!(a.trail.len(), 2, "a plausible move extends the trail");
         a.set_position((53.5, 3.6), t + std::time::Duration::from_secs(11), true);
         assert_eq!(a.trail, vec![(53.5, 3.6)], "the old track was not where it was");
+    }
+
+    #[test]
+    fn a_comm_b_reply_fills_in_what_no_broadcast_carries() {
+        // Weather and a callsign from replies to a radar. An aircraft that
+        // never sends an extended squitter is still on the list with an
+        // altitude, and this is the only place a wind reading comes from.
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        t.update_adsb(&frame("A0001692185BD5CF400000DFC696"), now);
+        t.update_adsb(&frame("A0001838201584F23468207CDFA5"), now);
+        let list = t.active(now);
+        let a = list
+            .iter()
+            .find(|a| matches!(a.detail, Detail::Aircraft { wind: Some(_), .. }))
+            .expect("the meteorological reply made a track");
+        let Detail::Aircraft { wind: Some((kt, deg)), temp_c: Some(c), .. } = a.detail else {
+            panic!("no weather on the track")
+        };
+        assert_eq!(kt, 22.0);
+        assert!((deg - 344.5).abs() < 0.5, "wind from {deg}");
+        assert!((c + 48.75).abs() < 0.1, "temperature {c}");
+
+        let named = list.iter().find(|a| a.label.as_deref() == Some("EXS2MF"));
+        assert!(named.is_some(), "the callsign register named the aircraft");
+        assert_eq!(named.unwrap().altitude_ft(), Some(38_000));
     }
 
     #[test]

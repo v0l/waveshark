@@ -70,6 +70,19 @@ pub enum Message {
     },
     /// A format this decoder does not parse, named by its type code.
     Unsupported { type_code: u8 },
+    /// A reply to an interrogation, carrying a Comm-B register.
+    ///
+    /// DF20 answers with an altitude and DF21 with a squawk, and both attach
+    /// 56 bits of whichever register the radar asked for. Nothing in the frame
+    /// says which register that was, so [`crate::bds::infer`] works it out and
+    /// reports nothing when the answer is not clear.
+    CommB {
+        /// Barometric altitude, from a DF20.
+        altitude_ft: Option<i32>,
+        /// Mode A code, from a DF21.
+        squawk: Option<u16>,
+        report: Option<crate::bds::Report>,
+    },
     /// A short reply, recognisable but not attributable on its own.
     ShortReply,
 }
@@ -293,6 +306,23 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, FrameError> {
     if extended && crc24(bytes) != 0 {
         return Err(FrameError::CrcFailed);
     }
+    // A Comm-B reply. The address is the CRC remainder rather than a field,
+    // so it is only as good as whatever decided to let this frame through:
+    // [`AddressBook`] accepts one when an ADS-B frame has already proved that
+    // aircraft is out there, and everything downstream inherits that judgment.
+    if !extended && matches!(df, 20 | 21) && bytes.len() == 14 {
+        let ac = (((bytes[2] & 0x1f) as u16) << 8) | bytes[3] as u16;
+        return Ok(Frame {
+            df,
+            icao: overlaid_address(bytes),
+            kind: Message::CommB {
+                altitude_ft: (df == 20).then(|| altitude_13(ac)).flatten(),
+                squawk: (df == 21).then(|| squawk_13(ac)).flatten(),
+                report: crate::bds::infer(&bytes[4..11]),
+            },
+            raw: bytes.to_vec(),
+        });
+    }
     if !extended {
         return Ok(Frame { df, icao: None, kind: Message::ShortReply, raw: bytes.to_vec() });
     }
@@ -367,6 +397,39 @@ fn altitude(me: &[u8]) -> Option<i32> {
     }
     let n = ((raw & 0x0fe0) >> 1) | (raw & 0x000f);
     Some(n as i32 * 25 - 1000)
+}
+
+/// The 13 bit altitude field of a DF4, DF20 or all-call reply.
+///
+/// The M bit picks metres and the Q bit picks 25 foot steps. Neither the
+/// metric encoding nor the 100 foot Gillham code is decoded here, and both are
+/// reported as no altitude rather than as a wrong one: a Gillham code read as
+/// binary is a plausible number at the wrong height.
+pub fn altitude_13(ac: u16) -> Option<i32> {
+    if ac == 0 || ac & 0x0040 != 0 || ac & 0x0010 == 0 {
+        return None;
+    }
+    let n = ((ac & 0x1f80) >> 2) | ((ac & 0x0020) >> 1) | (ac & 0x000f);
+    Some(n as i32 * 25 - 1000)
+}
+
+/// The 13 bit identity field of a DF5 or DF21, as the four digit squawk the
+/// crew set.
+///
+/// The bits are interleaved by pulse position rather than by digit: reading
+/// the field as a number gives something that looks like a squawk and is not.
+pub fn squawk_13(id: u16) -> Option<u16> {
+    if id == 0 {
+        return None;
+    }
+    // C1 A1 C2 A2 C4 A4 X B1 D1 B2 D2 B4 D4, from the top of the field, and
+    // each digit's own bits run 4, 2, 1 rather than in field order.
+    let at = |i: u32| ((id >> (12 - i)) & 1) as u16;
+    let a = (at(5) << 2) | (at(3) << 1) | at(1);
+    let b = (at(11) << 2) | (at(9) << 1) | at(7);
+    let c = (at(4) << 2) | (at(2) << 1) | at(0);
+    let d = (at(12) << 2) | (at(10) << 1) | at(8);
+    Some(a * 1000 + b * 100 + c * 10 + d)
 }
 
 /// Ground speed, track and vertical rate from a type 19 subtype 1 or 3.
@@ -604,6 +667,51 @@ mod tests {
         assert_eq!(f.df, 0);
         assert_eq!(f.icao, None);
         assert_eq!(f.kind, Message::ShortReply);
+    }
+
+    #[test]
+    fn a_comm_b_reply_carries_its_altitude_and_its_register() {
+        // A DF20 from pyModeS's test suite: the radar asked for the callsign
+        // register and the aircraft answered with EXS2MF.
+        let f = parse(&hex("A0001838201584F23468207CDFA5")).unwrap();
+        assert_eq!(f.df, 20);
+        // The address is the CRC remainder, believable only because something
+        // upstream matched it against an aircraft already seen.
+        assert_eq!(f.icao, Some(crc24(&hex("A0001838201584F23468207CDFA5"))));
+        let Message::CommB { altitude_ft, squawk, report } = f.kind else {
+            panic!("not read as a Comm-B reply")
+        };
+        assert_eq!(altitude_ft, Some(38_000), "altitude {altitude_ft:?}");
+        assert_eq!(squawk, None, "a DF20 has no squawk in it");
+        assert_eq!(
+            report,
+            Some(crate::bds::Report::Identification { callsign: "EXS2MF".into() })
+        );
+    }
+
+    #[test]
+    fn an_altitude_field_only_decodes_the_encoding_it_understands() {
+        // Q set, 25 foot steps.
+        assert_eq!(altitude_13(0x1838), Some(38_000));
+        assert_eq!(altitude_13(0x00b0), Some(200));
+        // Q clear is the Gillham code, which is not decoded, and M set is
+        // metric. Both must report nothing rather than a number: a Gillham
+        // code read as binary is a plausible height that is not the one the
+        // aircraft is at.
+        assert_eq!(altitude_13(0x1828), None);
+        assert_eq!(altitude_13(0x1878), None);
+        assert_eq!(altitude_13(0), None);
+    }
+
+    #[test]
+    fn a_squawk_is_read_by_pulse_position_rather_than_as_a_number() {
+        // A1 alone is the thousands digit of 1000, and it sits in bit 1 of
+        // the field rather than anywhere a plain integer would put it.
+        assert_eq!(squawk_13(1 << 11), Some(1000));
+        // The emergency code 7700: A=7, B=7, C=0, D=0.
+        let bits = (1 << 11) | (1 << 9) | (1 << 7) | (1 << 5) | (1 << 3) | (1 << 1);
+        assert_eq!(squawk_13(bits), Some(7700));
+        assert_eq!(squawk_13(0), None);
     }
 
     #[test]
