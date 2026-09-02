@@ -27,6 +27,11 @@
 use crate::event::Event;
 use crate::node::{Node, NodeCtx, PortSpec};
 use crate::port::{Payload, StreamSpec, Tag};
+
+/// How often slot throughput is recomputed.
+const RATE_WINDOW: f32 = 0.25;
+/// Time constant of the smoothing applied to it.
+const RATE_TAU: f32 = 2.0;
 use common::{Error, Result};
 use std::collections::HashMap;
 
@@ -233,9 +238,21 @@ pub struct Topology {
     pub input: StreamSpec,
     pub nodes: Vec<TopoNode>,
     pub output_slot: usize,
+    /// Items per second measured on each slot, indexed by slot.
+    ///
+    /// Measured rather than declared, because for an event stream there is
+    /// nothing to declare: a packet bus carries whatever the decoders found,
+    /// and its spec rate is zero. This is the only number that says whether a
+    /// wire is doing anything.
+    pub rates: Vec<f32>,
 }
 
 impl Topology {
+    /// What is flowing on a slot right now, in items per second.
+    pub fn rate_of(&self, slot: usize) -> Option<f32> {
+        self.rates.get(slot).copied()
+    }
+
     /// Which node writes a slot, for drawing edges.
     pub fn producer(&self, slot: usize) -> Option<&TopoNode> {
         self.nodes.iter().find(|n| n.outputs.iter().any(|(s, _)| *s == slot))
@@ -252,6 +269,14 @@ pub struct Graph {
     tags: Vec<Vec<Tag>>,
     /// Cumulative samples emitted on each slot.
     produced: Vec<u64>,
+    /// Throughput per slot, in items per second, and what it was measured
+    /// from. Smoothed with a time constant rather than reported per window:
+    /// a packet every few seconds through a quarter-second window reads as
+    /// four per second and then nothing, which is a flicker rather than a
+    /// measurement.
+    rate: Vec<f32>,
+    rate_seen: Vec<u64>,
+    rate_at: std::time::Instant,
     output_slot: Slot,
     events: Vec<Event>,
     /// Reused per-call scratch so steady state never allocates.
@@ -366,6 +391,9 @@ impl Graph {
             latency: vec![0; n_slots],
             tags: vec![Vec::new(); n_slots],
             produced: vec![0; n_slots],
+            rate: vec![0.0; n_slots],
+            rate_seen: vec![0; n_slots],
+            rate_at: std::time::Instant::now(),
             output_slot: INPUT_SLOT,
             events: Vec::new(),
             scratch_out: Vec::new(),
@@ -512,7 +540,12 @@ impl Graph {
                 params: e.node.params(),
             });
         }
-        Topology { input: self.specs[INPUT_SLOT], nodes, output_slot: self.output_slot }
+        Topology {
+            input: self.specs[INPUT_SLOT],
+            nodes,
+            output_slot: self.output_slot,
+            rates: self.rate.clone(),
+        }
     }
 
     /// Take the nodes back out, to be rebuilt into a different shape.
@@ -537,6 +570,8 @@ impl Graph {
             t.clear();
         }
         self.produced.iter_mut().for_each(|p| *p = 0);
+        self.rate.iter_mut().for_each(|r| *r = 0.0);
+        self.rate_seen.iter_mut().for_each(|p| *p = 0);
     }
 
     /// Buffer the caller fills with graph input. Clear before filling.
@@ -671,7 +706,30 @@ impl Graph {
 
         self.tags[INPUT_SLOT].clear();
         self.produced[INPUT_SLOT] += n_in;
+        self.measure();
         Ok(&self.events)
+    }
+
+    /// Fold the items counted since the last window into each slot's rate.
+    ///
+    /// One clock reading per block, and the arithmetic only every window, so a
+    /// chain running at 2.4 MS/s in blocks of a few thousand samples pays this
+    /// a few hundred times a second.
+    fn measure(&mut self) {
+        let dt = self.rate_at.elapsed().as_secs_f32();
+        if dt < RATE_WINDOW {
+            return;
+        }
+        self.rate_at = std::time::Instant::now();
+        // A time constant rather than a fixed weight, so the smoothing does
+        // not change when the window does.
+        let a = dt / (RATE_TAU + dt);
+        for s in 0..self.rate.len() {
+            let n = self.produced[s].saturating_sub(self.rate_seen[s]);
+            self.rate_seen[s] = self.produced[s];
+            let now = n as f32 / dt;
+            self.rate[s] += a * (now - self.rate[s]);
+        }
     }
 
     /// Fill the input buffer from IQ and run.

@@ -233,6 +233,11 @@ fn restart(
 /// freezes for as long as the drag lasts.
 const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// How often the running chain is republished, for the throughput on its
+/// wires. Fast enough to watch, slow enough that cloning the topology is
+/// nothing beside the DSP.
+const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -1179,6 +1184,7 @@ fn run(
     let mut last_patch: Option<Option<crate::patch::Patch>> = None;
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
+    let mut last_chain = std::time::Instant::now();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
 
@@ -1503,6 +1509,14 @@ fn run(
             }
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();
+            }
+            // The chain carries what each wire is measured to be passing, so
+            // it is republished while it runs rather than only when its shape
+            // changes: a graph drawn once at build time reports the throughput
+            // it had before any samples went through it, which is none.
+            if last_chain.elapsed() >= CHAIN_PUBLISH {
+                publish_chain(status, &rx);
+                last_chain = std::time::Instant::now();
             }
             // The rate the spectrum sees rather than the one the radio
             // delivers: in manual mode a stage can sit between the two, and

@@ -40,9 +40,23 @@ fn kind_label(k: PortKind) -> &'static str {
     }
 }
 
-/// Rate as a human reads it, in the unit that suits the magnitude.
-fn rate_label(s: &StreamSpec) -> String {
+/// Rate as a human reads it, in the unit that suits the magnitude, or `None`
+/// where the stream has no rate to report.
+///
+/// A packet bus carries events rather than samples: nothing on it arrives at a
+/// fixed rate, and its spec says so by leaving the rate at zero. Printing that
+/// as `0 S/s` claimed the wire was dead while packets were going down it. What
+/// those wires get instead is [`flow_label`], measured by the graph. A source
+/// port is the other case, carrying many streams each at its own rate,
+/// where one number would have to be wrong about all but one of them.
+fn rate_label(s: &StreamSpec) -> Option<String> {
+    if matches!(s.kind, PortKind::Packets | PortKind::Sources) {
+        return None;
+    }
     let r = s.frame_rate();
+    if !r.is_finite() || r <= 0.0 {
+        return None;
+    }
     let base = if r >= 1e6 {
         format!("{:.3} MS/s", r / 1e6)
     } else if r >= 10e3 {
@@ -50,10 +64,38 @@ fn rate_label(s: &StreamSpec) -> String {
     } else {
         format!("{r:.0} S/s")
     };
-    if s.channels > 1 {
-        format!("{base} x{}", s.channels)
+    Some(if s.channels > 1 { format!("{base} x{}", s.channels) } else { base })
+}
+
+/// What the graph measured on a wire that has no rate of its own, in items per
+/// second.
+///
+/// Two significant figures at the bottom of the range, because the interesting
+/// question about a bus carrying one message every few seconds is whether it is
+/// carrying anything at all.
+fn flow_label(rate: f32) -> String {
+    if !rate.is_finite() || rate >= 100.0 {
+        return format!("{rate:.0}/s");
+    }
+    if rate >= 10.0 {
+        format!("{rate:.1}/s")
+    } else if rate >= 0.05 {
+        format!("{rate:.2}/s")
     } else {
-        base
+        // Below this the figure is what is left in the smoothing rather than a
+        // rate: one message every twenty seconds is better said as idle.
+        "idle".to_string()
+    }
+}
+
+/// What a wire carries, and how fast: its declared sample rate where it has
+/// one, otherwise what the graph counted going down it.
+fn wire_label(s: &StreamSpec, measured: Option<f32>) -> String {
+    let kind = kind_label(s.kind);
+    match (rate_label(s), measured) {
+        (Some(r), _) => format!("{kind}  {r}"),
+        (None, Some(r)) => format!("{kind}  {}", flow_label(r)),
+        (None, None) => kind.to_string(),
     }
 }
 
@@ -280,20 +322,16 @@ pub fn inspector(
     ui.add_space(6.0);
     for (slot, spec) in &node.inputs {
         ui.label(
-            egui::RichText::new(format!("in  {}  {}", kind_label(spec.kind), rate_label(spec)))
+            egui::RichText::new(format!("in  {}", wire_label(spec, topo.rate_of(*slot))))
                 .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
                 .color(theme::LEGEND),
         );
         let _ = slot;
     }
     if !node.sink {
-        for (_, spec) in &node.outputs {
+        for (slot, spec) in &node.outputs {
             ui.label(
-                egui::RichText::new(format!(
-                    "out {}  {}",
-                    kind_label(spec.kind),
-                    rate_label(spec)
-                ))
+                egui::RichText::new(format!("out {}", wire_label(spec, topo.rate_of(*slot))))
                 .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
                 .color(theme::TRACE),
             );
@@ -573,7 +611,7 @@ pub fn draw(
             let at = pointer.or_else(|| resp.interact_pointer_pos());
             let on = mine && at.is_some_and(|q| near_wire(from, to, q));
             let chosen = mine && node.tag.map(|t| (t, k)) == wire;
-            edge(&p, from, to, spec, label, on || chosen);
+            edge(&p, from, to, spec, topo.rate_of(*slot), label, on || chosen);
             if on && resp.clicked() {
                 act.wire = node.tag.map(|t| (t, k));
             }
@@ -739,11 +777,11 @@ pub fn draw(
             other.inputs.iter().any(|(s, _)| node.outputs.iter().any(|(o, _)| o == s))
         });
         if !feeds_anything && !node.sink {
-            if let Some((_, spec)) = node.outputs.first() {
+            if let Some((slot, spec)) = node.outputs.first() {
                 p.text(
                     Pos2::new(r.right() + 8.0, r.center().y),
                     egui::Align2::LEFT_CENTER,
-                    format!("out  {}  {}", kind_label(spec.kind), rate_label(spec)),
+                    format!("out  {}", wire_label(spec, topo.rate_of(*slot))),
                     FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
                     theme::TRACE,
                 );
@@ -1126,6 +1164,7 @@ fn edge(
     from: Pos2,
     to: Pos2,
     spec: &StreamSpec,
+    measured: Option<f32>,
     label: bool,
     lit: bool,
 ) {
@@ -1155,7 +1194,7 @@ fn edge(
         p.text(
             Pos2::new(mid.x, mid.y - 3.0),
             egui::Align2::CENTER_BOTTOM,
-            format!("{}  {}", kind_label(spec.kind), rate_label(spec)),
+            wire_label(spec, measured),
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,
         );
@@ -1176,12 +1215,40 @@ mod tests {
             .with_channels(2);
         // The port rate is 96 kHz but each ear runs at 48 kHz. Showing the port
         // rate would read as an audio chain running twice as fast as it is.
-        assert_eq!(rate_label(&s), "48.0 kS/s x2");
+        assert_eq!(rate_label(&s).as_deref(), Some("48.0 kS/s x2"));
+    }
+
+    #[test]
+    fn a_packet_wire_does_not_claim_a_sample_rate() {
+        // Packets are events. The bus used to be labelled "packets 0 S/s",
+        // which reads as a dead wire while decodes are going down it.
+        let s = StreamSpec::iq(0.0, Hz::mhz(1090)).with_kind(PortKind::Packets);
+        assert_eq!(rate_label(&s), None);
+        assert_eq!(wire_label(&s, None), "packets");
+        // Same for a port carrying one stream per transmitter found, where a
+        // single rate would be wrong about all but one of them.
+        let src = StreamSpec::iq(2_400_000.0, Hz::mhz(433)).with_kind(PortKind::Sources);
+        assert_eq!(wire_label(&src, None), "sources");
+    }
+
+    #[test]
+    fn a_packet_wire_says_what_the_graph_counted_on_it() {
+        let s = StreamSpec::iq(0.0, Hz::mhz(1090)).with_kind(PortKind::Packets);
+        assert_eq!(wire_label(&s, Some(3.4)), "packets  3.40/s");
+        assert_eq!(wire_label(&s, Some(128.0)), "packets  128/s");
+        // A bus nothing is using says so, rather than showing a number left
+        // over in the smoothing.
+        assert_eq!(wire_label(&s, Some(0.0)), "packets  idle");
+        assert_eq!(wire_label(&s, Some(0.01)), "packets  idle");
+        // A stream with a real sample rate keeps it: that number is exact, and
+        // a measured one would only wobble around it.
+        let iq = StreamSpec::iq(2_400_000.0, Hz::mhz(433));
+        assert_eq!(wire_label(&iq, Some(2_399_888.0)), "iq  2.400 MS/s");
     }
 
     #[test]
     fn rates_are_shown_in_a_unit_that_suits_them() {
-        let at = |r: f64| rate_label(&StreamSpec::iq(r, Hz::mhz(95)));
+        let at = |r: f64| rate_label(&StreamSpec::iq(r, Hz::mhz(95))).unwrap_or_default();
         assert_eq!(at(2_304_000.0), "2.304 MS/s");
         assert_eq!(at(48_000.0), "48.0 kS/s");
         // A symbol rate is not helped by being rounded to 1.2 kS/s, which is
@@ -1219,6 +1286,7 @@ mod tests {
                 node(4, "Demod", &[4], 5),
             ],
             output_slot: 5,
+            rates: Vec::new(),
         }
     }
 
@@ -1543,6 +1611,7 @@ mod tests {
             input: t.input,
             nodes: vec![node(0, "Envelope", &[0], 1), node(1, "OOK pulses", &[1], 2)],
             output_slot: 2,
+            rates: Vec::new(),
         };
         t.nodes[2].inner = Some(Box::new(inner));
         t.nodes[2].inner_count = 74;
