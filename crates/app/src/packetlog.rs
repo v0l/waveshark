@@ -432,6 +432,11 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             body: packet_body,
             measure,
             iq: None,
+            // The log is a record of what was on the air, in timings and
+            // bytes. Speech is not written to it: an hour of a busy repeater
+            // is gigabytes, and the decision to keep audio belongs to
+            // whoever asked for a recording.
+            audio: None,
         });
     }
     out
@@ -480,6 +485,7 @@ mod tests {
             ]),
             measure: None,
             iq: None,
+            audio: None,
         }
     }
 
@@ -534,6 +540,7 @@ mod tests {
             body: PacketBody::Frame(bytes.to_vec()),
             measure: None,
             iq: None,
+            audio: None,
         }
     }
 

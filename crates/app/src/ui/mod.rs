@@ -131,6 +131,10 @@ pub struct App {
     /// names a destination. Held here rather than in the graph because it is
     /// assembled from the same records the packet list shows.
     calls: crate::calls::Calls,
+    /// Whether decoded speech is being played as it arrives, and how loudly.
+    /// The call strip is what this draws as.
+    call_listen: bool,
+    call_volume: f32,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
@@ -501,6 +505,8 @@ impl Default for App {
             dc_block: true,
             view: View::Spectrum,
             calls: crate::calls::Calls::new(),
+            call_listen: false,
+            call_volume: 0.8,
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
@@ -2025,6 +2031,7 @@ impl App {
                 });
 
                 ui.add_space(8.0);
+                self.call_strip(ui);
 
                 if self.channels.is_empty() {
                     ui.label(
@@ -2285,7 +2292,12 @@ fn row_color(rec: &DecodeRecord) -> Color32 {
 /// when the answer is wrong, or when the protocol is unknown and the bytes are
 /// all there is. Both are also what a view widget would consume: a map reads
 /// the fields, an image pane reads the bytes and the media type.
-fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
+/// The detail pane under the packet list.
+///
+/// Returns whether the operator asked to hear the transmission again, which
+/// the caller turns into a command: the audio device belongs to the radio
+/// thread, and a view does not get to open its own.
+fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
     // The burst view takes up to half the room the inspector was dragged
     // to, never less than its natural height, so dragging the divider up
     // grows the RF view and the bytes together rather than only the
@@ -2301,6 +2313,16 @@ fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
         }
     }
     ui.add_space(4.0);
+    // A voice transmission's payload is what was said, so the row offers to
+    // say it again. The bytes below are the vocoder's, and nobody reads those.
+    let mut play = false;
+    if let Some(a) = &rec.audio {
+        ui.horizontal(|ui| {
+            play = ui.button("PLAY").clicked();
+            ui.label(legend(&format!("{:.1} s of speech", a.seconds())));
+        });
+        ui.add_space(4.0);
+    }
     if !rec.fields.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -2315,6 +2337,7 @@ fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
         ui.add_space(4.0);
     }
     hex_dump(ui, &rec.bytes);
+    play
 }
 
 /// One column of the burst view: the loudest sample in the column, and the
@@ -2629,6 +2652,7 @@ mod tests {
             bytes: vec![0xab, 0xcd],
             crc,
             iq: None,
+            audio: None,
         }
     }
 

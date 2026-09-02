@@ -843,6 +843,19 @@ impl Receiver {
         self.pocsag.is_some()
     }
 
+    /// Speech the M17 front end decoded in this block, at its codec's rate.
+    ///
+    /// Empty unless somebody is transmitting voice on the channel it watches.
+    /// Read like the spectrum rather than carried on a port: audio at 8 kHz
+    /// has no business in a graph negotiated for the sample rate the radio is
+    /// running at, and only the mixer wants it.
+    pub fn m17_voice(&self) -> &[f32] {
+        self.m17
+            .and_then(|id| downcast::<nodes::m17_nodes::M17Node>(&self.graph, id))
+            .map(|n| n.voice_now())
+            .unwrap_or(&[])
+    }
+
     pub fn m17_on(&self) -> bool {
         self.m17.is_some()
     }
@@ -2120,6 +2133,7 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         bytes: d.payload.clone(),
         crc: d.crc_ok,
         iq: d.iq.clone(),
+        audio: d.audio.clone(),
     }
 }
 

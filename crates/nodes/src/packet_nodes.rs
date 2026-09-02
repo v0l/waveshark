@@ -107,7 +107,9 @@ impl PacketDecodeNode {
         // shape is the most specific claim any of these make: a tagged event
         // of an exact length, carrying a link setup frame whose CRC checks.
         if let Some(d) = crate::m17_nodes::m17_decoded(bytes, center) {
-            self.hits.push(d);
+            // The speech travelled with the packet rather than in its bytes,
+            // and this is the row it belongs to.
+            self.hits.push(d.with_audio(p.audio.clone()));
             return;
         }
         if dsp::ais::is_ais_band(p.center_hz as f64) {
@@ -255,6 +257,7 @@ mod tests {
             body: PacketBody::Pulses(pulses),
             measure: None,
             iq: None,
+            audio: None,
         }
     }
 
@@ -294,6 +297,7 @@ mod tests {
                 body: PacketBody::Frame(bytes),
                 measure: None,
                 iq: None,
+                audio: None,
             }],
         );
         assert_eq!(hits.len(), 1);
@@ -340,6 +344,7 @@ mod tests {
                 body: PacketBody::Frame(bytes),
                 measure: None,
                 iq: None,
+                audio: None,
             }],
         );
         assert_eq!(hits.len(), 2);
@@ -363,6 +368,7 @@ mod tests {
                 body: PacketBody::Frame(vec![0xff; 5]),
                 measure: None,
                 iq: None,
+                audio: None,
             }],
         );
         assert!(hits.is_empty());

@@ -206,6 +206,13 @@ pub struct Packet {
     /// They are what an unknown device is worked out from, the way Universal
     /// Radio Hacker shows a burst beside its bits.
     pub iq: Option<std::sync::Arc<IqBurst>>,
+    /// Speech the demodulator decoded, for a protocol that carries voice.
+    ///
+    /// The payload of a voice transmission is what was said, and no rendering
+    /// of its bytes is that. Shared for the same reason the samples are: a
+    /// minute of speech is megabytes, and the log, the player and anything
+    /// writing it to a file all want the one copy.
+    pub audio: Option<std::sync::Arc<Speech>>,
     /// What the burst was measured to be, when something measured it before
     /// deciding how to read it. Travels with the timings because it is
     /// evidence about the same burst: a chirp's sweep rate or a keyed
@@ -302,6 +309,19 @@ impl Measure {
         }
         parts.push(format!("{:.1} ms", self.duration_us as f64 / 1e3));
         parts.join(", ")
+    }
+}
+
+/// Decoded speech, at whatever rate the codec produces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Speech {
+    pub pcm: Vec<f32>,
+    pub rate: f64,
+}
+
+impl Speech {
+    pub fn seconds(&self) -> f64 {
+        self.pcm.len() as f64 / self.rate.max(1.0)
     }
 }
 

@@ -36,6 +36,7 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
                     modulation: None,
                     body: PacketBody::Frame(f.clone()),
                     measure: None,
+                    audio: None,
                     iq: None,
                 }))
             }

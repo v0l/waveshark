@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::calls::Call;
+use std::sync::atomic::Ordering;
 
 /// Columns, and how wide each is.
 ///
@@ -130,6 +131,89 @@ impl App {
         if let Some(hz) = tune_to {
             self.set_center(hz / 1e6);
         }
+    }
+}
+
+impl App {
+    /// The strip that listens to voice as it decodes.
+    ///
+    /// Beside the channel strips because it is the same kind of control and
+    /// the same output, and apart from them because a call is not a channel:
+    /// nothing here is tuned or demodulated by the strip, and it is the front
+    /// end watching the channel that decides when there is anything to hear.
+    pub(super) fn call_strip(&mut self, ui: &mut egui::Ui) {
+        let now = std::time::Instant::now();
+        let live = self.calls.active(now).into_iter().find(|c| c.live(now)).cloned();
+        // Shown once there is something to listen to, and kept while it is
+        // switched on, so turning it on does not make the panel jump about.
+        if live.is_none() && !self.call_listen {
+            return;
+        }
+        let playing =
+            self.radio.as_ref().is_some_and(|r| r.status.replaying.load(Ordering::Relaxed));
+
+        egui::Frame::NONE
+            .fill(theme::PANEL)
+            .stroke(Stroke::new(
+                if self.call_listen { 1.5 } else { 1.0 },
+                if self.call_listen { theme::READOUT } else { theme::ETCH },
+            ))
+            .corner_radius(2.0)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                    ui.painter().rect_filled(
+                        r,
+                        1.0,
+                        match &live {
+                            Some(_) if self.call_listen => theme::READOUT,
+                            Some(_) => CRC_OK,
+                            None => theme::ETCH,
+                        },
+                    );
+                    ui.label(legend("calls"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.selectable_label(self.call_listen, "LISTEN").clicked() {
+                            self.call_listen = !self.call_listen;
+                            self.send(Cmd::CallAudio {
+                                on: self.call_listen,
+                                volume: self.call_volume,
+                            });
+                        }
+                    });
+                });
+
+                // What is being heard, or the last thing that was: a strip
+                // that empties between overs says nothing about the
+                // conversation it is following.
+                match &live {
+                    Some(c) => {
+                        ui.label(value(c.title()).size(12.0));
+                        ui.label(
+                            legend(&format!("{} {:.4} MHz", c.system, c.channel_hz / 1e6)),
+                        );
+                    }
+                    None => {
+                        ui.label(legend(if playing { "replaying" } else { "nothing on air" }));
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(legend("vol"));
+                    if ui
+                        .add(egui::Slider::new(&mut self.call_volume, 0.0..=1.0).show_value(false))
+                        .changed()
+                        && self.call_listen
+                    {
+                        self.send(Cmd::CallAudio {
+                            on: true,
+                            volume: self.call_volume,
+                        });
+                    }
+                });
+            });
+        ui.add_space(8.0);
     }
 }
 

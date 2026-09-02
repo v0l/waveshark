@@ -105,7 +105,11 @@ impl App {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, body_h), Sense::hover());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
         child.set_clip_rect(rect);
-        packet_detail(&mut child, rec);
+        if packet_detail(&mut child, rec) {
+            if let Some(a) = rec.audio.clone() {
+                self.send(Cmd::Play(a));
+            }
+        }
     }
 
     fn log_header(&mut self, ui: &mut egui::Ui) {

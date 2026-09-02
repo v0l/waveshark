@@ -123,6 +123,7 @@ impl Member {
                         modulation: None,
                         body: PacketBody::Pulses(Vec::new()),
                         measure: Some(m),
+                        audio: None,
                         iq: iq.clone(),
                     });
                     continue;
@@ -137,6 +138,7 @@ impl Member {
                         modulation: p.modulation,
                         body: PacketBody::Pulses(p.pulses.clone()),
                         measure: Some(m.clone()),
+                        audio: None,
                         iq: iq.clone(),
                     });
                 }
@@ -160,6 +162,7 @@ impl Member {
                     modulation: p.modulation,
                     body: PacketBody::Pulses(p.pulses.clone()),
                     measure: None,
+                    audio: None,
                     iq: None,
                 });
             }
@@ -177,6 +180,7 @@ impl Member {
                     modulation: None,
                     body: PacketBody::Frame(f.clone()),
                     measure: None,
+                    audio: None,
                     iq: None,
                 });
             }

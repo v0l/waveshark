@@ -152,6 +152,26 @@ impl Front {
         ]
     }
 
+    /// Whether this front end demodulates one named channel, so a block
+    /// listing several means one of these per channel.
+    ///
+    /// The others are about a band: `auto` searches it, a bank channelizes it,
+    /// Mode S and AIS have one allocation each and find their own traffic
+    /// inside it.
+    pub fn per_channel(&self) -> bool {
+        matches!(self, Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_))
+    }
+
+    /// The same front end moved to another channel.
+    fn at(&self, hz: f64) -> Front {
+        match self {
+            Front::Aprs(_) => Front::Aprs(hz),
+            Front::Pocsag(_) => Front::Pocsag(hz),
+            Front::M17(_) => Front::M17(hz),
+            other => other.clone(),
+        }
+    }
+
     fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" | "sources" | "scan" => Some(Front::Auto),
@@ -238,7 +258,20 @@ impl Scanner {
         // on the edge is one being demodulated through the anti-alias
         // filter's skirt, which reads as silence.
         let edge = rate / 2.0 - self.margin_hz;
+        // A block whose front end is one demodulator per channel runs for
+        // whichever channels are in the span. AIS is the other case, where
+        // both channels are one front end and half of them is half the
+        // traffic, so there it is all of them or none.
+        if self.front.per_channel() {
+            return self.channels.iter().any(|c| (c - center).abs() <= edge);
+        }
         self.channels.iter().all(|c| (c - center).abs() <= edge)
+    }
+
+    /// The channels of this block that the span actually covers.
+    fn covered(&self, center: f64, rate: f64) -> Vec<f64> {
+        let edge = rate / 2.0 - self.margin_hz;
+        self.channels.iter().copied().filter(|c| (c - center).abs() <= edge).collect()
     }
 }
 
@@ -307,6 +340,18 @@ impl Scanners {
         for s in self.active(center, rate) {
             let band = (s.lo, s.hi);
             let touching = |a: (f64, f64), b: (f64, f64)| a.0 <= b.1 && b.0 <= a.1;
+            // One demodulator per listed channel, which is what lets a block
+            // watch a calling channel and the two repeaters beside it rather
+            // than only whichever was written first.
+            if s.front.per_channel() && s.channels.len() > 1 {
+                for hz in s.covered(center, rate) {
+                    let front = s.front.at(hz);
+                    if !out.iter().any(|e| e.front == front) {
+                        out.push(FrontAt { front, band });
+                    }
+                }
+                continue;
+            }
             if matches!(s.front, Front::Banks(_) | Front::Auto) {
                 // Two blocks asking for the same channel width in bands that
                 // meet are one bank over both, not two banks decoding the
@@ -474,6 +519,9 @@ impl Scanner {
                 self.front = Front::Auto;
             }
         }
+        // A single-channel front end takes its frequency from the block. With
+        // several listed it is the first, and the rest become their own front
+        // ends when the span covers them.
         let Some(&c) = self.channels.first() else { return };
         match &mut self.front {
             Front::Aprs(f) | Front::Pocsag(f) | Front::M17(f) => *f = c,
@@ -537,7 +585,10 @@ pub const HEADER: &str = "\
 #             with the span runs it
 #   span      narrowest span the front end works in
 #   front     auto | modes | ais | aprs | pocsag | m17 | banks
-#   channels  frequencies that must all be inside the span (optional)
+#   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
+#             one demodulator per channel, and run for each channel the span
+#             covers; ais needs both of its, so it runs only when the span
+#             holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
 ";
@@ -558,7 +609,10 @@ pub const DEFAULT_TEXT: &str = "\
 #             with the span runs it
 #   span      narrowest span the front end works in
 #   front     auto | modes | ais | aprs | pocsag | m17 | banks
-#   channels  frequencies that must all be inside the span (optional)
+#   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
+#             one demodulator per channel, and run for each channel the span
+#             covers; ais needs both of its, so it runs only when the span
+#             holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
 #
@@ -606,9 +660,12 @@ channels = 439.9875 MHz
 margin   = 12.5 kHz
 
 [M17]
-# The M17 calling frequency in Region 1. M17 is 4-FSK at 4800 baud with an
-# open codec, so a transmission reports who called whom, and a packet-mode
-# message reports its text.
+# M17 is 4-FSK at 4800 baud with an open codec, so a transmission reports who
+# called whom, and a packet-mode message reports its text. There is no band to
+# sweep here: the front end is one demodulator on one channel, so the channels
+# are listed and each one the span covers gets its own. 433.475 is the Region 1
+# calling frequency; add the repeater outputs you can hear and widen the range
+# to take them in.
 range    = 433.4 - 433.55 MHz
 span     = 100 kHz
 front    = m17

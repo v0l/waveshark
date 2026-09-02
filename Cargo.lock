@@ -819,6 +819,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "codec2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99"
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2362,6 +2368,7 @@ dependencies = [
 name = "nodes"
 version = "0.1.0"
 dependencies = [
+ "codec2",
  "common",
  "decode",
  "dsp",

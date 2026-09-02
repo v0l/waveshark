@@ -266,6 +266,7 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
                 modulation: p.modulation,
                 body: PacketBody::Pulses(p.pulses.clone()),
                 measure: None,
+                audio: None,
                 iq: None,
             })
             .collect();

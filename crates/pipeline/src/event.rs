@@ -107,6 +107,11 @@ pub struct Decoded {
     /// The burst's own samples, when the front end kept them. See
     /// [`common::Packet::iq`].
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
+    /// Decoded speech, for a protocol that carries it.
+    ///
+    /// A voice transmission is not readable as bytes: what it said is in the
+    /// audio, so the audio is the payload a view wants.
+    pub audio: Option<std::sync::Arc<common::Speech>>,
 }
 
 impl Decoded {
@@ -127,11 +132,17 @@ impl Decoded {
             rssi_dbfs: None,
             snr_db: None,
             iq: None,
+            audio: None,
         }
     }
 
     pub fn with_iq(mut self, iq: Option<std::sync::Arc<common::IqBurst>>) -> Self {
         self.iq = iq;
+        self
+    }
+
+    pub fn with_audio(mut self, audio: Option<std::sync::Arc<common::Speech>>) -> Self {
+        self.audio = audio;
         self
     }
 

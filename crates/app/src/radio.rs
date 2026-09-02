@@ -278,6 +278,17 @@ pub enum Cmd {
     Zoom(usize),
     /// Decode every channel in the span, or stop doing so.
     Decode(bool),
+    /// Listen to voice as it is decoded, at this volume, or stop.
+    ///
+    /// Separate from the channel strips because a call is not a channel: it
+    /// arrives already demodulated by the front end watching that channel,
+    /// and it comes and goes with whoever is talking.
+    CallAudio { on: bool, volume: f32 },
+    /// Play a transmission that has already been decoded, once.
+    ///
+    /// The sink belongs to this thread, so replaying from the packet list is
+    /// a message rather than the interface opening its own audio device.
+    Play(std::sync::Arc<common::Speech>),
     /// Write every burst that decodes to this directory, with an optional
     /// budget in megabytes, or stop recording.
     Record(Option<(std::path::PathBuf, Option<u64>)>),
@@ -400,6 +411,9 @@ pub struct DecodeRecord {
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
+    /// What was said, for a voice protocol. This is the payload of such a
+    /// transmission: the bytes of a vocoded stream say nothing to anybody.
+    pub audio: Option<std::sync::Arc<common::Speech>>,
 }
 
 impl DecodeRecord {
@@ -443,6 +457,7 @@ impl DecodeRecord {
             bytes: vec![1, 2, 3],
             crc: Some(true),
             iq: None,
+            audio: None,
         }
     }
 
@@ -770,6 +785,10 @@ pub struct Status {
     pub patch_rev: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
     pub logged: AtomicU64,
+    /// Whether voice is being monitored as it decodes, and whether a
+    /// recorded transmission is playing.
+    pub call_audio: AtomicBool,
+    pub replaying: AtomicBool,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -832,6 +851,8 @@ impl Default for Status {
             dropped: AtomicU64::new(0),
             running: AtomicBool::new(false),
             audio_backlog: AtomicU64::new(0),
+            call_audio: AtomicBool::new(false),
+            replaying: AtomicBool::new(false),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
@@ -1185,6 +1206,14 @@ fn run(
     let mut rebuild = false;
     let mut want_center: Option<Hz> = None;
     let mut last_chain = std::time::Instant::now();
+    // Voice from the call front ends: whether anybody is listening, how loud,
+    // the resampler that lifts the codec's 8 kHz to the output rate, and a
+    // queue holding a transmission being replayed.
+    let mut call_listen = false;
+    let mut call_volume = 0.8f32;
+    let mut voice_up = audio::Resampler::new(nodes::m17_nodes::VOICE_HZ, 48_000.0, 4);
+    let mut voice_pcm: Vec<f32> = Vec::new();
+    let mut replay: std::collections::VecDeque<f32> = std::collections::VecDeque::new();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
 
@@ -1404,6 +1433,23 @@ fn run(
                 Cmd::Decode(on) => {
                     scan_on = on;
                     rebuild = !manual;
+                }
+                Cmd::CallAudio { on, volume } => {
+                    call_listen = on;
+                    call_volume = volume.clamp(0.0, 2.0);
+                    if !on {
+                        voice_up.reset();
+                    }
+                }
+                Cmd::Play(speech) => {
+                    // Resampled here, once, rather than while it plays: a
+                    // transmission is at most a couple of minutes and the
+                    // audio thread must not be given work that can grow.
+                    let mut rs = audio::Resampler::new(speech.rate, 48_000.0, 4);
+                    let mut out = Vec::with_capacity(speech.pcm.len() * 6);
+                    rs.process(&speech.pcm, &mut out);
+                    replay.clear();
+                    replay.extend(out);
                 }
             }
         }
@@ -1644,6 +1690,31 @@ fn run(
                 });
             }
             status.set_channel_states(states);
+
+            // Voice from a call front end, live and replayed. Both are mono
+            // at the output rate by the time they get here, and both are
+            // mixed rather than switched: a replay while somebody is talking
+            // should not silence the person talking.
+            if call_listen {
+                voice_pcm.clear();
+                voice_up.process(rx.m17_voice(), &mut voice_pcm);
+                if !voice_pcm.is_empty() {
+                    let gain = call_volume * volume;
+                    frames = frames.max(mix_gain_into(&mut mix, &voice_pcm, false, gain));
+                }
+            }
+            if !replay.is_empty() {
+                // A block's worth, so a replay runs at its own speed rather
+                // than arriving as one enormous buffer.
+                let want = if frames > 0 { frames } else { (rate / 50.0) as usize };
+                let take = want.min(replay.len());
+                voice_pcm.clear();
+                voice_pcm.extend(replay.drain(..take));
+                frames = frames.max(mix_gain_into(&mut mix, &voice_pcm, false, volume));
+            }
+            status.call_audio.store(call_listen, Ordering::Relaxed);
+            status.replaying.store(!replay.is_empty(), Ordering::Relaxed);
+
             if frames > 0 {
                 clip(&mut mix[..frames * 2]);
                 s.write_adaptive_stereo(&mix[..frames * 2], rate);
@@ -2012,6 +2083,7 @@ pub(crate) mod tests {
             bytes: vec![1, 2, 3],
             crc: None,
             iq: None,
+            audio: None,
         }
     }
 
