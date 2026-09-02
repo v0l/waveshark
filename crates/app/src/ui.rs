@@ -1343,6 +1343,9 @@ impl eframe::App for App {
         }
         {
             let _s = tracing::info_span!("log").entered();
+            // The inspector first, so as a bottom panel it takes the lowest
+            // slot and the list sits above it.
+            self.packet_inspector(ui);
             self.decode_log(ui);
         }
         {
@@ -4488,6 +4491,35 @@ impl App {
     }
 
     /// The packet log: everything decoded anywhere in the span.
+    /// The packet inspector: the selected burst and its bytes.
+    ///
+    /// Its own bottom panel below the list rather than a slice of the list,
+    /// so opening it grows the whole log region into the waterfall and
+    /// closing it gives that back, and the list keeps its height either way.
+    /// Declared before the list so it sits at the very bottom.
+    fn packet_inspector(&mut self, ui: &mut egui::Ui) {
+        if !self.log_open {
+            return;
+        }
+        let selected = self
+            .selected
+            .and_then(|id| self.decodes.iter().find(|l| l.id == id))
+            .map(|l| l.rec.clone());
+        let Some(rec) = selected else { return };
+        Panel::bottom("packet_detail")
+            .default_size(116.0 + BURST_VIEW_H + 24.0)
+            .resizable(true)
+            .min_size(64.0)
+            .max_size(720.0)
+            .show_separator_line(true)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show(ui, |ui| packet_detail(ui, &rec));
+    }
+
     fn decode_log(&mut self, ui: &mut egui::Ui) {
         if !self.log_open {
             return;
@@ -4508,33 +4540,6 @@ impl App {
             .show(ui, |ui| {
                 self.log_header(ui);
                 ui.add_space(4.0);
-                let selected = self
-                    .selected
-                    .and_then(|id| self.decodes.iter().find(|l| l.id == id))
-                    .map(|l| l.rec.clone());
-                // The detail sits in a bottom sub-panel whose top edge drags,
-                // so its height is the operator's rather than fixed: a burst
-                // worth studying gets the room, and a glance at the bytes
-                // gives it back. It is always present, empty when nothing is
-                // selected, so selecting or clearing a packet does not resize
-                // the list under the pointer. Reserved before the list, so
-                // the list takes whatever is left.
-                let avail = ui.available_height();
-                let want = 116.0 + BURST_VIEW_H + 24.0;
-                Panel::bottom("packet_detail")
-                    .resizable(true)
-                    .default_size(want.min(avail - 40.0).max(64.0))
-                    .min_size(64.0)
-                    .max_size((avail - 40.0).max(80.0))
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 6, ..Default::default() }))
-                    // Blank when nothing is selected: the space is held so
-                    // the list does not jump, but an empty dump is not drawn
-                    // into it.
-                    .show_inside(ui, |ui| {
-                        if let Some(rec) = &selected {
-                            packet_detail(ui, rec);
-                        }
-                    });
                 let list_h = ui.available_height().max(24.0);
                 // Two nested scroll areas so the headings stay above the rows
                 // vertically but travel with them sideways, which is the only
