@@ -71,6 +71,16 @@ pub const DEFAULT_WIDTHS: [f64; 4] = [12_500.0, 31_250.0, 125_000.0, 500_000.0];
 /// Which demodulator a block asks for.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Front {
+    /// Find and decode everything in the band on its own: sources wherever
+    /// something transmits, each read as its own stream, and the span-wide
+    /// decoders where the span reaches what they are for.
+    ///
+    /// What `banks` became. A bank decided a signal's width before it had
+    /// seen the signal, which is why it took four of them; this measures
+    /// the width instead and needs one of itself. It also makes the other
+    /// fronts unnecessary as defaults: a pager channel is found wherever it
+    /// is, and Mode S runs when the span covers 1090 MHz.
+    Auto,
     /// Channelize the span and run the protocol tables over every channel.
     Banks(Vec<f64>),
     /// The 1090 MHz wideband envelope demodulator.
@@ -99,6 +109,7 @@ impl Front {
     /// The word this front end is written as in the file.
     pub fn key(&self) -> &'static str {
         match self {
+            Front::Auto => "auto",
             Front::Banks(_) => "banks",
             Front::ModeS => "modes",
             Front::Ais => "ais",
@@ -110,6 +121,7 @@ impl Front {
     /// What it is called where a person reads it.
     pub fn label(&self) -> &'static str {
         match self {
+            Front::Auto => "auto",
             Front::Banks(_) => "banks",
             Front::ModeS => "mode s",
             Front::Ais => "ais",
@@ -119,8 +131,9 @@ impl Front {
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 5] {
+    pub fn all() -> [Front; 6] {
         [
+            Front::Auto,
             Front::ModeS,
             Front::Ais,
             Front::Aprs(DEFAULT_APRS_HZ),
@@ -131,7 +144,8 @@ impl Front {
 
     fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "banks" | "scan" => Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
+            "auto" | "sources" | "scan" => Some(Front::Auto),
+            "banks" => Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
             "modes" | "mode-s" | "adsb" => Some(Front::ModeS),
             "ais" => Some(Front::Ais),
             "aprs" => Some(Front::Aprs(DEFAULT_APRS_HZ)),
@@ -282,7 +296,7 @@ impl Scanners {
         for s in self.active(center, rate) {
             let band = (s.lo, s.hi);
             let touching = |a: (f64, f64), b: (f64, f64)| a.0 <= b.1 && b.0 <= a.1;
-            if matches!(s.front, Front::Banks(_)) {
+            if matches!(s.front, Front::Banks(_) | Front::Auto) {
                 // Two blocks asking for the same channel width in bands that
                 // meet are one bank over both, not two banks decoding the
                 // overlap twice. Bands that do not meet stay separate, which
@@ -372,7 +386,7 @@ impl Scanners {
                     min_rate: 0.0,
                     channels: Vec::new(),
                     margin_hz: 0.0,
-                    front: Front::Banks(DEFAULT_WIDTHS.to_vec()),
+                    front: Front::Auto,
                 });
                 continue;
             }
@@ -417,13 +431,12 @@ impl Scanners {
     }
 }
 
-impl Scanner {
-    /// A block with no usable range is a block that would match everything or
-    /// nothing, and both are worse than dropping it.
-    fn channels_unset(&self) -> bool {
-        self.hi <= self.lo
-    }
+/// The widths the shipped ISM blocks carried before `sources` existed: two
+/// tiers at first, then four.
+const LEGACY_WIDTHS: [&[f64]; 2] =
+    [&[31_250.0, 125_000.0], &[12_500.0, 31_250.0, 125_000.0, 500_000.0]];
 
+impl Scanner {
     /// Fold what the block said into the front end, now that the whole block
     /// has been read.
     ///
@@ -434,13 +447,37 @@ impl Scanner {
     /// demodulate 144.800, which is silence that looks like a quiet band.
     /// Done at the end of the block rather than as the keys arrive, so that
     /// `channels` and `front` can be written in either order.
+    ///
+    /// A `banks` block at exactly the widths the file used to ship with is
+    /// the shipped default nobody edited, and the shipped default for that
+    /// band is now `auto` over the same range. The file is written once and only read afterwards, so
+    /// this is the only place the change can reach a file that already
+    /// exists. A block with any other widths was somebody's decision and is
+    /// left alone.
     fn settle(&mut self) {
+        if let Front::Banks(w) = &self.front {
+            let shipped = LEGACY_WIDTHS.iter().any(|l| {
+                w.len() == l.len() && w.iter().zip(l.iter()).all(|(a, b)| (a - b).abs() < 1.0)
+            });
+            if shipped {
+                self.front = Front::Auto;
+            }
+        }
         let Some(&c) = self.channels.first() else { return };
         match &mut self.front {
             Front::Aprs(f) | Front::Pocsag(f) => *f = c,
             _ => {}
         }
     }
+}
+
+impl Scanner {
+    /// A block with no usable range is a block that would match everything or
+    /// nothing, and both are worse than dropping it.
+    fn channels_unset(&self) -> bool {
+        self.hi <= self.lo
+    }
+
 }
 
 /// The unit suffix of a value, so `433.05 - 434.79 MHz` can write it once.
@@ -488,7 +525,7 @@ pub const HEADER: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     modes | ais | aprs | pocsag | banks
+#   front     auto | modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
@@ -509,10 +546,18 @@ pub const DEFAULT_TEXT: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     modes | ais | aprs | pocsag | banks
+#   front     auto | modes | ais | aprs | pocsag | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
+#
+# `auto` finds and decodes everything in the block's band on its own: sources
+# wherever something transmits, each measured for centre and width and read
+# as its own stream, plus the span-wide decoders (Mode S, AIS) where the band
+# reaches the frequency they are for. It costs what is transmitting in the
+# band, so the band is what keeps it real-time: an ISM allocation, not the
+# whole of what a wideband radio samples. `banks` is the older fixed grid of
+# channels at the widths listed, kept for comparison.
 
 [ADS-B]
 range = 1089.9 - 1090.1 MHz
@@ -550,22 +595,19 @@ channels = 439.9875 MHz
 margin   = 12.5 kHz
 
 [ISM 433]
-range  = 433.05 - 434.79 MHz
-span   = 250 kHz
-front  = banks
-widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
+range = 433.05 - 434.79 MHz
+span  = 250 kHz
+front = auto
 
 [ISM 868]
-range  = 862 - 876 MHz
-span   = 250 kHz
-front  = banks
-widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
+range = 862 - 876 MHz
+span  = 250 kHz
+front = auto
 
 [ISM 315]
-range  = 314 - 316 MHz
-span   = 250 kHz
-front  = banks
-widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz
+range = 314 - 316 MHz
+span  = 250 kHz
+front = auto
 ";
 
 #[cfg(test)]
@@ -577,6 +619,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_file_written_from_the_old_defaults_is_read_as_sources() {
+        // The file is written once and only read afterwards, so a receiver
+        // that wrote it before `sources` existed has ISM blocks saying
+        // `banks` at the four widths that used to ship. Those blocks are the
+        // default, and the default changed.
+        let s = Scanners::parse(
+            "[ISM 433]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = banks\n\
+             widths = 12.5 kHz, 31.25 kHz, 125 kHz, 500 kHz\n\
+             [Mine]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = banks\n\
+             widths = 20 kHz\n",
+        );
+        assert_eq!(s.list[0].front, Front::Auto);
+        assert_eq!(s.list[1].front, Front::Banks(vec![20_000.0]), "a chosen width is kept");
+        let older = Scanners::parse(
+            "[ISM 433]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = banks\n\
+             widths = 31.25 kHz, 125 kHz\n",
+        );
+        assert_eq!(older.list[0].front, Front::Auto, "the two-tier default before that");
+    }
 
     #[test]
     fn the_shipped_defaults_parse() {
@@ -596,8 +659,8 @@ mod tests {
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
         assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
         assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::Pocsag(439_987_500.0)]);
-        assert!(matches!(fronts(433_920_000.0, 2_400_000.0)[..], [Front::Banks(_)]));
-        assert!(matches!(fronts(868_300_000.0, 2_400_000.0)[..], [Front::Banks(_)]));
+        assert_eq!(fronts(433_920_000.0, 2_400_000.0), [Front::Auto]);
+        assert_eq!(fronts(868_300_000.0, 2_400_000.0), [Front::Auto]);
     }
 
     /// The point of the change: a band nobody declared runs nothing, instead

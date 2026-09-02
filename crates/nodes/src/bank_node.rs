@@ -20,6 +20,7 @@ use dsp::DetectorConfig;
 use pipeline::event::Event;
 use pipeline::graph::Topology;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::Graph;
 
@@ -39,6 +40,9 @@ pub struct BankNode {
     hits: Vec<(Hz, Event)>,
     rate: f64,
     center: Hz,
+    /// Gate settings the channels run with, kept so they can be reported as
+    /// parameters and restored onto a bank rebuilt for a new span.
+    detect: DetectorConfig,
     /// The band actually wanted, when it is narrower than the input.
     ///
     /// A band is extracted by mixing and decimating, and the decimation is a
@@ -67,6 +71,7 @@ impl BankNode {
             hits: Vec::new(),
             rate: 0.0,
             center: Hz(0),
+            detect: crate::ism_detector_config(),
             band: None,
         }
     }
@@ -137,7 +142,50 @@ impl BankNode {
     }
 
     pub fn set_detector_config(&mut self, cfg: DetectorConfig) {
+        self.detect = cfg;
         self.bank.set_detector_config(cfg);
+    }
+
+    /// Every channel runs the same graph, so one channel's parameters are the
+    /// bank's. The first channel with a decoder on it is the one asked: a
+    /// banded bank has no decoder on channel zero.
+    fn inner_params(&self) -> Vec<Param> {
+        let Some(g) = (0..self.bank.channels()).find_map(|c| self.bank.graph(c)) else {
+            return Vec::new();
+        };
+        g.topology().nodes.into_iter().flat_map(|n| n.params).collect()
+    }
+
+    /// Set a parameter on every channel's copy of the decoder.
+    ///
+    /// Applied to all of them rather than to a template, because the graphs
+    /// already exist and hold burst state; rebuilding them to change a
+    /// threshold would drop whatever was half received across the band.
+    fn set_inner_param(&mut self, name: &str, v: &ParamValue) -> Result<()> {
+        let mut found = false;
+        let mut err = None;
+        for ch in 0..self.bank.channels() {
+            let Some(g) = self.bank.graph_mut(ch) else { continue };
+            let ids: Vec<_> = g.topology().nodes.iter().map(|n| n.id).collect();
+            for id in ids {
+                let Some(node) = g.node_mut(id) else { continue };
+                if !node.params().iter().any(|p| p.name == name) {
+                    continue;
+                }
+                found = true;
+                if let Err(e) = node.set_param(name, v.clone()) {
+                    err = Some(e);
+                }
+            }
+        }
+        match err {
+            Some(e) => Err(e),
+            None if found => Ok(()),
+            None => Err(common::Error::other(format!(
+                "{}: unknown parameter {name:?}",
+                self.label
+            ))),
+        }
     }
 
     pub fn set_gating(&mut self, g: Gating) {
@@ -170,7 +218,7 @@ impl BankNode {
         // across the band and decode several times over.
         let mut bank = ChannelBank::new(channels, 12, rate, center);
         bank.set_gating(Gating::OnDetection);
-        bank.set_detector_config(crate::ism_detector_config());
+        bank.set_detector_config(self.detect);
         bank.set_all_graphs(&self.make)?;
         self.bank = bank;
         self.rate = rate;
@@ -191,6 +239,38 @@ impl Simple for BankNode {
 
     fn subgraph_count(&self) -> usize {
         self.bank.channels()
+    }
+
+    /// The gate in front of the channels, and then whatever the channel graph
+    /// itself exposes. Both belong to the bank as far as an operator is
+    /// concerned: the decoder inside it is not a node they can reach.
+    fn params(&self) -> Vec<Param> {
+        let mut p = vec![
+            Param::float("open_db", self.detect.open_db as f64, 3.0..=30.0)
+                .unit("dB")
+                .label("SNR that opens a channel"),
+            Param::float("close_db", self.detect.close_db as f64, 1.0..=30.0)
+                .unit("dB")
+                .label("SNR that closes it again"),
+        ];
+        p.extend(self.inner_params());
+        p
+    }
+
+    fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        let f = v.as_f64().unwrap_or_default();
+        match name {
+            // Held apart so the close threshold stays under the open one; a
+            // gate that closes at the level it opens at chatters.
+            "open_db" => {
+                self.detect.open_db = f as f32;
+                self.detect.close_db = self.detect.close_db.min(self.detect.open_db - 1.0);
+            }
+            "close_db" => self.detect.close_db = (f as f32).min(self.detect.open_db - 1.0),
+            _ => return self.set_inner_param(name, &v),
+        }
+        self.bank.set_detector_config(self.detect);
+        Ok(())
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {

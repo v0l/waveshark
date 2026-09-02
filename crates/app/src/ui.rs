@@ -87,6 +87,10 @@ pub struct App {
     /// Decoding every channel is on by default and can be turned off; it is
     /// the most expensive thing the app does.
     decode_on: bool,
+    /// Print every packet to standard output as well as listing it, timed
+    /// from when the window opened.
+    pub print_log: bool,
+    print_since: std::time::Instant,
     /// Whether the packet log is showing.
     log_open: bool,
     /// Share of the scope pane given to the spectrum, the rest going to the
@@ -391,6 +395,8 @@ impl Default for App {
             selected: None,
             show_unknown: true,
             decode_on: true,
+            print_log: false,
+            print_since: std::time::Instant::now(),
             log_open: true,
             plot_frac: DEFAULT_PLOT_FRAC,
             splitting: false,
@@ -839,6 +845,9 @@ impl App {
     /// this list: these are conclusions, and they are bounded.
     fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
         for rec in batch {
+            if self.print_log {
+                println!("{}", rec.line(self.print_since));
+            }
             let id = self.next_packet;
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
@@ -3195,6 +3204,7 @@ impl App {
         // own colour. Kept to four pixels and a low alpha so it reads as a
         // margin note rather than as a signal.
         self.scan_marks(&p, &plot);
+        self.source_marks(&p, &plot);
         self.ribbon(&p, &ribbon);
 
         p.rect_filled(fall, 0.0, theme::CHASSIS);
@@ -3331,6 +3341,78 @@ impl App {
     /// strip and the channel grid appears as ticks only when the ticks are far
     /// enough apart to be counted. Below that the strip alone is the honest
     /// drawing: the channels are narrower than a pixel.
+    /// The transmitters the detector has open right now, drawn over the
+    /// trace where they are and as wide as they were measured: the moment a
+    /// sensor keys up it appears here, and the moment it stops it is gone.
+    fn source_marks(&self, p: &egui::Painter, plot: &Rect) {
+        if !self.decode_on {
+            return;
+        }
+        let Some(r) = &self.radio else { return };
+        let seen = r.status.sources.lock().clone();
+        if seen.is_empty() {
+            return;
+        }
+        let col = theme::READOUT;
+        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        // Left to right, so a label that would land on the one before it
+        // can take the next row down instead. Two sensors a few kilohertz
+        // apart are two sources, and printed on one row they were one
+        // unreadable smear.
+        let mut seen = seen;
+        seen.sort_by(|a, b| a.source.center_hz.partial_cmp(&b.source.center_hz).unwrap());
+        let now = std::time::Instant::now();
+        let mut rows: Vec<f32> = Vec::new();
+        for e in &seen {
+            let s = &e.source;
+            // A source still open is drawn full; one that closed fades over
+            // the seconds it lingers, so a burst leaves a mark that can be
+            // read and then gets out of the way.
+            let age = now.duration_since(e.last_seen).as_secs_f32();
+            let fade = if e.live {
+                1.0
+            } else {
+                (1.0 - age / crate::radio::SOURCE_LINGER.as_secs_f32()).clamp(0.0, 1.0)
+            };
+            let dim = |a: u8| {
+                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), (a as f32 * fade) as u8)
+            };
+            let x0 = self.x_of(plot, s.center_hz - s.bandwidth_hz / 2.0);
+            let x1 = self.x_of(plot, s.center_hz + s.bandwidth_hz / 2.0);
+            let (cx0, cx1) = (x0.max(plot.left()), x1.min(plot.right()));
+            if cx1 < plot.left() || cx0 > plot.right() {
+                continue;
+            }
+            // At least two pixels, or a narrow sensor on a wide span vanishes.
+            let (cx0, cx1) = if cx1 - cx0 < 2.0 { (cx0 - 1.0, cx0 + 1.0) } else { (cx0, cx1) };
+            let label = if s.bandwidth_hz >= 1e6 {
+                format!("{:.4} MHz  {:.0} kHz  {:.0} dB", s.center_hz / 1e6, s.bandwidth_hz / 1e3, s.snr_db)
+            } else {
+                format!("{:.4} MHz  {:.1} kHz  {:.0} dB", s.center_hz / 1e6, s.bandwidth_hz / 1e3, s.snr_db)
+            };
+            let width = label.len() as f32 * 5.6 + 6.0;
+            let row = rows.iter().position(|end| *end < cx0).unwrap_or(rows.len());
+            if row == rows.len() {
+                rows.push(0.0);
+            }
+            rows[row] = cx0 + width;
+            let y0 = plot.top() + 4.0 + row as f32 * 22.0;
+            let y1 = y0 + 10.0;
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)),
+                1.0,
+                dim(90),
+            );
+            p.rect_stroke(
+                Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)),
+                1.0,
+                Stroke::new(1.0, dim(200)),
+                egui::StrokeKind::Outside,
+            );
+            p.text(Pos2::new(cx0, y1 + 2.0), Align2::LEFT_TOP, label, font.clone(), dim(220));
+        }
+    }
+
     fn scan_marks(&self, p: &egui::Painter, plot: &Rect) {
         if !self.decode_on {
             return;
@@ -4499,6 +4581,14 @@ impl App {
                 if narrow > 0 || wide > 0 {
                     running.push(format!("{narrow} ook + {wide} fsk channels"));
                 }
+                if r.status.sources_on.load(Ordering::Relaxed) {
+                    let live = r.status.sources.lock().iter().filter(|e| e.live).count();
+                    running.push(if live == 0 {
+                        "auto".into()
+                    } else {
+                        format!("auto, {live} sources")
+                    });
+                }
                 let tracking = r.status.modes_on.load(Ordering::Relaxed)
                     || r.status.ais_on.load(Ordering::Relaxed)
                     || r.status.aprs_on.load(Ordering::Relaxed);
@@ -4554,7 +4644,7 @@ impl App {
         ("no", 40.0),
         ("time", 64.0),
         ("frequency", 96.0),
-        ("mod", 34.0),
+        ("mod", 70.0),
         ("rssi", 48.0),
         ("snr", 44.0),
         ("protocol", 140.0),

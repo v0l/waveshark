@@ -7,6 +7,7 @@
 //! reconfiguration rather than a recompile.
 
 pub mod ais_nodes;
+pub mod auto_node;
 pub mod aprs_nodes;
 pub mod bank;
 pub mod decode_nodes;
@@ -18,6 +19,7 @@ pub mod pocsag_nodes;
 pub mod bank_node;
 mod filter_nodes;
 pub mod sink_nodes;
+pub mod source_nodes;
 pub mod wfm;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
@@ -31,7 +33,9 @@ pub use pocsag_nodes::PocsagNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
+pub use auto_node::AutoNode;
 pub use bank_node::BankNode;
+pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use filter_nodes::{FirFilterNode, IirFilterNode};
 pub use sink_nodes::{DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
@@ -151,6 +155,74 @@ pub fn registry() -> Registry {
                 n.set_band(Some((lo, hi)));
             }
             Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "auto",
+            summary: "Find and decode everything in the span on its own: sources \
+                      wherever something transmits, and the span-wide decoders \
+                      where the span reaches them",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let mut cfg = dsp::SourceConfig::default();
+            cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
+            cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
+            cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
+            cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
+            if cfg.close_db >= cfg.open_db {
+                cfg.close_db = cfg.open_db - 1.0;
+            }
+            let mut n = AutoNode::new(s.str_or("label", "Auto"), cfg);
+            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
+            if hi > lo {
+                n.set_band(Some((lo, hi)));
+            }
+            let spur = s.f64_or("spur_hz", 0.0);
+            if spur > 0.0 {
+                n.set_spur(Some(spur));
+            }
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "source_detect",
+            summary: "Find every transmitter in a span, measure its centre and \
+                      width, and hand each over as its own stream",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let mut cfg = dsp::SourceConfig::default();
+            cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
+            cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
+            cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
+            cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
+            cfg.min_rate_hz = s.f64_or("min_rate_hz", cfg.min_rate_hz);
+            if cfg.close_db >= cfg.open_db {
+                cfg.close_db = cfg.open_db - 1.0;
+            }
+            let mut n = SourceDetectNode::new(cfg);
+            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
+            if hi > lo {
+                n.set_band(Some((lo, hi)));
+            }
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "source_decode",
+            summary: "Run the burst front end over every source found, for as \
+                      long as each one lasts",
+            category: "decode",
+        },
+        |_: &Settings| {
+            Ok(Box::new(SourceDecodeNode::new("sources", ism_decode_graph)) as Box<dyn Node>)
         },
     );
 

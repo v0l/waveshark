@@ -195,6 +195,92 @@ pub struct Packet {
     /// [`Package::modulation`].
     pub modulation: Option<&'static str>,
     pub body: PacketBody,
+    /// What the burst was measured to be, when something measured it before
+    /// deciding how to read it. Travels with the timings because it is
+    /// evidence about the same burst: a chirp's sweep rate or a keyed
+    /// signal's tone separation is what identifies a device the tables do
+    /// not know, and a burst no front end reads has nothing else to say.
+    pub measure: Option<Measure>,
+}
+
+/// What a burst was measured to be, before any decoder read it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Measure {
+    /// The classifier's verdict, as its label: "OOK", "2-FSK", "chirp",
+    /// "carrier", "unknown".
+    pub modulation: &'static str,
+    /// How far that verdict stood above the runner-up, 0 to 1.
+    pub confidence: f32,
+    /// Which front end the burst was sent to, or "none".
+    pub front_end: &'static str,
+    /// The mode the parameters place it in, when one is known: "LoRa SF9
+    /// BW125".
+    pub mode: Option<String>,
+    pub duration_us: u32,
+    pub bandwidth_hz: f32,
+    /// Symbol rate in baud, zero when none was found.
+    pub baud: f32,
+    /// Tone separation in hertz, for keyed signals; zero otherwise.
+    pub separation_hz: f32,
+    /// Sweep rate in hertz per second, for chirps; zero otherwise.
+    pub sweep_hz_s: f32,
+    /// Period of a repeating structure in microseconds, a cyclic prefix or
+    /// a chip sequence; zero otherwise.
+    pub symbol_period_us: f32,
+}
+
+/// The classifier's labels, so a label read back from a file is the same
+/// static string the classifier uses.
+pub const MODULATION_LABELS: [&str; 13] = [
+    "OOK", "ASK", "2-FSK", "4-FSK", "MSK", "BPSK", "QPSK", "chirp", "OFDM", "DSSS",
+    "noise-like", "carrier", "unknown",
+];
+
+/// The front ends a burst can be sent to.
+pub const FRONT_ENDS: [&str; 6] = ["ook", "ask", "fsk", "c4fm", "ook+fsk", "none"];
+
+impl Measure {
+    /// The label as one of [`MODULATION_LABELS`], or "unknown".
+    pub fn label(s: &str) -> &'static str {
+        MODULATION_LABELS.iter().copied().find(|l| *l == s).unwrap_or("unknown")
+    }
+
+    /// The front end as one of [`FRONT_ENDS`], or "none".
+    pub fn front(s: &str) -> &'static str {
+        FRONT_ENDS.iter().copied().find(|l| *l == s).unwrap_or("none")
+    }
+
+    /// One line a list can show: what it was, how sure, and the numbers
+    /// that identify it.
+    ///
+    /// Only the numbers that belong to the verdict: the tone separation of
+    /// a keyed signal, the sweep of a chirp, the period of a multi-carrier
+    /// or spread signal. Every feature is measured on every burst, and the
+    /// ones that belong to the hypotheses that lost are noise here.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!("{} {:.2}", self.modulation, self.confidence)];
+        if let Some(m) = &self.mode {
+            parts.push(m.clone());
+        }
+        if self.bandwidth_hz > 0.0 {
+            parts.push(format!("{:.1} kHz wide", self.bandwidth_hz / 1e3));
+        }
+        let keyed = matches!(self.modulation, "OOK" | "ASK" | "2-FSK" | "4-FSK" | "MSK" | "BPSK" | "QPSK");
+        if keyed && self.baud > 0.0 {
+            parts.push(format!("{:.0} baud", self.baud));
+        }
+        if matches!(self.modulation, "2-FSK" | "4-FSK" | "MSK") && self.separation_hz > 0.0 {
+            parts.push(format!("tones {:.1} kHz apart", self.separation_hz / 1e3));
+        }
+        if self.modulation == "chirp" && self.sweep_hz_s.abs() > 0.0 {
+            parts.push(format!("sweep {:.1} MHz/s", self.sweep_hz_s / 1e6));
+        }
+        if matches!(self.modulation, "OFDM" | "DSSS") && self.symbol_period_us > 0.0 {
+            parts.push(format!("period {:.1} us", self.symbol_period_us));
+        }
+        parts.push(format!("{:.1} ms", self.duration_us as f64 / 1e3));
+        parts.join(", ")
+    }
 }
 
 /// What the demodulator actually produced.

@@ -8,6 +8,7 @@ pub mod device;
 pub mod error;
 pub mod iq;
 pub mod pulse;
+pub mod source;
 pub mod value;
 pub mod units;
 
@@ -16,6 +17,7 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
-pub use pulse::{Package, Packet, PacketBody, Pulse};
+pub use pulse::{Measure, Package, Packet, PacketBody, Pulse};
+pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;
 pub use units::{Hz, Sps};

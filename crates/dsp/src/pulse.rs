@@ -105,6 +105,9 @@ pub struct LevelGate {
     signal: f32,
     high: bool,
     seeded: bool,
+    /// Samples summed towards the seed, and how many.
+    warm_sum: f32,
+    warm_n: u32,
     /// Measured peak of the quietest recent stretch, or `None` while the
     /// window is still filling. See [`QuietPeak`].
     quiet: Option<QuietPeak>,
@@ -210,6 +213,8 @@ impl LevelGate {
             signal: 0.0,
             high: false,
             seeded: false,
+            warm_sum: 0.0,
+            warm_n: 0,
             quiet: None,
         }
     }
@@ -244,6 +249,8 @@ impl LevelGate {
     pub fn reset(&mut self) {
         self.high = false;
         self.seeded = false;
+        self.warm_sum = 0.0;
+        self.warm_n = 0;
         if let Some(q) = self.quiet.as_mut() {
             q.reset();
         }
@@ -263,9 +270,22 @@ impl LevelGate {
     /// threshold then rises above the high level, and the gate declares the
     /// whole packet absent.
     pub fn update_learning(&mut self, v: f32, learn_noise: bool) -> bool {
+        // Seeded from the first time constant's worth of samples, not from
+        // the first sample alone. One sample of noise is one Rayleigh draw,
+        // and a tenth of those sit under a third of the mean: a threshold
+        // built on one of them is cleared by half the noise that follows,
+        // and the gate opens on nothing before the burst has arrived. That
+        // was invisible while every stream ran from the radio's start, and
+        // it was the first thing a stream cut out around a burst hit.
         if !self.seeded {
-            self.noise = v;
-            self.signal = v * 4.0;
+            let n = (1.0 / self.alpha).round().max(1.0) as u32;
+            self.warm_sum += v;
+            self.warm_n += 1;
+            if self.warm_n < n {
+                return false;
+            }
+            self.noise = self.warm_sum / self.warm_n as f32;
+            self.signal = self.noise * 4.0;
             self.seeded = true;
         }
 
@@ -301,6 +321,19 @@ impl LevelGate {
             }
         } else if learn_noise {
             self.noise += self.alpha * (v - self.noise);
+            // The signal estimate only tracks while the gate is high, so
+            // one that is too high can never be corrected by the signal
+            // itself: the threshold sits above everything and nothing is
+            // ever high again. A quarter second of full-scale constant at
+            // the start of a capture, which is how a tuner settles in some
+            // recordings, did exactly that. So it leaks, slowly, towards the
+            // least level the gate would accept as signal: sixteen time
+            // constants, long against any gap inside a packet and short
+            // against a band gone quiet.
+            let rest = self.noise * self.min_ratio;
+            if self.signal > rest {
+                self.signal -= self.alpha * 0.0625 * (self.signal - rest);
+            }
         }
 
         self.high = now_high;

@@ -185,6 +185,14 @@ pub struct Bank {
     pub channels: usize,
 }
 
+/// A transmitter the source detector has open right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveSource {
+    pub center_hz: f64,
+    pub bandwidth_hz: f64,
+    pub snr_db: f32,
+}
+
 pub struct Receiver {
     graph: Graph,
     /// What each node is, indexed by `NodeId`, so a rebuild can hand the same
@@ -204,6 +212,8 @@ pub struct Receiver {
     aprs: Option<NodeId>,
     pocsag: Option<NodeId>,
     banks: Vec<Bank>,
+    /// The source detectors, one per band watched.
+    sources: Vec<NodeId>,
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
     pending_record: Option<RecordRing>,
@@ -311,6 +321,7 @@ impl Receiver {
             aprs: None,
             pocsag: None,
             banks: Vec::new(),
+            sources: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
             log_dir: sinks.packet_log,
@@ -385,6 +396,7 @@ impl Receiver {
         self.aprs = None;
         self.pocsag = None;
         self.banks.clear();
+        self.sources.clear();
         self.center = plan.center;
         self.rate = plan.rate;
         self.assemble(plan, pool, ring)
@@ -487,6 +499,8 @@ impl Receiver {
         let aprs = of_kind("aprs").first().copied();
         let pocsag = of_kind("pocsag").first().copied();
         let banks: Vec<NodeId> = of_kind("bank");
+        let mut sources: Vec<NodeId> = of_kind("source_detect");
+        sources.extend(of_kind("auto"));
 
         narrowband.extend(patch_packets);
 
@@ -682,6 +696,7 @@ impl Receiver {
                 Bank { channels }
             })
             .collect();
+        self.sources = sources;
         self.chans = chans;
         self.refused = refused;
         Ok(())
@@ -807,11 +822,11 @@ impl Receiver {
     }
 
     pub fn modes_on(&self) -> bool {
-        self.modes.is_some()
+        self.modes.is_some() || self.auto_wide("mode_s")
     }
 
     pub fn ais_on(&self) -> bool {
-        self.ais.is_some()
+        self.ais.is_some() || self.auto_wide("ais")
     }
 
     pub fn aprs_on(&self) -> bool {
@@ -831,6 +846,44 @@ impl Receiver {
     /// Channels in each bank, in the order the banks were added.
     pub fn bank_channels(&self) -> Vec<usize> {
         self.banks.iter().map(|b| b.channels).collect()
+    }
+
+    /// Whether any band is being watched for sources.
+    pub fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Every source open right now, across every band watched: RF centre,
+    /// width and peak SNR.
+    pub fn live_sources(&self) -> Vec<LiveSource> {
+        let mut out = Vec::new();
+        for &id in &self.sources {
+            let Some(spec) = self.graph.spec_of(id.o()) else { continue };
+            let c = spec.center.as_f64();
+            let live = if let Some(n) = downcast::<nodes::SourceDetectNode>(&self.graph, id) {
+                n.live()
+            } else if let Some(n) = downcast::<nodes::AutoNode>(&self.graph, id) {
+                n.live()
+            } else {
+                continue;
+            };
+            for s in live {
+                out.push(LiveSource {
+                    center_hz: c + s.center_hz,
+                    bandwidth_hz: s.bandwidth_hz(),
+                    snr_db: s.peak_snr_db,
+                });
+            }
+        }
+        out
+    }
+
+    /// The span-wide decoders the auto nodes are running, by stage name.
+    fn auto_wide(&self, name: &str) -> bool {
+        self.sources
+            .iter()
+            .filter_map(|&id| downcast::<nodes::AutoNode>(&self.graph, id))
+            .any(|n| n.wide().contains(&name))
     }
 
     pub fn recorder_mut(&mut self) -> Option<&mut Recorder> {
@@ -1135,17 +1188,21 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             let widest = widths.iter().cloned().fold(0.0f64, f64::max);
             Some((band, widest * 2.0))
         }
+        // Detection works at whatever rate the band arrives at.
+        Front::Auto => Some((at.band, 0.0)),
     }
 }
 
 
 
 /// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 8] = [
+const BUS_TAILS: [&str; 10] = [
     "pulse_detect",
     "ask_detect",
     "fsk_detect",
     "bank",
+    "source_decode",
+    "auto",
     "mode_s",
     "ais",
     "aprs",
@@ -1154,7 +1211,7 @@ const BUS_TAILS: [&str; 8] = [
 
 /// Stages that report something a position can be resolved from, so the
 /// tracker is worth attaching to the bus.
-const TRACK_SOURCES: [&str; 3] = ["mode_s", "ais", "aprs"];
+const TRACK_SOURCES: [&str; 4] = ["mode_s", "ais", "aprs", "auto"];
 
 /// The recorder's ring, which is a stage in the graph but owns an open file
 /// and so cannot be built from a description alone.
@@ -1251,7 +1308,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // where nothing could see them.
         let want = front_band(front, at).and_then(|(band, min_rate)| {
             let band = match front {
-                Front::Banks(_) => at.covered(plan.center.as_f64(), plan.eff_rate())?,
+                Front::Banks(_) | Front::Auto => {
+                    at.covered(plan.center.as_f64(), plan.eff_rate())?
+                }
                 _ => band,
             };
             (band.1 > band.0).then(|| SubBand::plan(band, plan.eff_rate(), min_rate))
@@ -1297,6 +1356,23 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 p.connect(src, (id, 0));
             }
             Front::Aprs(_) | Front::Pocsag(_) => {}
+            Front::Auto => {
+                // One node over the band, whatever the band holds. The band
+                // is passed on so it ignores the margin the power-of-two
+                // extraction leaves either side, as a bank does.
+                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
+                    continue;
+                };
+                let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
+                let mut s = Settings::new();
+                s.insert("band_lo_hz".into(), pipeline::ParamValue::Float(band.0));
+                s.insert("band_hi_hz".into(), pipeline::ParamValue::Float(band.1));
+                // The tuner's own centre, where the DC offset's movement
+                // under a strong signal reads as a burst.
+                s.insert("spur_hz".into(), pipeline::ParamValue::Float(plan.center.as_f64()));
+                let id = p.add_derived(derived::at("auto", sub.key(), 0), "auto", s);
+                p.connect(src, (id, 0));
+            }
             Front::Banks(widths) => {
                 // The band the block was written about, not the whole span. A
                 // bank handed 60 MS/s divides it into 1024 channels at best,
@@ -1657,6 +1733,9 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "aprs" => "APRS".into(),
         "pocsag" => "Pager".into(),
         "bank" => bank_label(settings.f64_or("channel_hz", 0.0)),
+        "source_detect" => "Sources".into(),
+        "source_decode" => "Source decoders".into(),
+        "auto" => "Auto".into(),
         other => other.to_string(),
     }
 }
@@ -1776,6 +1855,23 @@ fn add_patch(
                 n.set_band((hi > lo).then_some((lo, hi)));
             }
         }
+        // The same for the source detector and the auto node, and for the
+        // same reason.
+        if st.kind == "source_detect" || st.kind == "auto" {
+            let (lo, hi) =
+                (st.settings.f64_or("band_lo_hz", 0.0), st.settings.f64_or("band_hi_hz", 0.0));
+            let band = (hi > lo).then_some((lo, hi));
+            if let Some(n) =
+                node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::SourceDetectNode>())
+            {
+                n.set_band(band);
+            }
+            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
+                n.set_band(band);
+                let spur = st.settings.f64_or("spur_hz", 0.0);
+                n.set_spur((spur > 0.0).then_some(spur));
+            }
+        }
         made.push((st.id, st.kind.clone(), node));
     }
 
@@ -1873,7 +1969,9 @@ fn hz_label(hz: f64) -> String {
 pub enum ScanMark {
     /// One frequency a single-channel front end demodulates.
     Channel { hz: f64, width: f64, label: String },
-    /// A band a bank channelizes, and the grid it channelizes it on.
+    /// A band a bank channelizes, and the grid it channelizes it on; or a
+    /// band watched for sources, which has no grid and says so with a
+    /// spacing of zero.
     ///
     /// `origin` is a real channel centre, not the band edge: the grid is
     /// anchored to the extraction's centre and the band is a window onto it,
@@ -1914,6 +2012,18 @@ pub fn scan_marks(
                 width: nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
                 label: "POCSAG".into(),
             }),
+            Front::Auto => {
+                // No grid to draw: the band is watched whole and whatever
+                // is in it is found where it is.
+                let Some(band) = at.covered(center, rate) else { continue };
+                out.push(ScanMark::Band {
+                    lo: band.0,
+                    hi: band.1,
+                    origin: (band.0 + band.1) / 2.0,
+                    spacing: 0.0,
+                    label: "auto".into(),
+                });
+            }
             Front::Banks(widths) => {
                 let Some(band) = at.covered(center, rate) else { continue };
                 let sub = SubBand::plan(band, rate, 0.0);
@@ -2677,7 +2787,7 @@ mod scan_mark_tests {
     use super::*;
 
     #[test]
-    fn the_ism_band_is_marked_where_the_bank_is_looking() {
+    fn the_ism_band_is_marked_where_the_detector_is_looking() {
         let s = crate::scanners::Scanners::default();
         let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0);
         let band = marks
@@ -2690,12 +2800,33 @@ mod scan_mark_tests {
             })
             .expect("the ISM block should mark a band");
         assert!(band.0 >= 432.0e6 && band.1 <= 435.5e6, "{band:?}");
-        assert!(band.2 > 0.0 && band.2 < 200_000.0, "{band:?}");
+        // Auto has no channel grid, and the mark says so.
+        assert_eq!(band.2, 0.0, "{band:?}");
+        assert_eq!(band.3, "auto");
+    }
+
+    #[test]
+    fn a_bank_block_still_marks_its_grid() {
+        let s = crate::scanners::Scanners::parse(
+            "[ISM]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = banks\nwidths = 31.25 kHz\n",
+        );
+        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0);
+        let spacing = marks
+            .iter()
+            .find_map(|m| match m {
+                ScanMark::Band { spacing, .. } => Some(*spacing),
+                _ => None,
+            })
+            .expect("a band");
+        assert!(spacing > 0.0 && spacing < 200_000.0, "{spacing}");
     }
 
     #[test]
     fn a_pager_channel_is_marked_at_its_frequency() {
-        let s = crate::scanners::Scanners::default();
+        let s = crate::scanners::Scanners::parse(
+            "[POCSAG]\nrange = 439.9 - 440.1 MHz\nspan = 100 kHz\nfront = pocsag\n\
+             channels = 439.9875 MHz\nmargin = 12.5 kHz\n",
+        );
         let marks = scan_marks(&s, 439_987_500.0, 500_000.0);
         assert!(marks.iter().any(|m| matches!(m, ScanMark::Channel { hz, .. } if (*hz - 439_987_500.0).abs() < 1.0)), "{marks:?}");
     }

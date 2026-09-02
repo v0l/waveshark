@@ -76,6 +76,10 @@ const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 pub const KIND_PULSES: u8 = 1;
 /// Bytes from a demodulator that produces frames directly, such as Mode S.
 pub const KIND_BYTES: u8 = 2;
+/// A burst with what it was measured to be in front of its timings, of
+/// which there may be none: a chirp or a carrier no front end reads is a
+/// measurement and nothing else.
+pub const KIND_MEASURED: u8 = 3;
 
 /// How the burst was keyed, in the record's second byte.
 ///
@@ -262,8 +266,11 @@ impl nodes::PacketSink for PacketLog {
                 // capped rather than the record refused, so whatever it was
                 // is still on record with its level and frequency.
                 let n = pulses.len().min(u16::MAX as usize);
-                let mut rec = Vec::with_capacity(4 + HEAD_LEN + n * 8);
-                put_head(&mut rec, KIND_PULSES, n as u16, n * 8, p);
+                let measure = p.measure.as_ref().map(put_measure).unwrap_or_default();
+                let kind = if p.measure.is_some() { KIND_MEASURED } else { KIND_PULSES };
+                let mut rec = Vec::with_capacity(4 + HEAD_LEN + measure.len() + n * 8);
+                put_head(&mut rec, kind, n as u16, measure.len() + n * 8, p);
+                rec.extend_from_slice(&measure);
                 for pulse in &pulses[..n] {
                     rec.extend_from_slice(&pulse.mark.to_le_bytes());
                     rec.extend_from_slice(&pulse.gap.to_le_bytes());
@@ -290,6 +297,60 @@ impl nodes::PacketSink for PacketLog {
     fn flush(&mut self) {
         self.flush_due();
     }
+}
+
+/// A measurement: three length-prefixed strings, then the numbers.
+fn put_measure(m: &common::Measure) -> Vec<u8> {
+    let mut out = Vec::new();
+    let put_str = |out: &mut Vec<u8>, s: &str| {
+        let b = &s.as_bytes()[..s.len().min(u16::MAX as usize)];
+        out.extend_from_slice(&(b.len() as u16).to_le_bytes());
+        out.extend_from_slice(b);
+    };
+    put_str(&mut out, m.modulation);
+    put_str(&mut out, m.front_end);
+    put_str(&mut out, m.mode.as_deref().unwrap_or(""));
+    out.extend_from_slice(&m.confidence.to_le_bytes());
+    out.extend_from_slice(&m.duration_us.to_le_bytes());
+    for v in [m.bandwidth_hz, m.baud, m.separation_hz, m.sweep_hz_s, m.symbol_period_us] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// The measurement at the front of a body, and the rest of the body.
+fn take_measure(body: &[u8]) -> Option<(common::Measure, &[u8])> {
+    let mut at = 0usize;
+    let mut take_str = |at: &mut usize| -> Option<String> {
+        let n = u16::from_le_bytes(body.get(*at..*at + 2)?.try_into().ok()?) as usize;
+        *at += 2;
+        let s = String::from_utf8_lossy(body.get(*at..*at + n)?).into_owned();
+        *at += n;
+        Some(s)
+    };
+    let modulation = take_str(&mut at)?;
+    let front = take_str(&mut at)?;
+    let mode = take_str(&mut at)?;
+    let getf = |o: usize| -> Option<f32> { Some(f32::from_le_bytes(body.get(o..o + 4)?.try_into().ok()?)) };
+    let confidence = getf(at)?;
+    let duration_us = u32::from_le_bytes(body.get(at + 4..at + 8)?.try_into().ok()?);
+    let nums: Vec<f32> = (0..5).map(|k| getf(at + 8 + k * 4)).collect::<Option<_>>()?;
+    let rest = body.get(at + 28..)?;
+    Some((
+        common::Measure {
+            modulation: common::Measure::label(&modulation),
+            confidence,
+            front_end: common::Measure::front(&front),
+            mode: (!mode.is_empty()).then_some(mode),
+            duration_us,
+            bandwidth_hz: nums[0],
+            baud: nums[1],
+            separation_hz: nums[2],
+            sweep_hz_s: nums[3],
+            symbol_period_us: nums[4],
+        },
+        rest,
+    ))
 }
 
 fn put_head(out: &mut Vec<u8>, kind: u8, count: u16, body_len: usize, p: &Packet) {
@@ -337,8 +398,15 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
         let get32 = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
         let getf = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
         let body = &r[HEAD_LEN..];
+        let mut measure = None;
         let packet_body = match kind {
-            KIND_PULSES => {
+            KIND_PULSES | KIND_MEASURED => {
+                let mut body = body;
+                if kind == KIND_MEASURED {
+                    let Some((m, rest)) = take_measure(body) else { continue };
+                    measure = Some(m);
+                    body = rest;
+                }
                 let mut pulses = Vec::new();
                 for k in 0..count.min(body.len() / 8) {
                     let o = k * 8;
@@ -362,6 +430,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             snr_db: getf(28),
             modulation: keying_from_code(r[1]),
             body: packet_body,
+            measure,
         });
     }
     out
@@ -408,7 +477,48 @@ mod tests {
                 Pulse { mark: 1500, gap: 500 },
                 Pulse { mark: 500, gap: 9000 },
             ]),
+            measure: None,
         }
+    }
+
+    #[test]
+    fn a_measured_burst_round_trips_with_its_measurement() {
+        let d = std::env::temp_dir().join(format!("sr-wspkt-measure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut log = PacketLog::new(d.clone());
+        let mut p = burst(869_500_000);
+        p.body = PacketBody::Pulses(Vec::new());
+        p.measure = Some(common::Measure {
+            modulation: "chirp",
+            confidence: 0.83,
+            front_end: "none",
+            mode: Some("LoRa SF9 BW125 (EU868)".into()),
+            duration_us: 183_000,
+            bandwidth_hz: 125_000.0,
+            baud: 0.0,
+            separation_hz: 0.0,
+            sweep_hz_s: 30_500_000.0,
+            symbol_period_us: 0.0,
+        });
+        let mut q = burst(433_920_000);
+        q.measure = Some(common::Measure {
+            modulation: "OOK",
+            confidence: 0.91,
+            front_end: "ook",
+            mode: None,
+            duration_us: 184_000,
+            bandwidth_hz: 11_700.0,
+            baud: 1_500.0,
+            separation_hz: 0.0,
+            sweep_hz_s: 0.0,
+            symbol_period_us: 0.0,
+        });
+        nodes::PacketSink::write(&mut log, &p);
+        nodes::PacketSink::write(&mut log, &q);
+        log.flush();
+        let got = read(d.join(format!("{}.wspkt", day_of(AT)))).unwrap();
+        assert_eq!(got, vec![p, q]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn frame(at_us: u64, bytes: &[u8]) -> Packet {
@@ -420,6 +530,7 @@ mod tests {
             snr_db: f32::NAN,
             modulation: None,
             body: PacketBody::Frame(bytes.to_vec()),
+            measure: None,
         }
     }
 

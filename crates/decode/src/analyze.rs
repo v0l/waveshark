@@ -64,11 +64,35 @@ impl Analysis {
     }
 }
 
-/// Bucket width for the histograms, in microseconds.
+/// Widest bucket for the histograms, in microseconds.
 ///
 /// Wide enough to absorb the systematic bias a threshold detector puts on
-/// every edge, narrow enough to keep 500 us and 1000 us symbols apart.
+/// every edge, narrow enough to keep 500 us and 1000 us symbols apart. It is
+/// the ceiling, not the bucket: see [`tolerance`].
 const TOL_US: u32 = 120;
+
+/// Bucket width for this burst, from its own shortest common width.
+///
+/// A fixed 120 us is right for the half-millisecond symbols of an OOK
+/// sensor and wrong by an order of magnitude for a 19.2 kbit/s FSK frame,
+/// whose 52 us and 104 us runs it folds into one bucket and reports as 63.
+/// So the bucket is a fraction of the width a fifth of the runs are shorter
+/// than, which is the symbol or close to it, and never wider than the
+/// ceiling.
+fn tolerance(pkg: &Package) -> u32 {
+    let n = pkg.pulses.len().saturating_sub(1);
+    let mut widths: Vec<u32> = pkg.pulses[..n]
+        .iter()
+        .flat_map(|p| [p.mark, p.gap])
+        .filter(|w| *w > 0)
+        .collect();
+    if widths.len() < 4 {
+        return TOL_US;
+    }
+    widths.sort_unstable();
+    let short = widths[widths.len() / 5];
+    (short / 3).clamp(8, TOL_US)
+}
 
 /// Infer a coding and slice the bits out under it.
 ///
@@ -78,8 +102,9 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
     if pkg.pulses.len() < 4 {
         return None;
     }
-    let marks = cluster(pkg.mark_histogram(TOL_US));
-    let gaps = cluster(pkg.gap_histogram(TOL_US));
+    let tol = tolerance(pkg);
+    let marks = cluster(pkg.mark_histogram(tol));
+    let gaps = cluster(pkg.gap_histogram(tol));
     if marks.is_empty() {
         return None;
     }
@@ -122,7 +147,7 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
         // width that sits between them is jitter, not evidence of a different
         // protocol, and refusing the whole burst over one stray pulse throws
         // away the only look anyone will get at an unknown device.
-        tolerance_us: (long_us / 2).max(TOL_US),
+        tolerance_us: (long_us / 2).max(tol),
         reset_us: pkg.pulses.last().map(|p| p.gap).unwrap_or(0),
     };
     let bits = slice(pkg, &t).ok()?;
@@ -245,6 +270,23 @@ mod tests {
         p.pulses[7].mark = 2600;
         let a = analyze(&p).expect("analysis");
         assert_eq!(a.coding, Coding::Pwm, "{a:?}");
+    }
+
+    #[test]
+    fn a_fast_fsk_frame_is_read_at_its_own_symbol() {
+        // 19.2 kbit/s two-tone keying off the air: runs of one to five
+        // 52 us symbols. A 120 us bucket folded the ones and twos together
+        // and called the symbol 63 us.
+        let runs = [
+            (52, 52), (52, 52), (49, 52), (56, 49), (52, 52), (52, 49), (56, 52), (52, 105),
+            (56, 154), (154, 49), (59, 101), (255, 63), (150, 150), (56, 52), (52, 52),
+            (49, 108), (52, 49), (108, 49), (161, 154), (157, 52), (150, 210), (105, 311),
+            (210, 52), (49, 56), (101, 49), (266, 101), (105, 101), (49, 157), (210, 52),
+            (262, 154), (101, 157), (157, 49), (56, 52), (206, 157), (52, 308), (52, 10000),
+        ];
+        let a = analyze(&pkg(&runs)).expect("an analysis");
+        assert_eq!(a.coding, Coding::Nrz);
+        assert!((48..=56).contains(&a.short_us), "symbol read as {} us", a.short_us);
     }
 
     #[test]

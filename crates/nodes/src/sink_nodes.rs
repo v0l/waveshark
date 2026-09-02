@@ -409,6 +409,7 @@ impl pipeline::node::Node for PacketBusNode {
                             snr_db: p.snr_db,
                             modulation: p.modulation,
                             body: common::PacketBody::Pulses(p.pulses.clone()),
+                            measure: None,
                         });
                     }
                 }
@@ -426,6 +427,7 @@ impl pipeline::node::Node for PacketBusNode {
                             snr_db: f32::NAN,
                             modulation: None,
                             body: common::PacketBody::Frame(f.clone()),
+                            measure: None,
                         });
                     }
                 }

@@ -54,22 +54,28 @@ Everything else costs a demodulator first.
 Transmit inverts the same layers and none of it is written yet. See
 [Transmit](#transmit) below.
 
-The second constraint is channel width. The scanner runs four channelizers over
-the same span, at 12.5, 31.25, 125 and 500 kHz, and every tier hears every
-burst: what differs is how much of the signal survives the filter and how much
-noise arrives with it. A 1.5 kbit/s OOK sensor decodes down to 12.3 dB
-peak-to-noise in a 31 kHz channel and needs 22.9 dB in a 125 kHz one; FSK wants
-the opposite, since a narrow channel cuts one of its tones off. The classifier
-reports the occupied bandwidth next to the channel width, so a burst that fills
-its channel says so rather than being quietly measured through a filter that
-removed most of it. Anything past 500 kHz still needs a chain of its own rather
-than a channel in a bank.
+The second constraint is width, and it is no longer a constraint on the
+scanner. The `auto` node watches its band as a spectrogram, and a run of bins
+over the floor that persists from one frame to the next is a source, with its
+centre and width measured rather than assumed. Each source is cut out at a
+rate that fits its width, so a 1.5 kbit/s OOK sensor is read through a
+channel a few kilohertz wide and a LaCrosse sensor keying tones 120 kHz apart
+is read through one that holds both, and a pager channel is found wherever it
+is rather than where a block said. The classifier still reports the occupied
+bandwidth next to the width it was given, since a source that fills its
+extraction is one whose extent was measured wrong. Anything a spectrogram
+cannot find, Mode S and AIS, the node runs its own demodulator for when the
+span covers the frequency.
 
-The tiers cost what they channelize: at 2.4 MS/s the four are 296 channels
-against the 98 the first two were, which measures 6.1x real time against 10.7x
-on a 48 core machine. `testdata`-driven, in
-`radio::tests::the_scanner_keeps_up_with_the_stream`. A slower receiver drops a
-tier in the scanner table.
+Sources cost what is transmitting: an empty band is one FFT, and each source
+that opens is a mixer and two decimators for as long as it lasts, plus the
+frame decoders where the width warrants them. At 2.4 MS/s on an empty band
+that measures about 9x real time on a 48 core machine against the 6.1x the
+four bank tiers took, in `radio::tests::the_scanner_keeps_up_with_the_stream`.
+Scored on rtl_433's corpus by `crates/nodes/tests/source_corpus.rs`, the node
+recovers 50 of the 57 reference decodes against the tiers' 48, and loses
+ground on no capture. The tiers remain a front end a scanner block can ask
+for as `banks`, for that comparison.
 
 The third is hardware.
 

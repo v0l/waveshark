@@ -435,6 +435,88 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Scan a band headless: the receiver as the window runs it, with every
+/// packet printed as it arrives instead of listed.
+///
+/// The same radio thread, the same scanner table and the same decode
+/// switch as the interactive receiver, so what this prints is what the
+/// window would list, one line per packet in the list's columns. For a
+/// capture on disk, `--replay` does the same from the file.
+fn scan(
+    mhz: f64,
+    span_khz: f64,
+    want: Option<String>,
+    packet_log: Option<PathBuf>,
+    location: Option<(f64, f64)>,
+    dc_on: bool,
+    print: bool,
+) {
+    use common::{Hz, Sps};
+    eprintln!("listing radios");
+    let all = devices::list();
+    for d in &all {
+        eprintln!("  {}", d.label);
+    }
+    let Some(entry) = want
+        .as_ref()
+        .and_then(|w| {
+            all.iter()
+                .find(|d| d.label.to_lowercase().contains(&w.to_lowercase()))
+                .cloned()
+        })
+        .or_else(|| all.into_iter().next())
+    else {
+        println!("no radio found");
+        return;
+    };
+    let rate = span_khz * 1e3;
+    let r = radio::Radio::start(entry.clone(), Hz((mhz * 1e6) as u64), Sps(rate as u64), 1024, || {});
+    r.send(radio::Cmd::DcBlock(dc_on));
+    r.send(radio::Cmd::Decode(true));
+    if let Some((lat, lon)) = location {
+        r.send(radio::Cmd::Location(lat, lon));
+    }
+    r.send(radio::Cmd::PacketLog(packet_log.clone()));
+    eprintln!(
+        "scanning {:.4} MHz at {:.3} MS/s on {}; packet log {}; ctrl-c stops",
+        mhz,
+        rate / 1e6,
+        entry.label,
+        packet_log.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "off".into())
+    );
+    if print {
+        println!("{}", radio::DecodeRecord::line_header());
+    }
+    let start = std::time::Instant::now();
+    let mut n = 0u64;
+    loop {
+        // The spectrum frames are for a window; drained so the radio thread
+        // never waits on a display that is not there.
+        while r.frames.try_recv().is_ok() {}
+        match r.decodes.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(recs) => {
+                for rec in recs {
+                    n += 1;
+                    if print {
+                        println!("{}", rec.line(start));
+                    }
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if let Some(e) = r.status.error.lock().clone() {
+                    eprintln!("radio: {e}");
+                    break;
+                }
+                if !r.status.running.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    eprintln!("{n} packets");
+}
+
 fn replay(path: &str) -> anyhow::Result<()> {
     let path = std::path::Path::new(path);
     if path.extension().and_then(|s| s.to_str()) == Some("wspkt") {
@@ -597,6 +679,16 @@ struct Args {
     #[arg(long)]
     listen: bool,
 
+    /// Run the receiver without a window, on the radio at `--tune` and
+    /// `--span`, scanning and logging as the window would.
+    #[arg(long)]
+    headless: bool,
+
+    /// Print every packet to standard output as it arrives, in the packet
+    /// list's columns, with or without a window.
+    #[arg(long)]
+    print_log: bool,
+
     /// Report what the squelch reads on a frequency
     #[arg(long, value_name = "MHZ", num_args = 0..=1, default_missing_value = "145.5")]
     squelch_probe: Option<f64>,
@@ -672,6 +764,23 @@ fn main() -> eframe::Result<()> {
         probe(mhz, args.listen, args.device.clone(), !args.no_dc);
         return Ok(());
     }
+    if args.headless {
+        let log = if args.no_packet_log {
+            None
+        } else {
+            args.packet_log.clone().or_else(packetlog::PacketLog::default_dir)
+        };
+        scan(
+            args.tune.first().copied().unwrap_or(433.92),
+            args.span.unwrap_or(2_400.0),
+            args.device.clone(),
+            log,
+            args.location,
+            !args.no_dc,
+            args.print_log,
+        );
+        return Ok(());
+    }
     if let Some(path) = &args.replay {
         if let Err(e) = replay(path) {
             eprintln!("replay failed: {e}");
@@ -710,6 +819,7 @@ fn main() -> eframe::Result<()> {
             }
             app.shot = args.shot.clone();
             app.shot_after = args.shot_after;
+            app.print_log = args.print_log;
             if let Some(dir) = args.record.clone() {
                 app.record_to(dir, args.record_mb);
             }

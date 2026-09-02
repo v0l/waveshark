@@ -10,7 +10,8 @@
 # HackRF files round-trip to the recorded floats exactly.
 #
 # `family` is the label, and it is only ever what the capture demonstrates. See
-# docs/amc.md for why an unverified label is worse than none.
+# crates/decode/tests/classify_offair.rs for why an unverified label is worse
+# than none.
 
 [[capture]]
 name = "fm_broadcast_95.8M_2000k.cs16"

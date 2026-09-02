@@ -68,8 +68,18 @@ impl PacketDecodeNode {
             }
         }
         if !matched && self.report_unknown {
-            self.hits
-                .push(unmatched_event(pkg, center, modulation).with_bandwidth(p.bandwidth_hz as f64));
+            // The keying column shows what the classifier measured where it
+            // is more specific than the front end that read the burst: a
+            // chirp or a carrier that no front end reads, or a burst it
+            // could not name at all.
+            let label = match p.measure.as_ref().map(|m| m.modulation) {
+                Some(l) if l != "unknown" => l,
+                _ => modulation,
+            };
+            self.hits.push(
+                unmatched_event(pkg, center, label, p.measure.as_ref())
+                    .with_bandwidth(p.bandwidth_hz as f64),
+            );
         }
     }
 
@@ -153,9 +163,11 @@ impl Simple for PacketDecodeNode {
                     // is only ever a guess: the wide tier carries plenty of
                     // on-off keyed sensors, and this used to label every one
                     // of them FSK.
-                    let modulation = p
-                        .modulation
-                        .unwrap_or(if p.bandwidth_hz > 60_000 { "FSK" } else { "OOK" });
+                    let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
+                        Some(m) => m.modulation,
+                        None if p.bandwidth_hz > 60_000 => "FSK",
+                        None => "OOK",
+                    });
                     self.decode_burst(p, &pkg, modulation);
                 }
                 PacketBody::Frame(bytes) => self.decode_frame(p, bytes),
@@ -220,6 +232,7 @@ mod tests {
             snr_db: 22.0,
             modulation: None,
             body: PacketBody::Pulses(pulses),
+            measure: None,
         }
     }
 
@@ -257,6 +270,7 @@ mod tests {
                 snr_db: f32::NAN,
                 modulation: None,
                 body: PacketBody::Frame(bytes),
+                measure: None,
             }],
         );
         assert_eq!(hits.len(), 1);
@@ -301,6 +315,7 @@ mod tests {
                 snr_db: f32::NAN,
                 modulation: None,
                 body: PacketBody::Frame(bytes),
+                measure: None,
             }],
         );
         assert_eq!(hits.len(), 2);
@@ -322,6 +337,7 @@ mod tests {
                 snr_db: f32::NAN,
                 modulation: None,
                 body: PacketBody::Frame(vec![0xff; 5]),
+                measure: None,
             }],
         );
         assert!(hits.is_empty());

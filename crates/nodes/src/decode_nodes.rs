@@ -439,24 +439,65 @@ pub fn unmatched_event(
     pkg: &common::Package,
     center: common::Hz,
     modulation: &'static str,
+    measure: Option<&common::Measure>,
 ) -> Decoded {
     let at = pkg.start_sample as f64;
+    // What the burst was measured to be comes first, since it is what
+    // there is to say about a burst nothing decoded: the coding guessed
+    // from the timings follows, where there were timings.
+    let measured = measure.map(|m| m.summary());
+    let join = |a: Option<String>, b: String| match a {
+        Some(a) => format!("{a}; {b}"),
+        None => b,
+    };
     let ev = match decode::analyze(pkg) {
         Some(a) => Decoded::bytes("unknown", center, at, a.bits.as_bytes().to_vec())
             .with_text(format!("unknown: {}", a.summary()))
-            .with_detail(a.summary()),
+            .with_detail(join(measured, a.summary())),
         // Too short or too irregular to read. Still worth a line: it says
         // something was there, which is the difference between a quiet band
         // and a misconfigured chain.
+        None if pkg.pulses.is_empty() && measure.is_some() => {
+            Decoded::bytes("unknown", center, at, Vec::new())
+                .with_text(format!("unknown: {}", measured.clone().unwrap_or_default()))
+                .with_detail(measured.unwrap_or_default())
+        }
         None => Decoded::bytes("unknown", center, at, Vec::new())
             .with_text("unknown: unreadable burst")
-            .with_detail(format!(
-                "{} pulses, {:.1} ms, no coding inferred",
-                pkg.pulses.len(),
-                pkg.duration_us() as f64 / 1000.0,
+            .with_detail(join(
+                measured,
+                format!(
+                    "{} pulses, {:.1} ms, no coding inferred",
+                    pkg.pulses.len(),
+                    pkg.duration_us() as f64 / 1000.0,
+                ),
             )),
     };
-    ev.with_modulation(modulation).with_level(pkg.rssi_dbfs, pkg.snr_db)
+    let mut ev = ev.with_modulation(modulation).with_level(pkg.rssi_dbfs, pkg.snr_db);
+    if let Some(m) = measure {
+        let mut fields: Vec<(String, common::Value)> =
+            vec![("confidence".into(), common::Value::Float(m.confidence as f64))];
+        if m.baud > 0.0 {
+            fields.push(("baud".into(), common::Value::Float(m.baud as f64)));
+        }
+        if m.separation_hz > 0.0 {
+            fields.push(("separation_hz".into(), common::Value::Float(m.separation_hz as f64)));
+        }
+        if m.sweep_hz_s.abs() > 0.0 {
+            fields.push(("sweep_hz_per_s".into(), common::Value::Float(m.sweep_hz_s as f64)));
+        }
+        if m.symbol_period_us > 0.0 {
+            fields.push(("symbol_period_us".into(), common::Value::Float(m.symbol_period_us as f64)));
+        }
+        if let Some(mode) = &m.mode {
+            fields.push(("mode".into(), common::Value::Text(mode.clone())));
+        }
+        ev = ev.with_fields(fields);
+        if m.bandwidth_hz > 0.0 {
+            ev = ev.with_bandwidth(m.bandwidth_hz as f64);
+        }
+    }
+    ev
 }
 
 /// Run protocols against pulse packages and emit decodes as events.
@@ -502,7 +543,7 @@ impl ProtocolDecodeNode {
             return;
         }
         let center = c.inputs[0].spec.center;
-        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation)));
+        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation, None)));
     }
 
     pub fn all() -> Self {
@@ -651,6 +692,31 @@ impl BurstRouteNode {
 
     pub fn default_ism() -> Self {
         Self::new(dsp::RouterConfig::default())
+    }
+
+    /// Every burst the last block finished, with what it was measured to be
+    /// and what the front end it went to made of it.
+    pub fn routed(&self) -> &[dsp::RoutedBurst] {
+        &self.bursts
+    }
+}
+
+/// What a routed burst was measured to be, as evidence a packet carries.
+pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
+    let f = &b.class.features;
+    let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz)
+        .map(|m| format!("{} ({})", m.name, m.note));
+    common::Measure {
+        modulation: b.class.modulation.label(),
+        confidence: b.class.confidence,
+        front_end: common::Measure::front(b.routed_to),
+        mode,
+        duration_us: f.duration_us as u32,
+        bandwidth_hz: f.bandwidth_hz,
+        baud: f.baud,
+        separation_hz: f.separation_hz,
+        sweep_hz_s: f.chirp_rate,
+        symbol_period_us: if f.cyclic_period_s > 0.0 { f.cyclic_period_s * 1e6 } else { 0.0 },
     }
 }
 

@@ -309,6 +309,7 @@ fn read_loop(
                 snr_db: f32::NAN,
                 modulation: None,
                 body: PacketBody::Frame(f.bytes),
+                measure: None,
             };
             if tx.send(packet).is_err() {
                 return;

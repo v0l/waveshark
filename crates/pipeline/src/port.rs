@@ -1,6 +1,6 @@
 //! What flows between stages, and how a stage advertises its rate.
 
-use common::{Hz, Package, C32};
+use common::{Hz, Package, SourceBlock, C32};
 
 /// The data type carried on a port. Checked when a chain is built so a
 /// mis-ordered chain fails at construction rather than producing silence.
@@ -37,6 +37,15 @@ pub enum PortKind {
     /// replies written into one buffer came back out of a log as a single
     /// 14-byte frame that never existed.
     Frames,
+    /// Transmitters found in a wideband stream, each as its own run of
+    /// samples at its own rate.
+    ///
+    /// The junction between finding signals and reading them. Upstream is
+    /// one detector over the whole span; downstream is a decoder per source,
+    /// built when the source opens and dropped when it closes. A port of this
+    /// kind carries many streams at once, which is why it is not
+    /// [`PortKind::Iq`]: a single rate and centre cannot describe it.
+    Sources,
 }
 
 /// A reusable buffer. Stages write into the caller's buffer rather than
@@ -50,6 +59,7 @@ pub enum Payload {
     Pulses(Vec<Package>),
     Frames(Vec<Vec<u8>>),
     Packets(Vec<common::Packet>),
+    Sources(Vec<SourceBlock>),
 }
 
 impl Payload {
@@ -62,6 +72,7 @@ impl Payload {
             PortKind::Pulses => Payload::Pulses(Vec::new()),
             PortKind::Frames => Payload::Frames(Vec::new()),
             PortKind::Packets => Payload::Packets(Vec::new()),
+            PortKind::Sources => Payload::Sources(Vec::new()),
         }
     }
 
@@ -74,6 +85,7 @@ impl Payload {
             Payload::Pulses(_) => PortKind::Pulses,
             Payload::Frames(_) => PortKind::Frames,
             Payload::Packets(_) => PortKind::Packets,
+            Payload::Sources(_) => PortKind::Sources,
         }
     }
 
@@ -85,6 +97,7 @@ impl Payload {
             Payload::Pulses(v) => v.len(),
             Payload::Frames(v) => v.len(),
             Payload::Packets(v) => v.len(),
+            Payload::Sources(v) => v.len(),
         }
     }
 
@@ -101,6 +114,7 @@ impl Payload {
             Payload::Pulses(v) => v.clear(),
             Payload::Frames(v) => v.clear(),
             Payload::Packets(v) => v.clear(),
+            Payload::Sources(v) => v.clear(),
         }
     }
 
@@ -143,6 +157,20 @@ impl Payload {
         match self {
             Payload::Packets(v) => Some(v),
             _ => None,
+        }
+    }
+
+    pub fn as_sources(&self) -> Option<&[SourceBlock]> {
+        match self {
+            Payload::Sources(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn sources_mut(&mut self) -> &mut Vec<SourceBlock> {
+        match self {
+            Payload::Sources(v) => v,
+            _ => panic!("payload is {:?}, not Sources", self.kind()),
         }
     }
 

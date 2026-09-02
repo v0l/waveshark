@@ -187,6 +187,117 @@ guessing, and each initially wrong:
   gather its own column has a `channels * 8` byte stride and wastes seven
   eighths of the memory bandwidth.
 
+## One node that finds everything
+
+The channel banks decided a signal's width before they had seen the signal:
+a grid of fixed channels was split over the band, and whatever landed in a
+channel was read through that channel's filter however wide it really was.
+That is why there were four grids of different widths over the same band, why
+one burst arrived in several of them at once and had to be deduplicated, and
+why a signal on a channel edge was mangled in every tier. And the scanner
+table had to say which decoder ran where, because nothing measured what was
+there.
+
+The receiver now runs one node, `auto`, over a band, and the shipped scanner
+table puts it on the ISM bands. In at one end is complex baseband at whatever
+rate and centre the band arrives at; out at the other are packets for the
+bus. It costs what is transmitting in the band, which is why the band is
+still what a scanner block declares rather than the whole of what a wideband
+radio samples: that is what keeps it real time. Inside are the two things a
+band holds.
+
+Most of what transmits is found by watching the span as a spectrogram, one
+FFT frame at a time, with a noise floor per bin. A run of bins above the floor
+that persists from one frame to the next is a *source*: something transmitting
+at a centre with a width, from one instant until another, with both measured
+rather than assumed. Each source is mixed to baseband and decimated to a rate
+that fits its width, from a short ring of the span so the lead-in the detector
+needed is not lost, and read as a stream of its own for as long as it lasts: a
+packet four milliseconds long is a stream that runs four milliseconds, a
+carrier is one that never closes. The stream gets decoders of its own, built
+when the source opens and dropped when it closes: the burst front end always,
+since it measures the burst and picks the demodulator itself, and the
+narrowband frame decoders whose channel a source of that width could be, the
+pager and packet demodulators, which decide for themselves whether the bits
+are theirs. A pager channel is a pager channel at 153 MHz and at 440 MHz.
+
+The rest is what a spectrogram cannot find. A Mode S reply is 120 microseconds
+of pulses two megahertz wide, shorter than a frame; AIS is two channels 50 kHz
+apart that stations alternate between. Those demodulators watch the whole span
+inside the node, and run when the span covers the frequency they are for; no
+source is opened inside their bands. That is the one piece of knowledge about
+where things are that the receiver keeps, because it is knowledge about the
+world rather than about this radio.
+
+`dsp::source` holds the detector and the extractor; `nodes::auto_node` the
+node; `source_detect` and `source_decode` are the same two halves as separate
+stages, for a chain built by hand.
+
+Several details of the detector were found by measurement rather than design.
+The extent of a strong signal cannot be every bin over the floor, because sharp
+keying puts sidebands over the floor across hundreds of kilohertz at 60 dB;
+it is every bin within 20 dB of the run's peak, which also takes in both tones
+of a two-tone signal whose onset lit the whole band for a frame. Two runs that
+open in the same frame within 200 kHz and within 12 dB of each other are one
+transmitter, since that is what frequency-shift keying looks like and a
+LaCrosse sensor keys tones 120 kHz apart. A source whose extent keeps growing
+frame after frame until it is half again the width it opened at is a sweep,
+and is reopened under a new id at the full width from the transmitter's
+start, out of a ring that holds the last third of a second: a chirp at a
+high spreading factor is a tone a few kilohertz wide in the frames it takes
+to open, and an extraction designed then would keep the sliver and lose the
+sweep. The stream it supersedes is dropped without being read into. A source is still present only if
+the raw, unsmoothed power where it was last seen says so: the smoothed power
+that gives detection its sensitivity takes thirty frames to decay after a
+45 dB signal stops, and single bins of noise inside a wide extent reach the
+close threshold a few times a frame.
+
+Three more were found at the start of a stream. A capture can open with a
+quarter second of full-scale constant while the tuner settles, which is a
+carrier at DC and an empty floor everywhere else, so silence is judged on a
+frame's power after its mean is removed. A filter in front of the detector
+fades in over its first few hundred samples, so the floor is not measured
+until thirty-two frames have passed. And the burst gate every front end uses
+seeded its noise estimate from the first sample it saw, one Rayleigh draw, and
+had no way to lower a signal estimate set too high; it now seeds from its
+first time constant and lets the estimate leak while the gate is low. None of
+that showed while every stream ran from the radio's start; a stream cut out
+around a burst hits all of it at once.
+
+Measured on rtl_433's corpus by `crates/nodes/tests/source_corpus.rs`, which
+runs both paths over every capture through the same front end and tables, the
+node recovers 50 of the 57 reference decodes against the banks' 48, and loses
+ground on none.
+
+What it keeps up with is a question of how much is transmitting, not only of
+the rate, because the band costs one transform per frame and every open
+source costs a mixer and two decimators at the band's rate plus its decoders.
+Measured by `crates/nodes/examples/auto_bench` on a 48 core machine, with the
+transmitters keying 40 ms bursts every 250 ms spread across the band:
+
+| band | empty | 8 transmitters | 16 transmitters |
+|---|---|---|---|
+| 4 MS/s | 4.6x | 2.9x | |
+| 8 MS/s | 3.3x | | 1.5x |
+| 20 MS/s | 2.4x | | 0.9x |
+| 40 MS/s | 1.0x | | |
+
+So a few megahertz of ISM band is comfortable, a 20 MS/s span is real time
+only while quiet, and the per-source cost at the band's rate is what would
+have to change for a busy wide span: a fixed coarse channelizer in front of
+the per-source stage would amortise it, which is the bank's one advantage
+and the next thing worth building if that span is wanted. Three things had
+to be found before those numbers held: the extractor's history ring shifted
+its whole contents every block, the mixer took a sine and cosine per sample,
+and single bins of noise inside a source's range were being folded into its
+extent and reopening it at ten times its width. The reopening itself is
+triggered by the source's centre moving, not its extent growing: a keyed
+signal's edges flicker as its peak dips between repeats, and measured as
+growth that reopened a sensor's burst two thirds of the way through.
+
+The banks are still a front end a block can ask for by name, kept for that
+comparison; the section below describes them.
+
 ## Two channelizers, not one
 
 Within a band that channelizes, the receiver splits the span into channels and
@@ -241,6 +352,16 @@ Undecoded bursts are written too, and they matter most: a burst no protocol
 claimed leaves no other trace at all, and it is the raw material for the
 protocol that would have claimed it.
 
+What the burst was measured to be travels with it. The front end classifies
+every burst before deciding how to read it, and the verdict, its confidence,
+the width, the symbol rate, the tone separation or the sweep rate, and the
+mode those place it in are evidence about the same burst as the timings, so
+the packet carries them and the log keeps them. A burst no front end reads,
+a chirp or a bare carrier, is written as its measurement and no timings at
+all, which is the row that used to be missing: the log showed only what the
+pulse front ends produced, so a LoRa frame left nothing and a keyed sensor
+showed its coding but not its keying.
+
 The log is the packet bus, and it is a node in the graph. Everything that
 produces packets feeds it; everything that consumes them hangs off the far
 side, starting with the flight list. A view is a consumer of what the
@@ -255,7 +376,8 @@ disk rather than disconnecting every view from the traffic.
 
 The format is little-endian binary: a six-byte magic and a version, then a
 length-prefixed record per burst carrying the time, frequency, channel width,
-level, noise and the timings themselves. Binary rather than line-delimited
+level, noise and the timings themselves, with the measurement in front of the
+timings where there is one. Binary rather than line-delimited
 JSON, because a burst is a few hundred timings and a hundred bytes of quoted
 JSON per pulse turns an overnight capture into gigabytes. The length prefix
 means an unknown record kind is skipped rather than misparsed, and a receiver
@@ -522,6 +644,12 @@ cargo run --release -p nodes --example chain -- \
 
 # WFM receiver; verifies itself by finding the 19 kHz stereo pilot
 cargo run --release -p rtlsdr --example wfm
+
+# Run the receiver without a window, printing every packet as it arrives
+waveshark --headless --print-log --tune 434 --span 2400 --device hackrf
+
+# The same packet lines from the window
+waveshark --print-log
 
 # Listen live without the GUI
 cargo run --release -p rtlsdr --example listen -- 95.8

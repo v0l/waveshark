@@ -395,6 +395,29 @@ pub struct DecodeRecord {
 }
 
 impl DecodeRecord {
+    /// The column headings [`Self::line`] prints under.
+    pub fn line_header() -> String {
+        format!(
+            "{:>8}  {:>13}  {:<10} {:>6} {:>5}  {:<22} {:>3}  info",
+            "time", "frequency", "mod", "rssi", "snr", "protocol", "len"
+        )
+    }
+
+    /// One line in the packet list's columns, timed from `since`.
+    pub fn line(&self, since: std::time::Instant) -> String {
+        format!(
+            "{:>8.3}  {:>9.4} MHz  {:<10} {:>6.1} {:>5.1}  {:<22} {:>3}  {}",
+            self.at.saturating_duration_since(since).as_secs_f64(),
+            self.freq / 1e6,
+            self.modulation,
+            self.rssi_dbfs,
+            self.snr_db,
+            self.model,
+            self.bytes.len(),
+            self.detail
+        )
+    }
+
     /// A bare record, for tests that need one to hand to something else.
     #[cfg(test)]
     pub fn for_test(freq: f64, model: &str) -> Self {
@@ -464,6 +487,7 @@ impl Dedupe {
             freq: r.freq,
             channel_hz: r.channel_hz,
             modulation: r.modulation,
+            known: r.is_known(),
         });
         true
     }
@@ -480,6 +504,8 @@ struct Reported {
     freq: f64,
     channel_hz: f64,
     modulation: &'static str,
+    /// Whether a protocol claimed it.
+    known: bool,
 }
 
 /// How long a burst stays in that memory.
@@ -612,6 +638,13 @@ pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<DecodeRec
 /// a half channels either side, taken from the wider of the two reports
 /// because that is the one whose skirts reach furthest.
 fn same_burst(kept: &Reported, new: &DecodeRecord) -> bool {
+    // A real decode is never a copy of a guess. The front end names what it
+    // measured about every burst, including the ones it read nothing from,
+    // and a measurement of noise a few kilohertz off a sensor a moment
+    // before it keyed up must not stand in for the sensor's packet.
+    if new.is_known() && !kept.known {
+        return false;
+    }
     let d = (kept.freq - new.freq).abs();
     if d < 1.0 && (kept.channel_hz - new.channel_hz).abs() < 1.0 {
         return kept.modulation != new.modulation;
@@ -627,15 +660,16 @@ fn dedupe_neighbours(block: &mut [DecodeRecord]) {
         kb.0.cmp(&ka.0).then(kb.1.total_cmp(&ka.1))
     });
 
-    let mut kept: Vec<(f64, f64, &'static str)> = Vec::new();
+    let mut kept: Vec<(f64, f64, &'static str, bool)> = Vec::new();
     for i in order {
-        let dup = kept.iter().any(|(kf, kw, km)| {
+        let dup = kept.iter().any(|(kf, kw, km, known)| {
             same_burst(
                 &Reported {
                     at: block[i].at,
                     freq: *kf,
                     channel_hz: *kw,
                     modulation: km,
+                    known: *known,
                 },
                 &block[i],
             )
@@ -643,10 +677,21 @@ fn dedupe_neighbours(block: &mut [DecodeRecord]) {
         if dup {
             block[i].model.clear();
         } else {
-            kept.push((block[i].freq, block[i].channel_hz, block[i].modulation));
+            kept.push((block[i].freq, block[i].channel_hz, block[i].modulation, block[i].is_known()));
         }
     }
 }
+
+/// A source the detector has, or recently had, open.
+#[derive(Clone, Copy, Debug)]
+pub struct SeenSource {
+    pub source: crate::chain::LiveSource,
+    pub last_seen: std::time::Instant,
+    pub live: bool,
+}
+
+/// How long a closed source stays on the waterfall.
+pub const SOURCE_LINGER: std::time::Duration = std::time::Duration::from_secs(6);
 
 pub struct Status {
     pub dropped: AtomicU64,
@@ -675,6 +720,15 @@ pub struct Status {
     /// off. Narrow ones run the OOK front end, wide ones the FSK front end.
     pub scan_channels: AtomicU64,
     pub scan_channels_wide: AtomicU64,
+    /// Whether a band is being watched for sources, and the sources open
+    /// right now or closed within the last few seconds, republished every
+    /// block for the waterfall to mark.
+    ///
+    /// The recently closed ones are the point. A sensor's burst lasts tens
+    /// of milliseconds, and a mark that only lasts as long as the source is
+    /// open is a flash nobody can read.
+    pub sources_on: AtomicBool,
+    pub sources: parking_lot::Mutex<Vec<SeenSource>>,
     /// Aircraft whose address has proved itself, when tuned to 1090 MHz.
     pub aircraft: AtomicU64,
     /// The aircraft the tracker in the graph is holding, republished at the
@@ -779,6 +833,8 @@ impl Default for Status {
             decoded: AtomicU64::new(0),
             scan_channels: AtomicU64::new(0),
             scan_channels_wide: AtomicU64::new(0),
+            sources_on: AtomicBool::new(false),
+            sources: parking_lot::Mutex::new(Vec::new()),
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
@@ -1479,6 +1535,29 @@ fn run(
         status
             .scan_channels_wide
             .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
+        status.sources_on.store(rx.has_sources(), Ordering::Relaxed);
+        {
+            let now = std::time::Instant::now();
+            let mut seen = status.sources.lock();
+            for e in seen.iter_mut() {
+                e.live = false;
+            }
+            for s in rx.live_sources() {
+                let same = seen.iter_mut().find(|e| {
+                    (e.source.center_hz - s.center_hz).abs()
+                        < e.source.bandwidth_hz.max(s.bandwidth_hz) / 2.0
+                });
+                match same {
+                    Some(e) => {
+                        e.source = s;
+                        e.last_seen = now;
+                        e.live = true;
+                    }
+                    None => seen.push(SeenSource { source: s, last_seen: now, live: true }),
+                }
+            }
+            seen.retain(|e| e.live || now.duration_since(e.last_seen) < SOURCE_LINGER);
+        }
 
         // Stamped at the start of the block rather than at the moment the
         // decode fell out of it. The packet happened somewhere inside the
@@ -1828,18 +1907,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_tiers_run_narrowest_first() {
-        // The whole reason for more than one bank. Measured on the Fine Offset
-        // capture, a 31 kHz channel decodes it down to 12.3 dB peak-to-noise
-        // where a 125 kHz channel needs 22.9 dB, and a chirp needs the widest
-        // tier or it is measured through a filter that removed most of it.
+    fn an_ism_band_is_watched_for_sources_and_not_channelized() {
+        // What the shipped table asks for on an ISM band: one detector that
+        // finds transmitters where they are, rather than a set of channel
+        // grids at guessed widths.
         let rx = replay_receiver(&empty_buf(2_400_000.0, Hz::mhz(868)), None).unwrap();
-        let chans = rx.bank_channels();
-        assert!(chans.len() >= 2, "one tier is not a set of tiers: {chans:?}");
-        assert!(
-            chans.windows(2).all(|w| w[0] > w[1]),
-            "a narrower tier has more channels, so the counts must fall: {chans:?}"
-        );
+        let labels: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
+        assert!(rx.has_sources(), "no source detector on the 868 MHz band: {labels:?}");
+        assert!(rx.bank_channels().is_empty(), "a bank tier is still running: {:?}", rx.bank_channels());
+        assert!(rx.live_sources().is_empty(), "an empty band has no sources");
     }
 
     #[test]
@@ -2118,10 +2194,8 @@ pub(crate) mod tests {
         let secs = t.elapsed().as_secs_f64();
         let audio_secs = blocks as f64 * b.len() as f64 / rate;
         let x = audio_secs / secs;
-        let chans = rx.bank_channels();
-        let total: usize = chans.iter().sum();
-        eprintln!("scanner: {x:.1}x real time on {total} channels across {chans:?}");
-        assert!(x > 1.0, "the scanner ran at only {x:.2}x real time across {chans:?}");
+        eprintln!("scanner: {x:.1}x real time watching for sources");
+        assert!(x > 1.0, "the scanner ran at only {x:.2}x real time");
     }
 
     #[test]

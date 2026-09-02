@@ -265,6 +265,7 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
                 snr_db: p.snr_db,
                 modulation: p.modulation,
                 body: PacketBody::Pulses(p.pulses.clone()),
+                measure: None,
             })
             .collect();
         for d in decode_packets(&mut decoder, packets) {
