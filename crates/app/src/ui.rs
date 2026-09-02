@@ -272,6 +272,13 @@ const IQ_KEEP: usize = 64;
 const BURST_VIEW_H: f32 = 120.0;
 /// The least the inspector may be dragged to, and the drag handle's height.
 const INSPECTOR_MIN_H: f32 = 64.0;
+
+/// Tallest the inspector may be drawn, leaving the list a usable strip and the
+/// column layout its two gaps of spacing.
+fn inspector_max(avail: f32, gap: f32) -> f32 {
+    (avail - 40.0 - gap * 2.0).max(INSPECTOR_MIN_H)
+}
+
 const HANDLE_H: f32 = 7.0;
 
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
@@ -4527,13 +4534,21 @@ impl App {
                 // or no samples gets the same height as one with both and
                 // nothing jumps when moving between rows.
                 let avail = ui.available_height();
-                let inspect_h = if selected.is_some() {
-                    self.inspector_h = self.inspector_h.clamp(INSPECTOR_MIN_H, (avail - 40.0).max(INSPECTOR_MIN_H));
-                    self.inspector_h
+                // The list, the drag handle and the inspector body are three
+                // widgets in a column, so two gaps of item spacing sit between
+                // them. Spending the whole height as though they did not made
+                // the content taller than the panel by those two gaps, and
+                // what went over the edge was the toolbar at the top: the row
+                // with the decode switch and the frame count was drawn half
+                // outside the panel's clip rect.
+                let gap = ui.spacing().item_spacing.y;
+                let (inspect_h, gaps) = if selected.is_some() {
+                    self.inspector_h = self.inspector_h.clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
+                    (self.inspector_h, gap * 2.0)
                 } else {
-                    0.0
+                    (0.0, 0.0)
                 };
-                let list_h = (avail - inspect_h).max(24.0);
+                let list_h = (avail - inspect_h - gaps).max(24.0);
                 // Two nested scroll areas so the headings stay above the rows
                 // vertically but travel with them sideways, which is the only
                 // arrangement where a narrow window can still reach the last
@@ -4572,8 +4587,9 @@ impl App {
         // the inspector taller and the list shorter; the window is unmoved.
         let (hrect, hresp) = ui.allocate_exact_size(Vec2::new(w, HANDLE_H), Sense::drag());
         if hresp.dragged() {
-            self.inspector_h =
-                (self.inspector_h - hresp.drag_delta().y).clamp(INSPECTOR_MIN_H, (avail - 40.0).max(INSPECTOR_MIN_H));
+            let gap = ui.spacing().item_spacing.y;
+            self.inspector_h = (self.inspector_h - hresp.drag_delta().y)
+                .clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
         }
         if hresp.hovered() || hresp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
