@@ -82,6 +82,10 @@ pub struct App {
     next_packet: u64,
     /// Packet whose bytes are shown in the dump.
     selected: Option<u64>,
+    /// Height of the packet inspector inside the log window, dragged by
+    /// its top edge. Held here rather than in a panel's memory so it is
+    /// exactly this for every packet, whatever the packet holds.
+    inspector_h: f32,
     /// Show bursts no protocol claimed.
     show_unknown: bool,
     /// Decoding every channel is on by default and can be turned off; it is
@@ -266,6 +270,9 @@ const DECODE_LOG_MAX: usize = 500;
 const IQ_KEEP: usize = 64;
 /// Height of the burst view in the packet detail, in pixels.
 const BURST_VIEW_H: f32 = 120.0;
+/// The least the inspector may be dragged to, and the drag handle's height.
+const INSPECTOR_MIN_H: f32 = 64.0;
+const HANDLE_H: f32 = 7.0;
 
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
 /// screen, which is about what a rooftop antenna hears.
@@ -397,6 +404,7 @@ impl Default for App {
             decodes: Vec::new(),
             next_packet: 1,
             selected: None,
+            inspector_h: 116.0 + BURST_VIEW_H + 24.0,
             show_unknown: true,
             decode_on: true,
             print_log: false,
@@ -1343,9 +1351,6 @@ impl eframe::App for App {
         }
         {
             let _s = tracing::info_span!("log").entered();
-            // The inspector first, so as a bottom panel it takes the lowest
-            // slot and the list sits above it.
-            self.packet_inspector(ui);
             self.decode_log(ui);
         }
         {
@@ -4491,35 +4496,6 @@ impl App {
     }
 
     /// The packet log: everything decoded anywhere in the span.
-    /// The packet inspector: the selected burst and its bytes.
-    ///
-    /// Its own bottom panel below the list rather than a slice of the list,
-    /// so opening it grows the whole log region into the waterfall and
-    /// closing it gives that back, and the list keeps its height either way.
-    /// Declared before the list so it sits at the very bottom.
-    fn packet_inspector(&mut self, ui: &mut egui::Ui) {
-        if !self.log_open {
-            return;
-        }
-        let selected = self
-            .selected
-            .and_then(|id| self.decodes.iter().find(|l| l.id == id))
-            .map(|l| l.rec.clone());
-        let Some(rec) = selected else { return };
-        Panel::bottom("packet_detail")
-            .default_size(116.0 + BURST_VIEW_H + 24.0)
-            .resizable(true)
-            .min_size(64.0)
-            .max_size(720.0)
-            .show_separator_line(true)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
-            .show(ui, |ui| packet_detail(ui, &rec));
-    }
-
     fn decode_log(&mut self, ui: &mut egui::Ui) {
         if !self.log_open {
             return;
@@ -4540,7 +4516,24 @@ impl App {
             .show(ui, |ui| {
                 self.log_header(ui);
                 ui.add_space(4.0);
-                let list_h = ui.available_height().max(24.0);
+                let selected = self
+                    .selected
+                    .and_then(|id| self.decodes.iter().find(|l| l.id == id))
+                    .map(|l| l.rec.clone());
+                // The inspector lives inside this window and takes its room
+                // from the list, so the window itself stays the size it was
+                // dragged to. Its height is one number held by the app, not
+                // read from what the packet holds, so a packet with no bytes
+                // or no samples gets the same height as one with both and
+                // nothing jumps when moving between rows.
+                let avail = ui.available_height();
+                let inspect_h = if selected.is_some() {
+                    self.inspector_h = self.inspector_h.clamp(INSPECTOR_MIN_H, (avail - 40.0).max(INSPECTOR_MIN_H));
+                    self.inspector_h
+                } else {
+                    0.0
+                };
+                let list_h = (avail - inspect_h).max(24.0);
                 // Two nested scroll areas so the headings stay above the rows
                 // vertically but travel with them sideways, which is the only
                 // arrangement where a narrow window can still reach the last
@@ -4565,7 +4558,37 @@ impl App {
                         .id_salt("packet_rows")
                         .show(ui, |ui| self.log_rows(ui, w));
                 });
+                if let Some(rec) = &selected {
+                    self.inspector(ui, rec, inspect_h, avail);
+                }
             });
+    }
+
+    /// The packet inspector under the list: a drag handle, then the burst
+    /// and the bytes in exactly `height` pixels.
+    fn inspector(&mut self, ui: &mut egui::Ui, rec: &DecodeRecord, height: f32, avail: f32) {
+        let w = ui.available_width();
+        // The handle: a thin strip that drags the divider. Dragging up makes
+        // the inspector taller and the list shorter; the window is unmoved.
+        let (hrect, hresp) = ui.allocate_exact_size(Vec2::new(w, HANDLE_H), Sense::drag());
+        if hresp.dragged() {
+            self.inspector_h =
+                (self.inspector_h - hresp.drag_delta().y).clamp(INSPECTOR_MIN_H, (avail - 40.0).max(INSPECTOR_MIN_H));
+        }
+        if hresp.hovered() || hresp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        let y = hrect.center().y;
+        ui.painter().line_segment(
+            [Pos2::new(hrect.left(), y), Pos2::new(hrect.right(), y)],
+            Stroke::new(1.0, if hresp.hovered() || hresp.dragged() { theme::READOUT } else { theme::ETCH }),
+        );
+        // The body, in the rest of the height regardless of what it holds.
+        let body_h = (height - HANDLE_H).max(8.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, body_h), Sense::hover());
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+        child.set_clip_rect(rect);
+        packet_detail(&mut child, rec);
     }
 
     fn log_header(&mut self, ui: &mut egui::Ui) {
@@ -4986,15 +5009,21 @@ fn row_color(rec: &DecodeRecord) -> Color32 {
 /// all there is. Both are also what a view widget would consume: a map reads
 /// the fields, an image pane reads the bytes and the media type.
 fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
-    if let Some(iq) = &rec.iq {
-        // The burst view takes up to half the room the panel was dragged to,
-        // never less than its natural height, so dragging the divider up
-        // grows the RF view and the bytes together rather than only the
-        // scrollback under them.
-        let h = (ui.available_height() * 0.5).clamp(BURST_VIEW_H, 320.0);
-        burst_view(ui, iq, h);
-        ui.add_space(4.0);
+    // The burst view takes up to half the room the inspector was dragged
+    // to, never less than its natural height, so dragging the divider up
+    // grows the RF view and the bytes together rather than only the
+    // scrollback under them. A packet without samples gets the same area,
+    // blank, so the bytes sit where they did for the last packet.
+    let h = (ui.available_height() * 0.5).clamp(BURST_VIEW_H, 320.0);
+    match &rec.iq {
+        Some(iq) => burst_view(ui, iq, h),
+        None => {
+            ui.label(legend("burst  no samples kept for this packet"));
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), h), Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, theme::WELL);
+        }
     }
+    ui.add_space(4.0);
     if !rec.fields.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
