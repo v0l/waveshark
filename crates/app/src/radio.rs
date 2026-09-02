@@ -238,6 +238,28 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// What a transmission's audio file is called: when it was heard, who was
+/// talking and to whom, so a directory of them reads as a log.
+fn call_file_name(r: &DecodeRecord) -> String {
+    let field = |k: &str| {
+        r.fields
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let clean = |s: String| {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+            .collect::<String>()
+    };
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}_{}_{}_{}.wav", r.model, clean(field("from")), clean(field("to")))
+}
+
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -797,6 +819,8 @@ pub struct Status {
     /// "nothing was decoded" from "it was decoded and you still cannot hear
     /// it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    /// Voice transmissions written to disk since the receiver started.
+    pub calls_written: AtomicU64,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -863,6 +887,7 @@ impl Default for Status {
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            calls_written: AtomicU64::new(0),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
@@ -1223,6 +1248,7 @@ fn run(
     let mut last_chain = std::time::Instant::now();
     // Where voice from every front end meets what the operator asked to hear.
     let mut calls = crate::callbus::CallBus::new(48_000.0);
+    let mut call_dir: Option<std::path::PathBuf> = None;
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
 
@@ -1428,6 +1454,10 @@ fn run(
                 }
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
+                    // Voice is written beside the log rather than into it: a
+                    // record of what was on the air stays small, and what it
+                    // sounded like is a file per transmission.
+                    call_dir = dir.clone().map(|d| d.join("calls"));
                     rx.set_packet_log(dir);
                     rebuild = true;
                 }
@@ -1632,6 +1662,22 @@ fn run(
 
         records.clear();
         records.extend(rx.decodes(at));
+        // Speech goes to its own file as soon as the transmission closes.
+        if let Some(dir) = &call_dir {
+            for r in records.iter().filter(|r| r.audio.is_some()) {
+                let Some(a) = &r.audio else { continue };
+                let name = call_file_name(r);
+                let path = dir.join(name);
+                match crate::callbus::write_wav(&path, a) {
+                    Ok(()) => status.calls_written.fetch_add(1, Ordering::Relaxed),
+                    Err(e) => {
+                        *status.error.lock() =
+                            Some(format!("cannot write {}: {e}", path.display()));
+                        0
+                    }
+                };
+            }
+        }
         dedupe_neighbours(&mut records);
         records.retain(|r| !r.model.is_empty() && dedupe.accept(r, at));
         if let Some(r) = rx.recorder_mut() {

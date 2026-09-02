@@ -2369,9 +2369,13 @@ fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
     // say it again. The bytes below are the vocoder's, and nobody reads those.
     let mut play = false;
     if let Some(a) = &rec.audio {
+        let (peak, rms) = crate::callbus::levels_db(a);
         ui.horizontal(|ui| {
             play = ui.button("PLAY").clicked();
-            ui.label(legend(&format!("{:.1} s of speech", a.seconds())));
+            ui.label(legend(&format!(
+                "{:.1} s of speech   peak {peak:.0} dBFS   rms {rms:.0} dBFS",
+                a.seconds()
+            )));
         });
         ui.add_space(4.0);
     }

@@ -22,6 +22,7 @@
 //! same thing for both.
 
 use common::Speech;
+use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -287,6 +288,55 @@ impl CallBus {
     }
 }
 
+/// Write speech to a 16 bit WAV, which is what everything else can open.
+///
+/// Voice is kept out of the packet log deliberately: an hour of a busy
+/// repeater is gigabytes and the log is a record of what was on the air, not
+/// of what it sounded like. A transmission worth keeping is worth a file of
+/// its own, and a file is what a spectrogram, a player or another decoder can
+/// be pointed at.
+pub fn write_wav(path: &Path, speech: &Speech) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let rate = speech.rate.max(1.0) as u32;
+    let n = speech.pcm.len() as u32;
+    let data_len = n * 2;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVEfmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&1u16.to_le_bytes())?; // mono
+    f.write_all(&rate.to_le_bytes())?;
+    f.write_all(&(rate * 2).to_le_bytes())?; // bytes per second
+    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in &speech.pcm {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        f.write_all(&v.to_le_bytes())?;
+    }
+    f.flush()
+}
+
+/// Peak and RMS of a transmission, in dBFS.
+///
+/// Shown beside the replay button, because "I can hear nothing" has two
+/// causes that look identical from the speaker: nothing was decoded, or it
+/// was decoded quietly and something later in the path lost it.
+pub fn levels_db(speech: &Speech) -> (f32, f32) {
+    let peak = speech.pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+    let rms = (speech.pcm.iter().map(|v| v * v).sum::<f32>()
+        / speech.pcm.len().max(1) as f32)
+        .sqrt();
+    let db = |v: f32| if v > 0.0 { 20.0 * v.log10() } else { -120.0 };
+    (db(peak), db(rms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +446,24 @@ mod tests {
         assert!(b.replaying(), "the rest is still queued");
         b.stop_replay();
         assert!(!b.replaying());
+    }
+
+    #[test]
+    fn a_transmission_writes_a_wav_that_says_what_it_holds() {
+        let dir = std::env::temp_dir().join(format!("waveshark-call-{}", std::process::id()));
+        let path = dir.join("call.wav");
+        let speech = Speech { pcm: vec![0.5, -0.5, 0.25, 0.0], rate: 8_000.0 };
+        write_wav(&path, &speech).expect("wav");
+        let bytes = std::fs::read(&path).expect("read back");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        // 44 byte header, then one sixteen bit sample per value.
+        assert_eq!(bytes.len(), 44 + speech.pcm.len() * 2);
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 8_000);
+        let (peak, rms) = levels_db(&speech);
+        assert!((peak + 6.02).abs() < 0.1, "peak {peak}");
+        assert!(rms < peak, "rms {rms} is not below the peak");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
