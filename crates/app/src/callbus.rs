@@ -26,6 +26,15 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Level the makeup gain aims a transmission at.
+const TARGET_PEAK: f32 = 0.5;
+/// Most it will lift one. Thirty decibels covers a handheld with its
+/// microphone gain low; beyond that it is amplifying the vocoder's own noise
+/// between words.
+const MAX_MAKEUP: f32 = 32.0;
+/// How quickly the tracked peak falls back when a transmission goes quiet.
+const RELEASE_S: f32 = 2.0;
+
 /// What a subscription matches on.
 ///
 /// Deliberately data rather than a closure: the set is edited in the
@@ -129,6 +138,17 @@ pub struct CallBus {
     scratch: Vec<f32>,
     /// A transmission being replayed, already at `out_rate`.
     replay: std::collections::VecDeque<f32>,
+    /// Makeup gain, and the peak it is tracking.
+    ///
+    /// A vocoder's output level follows whatever the transmitting radio's
+    /// microphone gain was, and on a handheld that is often thirty decibels
+    /// below full scale: measured on a real M17 transmission here, the speech
+    /// peaked at -37 dBFS and averaged -57, which is inaudible once the
+    /// channel and master levels have had their share of it. This brings a
+    /// transmission up to a usable level the way a receiver's AGC does,
+    /// slowly and per source rather than per syllable.
+    makeup: f32,
+    tracked_peak: f32,
     /// What was last heard through the bus, for the interface to show.
     last: Option<String>,
 }
@@ -145,6 +165,8 @@ impl CallBus {
             mix: Vec::new(),
             scratch: Vec::new(),
             replay: std::collections::VecDeque::new(),
+            makeup: 1.0,
+            tracked_peak: 0.0,
             last: None,
         }
     }
@@ -214,6 +236,24 @@ impl CallBus {
             .or_insert_with(|| audio::Resampler::new(v.rate, self.out_rate, 4));
         self.scratch.clear();
         rs.process(v.pcm, &mut self.scratch);
+
+        // Track the loudest thing heard lately and lift it towards the
+        // target. Attack is immediate so the first syllable is not lost;
+        // release runs on a time constant so a gap between words does not
+        // wind the gain up on the silence.
+        let block_peak = self.scratch.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        if block_peak > self.tracked_peak {
+            self.tracked_peak = block_peak;
+        } else {
+            let secs = self.scratch.len() as f32 / self.out_rate as f32;
+            self.tracked_peak *= (-secs / RELEASE_S).exp();
+        }
+        self.makeup = if self.tracked_peak > 1e-5 {
+            (TARGET_PEAK / self.tracked_peak).clamp(1.0, MAX_MAKEUP)
+        } else {
+            1.0
+        };
+        let gain = gain * self.makeup;
         if self.mix.len() < self.scratch.len() {
             self.mix.resize(self.scratch.len(), 0.0);
         }
@@ -464,6 +504,23 @@ mod tests {
         assert!((peak + 6.02).abs() < 0.1, "peak {peak}");
         assert!(rms < peak, "rms {rms} is not below the peak");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_quiet_transmission_is_brought_up_to_a_usable_level() {
+        // The level a vocoder produces is whoever transmitted's microphone
+        // gain, and on the real M17 traffic measured here that was -37 dBFS
+        // peak. Passing that on as it is means an operator hears nothing.
+        let mut b = bus(&[Rule::Everything]);
+        let quiet = vec![0.01f32; 1600];
+        for _ in 0..4 {
+            assert!(b.push(voice("ALL", "M0ABC", &quiet)));
+            b.clear();
+        }
+        b.push(voice("ALL", "M0ABC", &quiet));
+        let peak = b.take(0).iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        assert!(peak > 0.1, "a quiet call came through at {peak:.3}");
+        assert!(peak <= 1.0, "and it must not be lifted past full scale: {peak:.3}");
     }
 
     #[test]

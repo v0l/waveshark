@@ -712,6 +712,11 @@ struct Args {
     #[arg(long)]
     no_dc: bool,
 
+    /// Read the M17 streams out of a packet log and report what their
+    /// payloads decode to, for tracing a call that arrived silent
+    #[arg(long, value_name = "LOG")]
+    m17_dump: Option<PathBuf>,
+
     /// Time a retune
     #[arg(long)]
     bench_tune: bool,
@@ -748,6 +753,72 @@ impl From<Mode> for radio::Demod {
     }
 }
 
+/// What a logged M17 transmission holds, and what the vocoder makes of it.
+///
+/// The log keeps every stream frame's payload, so a call that sounded wrong
+/// can be taken apart afterwards: whether the frames are there, whether their
+/// payloads are anything but zero, and what level the speech comes out at.
+fn m17_dump(path: &std::path::Path) {
+    use decode::m17::Event;
+    let packets = match packetlog::read(path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            return;
+        }
+    };
+    let mut runs: Vec<Vec<(u16, [u8; 16])>> = Vec::new();
+    let mut setups = 0usize;
+    for p in &packets {
+        let common::PacketBody::Frame(b) = &p.body else { continue };
+        match Event::parse(b) {
+            Some(Event::LinkSetup { lsf, .. }) => {
+                setups += 1;
+                println!("setup: {} to {}", lsf.source(), lsf.destination());
+                runs.push(Vec::new());
+            }
+            Some(Event::StreamFrame { number, payload, .. }) => {
+                if runs.is_empty() {
+                    runs.push(Vec::new());
+                }
+                runs.last_mut().unwrap().push((number, payload));
+            }
+            _ => {}
+        }
+    }
+    println!("{} packets, {setups} link setups, {} streams", packets.len(), runs.len());
+    for (i, run) in runs.iter().enumerate().filter(|(_, r)| !r.is_empty()) {
+        let zeros = run.iter().filter(|(_, p)| p.iter().all(|b| *b == 0)).count();
+        let bytes: Vec<u8> = run.iter().flat_map(|(_, p)| p.iter().copied()).collect();
+        let pcm = nodes::m17_nodes::decode_stream_voice(&bytes);
+        let peak = pcm.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+        let db = |v: f32| 20.0 * v.max(1e-9).log10();
+        println!(
+            "stream {i}: {} frames, numbers {:?}..{:?}, {zeros} payloads all zero",
+            run.len(),
+            run.first().map(|(n, _)| *n),
+            run.last().map(|(n, _)| *n),
+        );
+        for (n, p) in run.iter().take(3) {
+            println!("  frame {n:>3}: {}", p.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        }
+        println!(
+            "  {} samples, peak {:.1} dBFS, rms {:.1} dBFS",
+            pcm.len(),
+            db(peak),
+            db(rms)
+        );
+        // The payloads as they were on the air, for taking apart with
+        // anything else that speaks Codec 2.
+        let out = path.with_extension(format!("stream{i}.c2"));
+        match std::fs::write(&out, &bytes) {
+            Ok(()) => println!("  payloads written to {}", out.display()),
+            Err(e) => eprintln!("  cannot write {}: {e}", out.display()),
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let args = Args::parse();
 
@@ -760,6 +831,10 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    if let Some(log) = &args.m17_dump {
+        m17_dump(log);
+        return Ok(());
+    }
     if args.bench_pan {
         bench_pan();
         return Ok(());

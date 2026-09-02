@@ -298,6 +298,22 @@ impl Simple for M17Node {
     }
 }
 
+/// Decode a run of stream payloads into speech.
+///
+/// The payloads are what the log holds, sixteen bytes a frame, so this is how
+/// a transmission is heard again from a recording rather than from the
+/// receiver that decoded it live.
+pub fn decode_stream_voice(payloads: &[u8]) -> Vec<f32> {
+    let mut c2 = Codec2::new(Codec2Mode::MODE_3200);
+    let mut pcm = [0i16; 160];
+    let mut out = Vec::with_capacity(payloads.len() / C2_FRAME_BYTES * 160);
+    for half in payloads.chunks_exact(C2_FRAME_BYTES) {
+        c2.decode(&mut pcm, half);
+        out.extend(pcm.iter().map(|s| *s as f32 / 32768.0));
+    }
+    out
+}
+
 /// Payload bytes as hex, so a row carries what was on the air in a form that
 /// can be pasted into another decoder.
 fn hex(bytes: &[u8]) -> String {
@@ -351,6 +367,10 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         // interface folds them into the transmission they belong to.
         Event::StreamFrame { number, payload, .. } => {
             fields.push(("frame".into(), Value::Int(i64::from(*number))));
+            // 40 ms, the one duration in M17 that needs no clock, so anything
+            // counting airtime can add these up without waiting for the
+            // transmission to end.
+            fields.push(("seconds".into(), Value::Float(0.04)));
             fields.push(("payload".into(), Value::Text(hex(payload))));
             match lsf.map(|l| l.data_type()) {
                 Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
@@ -511,6 +531,59 @@ mod tests {
         assert_eq!(rows[1].protocol, "M17-Voice");
         assert_eq!(get(&rows[1], "frames"), Some(common::Value::Int(25)));
         assert_eq!(get(&rows[1], "seconds"), Some(common::Value::Float(1.0)));
+    }
+
+    /// A frame produced by an independent implementation, decoded by ours.
+    ///
+    /// Every other test here checks this code against itself: our encoder
+    /// makes the symbols our decoder reads, and a puncture pattern or a bit
+    /// order that is wrong in both is invisible. These symbols came from
+    /// m17core 0.1.0, a separate M17 implementation, encoding a stream frame
+    /// number 7 whose payload is the bytes below. Agreement means the frame
+    /// layer matches somebody else's reading of the specification, which is
+    /// what makes the vocoder's output trustworthy: a payload one bit out of
+    /// place decodes to speech-shaped noise rather than to nothing.
+    #[test]
+    fn a_frame_from_another_implementation_decodes_to_its_payload() {
+        const REFERENCE: [f32; 192] = [
+    -3.0, -3.0, -3.0, -3.0, 3.0, 3.0, -3.0, 3.0, 1.0, 3.0, 3.0, -3.0, -1.0, -3.0, -1.0, 1.0,
+    1.0, 3.0, 3.0, 3.0, 1.0, 3.0, 3.0, -3.0, 1.0, -3.0, 1.0, -3.0, 3.0, 3.0, -3.0, 3.0,
+    1.0, -1.0, -1.0, 1.0, -3.0, 3.0, -1.0, 3.0, 3.0, 1.0, -3.0, -3.0, 1.0, -3.0, -1.0, 3.0,
+    3.0, -3.0, 1.0, -3.0, -3.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -3.0, 3.0, -3.0, -3.0,
+    -1.0, 3.0, 3.0, -3.0, 1.0, 3.0, 1.0, -1.0, -3.0, 1.0, 3.0, -3.0, -1.0, 3.0, 3.0, 1.0,
+    1.0, -3.0, -1.0, 3.0, -3.0, -3.0, -3.0, -3.0, 1.0, -1.0, -3.0, 1.0, 1.0, -1.0, 1.0, 1.0,
+    3.0, -1.0, 1.0, -1.0, -3.0, 3.0, 3.0, 1.0, -1.0, 3.0, -3.0, 3.0, -3.0, -3.0, -3.0, 3.0,
+    -3.0, -1.0, 3.0, -1.0, 1.0, 1.0, 1.0, 3.0, 3.0, 1.0, 3.0, -3.0, -3.0, -1.0, 1.0, 1.0,
+    -3.0, 1.0, 3.0, -3.0, -3.0, 1.0, 1.0, 3.0, 3.0, -1.0, -3.0, -1.0, -1.0, 3.0, 1.0, -1.0,
+    -3.0, -1.0, -1.0, 3.0, 3.0, 1.0, -3.0, -1.0, -1.0, -1.0, -3.0, 3.0, -3.0, -3.0, 3.0, -3.0,
+    3.0, 1.0, -1.0, -3.0, -1.0, 1.0, 3.0, -3.0, -1.0, -3.0, -1.0, 3.0, -1.0, -1.0, -3.0, 1.0,
+    -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -3.0, -3.0, 3.0, 1.0, 1.0, -1.0, 1.0,
+        ];
+        const PAYLOAD: [u8; 16] = [
+            0x03, 0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a, 0x8b, 0x9c, 0xad, 0xbe, 0xcf, 0xe0,
+            0xf1, 0x02,
+        ];
+
+        let (rate, center) = (2_400_000.0, DEFAULT_HZ);
+        let mut symbols = preamble_symbols();
+        // Repeated, because one frame in isolation is not a transmission: the
+        // demodulator needs a run of them to lock to.
+        for _ in 0..8 {
+            symbols.extend_from_slice(&REFERENCE);
+        }
+        let iq = modulate(&symbols, rate, 0.0);
+        let frames = run(&iq, rate, center);
+        let payloads: Vec<[u8; 16]> = frames
+            .iter()
+            .filter_map(|f| match m17::Event::parse(f) {
+                Some(m17::Event::StreamFrame { number: 7, payload, .. }) => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert!(!payloads.is_empty(), "nothing decoded from the reference frames");
+        for p in &payloads {
+            assert_eq!(*p, PAYLOAD, "payload differs from the reference");
+        }
     }
 
     /// The speech of a voice stream comes out of the vocoder and travels with

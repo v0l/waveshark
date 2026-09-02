@@ -1012,13 +1012,6 @@ impl App {
             // ago has scrolled out of the log long before it is forgotten
             // here.
             self.calls.update(&rec, rec.at);
-            // A voice stream is twenty-five frames a second, each of them a
-            // packet on the bus and a line in the log. In the list they are
-            // one row that grows, because a scrollback of forty millisecond
-            // fragments is not something anybody reads.
-            if fold_frame(self.decodes.last_mut().map(|l| &mut l.rec), &rec) {
-                continue;
-            }
             let id = self.next_packet;
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
@@ -1349,50 +1342,6 @@ fn apply_locale(s: &mut crate::session::Session) {
 
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
-}
-
-/// Fold a stream frame into the row above it, when that row is the same
-/// transmission.
-///
-/// Returns whether it was folded. The row keeps every payload end to end, so
-/// the list holds the same bytes the log does and a transmission can be read
-/// back from either.
-fn fold_frame(into: Option<&mut DecodeRecord>, rec: &DecodeRecord) -> bool {
-    let frame_no = |r: &DecodeRecord| {
-        r.fields.iter().find(|(k, _)| k == "frame").map(|(_, v)| v.clone())
-    };
-    if frame_no(rec).is_none() {
-        return false;
-    }
-    let Some(prev) = into else { return false };
-    if prev.model != rec.model || (prev.freq - rec.freq).abs() > 1.0 || frame_no(prev).is_none() {
-        return false;
-    }
-    prev.at = rec.at;
-    prev.bytes.extend_from_slice(&rec.bytes);
-    for (k, v) in &rec.fields {
-        match prev.fields.iter_mut().find(|(n, _)| n == k) {
-            Some((_, old)) if k == "frame" => *old = v.clone(),
-            Some(_) => {}
-            None => prev.fields.push((k.clone(), v.clone())),
-        }
-    }
-    let frames = prev
-        .fields
-        .iter_mut()
-        .find(|(k, _)| k == "frames")
-        .map(|(_, v)| {
-            let n = v.as_f64().unwrap_or(1.0) as i64 + 1;
-            *v = common::Value::Int(n);
-            n
-        })
-        .unwrap_or_else(|| {
-            prev.fields.push(("frames".into(), common::Value::Int(2)));
-            2
-        });
-    // 40 ms a frame, the one duration in M17 that needs no clock.
-    prev.detail = format!("{} frames  {:.1} s", frames, frames as f64 * 0.04);
-    true
 }
 
 /// The heading every modal wears, so one dialog does not announce itself in a
