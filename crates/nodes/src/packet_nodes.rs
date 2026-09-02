@@ -100,6 +100,16 @@ impl PacketDecodeNode {
     /// draws its own conclusions from it.
     fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
         let center = common::Hz(p.center_hz);
+        // M17 is the one protocol here that its own frequency cannot
+        // identify: it runs wherever an amateur puts it, which includes the
+        // 2 m channels APRS uses and the 70 cm ones near the pager bands. So
+        // it is recognised by shape instead, and tried first because that
+        // shape is the most specific claim any of these make: a tagged event
+        // of an exact length, carrying a link setup frame whose CRC checks.
+        if let Some(d) = crate::m17_nodes::m17_decoded(bytes, center) {
+            self.hits.push(d);
+            return;
+        }
         if dsp::ais::is_ais_band(p.center_hz as f64) {
             let Ok(frame) = decode::ais::parse(bytes) else { return };
             self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));

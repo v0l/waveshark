@@ -211,6 +211,7 @@ pub struct Receiver {
     ais: Option<NodeId>,
     aprs: Option<NodeId>,
     pocsag: Option<NodeId>,
+    m17: Option<NodeId>,
     banks: Vec<Bank>,
     /// The source detectors, one per band watched.
     sources: Vec<NodeId>,
@@ -320,6 +321,7 @@ impl Receiver {
             ais: None,
             aprs: None,
             pocsag: None,
+            m17: None,
             banks: Vec::new(),
             sources: Vec::new(),
             chans: Vec::new(),
@@ -395,6 +397,7 @@ impl Receiver {
         self.ais = None;
         self.aprs = None;
         self.pocsag = None;
+        self.m17 = None;
         self.banks.clear();
         self.sources.clear();
         self.center = plan.center;
@@ -487,6 +490,7 @@ impl Receiver {
             let (hz, width, what) = match at.front {
                 Front::Aprs(hz) => (hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ, "aprs"),
                 Front::Pocsag(hz) => (hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ, "pocsag"),
+                Front::M17(hz) => (hz, nodes::m17_nodes::CHANNEL_WIDTH_HZ, "m17"),
                 _ => continue,
             };
             if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - width {
@@ -498,6 +502,7 @@ impl Receiver {
         let ais = of_kind("ais").first().copied();
         let aprs = of_kind("aprs").first().copied();
         let pocsag = of_kind("pocsag").first().copied();
+        let m17 = of_kind("m17").first().copied();
         let banks: Vec<NodeId> = of_kind("bank");
         let mut sources: Vec<NodeId> = of_kind("source_detect");
         sources.extend(of_kind("auto"));
@@ -673,6 +678,7 @@ impl Receiver {
         self.ais = ais;
         self.aprs = aprs;
         self.pocsag = pocsag;
+        self.m17 = m17;
         self.tracks = tracks;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
@@ -835,6 +841,10 @@ impl Receiver {
 
     pub fn pocsag_on(&self) -> bool {
         self.pocsag.is_some()
+    }
+
+    pub fn m17_on(&self) -> bool {
+        self.m17.is_some()
     }
 
     /// Whether anything is tracking aircraft, from the local demodulator or
@@ -1181,6 +1191,10 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             let w = nodes::pocsag_nodes::CHANNEL_WIDTH_HZ;
             Some(((hz - w, hz + w), 192_000.0))
         }
+        Front::M17(hz) => {
+            let w = nodes::m17_nodes::CHANNEL_WIDTH_HZ;
+            Some(((hz - w, hz + w), 192_000.0))
+        }
         Front::Banks(widths) => {
             let band = at.band;
             // Two channels is the least a channelizer will build, so the band
@@ -1196,7 +1210,7 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 
 
 /// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 10] = [
+const BUS_TAILS: [&str; 11] = [
     "pulse_detect",
     "ask_detect",
     "fsk_detect",
@@ -1207,6 +1221,7 @@ const BUS_TAILS: [&str; 10] = [
     "ais",
     "aprs",
     "pocsag",
+    "m17",
 ];
 
 /// Stages that report something a position can be resolved from, so the
@@ -1355,7 +1370,17 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 let id = p.add_derived(derived::at("pocsag", *hz as u64, 0), "pocsag", s);
                 p.connect(src, (id, 0));
             }
-            Front::Aprs(_) | Front::Pocsag(_) => {}
+            Front::M17(hz) if fits(*hz, nodes::m17_nodes::CHANNEL_WIDTH_HZ) => {
+                let mut s = Settings::new();
+                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
+                s.insert(
+                    "label".into(),
+                    pipeline::ParamValue::Text(format!("{:.4} M17", hz / 1e6)),
+                );
+                let id = p.add_derived(derived::at("m17", *hz as u64, 0), "m17", s);
+                p.connect(src, (id, 0));
+            }
+            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) => {}
             Front::Auto => {
                 // One node over the band, whatever the band holds. The band
                 // is passed on so it ignores the margin the power-of-two
@@ -1732,6 +1757,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "ais" => "162 AIS".into(),
         "aprs" => "APRS".into(),
         "pocsag" => "Pager".into(),
+        "m17" => "M17".into(),
         "bank" => bank_label(settings.f64_or("channel_hz", 0.0)),
         "source_detect" => "Sources".into(),
         "source_decode" => "Source decoders".into(),
@@ -2012,6 +2038,11 @@ pub fn scan_marks(
                 width: nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
                 label: "POCSAG".into(),
             }),
+            Front::M17(hz) => out.push(ScanMark::Channel {
+                hz: *hz,
+                width: nodes::m17_nodes::CHANNEL_WIDTH_HZ,
+                label: "M17".into(),
+            }),
             Front::Auto => {
                 // No grid to draw: the band is watched whole and whatever
                 // is in it is found where it is.
@@ -2104,6 +2135,7 @@ fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
         Some("FSK") if d.protocol.starts_with("POCSAG") => {
             nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
         }
+        Some("4FSK") => nodes::m17_nodes::CHANNEL_WIDTH_HZ,
         Some("FSK") => FSK_CHANNEL_HZ,
         _ => OOK_CHANNEL_HZ,
     }

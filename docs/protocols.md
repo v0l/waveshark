@@ -19,18 +19,28 @@ that turns radio into symbols, and there are only a few of those.
 | discriminator, `fsk_detect` | mark/gap timings from two-level FSK | yes | no |
 | pilot PLL, `wfm` | stereo audio, RDS | yes | no |
 | discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
+| discriminator plus sync correlation, `m17` | M17 frames | yes | no |
 | coherent PSK/GMSK with timing recovery | soft symbols | no | no |
 | chirp correlator (dechirp then FFT) | LoRa symbols | no | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
 
-The four-level front end exists but nothing decodes through it yet, so every
-4-FSK protocol below still reads **demod**: what each now needs is a level to
-bit mapping, a sync word and a framer, not a demodulator. It differs from the
-other front ends in needing to be told the symbol rate, because a four-level
-eye cannot be opened without knowing where the symbol boundaries should be, and
-it emits numbered levels rather than mark/gap timings, because two like symbols
-in a row are one run and four levels give no rule for splitting it again.
+The four-level burst front end differs from the others in needing to be told
+the symbol rate, because a four-level eye cannot be opened without knowing
+where the symbol boundaries should be, and it emits numbered levels rather
+than mark/gap timings, because two like symbols in a row are one run and four
+levels give no rule for splitting it again. FLEX, ERMES and wireless M-Bus
+mode N still read **demod** below for want of a level to bit mapping, a sync
+word and a framer on top of it, rather than for want of a demodulator.
+
+M17 does not go through it, and the reason generalises to the rest of the
+digital voice modes. A burst detector gates on envelope, which suits a packet
+with silence either side; a voice transmission is a continuous carrier that
+can last minutes and whose clock has to hold for all of it. M17 puts a 16 bit
+sync burst in front of every 40 ms frame, so `dsp::m17` correlates for the
+next sync and reads the 184 symbols behind it, and never holds a clock for
+longer than one frame. DMR, P25 and NXDN are framed the same way and would be
+read the same way; what stops them is the vocoder, not the demodulator.
 
 Which front end runs is measured rather than configured. Each channel gates a
 burst once and `dsp::classify` measures it: envelope levels and how long each
@@ -250,7 +260,7 @@ codewords the message text can be read back out of.
 | DMR | 136-174, 400-470 MHz | 4-FSK 4800 baud | 12.5 kHz | demod | mod | Four-level slicer, then AMBE, which is patent encumbered |
 | P25 phase 1 | 700-900 MHz | C4FM | 12.5 kHz | demod | mod | As DMR, plus IMBE |
 | NXDN, dPMR | 400-470 MHz | 4-FSK | 6.25/12.5 kHz | demod | mod | |
-| M17 | amateur bands | 4-FSK 4800 baud | 12.5 kHz | demod | mod | Open codec and open spec, so the only one here with no patent or vocoder problem |
+| M17 | amateur bands | 4-FSK 4800 baud | 12.5 kHz | synthetic | mod | Link setup, stream and packet frames, in `dsp::m17` and `decode::m17`. Reports who called whom, the channel access number, whether the stream is encrypted or signed, and the position, text or repeater callsigns the metadata carries. Packet mode is reassembled and CRC checked, so an SMS packet reports its message. A receiver that missed the link setup rebuilds it from six stream frames through the link information channel, which is what that channel is for. Frames are verified against the M17 project's own C library symbol for symbol, in `the_frames_match_the_reference_implementation`, which is a stronger check than **synthetic** usually means: an encoder and a decoder written together agree with each other whatever they both misread, and this one agrees with somebody else's. The demodulator in front of them has met synthetic RF and not yet a radio, which is why the status is not **done**. Voice payloads are carried but not decoded: Codec 2 at 3200 bits per second is the last piece missing, and unlike AMBE or IMBE it is free to implement |
 | TETRA | 380-400, 410-430 MHz | pi/4-DQPSK 36 kbps | 25 kHz | demod | mod | Coherent differential PSK |
 | FM with CTCSS/DCS | any | FM plus subaudible tone | 12.5 kHz | table | mod | Trivial next to the rest: a Goertzel on the discriminator output |
 

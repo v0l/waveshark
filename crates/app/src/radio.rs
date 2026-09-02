@@ -751,6 +751,7 @@ pub struct Status {
     pub aprs_on: AtomicBool,
     /// Whether the pager path is the one running.
     pub pocsag_on: AtomicBool,
+    pub m17_on: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
     /// Whether the operator owns the shape of the graph.
@@ -849,6 +850,7 @@ impl Default for Status {
             ais_on: AtomicBool::new(false),
             aprs_on: AtomicBool::new(false),
             pocsag_on: AtomicBool::new(false),
+            m17_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
             manual: AtomicBool::new(false),
             patch: parking_lot::Mutex::new(None),
@@ -1531,6 +1533,7 @@ fn run(
         status.ais_on.store(rx.ais_on(), Ordering::Relaxed);
         status.aprs_on.store(rx.aprs_on(), Ordering::Relaxed);
         status.pocsag_on.store(rx.pocsag_on(), Ordering::Relaxed);
+        status.m17_on.store(rx.m17_on(), Ordering::Relaxed);
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);

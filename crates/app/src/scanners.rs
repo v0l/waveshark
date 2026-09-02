@@ -94,6 +94,10 @@ pub enum Front {
     /// turns out to be. Carries the channel, because paging allocations are
     /// national and there is no frequency worth compiling in.
     Pocsag(f64),
+    /// One M17 channel: narrowband FM into 4-FSK at 4800 baud. Carries the
+    /// channel for the same reason APRS does, and more so: M17 runs wherever
+    /// an amateur puts it.
+    M17(f64),
 }
 
 /// The amateur DAPNET channel, used until a block says otherwise. Amateur
@@ -105,6 +109,9 @@ pub const DEFAULT_POCSAG_HZ: f64 = 439_987_500.0;
 /// America is 144.390 and Japan 144.640.
 pub const DEFAULT_APRS_HZ: f64 = 144_800_000.0;
 
+/// The M17 calling frequency in Region 1, used until a block says otherwise.
+pub const DEFAULT_M17_HZ: f64 = 433_475_000.0;
+
 impl Front {
     /// The word this front end is written as in the file.
     pub fn key(&self) -> &'static str {
@@ -115,6 +122,7 @@ impl Front {
             Front::Ais => "ais",
             Front::Aprs(_) => "aprs",
             Front::Pocsag(_) => "pocsag",
+            Front::M17(_) => "m17",
         }
     }
 
@@ -127,17 +135,19 @@ impl Front {
             Front::Ais => "ais",
             Front::Aprs(_) => "aprs",
             Front::Pocsag(_) => "pager",
+            Front::M17(_) => "m17",
         }
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 6] {
+    pub fn all() -> [Front; 7] {
         [
             Front::Auto,
             Front::ModeS,
             Front::Ais,
             Front::Aprs(DEFAULT_APRS_HZ),
             Front::Pocsag(DEFAULT_POCSAG_HZ),
+            Front::M17(DEFAULT_M17_HZ),
             Front::Banks(DEFAULT_WIDTHS.to_vec()),
         ]
     }
@@ -150,6 +160,7 @@ impl Front {
             "ais" => Some(Front::Ais),
             "aprs" => Some(Front::Aprs(DEFAULT_APRS_HZ)),
             "pocsag" | "pager" => Some(Front::Pocsag(DEFAULT_POCSAG_HZ)),
+            "m17" => Some(Front::M17(DEFAULT_M17_HZ)),
             _ => None,
         }
     }
@@ -465,7 +476,7 @@ impl Scanner {
         }
         let Some(&c) = self.channels.first() else { return };
         match &mut self.front {
-            Front::Aprs(f) | Front::Pocsag(f) => *f = c,
+            Front::Aprs(f) | Front::Pocsag(f) | Front::M17(f) => *f = c,
             _ => {}
         }
     }
@@ -525,7 +536,7 @@ pub const HEADER: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | banks
+#   front     auto | modes | ais | aprs | pocsag | m17 | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
@@ -546,7 +557,7 @@ pub const DEFAULT_TEXT: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | banks
+#   front     auto | modes | ais | aprs | pocsag | m17 | banks
 #   channels  frequencies that must all be inside the span (optional)
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
@@ -592,6 +603,16 @@ range    = 439.9 - 440.1 MHz
 span     = 100 kHz
 front    = pocsag
 channels = 439.9875 MHz
+margin   = 12.5 kHz
+
+[M17]
+# The M17 calling frequency in Region 1. M17 is 4-FSK at 4800 baud with an
+# open codec, so a transmission reports who called whom, and a packet-mode
+# message reports its text.
+range    = 433.4 - 433.55 MHz
+span     = 100 kHz
+front    = m17
+channels = 433.475 MHz
 margin   = 12.5 kHz
 
 [ISM 433]
@@ -645,7 +666,10 @@ mod tests {
     fn the_shipped_defaults_parse() {
         let s = Scanners::default();
         let names: Vec<&str> = s.list.iter().map(|x| x.name.as_str()).collect();
-        assert_eq!(names, ["ADS-B", "AIS", "APRS", "POCSAG", "ISM 433", "ISM 868", "ISM 315"]);
+        assert_eq!(
+            names,
+            ["ADS-B", "AIS", "APRS", "POCSAG", "M17", "ISM 433", "ISM 868", "ISM 315"]
+        );
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
@@ -659,7 +683,14 @@ mod tests {
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
         assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
         assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::Pocsag(439_987_500.0)]);
-        assert_eq!(fronts(433_920_000.0, 2_400_000.0), [Front::Auto]);
+        // A 2.4 MS/s span on the ISM band reaches the M17 calling channel
+        // 445 kHz below it, so both run: the receiver is sampling it either
+        // way, and the dial is only where somebody is looking.
+        assert_eq!(
+            fronts(433_920_000.0, 2_400_000.0),
+            [Front::M17(433_475_000.0), Front::Auto]
+        );
+        assert_eq!(fronts(433_920_000.0, 250_000.0), [Front::Auto]);
         assert_eq!(fronts(868_300_000.0, 2_400_000.0), [Front::Auto]);
     }
 

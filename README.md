@@ -21,6 +21,7 @@ decoded or not.
 | Shipping | marine VHF | AIS positions and vessel identity on the same map |
 | APRS | 144.800, 144.390 US, 144.640 JP | packet stations and vehicle trackers, Mic-E included |
 | Pagers | wherever you point it | POCSAG at 512, 1200 and 2400 bit/s, message text in clear |
+| M17 | amateur VHF and UHF | who called whom, for how long, and packet-mode messages in full |
 | Voice | any band | WFM with stereo and RDS, NFM, AM, USB, LSB, CW, several channels at once |
 
 Receive only. Nothing here keys a radio. [`docs/protocols.md`](docs/protocols.md)

@@ -12,6 +12,7 @@ pub mod aprs_nodes;
 pub mod bank;
 pub mod decode_nodes;
 pub mod dsp_nodes;
+pub mod m17_nodes;
 pub mod modes_nodes;
 pub mod feed_nodes;
 pub mod packet_nodes;
@@ -30,6 +31,7 @@ pub use decode_nodes::{
 };
 pub use ais_nodes::AisNode;
 pub use aprs_nodes::AprsNode;
+pub use m17_nodes::M17Node;
 pub use pocsag_nodes::PocsagNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
@@ -120,6 +122,18 @@ pub fn registry() -> Registry {
         },
         |s: &Settings| {
             Ok(Box::new(AprsNode::new(s.f64_or("channel_hz", 144_800_000.0))) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "m17",
+            summary: "One M17 channel: narrowband FM, 4-FSK at 4800 baud, link setup and packets",
+            category: "decode",
+        },
+        |s: &Settings| {
+            Ok(Box::new(M17Node::new(s.f64_or("channel_hz", m17_nodes::DEFAULT_HZ)))
+                as Box<dyn Node>)
         },
     );
 

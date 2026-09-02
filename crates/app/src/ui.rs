@@ -4640,6 +4640,9 @@ impl App {
                 if r.status.pocsag_on.load(Ordering::Relaxed) {
                     running.push("pocsag".into());
                 }
+                if r.status.m17_on.load(Ordering::Relaxed) {
+                    running.push("m17".into());
+                }
                 if narrow > 0 || wide > 0 {
                     running.push(format!("{narrow} ook + {wide} fsk channels"));
                 }
