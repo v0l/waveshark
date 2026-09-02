@@ -5,6 +5,8 @@
 //! happens to produce them. The detector lives in `dsp`; the shape of what it
 //! emits belongs to everybody.
 
+use crate::C32;
+
 /// One mark/gap pair, in microseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pulse {
@@ -195,12 +197,32 @@ pub struct Packet {
     /// [`Package::modulation`].
     pub modulation: Option<&'static str>,
     pub body: PacketBody,
+    /// The burst itself, as complex samples at the rate it was read at,
+    /// when the front end kept them.
+    ///
+    /// Shared rather than copied, since the packages of one burst all refer
+    /// to the same samples, and carried in memory only: a log keeps
+    /// timings and measurements, a list keeps the samples of what it shows.
+    /// They are what an unknown device is worked out from, the way Universal
+    /// Radio Hacker shows a burst beside its bits.
+    pub iq: Option<std::sync::Arc<IqBurst>>,
     /// What the burst was measured to be, when something measured it before
     /// deciding how to read it. Travels with the timings because it is
     /// evidence about the same burst: a chirp's sweep rate or a keyed
     /// signal's tone separation is what identifies a device the tables do
     /// not know, and a burst no front end reads has nothing else to say.
     pub measure: Option<Measure>,
+}
+
+/// A burst's samples, as the front end that read it saw them: the lead-in,
+/// the burst and the silence that ended it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IqBurst {
+    /// Sample rate of `samples`.
+    pub rate: f64,
+    /// RF centre the samples are at baseband from.
+    pub center_hz: u64,
+    pub samples: Vec<C32>,
 }
 
 /// What a burst was measured to be, before any decoder read it.

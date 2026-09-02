@@ -410,6 +410,7 @@ impl pipeline::node::Node for PacketBusNode {
                             modulation: p.modulation,
                             body: common::PacketBody::Pulses(p.pulses.clone()),
                             measure: None,
+                            iq: None,
                         });
                     }
                 }
@@ -428,6 +429,7 @@ impl pipeline::node::Node for PacketBusNode {
                             modulation: None,
                             body: common::PacketBody::Frame(f.clone()),
                             measure: None,
+                            iq: None,
                         });
                     }
                 }

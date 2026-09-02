@@ -310,6 +310,7 @@ fn read_loop(
                 modulation: None,
                 body: PacketBody::Frame(f.bytes),
                 measure: None,
+                iq: None,
             };
             if tx.send(packet).is_err() {
                 return;

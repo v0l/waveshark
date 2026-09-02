@@ -431,6 +431,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             modulation: keying_from_code(r[1]),
             body: packet_body,
             measure,
+            iq: None,
         });
     }
     out
@@ -478,6 +479,7 @@ mod tests {
                 Pulse { mark: 500, gap: 9000 },
             ]),
             measure: None,
+            iq: None,
         }
     }
 
@@ -531,6 +533,7 @@ mod tests {
             modulation: None,
             body: PacketBody::Frame(bytes.to_vec()),
             measure: None,
+            iq: None,
         }
     }
 

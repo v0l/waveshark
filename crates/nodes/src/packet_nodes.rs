@@ -60,8 +60,11 @@ impl PacketDecodeNode {
         for (_, res) in self.protocols.diagnose(pkg) {
             if let Ok(report) = res {
                 matched = true;
-                self.hits
-                    .push(decoded_event(&report, pkg, center, modulation).with_bandwidth(p.bandwidth_hz as f64));
+                self.hits.push(
+                    decoded_event(&report, pkg, center, modulation)
+                        .with_bandwidth(p.bandwidth_hz as f64)
+                        .with_iq(p.iq.clone()),
+                );
                 if !self.report_all {
                     break;
                 }
@@ -78,7 +81,8 @@ impl PacketDecodeNode {
             };
             self.hits.push(
                 unmatched_event(pkg, center, label, p.measure.as_ref())
-                    .with_bandwidth(p.bandwidth_hz as f64),
+                    .with_bandwidth(p.bandwidth_hz as f64)
+                    .with_iq(p.iq.clone()),
             );
         }
     }
@@ -233,6 +237,7 @@ mod tests {
             modulation: None,
             body: PacketBody::Pulses(pulses),
             measure: None,
+            iq: None,
         }
     }
 
@@ -271,6 +276,7 @@ mod tests {
                 modulation: None,
                 body: PacketBody::Frame(bytes),
                 measure: None,
+                iq: None,
             }],
         );
         assert_eq!(hits.len(), 1);
@@ -316,6 +322,7 @@ mod tests {
                 modulation: None,
                 body: PacketBody::Frame(bytes),
                 measure: None,
+                iq: None,
             }],
         );
         assert_eq!(hits.len(), 2);
@@ -338,6 +345,7 @@ mod tests {
                 modulation: None,
                 body: PacketBody::Frame(vec![0xff; 5]),
                 measure: None,
+                iq: None,
             }],
         );
         assert!(hits.is_empty());

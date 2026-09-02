@@ -104,6 +104,9 @@ pub struct Decoded {
     /// says whether the front end is near clipping.
     pub rssi_dbfs: Option<f32>,
     pub snr_db: Option<f32>,
+    /// The burst's own samples, when the front end kept them. See
+    /// [`common::Packet::iq`].
+    pub iq: Option<std::sync::Arc<common::IqBurst>>,
 }
 
 impl Decoded {
@@ -123,7 +126,13 @@ impl Decoded {
             fields: Vec::new(),
             rssi_dbfs: None,
             snr_db: None,
+            iq: None,
         }
+    }
+
+    pub fn with_iq(mut self, iq: Option<std::sync::Arc<common::IqBurst>>) -> Self {
+        self.iq = iq;
+        self
     }
 
     pub fn with_fields(mut self, fields: Vec<(String, Value)>) -> Self {

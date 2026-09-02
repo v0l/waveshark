@@ -39,7 +39,11 @@ claims what it can render.
 ## Today
 
 - **Packet list**: every record, newest at the bottom, with a detail pane
-  showing fields and a hex dump of the selected packet.
+  showing the selected packet's burst as the front end saw it, its
+  envelope and instantaneous frequency against time, then its fields and a
+  hex dump. The burst view is what an unknown device is worked out from, the
+  way Universal Radio Hacker shows a burst beside its bits; the samples are
+  kept for the newest rows only.
 It is a view by this definition. It knows nothing about a protocol.
 
 ## Planned views

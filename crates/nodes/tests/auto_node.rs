@@ -36,6 +36,7 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
                     modulation: None,
                     body: PacketBody::Frame(f.clone()),
                     measure: None,
+                    iq: None,
                 }))
             }
             _ => {}
@@ -74,6 +75,12 @@ fn four_sensors_placed_anywhere_all_decode() {
         }
     }
     let pk = packets(NodeSpec::new("auto"), rate, buf.center, &wide);
+    // Every burst carries its own samples, the whole burst at the rate it
+    // was read at: a 184 ms transmission is at least that long.
+    for p in &pk {
+        let iq = p.iq.as_ref().expect("a burst without its samples");
+        assert!(iq.samples.len() as f64 / iq.rate > 0.18, "{} samples at {}", iq.samples.len(), iq.rate);
+    }
     let mut got = decodes(&pk, "WHx080");
     got.sort();
     got.dedup_by(|a, b| a.0.abs_diff(b.0) < 4_000);

@@ -96,6 +96,9 @@ pub struct RoutedBurst {
     /// Four-level symbols, for the bursts that went to [`C4fmDetector`].
     pub symbols: Vec<SymbolBurst>,
     pub start_sample: u64,
+    /// The burst as it was read: the margin before it, the burst, and the
+    /// margin after, at the router's rate.
+    pub iq: Vec<C32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -295,9 +298,8 @@ impl BurstRouter {
             packages,
             symbols,
             start_sample: self.burst_start,
+            iq: burst,
         });
-        self.burst = burst;
-        self.burst.clear();
     }
 
     fn run_ook(&mut self, burst: &[C32], out: &mut Vec<Package>) {

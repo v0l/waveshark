@@ -88,8 +88,14 @@ impl Member {
                 .node(id)
                 .and_then(|n| n.as_any())
                 .and_then(|a| a.downcast_ref::<crate::BurstRouteNode>());
+            let rate = spec.map(|s| s.rate).unwrap_or(0.0);
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
                 let m = crate::decode_nodes::measure_of(b, center_hz as f64);
+                let iq = Some(std::sync::Arc::new(common::IqBurst {
+                    rate,
+                    center_hz,
+                    samples: b.iq.clone(),
+                }));
                 if b.packages.is_empty() {
                     // A burst nothing reads is worth a row when the
                     // classifier named it as something no front end here
@@ -110,6 +116,7 @@ impl Member {
                         modulation: None,
                         body: PacketBody::Pulses(Vec::new()),
                         measure: Some(m),
+                        iq: iq.clone(),
                     });
                     continue;
                 }
@@ -123,6 +130,7 @@ impl Member {
                         modulation: p.modulation,
                         body: PacketBody::Pulses(p.pulses.clone()),
                         measure: Some(m.clone()),
+                        iq: iq.clone(),
                     });
                 }
             }
@@ -145,6 +153,7 @@ impl Member {
                     modulation: p.modulation,
                     body: PacketBody::Pulses(p.pulses.clone()),
                     measure: None,
+                    iq: None,
                 });
             }
         }
@@ -161,6 +170,7 @@ impl Member {
                     modulation: None,
                     body: PacketBody::Frame(f.clone()),
                     measure: None,
+                    iq: None,
                 });
             }
         }

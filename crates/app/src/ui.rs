@@ -262,6 +262,8 @@ impl View {
 /// Packets kept in the log. About a screenful of scrollback at any plausible
 /// reading speed, and bounded memory on a band that never goes quiet.
 const DECODE_LOG_MAX: usize = 500;
+/// How many of the newest rows keep their burst's samples for the view.
+const IQ_KEEP: usize = 64;
 
 /// Where the flight map opens. Zoom 8 is roughly a 150 nm view on a laptop
 /// screen, which is about what a rooftop antenna hears.
@@ -854,6 +856,14 @@ impl App {
         }
         // A busy band produces packets faster than anyone reads them, and an
         // unbounded log is a slow memory leak with a scrollbar.
+        // The samples of a burst are kept for the newest rows only. A row
+        // is a few hundred bytes; its burst is a few hundred kilobytes, and
+        // five hundred of those is the receiver's memory spent on a scroll
+        // nobody reads that far back.
+        let keep_from = self.decodes.len().saturating_sub(IQ_KEEP);
+        for l in &mut self.decodes[..keep_from] {
+            l.rec.iq = None;
+        }
         if self.decodes.len() > DECODE_LOG_MAX {
             let drop = self.decodes.len() - DECODE_LOG_MAX;
             self.decodes.drain(..drop);
@@ -4940,6 +4950,10 @@ fn row_color(rec: &DecodeRecord) -> Color32 {
 /// all there is. Both are also what a view widget would consume: a map reads
 /// the fields, an image pane reads the bytes and the media type.
 fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
+    if let Some(iq) = &rec.iq {
+        burst_view(ui, iq);
+        ui.add_space(4.0);
+    }
     if !rec.fields.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -4954,6 +4968,133 @@ fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) {
         ui.add_space(4.0);
     }
     hex_dump(ui, &rec.bytes);
+}
+
+/// One column of the burst view: the loudest sample in the column, and the
+/// mean instantaneous frequency across it, in hertz.
+///
+/// A burst is thousands of samples and the view a few hundred pixels wide,
+/// so each column stands for a run of samples. The envelope keeps the peak
+/// of the run, since a mark a few samples long has to stay visible, and the
+/// frequency is the mean phase step across it, which for a keyed carrier
+/// sits at its offset during a mark and wanders during a gap.
+fn burst_columns(samples: &[common::C32], rate: f64, cols: usize) -> Vec<(f32, f32)> {
+    let cols = cols.max(1);
+    let n = samples.len();
+    (0..cols)
+        .map(|c| {
+            let a = c * n / cols;
+            let b = ((c + 1) * n / cols).max(a + 1).min(n);
+            let env = samples[a..b].iter().map(|x| x.norm()).fold(0.0f32, f32::max);
+            let mut acc = common::C32::new(0.0, 0.0);
+            for i in a.max(1)..b {
+                acc += samples[i] * samples[i - 1].conj();
+            }
+            let hz = if acc.norm_sqr() > 0.0 {
+                acc.arg() / std::f32::consts::TAU * rate as f32
+            } else {
+                0.0
+            };
+            (env, hz)
+        })
+        .collect()
+}
+
+/// The burst as the front end saw it: its envelope filled from the floor,
+/// and its instantaneous frequency drawn over it, against time. What
+/// Universal Radio Hacker shows beside a burst's bits, and the view an
+/// unknown device is worked out from: a keyed carrier's marks and gaps, a
+/// two-tone signal's frequency stepping between its tones, a chirp's
+/// frequency ramping across the width.
+fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst) {
+    let secs = iq.samples.len() as f64 / iq.rate.max(1.0);
+    ui.label(legend(&format!(
+        "burst  {:.1} ms  {} samples at {:.1} kS/s  around {:.4} MHz",
+        secs * 1e3,
+        iq.samples.len(),
+        iq.rate / 1e3,
+        iq.center_hz as f64 / 1e6
+    )));
+    let width = ui.available_width().max(200.0);
+    let (resp, p) = ui.allocate_painter(Vec2::new(width, 140.0), Sense::hover());
+    let rect = resp.rect;
+    p.rect_filled(rect, 2.0, theme::WELL);
+    let cols = burst_columns(&iq.samples, iq.rate, rect.width() as usize);
+    if cols.is_empty() {
+        return;
+    }
+    let peak = cols.iter().map(|(e, _)| *e).fold(1e-6f32, f32::max);
+    // The frequency scale is the burst's own: what it reached, either way,
+    // so a 5 kHz keyed carrier and a 250 kHz chirp both fill the height.
+    let fmax = cols
+        .iter()
+        .map(|(_, hz)| hz.abs())
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let x_of = |c: usize| rect.left() + c as f32 + 0.5;
+    // Envelope, filled to the floor.
+    for (c, (env, _)) in cols.iter().enumerate() {
+        let h = (env / peak) * (rect.height() - 6.0);
+        p.line_segment(
+            [Pos2::new(x_of(c), rect.bottom() - 2.0), Pos2::new(x_of(c), rect.bottom() - 2.0 - h)],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(theme::TRACE.r(), theme::TRACE.g(), theme::TRACE.b(), 150)),
+        );
+    }
+    // Frequency, centred on the middle line, only where there is signal to
+    // measure it on: in a gap the phase step is noise.
+    let mid = rect.center().y;
+    let half = (rect.height() - 8.0) / 2.0;
+    p.line_segment(
+        [Pos2::new(rect.left(), mid), Pos2::new(rect.right(), mid)],
+        Stroke::new(1.0, theme::ETCH),
+    );
+    let mut pts: Vec<Pos2> = Vec::new();
+    for (c, (env, hz)) in cols.iter().enumerate() {
+        if *env < peak * 0.25 {
+            if pts.len() > 1 {
+                p.add(egui::Shape::line(std::mem::take(&mut pts), Stroke::new(1.2, theme::READOUT)));
+            }
+            pts.clear();
+            continue;
+        }
+        pts.push(Pos2::new(x_of(c), mid - (hz / fmax) * half));
+    }
+    if pts.len() > 1 {
+        p.add(egui::Shape::line(pts, Stroke::new(1.2, theme::READOUT)));
+    }
+    let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+    p.text(
+        Pos2::new(rect.left() + 4.0, rect.top() + 3.0),
+        Align2::LEFT_TOP,
+        format!("{:+.1} kHz", fmax / 1e3),
+        font.clone(),
+        theme::READOUT,
+    );
+    p.text(
+        Pos2::new(rect.left() + 4.0, rect.bottom() - 3.0),
+        Align2::LEFT_BOTTOM,
+        format!("{:+.1} kHz", -fmax / 1e3),
+        font.clone(),
+        theme::READOUT,
+    );
+    p.text(
+        Pos2::new(rect.right() - 4.0, rect.top() + 3.0),
+        Align2::RIGHT_TOP,
+        format!("{:.1} ms", secs * 1e3),
+        font,
+        theme::LEGEND,
+    );
+    // Where the pointer is, in the burst's own time.
+    if let Some(pos) = resp.hover_pos() {
+        let t = (pos.x - rect.left()) as f64 / rect.width() as f64 * secs;
+        let c = ((pos.x - rect.left()) as usize).min(cols.len() - 1);
+        resp.on_hover_text(format!(
+            "{:.2} ms   level {:.2}   {:+.1} kHz",
+            t * 1e3,
+            cols[c].0 / peak,
+            cols[c].1 / 1e3
+        ));
+    }
 }
 
 /// Offset, hex, and printable ASCII, sixteen bytes to the line.
@@ -5103,6 +5244,7 @@ mod tests {
             snr_db: 21.5,
             bytes: vec![0xab, 0xcd],
             crc,
+            iq: None,
         }
     }
 
@@ -5155,6 +5297,22 @@ mod tests {
         a.show_unknown = false;
         assert_eq!(a.decodes.len(), 2, "hiding must not drop anything");
         assert_eq!(a.decodes.iter().filter(|l| !l.rec.is_known()).count(), 1);
+    }
+
+    #[test]
+    fn a_burst_reduces_to_columns_that_keep_its_marks_and_its_frequency() {
+        // A tone 10 kHz up, keyed on for the middle third: one column per
+        // third, and the middle one is loud at +10 kHz.
+        let rate = 100_000.0;
+        let mut iq = vec![common::C32::new(0.0, 0.0); 3000];
+        for (i, x) in iq.iter_mut().enumerate().take(2000).skip(1000) {
+            let ph = std::f64::consts::TAU * 10_000.0 * i as f64 / rate;
+            *x = common::C32::new(ph.cos() as f32, ph.sin() as f32);
+        }
+        let cols = burst_columns(&iq, rate, 3);
+        assert!(cols[0].0 < 0.01 && cols[2].0 < 0.01, "{cols:?}");
+        assert!(cols[1].0 > 0.99, "{cols:?}");
+        assert!((cols[1].1 - 10_000.0).abs() < 50.0, "{cols:?}");
     }
 
     #[test]
