@@ -1,5 +1,6 @@
 //! Instrument front panel: readout, spectrum, waterfall, channel strips.
 
+mod calls_pane;
 mod chain_pane;
 mod map_pane;
 mod packets;
@@ -126,6 +127,10 @@ pub struct App {
     /// aircraft from ADS-B, vessels and marks from AIS. The most recent table
     /// published by the receiver.
     tracks: Vec<crate::tracks::Track>,
+    /// Who has been talking to whom, folded together from every decode that
+    /// names a destination. Held here rather than in the graph because it is
+    /// assembled from the same records the packet list shows.
+    calls: crate::calls::Calls,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
@@ -319,6 +324,7 @@ enum View {
     Spectrum,
     Chain,
     Map,
+    Calls,
 }
 
 impl View {
@@ -327,6 +333,7 @@ impl View {
             View::Spectrum => "Spectrum",
             View::Chain => "Signal chain",
             View::Map => "Map",
+            View::Calls => "Calls",
         }
     }
 }
@@ -493,6 +500,7 @@ impl Default for App {
             shot_sent: false,
             dc_block: true,
             view: View::Spectrum,
+            calls: crate::calls::Calls::new(),
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
@@ -981,6 +989,11 @@ impl App {
             if self.print_log {
                 println!("{}", rec.line(self.print_since));
             }
+            // A transmission that names who it is for is also a call, and
+            // the call list outlives the packet log: a group heard an hour
+            // ago has scrolled out of the log long before it is forgotten
+            // here.
+            self.calls.update(&rec, rec.at);
             let id = self.next_packet;
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
@@ -1489,6 +1502,7 @@ impl eframe::App for App {
                     View::Spectrum => self.scope(ui),
                     View::Chain => self.chain(ui),
                     View::Map => self.map_view(ui),
+                    View::Calls => self.call_view(ui),
                 });
         }
         self.settings_modal(ui.ctx());
@@ -1759,7 +1773,7 @@ impl App {
                             .selected_text(v.label())
                             .width(120.0)
                             .show_ui(ui, |ui| {
-                                for opt in [View::Spectrum, View::Chain, View::Map] {
+                                for opt in [View::Spectrum, View::Chain, View::Map, View::Calls] {
                                     ui.selectable_value(&mut v, opt, opt.label());
                                 }
                             });
@@ -2185,6 +2199,10 @@ impl App {
 
     pub fn show_map(&mut self) {
         self.view = View::Map;
+    }
+
+    pub fn show_calls(&mut self) {
+        self.view = View::Calls;
     }
 
     /// Point the receiver at a frequency without opening a channel on it.

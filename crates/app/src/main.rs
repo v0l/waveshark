@@ -5,6 +5,7 @@ mod prof;
 mod wheel;
 mod chain;
 mod bands;
+mod calls;
 mod devices;
 mod i18n;
 mod icons;
@@ -634,6 +635,10 @@ struct Args {
     #[arg(long)]
     flights: bool,
 
+    /// Open on the call list
+    #[arg(long)]
+    calls: bool,
+
     /// Tune here, in MHz, without opening a channel on it
     #[arg(long, value_name = "MHZ")]
     center: Option<f64>,
@@ -851,6 +856,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.flights {
                 app.show_map();
+            }
+            if args.calls {
+                app.show_calls();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

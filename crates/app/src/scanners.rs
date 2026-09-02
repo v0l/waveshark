@@ -615,6 +615,19 @@ front    = m17
 channels = 433.475 MHz
 margin   = 12.5 kHz
 
+[TETRA]
+# Base station downlinks, which is the half of a TETRA network a listener
+# hears: 390 to 400 MHz across Europe for the emergency services, with the
+# handsets answering 10 MHz lower. Commercial networks sit at 415 to 430 MHz,
+# so move the range if that is what is above you.
+#
+# Nothing here decodes TETRA. The carriers are pi/4-DQPSK at 18 kbaud on a
+# 25 kHz raster, and this finds them, measures each one and logs it as a
+# burst: it says which channels are busy and when, not what was said.
+range = 390 - 400 MHz
+span  = 250 kHz
+front = auto
+
 [ISM 433]
 range = 433.05 - 434.79 MHz
 span  = 250 kHz
@@ -668,7 +681,10 @@ mod tests {
         let names: Vec<&str> = s.list.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(
             names,
-            ["ADS-B", "AIS", "APRS", "POCSAG", "M17", "ISM 433", "ISM 868", "ISM 315"]
+            [
+                "ADS-B", "AIS", "APRS", "POCSAG", "M17", "TETRA", "ISM 433", "ISM 868",
+                "ISM 315"
+            ]
         );
     }
 
@@ -692,6 +708,11 @@ mod tests {
         );
         assert_eq!(fronts(433_920_000.0, 250_000.0), [Front::Auto]);
         assert_eq!(fronts(868_300_000.0, 2_400_000.0), [Front::Auto]);
+        // The TETRA downlinks, where the detector finds carriers it cannot
+        // read. Worth running: on that band the question is which channels
+        // are busy, and that is what a source detector answers.
+        assert_eq!(fronts(395_000_000.0, 2_400_000.0), [Front::Auto]);
+        assert_eq!(fronts(380_000_000.0, 250_000.0), [], "the uplink half is not covered");
     }
 
     /// The point of the change: a band nobody declared runs nothing, instead
