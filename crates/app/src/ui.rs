@@ -2333,6 +2333,10 @@ impl App {
                 });
             if n != self.fft_size {
                 self.fft_size = n;
+                // The same value the session saves and the radio starts with,
+                // so a chosen FFT size survives a restart rather than only
+                // living in the running spectrum.
+                self.fft = n;
                 self.send(Cmd::Fft(n));
                 self.reset_waterfall();
             }
@@ -5052,12 +5056,13 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let rect = resp.rect;
     p.rect_filled(rect, 2.0, theme::WELL);
     let cols = (rect.width() as usize).max(1);
-    // Frequency resolution: enough rows to separate tens of kilohertz in a
-    // few hundred kilohertz of span, and no more than the height can show.
-    // The transform's frequency detail is fixed; the image is built at the
-    // panel's own pixel height so the texture is drawn one-to-one and not
-    // stretched. Rows are mapped to pixels below.
-    let rows = 512usize;
+    // A short transform window: 128 samples, so the time axis resolves the
+    // keying rather than averaging a spectrum over many symbols, which is
+    // what a long window did and what smeared an on-off burst into a solid
+    // band. 128 bins over the extraction's span is ample frequency detail
+    // for what this shows. The columns overlap, one per pixel, so the time
+    // detail is the panel's width rather than the window.
+    let rows = 128usize;
     let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows);
     let n = img.len() / cols;
     // The floor is the median cell; the top is the peak. A fixed range would
@@ -5067,34 +5072,24 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let floor = sorted.get(sorted.len() / 2).copied().unwrap_or(-60.0);
     let span = (0.0 - floor).max(6.0);
-    // One image row per screen pixel, highest frequency at the top. There
-    // are more frequency bins than pixels, so each pixel pools the bins that
-    // fall in it and keeps the strongest: a carrier one bin wide stays a
-    // sharp line, and the noise between pixels does not flicker the way
-    // sampling a single bin per pixel did.
-    let pix_h = (rect.height() as usize).max(1);
-    let mut pixels = vec![Color32::BLACK; cols * pix_h];
-    for y in 0..pix_h {
-        let r0 = (pix_h - 1 - y) * n / pix_h;
-        let r1 = ((pix_h - y) * n / pix_h).max(r0 + 1).min(n);
-        let dst = y * cols;
+    let mut pixels = vec![Color32::BLACK; cols * n];
+    for r in 0..n {
+        // Row zero of the transform is the lowest frequency; the screen has
+        // the highest at the top, so the image is filled upside down.
+        let dst = (n - 1 - r) * cols;
         for c in 0..cols {
-            let mut m = f32::MIN;
-            for r in r0..r1 {
-                m = m.max(img[r * cols + c]);
-            }
-            let v = ((m - floor) / span).clamp(0.0, 1.0);
+            let v = ((img[r * cols + c] - floor) / span).clamp(0.0, 1.0);
             pixels[dst + c] = crate::waterfall::colormap(v);
         }
     }
     let image = ColorImage {
-        size: [cols, pix_h],
+        size: [cols, n],
         pixels,
-        source_size: egui::Vec2::new(cols as f32, pix_h as f32),
+        source_size: egui::Vec2::new(cols as f32, n as f32),
     };
-    // The image is already the panel's size, so nearest sampling keeps the
-    // tone lines crisp rather than smearing them across pixels.
-    let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::NEAREST);
+    // Linear filtering fills the panel height smoothly from the transform's
+    // rows, which reads as a spectrogram rather than a grid of cells.
+    let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::LINEAR);
     p.image(
         tex.id(),
         rect,
