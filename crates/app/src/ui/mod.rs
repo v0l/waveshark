@@ -2034,7 +2034,15 @@ impl App {
                     }
                     let all_muted = !self.channels.is_empty()
                         && self.channels.iter().all(|c| c.muted || !c.on);
-                    if ui.selectable_label(all_muted, "MUTE").clicked() {
+                    if crate::icons::icon_button(
+                        ui,
+                        if all_muted { crate::icons::Icon::Mute } else { crate::icons::Icon::Sound },
+                        "Mute every channel",
+                        true,
+                        all_muted,
+                    )
+                    .clicked()
+                    {
                         for c in &mut self.channels {
                             c.muted = !all_muted;
                         }
@@ -2051,7 +2059,19 @@ impl App {
                     let mut changed = ui
                         .add(egui::Slider::new(&mut self.call_volume, 0.0..=1.0).show_value(false))
                         .changed();
-                    if ui.selectable_label(self.call_muted, "MUTE").clicked() {
+                    if crate::icons::icon_button(
+                        ui,
+                        if self.call_muted {
+                            crate::icons::Icon::Mute
+                        } else {
+                            crate::icons::Icon::Sound
+                        },
+                        "Mute call audio",
+                        true,
+                        self.call_muted,
+                    )
+                    .clicked()
+                    {
                         self.call_muted = !self.call_muted;
                         changed = true;
                     }

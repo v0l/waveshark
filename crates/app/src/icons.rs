@@ -25,6 +25,11 @@ pub enum Icon {
     Decode,
     /// The packet log.
     Log,
+    /// Audio on, and audio muted. Two icons rather than one lit differently:
+    /// a mute control has to say which state it is in from across the desk,
+    /// and colour alone does not carry that.
+    Sound,
+    Mute,
 }
 
 /// Side of the clickable square, in points.
@@ -115,6 +120,47 @@ impl Icon {
                     p.line_segment(
                         [Pos2::new(x, b.bottom()), Pos2::new(x, b.bottom() - b.height() * h)],
                         bar,
+                    );
+                }
+            }
+            Icon::Sound | Icon::Mute => {
+                // A speaker: a box and a cone. Drawn filled rather than
+                // stroked because at fourteen points an outlined cone closes
+                // up into a blob, and this shape has to be recognisable at
+                // the size the strip uses.
+                let w = b.width();
+                let h = b.height();
+                let body = Rect::from_min_max(
+                    Pos2::new(b.left(), c.y - h * 0.18),
+                    Pos2::new(b.left() + w * 0.3, c.y + h * 0.18),
+                );
+                p.rect_filled(body, 1.0, col);
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        Pos2::new(b.left() + w * 0.28, c.y - h * 0.18),
+                        Pos2::new(b.left() + w * 0.6, b.top()),
+                        Pos2::new(b.left() + w * 0.6, b.bottom()),
+                        Pos2::new(b.left() + w * 0.28, c.y + h * 0.18),
+                    ],
+                    col,
+                    Stroke::NONE,
+                ));
+                if self == Icon::Sound {
+                    // Two arcs for sound coming out of it, as short strokes
+                    // rather than curves: a curve this small is a smudge.
+                    for (i, at) in [0.72f32, 0.9].into_iter().enumerate() {
+                        let x = b.left() + w * at;
+                        let dy = h * (0.16 + 0.12 * i as f32);
+                        p.line_segment([Pos2::new(x, c.y - dy), Pos2::new(x, c.y + dy)], s);
+                    }
+                } else {
+                    // The slash, which is what says muted at a glance.
+                    p.line_segment(
+                        [
+                            Pos2::new(b.left() + w * 0.66, c.y - h * 0.3),
+                            Pos2::new(b.right(), c.y + h * 0.3),
+                        ],
+                        Stroke::new(sw * 1.1, col),
                     );
                 }
             }
