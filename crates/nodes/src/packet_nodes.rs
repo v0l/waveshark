@@ -122,6 +122,13 @@ impl PacketDecodeNode {
             self.hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
             return;
         }
+        // Meters: the 868.95 MHz uplink and the older 868.3 MHz mode.
+        if dsp::wmbus::is_wmbus_band(p.center_hz as f64) {
+            if let Some(d) = crate::wmbus_nodes::wmbus_decoded(bytes, center) {
+                self.hits.push(d);
+            }
+            return;
+        }
         let Ok(frame) = adsb::parse(bytes) else { return };
         let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
         // A local demodulator reports no level for a frame it has already

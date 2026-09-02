@@ -23,6 +23,7 @@ pub mod pocsag;
 pub mod protocol;
 pub mod protocols;
 pub mod slicer;
+pub mod wmbus;
 
 pub use analyze::{analyze, Analysis};
 pub use bits::BitBuffer;

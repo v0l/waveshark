@@ -33,6 +33,7 @@ pub mod ssb;
 pub mod stereo;
 pub(crate) mod twolevel;
 pub mod window;
+pub mod wmbus;
 
 pub use afsk::{AfskConfig, AfskDemod};
 pub use ais::{AisAudioDemod, AisConfig, AisDetector, AisFrame};

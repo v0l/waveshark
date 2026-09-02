@@ -21,6 +21,7 @@ mod filter_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
+pub mod wmbus_nodes;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use wfm::WfmDemodNode;
@@ -34,6 +35,7 @@ pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
+pub use wmbus_nodes::WmbusNode;
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use filter_nodes::{FirFilterNode, IirFilterNode};
@@ -156,6 +158,15 @@ pub fn registry() -> Registry {
             }
             Ok(Box::new(n) as Box<dyn Node>)
         },
+    );
+
+    r.register(
+        StageDesc {
+            name: "wmbus",
+            summary: "Wireless M-Bus meter frames, modes T and C at 100 kchip/s",
+            category: "decode",
+        },
+        |_: &Settings| Ok(Box::new(WmbusNode::new()) as Box<dyn Node>),
     );
 
     r.register(

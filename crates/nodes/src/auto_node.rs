@@ -40,6 +40,10 @@ use crate::{build_chain, NodeSpec};
 /// channel worth trying the frame decoders on, in hertz.
 const NARROW_HZ: std::ops::RangeInclusive<f64> = 6_000.0..=40_000.0;
 
+/// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
+/// with what the extraction adds around it.
+const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
+
 /// Silence fed to a source's decoders after its last block, in seconds.
 ///
 /// A pager transmission has no closing flag: it ends when the batch that
@@ -372,6 +376,11 @@ impl AutoNode {
                 if let Ok(m) = Member::build("aprs", spec, NodeSpec::new("aprs").f("channel_hz", hz), &self.reg) {
                     members.push(m);
                 }
+            }
+        }
+        if METER_HZ.contains(&b.bandwidth_hz) {
+            if let Ok(m) = Member::build("wmbus", spec, NodeSpec::new("wmbus"), &self.reg) {
+                members.push(m);
             }
         }
         Ok(Slot { id: b.id, center_hz: b.center_hz, members })

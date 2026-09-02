@@ -33,7 +33,12 @@ pub fn fixtures() -> Vec<Fixture> {
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
+        // The wireless M-Bus meter recordings share this directory but are
+        // not ISM sensor bursts: they are decoded through the auto node in
+        // `nodes`' own capture test, not by the pulse path these fixtures
+        // feed, and their reference model has no decoder here.
         .filter(|p| p.extension().is_some_and(|e| e == "cu8"))
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("wmbus_")))
         .collect();
     paths.sort();
     paths.iter().filter_map(|p| Fixture::load(p)).collect()

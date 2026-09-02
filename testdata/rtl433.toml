@@ -427,3 +427,36 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "aac525a8456d08fb7c86fdeaa62c5b9146dbceb3f6ab0ba1f96a4cacdd86fe17"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/acurite/Acurite_606TX/05/gfile005.json"
 description = "The same sensor just below freezing. Its symbols are close enough to the GT-WT-02's to slice the same way, which is how this recording caught a Globaltronics decode of an Acurite burst"
+
+
+[[sample]]
+name = "wmbus_diehl_868.9M_1000k.cu8"
+sha256 = "0b49712f61b2216f2947490931629813187aaf2d5d6df1c07b515bb82ab0b9df"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m_bus/01/g001_868.9M_1000k.cu8"
+reference_sha256 = "f5a15fb256943eb172e847ec8e3a781a4b26a038e01928ca354f5af847302111"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m_bus/01/g001_868.9M_1000k.json"
+description = "Diehl Hydrus 2.0 water meter, wM-Bus mode T"
+
+[[sample]]
+name = "wmbus_imt_868.9M_1000k.cu8"
+sha256 = "778b892bb9f12234817ea8eb51e50bdb32700466d26697163c4cb52e885318eb"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m_bus/02/g001_868.9M_1000k.cu8"
+reference_sha256 = "767a98a92cbfb6179603b5e9b83fd9f3e2cc90160c6ea8a21024daf77a5b1ed4"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m_bus/02/g001_868.9M_1000k.json"
+description = "IMT meter behind a repeater, mode T long header, payload encrypted"
+
+[[sample]]
+name = "wmbus_bmt_868.9M_1600k.cu8"
+sha256 = "c416729702519105f5ef0f19f5b377e65982769dda14d5aee1be36e164399a4f"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-bus/03/g001_868.9M_1600k.cu8"
+reference_sha256 = "e3dee97dd0fc4723be14587fbfc6c4035964818b4771f8c9d3c3ddfb760f37aa"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-bus/03/g001_868.9M_1600k.json"
+description = "BMeters water meter, mode T, payload encrypted"
+
+[[sample]]
+name = "wmbus_tch_868.9M_1000k.cu8"
+sha256 = "9ad2c46d2ad541ffd9ceff1c901b0b89a4d12641d469c20ee14ca5347bc02535"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-bus/04/g001_868.9M_1000k.cu8"
+reference_sha256 = "9ae83df069391f8d45fa902ca345e1e9b3d4509e1b7c35c21c5bcc86f5c901d3"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-bus/04/g001_868.9M_1000k.json"
+description = "Techem meter, mode T"
