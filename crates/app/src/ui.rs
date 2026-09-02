@@ -5067,16 +5067,23 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let floor = sorted.get(sorted.len() / 2).copied().unwrap_or(-60.0);
     let span = (0.0 - floor).max(6.0);
-    // One image row per screen pixel: the highest frequency at the top, so
-    // pixel y reads bin `(pix_h - 1 - y)` scaled into the transform's rows.
+    // One image row per screen pixel, highest frequency at the top. There
+    // are more frequency bins than pixels, so each pixel pools the bins that
+    // fall in it and keeps the strongest: a carrier one bin wide stays a
+    // sharp line, and the noise between pixels does not flicker the way
+    // sampling a single bin per pixel did.
     let pix_h = (rect.height() as usize).max(1);
     let mut pixels = vec![Color32::BLACK; cols * pix_h];
     for y in 0..pix_h {
-        let r = (pix_h - 1 - y) * n / pix_h;
-        let src = r * cols;
+        let r0 = (pix_h - 1 - y) * n / pix_h;
+        let r1 = ((pix_h - y) * n / pix_h).max(r0 + 1).min(n);
         let dst = y * cols;
         for c in 0..cols {
-            let v = ((img[src + c] - floor) / span).clamp(0.0, 1.0);
+            let mut m = f32::MIN;
+            for r in r0..r1 {
+                m = m.max(img[r * cols + c]);
+            }
+            let v = ((m - floor) / span).clamp(0.0, 1.0);
             pixels[dst + c] = crate::waterfall::colormap(v);
         }
     }
