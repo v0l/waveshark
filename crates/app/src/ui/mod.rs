@@ -134,6 +134,12 @@ pub struct App {
     /// What the call bus is subscribed to, as the interface holds it. The
     /// radio thread is sent the whole set whenever it changes.
     call_subs: Vec<crate::callbus::Subscription>,
+    /// Groups switched off by hand, so a group that was turned off does not
+    /// subscribe itself again the next time somebody transmits on it.
+    call_optout: Vec<crate::callbus::Rule>,
+    /// Level and mute for all call audio, as the channel strip sets it.
+    call_volume: f32,
+    call_muted: bool,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
@@ -505,6 +511,9 @@ impl Default for App {
             view: View::Spectrum,
             calls: crate::calls::Calls::new(),
             call_subs: Vec::new(),
+            call_optout: Vec::new(),
+            call_volume: 0.8,
+            call_muted: false,
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
@@ -860,6 +869,11 @@ impl App {
         // radio thread has them at their defaults until it is told otherwise.
         self.send(Cmd::Refresh(self.refresh));
         self.send(Cmd::Smoothing(self.smoothing));
+        // Same for the call bus: a new thread has an empty one.
+        self.send(Cmd::CallVolume { volume: self.call_volume, muted: self.call_muted });
+        if !self.call_subs.is_empty() {
+            self.send(Cmd::CallSubs(self.call_subs.clone()));
+        }
         // Whatever the radio was set to last time has to be pushed at it
         // again: a new thread means a freshly opened device at its defaults.
         self.pending_radio = Some(self.saved.clone());
@@ -2025,6 +2039,27 @@ impl App {
                             c.muted = !all_muted;
                         }
                         self.send_channels();
+                    }
+                });
+
+                // Call audio has one level for the lot, beside the master:
+                // it is not a channel anybody tuned, it is whatever the front
+                // ends decode, and mixing it belongs where every other level
+                // in the receiver is set.
+                ui.horizontal(|ui| {
+                    ui.label(legend("calls"));
+                    let mut changed = ui
+                        .add(egui::Slider::new(&mut self.call_volume, 0.0..=1.0).show_value(false))
+                        .changed();
+                    if ui.selectable_label(self.call_muted, "MUTE").clicked() {
+                        self.call_muted = !self.call_muted;
+                        changed = true;
+                    }
+                    if changed {
+                        self.send(Cmd::CallVolume {
+                            volume: self.call_volume,
+                            muted: self.call_muted,
+                        });
                     }
                 });
 

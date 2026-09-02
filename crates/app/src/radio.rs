@@ -284,6 +284,8 @@ pub enum Cmd {
     CallSubs(Vec<crate::callbus::Subscription>),
     /// Stop a replay part way through.
     StopPlay,
+    /// The level all call audio is heard at, from the channel strip.
+    CallVolume { volume: f32, muted: bool },
     /// Play a transmission that has already been decoded, once.
     ///
     /// The sink belongs to this thread, so replaying from the packet list is
@@ -790,11 +792,11 @@ pub struct Status {
     pub call_audio: AtomicBool,
     pub replaying: AtomicBool,
     pub call_heard: parking_lot::Mutex<Option<String>>,
-    /// Peak of what the call bus put into the mix last block, as f32 bits.
-    /// A meter beside the subscriptions: it separates "nothing was decoded"
-    /// from "it was decoded and you still cannot hear it", which are two
-    /// different faults and look identical from the speaker.
-    call_peak: AtomicU32,
+    /// What each voice source put into the mix last block, keyed as
+    /// `system:channel`. The meter on a call's own row, which separates
+    /// "nothing was decoded" from "it was decoded and you still cannot hear
+    /// it": two different faults that sound identical.
+    call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -860,7 +862,7 @@ impl Default for Status {
             call_audio: AtomicBool::new(false),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
-            call_peak: AtomicU32::new(0),
+            call_levels: parking_lot::Mutex::new(Vec::new()),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
@@ -910,9 +912,9 @@ impl Status {
     }
 
     /// The radio's gain stages and switches, as they currently are.
-    /// Peak level the call bus last mixed, 0 to 1.
-    pub fn call_peak(&self) -> f32 {
-        f32::from_bits(self.call_peak.load(Ordering::Relaxed))
+    /// What each voice source last put into the mix, for the meters.
+    pub fn call_levels(&self) -> Vec<(String, f32)> {
+        self.call_levels.lock().clone()
     }
 
     pub fn radio(&self) -> RadioControls {
@@ -1443,6 +1445,7 @@ fn run(
                 }
                 Cmd::CallSubs(subs) => calls.set_subscriptions(subs),
                 Cmd::StopPlay => calls.stop_replay(),
+                Cmd::CallVolume { volume, muted } => calls.set_master(volume, muted),
                 Cmd::Play(speech) => calls.play(&speech),
             }
         }
@@ -1699,13 +1702,10 @@ fn run(
             }
             let voice = calls.take(frames);
             if !voice.is_empty() {
-                let peak = voice.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-                status.call_peak.store(peak.to_bits(), Ordering::Relaxed);
                 let n = mix_gain_into(&mut mix, voice, false, volume);
                 frames = frames.max(n);
-            } else {
-                status.call_peak.store(0f32.to_bits(), Ordering::Relaxed);
             }
+            *status.call_levels.lock() = calls.levels();
             calls.clear();
             status.call_audio.store(calls.listening(), Ordering::Relaxed);
             status.replaying.store(calls.replaying(), Ordering::Relaxed);

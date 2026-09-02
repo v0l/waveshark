@@ -112,6 +112,14 @@ pub struct Voice<'a> {
 pub struct CallBus {
     out_rate: f64,
     subs: Vec<Subscription>,
+    /// One level for all of it, from the channel strip, because that is where
+    /// every other level in this receiver lives.
+    master: f32,
+    muted: bool,
+    /// Peak per source since the last block, for a meter on the row it
+    /// belongs to. Decayed rather than reset, so a meter tracks speech
+    /// instead of flickering with every syllable.
+    peaks: HashMap<String, f32>,
     /// One resampler per source, because each carries filter state and two
     /// sources at the same rate are still two different streams.
     rs: HashMap<String, audio::Resampler>,
@@ -129,6 +137,9 @@ impl CallBus {
         Self {
             out_rate,
             subs: Vec::new(),
+            master: 0.8,
+            muted: false,
+            peaks: HashMap::new(),
             rs: HashMap::new(),
             mix: Vec::new(),
             scratch: Vec::new(),
@@ -145,10 +156,32 @@ impl CallBus {
         self.subs = subs;
     }
 
+    /// The level every subscription is heard at, and whether the lot is
+    /// muted. Set from the channel strip.
+    pub fn set_master(&mut self, volume: f32, muted: bool) {
+        self.master = volume.clamp(0.0, 1.0);
+        self.muted = muted;
+    }
+
+    pub fn master(&self) -> (f32, bool) {
+        (self.master, self.muted)
+    }
+
     /// Whether anything at all is being listened to, which decides whether a
     /// source needs to do the work of decoding speech.
     pub fn listening(&self) -> bool {
-        self.subs.iter().any(|s| !s.muted)
+        !self.muted && self.subs.iter().any(|s| !s.muted)
+    }
+
+    /// What each source put into the mix last block, keyed as
+    /// `system:channel`, for a meter on its row.
+    pub fn levels(&self) -> Vec<(String, f32)> {
+        self.peaks.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
+    /// The key a source's meter is filed under.
+    pub fn key_of(system: &str, channel_hz: f64) -> String {
+        format!("{system}:{channel_hz:.0}")
     }
 
     /// What the subscriptions say about one transmission: the gain to mix it
@@ -157,10 +190,13 @@ impl CallBus {
     /// The loudest matching subscription wins rather than their sum, so
     /// covering one group twice does not make it twice as loud.
     pub fn gain_for(&self, v: &Voice) -> Option<f32> {
+        if self.muted {
+            return None;
+        }
         self.subs
             .iter()
             .filter(|s| s.rule.matches(v))
-            .map(|s| s.gain())
+            .map(|s| s.gain() * self.master)
             .fold(None, |acc, g| Some(acc.map_or(g, |a: f32| a.max(g))))
     }
 
@@ -170,10 +206,10 @@ impl CallBus {
         if v.pcm.is_empty() || gain <= 0.0 {
             return false;
         }
-        let key = format!("{}:{:.0}", v.system, v.channel_hz);
+        let key = Self::key_of(v.system, v.channel_hz);
         let rs = self
             .rs
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| audio::Resampler::new(v.rate, self.out_rate, 4));
         self.scratch.clear();
         rs.process(v.pcm, &mut self.scratch);
@@ -183,6 +219,9 @@ impl CallBus {
         for (m, s) in self.mix.iter_mut().zip(self.scratch.iter()) {
             *m += s * gain;
         }
+        let peak = self.scratch.iter().fold(0.0f32, |a, s| a.max((s * gain).abs()));
+        let e = self.peaks.entry(key).or_insert(0.0);
+        *e = e.max(peak);
         self.last = Some(match v.from {
             Some(f) => format!("{f} to {}", v.to),
             None => v.to.to_string(),
@@ -237,9 +276,14 @@ impl CallBus {
         &self.mix
     }
 
-    /// Drop this block's audio, once it has been mixed.
+    /// Drop this block's audio, once it has been mixed, and let the meters
+    /// fall back towards zero.
     pub fn clear(&mut self) {
         self.mix.clear();
+        for v in self.peaks.values_mut() {
+            *v *= 0.7;
+        }
+        self.peaks.retain(|_, v| *v > 0.002);
     }
 }
 
@@ -260,8 +304,23 @@ mod tests {
 
     fn bus(rules: &[Rule]) -> CallBus {
         let mut b = CallBus::new(48_000.0);
+        b.set_master(1.0, false);
         b.set_subscriptions(rules.iter().cloned().map(Subscription::new).collect());
         b
+    }
+
+    #[test]
+    fn the_strip_mutes_everything_at_once() {
+        // One level for the lot, from the channel strip, so muting is one
+        // action rather than one per group being watched.
+        let mut b = bus(&[Rule::Everything]);
+        let pcm = vec![0.5f32; 160];
+        b.set_master(0.5, true);
+        assert!(!b.listening());
+        assert!(!b.push(voice("ALL", "M0ABC", &pcm)));
+        b.set_master(0.5, false);
+        assert!(b.push(voice("ALL", "M0ABC", &pcm)));
+        assert!(b.levels().iter().any(|(_, v)| *v > 0.0), "the meter saw it");
     }
 
     #[test]
@@ -317,6 +376,7 @@ mod tests {
             Subscription { rule: Rule::Group("ALL".into()), volume: 0.5, muted: false },
             Subscription { rule: Rule::Caller("M0ABC".into()), volume: 0.9, muted: false },
         ]);
+        b.set_master(1.0, false);
         let pcm = vec![1.0f32; 160];
         assert_eq!(b.gain_for(&voice("ALL", "M0ABC", &pcm)), Some(0.9), "the louder rule wins");
     }

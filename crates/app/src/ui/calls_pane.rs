@@ -14,34 +14,32 @@ use std::sync::atomic::Ordering;
 ///
 /// The two subscription boxes come first, because that is what this pane is
 /// for: the rest of the row is what tells you whether to tick them.
-const COLS: [(&str, f32); 9] = [
+const COLS: [(&str, f32); 10] = [
     ("grp", 34.0),
     ("who", 34.0),
     ("system", 60.0),
     ("channel", 100.0),
     ("group / party", 180.0),
     ("caller", 110.0),
+    ("level", 70.0),
     ("airtime", 74.0),
     ("overs", 50.0),
     ("last", 56.0),
 ];
 
-/// Width of the subscription pane beside the list.
-const SIDE_W: f32 = 230.0;
-
 impl App {
     pub(super) fn call_view(&mut self, ui: &mut egui::Ui) {
         let now = std::time::Instant::now();
         let calls: Vec<Call> = self.calls.active(now).into_iter().cloned().collect();
-
-        Panel::right("call-subs")
-            .default_size(SIDE_W)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 10)),
-            )
-            .show_inside(ui, |ui| self.call_subs_pane(ui));
+        // Every group is listened to unless it was turned off. A scanner that
+        // hears nothing until it is configured is a scanner nobody hears
+        // anything on, and the box on the row is how it is turned off.
+        self.subscribe_new_groups(&calls);
+        let levels = self
+            .radio
+            .as_ref()
+            .map(|r| r.status.call_levels())
+            .unwrap_or_default();
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -138,8 +136,21 @@ impl App {
                     }
                     let cells = row_cells(c, now, live);
                     let mut x = rect.left() + 12.0 + COLS[..2].iter().map(|(_, w)| w).sum::<f32>();
-                    for ((text, col), (_, w)) in cells.iter().zip(&COLS[2..]) {
-                        Self::cell(&p, rect, x, *w, text, *col);
+                    for (i, ((text, col), (_, w))) in cells.iter().zip(&COLS[2..]).enumerate() {
+                        // The level column is a meter rather than a number:
+                        // what it answers is whether this call is reaching
+                        // the speaker, and a bar answers that at a glance.
+                        if i == LEVEL_COL {
+                            let key = crate::callbus::CallBus::key_of(&c.system, c.channel_hz);
+                            let peak = levels
+                                .iter()
+                                .find(|(k, _)| *k == key)
+                                .map(|(_, v)| *v)
+                                .unwrap_or(0.0);
+                            meter(&p, rect, x, *w, peak);
+                        } else {
+                            Self::cell(&p, rect, x, *w, text, *col);
+                        }
                         x += w;
                     }
                 }
@@ -156,109 +167,22 @@ impl App {
         }
     }
 
-    /// The subscription pane: everything the call bus is listening to.
-    fn call_subs_pane(&mut self, ui: &mut egui::Ui) {
-        ui.label(legend("listening to"));
-        ui.add_space(6.0);
-
-        let heard = self
-            .radio
-            .as_ref()
-            .and_then(|r| r.status.call_heard.lock().clone())
-            .filter(|_| !self.call_subs.is_empty());
-        let replaying =
-            self.radio.as_ref().is_some_and(|r| r.status.replaying.load(Ordering::Relaxed));
-
-        if self.call_subs.is_empty() {
-            hint(
-                ui,
-                "Nothing. Tick a box beside a group or a caller in the list and their \
-                 audio is mixed into the master output as it decodes.",
-            );
+    /// Subscribe to any group not heard of before, unless it was switched
+    /// off by hand.
+    ///
+    /// The opt-outs are remembered separately, so a group turned off does not
+    /// come back the next time somebody transmits on it.
+    fn subscribe_new_groups(&mut self, calls: &[Call]) {
+        let mut added = false;
+        for c in calls {
+            let rule = Rule::Group(c.to.clone());
+            if self.call_optout.contains(&rule) || self.call_subs.iter().any(|s| s.rule == rule) {
+                continue;
+            }
+            self.call_subs.push(Subscription::new(rule));
+            added = true;
         }
-
-        let mut remove = None;
-        let mut changed = false;
-        for (i, s) in self.call_subs.iter_mut().enumerate() {
-            egui::Frame::NONE
-                .fill(theme::PANEL)
-                .stroke(Stroke::new(1.0, if s.muted { theme::ETCH } else { theme::READOUT }))
-                .corner_radius(2.0)
-                .inner_margin(egui::Margin::same(6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(value(s.rule.label()).size(11.0));
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button("X").clicked() {
-                                    remove = Some(i);
-                                }
-                                if ui.selectable_label(s.muted, "M").clicked() {
-                                    s.muted = !s.muted;
-                                    changed = true;
-                                }
-                            },
-                        );
-                    });
-                    if ui
-                        .add(egui::Slider::new(&mut s.volume, 0.0..=1.0).show_value(false))
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-            ui.add_space(6.0);
-        }
-        if let Some(i) = remove {
-            self.call_subs.remove(i);
-            changed = true;
-        }
-
-        ui.add_space(4.0);
-        let everything = Rule::Everything;
-        let mut all = self.call_subs.iter().any(|s| s.rule == everything);
-        if ui.checkbox(&mut all, "Everything").changed() {
-            self.toggle_call_sub(everything);
-        }
-        hint(ui, "Every call every front end decodes, whoever it is for.");
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-        ui.label(legend("on air"));
-        match &heard {
-            Some(h) => ui.label(value(h.clone()).size(12.0)),
-            None => ui.label(legend("nothing")),
-        };
-
-        // What the bus actually put into the mix. An empty meter with a call
-        // on air means the subscription is wrong; a full one with silence
-        // from the speaker means the fault is past this point.
-        let peak = self.radio.as_ref().map(|r| r.status.call_peak()).unwrap_or(0.0);
-        ui.add_space(6.0);
-        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
-        ui.painter().rect_filled(r, 1.0, theme::WELL);
-        if peak > 0.0 {
-            let w = (peak.clamp(0.0, 1.0) * r.width()).max(2.0);
-            ui.painter().rect_filled(
-                Rect::from_min_size(r.min, Vec2::new(w, r.height())),
-                1.0,
-                if peak > 0.98 { theme::FAULT } else { CRC_OK },
-            );
-        }
-        ui.label(legend(&format!("bus level {:.0}%", peak * 100.0)));
-        if replaying {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("replaying").color(CRC_OK).size(11.0));
-                if ui.small_button("STOP").clicked() {
-                    self.send(Cmd::StopPlay);
-                }
-            });
-        }
-
-        if changed {
+        if added {
             self.send(Cmd::CallSubs(self.call_subs.clone()));
         }
     }
@@ -268,10 +192,36 @@ impl App {
         match self.call_subs.iter().position(|s| s.rule == rule) {
             Some(i) => {
                 self.call_subs.remove(i);
+                self.call_optout.push(rule);
             }
-            None => self.call_subs.push(Subscription::new(rule)),
+            None => {
+                self.call_optout.retain(|r| r != &rule);
+                self.call_subs.push(Subscription::new(rule));
+            }
         }
         self.send(Cmd::CallSubs(self.call_subs.clone()));
+    }
+}
+
+/// Which of the columns after the checkboxes is the meter.
+const LEVEL_COL: usize = 4;
+
+/// The level bar in a row, drawn in the cell rather than as a widget: the
+/// whole table is painted, and a bar is two rectangles.
+fn meter(p: &egui::Painter, row: Rect, x: f32, w: f32, peak: f32) {
+    let h = 6.0;
+    let r = Rect::from_min_size(
+        Pos2::new(x, row.center().y - h / 2.0),
+        Vec2::new(w - 10.0, h),
+    );
+    p.rect_filled(r, 1.0, theme::WELL);
+    if peak > 0.001 {
+        let filled = (peak.clamp(0.0, 1.0).sqrt() * r.width()).max(2.0);
+        p.rect_filled(
+            Rect::from_min_size(r.min, Vec2::new(filled, r.height())),
+            1.0,
+            if peak > 0.98 { theme::FAULT } else { CRC_OK },
+        );
     }
 }
 
@@ -288,6 +238,9 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
             if c.encrypted { theme::FAULT } else { party },
         ),
         (c.from.clone().unwrap_or_else(|| "-".into()), theme::VALUE),
+        // The meter is painted over this one; the text is what a row without
+        // a level would have shown.
+        (String::new(), theme::VALUE),
         (airtime, theme::VALUE),
         (c.overs.to_string(), theme::LEGEND),
         (
