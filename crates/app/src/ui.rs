@@ -4527,10 +4527,12 @@ impl App {
                     .min_size(64.0)
                     .max_size((avail - 40.0).max(80.0))
                     .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 6, ..Default::default() }))
-                    .show_inside(ui, |ui| match &selected {
-                        Some(rec) => packet_detail(ui, rec),
-                        None => {
-                            ui.label(legend("select a packet to see its burst and bytes"));
+                    // Blank when nothing is selected: the space is held so
+                    // the list does not jump, but an empty dump is not drawn
+                    // into it.
+                    .show_inside(ui, |ui| {
+                        if let Some(rec) = &selected {
+                            packet_detail(ui, rec);
                         }
                     });
                 let list_h = ui.available_height().max(24.0);
