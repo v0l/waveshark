@@ -29,7 +29,7 @@ pub use bresser::Bresser3Ch;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
 pub use globaltronics::{GtWt02, GtWt03};
-pub use keyfob::{Ansonic, Bett, came12_bit, came24_bit, Holtek, HoltekHt12x, Linear, LinearDelta3, NiceFlo, Princeton};
+pub use keyfob::{Ansonic, Bett, came12_bit, came24_bit, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3, NiceFlo, Princeton};
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
 pub use oregon::{OregonV2, OregonV3};

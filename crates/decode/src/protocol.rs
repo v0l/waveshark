@@ -157,6 +157,7 @@ impl Protocols {
         p.add(Box::new(X10Rf));
         p.add(Box::new(Ev1527));
         p.add(Box::new(Princeton));
+        p.add(Box::new(KeeLoq));
         p.add(Box::new(Holtek));
         p.add(Box::new(HoltekHt12x));
         p.add(Box::new(Ansonic));
