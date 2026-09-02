@@ -1213,7 +1213,7 @@ mod tests {
             nodes: vec![
                 node(0, "DC block", &[0], 1),
                 node(1, "Spectrum", &[1], 2),
-                node(2, "OOK bank", &[1], 3),
+                node(2, "31 kHz bank", &[1], 3),
                 node(3, "Mixer", &[1], 4),
                 node(4, "Demod", &[4], 5),
             ],

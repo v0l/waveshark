@@ -170,7 +170,7 @@ pub fn packages(path: &Path) -> Vec<Package> {
 }
 
 /// Sample ranges covering each detected burst, merged where they overlap.
-fn windows(pkgs: &[Package], rate: f64, len: usize) -> Vec<(usize, usize)> {
+pub fn windows(pkgs: &[Package], rate: f64, len: usize) -> Vec<(usize, usize)> {
     let mut spans: Vec<(usize, usize)> = pkgs
         .iter()
         .map(|p| {

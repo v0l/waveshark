@@ -74,6 +74,16 @@ pub struct Decoded {
     /// own column, and the protocol name does not imply it: plenty of devices
     /// exist in both an OOK and an FSK variant.
     pub modulation: Option<&'static str>,
+    /// The width it was heard through, in hertz.
+    ///
+    /// Carried rather than inferred from the keying. The same burst arrives in
+    /// every bank tier that covers its frequency, and telling those copies
+    /// apart from a device genuinely repeating its packet is the difference
+    /// between one row in the log and four. That worked by accident while the
+    /// keying was guessed from the channel width, since the two tiers then
+    /// always disagreed about the keying; a classifier that gets both tiers
+    /// right takes the accident away.
+    pub bandwidth_hz: Option<f64>,
     /// The fields, timings or whatever else the decoder can say about this
     /// frame beyond naming it. Kept apart from `text` so a list can put the
     /// protocol in one column and its detail in another.
@@ -108,6 +118,7 @@ impl Decoded {
             text: None,
             crc_ok: None,
             modulation: None,
+            bandwidth_hz: None,
             detail: None,
             fields: Vec::new(),
             rssi_dbfs: None,
@@ -134,6 +145,12 @@ impl Decoded {
 
     pub fn with_modulation(mut self, m: &'static str) -> Self {
         self.modulation = Some(m);
+        self
+    }
+
+    /// The channel width the frame was heard through.
+    pub fn with_bandwidth(mut self, hz: f64) -> Self {
+        self.bandwidth_hz = Some(hz);
         self
     }
 

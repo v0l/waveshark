@@ -18,11 +18,33 @@ that turns radio into symbols, and there are only a few of those.
 | buffered envelope, `ask_detect` | mark/gap timings from shallow ASK | yes | no |
 | discriminator, `fsk_detect` | mark/gap timings from two-level FSK | yes | no |
 | pilot PLL, `wfm` | stereo audio, RDS | yes | no |
-| four-level slicer | 4-FSK symbols | no | no |
+| discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
 | coherent PSK/GMSK with timing recovery | soft symbols | no | no |
 | chirp correlator (dechirp then FFT) | LoRa symbols | no | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
+
+The four-level front end exists but nothing decodes through it yet, so every
+4-FSK protocol below still reads **demod**: what each now needs is a level to
+bit mapping, a sync word and a framer, not a demodulator. It differs from the
+other front ends in needing to be told the symbol rate, because a four-level
+eye cannot be opened without knowing where the symbol boundaries should be, and
+it emits numbered levels rather than mark/gap timings, because two like symbols
+in a row are one run and four levels give no rule for splitting it again.
+
+Which front end runs is measured rather than configured. Each channel gates a
+burst once and `dsp::classify` measures it: envelope levels and how long each
+is held, occupied bandwidth, the histogram of instantaneous frequency, the
+symbol rate from the transition line, the power-law lines that give phase
+keying away, and the frequency slope that gives a sweep away. The burst then
+goes to the one front end that can read it, and to both pulse front ends when
+the measurement will not name it, which is what every channel used to do with
+every burst. Scored against rtl_433's recordings, whose devices and therefore
+modulations are known, it puts 46 of 52 in the right family;
+`crates/decode/tests/classify_corpus.rs` prints the confusion matrix and lists
+the six by name. The classes it can name but not yet read (MSK, BPSK, QPSK,
+chirp, noise-like, bare carrier) are labels on the burst rather than routes to
+anything.
 
 A protocol whose symbols reach the mark/gap layer costs a timing table and a
 payload parser, and nothing else: the slicers (PWM, PPM, Manchester, NRZ), the
@@ -32,11 +54,22 @@ Everything else costs a demodulator first.
 Transmit inverts the same layers and none of it is written yet. See
 [Transmit](#transmit) below.
 
-The second constraint is channel width. The scanner runs two channelizers: a
-31.25 kHz bank feeding the OOK front end and a 125 kHz bank feeding the FSK
-one. Anything wider than about 100 kHz occupied needs a third, wider tier, and
-anything past a few hundred kHz needs a chain of its own rather than a channel
-in a bank.
+The second constraint is channel width. The scanner runs four channelizers over
+the same span, at 12.5, 31.25, 125 and 500 kHz, and every tier hears every
+burst: what differs is how much of the signal survives the filter and how much
+noise arrives with it. A 1.5 kbit/s OOK sensor decodes down to 12.3 dB
+peak-to-noise in a 31 kHz channel and needs 22.9 dB in a 125 kHz one; FSK wants
+the opposite, since a narrow channel cuts one of its tones off. The classifier
+reports the occupied bandwidth next to the channel width, so a burst that fills
+its channel says so rather than being quietly measured through a filter that
+removed most of it. Anything past 500 kHz still needs a chain of its own rather
+than a channel in a bank.
+
+The tiers cost what they channelize: at 2.4 MS/s the four are 296 channels
+against the 98 the first two were, which measures 6.1x real time against 10.7x
+on a 48 core machine. `testdata`-driven, in
+`radio::tests::the_scanner_keeps_up_with_the_stream`. A slower receiver drops a
+tier in the scanner table.
 
 The third is hardware.
 
@@ -194,7 +227,7 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
 | POCSAG | 137-174, 450-470, 929 MHz | 2-FSK 512/1200/2400 bps | 25 kHz | synthetic | table | `dsp::pocsag` and `decode::pocsag`. All three bit rates are demodulated at once, since nothing in the signal says which is in use, and both polarities are searched for. BCH(31,21) corrects up to two errors per codeword. The message layer is checked against a published off-air capture decoded by POC32; the demodulator in front of it has not met real RF. Amateur DAPNET networks run the same protocol |
-| FLEX | 929-932 MHz | 2/4-FSK 1600-6400 bps | 25 kHz | demod | mod | The four-level modes need a four-way slicer |
+| FLEX | 929-932 MHz | 2/4-FSK 1600-6400 bps | 25 kHz | demod | mod | The four-level front end reads the symbols; what is missing is the level to bit mapping, the sync words and the framing |
 | ERMES | 169 MHz | 4-FSK 6250 bps | 25 kHz | demod | mod | As FLEX |
 
 Pager traffic is unencrypted and often carries medical and personal detail.

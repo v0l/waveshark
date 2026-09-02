@@ -60,14 +60,16 @@ impl PacketDecodeNode {
         for (_, res) in self.protocols.diagnose(pkg) {
             if let Ok(report) = res {
                 matched = true;
-                self.hits.push(decoded_event(&report, pkg, center, modulation));
+                self.hits
+                    .push(decoded_event(&report, pkg, center, modulation).with_bandwidth(p.bandwidth_hz as f64));
                 if !self.report_all {
                     break;
                 }
             }
         }
         if !matched && self.report_unknown {
-            self.hits.push(unmatched_event(pkg, center, modulation));
+            self.hits
+                .push(unmatched_event(pkg, center, modulation).with_bandwidth(p.bandwidth_hz as f64));
         }
     }
 
@@ -145,7 +147,15 @@ impl Simple for PacketDecodeNode {
                     // protocols can tell, and it belongs in the packet list's
                     // own column: a device that exists in both an OOK and an
                     // FSK variant decodes the same either way.
-                    let modulation = if p.bandwidth_hz > 60_000 { "FSK" } else { "OOK" };
+                    //
+                    // Measured where a classifier saw the burst. The fallback
+                    // is the channel width the packet arrived through, which
+                    // is only ever a guess: the wide tier carries plenty of
+                    // on-off keyed sensors, and this used to label every one
+                    // of them FSK.
+                    let modulation = p
+                        .modulation
+                        .unwrap_or(if p.bandwidth_hz > 60_000 { "FSK" } else { "OOK" });
                     self.decode_burst(p, &pkg, modulation);
                 }
                 PacketBody::Frame(bytes) => self.decode_frame(p, bytes),
@@ -208,6 +218,7 @@ mod tests {
             bandwidth_hz,
             rssi_dbfs: -20.0,
             snr_db: 22.0,
+            modulation: None,
             body: PacketBody::Pulses(pulses),
         }
     }
@@ -244,6 +255,7 @@ mod tests {
                 bandwidth_hz: 2_000_000,
                 rssi_dbfs: f32::NAN,
                 snr_db: f32::NAN,
+                modulation: None,
                 body: PacketBody::Frame(bytes),
             }],
         );
@@ -287,6 +299,7 @@ mod tests {
                 bandwidth_hz: 12_500,
                 rssi_dbfs: f32::NAN,
                 snr_db: f32::NAN,
+                modulation: None,
                 body: PacketBody::Frame(bytes),
             }],
         );
@@ -307,6 +320,7 @@ mod tests {
                 bandwidth_hz: 2_000_000,
                 rssi_dbfs: f32::NAN,
                 snr_db: f32::NAN,
+                modulation: None,
                 body: PacketBody::Frame(vec![0xff; 5]),
             }],
         );

@@ -44,6 +44,14 @@ pub struct Package {
     /// that has been separated from the port it arrived on is otherwise
     /// unplaceable, and a burst without a frequency is not evidence of much.
     pub center_hz: u64,
+    /// What the burst was measured to be keyed on, when something measured it.
+    ///
+    /// `None` where the front end was chosen in advance rather than from the
+    /// signal, which is every chain that runs one demodulator by
+    /// configuration. A guess from the channel width stands in there, and it
+    /// is a guess: a 125 kHz channel holds an OOK sensor as readily as an FSK
+    /// one.
+    pub modulation: Option<&'static str>,
 }
 
 impl Package {
@@ -183,6 +191,9 @@ pub struct Packet {
     pub bandwidth_hz: u32,
     pub rssi_dbfs: f32,
     pub snr_db: f32,
+    /// What the burst was measured to be keyed on. See
+    /// [`Package::modulation`].
+    pub modulation: Option<&'static str>,
     pub body: PacketBody,
 }
 
@@ -205,6 +216,7 @@ impl Packet {
                 rssi_dbfs: self.rssi_dbfs,
                 start_sample: 0,
                 center_hz: self.center_hz,
+                modulation: self.modulation,
             }),
             PacketBody::Frame(_) => None,
         }

@@ -239,7 +239,7 @@ mod tests {
     use pipeline::node::Node;
 
     fn bank() -> BankNode {
-        BankNode::new("OOK bank", 31_250.0, crate::ism_ook_graph)
+        BankNode::new("31 kHz bank", 31_250.0, crate::ism_decode_graph)
     }
 
     fn spec(rate: f64) -> PortSpec {
@@ -271,7 +271,7 @@ mod tests {
         Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
         let inner = Node::subgraph(&b).expect("the chain a channel runs");
         let names: Vec<&str> = inner.nodes.iter().map(|n| n.label.as_str()).collect();
-        assert!(names.iter().any(|n| n.contains("Envelope")), "{names:?}");
+        assert!(names.iter().any(|n| n.contains("Classify")), "{names:?}");
         assert_eq!(Node::subgraph_count(&b), b.channels());
     }
 
