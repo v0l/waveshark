@@ -147,7 +147,10 @@ pub fn install(ctx: &egui::Context) {
 
     style.text_styles.insert(TextStyle::Body, FontId::proportional(13.0));
     style.text_styles.insert(TextStyle::Button, FontId::proportional(13.0));
-    style.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
+    // Explanatory prose under a control is set in Small, and a dialog is made
+    // of it. Eleven px is a size for a tick mark on an axis, not for two
+    // sentences somebody has to read before choosing.
+    style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
     style
         .text_styles
         .insert(TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
@@ -156,9 +159,13 @@ pub fn install(ctx: &egui::Context) {
 }
 
 /// A silkscreened panel label: condensed, uppercase, widely tracked.
+///
+/// Eleven and a half rather than ten: the face is condensed and set in caps
+/// with letter spacing, all of which costs legibility, and these are the words
+/// that say what every control on the panel is.
 pub fn legend(text: &str) -> RichText {
     RichText::new(text.to_uppercase())
-        .font(FontId::new(10.0, FontFamily::Name(LEGEND_FONT.into())))
+        .font(FontId::new(11.5, FontFamily::Name(LEGEND_FONT.into())))
         .extra_letter_spacing(1.6)
         .color(LEGEND)
 }

@@ -51,6 +51,13 @@ pub struct Session {
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
+    /// How the spectrum and the waterfall are drawn.
+    ///
+    /// Kept here with the rest of it because they are settings in the same
+    /// sense the gain is: an operator picks a scroll rate and a scale to suit
+    /// the band being watched, and having to pick them again at every start is
+    /// the difference between an instrument and a demo.
+    pub view: ViewPrefs,
     /// Packet feeds from other receivers, as `format host:port`.
     pub feeds: Vec<nodes::FeedSpec>,
     /// iqstream servers to offer as radios, as `host:port` and the name given
@@ -60,6 +67,41 @@ pub struct Session {
     /// Whether the operator owns the shape of the graph. The graph itself is
     /// in its own file: it is a drawing, not a setting.
     pub manual_chain: bool,
+}
+
+/// Spectrum and waterfall settings, as the two panes' own panels set them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewPrefs {
+    /// Waterfall rows drawn per second.
+    pub rows_per_sec: f32,
+    /// Rows of history the waterfall keeps.
+    pub wf_rows: usize,
+    /// How far below the trace ceiling the hottest colour sits, in dB.
+    pub wf_top_offset: f32,
+    /// Whether the scale follows the signal, and where it sits when it does
+    /// not. Both are saved: an operator who turned auto off did so to hold a
+    /// particular window on the noise floor.
+    pub auto_scale: bool,
+    pub floor: f32,
+    pub ceil: f32,
+    /// Spectrum frames per second, and the averaging applied to them.
+    pub refresh: f32,
+    pub smoothing: f32,
+}
+
+impl Default for ViewPrefs {
+    fn default() -> Self {
+        Self {
+            rows_per_sec: 20.0,
+            wf_rows: 512,
+            wf_top_offset: 5.0,
+            auto_scale: true,
+            floor: -90.0,
+            ceil: -20.0,
+            refresh: 30.0,
+            smoothing: 0.35,
+        }
+    }
 }
 
 impl Default for Session {
@@ -81,6 +123,7 @@ impl Default for Session {
             dc_block: true,
             decode_on: true,
             volume: 0.5,
+            view: ViewPrefs::default(),
             feeds: Vec::new(),
             streams: Vec::new(),
             manual_chain: false,
@@ -179,6 +222,22 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
+            view: ViewPrefs {
+                rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
+                    as f32,
+                wf_rows: kv
+                    .get("wf_rows")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d.view.wf_rows)
+                    .clamp(64, 4096),
+                wf_top_offset: f("wf_contrast", d.view.wf_top_offset as f64).clamp(0.0, 20.0)
+                    as f32,
+                auto_scale: kv.get("auto_scale").map(|v| *v == "true").unwrap_or(d.view.auto_scale),
+                floor: f("floor", d.view.floor as f64).clamp(-140.0, 20.0) as f32,
+                ceil: f("ceiling", d.view.ceil as f64).clamp(-140.0, 20.0) as f32,
+                refresh: f("refresh", d.view.refresh as f64).clamp(1.0, 120.0) as f32,
+                smoothing: f("smoothing", d.view.smoothing as f64).clamp(0.01, 1.0) as f32,
+            },
             feeds,
             streams,
             manual_chain: kv.get("manual_chain").map(|v| *v == "true").unwrap_or(false),
@@ -210,6 +269,15 @@ impl Session {
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("volume = {}\n", self.volume));
+        let v = &self.view;
+        s.push_str(&format!("rows_per_sec = {}\n", v.rows_per_sec));
+        s.push_str(&format!("wf_rows = {}\n", v.wf_rows));
+        s.push_str(&format!("wf_contrast = {}\n", v.wf_top_offset));
+        s.push_str(&format!("auto_scale = {}\n", v.auto_scale));
+        s.push_str(&format!("floor = {}\n", v.floor));
+        s.push_str(&format!("ceiling = {}\n", v.ceil));
+        s.push_str(&format!("refresh = {}\n", v.refresh));
+        s.push_str(&format!("smoothing = {}\n", v.smoothing));
         if self.manual_chain {
             s.push_str("manual_chain = true\n");
         }
@@ -285,6 +353,16 @@ mod tests {
             dc_block: false,
             decode_on: false,
             volume: 0.25,
+            view: ViewPrefs {
+                rows_per_sec: 40.0,
+                wf_rows: 1024,
+                wf_top_offset: 3.0,
+                auto_scale: false,
+                floor: -102.5,
+                ceil: -14.0,
+                refresh: 60.0,
+                smoothing: 0.5,
+            },
             manual_chain: true,
             feeds: vec![
                 nodes::FeedSpec::new("10.100.2.249", 30005, &nodes::feed_nodes::BEAST),
