@@ -4515,19 +4515,24 @@ impl App {
                 // The detail sits in a bottom sub-panel whose top edge drags,
                 // so its height is the operator's rather than fixed: a burst
                 // worth studying gets the room, and a glance at the bytes
-                // gives it back. Reserved before the list, so the list takes
-                // whatever is left.
-                if let Some(rec) = &selected {
-                    let want = if rec.iq.is_some() { 116.0 + BURST_VIEW_H + 24.0 } else { 116.0 };
-                    let avail = ui.available_height();
-                    Panel::bottom("packet_detail")
-                        .resizable(true)
-                        .default_size(want.min(avail - 40.0).max(64.0))
-                        .min_size(64.0)
-                        .max_size((avail - 40.0).max(80.0))
-                        .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 6, ..Default::default() }))
-                        .show_inside(ui, |ui| packet_detail(ui, rec));
-                }
+                // gives it back. It is always present, empty when nothing is
+                // selected, so selecting or clearing a packet does not resize
+                // the list under the pointer. Reserved before the list, so
+                // the list takes whatever is left.
+                let avail = ui.available_height();
+                let want = 116.0 + BURST_VIEW_H + 24.0;
+                Panel::bottom("packet_detail")
+                    .resizable(true)
+                    .default_size(want.min(avail - 40.0).max(64.0))
+                    .min_size(64.0)
+                    .max_size((avail - 40.0).max(80.0))
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: 6, ..Default::default() }))
+                    .show_inside(ui, |ui| match &selected {
+                        Some(rec) => packet_detail(ui, rec),
+                        None => {
+                            ui.label(legend("select a packet to see its burst and bytes"));
+                        }
+                    });
                 let list_h = ui.available_height().max(24.0);
                 // Two nested scroll areas so the headings stay above the rows
                 // vertically but travel with them sideways, which is the only
@@ -5062,8 +5067,12 @@ fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     // band. 128 bins over the extraction's span is ample frequency detail
     // for what this shows. The columns overlap, one per pixel, so the time
     // detail is the panel's width rather than the window.
-    let rows = 128usize;
-    let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows);
+    let rows = 256usize;
+    // A window that is a fixed fraction of the burst, so a fast and a slow
+    // extraction of the same signal read alike rather than one crisp and one
+    // smeared. About three hundred resolvable time cells across the burst.
+    let win = (iq.samples.len() / 300).clamp(8, rows);
+    let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows, win);
     let n = img.len() / cols;
     // The floor is the median cell; the top is the peak. A fixed range would
     // wash out a weak burst or clip a strong one, and the burst is all there

@@ -113,16 +113,25 @@ impl Spectrum {
 /// This is the view a burst is read from, the way inspectrum and Universal
 /// Radio Hacker show one: a two-tone signal is two lines, a chirp a ramp,
 /// on-off keying a broken bar, a multi-carrier signal a filled band. `rows`
-/// is rounded up to a power of two for the transform.
-pub fn spectrogram(samples: &[C32], cols: usize, rows: usize) -> Vec<f32> {
+/// is rounded up to a power of two for the transform, and `win_len` is how
+/// many samples one column spans, which sets the time resolution.
+pub fn spectrogram(samples: &[C32], cols: usize, rows: usize, win_len: usize) -> Vec<f32> {
     let n = rows.max(16).next_power_of_two();
     let cols = cols.max(1);
+    // The window is how much of the burst one column sees, so it sets the
+    // time resolution; the transform size `n` sets the frequency detail.
+    // Keeping the window a fixed fraction of the burst rather than a fixed
+    // number of samples is what makes the same signal look the same however
+    // fast it was sampled: a wide window averages the spectrum over many
+    // symbols and smears keying into a solid band. The window is zero-padded
+    // up to `n`, which interpolates the spectrum smoothly.
+    let w = win_len.clamp(4, n);
     let mut out = vec![-120.0f32; cols * n];
     if samples.len() < 4 {
         return out;
     }
     let fft = FftPlanner::new().plan_fft_forward(n);
-    let win = window::hann(n);
+    let hann = window::hann(w);
     let mut buf = vec![C32::default(); n];
     let mut scratch = vec![C32::default(); fft.get_inplace_scratch_len()];
     let half = n / 2;
@@ -132,10 +141,15 @@ pub fn spectrogram(samples: &[C32], cols: usize, rows: usize) -> Vec<f32> {
     // beyond them.
     for c in 0..cols {
         let centre = (c as f64 + 0.5) / cols as f64 * samples.len() as f64;
-        let start = (centre as isize - half as isize).max(0) as usize;
+        let start = centre as isize - (w / 2) as isize;
         for i in 0..n {
-            let s = samples.get(start + i).copied().unwrap_or(C32::new(0.0, 0.0));
-            buf[i] = s * win[i];
+            buf[i] = if i < w {
+                let j = start + i as isize;
+                let s = if j >= 0 { samples.get(j as usize).copied() } else { None };
+                s.unwrap_or(C32::new(0.0, 0.0)) * hann[i]
+            } else {
+                C32::new(0.0, 0.0)
+            };
         }
         fft.process_with_scratch(&mut buf, &mut scratch);
         for r in 0..n {
@@ -254,7 +268,7 @@ mod tests {
             })
             .collect();
         let (cols, rows) = (64usize, 128usize);
-        let img = spectrogram(&sig, cols, rows);
+        let img = spectrogram(&sig, cols, rows, rows);
         // Row of -100 kHz is below centre, +100 kHz above; find the loudest
         // row in the first and last columns.
         let loudest = |col: usize| {
