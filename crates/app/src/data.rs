@@ -11,6 +11,7 @@
 //! they load on first use and stay loaded.
 
 use datasets::airports::Airport;
+use datasets::gateways::Gateway;
 use datasets::radioid::{Repeater, Users};
 use datasets::{Cache, When};
 use parking_lot::RwLock;
@@ -41,6 +42,7 @@ pub fn airports() -> &'static [Airport] {
 static USERS: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static NXDN: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static REPEATERS: RwLock<Option<Arc<Vec<Repeater>>>> = RwLock::new(None);
+static GATEWAYS: RwLock<Option<Arc<Vec<Gateway>>>> = RwLock::new(None);
 
 /// The DMR ID registry: what the number in a DMR frame belongs to.
 ///
@@ -65,6 +67,13 @@ pub fn dmr_repeaters() -> Option<Arc<Vec<Repeater>>> {
     on_demand(Which::Repeaters, &REPEATERS)
 }
 
+/// Where the digital voice networks can be reached: an address, a port, and
+/// the channels within it that carry the mode spoken there.
+#[allow(dead_code)]
+pub fn gateways() -> Option<Arc<Vec<Gateway>>> {
+    on_demand(Which::Gateways, &GATEWAYS)
+}
+
 fn on_demand<T>(which: Which, held: &'static RwLock<Option<Arc<T>>>) -> Option<Arc<T>> {
     if let Some(v) = held.read().clone() {
         return Some(v);
@@ -84,10 +93,17 @@ pub enum Which {
     Repeaters,
     DmrIds,
     NxdnIds,
+    Gateways,
 }
 
 impl Which {
-    pub const ALL: [Which; 4] = [Which::Airports, Which::Repeaters, Which::DmrIds, Which::NxdnIds];
+    pub const ALL: [Which; 5] = [
+        Which::Airports,
+        Which::Repeaters,
+        Which::DmrIds,
+        Which::NxdnIds,
+        Which::Gateways,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -95,6 +111,7 @@ impl Which {
             Which::Repeaters => "DMR repeaters",
             Which::DmrIds => "DMR IDs",
             Which::NxdnIds => "NXDN IDs",
+            Which::Gateways => "Digital voice gateways",
         }
     }
 
@@ -102,6 +119,12 @@ impl Which {
     pub fn publisher(self) -> &'static str {
         match self {
             Which::Airports => "ourairports.com",
+            // One row, one publisher to name. Several is a list nobody can
+            // read in a caption, so the pane says how many instead.
+            Which::Gateways => match datasets::gateways::HOST_FILES {
+                [one] => one.publisher,
+                _ => "several host files",
+            },
             _ => "radioid.net",
         }
     }
@@ -121,16 +144,21 @@ impl Which {
                  is what turns it into a callsign without asking anybody over the network."
             }
             Which::NxdnIds => "The same registry for NXDN.",
+            Which::Gateways => {
+                "Where the digital voice networks can be reached: the address and port of \
+                 every reflector, and which of its channels carry the mode spoken there."
+            }
         }
     }
 
     fn sources(self) -> Vec<datasets::Source> {
-        use datasets::{airports, radioid};
+        use datasets::{airports, gateways, radioid};
         match self {
             Which::Airports => vec![airports::airports_source(), airports::frequencies_source()],
             Which::Repeaters => vec![radioid::repeaters_source()],
             Which::DmrIds => vec![radioid::users_source()],
             Which::NxdnIds => vec![radioid::nxdn_source()],
+            Which::Gateways => gateways::sources(),
         }
     }
 
@@ -148,6 +176,7 @@ impl Which {
             Which::Repeaters => REPEATERS.read().as_ref().map(|r| r.len()),
             Which::DmrIds => USERS.read().as_ref().map(|u| u.len()),
             Which::NxdnIds => NXDN.read().as_ref().map(|u| u.len()),
+            Which::Gateways => GATEWAYS.read().as_ref().map(|g| g.len()),
         }
     }
 
@@ -174,7 +203,7 @@ impl Work {
     }
 }
 
-static WORK: [Work; 4] = [Work::new(), Work::new(), Work::new(), Work::new()];
+static WORK: [Work; 5] = [Work::new(), Work::new(), Work::new(), Work::new(), Work::new()];
 
 /// A dataset as the settings pane shows it: what is held, how big it is on
 /// disk, when it was last checked, and whatever went wrong last time.
@@ -266,7 +295,7 @@ fn load(which: Which, when: When) {
 /// first step is the download and the second answers 304 straight away; on a
 /// warm one the first step is a file read.
 fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> {
-    use datasets::{airports, radioid};
+    use datasets::{airports, gateways, radioid};
     match which {
         Which::Airports => {
             if airports().is_empty() {
@@ -298,6 +327,14 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
             }
             if let Some(u) = radioid::refresh_nxdn(cache, when)? {
                 *NXDN.write() = Some(Arc::new(u));
+            }
+        }
+        Which::Gateways => {
+            if GATEWAYS.read().is_none() {
+                *GATEWAYS.write() = Some(Arc::new(gateways::load(cache)?));
+            }
+            if let Some(g) = gateways::refresh(cache, when)? {
+                *GATEWAYS.write() = Some(Arc::new(g));
             }
         }
     }
@@ -363,6 +400,11 @@ pub fn fetch_all() {
         datasets::radioid::refresh_users(&cache, When::Now).map(|u| u.is_some()),
         datasets::radioid::load_users(&cache).map(|u| u.len()),
     );
+    each(
+        "gateways",
+        datasets::gateways::refresh(&cache, When::Now).map(|u| u.is_some()),
+        datasets::gateways::load(&cache).map(|g| g.len()),
+    );
 }
 
 fn each(
@@ -426,7 +468,7 @@ mod tests {
             assert!(!w.sources().is_empty(), "{} has no source", w.label());
         }
         let idx: Vec<usize> = Which::ALL.iter().map(|w| w.index()).collect();
-        assert_eq!(idx, [0, 1, 2, 3], "slot indices must be distinct");
+        assert_eq!(idx, [0, 1, 2, 3, 4], "slot indices must be distinct");
         assert_eq!(WORK.len(), Which::ALL.len());
     }
 }

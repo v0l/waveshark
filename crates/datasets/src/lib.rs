@@ -1,5 +1,6 @@
 //! Reference data the receiver reads but does not produce: airports and
-//! their frequencies, the DMR and NXDN registries, and whatever comes next.
+//! their frequencies, the DMR and NXDN registries, the gateways of the
+//! digital voice networks, and whatever comes next.
 //!
 //! None of it is signal, so none of it belongs in the flow graph. What it
 //! shares is a lifecycle: published by somebody else, large enough to be
@@ -10,6 +11,8 @@
 
 pub mod airports;
 pub mod cache;
+pub mod gateways;
+pub mod m17;
 pub mod radioid;
 
 pub use cache::{Cache, Error, Source, Status, When};
