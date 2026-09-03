@@ -2,6 +2,28 @@
 resolver = "2"
 members = [
     "crates/common",
+    "crates/mbe",
+    "crates/dsp",
+    "crates/nodes",
+    "crates/pipeline",
+    "crates/hackrf",
+    "crates/rtlsdr-sys",
+    "crates/rtlsdr",
+    "crates/limesdr-sys",
+    "crates/limesdr",
+    "crates/iqnet",
+    "crates/sources",
+    "crates/decode",
+    "crates/datasets",
+    "crates/app",
+    "crates/audio",
+]
+
+# The MBE vocoder port is opt-in only: its algorithms carry patent
+# restrictions, so nothing builds or links it by default.
+# `cargo test -p mbe` builds and tests it explicitly.
+default-members = [
+    "crates/common",
     "crates/dsp",
     "crates/nodes",
     "crates/pipeline",
