@@ -627,13 +627,9 @@ impl Node for AutoNode {
         let rate = c.inputs[0].spec.rate.max(1.0);
         let out = outputs[OUT_PACKETS].packets_mut();
 
-        // The span-wide decoders see every block.
+        // The sources: find, cut out, and read. The span-wide decoders run
+        // beside them, in the same fanout, once the blocks are known.
         let mut events: Vec<Event> = Vec::new();
-        for m in &mut self.wide {
-            events.extend(m.run(iq, at_us, out));
-        }
-
-        // Then the sources: find, cut out, and read.
         self.events.clear();
         let c0 = self.center.as_f64();
         let exclude = &self.exclude;
@@ -683,37 +679,74 @@ impl Node for AutoNode {
             }
         }
 
-        // One block per source per call, and the sources share nothing, so
-        // the pool takes them all at once.
+        // Every member of every source is a task of its own, not one task
+        // per source: the members share nothing but the block they read, and
+        // per-source tasks left an m17 member decoding voice alone on one
+        // lane while the others sat finished. The span-wide decoders join
+        // the same fanout, since a Mode S correlator over the whole span
+        // costs more than any narrowband member.
         let blocks = &self.blocks;
-        let results: Vec<(usize, Vec<Event>, Vec<Packet>, bool)> = self
-            .slots
-            .par_iter_mut()
-            .enumerate()
-            .filter_map(|(k, slot)| {
-                let b = blocks.iter().find(|b| b.id == slot.id)?;
-                let mut pk = Vec::new();
-                let mut ev = Vec::new();
-                for m in &mut slot.members {
-                    ev.extend(m.run(&b.samples, at_us, &mut pk));
-                }
-                let done = matches!(b.state, SourceState::Closed | SourceState::Superseded);
-                if b.state == SourceState::Closed {
-                    let quiet = vec![C32::new(0.0, 0.0); (FLUSH_S * b.rate) as usize];
-                    for m in &mut slot.members {
-                        ev.extend(m.run(&quiet, at_us, &mut pk));
-                    }
-                }
-                if b.state == SourceState::Superseded {
-                    // A wider stream for the same transmitter takes over
-                    // from its start. Whatever this one made of the sliver it
-                    // had is half a burst, and half a burst is not evidence.
-                    pk.clear();
-                    ev.retain(|e| !matches!(e, Event::Decoded(_)));
-                }
-                Some((k, ev, pk, done))
-            })
-            .collect();
+        let wide = &mut self.wide;
+        let slots = &mut self.slots;
+        let (wide_results, results): (
+            Vec<(Vec<Event>, Vec<Packet>)>,
+            Vec<(usize, Vec<Event>, Vec<Packet>, bool)>,
+        ) = rayon::join(
+            || {
+                wide.par_iter_mut()
+                    .map(|m| {
+                        let mut pk = Vec::new();
+                        let ev = m.run(iq, at_us, &mut pk);
+                        (ev, pk)
+                    })
+                    .collect()
+            },
+            || {
+                slots
+                    .par_iter_mut()
+                    .enumerate()
+                    .filter_map(|(k, slot)| {
+                        let b = blocks.iter().find(|b| b.id == slot.id)?;
+                        // One buffer of silence for the slot; every member
+                        // reads it, none writes it.
+                        let quiet = (b.state == SourceState::Closed)
+                            .then(|| vec![C32::new(0.0, 0.0); (FLUSH_S * b.rate) as usize]);
+                        let per: Vec<(Vec<Event>, Vec<Packet>)> = slot
+                            .members
+                            .par_iter_mut()
+                            .map(|m| {
+                                let mut pk = Vec::new();
+                                let mut ev = m.run(&b.samples, at_us, &mut pk);
+                                if let Some(q) = &quiet {
+                                    ev.extend(m.run(q, at_us, &mut pk));
+                                }
+                                (ev, pk)
+                            })
+                            .collect();
+                        let mut ev = Vec::new();
+                        let mut pk = Vec::new();
+                        for (e2, p2) in per {
+                            ev.extend(e2);
+                            pk.extend(p2);
+                        }
+                        let done =
+                            matches!(b.state, SourceState::Closed | SourceState::Superseded);
+                        if b.state == SourceState::Superseded {
+                            // A wider stream for the same transmitter takes over
+                            // from its start. Whatever this one made of the sliver it
+                            // had is half a burst, and half a burst is not evidence.
+                            pk.clear();
+                            ev.retain(|e| !matches!(e, Event::Decoded(_)));
+                        }
+                        Some((k, ev, pk, done))
+                    })
+                    .collect()
+            },
+        );
+        for (ev, pk) in wide_results {
+            events.extend(ev);
+            out.extend(pk);
+        }
         let mut results = results;
         results.sort_by_key(|(k, ..)| *k);
         let mut closed = Vec::new();
