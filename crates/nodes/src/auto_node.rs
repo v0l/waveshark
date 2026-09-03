@@ -321,6 +321,13 @@ impl AutoNode {
             (Some(d), Some(hz)) => Some((hz - 3.0 * d.bin_hz(), hz + 3.0 * d.bin_hz())),
             _ => None,
         };
+        // And the floor cap left off there: the residual DC is a permanent
+        // hump the cap would otherwise unhide, and reported it is an unknown
+        // at the centre of every span for as long as the receiver runs.
+        if let (Some(d), Some((lo, hi))) = (self.detector.as_mut(), self.spur_band) {
+            let c = self.center.as_f64();
+            d.exempt_from_cap(lo - c, hi - c);
+        }
     }
 
     /// Sources open right now.

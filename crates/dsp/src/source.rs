@@ -73,9 +73,39 @@ pub struct SourceConfig {
     /// cannot be thresholded on its own; four frames bring its spread to a
     /// few dB.
     pub integrate_frames: usize,
-    /// How far back the floor looks, in seconds. Must exceed the longest
-    /// transmission expected, or the transmission is learned as floor.
+    /// How far back the floor looks, in seconds. On its own this must exceed
+    /// the longest transmission expected, or the transmission is learned as
+    /// floor; `floor_cap_db` is what removes that requirement.
     pub floor_memory_s: f64,
+    /// How far a bin's floor may sit above the floor of the bins around it,
+    /// in dB, before it is taken to be a signal rather than noise.
+    ///
+    /// A floor from minimum statistics alone cannot see a carrier that never
+    /// stops: the minimum in its bin is the carrier, so it reads as its own
+    /// noise and its SNR is zero. TETRA base station downlinks are the case
+    /// that showed it, on air continuously and already transmitting before
+    /// the receiver tuned to them, so they were never reported at all. The
+    /// band answers what time cannot: a carrier is a few bins out of
+    /// hundreds, and the bins beside it say what the noise is.
+    ///
+    /// The cap is the headroom left for the floor's own shape across a
+    /// chunk, so it is set by tilt, not by any signal. Filter roll-off,
+    /// tuner gain slope and a distant transmitter's shoulder are a few dB
+    /// over a few hundred kilohertz, and a signal worth reporting is tens.
+    /// Set it high enough that no chunk trips it and the detector goes back
+    /// to minimum statistics alone.
+    pub floor_cap_db: f32,
+    /// Bins the cap's floor is measured over, or zero for an eighth of the
+    /// frame, and never fewer than sixty-four.
+    ///
+    /// The measure is a median, so it holds while the signals in a chunk are
+    /// under half of it: a 25 kHz channel in a chunk of a quarter megahertz
+    /// is a fifteenth. Wider chunks tolerate wider signals and follow the
+    /// floor's shape less closely. A signal that fills its chunk is
+    /// indistinguishable from a noise floor by this test and is left to the
+    /// minimum statistics, which is the right answer for a band nobody can
+    /// see past.
+    pub floor_chunk_bins: usize,
     /// Consecutive frames a run of bins must persist before it is a source.
     pub min_frames: usize,
     /// Silence before a source closes, in microseconds.
@@ -121,6 +151,23 @@ pub struct SourceConfig {
     pub extent_db: f32,
     /// Stopband of the extraction filter, in dB.
     pub atten_db: f64,
+    /// Movement in a candidate's peak power, in dB, before it is taken to be
+    /// a transmission rather than a fixture of the receiver.
+    ///
+    /// Now that a carrier which never stops is no longer absorbed into the
+    /// floor, the receiver's own spurs are not either: the tuner's leakage at
+    /// the centre, a switching supply's harmonic, a bare oscillator. What
+    /// separates those from a transmission is not width or strength but that
+    /// nothing is being sent. A modulated carrier's strongest bin moves by
+    /// several dB from frame to frame however constant its envelope, and an
+    /// unmodulated one does not move at all.
+    ///
+    /// A candidate that has not moved this far is held as a candidate rather
+    /// than discarded, so it opens on the frame it first does. The cost is
+    /// that a genuinely unmodulated carrier, a beacon sending nothing, is
+    /// never reported; it is indistinguishable from a spur by any measure
+    /// this detector has.
+    pub steady_db: f32,
     /// Fewest bins a run must occupy to open a source.
     ///
     /// Two, because nothing keyed is one bin wide, and what is one bin wide
@@ -152,6 +199,8 @@ impl Default for SourceConfig {
             close_db: 5.0,
             integrate_frames: 4,
             floor_memory_s: 2.0,
+            floor_cap_db: 8.0,
+            floor_chunk_bins: 0,
             min_frames: 2,
             hang_us: 20_000,
             guard_bins: 2,
@@ -163,6 +212,7 @@ impl Default for SourceConfig {
             width_margin: 1.5,
             extent_db: 20.0,
             atten_db: 60.0,
+            steady_db: 3.0,
             min_bins: 2,
             regrow: 1.5,
             history_s: 0.3,
@@ -388,6 +438,10 @@ struct Track {
     occ_hi: usize,
     /// Consecutive frames matched, for the candidate stage.
     hits: usize,
+    /// Weakest and strongest the run's peak has been, in dB over the floor,
+    /// which is what says whether anything is being sent.
+    peak_lo: f32,
+    peak_hi: f32,
     /// Consecutive frames unmatched, for the hang.
     misses: usize,
     open: bool,
@@ -429,6 +483,24 @@ pub struct SourceDetector {
     /// Smoothed power per bin, in display order (lowest frequency first).
     power: Vec<f32>,
     floor: FloorBank,
+    /// Ceiling on each bin's floor, from the floor of the bins around it, or
+    /// infinity where there is not enough history to measure one. Applied to
+    /// the minimum before the bias, so a bin whose own minimum is the signal
+    /// standing in it is floored at what its neighbours read instead.
+    cap: Vec<f32>,
+    /// Bins each cap is measured over, and the frame the caps were last
+    /// measured in. Measured once a sub-window, because it answers where the
+    /// noise is and not what is transmitting.
+    cap_bins: usize,
+    cap_at: u64,
+    /// Scratch for the median, kept so a chunk is not allocated per frame.
+    cap_scratch: Vec<f32>,
+    /// Bins the cap leaves alone, where minimum statistics rule as they
+    /// always did. The tuner's residual DC is a permanent hump the cap
+    /// would otherwise unhide and report forever; learned as floor it costs
+    /// nothing, and a real device on the same frequency still opens because
+    /// its silences let the minimum fall to the noise.
+    cap_skip: Option<(usize, usize)>,
     /// The floor as a power, per bin, once measured.
     floor_lin: Vec<f32>,
     /// Smoothed power over the floor, as a ratio; zero before the floor is
@@ -496,6 +568,15 @@ impl SourceDetector {
             alpha,
             power: vec![0.0; n],
             floor: FloorBank::new(n, sub_len, sub_count),
+            cap: vec![f32::INFINITY; n],
+            cap_bins: if cfg.floor_chunk_bins > 0 {
+                cfg.floor_chunk_bins.min(n)
+            } else {
+                (n / 8).clamp(64, n)
+            },
+            cap_at: 0,
+            cap_scratch: Vec::new(),
+            cap_skip: None,
             floor_lin: vec![0.0; n],
             ratio: vec![0.0; n],
             raw_ratio: vec![0.0; n],
@@ -533,6 +614,16 @@ impl SourceDetector {
         if self.bin_hi < self.bin_lo {
             self.bin_hi = self.bin_lo;
         }
+    }
+
+    /// Leave the floor cap off between two offsets from the stream centre,
+    /// for a fixture of the receiver that lives at a known frequency.
+    pub fn exempt_from_cap(&mut self, lo_hz: f64, hi_hz: f64) {
+        let bin = self.bin_hz();
+        let half = (self.n / 2) as f64;
+        let lo = ((lo_hz / bin) + half).floor().max(0.0) as usize;
+        let hi = (((hi_hz / bin) + half).ceil() as usize).min(self.n - 1);
+        self.cap_skip = (lo <= hi).then_some((lo, hi));
     }
 
     pub fn hop(&self) -> usize {
@@ -578,6 +669,8 @@ impl SourceDetector {
         self.consumed = 0;
         self.power.fill(0.0);
         self.floor.reset();
+        self.cap.fill(f32::INFINITY);
+        self.cap_at = 0;
         self.floor_lin.fill(0.0);
         self.ratio.fill(0.0);
         self.raw_ratio.fill(0.0);
@@ -680,6 +773,9 @@ impl SourceDetector {
         let head = self.floor.head;
         let sc = self.floor.sub_count;
         let bias = if measure { floor_bias(alpha, self.floor.frames_after()) } else { 1.0 };
+        if measure {
+            self.measure_caps();
+        }
         const CHUNK: usize = 256;
         self.power
             .par_chunks_mut(CHUNK)
@@ -689,8 +785,10 @@ impl SourceDetector {
             .zip(self.floor_lin.par_chunks_mut(CHUNK))
             .zip(self.ratio.par_chunks_mut(CHUNK))
             .zip(self.raw_ratio.par_chunks_mut(CHUNK))
+            .zip(self.cap.par_chunks(CHUNK))
             .zip(raw.par_chunks(CHUNK))
-            .for_each(|(((((((power, current), min), mins), floor), ratio), raw_ratio), raw)| {
+            .for_each(
+                |((((((((power, current), min), mins), floor), ratio), raw_ratio), cap), raw)| {
                 for i in 0..power.len() {
                     let p = raw[i];
                     if silent {
@@ -717,7 +815,7 @@ impl SourceDetector {
                         head,
                         stored,
                     );
-                    let f = m * bias;
+                    let f = m.min(cap[i]) * bias;
                     if f > 0.0 && f.is_finite() {
                         floor[i] = f;
                         ratio[i] = power[i] / f;
@@ -728,7 +826,8 @@ impl SourceDetector {
                         raw_ratio[i] = 0.0;
                     }
                 }
-            });
+                },
+            );
         if measure {
             self.floor.advance();
         }
@@ -736,6 +835,46 @@ impl SourceDetector {
         self.segment();
         self.track();
         self.frame += 1;
+    }
+
+    /// Set each bin's ceiling from the median floor of the chunk it is in.
+    ///
+    /// The median is taken over the minimum statistics rather than over this
+    /// frame's power, so a burst passing through a chunk cannot lift the
+    /// ceiling for the bins beside it, and the number it produces is the one
+    /// the rest of the floor is already expressed in.
+    fn measure_caps(&mut self) {
+        let refresh = self.floor.sub_len as u64;
+        if self.cap_at != 0 && self.frame < self.cap_at + refresh {
+            return;
+        }
+        // Nothing complete yet: the running minimum is still falling towards
+        // the noise, and a ceiling from it would be measured on a floor that
+        // is about to move.
+        if self.floor.stored == 0 {
+            return;
+        }
+        self.cap_at = self.frame.max(1);
+        let ratio = 10f32.powf(self.cfg.floor_cap_db / 10.0);
+        let width = self.cap_bins.max(1);
+        let mut lo = self.bin_lo;
+        while lo <= self.bin_hi {
+            let hi = (lo + width - 1).min(self.bin_hi);
+            self.cap_scratch.clear();
+            self.cap_scratch.extend(self.floor.min[lo..=hi].iter().copied().filter(|m| m.is_finite()));
+            let cap = if self.cap_scratch.is_empty() {
+                f32::INFINITY
+            } else {
+                let k = self.cap_scratch.len() / 2;
+                let (_, med, _) = self.cap_scratch.select_nth_unstable_by(k, f32::total_cmp);
+                *med * ratio
+            };
+            self.cap[lo..=hi].fill(cap);
+            lo = hi + 1;
+        }
+        if let Some((lo, hi)) = self.cap_skip {
+            self.cap[lo..=hi.min(self.n - 1)].fill(f32::INFINITY);
+        }
     }
 
     /// A bin's smoothed power above the floor, as a weight for the centroid
@@ -942,6 +1081,8 @@ impl SourceDetector {
                     t.src.frames += 1;
                 }
                 t.src.peak_snr_db = t.src.peak_snr_db.max(s.peak_db);
+                t.peak_lo = t.peak_lo.min(s.peak_db);
+                t.peak_hi = t.peak_hi.max(s.peak_db);
                 if !t.open {
                     t.centroid_sum += s.centroid;
                     t.centroid_n += 1;
@@ -974,6 +1115,8 @@ impl SourceDetector {
                 occ_lo: s.occ_lo,
                 occ_hi: s.occ_hi,
                 hits: 1,
+                peak_lo: s.peak_db,
+                peak_hi: s.peak_db,
                 misses: 0,
                 open: false,
                 last_frame: self.frame,
@@ -1020,6 +1163,7 @@ impl SourceDetector {
         // moving, and updated from whatever the track saw this frame.
         let hop = self.hop as u64;
         let min_frames = self.cfg.min_frames;
+        let steady_db = self.cfg.steady_db;
         let hang = self.hang_frames;
         let regrow = self.cfg.regrow;
         let integrate = self.cfg.integrate_frames.max(1);
@@ -1061,7 +1205,7 @@ impl SourceDetector {
                 } else {
                     t.src.lo_hz = lo_hz;
                     t.src.hi_hz = hi_hz;
-                    if t.hits >= min_frames {
+                    if t.hits >= min_frames && t.peak_hi - t.peak_lo >= steady_db {
                         t.open = true;
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = (c + 0.5 - (n / 2) as f64) * bin_hz;
@@ -1416,6 +1560,40 @@ mod tests {
             .collect()
     }
 
+    /// A phase-keyed carrier at `hz`, `baud` symbols a second: a TETRA
+    /// downlink's shape, which is what the bare tone that `tone` gives is
+    /// not. The envelope is constant and the spectrum moves, and both
+    /// matter. A detector tells a transmission from the receiver's own
+    /// leakage by the spectrum moving, and a carrier whose envelope fades
+    /// would close and reopen on its own fades rather than on the air.
+    fn modulated(n: usize, hz: f64, baud: f64, rate: f64, amp: f32, seed: u64) -> Vec<C32> {
+        let hold = (rate / baud).round().max(1.0) as usize;
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut out = Vec::with_capacity(n);
+        let mut phase = 0.0f64;
+        let mut step = 0.0f64;
+        for i in 0..n {
+            if i % hold == 0 {
+                // Quarter turns, as pi/4-DQPSK keys, and turned into over
+                // the symbol rather than jumped. An unshaped jump every few
+                // dozen samples is a spectrum tens of times wider than the
+                // keying, and the detector rightly reopens it at that width.
+                step = std::f64::consts::FRAC_PI_4 * (1.0 + 2.0 * (next() * 4.0).floor())
+                    / hold as f64;
+            }
+            phase += step;
+            let ph = std::f64::consts::TAU * hz * i as f64 / rate + phase;
+            out.push(C32::new(amp * ph.cos() as f32, amp * ph.sin() as f32));
+        }
+        out
+    }
+
     const RATE: f64 = 1_000_000.0;
 
     fn cfg() -> SourceConfig {
@@ -1643,6 +1821,48 @@ mod tests {
         }
         assert_eq!(closed, 0);
         assert_eq!(d.live().count(), 1);
+    }
+
+    #[test]
+    fn a_carrier_already_on_when_the_stream_starts_is_found() {
+        // A TETRA base station downlink is on before the receiver tunes to
+        // it and stays on. Nothing in the stream is that bin without it, so
+        // minimum statistics have nothing to measure and the bins beside it
+        // are the only thing that says what the noise is.
+        let mut d = SourceDetector::new(RATE, RATE, cfg());
+        let mut x = noise(4_000_000, 0.05, 31);
+        for (i, s) in modulated(4_000_000, 50_000.0, 18_000.0, RATE, 0.3, 32).iter().enumerate() {
+            x[i] += *s;
+        }
+        let mut opened = 0;
+        for chunk in x.chunks(8192) {
+            opened += d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
+        }
+        assert!(opened > 0, "a permanent carrier never opened a source");
+    }
+
+    #[test]
+    fn a_carrier_outlasting_the_floor_memory_stays_open() {
+        // Same detector, carrier starting after the floor has been learned
+        // and running far longer than the memory.
+        let mut d = SourceDetector::new(RATE, RATE, cfg());
+        let mut x = noise(5_000_000, 0.05, 33);
+        for (i, s) in modulated(4_000_000, 50_000.0, 18_000.0, RATE, 0.3, 34).iter().enumerate() {
+            x[1_000_000 + i] += *s;
+        }
+        let mut opened = 0;
+        let mut closed = 0;
+        for chunk in x.chunks(8192) {
+            for e in d.process(chunk) {
+                match e {
+                    SourceEvent::Opened(_) => opened += 1,
+                    SourceEvent::Closed(_) => closed += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(opened, 1, "opened {opened}");
+        assert_eq!(closed, 0, "the carrier was learned as floor and closed under it");
     }
 
     #[test]

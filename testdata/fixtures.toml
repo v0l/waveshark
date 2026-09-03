@@ -155,3 +155,44 @@ from = "OPNRTX"
 to = "BROADCAST"
 channel_hz = 433_475_000
 frames_min = 20
+
+[[capture]]
+name = "tetra_downlink_391.5M_2400k.cu8"
+sha256 = "07561095d12f3a8605ce0acf6ef2b5dde093d366806b65e6b87af56e8b7c9df8"
+url = "https://nostr.download/07561095d12f3a8605ce0acf6ef2b5dde093d366806b65e6b87af56e8b7c9df8.xz"
+compression = "xz"
+center_hz = 391_500_000
+rate_sps = 2_400_000
+format = "cu8"
+description = """
+Twelve seconds of the TETRA downlink band, HackRF One at 52 dB of tuner gain,
+holding two base station carriers: 391.181 MHz and 391.7045 MHz, both about 16
+kHz wide and both transmitting for every frame of the capture. Measured with an
+independent FFT rather than by this code, they sit 30 to 33 dB over the median
+noise across the span, which is far more than any threshold in the receiver
+asks for.
+
+The receiver reports neither. That is what the capture is evidence of: the
+source detector estimates its noise floor as a per-bin sliding minimum over
+`floor_memory_s`, so a carrier that never stops becomes its own floor and its
+SNR reads zero. Here the carriers are already on when the capture starts, so
+they are in the floor before the detector has ever seen those bins empty and
+they are never reported at all. The synthesised equivalent passes, because the
+test that covers a continuous carrier runs one shorter than the memory.
+
+Nothing decodes TETRA, so the assertion is detection and only detection: a
+source opened within half a channel of each carrier. If a later change makes
+the receiver report a third carrier here, check it against the spectrum before
+assuming a regression; the band has weaker traffic in it that comes and goes.
+
+Recorded 2026-09-03 near the receiver in docs/design.md, DC blocker on, at a
+gain chosen so the peak sits 20 dB below full scale with no clipping. An
+earlier attempt at the default 32 dB put the carriers at under one ADC code
+and is not what is uploaded here.
+"""
+
+[capture.expect]
+carrier_hz = [391_181_000, 391_704_500]
+tolerance_hz = 12_500
+snr_min_db = 20
+always_on = true

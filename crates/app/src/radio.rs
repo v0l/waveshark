@@ -2218,6 +2218,40 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    fn tetra_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/tetra_downlink_391.5M_2400k.cu8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// Two TETRA base station downlinks, on for every one of the capture's
+    /// ten seconds, that the receiver never reports.
+    #[test]
+    fn a_permanent_tetra_downlink_is_found() {
+        let Some(buf) = tetra_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let mut seen: Vec<(f64, f32)> = Vec::new();
+        for block in buf.samples.chunks(16_384) {
+            if rx.process(block).is_err() {
+                break;
+            }
+            for s in rx.live_sources() {
+                if !seen.iter().any(|(hz, _)| (hz - s.center_hz).abs() < 12_500.0) {
+                    seen.push((s.center_hz, s.snr_db));
+                }
+            }
+        }
+        let near = |hz: f64| seen.iter().any(|(c, _)| (c - hz).abs() < 12_500.0);
+        assert!(near(391_181_000.0), "391.181 MHz was never opened: {seen:?}");
+        assert!(near(391_704_500.0), "391.7045 MHz was never opened: {seen:?}");
+    }
+
     #[test]
     fn an_m17_handheld_on_a_busy_band_is_found_and_read() {
         // Synthesised M17 does not fail the way this capture did. A generated
