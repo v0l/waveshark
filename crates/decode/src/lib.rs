@@ -22,6 +22,7 @@ pub mod bds;
 pub mod bits;
 pub mod m17;
 pub mod gpu;
+pub mod keystream;
 pub mod recover;
 pub mod tea;
 pub mod vocoder;

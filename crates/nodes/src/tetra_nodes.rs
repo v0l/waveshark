@@ -158,6 +158,27 @@ pub struct TetraNode {
     /// Message signatures whose whole-space search exhausted: never gathered
     /// or searched again.
     dead_sigs: std::collections::HashSet<u64>,
+    /// Ciphertexts seen per IV, watching for a timestamp that comes round
+    /// again with different traffic: the keystream re-use that reads a frame
+    /// of any cipher without its key (TETRA:BURST section 5.1).
+    reuse: decode::keystream::ReuseWatch,
+    /// Keystream recovered for an IV, by IV. A crib on one frame at a re-used
+    /// timestamp reads every frame there; empty until a crib is available.
+    keystreams: HashMap<u32, Vec<u8>>,
+    /// Timestamps caught carrying two different frames under one IV: the
+    /// keystream cancelled, so `xor` is `m1 ^ m2`, a crib-drag surface that
+    /// reads either frame once one plaintext is known. What a key manager
+    /// shows as recoverable-by-crib, for any cipher.
+    reuse_pairs: Vec<decode::keystream::Reuse>,
+    /// A session hyperframe counter. The absolute hyperframe is broadcast in
+    /// SYSINFO but not parsed here; without it, IVs would repeat every ~61 s
+    /// as the multiframe wraps and every wrap would look like key re-use. So
+    /// the IV carries a count of multiframe wraps since lock instead, which
+    /// is monotonic within a session and never falsely collides. It is not
+    /// the cell's real hyperframe, so it cannot match one across sessions:
+    /// cross-session re-use detection needs the SYSINFO field, not this.
+    hyperframe: u16,
+    last_multiframe: Option<u8>,
     /// The slot counter as of the last burst, for reaping traffic whose
     /// marker stopped appearing.
     slot_now: u64,
@@ -198,6 +219,11 @@ impl TetraNode {
             gpu: GpuSearch::new().map(Arc::new),
             recovery: None,
             dead_sigs: std::collections::HashSet::new(),
+            reuse: decode::keystream::ReuseWatch::new(),
+            keystreams: HashMap::new(),
+            reuse_pairs: Vec::new(),
+            hyperframe: 0,
+            last_multiframe: None,
             slot_now: 0,
             accepted: 0,
         }
@@ -424,6 +450,42 @@ impl TetraNode {
             return;
         }
         let Some(time) = self.rx.time_at(slot) else { return };
+
+        // Advance the session hyperframe on a multiframe wrap, so the IV a
+        // re-use is keyed by does not roll over every ~61 s.
+        if let Some(prev) = self.last_multiframe {
+            if time.multiframe < prev {
+                self.hyperframe = self.hyperframe.wrapping_add(1);
+            }
+        }
+        self.last_multiframe = Some(time.multiframe);
+
+        // Watch for the same IV coming round with different traffic: that is
+        // keystream re-use, and reads any cipher given a crib. Tagged by the
+        // addressed party so a re-decode of one frame is not mistaken for it.
+        let full_ts = Timestamp {
+            tn: time.tn,
+            frame: time.frame,
+            multiframe: time.multiframe,
+            hyperframe: self.hyperframe,
+            uplink: false,
+        };
+        let tag = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            c.address.hash(&mut h);
+            h.finish()
+        };
+        if let Some(re) = self.reuse.observe(&full_ts, c.cipher.clone(), tag) {
+            // A re-used IV: the keystream cancels across the pair. Without a
+            // crib nothing is decrypted, so the pair is kept for one to be
+            // applied later rather than claimed as plaintext now. Bounded so
+            // a long run does not grow it without limit.
+            if self.reuse_pairs.len() < 256 {
+                self.reuse_pairs.push(re);
+            }
+        }
+
         let ct: Vec<u8> = c.cipher[..4].to_vec();
 
         // The signature that says two frames are the same message, hence the
@@ -525,6 +587,30 @@ impl TetraNode {
     /// to show and persist it.
     pub fn recovered_key(&self, colour: u8) -> Option<Key> {
         self.keys.get(&colour).copied()
+    }
+
+    /// Timestamps caught re-using one keystream across two frames. Each is a
+    /// crib-drag surface (`m1 ^ m2`) that reads either frame once a plaintext
+    /// is known, for any cipher; what a key manager offers for a crib.
+    pub fn reuse_pairs(&self) -> &[decode::keystream::Reuse] {
+        &self.reuse_pairs
+    }
+
+    /// Apply a known plaintext to a re-used IV: recover its keystream and keep
+    /// it, so every frame seen at that timestamp can be decrypted. Returns
+    /// the keystream. This is the crib that turns a [`reuse_pairs`] entry
+    /// into readable traffic, for TEA2 as much as TEA1.
+    ///
+    /// [`reuse_pairs`]: Self::reuse_pairs
+    pub fn apply_crib(&mut self, iv: u32, ciphertext: &[u8], known_plaintext: &[u8]) -> Vec<u8> {
+        let ks = decode::keystream::keystream_from_known(ciphertext, known_plaintext);
+        self.keystreams.insert(iv, ks.clone());
+        ks
+    }
+
+    /// The keystream recovered for an IV by a crib, if any.
+    pub fn keystream_for(&self, iv: u32) -> Option<&[u8]> {
+        self.keystreams.get(&iv).map(|k| k.as_slice())
     }
 }
 
@@ -724,6 +810,11 @@ impl Node for TetraNode {
         self.collisions.clear();
         self.recovery = None;
         self.dead_sigs.clear();
+        self.reuse = decode::keystream::ReuseWatch::new();
+        self.keystreams.clear();
+        self.reuse_pairs.clear();
+        self.hyperframe = 0;
+        self.last_multiframe = None;
     }
 }
 
@@ -1026,5 +1117,69 @@ mod tests {
         let secs: f64 = get(traffic[1], "seconds").unwrap().parse().unwrap();
         let want = 29.0 * 4.0 * 255.0 / 18_000.0;
         assert!((secs - want).abs() < 0.2, "{secs} s of traffic, wanted about {want:.2}");
+    }
+
+    /// The cipher-agnostic passive path: one IV seen twice with different
+    /// traffic is keystream re-use, and a crib on one frame reads the other,
+    /// whatever the cipher. Built with TEA2, which no key search touches.
+    #[test]
+    fn a_reused_timestamp_is_caught_and_a_crib_reads_it() {
+        use decode::keystream::{keystream_from_known, xor};
+        use decode::tea::{keystream, Key};
+        use dsp::tetra::{Cell, TdmaTime};
+
+        let mut node = TetraNode::new(390_000_000.0);
+        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
+        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        node.last_aie = 3;
+
+        // Two calls at the same slot (hence same IV here, hyperframe 0),
+        // addressed to different parties, both TEA2 under one keystream.
+        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 0, uplink: false };
+        let ks = keystream(&Key::Tea2([9u8; 10]), &ts, 10);
+        let m1 = b"ABCDEFGHIJ";
+        let m2 = b"0123456789";
+        let enc = |m: &[u8]| xor(m, &ks);
+
+        let call = |ssi: u32, ct: Vec<u8>| CallPdu {
+            pdu: RESOURCE,
+            address: Address::Ssi(ssi),
+            aie: 3,
+            e2e: None,
+            speech: None,
+            call_id: None,
+            from: None,
+            group: None,
+            time: None,
+            alloc: None,
+            marker: None,
+            seconds: 0.0,
+            text: None,
+            cipher: ct,
+        };
+
+        // Same slot counter would be one frame; use two slots a multiframe
+        // apart so the clock is identical (tn/frame/multiframe) but the
+        // frames are distinct traffic. time_at advances from the seed, so
+        // pick slots that land on the same (tn,frame,multiframe).
+        node.collect_collision(&call(111, enc(m1)), 0);
+        // 4 slots = 1 frame; 18 frames = 1 multiframe; 60 multiframes wrap.
+        // One full multiframe cycle is 4*18*60 = 4320 slots, returning to the
+        // same (tn,frame,multiframe).
+        node.collect_collision(&call(222, enc(m2)), 4320);
+
+        let pairs = node.reuse_pairs();
+        assert_eq!(pairs.len(), 1, "the re-used IV was caught");
+        // m1 ^ m2 with the keystream gone.
+        assert_eq!(pairs[0].xor, xor(m1, m2));
+        // A crib of m1 reads m2 off the pair, no key, no cipher.
+        assert_eq!(xor(&pairs[0].xor, m1), m2);
+
+        // And applying the crib recovers the keystream for that IV.
+        let iv = pairs[0].iv;
+        let (ct1, ct2) = (pairs[0].a.clone(), pairs[0].b.clone());
+        let ks_rec = node.apply_crib(iv, &ct1, m1);
+        assert_eq!(ks_rec, keystream_from_known(&ct1, m1));
+        assert_eq!(xor(&ct2, node.keystream_for(iv).unwrap()), m2);
     }
 }
