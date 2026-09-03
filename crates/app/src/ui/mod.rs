@@ -493,7 +493,9 @@ impl App {
         }
         self.pending_radio = None;
         for (name, mode) in &want.gains {
-            if controls.stages.iter().any(|(s, _)| &s.name == name) {
+            // "tuner" is not a stage the radio lists: it is the one number a
+            // driver distributes across the stages it does have.
+            if name == "tuner" || controls.stages.iter().any(|(s, _)| &s.name == name) {
                 self.send(Cmd::GainStage(name.clone(), *mode));
             }
         }
@@ -562,6 +564,28 @@ impl App {
     pub fn set_capture(&mut self, on: bool) {
         self.capture = on;
         self.send(Cmd::CaptureIq(on));
+    }
+
+    /// Ask the tuner for a total gain, distributed across whatever stages the
+    /// radio has. Applied once the device reports its controls, the same way
+    /// a saved setting is.
+    pub fn set_rf_gain(&mut self, db: f32) {
+        let s = self.pending_radio.get_or_insert_with(|| self.saved.clone());
+        s.gains.retain(|(n, _)| n != "tuner");
+        s.gains.push(("tuner".into(), common::GainMode::Manual(db)));
+    }
+
+    /// Start on the radio whose label contains `want`, for when several are
+    /// plugged in and the saved one is not the one wanted.
+    pub fn set_device(&mut self, want: &str) {
+        let w = want.to_lowercase();
+        match self.devices.iter().find(|d| d.label.to_lowercase().contains(&w)) {
+            Some(d) => self.device = Some(d.clone()),
+            None => {
+                let have: Vec<&str> = self.devices.iter().map(|d| d.label.as_str()).collect();
+                eprintln!("no radio matching {want:?}; attached: {have:?}");
+            }
+        }
     }
 
     /// Pick the span closest to `hz`, narrowing in software if the radio

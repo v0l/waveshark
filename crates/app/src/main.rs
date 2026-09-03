@@ -615,6 +615,10 @@ struct Args {
     #[arg(long, value_name = "NAME")]
     device: Option<String>,
 
+    /// Total tuner gain in dB, distributed across the radio's stages
+    #[arg(long, value_name = "DB")]
+    rf_gain: Option<f32>,
+
     /// Offer an iqstream server as a radio, as host or host:port. Repeatable,
     /// and added to whatever the session already holds
     #[arg(long, value_name = "HOST")]
@@ -923,6 +927,12 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(move |cc| {
             let mut app = ui::App::new(cc);
+            if let Some(name) = &args.device {
+                app.set_device(name);
+            }
+            if let Some(db) = args.rf_gain {
+                app.set_rf_gain(db);
+            }
             if let Some(khz) = args.span {
                 app.set_span(khz * 1e3);
             }
