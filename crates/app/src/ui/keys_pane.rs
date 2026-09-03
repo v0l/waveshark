@@ -167,5 +167,6 @@ fn recovery_label(r: Recovery) -> Option<(String, Color32)> {
         Recovery::Exhausted { dropped } => {
             Some((format!("no TEA1 key ({dropped} tried)"), theme::LEGEND))
         }
+        Recovery::NotTea1 => Some(("not TEA1 (TEA2/3): key must be entered".into(), theme::READOUT)),
     }
 }

@@ -74,6 +74,11 @@ const TRAFFIC_CONFIRM: u32 = 2;
 /// worth starting: three leaves no candidate over the whole register space.
 const COLLISION_QUORUM: usize = 3;
 
+/// Whole-space searches that must exhaust on one cell before TEA1 is ruled
+/// out. Each is a genuine equal-plaintext set that a TEA1 key would have
+/// satisfied, so a handful failing is strong evidence the cipher is not TEA1.
+const TEA1_RULED_OUT: usize = 4;
+
 /// Where the TEA1 key search is for a cell, so the manager can show it
 /// happening rather than only its result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +93,11 @@ pub enum Recovery {
     /// The search swept the whole space and found nothing: not a TEA1 key,
     /// or the wrong hyperframe. `dropped` messages have been given up on.
     Exhausted { dropped: usize },
+    /// Enough genuine searches on this cell have swept the whole space and
+    /// found nothing that TEA1 is ruled out: the cell is TEA2 or TEA3, whose
+    /// keys this cannot recover. A verdict, not a phase; it does not change
+    /// unless a key is entered by hand.
+    NotTea1,
 }
 
 /// What a TETRA front end reports about the cell it hears and its key, for a
@@ -193,6 +203,10 @@ pub struct TetraNode {
     /// Message signatures whose whole-space search exhausted: never gathered
     /// or searched again.
     dead_sigs: std::collections::HashSet<u64>,
+    /// Whole-space searches that exhausted on this cell's colour. Past
+    /// [`TEA1_RULED_OUT`] of them, TEA1 is not the cipher: it would have been
+    /// found by now on real retransmissions, so the cell is TEA2/3.
+    exhausted: usize,
     /// Ciphertexts seen per IV, watching for a timestamp that comes round
     /// again with different traffic: the keystream re-use that reads a frame
     /// of any cipher without its key (TETRA:BURST section 5.1).
@@ -254,6 +268,7 @@ impl TetraNode {
             gpu: GpuSearch::new().map(Arc::new),
             recovery: None,
             dead_sigs: std::collections::HashSet::new(),
+            exhausted: 0,
             reuse: decode::keystream::ReuseWatch::new(),
             keystreams: HashMap::new(),
             reuse_pairs: Vec::new(),
@@ -287,6 +302,9 @@ impl TetraNode {
 
     /// Where the key search is, for the manager to show.
     fn recovery_phase(&self) -> Recovery {
+        if self.exhausted >= TEA1_RULED_OUT {
+            return Recovery::NotTea1;
+        }
         if let Some((_, _, job)) = &self.recovery {
             return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_)) };
         }
@@ -513,6 +531,10 @@ impl TetraNode {
         if c.aie == 0 || c.cipher.len() < 4 {
             return;
         }
+        // TEA1 already ruled out on this cell: gathering more is wasted work.
+        if self.exhausted >= TEA1_RULED_OUT {
+            return;
+        }
         let Some(cell) = self.rx.cell else { return };
         // A key is already known: nothing to recover.
         if self.keys.contains_key(&cell.colour) {
@@ -638,6 +660,14 @@ impl TetraNode {
                 self.recovery = None;
                 self.dead_sigs.insert(sig);
                 self.collisions.remove(&sig);
+                self.exhausted += 1;
+                // Once TEA1 is ruled out, stop spending the GPU on a cipher
+                // this cannot crack: drop what was gathered and do not start
+                // another search. A hand-entered key is the only way in then.
+                if self.exhausted >= TEA1_RULED_OUT {
+                    self.collisions.clear();
+                    return None;
+                }
                 // Hand the search slot to the next message already at quorum.
                 if let Some(cell) = self.rx.cell {
                     if let Some((&next, frames)) =
@@ -879,6 +909,7 @@ impl Node for TetraNode {
         self.collisions.clear();
         self.recovery = None;
         self.dead_sigs.clear();
+        self.exhausted = 0;
         self.reuse = decode::keystream::ReuseWatch::new();
         self.keystreams.clear();
         self.reuse_pairs.clear();
@@ -1250,5 +1281,29 @@ mod tests {
         let ks_rec = node.apply_crib(iv, &ct1, m1);
         assert_eq!(ks_rec, keystream_from_known(&ct1, m1));
         assert_eq!(xor(&ct2, node.keystream_for(iv).unwrap()), m2);
+    }
+
+    /// Enough exhausted searches on a cell become a standing verdict that
+    /// the cipher is not TEA1, so the manager stops looking as if it might
+    /// still crack. Driven through the exhausted count directly; a real
+    /// 2^32 sweep is far too slow for a test.
+    #[test]
+    fn repeated_exhaustion_rules_out_tea1() {
+        use dsp::tetra::{Cell, TdmaTime};
+        let mut node = TetraNode::new(390_000_000.0);
+        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
+        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        node.last_aie = 3;
+
+        node.exhausted = TEA1_RULED_OUT - 1;
+        assert!(
+            !matches!(node.key_status().unwrap().recovery, Recovery::NotTea1),
+            "one more search still worth trying"
+        );
+        node.exhausted = TEA1_RULED_OUT;
+        assert!(
+            matches!(node.key_status().unwrap().recovery, Recovery::NotTea1),
+            "TEA1 ruled out after enough exhaustion"
+        );
     }
 }
