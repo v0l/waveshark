@@ -520,11 +520,13 @@ mod tests {
         for block in [&quiet[..], iq, &quiet[..]] {
             for chunk in block.chunks(65_536) {
                 let input = Payload::Iq(chunk.to_vec());
-                let mut out = Payload::Packets(Vec::new());
+                // Packets and speech: the node has a port for each.
+                let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-                node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
-                if let Payload::Packets(ps) = out {
+                node.process(&[&input], &mut out, &mut ctx).unwrap();
+                let [packets, _] = out;
+                if let Payload::Packets(ps) = packets {
                     frames.extend(ps.into_iter().filter_map(|p| match p.body {
                         common::PacketBody::Frame(b) => Some(b),
                         _ => None,
@@ -672,12 +674,16 @@ mod tests {
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             for chunk in block.chunks(65_536) {
                 let input = Payload::Iq(chunk.to_vec());
-                let mut out = Payload::Packets(Vec::new());
+                let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-                node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
-                live += node.voice_now().len();
-                if let Payload::Packets(ps) = out {
+                node.process(&[&input], &mut out, &mut ctx).unwrap();
+                // What a listener hears is what leaves on the voice port.
+                let [packets, voice] = out;
+                if let Payload::Voice(vs) = voice {
+                    live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
+                }
+                if let Payload::Packets(ps) = packets {
                     for p in ps {
                         if p.audio.is_some() {
                             speech = p.audio;
