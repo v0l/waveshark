@@ -619,9 +619,11 @@ pub const DEFAULT_TEXT: &str = "\
 # `auto` finds and decodes everything in the block's band on its own: sources
 # wherever something transmits, each measured for centre and width and read
 # as its own stream, plus the span-wide decoders (Mode S, AIS) where the band
-# reaches the frequency they are for. It costs what is transmitting in the
-# band, so the band is what keeps it real-time: an ISM allocation, not the
-# whole of what a wideband radio samples. `banks` is the older fixed grid of
+# reaches the frequency they are for. That is why there is no M17 block: M17
+# runs wherever an amateur puts it, so a block naming one channel would read
+# that channel and miss every other, while `auto` reads it wherever it is.
+# It costs what is transmitting in the band, so the band is what keeps it
+# real-time: an ISM allocation, not the whole of what a wideband radio samples. `banks` is the older fixed grid of
 # channels at the widths listed, kept for comparison.
 
 [ADS-B]
@@ -657,19 +659,6 @@ range    = 439.9 - 440.1 MHz
 span     = 100 kHz
 front    = pocsag
 channels = 439.9875 MHz
-margin   = 12.5 kHz
-
-[M17]
-# M17 is 4-FSK at 4800 baud with an open codec, so a transmission reports who
-# called whom, and a packet-mode message reports its text. There is no band to
-# sweep here: the front end is one demodulator on one channel, so the channels
-# are listed and each one the span covers gets its own. 433.475 is the Region 1
-# calling frequency; add the repeater outputs you can hear and widen the range
-# to take them in.
-range    = 433.4 - 433.55 MHz
-span     = 100 kHz
-front    = m17
-channels = 433.475 MHz
 margin   = 12.5 kHz
 
 [TETRA]
@@ -739,8 +728,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "M17", "TETRA", "ISM 433", "ISM 868",
-                "ISM 315"
+                "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 433", "ISM 868", "ISM 315"
             ]
         );
     }
@@ -756,13 +744,10 @@ mod tests {
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
         assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
         assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::Pocsag(439_987_500.0)]);
-        // A 2.4 MS/s span on the ISM band reaches the M17 calling channel
-        // 445 kHz below it, so both run: the receiver is sampling it either
-        // way, and the dial is only where somebody is looking.
-        assert_eq!(
-            fronts(433_920_000.0, 2_400_000.0),
-            [Front::M17(433_475_000.0), Front::Auto]
-        );
+        // M17 has no channel of its own to list: it runs wherever an amateur
+        // puts it, and `auto` finds it there. A block naming one frequency
+        // would decode that frequency and miss every other.
+        assert_eq!(fronts(433_920_000.0, 2_400_000.0), [Front::Auto]);
         assert_eq!(fronts(433_920_000.0, 250_000.0), [Front::Auto]);
         assert_eq!(fronts(868_300_000.0, 2_400_000.0), [Front::Auto]);
         // The TETRA downlinks, where the detector finds carriers it cannot
