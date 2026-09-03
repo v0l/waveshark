@@ -22,6 +22,7 @@ iqnet.workspace = true
 sources.workspace = true
 nodes.workspace = true
 decode.workspace = true
+datasets.workspace = true
 pipeline.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true

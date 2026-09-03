@@ -440,9 +440,37 @@ destination callsign, abusing an address field to carry latitude digits because
 a frame has to have a destination anyway. Most vehicle trackers send Mic-E, so
 a decoder without it misses most of what moves.
 
-The airports and their frequencies drawn under the aircraft are a bundled slice
-of the public-domain OurAirports dataset (`crates/app/data/`), not something
-fetched at runtime.
+The airports and their frequencies drawn under the aircraft come from the
+public-domain OurAirports dataset through the dataset cache described below.
+
+## Cached datasets
+
+Airports, the DMR repeater list and the DMR and NXDN ID registries are all the
+same kind of thing: published by somebody else, large, and stale eventually.
+`crates/datasets` is the one mechanism for them. A `Source` says where a file
+comes from and how often it is worth asking whether it changed, `Cache` keeps
+it under `$XDG_CACHE_HOME/waveshark/data` with an entity tag and a
+modification date beside it, and a refresh is a conditional GET that usually
+answers 304 and transfers nothing.
+
+A source is not required to be a URL: `Fetch` is the interface, and a local
+file revalidated on its mtime implements it too, which is how the tests run
+without a network.
+
+Everything is done in paths rather than buffers, because the DMR user dump is
+85 MB of JSON and holding the download and the parse of it at once is a quarter
+of a gigabyte for a callsign lookup. A download streams into a temporary beside
+the target and is renamed into place, so a run killed halfway leaves the
+previous copy rather than a truncated file, and the recorded length is checked
+against the file so a short one is never served as complete.
+
+An earlier build shipped a filtered slice of northern Europe in the binary,
+which made a release the only way to fix a wrong frequency and left a receiver
+anywhere else looking at an empty map. `crates/app/src/data.rs` loads the
+airports on a background thread at startup and holds the registries until
+something asks for one; `--fetch-data` downloads or revalidates the lot and
+prints what it found, for warming the cache before going somewhere without a
+connection.
 
 ## POCSAG
 

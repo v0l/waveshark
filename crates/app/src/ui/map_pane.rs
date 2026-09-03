@@ -245,7 +245,7 @@ impl App {
         // Hover over an airport to read its frequencies. The card is drawn on
         // the map painter after everything else, so it sits over the tiles and
         // the aircraft instead of vanishing behind them.
-        if view.zoom >= crate::airports::SHOW_ZOOM && !resp.dragged() {
+        if view.zoom >= crate::data::SHOW_ZOOM && !resp.dragged() {
             if let Some(pos) = resp.hover_pos() {
                 if let Some((at, a)) = Self::hovered_airport(&airports_shown, pos) {
                     Self::airport_card(&clip, rect, at, a);
@@ -390,7 +390,7 @@ impl App {
     ///
     /// Returns the on-screen markers, so the caller can hit-test the pointer
     /// against them for the frequency tooltip. Airports appear only once the
-    /// map is zoomed in past [`crate::airports::SHOW_ZOOM`]; at the default
+    /// map is zoomed in past [`crate::data::SHOW_ZOOM`]; at the default
     /// wide view a marker is a blob under the traffic, and the range rings
     /// already say where the interesting things are.
     fn draw_airports(
@@ -398,13 +398,13 @@ impl App {
         rect: Rect,
         zoom: f64,
         to_screen: impl Fn(f64, f64) -> Pos2,
-    ) -> Vec<(Pos2, &'static crate::airports::Airport)> {
-        if zoom < crate::airports::SHOW_ZOOM {
+    ) -> Vec<(Pos2, &'static datasets::airports::Airport)> {
+        if zoom < crate::data::SHOW_ZOOM {
             return Vec::new();
         }
         // Cull to the window, plus room for a label hanging over an edge.
         let near = rect.expand(30.0);
-        let mut shown: Vec<(&'static crate::airports::Airport, Pos2)> = crate::airports::all()
+        let mut shown: Vec<(&'static datasets::airports::Airport, Pos2)> = crate::data::airports()
             .iter()
             .filter_map(|a| {
                 let at = to_screen(a.lat, a.lon);
@@ -413,9 +413,9 @@ impl App {
             .collect();
         for (a, at) in &shown {
             let (r, bright) = match a.kind {
-                crate::airports::Kind::Large => (4.5, 1.0),
-                crate::airports::Kind::Medium => (3.5, 0.85),
-                crate::airports::Kind::Small => (2.6, 0.7),
+                datasets::airports::Kind::Large => (4.5, 1.0),
+                datasets::airports::Kind::Medium => (3.5, 0.85),
+                datasets::airports::Kind::Small => (2.6, 0.7),
             };
             let col = theme::READOUT.gamma_multiply(bright);
             clip.circle_filled(*at, r, col);
@@ -426,16 +426,16 @@ impl App {
         // strips must not become a wall of text. Larger first so a big field
         // wins its label against smaller neighbours.
         shown.sort_by_key(|(a, _)| match a.kind {
-            crate::airports::Kind::Large => 0,
-            crate::airports::Kind::Medium => 1,
-            crate::airports::Kind::Small => 2,
+            datasets::airports::Kind::Large => 0,
+            datasets::airports::Kind::Medium => 1,
+            datasets::airports::Kind::Small => 2,
         });
         let mut labels: Vec<Rect> = Vec::new();
         for (a, at) in &shown {
             let at_zoom = match a.kind {
-                crate::airports::Kind::Large => 9.0,
-                crate::airports::Kind::Medium => 10.0,
-                crate::airports::Kind::Small => 11.0,
+                datasets::airports::Kind::Large => 9.0,
+                datasets::airports::Kind::Medium => 10.0,
+                datasets::airports::Kind::Small => 11.0,
             };
             if zoom < at_zoom {
                 continue;
@@ -456,11 +456,11 @@ impl App {
     /// card belongs on a hover, so the threshold is a small screen distance
     /// rather than a whole map.
     fn hovered_airport<'a>(
-        shown: &[(Pos2, &'a crate::airports::Airport)],
+        shown: &[(Pos2, &'a datasets::airports::Airport)],
         pos: Pos2,
-    ) -> Option<(Pos2, &'a crate::airports::Airport)> {
+    ) -> Option<(Pos2, &'a datasets::airports::Airport)> {
         const PX: f32 = 12.0;
-        let mut best: Option<(f32, Pos2, &'a crate::airports::Airport)> = None;
+        let mut best: Option<(f32, Pos2, &'a datasets::airports::Airport)> = None;
         for (at, a) in shown {
             let d = at.distance(pos);
             if d <= PX && best.is_none_or(|(b, _, _)| d < b) {
@@ -476,7 +476,7 @@ impl App {
     /// Drawn by hand rather than as an egui tooltip so it stays in the map's
     /// language and is clipped with the pane, and so it does not depend on the
     /// tooltip API changing under us.
-    fn airport_card(p: &egui::Painter, rect: Rect, anchor: Pos2, a: &crate::airports::Airport) {
+    fn airport_card(p: &egui::Painter, rect: Rect, anchor: Pos2, a: &datasets::airports::Airport) {
         // At most this many frequency rows before the card says how many it
         // is not showing. A field with thirty listed frequencies would
         // otherwise cover the map it is annotating.
@@ -490,9 +490,9 @@ impl App {
         let text_max = (f64::from(rect.width()) - 2.0 * f64::from(pad) - 8.0).clamp(80.0, 240.0) as f32;
         let name = p.layout(a.name.clone(), font(13.0), theme::VALUE, text_max);
         let class = match a.kind {
-            crate::airports::Kind::Large => "LARGE",
-            crate::airports::Kind::Medium => "MEDIUM",
-            crate::airports::Kind::Small => "SMALL",
+            datasets::airports::Kind::Large => "LARGE",
+            datasets::airports::Kind::Medium => "MEDIUM",
+            datasets::airports::Kind::Small => "SMALL",
         };
         let mut meta = format!("{class} AIRPORT");
         if let Some(el) = a.elev_ft {
@@ -514,7 +514,7 @@ impl App {
             rows.push((g, theme::LEGEND));
         } else {
             for f in a.freqs.iter().take(MAX_ROWS) {
-                let label = if f.kind == crate::airports::FreqKind::Other {
+                let label = if f.kind == datasets::airports::FreqKind::Other {
                     f.desc.as_str()
                 } else {
                     f.kind.label()
@@ -524,7 +524,7 @@ impl App {
                 // description push the frequency off the card.
                 let label: String = label.chars().take(16).collect();
                 let g = p.layout_no_wrap(
-                    format!("{label:<16}{}", crate::airports::fmt_mhz(f.mhz)),
+                    format!("{label:<16}{}", datasets::airports::fmt_mhz(f.mhz)),
                     font(11.0),
                     theme::VALUE,
                 );

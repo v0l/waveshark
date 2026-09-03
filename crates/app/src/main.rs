@@ -14,7 +14,7 @@ mod locale;
 mod dial;
 mod tracks;
 mod map;
-mod airports;
+mod data;
 mod packetlog;
 mod patch;
 mod chainview;
@@ -728,6 +728,11 @@ struct Args {
     /// Audio chain throughput
     #[arg(long)]
     bench_audio: bool,
+
+    /// Download or revalidate the cached datasets and exit, for warming the
+    /// cache before going somewhere without a connection
+    #[arg(long)]
+    fetch_data: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -831,6 +836,10 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    if args.fetch_data {
+        data::fetch_all();
+        return Ok(());
+    }
     if let Some(log) = &args.m17_dump {
         m17_dump(log);
         return Ok(());
@@ -889,6 +898,10 @@ fn main() -> eframe::Result<()> {
         prof::enable();
         tracing_subscriber::registry().with(prof::Timing).init();
     }
+
+    // Started before the window: on a warm cache the airports are parsed
+    // before the first frame that could draw them.
+    data::start();
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
