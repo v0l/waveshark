@@ -312,8 +312,13 @@ impl Graph {
             out_slot_base[k] = next;
             next += node.num_outputs().max(1);
         }
-        let n_slots = next;
+        let mut n_slots = next;
 
+        // An input nothing feeds on a node that allows it reads a slot of its
+        // own that nothing ever writes: silence, in the shape of an empty
+        // real stream at no rate. The node is told as much at negotiation
+        // and the view draws the port with nothing on it, which is the truth.
+        let mut silent: Vec<Slot> = Vec::new();
         let mut in_slots: Vec<Vec<Slot>> = Vec::with_capacity(n);
         for (k, node) in b.nodes.iter().enumerate() {
             let mut slots = Vec::with_capacity(node.num_inputs());
@@ -329,6 +334,10 @@ impl Graph {
                         )));
                     }
                     slots.push(out_slot_base[src.node.0] + src.port);
+                } else if node.optional_inputs() {
+                    slots.push(n_slots);
+                    silent.push(n_slots);
+                    n_slots += 1;
                 } else {
                     return Err(Error::other(format!(
                         "node {} ({}) input port {p} is not connected",
@@ -426,6 +435,9 @@ impl Graph {
         };
 
         g.specs[INPUT_SLOT] = b.input;
+        for s in silent {
+            g.specs[s] = StreamSpec::silence();
+        }
         g.negotiate()?;
         g.bufs = g.specs.iter().map(|s| Payload::empty_of(s.kind)).collect();
         Ok(g)
@@ -507,6 +519,17 @@ impl Graph {
 
     pub fn label(&self, id: NodeId) -> Option<&str> {
         self.entries.get(id.0).map(|e| e.label.as_str())
+    }
+
+    /// The caller's own name for a node, if it gave one.
+    pub fn tag_of(&self, id: NodeId) -> Option<u64> {
+        self.entries.get(id.0).and_then(|e| e.tag)
+    }
+
+    /// The node carrying a tag, which is how a caller finds a node again
+    /// after a rebuild has renumbered them all.
+    pub fn by_tag(&self, tag: u64) -> Option<NodeId> {
+        self.entries.iter().position(|e| e.tag == Some(tag)).map(NodeId)
     }
 
     /// Execution order, for display and debugging.

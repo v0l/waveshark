@@ -319,6 +319,17 @@ impl StreamSpec {
         Self { kind: PortKind::Iq, rate, center, bandwidth: rate, channels: 1 }
     }
 
+    /// What an input nothing feeds is told it is reading: real samples at no
+    /// rate, of which there are never any.
+    pub fn silence() -> Self {
+        Self { kind: PortKind::Real, rate: 0.0, center: Hz(0), bandwidth: 0.0, channels: 1 }
+    }
+
+    /// Whether this is the spec of an input nothing feeds.
+    pub fn is_silence(&self) -> bool {
+        self.rate <= 0.0
+    }
+
     /// Interleave `n` channels, which multiplies the sample rate by `n`.
     pub fn with_channels(self, n: usize) -> Self {
         let n = n.max(1);

@@ -200,11 +200,9 @@ impl Chain<'_> {
         // Which gestures exist, and the one thing that is not editable: only
         // the stages added here have live ports.
         let hint = if !self.st.edit.manual {
-            "built from the scanner table for this span"
+            "locked; what is drawn follows the dial and the scanner table"
         } else if self.st.wire.is_some() {
             "wire selected; DELETE removes it"
-        } else if self.st.patch.stages().is_empty() {
-            "add a stage: only stages added here can be wired"
         } else {
             "drag a port to wire, drag a wire off an input to move it"
         };

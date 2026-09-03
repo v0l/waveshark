@@ -7,7 +7,7 @@
 
 use super::state::CallsState;
 use super::*;
-use crate::callbus::Rule;
+use crate::audiobus::Rule;
 use crate::calls::Call;
 
 /// Columns, and how wide each is.
@@ -143,7 +143,7 @@ impl CallList<'_> {
                         // what it answers is whether this call is reaching
                         // the speaker, and a bar answers that at a glance.
                         if i == LEVEL_COL {
-                            let key = crate::callbus::CallBus::key_of(&c.system, c.channel_hz);
+                            let key = crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz);
                             let peak = levels
                                 .iter()
                                 .find(|(k, _)| *k == key)

@@ -21,7 +21,6 @@ pub(super) struct Log<'a> {
     pub decode_on: bool,
     /// Whether the receiver is running the operator's own graph, in which
     /// case the decode switch is not the pane's to throw.
-    pub manual: bool,
     pub cmds: &'a mut Vec<Cmd>,
     pub acts: Vec<Action>,
 }
@@ -144,15 +143,11 @@ impl Log<'_> {
             // span at once is the expensive thing this app does, so it stays a
             // one-click switch rather than a line in a settings modal, and it
             // sits beside the legend that reports what it did.
-            // Off while the graph is the operator's: the switch rebuilds the
-            // whole front end, which is the one thing manual mode promises
-            // will not happen behind your back.
-            let auto = !self.manual;
             if crate::icons::icon_button(
                 ui,
                 crate::icons::Icon::Decode,
-                crate::i18n::t(if auto { "ui.decode_all" } else { "ui.manual_locked" }),
-                auto,
+                crate::i18n::t("ui.decode_all"),
+                true,
                 self.decode_on,
             )
             .clicked()
@@ -237,11 +232,7 @@ impl Log<'_> {
                 // drawn: it sits in a row of named buttons with room for a
                 // word, and no glyph says "the table deciding what decodes
                 // where" without being learned first.
-                if ui
-                    .add_enabled(auto, egui::Button::new("SCANNERS"))
-                    .on_disabled_hover_text(crate::i18n::t("ui.manual_locked"))
-                    .clicked()
-                {
+                if ui.button("SCANNERS").clicked() {
                     self.acts.push(Action::Open(Settings::Scanners));
                 }
             });

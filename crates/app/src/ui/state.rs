@@ -153,18 +153,23 @@ pub(super) struct ChainState {
     pub sel: Option<usize>,
     /// Manual mode and where the stages have been dragged to.
     pub edit: crate::chainview::Edit,
-    /// The graph the operator has drawn, when manual mode is on.
+    /// The graph as it is running, with the operator's edits in it: what the
+    /// view draws in manual mode, and what an edit is made to.
     pub patch: crate::patch::Patch,
+    /// The graph as the receiver drew it before the edits. What `patch`
+    /// differs from it by is what the operator changed, and that is what is
+    /// sent, saved and put back on top of the next graph the receiver draws.
+    pub base: crate::patch::Patch,
     /// Which revision the radio thread last published, so an edit it refused
     /// can be noticed and taken back.
     pub patch_rev: u64,
     /// The last patch handed to the radio thread. What comes back matches it
     /// when the edit built, and is the previous graph when it did not.
     pub patch_sent: Option<crate::patch::Patch>,
-    /// The graph as last drawn by hand, which is not the one running: in
-    /// automatic mode the receiver derives its own, and this is what taking
-    /// it over goes back to.
-    pub drawn: Option<crate::patch::Patch>,
+    /// What the operator has changed, as last sent to the receiver and as
+    /// saved on disk. Applied whether or not manual mode is on: the mode is
+    /// a lock on editing, not a different receiver.
+    pub edits: crate::patch::Edits,
     /// Where the stages were when the graph was last written out, so that
     /// dragging one is saved without writing the file on every frame.
     pub places: crate::patch::Places,
@@ -221,17 +226,17 @@ impl ChainState {
     /// Hand the patch to the radio thread, remembering what was sent so that
     /// one handed back after a refusal can be told apart from an echo.
     pub fn send_patch(&mut self, cmds: &mut Vec<Cmd>) {
-        self.drawn = Some(self.patch.clone());
+        self.edits = crate::patch::Edits::diff(&self.patch, &self.base);
         self.patch_sent = Some(self.patch.clone());
-        cmds.push(Cmd::Patch(self.patch.clone()));
+        cmds.push(Cmd::Edits(self.edits.clone()));
         self.save_patch();
     }
 
-    /// Write the graph out, with where its stages were put.
+    /// Write the edits out, with where the stages were put.
     pub fn save_patch(&mut self) {
         self.places =
             self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
-        self.patch.save(&self.places);
+        self.edits.save(&self.places);
         self.saved_at = Some(std::time::Instant::now());
     }
 
@@ -254,30 +259,21 @@ impl ChainState {
         }
     }
 
-    /// Hand the shape of the graph to the operator, or give it back to the
-    /// scanner table.
+    /// Unlock the graph for editing, or lock it again.
+    ///
+    /// Nothing about what runs changes with it: the edits already made stay
+    /// on the graph either way, and the graph keeps following the dial
+    /// either way. Locking it puts the stages back where the automatic
+    /// layout has them, since dragging them about was the point of
+    /// unlocking.
     pub fn set_manual(&mut self, on: bool, cmds: &mut Vec<Cmd>) {
         self.edit.manual = on;
         if !on {
             self.edit.arrange();
             self.pick = None;
+            self.wire = None;
         }
-        match (on, self.drawn.clone()) {
-            // Back to the graph that was drawn, which is what a saved
-            // drawing is for. Turning manual mode off and on again is not a
-            // request to throw it away.
-            (true, Some(drawn)) => {
-                self.patch = drawn;
-                cmds.push(Cmd::Manual(true));
-                self.send_patch(cmds);
-            }
-            // Nothing drawn yet, so the radio thread answers with the graph
-            // it is running: taking it over means taking that over.
-            _ => {
-                self.patch_sent = None;
-                cmds.push(Cmd::Manual(on));
-            }
-        }
+        cmds.push(Cmd::Manual(on));
     }
 }
 
@@ -327,10 +323,10 @@ pub(super) struct CallsState {
     pub list: crate::calls::Calls,
     /// What the call bus is subscribed to, as the interface holds it. The
     /// radio thread is sent the whole set whenever it changes.
-    pub subs: Vec<crate::callbus::Subscription>,
+    pub subs: Vec<crate::audiobus::Subscription>,
     /// Groups switched off by hand, so one that was turned off does not
     /// subscribe itself again the next time somebody transmits on it.
-    pub optout: Vec<crate::callbus::Rule>,
+    pub optout: Vec<crate::audiobus::Rule>,
 }
 
 impl CallsState {
@@ -343,11 +339,11 @@ impl CallsState {
     pub fn subscribe_new(&mut self, calls: &[crate::calls::Call], cmds: &mut Vec<crate::radio::Cmd>) {
         let mut added = false;
         for c in calls {
-            let rule = crate::callbus::Rule::Group(c.to.clone());
+            let rule = crate::audiobus::Rule::Group(c.to.clone());
             if self.optout.contains(&rule) || self.subs.iter().any(|s| s.rule == rule) {
                 continue;
             }
-            self.subs.push(crate::callbus::Subscription::new(rule));
+            self.subs.push(crate::audiobus::Subscription::new(rule));
             added = true;
         }
         if added {
@@ -356,7 +352,7 @@ impl CallsState {
     }
 
     /// Subscribe to a rule, or drop it if it is already there.
-    pub fn toggle(&mut self, rule: crate::callbus::Rule, cmds: &mut Vec<crate::radio::Cmd>) {
+    pub fn toggle(&mut self, rule: crate::audiobus::Rule, cmds: &mut Vec<crate::radio::Cmd>) {
         match self.subs.iter().position(|s| s.rule == rule) {
             Some(i) => {
                 self.subs.remove(i);
@@ -364,7 +360,7 @@ impl CallsState {
             }
             None => {
                 self.optout.retain(|r| r != &rule);
-                self.subs.push(crate::callbus::Subscription::new(rule));
+                self.subs.push(crate::audiobus::Subscription::new(rule));
             }
         }
         cmds.push(crate::radio::Cmd::CallSubs(self.subs.clone()));
@@ -391,6 +387,8 @@ pub(super) struct AudioState {
     pub call_volume: f32,
     pub call_muted: bool,
     pub call_agc: bool,
+    /// Which publication of the levels was last taken from the radio.
+    pub levels_rev: u64,
 }
 
 impl Default for AudioState {
@@ -404,6 +402,7 @@ impl Default for AudioState {
             call_volume: 0.8,
             call_muted: false,
             call_agc: true,
+            levels_rev: 0,
         }
     }
 }

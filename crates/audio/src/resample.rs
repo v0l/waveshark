@@ -68,9 +68,12 @@ impl Resampler {
             self.pos += self.ratio;
         }
 
-        // Discard consumed history, keeping enough for the next kernel.
+        // Discard consumed history, keeping enough for the next kernel. At a
+        // large ratio the read position can have stepped past the end of
+        // what is held, so the drain is capped at what there is and the
+        // position keeps the remainder.
         let keep = self.half * 2;
-        let consumed = (self.pos.floor() as usize).saturating_sub(keep);
+        let consumed = (self.pos.floor() as usize).saturating_sub(keep).min(self.hist.len());
         if consumed > 0 {
             self.hist.drain(..consumed);
             self.pos -= consumed as f64;
@@ -93,6 +96,18 @@ fn kernel(x: f64, a: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_ratio_does_not_overrun_the_history() {
+        // 2.4 MS/s straight to 48 kHz is a ratio of fifty, and the read
+        // position steps past the end of the block by up to that much.
+        let mut r = Resampler::new(2_400_000.0, 48_000.0, 8);
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            r.process(&vec![0.5f32; 65_536], &mut out);
+        }
+        assert!(out.len() > 5_000 && out.len() < 5_600, "{} out", out.len());
+    }
 
     fn tone(n: usize, hz: f64, rate: f64) -> Vec<f32> {
         (0..n)

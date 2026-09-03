@@ -5,7 +5,7 @@ mod prof;
 mod wheel;
 mod chain;
 mod bands;
-mod callbus;
+mod audiobus;
 mod calls;
 mod devices;
 mod i18n;
@@ -44,6 +44,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
     let r = radio::Radio::start(entry, Hz((mhz * 1e6) as u64), Sps(2_304_000), 2048, || {});
     r.send(radio::Cmd::Channels(vec![radio::ChannelSpec {
         id: 1,
+        label: String::new(),
         offset_hz: 0.0,
         demod: mode,
         volume: 1.0,
@@ -106,6 +107,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
         // Decode a channel off-centre, the case that was dropping samples.
         r.send(radio::Cmd::Channels(vec![radio::ChannelSpec {
             id: 1,
+            label: String::new(),
             offset_hz: 0.0,
             demod: radio::Demod::Wfm,
             volume: 1.0,

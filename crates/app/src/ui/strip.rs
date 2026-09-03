@@ -3,6 +3,8 @@
 
 use super::state::AudioState;
 use super::*;
+use crate::audiobus::AudioBusNode;
+use pipeline::param::ParamValue;
 
 /// What the strip wants done that it cannot do itself.
 pub(super) enum Action {
@@ -336,6 +338,57 @@ impl Strip<'_> {
                             }
                         });
                     ui.add_space(6.0);
+                }
+
+                // Chains the operator drew and wired into the bus are strips
+                // too: nobody tuned them, so there is no dial or mode to
+                // show, but each has a level and a meter like everything
+                // else that reaches the speaker. Set by the same route the
+                // chain view uses, since the level is the bus's parameter.
+                let (bus, strips) =
+                    self.radio.map(|r| r.status.strips()).unwrap_or((None, Vec::new()));
+                if let Some(bus) = bus {
+                    for s in strips.iter().filter(|s| s.channel.is_none() && !s.voice) {
+                        egui::Frame::NONE
+                            .fill(theme::PANEL)
+                            .stroke(Stroke::new(1.0, theme::ETCH))
+                            .corner_radius(2.0)
+                            .inner_margin(egui::Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (r, _) = ui
+                                        .allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                                    ui.painter().rect_filled(r, 1.0, theme::ETCH);
+                                    ui.label(value(s.label.clone()).size(12.0));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(legend("chain"));
+                                        },
+                                    );
+                                });
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(legend("vol"));
+                                    let mut v = s.volume;
+                                    if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
+                                        self.cmds.push(Cmd::NodeParam(
+                                            bus,
+                                            AudioBusNode::param_of(s.port, "vol"),
+                                            ParamValue::Float(v as f64),
+                                        ));
+                                    }
+                                    if ui.selectable_label(s.muted, "M").clicked() {
+                                        self.cmds.push(Cmd::NodeParam(
+                                            bus,
+                                            AudioBusNode::param_of(s.port, "mute"),
+                                            ParamValue::Bool(!s.muted),
+                                        ));
+                                    }
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
                 }
 
                 if let Some(i) = remove {

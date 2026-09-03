@@ -103,10 +103,14 @@ The chain view draws that description, and in manual mode it edits it. Stages
 can be added from the block list, deleted, dragged, and wired by pulling a wire
 from either end onto a port or a box; a stage whose inputs are not all fed yet
 is left out of the built graph rather than refusing the whole receiver, and an
-edit that will not build is refused and the last graph that did build goes back,
-so a wrong wire cannot stop the radio. The graph and where its boxes sit are
-saved in `~/.config/waveshark/patch`. While manual mode is on, the scanner table
-and the decode switch no longer rebuild the graph: it is yours.
+edit that will not build is refused and the last edits that did build go back,
+so a wrong wire cannot stop the radio. What is kept is not the graph but the
+difference the operator made to it: stages added, derived stages removed,
+wires drawn or moved, settings overridden. That is saved in
+`~/.config/waveshark/edits` with where the boxes sit, and put back on top of
+whatever the receiver draws next, so the graph keeps following the dial, the
+scanner table and the strip with the edits still on it. Manual mode is only
+the lock on editing; nothing the receiver does depends on it.
 
 Either way what is drawn is what runs, which is the only way it can be trusted:
 documentation that has drifted is worse than none, because it is believed. It is
@@ -639,12 +643,18 @@ than issued once per frame.
 Which gesture a drag means is decided when it starts, so it cannot change
 meaning halfway through as the pointer leaves the line it grabbed.
 
-Every channel is demodulated at once and mixed together, each with its own
-level and mute into a master volume. The mix clips rather than being scaled to
-fit: several channels at once can sum past full scale, and quietly turning
-everything down would make the level of the channel you are listening to depend
-on how busy its neighbours are. A channel that is switched off costs nothing,
-because its chain is torn down rather than muted. Measured at 2.304 MS/s, one
+Every channel is demodulated at once and mixed together on the audio bus, a
+node with one input per strip: each channel's chain is wired into its own
+input, so is each voice front end, and the bus carries every level. A strip's
+fader and mute are the bus's parameters for that input, the master is its
+own, and its one stereo output is what the radio thread hands to the device.
+The mix clips rather than being scaled to fit: several channels at once can
+sum past full scale, and quietly turning everything down would make the level
+of the channel you are listening to depend on how busy its neighbours are. A
+channel that is switched off costs nothing, because its chain is torn down
+rather than muted. The bus always has one spare input, which is what a chain
+drawn by hand in the chain view is wired into; it then appears in the strip
+with a fader of its own. Measured at 2.304 MS/s, one
 WFM channel takes about 17% of the radio thread and two take 31%, so the thread
 runs out somewhere around six broadcast channels and rather more narrowband
 ones.

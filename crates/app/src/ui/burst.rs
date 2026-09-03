@@ -79,7 +79,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
     // say it again. The bytes below are the vocoder's, and nobody reads those.
     let mut play = false;
     if let Some(a) = &rec.audio {
-        let (peak, rms) = crate::callbus::levels_db(a);
+        let (peak, rms) = crate::audiobus::levels_db(a);
         ui.horizontal(|ui| {
             play = ui.button("PLAY").clicked();
             ui.label(legend(&format!(

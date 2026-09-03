@@ -144,6 +144,18 @@ pub trait Node: Send + 'static {
         1
     }
 
+    /// Whether an input port nothing feeds is acceptable, and read as
+    /// silence, rather than a build error.
+    ///
+    /// A mixer has a spare input by nature: the next thing to be heard is
+    /// wired into it, and until then it carries nothing. Every other node's
+    /// unfed input is a mistake, and the build refuses it so that a chain
+    /// with a wire missing cannot run and produce something that looks like
+    /// a result.
+    fn optional_inputs(&self) -> bool {
+        false
+    }
+
     fn num_outputs(&self) -> usize {
         1
     }

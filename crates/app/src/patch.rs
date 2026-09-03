@@ -1,12 +1,12 @@
 //! A graph the operator drew, rather than one the scanner table implied.
 //!
-//! In manual mode the front ends are no longer derived from where the dial is:
-//! they are whatever is in here. That makes a patch the answer to a question
-//! the automatic path never has to ask, which is what the operator meant, as
-//! opposed to what happens to be running. The receiver rebuilds several times
-//! a minute (a retune, a parameter that changes a rate, a channel opening) and
-//! a description that lived only in the built graph would be lost at the first
-//! one.
+//! The receiver draws a patch for itself from what it is doing, and the
+//! operator's changes to it are kept as [`Edits`] and put back on top of
+//! whatever it draws next. The receiver rebuilds several times a minute (a
+//! retune, a parameter that changes a rate, a channel opening) and a
+//! description that lived only in the built graph would be lost at the first
+//! one; so would a whole drawing kept from an earlier tuning, which is what
+//! manual mode used to swap in.
 //!
 //! Stages are named by an id of this module's own making, not by `NodeId`: a
 //! `NodeId` is a position in the built graph and every rebuild renumbers them.
@@ -96,6 +96,10 @@ impl Patch {
 
     pub fn stage(&self, id: u64) -> Option<&Stage> {
         self.stages.iter().find(|s| s.id == id)
+    }
+
+    pub fn stage_mut(&mut self, id: u64) -> Option<&mut Stage> {
+        self.stages.iter_mut().find(|s| s.id == id)
     }
 
     /// What the receiver's own stage is told to read, when it has been told
@@ -199,7 +203,8 @@ pub type Places = std::collections::BTreeMap<u64, (f32, f32)>;
 
 impl Patch {
     /// `$XDG_CONFIG_HOME/waveshark/patch`, beside the session and the scanner
-    /// table.
+    /// table: where the edits file sits, named after the drawing that used
+    /// to be saved whole.
     pub fn path() -> Option<std::path::PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
@@ -209,11 +214,129 @@ impl Patch {
         Some(base.join("waveshark").join("patch"))
     }
 
-    /// Written as plain lines rather than through a serialisation crate, for
-    /// the same reason the session is: a graph that will not load is exactly
-    /// the situation where being able to read and fix the file matters.
+}
+
+/// What the operator changed about the graph the receiver draws for itself.
+///
+/// Kept apart from the derived graph rather than as a second whole graph.
+/// The derived one follows the dial, the scanner table and the strip; the
+/// operator's changes are applied on top of whatever it is now. Saving the
+/// whole drawing froze everything in it, so taking the graph over meant
+/// taking over a stale tuning, a stale zoom and stale front ends as well,
+/// and manual mode behaved like a different receiver. Now manual mode is a
+/// lock on editing and nothing else: these edits apply in either mode.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edits {
+    /// Stages the operator added, with their settings.
+    pub stages: Vec<Stage>,
+    /// Derived stages the operator deleted.
+    pub removed: Vec<u64>,
+    /// Wires the operator drew or moved. Applied last, so each replaces
+    /// whatever the derived graph had on that input.
+    pub links: Vec<Link>,
+    /// Inputs the operator pulled the wire off.
+    pub unlinked: Vec<(u64, usize)>,
+    /// Settings the operator changed on derived stages.
+    pub settings: Vec<(u64, String, pipeline::param::ParamValue)>,
+}
+
+impl Edits {
+    pub fn is_empty(&self) -> bool {
+        self.stages.is_empty()
+            && self.removed.is_empty()
+            && self.links.is_empty()
+            && self.unlinked.is_empty()
+            && self.settings.is_empty()
+    }
+
+    /// Whether a setting on a derived stage is the operator's to override.
+    ///
+    /// A listening channel's stages and the audio bus's levels are the
+    /// strip's: what the operator sets on them by hand goes back into the
+    /// strip rather than sitting here as an override the strip would fight.
+    /// The level of a bus input the strip did not set, which is a chain the
+    /// operator drew, is the exception, since the strip has no other place
+    /// to keep it.
+    fn own_settings(st: &Stage, name: &str, base: &Stage) -> bool {
+        if st.settings.contains_key("channel") {
+            return false;
+        }
+        if st.kind == "audio_bus" {
+            return (name.starts_with("vol") || name.starts_with("mute"))
+                && !base.settings.contains_key(name);
+        }
+        true
+    }
+
+    /// What was changed, read off a graph edited from `base`.
+    pub fn diff(full: &Patch, base: &Patch) -> Self {
+        let mut e = Edits::default();
+        for st in &full.stages {
+            if !Patch::is_derived(st.id) {
+                e.stages.push(st.clone());
+                continue;
+            }
+            let Some(was) = base.stage(st.id) else { continue };
+            for (name, v) in &st.settings {
+                if was.settings.get(name) != Some(v) && Self::own_settings(st, name, was) {
+                    e.settings.push((st.id, name.clone(), v.clone()));
+                }
+            }
+        }
+        for st in &base.stages {
+            if full.stage(st.id).is_none() {
+                e.removed.push(st.id);
+            }
+        }
+        for l in &full.links {
+            if !base.links.contains(l) {
+                e.links.push(*l);
+            }
+        }
+        for l in &base.links {
+            let still = full.links.iter().any(|f| f.to == l.to);
+            if !still && full.stage(l.to.0).is_some() {
+                e.unlinked.push(l.to);
+            }
+        }
+        e
+    }
+
+    /// Put the changes onto a derived graph.
+    ///
+    /// A wire to a stage the graph no longer derives is dropped quietly
+    /// rather than refused: a front end that left the span takes its wires
+    /// with it, and they come back when it does.
+    pub fn apply(&self, p: &mut Patch) {
+        for id in &self.removed {
+            p.remove(*id);
+        }
+        for st in &self.stages {
+            p.stages.retain(|s| s.id != st.id);
+            p.stages.push(st.clone());
+            p.next = p.next.max(st.id);
+        }
+        for (id, name, v) in &self.settings {
+            if let Some(st) = p.stage_mut(*id) {
+                st.settings.insert(name.clone(), v.clone());
+            }
+        }
+        for to in &self.unlinked {
+            p.disconnect(*to);
+        }
+        for l in &self.links {
+            p.connect(l.from, l.to);
+        }
+    }
+
+    /// `$XDG_CONFIG_HOME/waveshark/edits`, beside the session.
+    pub fn path() -> Option<std::path::PathBuf> {
+        Patch::path().map(|p| p.with_file_name("edits"))
+    }
+
+    /// The same plain lines the patch is written in, for the same reason.
     pub fn render(&self, places: &Places) -> String {
-        let mut s = String::from("# waveshark patch: the graph as drawn\n");
+        let mut s = String::from("# waveshark edits: what was changed about the graph\n");
         for st in &self.stages {
             s.push_str(&format!("\nstage {} {}\n", st.id, st.kind));
             for (name, value) in &st.settings {
@@ -221,12 +344,17 @@ impl Patch {
             }
         }
         s.push('\n');
+        for id in &self.removed {
+            s.push_str(&format!("removed {id}\n"));
+        }
+        for (id, name, value) in &self.settings {
+            s.push_str(&format!("override {id} {name} {}\n", render_value(value)));
+        }
+        for (id, port) in &self.unlinked {
+            s.push_str(&format!("unlink {id}:{port}\n"));
+        }
         for l in &self.links {
-            let from = match l.from {
-                Source::Span => "span:0".to_string(),
-                Source::Stage(id, port) => format!("{id}:{port}"),
-            };
-            s.push_str(&format!("link {from} {}:{}\n", l.to.0, l.to.1));
+            s.push_str(&format!("link {} {}:{}\n", render_source(l.from), l.to.0, l.to.1));
         }
         s.push('\n');
         for (id, (x, y)) in places {
@@ -236,9 +364,8 @@ impl Patch {
     }
 
     pub fn parse(text: &str) -> (Self, Places) {
-        let mut p = Patch::default();
+        let mut e = Edits::default();
         let mut places = Places::new();
-        let mut last: Option<u64> = None;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -247,32 +374,41 @@ impl Patch {
             let mut w = line.split_whitespace();
             match w.next() {
                 Some("stage") => {
-                    let id: u64 = match w.next().and_then(|v| v.parse().ok()) {
-                        Some(v) => v,
-                        None => continue,
+                    let (Some(id), Some(kind)) = (w.next().and_then(|v| v.parse().ok()), w.next())
+                    else {
+                        continue;
                     };
-                    let Some(kind) = w.next() else { continue };
-                    p.stages.push(Stage {
-                        id,
-                        kind: kind.to_string(),
-                        settings: Settings::new(),
-                    });
-                    // Ids handed out later must not land on one already in
-                    // the file, or a new stage inherits its wires.
-                    if !Self::is_derived(id) {
-                        p.next = p.next.max(id);
-                    }
-                    last = Some(id);
+                    e.stages.push(Stage { id, kind: kind.to_string(), settings: Settings::new() });
                 }
                 Some("set") => {
-                    let (Some(name), Some(kind), Some(id)) = (w.next(), w.next(), last) else {
+                    let (Some(name), Some(kind), Some(st)) = (w.next(), w.next(), e.stages.last_mut())
+                    else {
                         continue;
                     };
                     let rest: Vec<&str> = w.collect();
                     if let Some(v) = parse_value(kind, &rest.join(" ")) {
-                        if let Some(st) = p.stages.iter_mut().find(|s| s.id == id) {
-                            st.settings.insert(name.to_string(), v);
-                        }
+                        st.settings.insert(name.to_string(), v);
+                    }
+                }
+                Some("removed") => {
+                    if let Some(id) = w.next().and_then(|v| v.parse().ok()) {
+                        e.removed.push(id);
+                    }
+                }
+                Some("override") => {
+                    let (Some(id), Some(name), Some(kind)) =
+                        (w.next().and_then(|v| v.parse().ok()), w.next(), w.next())
+                    else {
+                        continue;
+                    };
+                    let rest: Vec<&str> = w.collect();
+                    if let Some(v) = parse_value(kind, &rest.join(" ")) {
+                        e.settings.push((id, name.to_string(), v));
+                    }
+                }
+                Some("unlink") => {
+                    if let Some(to) = w.next().and_then(parse_port) {
+                        e.unlinked.push(to);
                     }
                 }
                 Some("link") => {
@@ -280,7 +416,7 @@ impl Patch {
                     let (Some(from), Some(to)) = (parse_source(from), parse_port(to)) else {
                         continue;
                     };
-                    p.links.push(Link { from, to });
+                    e.links.push(Link { from, to });
                 }
                 Some("at") => {
                     let vals: Vec<&str> = w.collect();
@@ -293,7 +429,7 @@ impl Patch {
                 _ => {}
             }
         }
-        (p, places)
+        (e, places)
     }
 
     pub fn save(&self, places: &Places) {
@@ -304,11 +440,16 @@ impl Patch {
         let _ = std::fs::write(path, self.render(places));
     }
 
-    /// The graph last drawn, or nothing when none has been.
     pub fn load() -> Option<(Self, Places)> {
         let text = std::fs::read_to_string(Self::path()?).ok()?;
-        let (p, places) = Self::parse(&text);
-        (!p.stages.is_empty()).then_some((p, places))
+        Some(Self::parse(&text))
+    }
+}
+
+fn render_source(s: Source) -> String {
+    match s {
+        Source::Span => "span:0".to_string(),
+        Source::Stage(id, port) => format!("{id}:{port}"),
     }
 }
 
@@ -354,27 +495,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_drawn_graph_round_trips_through_its_file() {
-        // A graph that came back missing a wire would be worse than one that
-        // did not come back at all: the receiver would run, quietly, as
-        // something else.
-        let mut p = Patch::default();
-        let mix = p.add("mixer");
-        let env = p.add("envelope");
-        p.stages_mut()[0]
+    fn edits_are_what_a_drawing_differs_from_the_derived_graph_by() {
+        use pipeline::param::ParamValue;
+        // The operator's changes are read off an edited copy against the
+        // graph the receiver drew, put back onto the next one it draws, and
+        // written out and read back the same.
+        let mut base = Patch::default();
+        base.add_derived(Patch::DERIVED_BASE + 1, "dc_block", Settings::new());
+        base.add_derived(Patch::DERIVED_BASE + 3, "spectrum", Settings::new());
+        base.connect(Source::Span, (Patch::DERIVED_BASE + 1, 0));
+        base.connect(Source::Stage(Patch::DERIVED_BASE + 1, 0), (Patch::DERIVED_BASE + 3, 0));
+
+        let mut full = base.clone();
+        let dec = full.add("decimate");
+        full.stage_mut(dec).unwrap().settings.insert("factor".into(), ParamValue::Int(4));
+        full.connect(Source::Span, (dec, 0));
+        full.connect(Source::Stage(dec, 0), (Patch::DERIVED_BASE + 3, 0));
+        full.remove(Patch::DERIVED_BASE + 1);
+        full.stage_mut(Patch::DERIVED_BASE + 3)
+            .unwrap()
             .settings
-            .insert("shift_hz".into(), pipeline::ParamValue::Float(-125_000.0));
-        p.connect(Source::Span, (mix, 0));
-        p.connect(Source::Stage(mix, 0), (env, 0));
-        let mut places = Places::new();
-        places.insert(mix, (120.0, 340.0));
-        let (back, back_places) = Patch::parse(&p.render(&places));
-        assert_eq!(back, p);
-        assert_eq!(back_places, places);
-        // And a stage added afterwards cannot take an id the file already
+            .insert("size".into(), ParamValue::Int(4096));
+
+        let e = Edits::diff(&full, &base);
+        assert_eq!(e.stages.len(), 1);
+        assert_eq!(e.removed, vec![Patch::DERIVED_BASE + 1]);
+        assert_eq!(e.links.len(), 2, "{:?}", e.links);
+        assert!(e.unlinked.is_empty(), "{:?}", e.unlinked);
+        assert_eq!(e.settings.len(), 1);
+
+        let mut again = base.clone();
+        e.apply(&mut again);
+        assert_eq!(again, full);
+        // And a stage added afterwards cannot take an id the edits already
         // used, which would hand it another stage's wires.
-        let mut back = back;
-        assert!(back.add("envelope") > env);
+        assert!(again.add("envelope") > dec);
+
+        let mut places = Places::new();
+        places.insert(dec, (10.0, 20.0));
+        let (back, places_back) = Edits::parse(&e.render(&places));
+        assert_eq!(back, e);
+        assert_eq!(places_back, places);
+        // No edits is no edits, so a fresh receiver is not told anything.
+        assert!(Edits::diff(&base, &base).is_empty());
     }
 
     #[test]

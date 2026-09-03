@@ -399,11 +399,11 @@ impl App {
         app.audio.volume = s.volume;
         app.log.path = crate::packetlog::PacketLog::default_dir();
         app.pending_radio = Some(s);
-        // The graph as it was left, if it was ever drawn by hand. Loaded
-        // whether or not manual mode is on, so that turning it on comes back
-        // to the drawing rather than to the automatic chain.
-        if let Some((patch, places)) = crate::patch::Patch::load() {
-            app.chain.drawn = Some(patch);
+        // What was changed about the graph, if anything was. Applied
+        // whether or not manual mode is on: the mode only says whether the
+        // graph can be edited now.
+        if let Some((edits, places)) = crate::patch::Edits::load() {
+            app.chain.edits = edits;
             app.chain.edit.pos =
                 places.iter().map(|(k, (x, y))| (*k, egui::Pos2::new(*x, *y))).collect();
             app.chain.places = places;
@@ -520,11 +520,7 @@ impl App {
         if !want.decode_on {
             self.send(Cmd::Decode(false));
         }
-        // A graph that was drawn by hand is the receiver's shape, so it has
-        // to go back before anything else settles: the alternative is a
-        // receiver that runs the automatic chain for a moment and then
-        // rebuilds into the one that was saved.
-        if want.manual_chain && self.chain.drawn.is_some() {
+        if want.manual_chain {
             let mut cmds = std::mem::take(&mut self.cmds);
             self.chain.set_manual(true, &mut cmds);
             self.cmds = cmds;
@@ -685,9 +681,17 @@ impl App {
         // radio thread has them at their defaults until it is told otherwise.
         self.send(Cmd::Refresh(self.scope.refresh));
         self.send(Cmd::Smoothing(self.scope.smoothing));
-        // Same for the call bus: a new thread has an empty one.
+        // Same for the bus: a new thread has one at its defaults.
+        self.send(Cmd::Volume(self.audio.volume));
         self.send(Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted });
         self.send(Cmd::CallAgc(self.audio.call_agc));
+        // And what was changed about the graph goes back on top of it
+        // before anything else settles: the alternative is a receiver that
+        // runs the automatic chain for a moment and then rebuilds into the
+        // edited one.
+        if !self.chain.edits.is_empty() {
+            self.send(Cmd::Edits(self.chain.edits.clone()));
+        }
         if !self.calls.subs.is_empty() {
             self.send(Cmd::CallSubs(self.calls.subs.clone()));
         }
@@ -774,12 +778,38 @@ impl App {
         let (rev, running) = radio.status.patch();
         if rev != self.chain.patch_rev {
             self.chain.patch_rev = rev;
-            let running = running.unwrap_or_default();
-            // Only when it is not the edit that was just sent. Adopting our
-            // own patch back would undo anything drawn in the meantime, since
-            // the receiver is a rebuild behind the pointer.
+            let (running, base) = running.unwrap_or_default();
+            // The graph the receiver drew underneath the edits is always
+            // taken: it is what the next edit is read against. The running
+            // graph only when it is not the edit that was just sent, since
+            // adopting our own patch back would undo anything drawn in the
+            // meantime, the receiver being a rebuild behind the pointer.
+            self.chain.base = base;
             if self.chain.patch_sent.as_ref() != Some(&running) {
                 self.chain.patch = running;
+            }
+        }
+        // A level set in the chain view lands on the node, and the strip
+        // has to follow or the next thing it sends puts the level back.
+        let (rev, audio, chans) = radio.status.levels();
+        if rev != self.audio.levels_rev {
+            self.audio.levels_rev = rev;
+            if rev > 0 {
+                self.audio.volume = audio.master;
+                self.audio.call_volume = audio.calls;
+                self.audio.call_muted = audio.calls_muted;
+                self.audio.call_agc = audio.agc;
+                for spec in chans {
+                    if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == spec.id) {
+                        c.volume = spec.volume;
+                        c.muted = spec.muted;
+                        c.squelch_db = spec.squelch_db;
+                        c.agc = spec.agc;
+                        if !spec.label.is_empty() {
+                            c.label = spec.label;
+                        }
+                    }
+                }
             }
         }
         let mut batches = Vec::new();
@@ -967,7 +997,6 @@ impl App {
             center: self.center,
             rate: self.rate,
             decode_on: self.decode_on,
-            manual: self.chain.edit.manual,
             cmds: &mut self.cmds,
             acts: Vec::new(),
         }
@@ -1079,6 +1108,7 @@ impl App {
             .filter(|c| c.on)
             .map(|c| ChannelSpec {
                 id: c.id,
+                label: c.label.clone(),
                 offset_hz: c.freq - center,
                 demod: c.demod,
                 volume: c.volume,
