@@ -623,8 +623,9 @@ pub const DEFAULT_TEXT: &str = "\
 # runs wherever an amateur puts it, so a block naming one channel would read
 # that channel and miss every other, while `auto` reads it wherever it is.
 # It costs what is transmitting in the band, so the band is what keeps it
-# real-time: an ISM allocation, not the whole of what a wideband radio samples. `banks` is the older fixed grid of
-# channels at the widths listed, kept for comparison.
+# real-time: an ISM allocation, not the whole of what a wideband radio
+# samples. `banks` is the older fixed grid of channels at the widths listed,
+# kept for comparison.
 
 [ADS-B]
 range = 1089.9 - 1090.1 MHz
