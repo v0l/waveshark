@@ -125,6 +125,12 @@ pub struct Demod {
     /// first of them.
     chips: Vec<u8>,
     chips_at: u64,
+    /// Chip position the sync search resumes from. Everything before it was
+    /// tried and is not the start of a frame, which will not change: chips
+    /// are only appended. Rescanning from the front on every run of noise
+    /// made the search quadratic, and on a wide stream that never closes it
+    /// was most of what the decoder cost.
+    scanned: usize,
     sample: u64,
     frames: Vec<Frame>,
 }
@@ -150,6 +156,7 @@ impl Demod {
             run: 0,
             chips: Vec::new(),
             chips_at: 0,
+            scanned: 0,
             sample: 0,
             frames: Vec::new(),
         }
@@ -170,6 +177,7 @@ impl Demod {
         self.box_sum = 0.0;
         self.run = 0;
         self.chips.clear();
+        self.scanned = 0;
         self.frames.clear();
     }
 
@@ -202,6 +210,7 @@ impl Demod {
         // and the chips behind it are either a frame by now or nothing.
         if self.run as f64 > 64.0 * self.sps {
             self.chips.clear();
+            self.scanned = 0;
         }
         &self.frames
     }
@@ -220,6 +229,7 @@ impl Demod {
         if n > 64 {
             // Idle: nothing keyed holds one level this long.
             self.chips.clear();
+            self.scanned = 0;
             return;
         }
         if self.chips.is_empty() {
@@ -231,6 +241,7 @@ impl Demod {
             let drop = self.chips.len() - MAX_CHIPS;
             self.chips.drain(..drop);
             self.chips_at += (drop as f64 * self.sps) as u64;
+            self.scanned = self.scanned.saturating_sub(drop);
         }
         self.search();
     }
@@ -238,7 +249,7 @@ impl Demod {
     /// Look for a sync word behind a preamble, and a whole frame after it.
     fn search(&mut self) {
         let chips = &self.chips;
-        let mut start = PREAMBLE_CHIPS;
+        let mut start = self.scanned.max(PREAMBLE_CHIPS);
         while start + SYNC_C.len() <= chips.len() {
             let pre = &chips[start - PREAMBLE_CHIPS..start];
             let alternating = pre.windows(2).all(|w| w[0] != w[1]);
@@ -251,7 +262,14 @@ impl Demod {
                 Self::frame_t(&rest[SYNC_T.len()..]).map(|(f, used)| (f, SYNC_T.len() + used))
             } else if rest.starts_with(SYNC_C) {
                 let body = &rest[SYNC_C.len()..];
-                if body.starts_with(FORMAT_A) {
+                if body.len() < FORMAT_A.len().max(FORMAT_B.len()) {
+                    // The sync matched and the format word is not all here
+                    // yet. This used to fall through as "not a frame", which
+                    // the full rescan on the next run quietly repaired; with
+                    // the search resuming where it left off it has to wait
+                    // here explicitly.
+                    Some((None, 0))
+                } else if body.starts_with(FORMAT_A) {
                     Self::frame_ca(&body[FORMAT_A.len()..])
                         .map(|(f, used)| (f, SYNC_C.len() + FORMAT_A.len() + used))
                 } else if body.starts_with(FORMAT_B) {
@@ -270,13 +288,18 @@ impl Demod {
                     let end = start + used;
                     self.chips.drain(..end);
                     self.chips_at += (end as f64 * self.sps) as u64;
+                    self.scanned = 0;
                     return;
                 }
                 // A sync word whose frame is not all here yet: wait.
-                Some((None, _)) => return,
+                Some((None, _)) => {
+                    self.scanned = start;
+                    return;
+                }
                 None => start += 1,
             }
         }
+        self.scanned = start;
     }
 
     /// Mode T: nibbles from 3-of-6 chips, blocks of up to sixteen bytes each
