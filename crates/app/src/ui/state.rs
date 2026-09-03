@@ -8,7 +8,6 @@
 //! These are the parts of the interface that survive a frame. Anything a pane
 //! works out again each frame stays a local.
 
-use super::DEFAULT_MAP_ZOOM;
 use crate::radio::{Cmd, DecodeRecord, Demod};
 use crate::dial::Dial;
 use crate::waterfall::Waterfall;
@@ -39,24 +38,6 @@ pub struct Channel {
     /// what an operator who has never touched the control should get.
     pub(super) squelch_db: Option<f32>,
     pub(super) agc: bool,
-}
-
-/// Where the map is looking. `center` is `None` until something has been
-/// heard, so the first track decides where the map opens rather than the map
-/// opening on the ocean.
-#[derive(Clone, Copy)]
-pub(super) struct MapView {
-    pub(super) center: Option<(f64, f64)>,
-    /// Continuous, not a tile level: the tile level is where the pictures
-    /// come from, and rounding the view to it would make most scroll notches
-    /// do nothing.
-    pub(super) zoom: f64,
-}
-
-impl Default for MapView {
-    fn default() -> Self {
-        Self { center: None, zoom: DEFAULT_MAP_ZOOM }
-    }
 }
 
 /// The spectrum and the waterfall: what is being drawn, and how.
@@ -339,22 +320,6 @@ impl Default for LogState {
         }
     }
 }
-
-/// The map: where it is looking, what is under it, and what is on it.
-pub(super) struct MapState {
-    pub view: MapView,
-    pub tiles: crate::map::Tiles,
-    /// Tracks, folded together from whatever on the bus reports a position:
-    /// aircraft from ADS-B, vessels and marks from AIS.
-    pub tracks: Vec<crate::tracks::Track>,
-}
-
-impl Default for MapState {
-    fn default() -> Self {
-        Self { view: MapView::default(), tiles: crate::map::Tiles::new(), tracks: Vec::new() }
-    }
-}
-
 /// The call list and what it has subscribed to.
 pub(super) struct CallsState {
     /// Who has been talking to whom, folded together from every decode that

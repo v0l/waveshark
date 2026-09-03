@@ -576,6 +576,20 @@ own meter, the squelch, the cell of a painted table. Each is an `egui::Widget`
 over the one value it edits and knows nothing about the receiver, so any pane
 can use one, twice on a row if it wants.
 
+`mapview.rs` is in that layer too, and is the largest of them: a slippy map
+with its own camera, tile cache and layer switches, knowing nothing about the
+receiver. What is drawn over the tiles arrives as a list of `Layer`
+implementations built fresh each frame, so the range rings, the station, the
+airports and the tracks live with the pane that knows what those are
+(`map_pane/layers.rs`), and a second view wanting a map hands over a different
+list rather than copying the file. Tiles are fetched through `poll-promise`,
+two requests in flight because that is what the OSM usage policy asks for,
+decoded with `spawn_blocking`, and uploaded as textures on the main thread
+where a resolved promise is collected. The runtime they run on belongs to
+`App`, one for the whole application, and reaches the tile cache as a handle
+passed down with the frame: a view that needs to wait on a network borrows it
+rather than starting threads of its own.
+
 Each view is then a struct that borrows its own state out of `state.rs` and
 nothing else: `Scope`, `Strip`, `Log`, `Map`, `Chain`, `CallList`. A pane
 cannot reach the radio. What it wants done it either pushes into the command

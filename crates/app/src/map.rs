@@ -7,9 +7,11 @@
 //! widget, and the widget here has to draw aircraft anyway.
 
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+use poll_promise::Promise;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 /// Tile edge in pixels. Fixed by the tile scheme, not a choice.
 pub const TILE_PX: f64 = 256.0;
@@ -28,6 +30,11 @@ const URL: &str = "https://tile.openstreetmap.org";
 /// few dozen at a time and panning discards the rest.
 const CACHE_MAX: usize = 512;
 
+/// Requests in flight at once. The tile usage policy asks for no more than
+/// two connections, and a pan asks for thirty tiles in one frame, so the
+/// limit has to be held on this side rather than left to the client.
+const IN_FLIGHT: usize = 2;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TileId {
     pub z: u8,
@@ -36,24 +43,26 @@ pub struct TileId {
 }
 
 enum Slot {
-    Loading,
+    Loading(Promise<Result<ColorImage, String>>),
     Ready(TextureHandle),
     /// Nothing will arrive for this one. Kept so a failure is not retried on
     /// every frame, and so the view can say what went wrong.
     Failed,
 }
 
-struct Fetched {
-    id: TileId,
-    result: Result<ColorImage, String>,
-}
-
-/// The tiles currently in hand, and the thread fetching the rest.
+/// The tiles currently in hand, and what is needed to fetch the rest. The
+/// runtime they are fetched on belongs to the application, and arrives as a
+/// handle with each request.
 pub struct Tiles {
     slots: HashMap<TileId, Slot>,
     order: Vec<TileId>,
-    want: Sender<TileId>,
-    done: Receiver<Fetched>,
+    http: reqwest::Client,
+    limit: Arc<Semaphore>,
+    dir: Option<PathBuf>,
+    /// Kept so a tile that lands while nothing else is moving still gets a
+    /// frame drawn for it. Set on the first poll, which is the first time
+    /// there is a context to clone.
+    ctx: Option<Context>,
     /// The most recent fetch failure, for the view to show. Cleared by the
     /// next tile that arrives, so a transient error does not stay on screen.
     error: Option<String>,
@@ -68,38 +77,49 @@ impl Default for Tiles {
 
 impl Tiles {
     pub fn new() -> Self {
-        let (want, want_rx) = std::sync::mpsc::channel::<TileId>();
-        let (done_tx, done) = std::sync::mpsc::channel::<Fetched>();
-        let dir = cache_dir();
-        // One thread, because the tile server asks for no more than two
-        // connections and because a map that fills in over a second is not
-        // worth a thread pool.
-        std::thread::Builder::new()
-            .name("tiles".into())
-            .spawn(move || fetch_loop(want_rx, done_tx, dir))
-            .ok();
+        let http = reqwest::Client::builder()
+            .user_agent(AGENT)
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
         Self {
             slots: HashMap::new(),
             order: Vec::new(),
-            want,
-            done,
+            http,
+            limit: Arc::new(Semaphore::new(IN_FLIGHT)),
+            dir: cache_dir(),
+            ctx: None,
             error: None,
             failures: 0,
         }
     }
 
-    /// Collect whatever arrived since the last frame.
+    /// Upload whatever finished since the last frame.
+    ///
+    /// The decode happens off the main thread but the texture upload cannot,
+    /// so a resolved promise is turned into a texture here rather than where
+    /// it is drawn.
     pub fn poll(&mut self, ctx: &Context) {
-        while let Ok(f) = self.done.try_recv() {
-            match f.result {
+        if self.ctx.is_none() {
+            self.ctx = Some(ctx.clone());
+        }
+        let done: Vec<TileId> = self
+            .slots
+            .iter()
+            .filter(|(_, s)| matches!(s, Slot::Loading(p) if p.ready().is_some()))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in done {
+            let Some(Slot::Loading(p)) = self.slots.remove(&id) else { continue };
+            match p.block_and_take() {
                 Ok(img) => {
-                    let name = format!("tile-{}-{}-{}", f.id.z, f.id.x, f.id.y);
+                    let name = format!("tile-{}-{}-{}", id.z, id.x, id.y);
                     let tex = ctx.load_texture(name, img, TextureOptions::LINEAR);
-                    self.slots.insert(f.id, Slot::Ready(tex));
+                    self.slots.insert(id, Slot::Ready(tex));
                     self.error = None;
                 }
                 Err(e) => {
-                    self.slots.insert(f.id, Slot::Failed);
+                    self.slots.insert(id, Slot::Failed);
                     self.failures += 1;
                     self.error = Some(e);
                 }
@@ -109,17 +129,40 @@ impl Tiles {
 
     /// The texture for a tile, asking for it if this is the first time it has
     /// been wanted. `None` means it is on its way, or will never come.
-    pub fn get(&mut self, id: TileId) -> Option<&TextureHandle> {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.slots.entry(id) {
-            e.insert(Slot::Loading);
+    pub fn get(&mut self, id: TileId, rt: &tokio::runtime::Handle) -> Option<&TextureHandle> {
+        if !self.slots.contains_key(&id) {
+            let promise = self.fetch(id, rt);
+            self.slots.insert(id, Slot::Loading(promise));
             self.order.push(id);
-            let _ = self.want.send(id);
             self.evict();
         }
         match self.slots.get(&id) {
             Some(Slot::Ready(t)) => Some(t),
             _ => None,
         }
+    }
+
+    /// Start one tile: cache, then network, then decode, each waiting its
+    /// turn behind the in-flight limit.
+    fn fetch(
+        &self,
+        id: TileId,
+        rt: &tokio::runtime::Handle,
+    ) -> Promise<Result<ColorImage, String>> {
+        let path = self.dir.as_ref().map(|d| d.join(format!("{}/{}/{}.png", id.z, id.x, id.y)));
+        let http = self.http.clone();
+        let limit = self.limit.clone();
+        let ctx = self.ctx.clone();
+        let _enter = rt.enter();
+        Promise::spawn_async(async move {
+            let out = load(http, limit, id, path).await;
+            // Nothing else may be moving on screen, and a tile that arrives
+            // into a still window has to ask for the frame that draws it.
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+            out
+        })
     }
 
     /// What went wrong most recently, and how many tiles have failed.
@@ -144,49 +187,47 @@ fn cache_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-fn fetch_loop(want: Receiver<TileId>, done: Sender<Fetched>, dir: Option<PathBuf>) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .user_agent(AGENT)
-        .timeout_global(Some(std::time::Duration::from_secs(15)))
-        .build()
-        .into();
-    while let Ok(id) = want.recv() {
-        let path = dir.as_ref().map(|d| d.join(format!("{}/{}/{}.png", id.z, id.x, id.y)));
-        let result = load_cached(path.as_deref())
-            .map(Ok)
-            .unwrap_or_else(|| fetch(&agent, id, path.as_deref()));
-        if done.send(Fetched { id, result }).is_err() {
-            return;
+/// One tile, from disk if it is there and from the server if it is not.
+///
+/// The permit is taken around the request only. A cached tile does not touch
+/// the network, and making it queue behind two that do would make a stored
+/// map redraw at the speed of the slowest fetch on screen.
+async fn load(
+    http: reqwest::Client,
+    limit: Arc<Semaphore>,
+    id: TileId,
+    path: Option<PathBuf>,
+) -> Result<ColorImage, String> {
+    if let Some(p) = path.as_deref() {
+        if let Ok(bytes) = tokio::fs::read(p).await {
+            if let Ok(img) = decode_off_thread(bytes).await {
+                return Ok(img);
+            }
         }
     }
-}
-
-fn load_cached(path: Option<&std::path::Path>) -> Option<ColorImage> {
-    let bytes = std::fs::read(path?).ok()?;
-    decode(&bytes).ok()
-}
-
-fn fetch(
-    agent: &ureq::Agent,
-    id: TileId,
-    path: Option<&std::path::Path>,
-) -> Result<ColorImage, String> {
     let url = format!("{URL}/{}/{}/{}.png", id.z, id.x, id.y);
-    let mut resp = agent.get(&url).call().map_err(|e| format!("{url}: {e}"))?;
-    let bytes = resp
-        .body_mut()
-        .with_config()
-        .limit(4 << 20)
-        .read_to_vec()
-        .map_err(|e| format!("{url}: {e}"))?;
-    let img = decode(&bytes).map_err(|e| format!("{url}: {e}"))?;
+    let bytes = {
+        let _permit = limit.acquire().await.map_err(|e| e.to_string())?;
+        let resp = http.get(&url).send().await.map_err(|e| format!("{url}: {e}"))?;
+        let resp = resp.error_for_status().map_err(|e| format!("{url}: {e}"))?;
+        resp.bytes().await.map_err(|e| format!("{url}: {e}"))?
+    };
+    let img = decode_off_thread(bytes.to_vec()).await.map_err(|e| format!("{url}: {e}"))?;
     if let Some(p) = path {
         if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let _ = std::fs::write(p, &bytes);
+        let _ = tokio::fs::write(p, &bytes).await;
     }
     Ok(img)
+}
+
+/// PNG decoding is milliseconds of CPU per tile, which is long enough to
+/// stall the other fetches sharing the runtime's two workers.
+async fn decode_off_thread(bytes: Vec<u8>) -> Result<ColorImage, String> {
+    tokio::task::spawn_blocking(move || decode(&bytes))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn decode(bytes: &[u8]) -> Result<ColorImage, String> {

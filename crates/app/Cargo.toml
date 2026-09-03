@@ -32,7 +32,9 @@ tracing-subscriber.workspace = true
 parking_lot.workspace = true
 libc = "0.2"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
+poll-promise = { version = "0.3", features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [features]
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so

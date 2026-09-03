@@ -67,6 +67,10 @@ pub struct Session {
     /// Whether the operator owns the shape of the graph. The graph itself is
     /// in its own file: it is a drawing, not a setting.
     pub manual_chain: bool,
+    /// Map reference layers by name, and whether each is drawn. Named rather
+    /// than positional so a layer added later keeps its own default instead
+    /// of inheriting a stale flag.
+    pub map_layers: Vec<(String, bool)>,
 }
 
 /// Spectrum and waterfall settings, as the two panes' own panels set them.
@@ -127,6 +131,7 @@ impl Default for Session {
             feeds: Vec::new(),
             streams: Vec::new(),
             manual_chain: false,
+            map_layers: Vec::new(),
         }
     }
 }
@@ -167,6 +172,7 @@ impl Session {
         let mut choices = Vec::new();
         let mut feeds = Vec::new();
         let mut streams = Vec::new();
+        let mut map_layers = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -182,6 +188,8 @@ impl Session {
                 toggles.push((name.to_string(), v == "true"));
             } else if let Some(name) = k.strip_prefix("choice.") {
                 choices.push((name.to_string(), v.to_string()));
+            } else if let Some(name) = k.strip_prefix("map_layer.") {
+                map_layers.push((name.to_string(), v == "true"));
             } else if k == "feed" {
                 if let Some(f) = parse_feed(v) {
                     feeds.push(f);
@@ -241,6 +249,7 @@ impl Session {
             feeds,
             streams,
             manual_chain: kv.get("manual_chain").map(|v| *v == "true").unwrap_or(false),
+            map_layers,
         }
     }
 
@@ -289,6 +298,9 @@ impl Session {
         }
         for (name, value) in &self.choices {
             s.push_str(&format!("choice.{name} = {value}\n"));
+        }
+        for (name, on) in &self.map_layers {
+            s.push_str(&format!("map_layer.{name} = {on}\n"));
         }
         for f in &self.feeds {
             s.push_str(&format!("feed = {} {}\n", f.kind.name, f.address()));
@@ -372,6 +384,7 @@ mod tests {
                 ("radarpi:1234".into(), "Loft dongle".into()),
                 ("10.0.0.5:1234".into(), String::new()),
             ],
+            map_layers: vec![("rings".into(), true), ("airports".into(), false)],
         };
         assert_eq!(Session::parse(&s.render()), s);
     }

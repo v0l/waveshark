@@ -28,6 +28,7 @@ mod calls_pane;
 mod chain_pane;
 mod head;
 mod map_pane;
+mod mapview;
 mod packets;
 mod scope;
 mod scope_settings;
@@ -46,7 +47,7 @@ use crate::theme::{self, legend, value};
 use burst::*;
 use settings::RemoteEdit;
 use settings_rows::{mhz_field, ScannerRow};
-use state::{Channel, Logged, MapView};
+use state::{Channel, Logged};
 use widgets::{bin_hint, cog, cog_rect, hint, modal_title, row, Fader, Squelch, Vu};
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
@@ -58,9 +59,14 @@ pub struct App {
     scope: state::ScopeState,
     chain: state::ChainState,
     log: state::LogState,
-    map: state::MapState,
+    map: map_pane::MapState,
     calls: state::CallsState,
     audio: state::AudioState,
+    /// Where the interface's waiting work runs: tile fetches now, anything
+    /// else that waits on a network later. One per application rather than
+    /// one per view, so a second view that needs it borrows a handle instead
+    /// of standing up threads of its own.
+    rt: tokio::runtime::Runtime,
     /// What the panes asked the receiver for this frame, sent once drawing
     /// is over.
     cmds: Vec<Cmd>,
@@ -206,6 +212,18 @@ const HANDLE_H: f32 = 7.0;
 /// screen, which is about what a rooftop antenna hears.
 const DEFAULT_MAP_ZOOM: f64 = 8.0;
 
+/// Two workers, matching the two tile requests allowed in flight. Everything
+/// this runtime carries is waiting on a network rather than computing, so
+/// sizing it to the core count would buy nothing.
+fn background_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("net")
+        .enable_all()
+        .build()
+        .expect("background runtime")
+}
+
 /// Bytes, in whatever unit keeps the number readable.
 fn human_bytes(n: u64) -> String {
     const UNITS: [(&str, u64); 4] =
@@ -293,7 +311,8 @@ impl Default for App {
             scope: state::ScopeState::default(),
             chain: state::ChainState::default(),
             log: state::LogState::default(),
-            map: state::MapState::default(),
+            map: map_pane::MapState::default(),
+            rt: background_runtime(),
             calls: state::CallsState::default(),
             audio: state::AudioState::default(),
             cmds: Vec::new(),
@@ -373,6 +392,7 @@ impl App {
             saved: s.clone(),
             ..Default::default()
         };
+        app.map.map.layers.restore(&s.map_layers);
         app.scope.restore(&s.view, s.fft);
         app.scope.db_center = s.center;
         app.scope.wf_center = s.center;
@@ -435,6 +455,7 @@ impl App {
             decode_on: self.decode_on,
             volume: self.audio.volume,
             manual_chain: self.chain.edit.manual,
+            map_layers: self.map.map.layers.saved(),
         }
     }
 
@@ -902,7 +923,10 @@ impl App {
     /// Draw the map, and take the station position it was given.
     fn map_view(&mut self, ui: &mut egui::Ui) {
         let mut edit = self.station_edit.take();
-        let place = map_pane::Map { st: &mut self.map, home: self.location, edit: &mut edit }
+        // Cloned rather than borrowed, so holding the runtime does not hold
+        // the application while the pane borrows its own state out of it.
+        let rt = self.rt.handle().clone();
+        let place = map_pane::Map { st: &mut self.map, home: self.location, edit: &mut edit, rt }
             .show(ui);
         self.station_edit = edit;
         if let Some((lat, lon)) = place {
