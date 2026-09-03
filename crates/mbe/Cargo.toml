@@ -1,0 +1,9 @@
+[package]
+name = "mbe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MBE vocoder decoders (IMBE 7200x4400, AMBE 3600x2450), ported from DSheirer/jmbe"
+
+[dependencies]
+rustfft.workspace = true
