@@ -1571,7 +1571,7 @@ const BUS_TAILS: [&str; 11] = [
 /// is a description, written before any node exists to be asked. What each
 /// front end does with the port is its own business; this only says which
 /// wire to draw.
-const VOICE_TAILS: [(&str, usize); 2] = [("m17", 1), ("auto", 1)];
+const VOICE_TAILS: [(&str, usize); 3] = [("m17", 1), ("tetra", 1), ("auto", 1)];
 
 /// Stages that report something a position can be resolved from, so the
 /// tracker is worth attaching to the bus.
@@ -3599,6 +3599,7 @@ mod tests {
             channels: Vec::new(),
             margin_hz: 0.0,
             front: Front::Banks(vec![OOK_CHANNEL_HZ]),
+            enabled: true,
         });
         scan_marks(&s, p.center.as_f64(), p.eff_rate())
     }

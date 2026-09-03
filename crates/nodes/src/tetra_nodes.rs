@@ -11,12 +11,25 @@
 //! that enciphers the air interface there are no call control PDUs to read,
 //! only MAC headers naming who is addressed, and those are reported once per
 //! address every couple of seconds: enough to say a group is busy, not so
-//! many that the list is a scroll of one group.
+//! many that the log is a scroll of one group. They are a log row and not a
+//! call row, since an enciphered SDU addressed to a radio may be a call, a
+//! registration or a data session, and only a row that carries `voice`
+//! reaches the call list.
 
 use common::Result;
 use decode::tetra::{Address, CallPdu, Event, RESOURCE, TRAFFIC, TRAFFIC_END};
+use decode::gpu::GpuSearch;
+use decode::recover::{Progress, Search};
+use decode::tea::{Collision, Key, Timestamp};
+use decode::voice::{frame_timestamps, CallDecoder};
+use poll_promise::Promise;
+use std::sync::Arc;
 use std::collections::HashMap;
-use dsp::tetra::{Block, Burst, TetraConfig, TetraDemod, TetraRx, OCCUPIED_HZ};
+use dsp::tetra::speech;
+use dsp::tetra::{
+    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, NDB_BB1, NDB_BLK1, NDB_BLK2,
+    OCCUPIED_HZ,
+};
 use dsp::{FirDecim, Mixer};
 use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
@@ -32,6 +45,13 @@ pub const MIN_RATE_HZ: f64 = OCCUPIED_HZ;
 
 /// Rate the demodulator likes to run at: four samples a symbol.
 const DEMOD_HZ: f64 = 72_000.0;
+
+/// The rate the TETRA vocoder speaks: 8 kHz.
+pub const VOICE_HZ: f64 = 8_000.0;
+
+/// Two outputs: the packet log, and the speech the traffic slots carry.
+const OUT_PACKETS: usize = 0;
+const OUT_VOICE: usize = 1;
 
 /// Slots between rows for one address that keeps being addressed with
 /// nothing readable: about two seconds, at 85/6 ms a slot.
@@ -49,6 +69,30 @@ const SLOT_S: f64 = 255.0 / 18_000.0;
 /// Frames a marker has to be seen on before its traffic is reported: one
 /// misread field must not open a call.
 const TRAFFIC_CONFIRM: u32 = 2;
+
+/// How many retransmissions of one message must be seen before a search is
+/// worth starting: three leaves no candidate over the whole register space.
+const COLLISION_QUORUM: usize = 3;
+
+/// A TEA1 register search in flight, on the GPU or the CPU.
+enum RecoveryJob {
+    Gpu(Promise<Option<u32>>),
+    Cpu(Search),
+}
+
+impl RecoveryJob {
+    /// The recovered register, if the search has finished with one.
+    fn poll(&mut self) -> Progress {
+        match self {
+            RecoveryJob::Gpu(p) => match p.ready() {
+                Some(Some(reg)) => Progress::Found(*reg),
+                Some(None) => Progress::Exhausted,
+                None => Progress::Running,
+            },
+            RecoveryJob::Cpu(s) => s.poll(),
+        }
+    }
+}
 
 /// Traffic running on one timeslot, as the access assign field shows it.
 struct Traffic {
@@ -86,8 +130,34 @@ pub struct TetraNode {
     /// Which party each usage marker was given to, from the addresses that
     /// carried one.
     markers: HashMap<u8, u32>,
+    /// Whether each usage marker's traffic is speech, where a call PDU
+    /// carrying that marker also carried the basic service information.
+    /// Traffic seen on the access assign field says a channel is in use but
+    /// never says what it carries, so this is the only thing that can tell
+    /// a data call's traffic from a voice one's.
+    marker_speech: HashMap<u8, bool>,
     /// Traffic on each timeslot right now, by timeslot number.
     traffic: HashMap<u8, Traffic>,
+    /// A speech decoder per timeslot carrying traffic, holding the vocoder's
+    /// inter-frame state for that call and, when known, its key.
+    voice_calls: HashMap<u8, CallDecoder>,
+    /// Keys to try on enciphered traffic, by cell colour code. Empty until a
+    /// key manager fills it or recovery finds one; without a key, enciphered
+    /// traffic decodes to noise and clear traffic decodes to speech.
+    keys: HashMap<u8, Key>,
+    /// Enciphered SDUs grouped by what says two of them are retransmissions
+    /// of the same message (address, PDU, mode, length): the equal-plaintext
+    /// sets a TEA1 key search runs on (TETRA:BURST section 5.2).
+    collisions: HashMap<u64, Vec<Collision>>,
+    /// The GPU searcher, built once; `None` where there is no adapter, and
+    /// the CPU search is used instead.
+    gpu: Option<Arc<GpuSearch>>,
+    /// A key recovery in flight: the colour code and message signature it is
+    /// for, and the search itself. One at a time, since the GPU is one device.
+    recovery: Option<(u8, u64, RecoveryJob)>,
+    /// Message signatures whose whole-space search exhausted: never gathered
+    /// or searched again.
+    dead_sigs: std::collections::HashSet<u64>,
     /// The slot counter as of the last burst, for reaping traffic whose
     /// marker stopped appearing.
     slot_now: u64,
@@ -120,10 +190,22 @@ impl TetraNode {
             resource_seen: HashMap::new(),
             cell_band: None,
             markers: HashMap::new(),
+            marker_speech: HashMap::new(),
             traffic: HashMap::new(),
+            voice_calls: HashMap::new(),
+            keys: HashMap::new(),
+            collisions: HashMap::new(),
+            gpu: GpuSearch::new().map(Arc::new),
+            recovery: None,
+            dead_sigs: std::collections::HashSet::new(),
             slot_now: 0,
             accepted: 0,
         }
+    }
+
+    /// Give the node a key to try on this colour code's enciphered traffic.
+    pub fn add_key(&mut self, colour: u8, key: Key) {
+        self.keys.insert(colour, key);
     }
 
     pub fn channel_hz(&self) -> f64 {
@@ -183,6 +265,7 @@ impl TetraNode {
             // a cell that encrypts encrypts everything.
             aie: self.last_aie,
             e2e: None,
+            speech: self.marker_speech.get(&marker).copied(),
             call_id: None,
             from: None,
             group: None,
@@ -191,6 +274,7 @@ impl TetraNode {
             marker: Some(marker),
             seconds,
             text: None,
+            cipher: Vec::new(),
         })
     }
 
@@ -246,6 +330,202 @@ impl TetraNode {
             self.end_traffic(tn, last, out);
         }
     }
+
+    /// Decode the speech a traffic slot carries into PCM, one [`common::Voice`]
+    /// per call heard this block. A traffic burst is a continuous burst
+    /// (`Normal1`, training sequence 1) on a timeslot the access assign field
+    /// has marked as traffic; its 432 channel bits are the same two half
+    /// blocks the SCH/F occupies. Enciphered slots are decrypted first when a
+    /// key for the cell's colour is known.
+    fn decode_voice(&mut self, bursts: &[Burst]) -> Vec<common::Voice> {
+        let Some(cell) = self.rx.cell else { return Vec::new() };
+        let key = self.keys.get(&cell.colour).copied();
+        // An enciphered call with no key is silence, not noise: the STEC
+        // frames are ciphertext, and feeding those to the vocoder would
+        // synthesise random speech parameters. Only decode when the traffic
+        // is clear or a key can undo it.
+        if self.last_aie != 0 && key.is_none() {
+            return Vec::new();
+        }
+        let mut pcm: HashMap<u8, Vec<f32>> = HashMap::new();
+        let mut seen_tn: Vec<u8> = Vec::new();
+
+        for b in bursts {
+            if b.kind != BurstKind::Normal1 {
+                continue;
+            }
+            let Some(time) = self.rx.time_at(b.slot) else { continue };
+            let tn = time.tn;
+            if !self.traffic.contains_key(&tn) {
+                continue;
+            }
+            let mut chan = [0u8; speech::CHAN_BITS];
+            chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
+            chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
+            let (frames, crc_ok) = speech::decode(cell.scramb, &chan);
+
+            let dec = self
+                .voice_calls
+                .entry(tn)
+                .or_insert_with(|| CallDecoder::new(key));
+            let ts = frame_timestamps(time, 0, false);
+            let buf = pcm.entry(tn).or_default();
+            for (frame, ts) in frames.iter().zip(&ts) {
+                let samples = dec.frame(frame, ts, !crc_ok);
+                buf.extend(samples.iter().map(|&s| s as f32 / 32768.0));
+            }
+            if !seen_tn.contains(&tn) {
+                seen_tn.push(tn);
+            }
+        }
+
+        // Drop decoders for timeslots no longer carrying traffic.
+        self.voice_calls.retain(|tn, _| self.traffic.contains_key(tn));
+
+        seen_tn
+            .into_iter()
+            .map(|tn| {
+                let marker = self.traffic.get(&tn).map(|t| t.marker);
+                let to = marker
+                    .and_then(|m| self.markers.get(&m))
+                    .map(|ssi| ssi.to_string());
+                common::Voice {
+                    system: "TETRA",
+                    channel_hz: self.channel_hz,
+                    to,
+                    from: None,
+                    rate: VOICE_HZ,
+                    pcm: pcm.remove(&tn).unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// Note an enciphered PDU as possible key-search material.
+    ///
+    /// Two frames that are retransmissions of one message carry the same
+    /// plaintext under different keystreams, which is what a TEA1 search
+    /// exploits. They are recognised, without reading the plaintext, by an
+    /// identical MAC header and SDU length (TETRA:BURST section 5.2): the
+    /// address, the PDU type, the encryption mode and the ciphertext length
+    /// are the signature here. Frames are kept per signature until a quorum
+    /// of distinct timestamps is reached, then handed to a search.
+    fn collect_collision(&mut self, c: &CallPdu, slot: u64) {
+        // The MAC header's encryption mode does not name the cipher, so any
+        // enciphered call is tried: the register search either finds a TEA1
+        // key or exhausts, which is the honest answer for a TEA2/3 network.
+        // Four ciphertext bytes are enough; 32 bits pin the 32-bit register.
+        if c.aie == 0 || c.cipher.len() < 4 {
+            return;
+        }
+        let Some(cell) = self.rx.cell else { return };
+        // A key is already known: nothing to recover.
+        if self.keys.contains_key(&cell.colour) {
+            return;
+        }
+        let Some(time) = self.rx.time_at(slot) else { return };
+        let ct: Vec<u8> = c.cipher[..4].to_vec();
+
+        // The signature that says two frames are the same message, hence the
+        // same plaintext: caller, PDU type, mode, length. Frames that only
+        // share a caller are different messages, and pooling those never
+        // converges; the search would exhaust because no key makes distinct
+        // plaintexts equal. So collection accumulates strictly per message.
+        let mut sig = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        c.pdu.hash(&mut sig);
+        c.aie.hash(&mut sig);
+        c.address.hash(&mut sig);
+        c.cipher.len().hash(&mut sig);
+        let sig = sig.finish();
+
+        // A signature that already exhausted a whole-space search will not
+        // yield: its frames did not share plaintext, or the hyperframe was
+        // wrong. Do not gather it again.
+        if self.dead_sigs.contains(&sig) {
+            return;
+        }
+
+        let ts = Timestamp {
+            tn: time.tn,
+            frame: time.frame,
+            multiframe: time.multiframe,
+            hyperframe: 0,
+            uplink: false,
+        };
+        let group = self.collisions.entry(sig).or_default();
+        // A retransmission is at a new time; the same slot twice is one frame.
+        if group.iter().any(|f| f.ts == ts) {
+            return;
+        }
+        // Bound the material a single message keeps: a quorum plus a little
+        // spare against a mis-decoded frame is all a 32-bit search needs.
+        if group.len() < 8 {
+            group.push(Collision { ts, ct });
+        }
+        // Start a search when a message has enough retransmissions and the
+        // one search slot (the GPU, or the CPU pool) is free. Collection of
+        // every other message keeps going regardless.
+        if group.len() >= COLLISION_QUORUM && self.recovery.is_none() {
+            let frames = group.clone();
+            self.start_recovery(cell.colour, sig, frames);
+        }
+    }
+
+    /// Start a register search over the whole space, on the GPU if there is
+    /// one, else across CPU threads.
+    fn start_recovery(&mut self, colour: u8, sig: u64, frames: Vec<Collision>) {
+        let job = match &self.gpu {
+            Some(gpu) => RecoveryJob::Gpu(gpu.clone().spawn(frames, 0..1u64 << 32, 1 << 20)),
+            None => {
+                let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                RecoveryJob::Cpu(Search::start(frames, threads))
+            }
+        };
+        self.recovery = Some((colour, sig, job));
+    }
+
+    /// Poll a running search; on success install the key so the next traffic
+    /// on this cell decodes, and report the colour it was found for.
+    ///
+    /// On failure the searched message is marked dead and dropped, but every
+    /// other message keeps its accumulated frames: recovery is a long game of
+    /// waiting for one message to be retransmitted enough times, and a wrong
+    /// guess on one caller must not throw away progress on another.
+    fn poll_recovery(&mut self) -> Option<u8> {
+        let (colour, sig, job) = self.recovery.as_mut()?;
+        let (colour, sig) = (*colour, *sig);
+        match job.poll() {
+            Progress::Running => None,
+            Progress::Found(reg) => {
+                self.keys.insert(colour, Key::Tea1(reg));
+                self.recovery = None;
+                self.collisions.clear();
+                Some(colour)
+            }
+            Progress::Exhausted => {
+                self.recovery = None;
+                self.dead_sigs.insert(sig);
+                self.collisions.remove(&sig);
+                // Hand the search slot to the next message already at quorum.
+                if let Some(cell) = self.rx.cell {
+                    if let Some((&next, frames)) =
+                        self.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
+                    {
+                        let frames = frames.clone();
+                        self.start_recovery(cell.colour, next, frames);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// The key recovered for a colour code, if any: what a key manager reads
+    /// to show and persist it.
+    pub fn recovered_key(&self, colour: u8) -> Option<Key> {
+        self.keys.get(&colour).copied()
+    }
 }
 
 impl Node for TetraNode {
@@ -266,7 +546,7 @@ impl Node for TetraNode {
     }
 
     fn num_outputs(&self) -> usize {
-        1
+        2
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -292,7 +572,10 @@ impl Node for TetraNode {
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         out.rate = 0.0;
-        Ok(vec![out])
+
+        let mut voice = out.with_kind(PortKind::Voice);
+        voice.rate = VOICE_HZ;
+        Ok(vec![out, voice])
     }
 
     fn process(
@@ -324,7 +607,7 @@ impl Node for TetraNode {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let out = outputs[0].packets_mut();
+        let out = outputs[OUT_PACKETS].packets_mut();
         // Every block's event, then the traffic the access assign fields
         // describe, as events of the node's own.
         let mut events: Vec<(Event, u64)> = Vec::new();
@@ -345,12 +628,17 @@ impl Node for TetraNode {
                     if let (Some(m), Some(ssi)) = (c.marker, c.address.ssi()) {
                         self.markers.insert(m, ssi);
                     }
+                    if let (Some(m), Some(speech)) = (c.marker, c.speech) {
+                        self.marker_speech.insert(m, speech);
+                    }
                     if c.aie != 0 {
                         self.last_aie = c.aie;
                     }
                     if let (Some(a), Some(band)) = (c.alloc.as_mut(), self.cell_band) {
                         a.band.get_or_insert(band);
                     }
+                    // Enciphered SDUs are the material a key search runs on.
+                    self.collect_collision(&c, block.slot);
                     events.push((Event::Call(c), block.slot));
                 }
                 Event::Network(mut n) => {
@@ -367,6 +655,10 @@ impl Node for TetraNode {
         let mut reaped = Vec::new();
         self.reap_traffic(&mut reaped);
         events.extend(reaped.into_iter().map(|e| (e, self.slot_now)));
+
+        // Advance any key recovery in flight; a found key decodes the next
+        // traffic without an operator entering anything.
+        self.poll_recovery();
 
         for (event, slot) in events {
             let bytes = event.to_bytes();
@@ -405,6 +697,13 @@ impl Node for TetraNode {
                 measure: None,
             });
         }
+        // Speech the traffic slots carried this block, one Voice per call.
+        let bursts = std::mem::take(&mut self.bursts);
+        let voices = self.decode_voice(&bursts);
+        self.bursts = bursts;
+        let vout = outputs[OUT_VOICE].voice_mut();
+        vout.extend(voices);
+
         self.blocks = blocks;
         Ok(())
     }
@@ -419,7 +718,12 @@ impl Node for TetraNode {
         self.last_network = None;
         self.resource_seen.clear();
         self.markers.clear();
+        self.marker_speech.clear();
         self.traffic.clear();
+        self.voice_calls.clear();
+        self.collisions.clear();
+        self.recovery = None;
+        self.dead_sigs.clear();
     }
 }
 
@@ -453,6 +757,13 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         // how long an over ran and `live` that it is still running.
         Event::Call(c) => {
             fields.push(("pdu".into(), Value::Text(c.name().into())));
+            // What the call list is filtered on: a row that is not about a
+            // circuit mode call still belongs in the packet log, but the
+            // list is for voice and a MAC header addressed to somebody is
+            // not evidence of any.
+            if c.is_call() {
+                fields.push(("voice".into(), Value::Bool(true)));
+            }
             match c.address {
                 Address::Ssi(s) | Address::Ussi(s) => {
                     fields.push(("to".into(), Value::Text(s.to_string())));
@@ -603,10 +914,11 @@ mod tests {
         let mut rows = Vec::new();
         for chunk in iq.chunks(16_384) {
             let input = Payload::Iq(chunk.to_vec());
-            let mut out = Payload::Packets(Vec::new());
+            let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
+            node.process(&[&input], &mut outs, &mut ctx).unwrap();
+            let [out, _voice] = outs;
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(b) = p.body {
@@ -687,10 +999,11 @@ mod tests {
         let mut rows = Vec::new();
         for chunk in iq.chunks(16_384) {
             let input = Payload::Iq(chunk.to_vec());
-            let mut out = Payload::Packets(Vec::new());
+            let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
+            node.process(&[&input], &mut outs, &mut ctx).unwrap();
+            let [out, _voice] = outs;
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(b) = p.body {

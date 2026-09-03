@@ -108,7 +108,7 @@ impl SysinfoPdu {
 }
 
 /// Who a MAC PDU is addressed to (21.4.3.1, address type).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Address {
     /// A short subscriber identity: a radio or a talkgroup.
     Ssi(u32),
@@ -307,6 +307,11 @@ pub struct CallPdu {
     pub aie: u8,
     /// End to end encryption, where the basic service information said.
     pub e2e: Option<bool>,
+    /// Circuit mode speech rather than data, where the basic service
+    /// information said. `None` is not knowing, which is most PDUs: only
+    /// the ones that carry that element say, and the rest of a call
+    /// inherits it by call identifier.
+    pub speech: Option<bool>,
     pub call_id: Option<u16>,
     /// The calling or transmitting party, where the PDU names one.
     pub from: Option<u32>,
@@ -323,6 +328,10 @@ pub struct CallPdu {
     pub seconds: f32,
     /// A short data message's text, where one was readable.
     pub text: Option<String>,
+    /// The enciphered SDU, packed MSB-first, when `aie != 0`: the ciphertext
+    /// a key search needs, empty otherwise. Not serialised in [`Event::to_bytes`]
+    /// (it does not belong in the log), so it survives only on the live PDU.
+    pub cipher: Vec<u8>,
 }
 
 impl CallPdu {
@@ -356,6 +365,36 @@ impl CallPdu {
     /// "AIE-n" for air interface encryption of that mode, with "E2E" where
     /// the call is also enciphered end to end. A key manager that can undo
     /// the air interface layer will report "decrypted" here in its place.
+    /// Whether this PDU is about a circuit mode call, which is what the
+    /// call list holds: call control and traffic, not short data, status,
+    /// facilities, or a resource whose SDU nobody read. A call whose basic
+    /// service information said data is excluded; one that never said is
+    /// not, since most call control PDUs do not carry the element.
+    pub fn is_call(&self) -> bool {
+        if self.speech == Some(false) {
+            return false;
+        }
+        matches!(
+            self.pdu,
+            D_ALERT
+                | D_CALL_PROCEEDING
+                | D_CONNECT
+                | D_CONNECT_ACK
+                | D_DISCONNECT
+                | D_INFO
+                | D_RELEASE
+                | D_SETUP
+                | D_TX_CEASED
+                | D_TX_CONTINUE
+                | D_TX_GRANTED
+                | D_TX_WAIT
+                | D_TX_INTERRUPT
+                | D_CALL_RESTORE
+                | TRAFFIC
+                | TRAFFIC_END
+        )
+    }
+
     pub fn encryption(&self) -> String {
         let mut s = if self.aie == 0 { "none".to_string() } else { format!("AIE-{}", self.aie) };
         if self.e2e == Some(true) {
@@ -456,6 +495,7 @@ impl Mac {
             address,
             aie,
             e2e: None,
+            speech: None,
             call_id: None,
             from: None,
             group: None,
@@ -464,8 +504,14 @@ impl Mac {
             marker,
             seconds: 0.0,
             text: None,
+            cipher: Vec::new(),
         };
         if aie != 0 || augmented {
+            // The enciphered SDU starts at `at`; pack the remaining bits into
+            // bytes, MSB-first, as the ciphertext for a key search.
+            if aie != 0 && at < b.len() {
+                pdu.cipher = b[at..].chunks(8).map(pack_bits).collect();
+            }
             return Some(Mac::Call(pdu));
         }
         // LLC (22.2.1): the basic link types carry a sequence number or two
@@ -495,9 +541,7 @@ impl Mac {
             D_SETUP => {
                 pdu.call_id = Some(take(b, &mut at, 14)? as u16);
                 at += 4 + 1 + 1;
-                let bsi = take(b, &mut at, 8)?;
-                pdu.e2e = Some((bsi >> 4) & 1 == 1);
-                pdu.group = Some((bsi >> 2) & 0b11 != 0);
+                basic_service(&mut pdu, take(b, &mut at, 8)?);
                 at += 2 + 1 + 4;
                 if take(b, &mut at, 1)? == 1 {
                     if take(b, &mut at, 1)? == 1 {
@@ -519,9 +563,7 @@ impl Mac {
                         at += 4;
                     }
                     if take(b, &mut at, 1)? == 1 {
-                        let bsi = take(b, &mut at, 8)?;
-                        pdu.e2e = Some((bsi >> 4) & 1 == 1);
-                        pdu.group = Some((bsi >> 2) & 0b11 != 0);
+                        basic_service(&mut pdu, take(b, &mut at, 8)?);
                     }
                 }
             }
@@ -551,6 +593,16 @@ impl Mac {
         }
         Some(Mac::Call(pdu))
     }
+}
+
+/// The basic service information element (14.8.2): circuit mode type in
+/// the top three bits, where 0 is TCH/S and the rest are data rates, then
+/// the encryption flag, the communication type and the slot or codec
+/// field.
+fn basic_service(pdu: &mut CallPdu, bsi: u32) {
+    pdu.speech = Some(bsi >> 5 == 0);
+    pdu.e2e = Some((bsi >> 4) & 1 == 1);
+    pdu.group = Some((bsi >> 2) & 0b11 != 0);
 }
 
 /// The text of a short data message, when it is text (29.4, 29.5).
@@ -665,6 +717,15 @@ fn party(b: &[u8], at: &mut usize) -> Option<u32> {
     }
 }
 
+/// Pack up to 8 one-bit values into a byte, MSB-first and left-aligned.
+fn pack_bits(chunk: &[u8]) -> u8 {
+    let mut byte = 0u8;
+    for (i, &bit) in chunk.iter().enumerate() {
+        byte |= (bit & 1) << (7 - i);
+    }
+    byte
+}
+
 fn take(b: &[u8], at: &mut usize, n: usize) -> Option<u32> {
     if *at + n > b.len() {
         return None;
@@ -753,6 +814,7 @@ impl Event {
                 let text = c.text.as_deref().unwrap_or("").as_bytes();
                 v.extend_from_slice(&(text.len().min(u16::MAX as usize) as u16).to_be_bytes());
                 v.extend_from_slice(&text[..text.len().min(u16::MAX as usize)]);
+                v.push(c.speech.map_or(2, u8::from));
                 v
             }
             Event::Network(n) => {
@@ -853,6 +915,7 @@ impl Event {
                     aie: r[1],
                     address,
                     e2e: flag(r[7]),
+                    speech: r.get(34 + text_len).copied().and_then(flag),
                     call_id: (call_id != 0xffff).then_some(call_id),
                     from: (from != 0xffff_ffff).then_some(from),
                     group: flag(r[14]),
@@ -861,6 +924,7 @@ impl Event {
                     marker: (r[26] == 1).then_some(r[27]),
                     seconds: f32::from_be_bytes([r[28], r[29], r[30], r[31]]),
                     text,
+                    cipher: Vec::new(),
                 }))
             }
             (4, n) if n >= 1 && (n - 1) % 12 == 0 && usize::from(r[0]) * 12 == n - 1 => {
@@ -1199,6 +1263,7 @@ mod tests {
             address: Address::Ssi(2001),
             aie: 0,
             e2e: None,
+            speech: Some(true),
             call_id: Some(77),
             from: Some(3_000_123),
             group: None,
@@ -1207,6 +1272,7 @@ mod tests {
             marker: Some(17),
             seconds: 0.0,
             text: None,
+            cipher: Vec::new(),
         });
         assert_eq!(Event::parse(&call.to_bytes()), Some(call));
         let bare = Event::Call(CallPdu {
@@ -1214,6 +1280,7 @@ mod tests {
             address: Address::UsageMarker(9),
             aie: 3,
             e2e: None,
+            speech: None,
             call_id: None,
             from: None,
             group: None,
@@ -1222,6 +1289,7 @@ mod tests {
             marker: Some(9),
             seconds: 12.5,
             text: None,
+            cipher: Vec::new(),
         });
         assert_eq!(Event::parse(&bare.to_bytes()), Some(bare));
     }

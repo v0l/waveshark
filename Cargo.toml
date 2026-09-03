@@ -58,6 +58,9 @@ csv = "1.3"
 nusb = "0.2"
 bindgen = "0.72"
 pkg-config = "0.3"
+wgpu = "29"
+bytemuck = { version = "1", features = ["derive"] }
+poll-promise = { version = "0.3", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

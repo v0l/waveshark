@@ -2357,10 +2357,13 @@ pub(crate) mod tests {
 
     /// The network in the capture enciphers its air interface, so no call
     /// control PDU is readable; the MAC headers are, and they say which
-    /// groups are being addressed. That reaches the call list, marked with
-    /// what protects it, so a key that undoes it later has a row to change.
+    /// groups are being addressed. That is worth logging, with what protects
+    /// it, so a key that undoes it later has a row to change. It is not
+    /// worth a call row: an enciphered SDU addressed to a radio is as likely
+    /// to be a registration or a data session as speech, and this twelve
+    /// seconds contains no traffic channel grant to say otherwise.
     #[test]
-    fn an_encrypting_tetra_network_still_names_its_busy_groups() {
+    fn an_encrypting_tetra_network_names_its_busy_groups_but_not_as_calls() {
         let Some(buf) = tetra_fixture() else {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
@@ -2386,17 +2389,19 @@ pub(crate) mod tests {
         // row every couple of seconds.
         assert!(calls.len() <= 12, "{} rows in twelve seconds", calls.len());
 
+        // A MAC header says an address is being talked to, not that anybody
+        // is talking: behind an enciphered SDU it is as likely to be a radio
+        // registering or a data session. Those rows belong in the log and
+        // not in a list of voice calls.
         let mut list = crate::calls::Calls::new();
-        for r in &calls {
-            assert!(list.update(r, r.at), "the call list refused {:?}", r.fields);
+        for r in calls.iter().filter(|r| field(r, "pdu").as_deref() == Some("MAC-RESOURCE")) {
+            assert!(!list.update(r, r.at), "a bare MAC header earned a call row: {:?}", r.fields);
         }
-        let now = std::time::Instant::now();
-        let heard = list.active(now);
-        let busy = heard.iter().find(|c| c.to == "10223295" || c.to == "15835885").expect("a busy group");
-        assert_eq!(busy.system, "TETRA");
-        assert!(busy.encrypted);
-        assert_eq!(busy.cipher.as_deref(), Some("AIE-3"));
-        assert!((busy.channel_hz - 391_175_000.0).abs() < 1.0, "on the channel, {}", busy.channel_hz);
+        assert!(
+            list.is_empty(),
+            "nothing here proved a voice call: {:?}",
+            calls.iter().filter_map(|r| field(r, "pdu")).collect::<Vec<_>>()
+        );
     }
 
     #[test]

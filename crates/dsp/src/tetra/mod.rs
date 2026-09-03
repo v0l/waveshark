@@ -26,6 +26,7 @@
 //! are one full-slot channel or two half-slot channels.
 
 pub mod coding;
+pub mod speech;
 
 use crate::fir::Fir;
 use crate::m17::rrc_taps;
@@ -451,7 +452,7 @@ pub struct TdmaTime {
 }
 
 impl TdmaTime {
-    fn advance(&mut self, slots: u64) {
+    pub fn advance(&mut self, slots: u64) {
         for _ in 0..slots {
             self.tn += 1;
             if self.tn > 4 {
@@ -509,6 +510,13 @@ pub struct TetraRx {
 impl TetraRx {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed the cell identity and clock without decoding a SYNC burst, for
+    /// tests and replay that start mid-stream.
+    pub fn seed(&mut self, cell: Cell, time: TdmaTime, slot: u64) {
+        self.cell = Some(cell);
+        self.time = Some((time, slot));
     }
 
     /// The cell time at a given slot counter, advanced from the last SYNC.

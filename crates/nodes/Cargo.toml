@@ -9,6 +9,7 @@ common.workspace = true
 dsp.workspace = true
 pipeline.workspace = true
 decode.workspace = true
+poll-promise.workspace = true
 rayon.workspace = true
 # M17 voice is Codec 2 3200, whose frame is exactly the 8 bytes M17 puts in
 # half a stream frame. Pure Rust, so it costs the build nothing.

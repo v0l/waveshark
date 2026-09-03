@@ -1100,9 +1100,12 @@ dependencies = [
 name = "decode"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "common",
  "dsp",
+ "poll-promise",
  "sources",
+ "wgpu",
 ]
 
 [[package]]
@@ -2544,6 +2547,7 @@ dependencies = [
  "decode",
  "dsp",
  "pipeline",
+ "poll-promise",
  "rayon",
  "sources",
 ]
