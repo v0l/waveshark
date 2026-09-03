@@ -55,6 +55,9 @@ pub struct Call {
     /// Whether the traffic is enciphered, which decides whether there is any
     /// point listening to it.
     pub encrypted: bool,
+    /// How, as the system names it: "AIE-3", "E2E", or "decrypted" once a
+    /// key has undone it. `None` when the decode did not say.
+    pub cipher: Option<String>,
     pub first: Instant,
     pub last: Instant,
     /// Separate keyings of the microphone, not packets.
@@ -138,17 +141,18 @@ impl Calls {
             Some(t) => t.eq_ignore_ascii_case("group"),
             None => is_group(&to),
         };
-        let encrypted = rec.fields.iter().any(|(k, v)| match (k.as_str(), v) {
-            ("encrypted", Value::Bool(b)) => *b,
-            ("encryption", Value::Text(t)) => !t.eq_ignore_ascii_case("none"),
-            _ => false,
-        });
+        let cipher = text(rec, &["encryption"]).filter(|t| !t.eq_ignore_ascii_case("none"));
+        let encrypted = cipher.as_deref().is_some_and(|t| !t.eq_ignore_ascii_case("decrypted"))
+            || rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("encrypted", Value::Bool(true))));
         let seconds = rec
             .fields
             .iter()
             .find(|(k, _)| k == "seconds")
             .and_then(|(_, v)| v.as_f64())
             .unwrap_or(0.0);
+        // A decode that says the transmission is still running is not an
+        // over yet; the one that says it ended is.
+        let live = rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
 
         // A channel is matched loosely: the same talkgroup found by two front
         // ends a few hundred hertz apart is one call, not two rows.
@@ -167,9 +171,14 @@ impl Calls {
                 c.overs = 0;
             }
             c.last = at;
-            c.overs += 1;
+            if !live {
+                c.overs += 1;
+            }
             c.seconds += seconds;
             c.encrypted = encrypted;
+            if cipher.is_some() {
+                c.cipher = cipher;
+            }
             return true;
         }
 
@@ -180,9 +189,10 @@ impl Calls {
             from,
             group,
             encrypted,
+            cipher,
             first: at,
             last: at,
-            overs: 1,
+            overs: u64::from(!live),
             seconds,
         });
         if self.seen.len() > MAX_CALLS {

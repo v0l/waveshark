@@ -252,9 +252,71 @@ pub fn encode_block(param: &BlockParam, scramb: u32, type1: &[u8]) -> Vec<u8> {
     type5
 }
 
+/// The (30,14) shortened Reed-Muller code the access assign field is sent
+/// in (8.2.3.2): systematic, the 14 information bits first and 16 parity
+/// bits after them, each parity column a row of this matrix.
+const RM_30_14_PARITY: [u16; 14] = [
+    0b1001_1011_0110_0000,
+    0b0010_1101_1110_0000,
+    0b1111_1100_0010_0000,
+    0b1110_0000_0011_1100,
+    0b1001_1000_0011_1010,
+    0b0101_0100_0011_0110,
+    0b0010_1100_0010_1110,
+    0b1111_1111_1101_1111,
+    0b1000_0011_0011_1001,
+    0b0100_0010_1011_0101,
+    0b0010_0001_1010_1101,
+    0b0001_0010_0111_0011,
+    0b0000_1001_0110_1011,
+    0b0000_0100_1110_0111,
+];
+
+/// The 30 bit codeword for 14 information bits, most significant first.
+pub fn rm3014_encode(info: u16) -> u32 {
+    let mut parity = 0u16;
+    for (i, row) in RM_30_14_PARITY.iter().enumerate() {
+        if (info >> (13 - i)) & 1 == 1 {
+            parity ^= row;
+        }
+    }
+    (u32::from(info & 0x3fff) << 16) | u32::from(parity)
+}
+
+/// The information bits nearest a received codeword, and how many bits
+/// away it was. The code's minimum distance is eight, so up to three
+/// errors are corrected outright; a caller decides how far it will trust.
+pub fn rm3014_decode(word: u32) -> (u16, u32) {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u32>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..1u16 << 14).map(rm3014_encode).collect());
+    let mut best = (0u16, u32::MAX);
+    for (info, code) in table.iter().enumerate() {
+        let d = (code ^ (word & 0x3fff_ffff)).count_ones();
+        if d < best.1 {
+            best = (info as u16, d);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_access_assign_code_corrects_three_errors() {
+        // Systematic: the information bits are the codeword's first 14.
+        let word = rm3014_encode(0x2a5b);
+        assert_eq!(word >> 16, 0x2a5b);
+        assert_eq!(rm3014_decode(word), (0x2a5b, 0));
+        let hit = word ^ (1 << 29) ^ (1 << 17) ^ 1;
+        assert_eq!(rm3014_decode(hit), (0x2a5b, 3));
+        // Every pair of codewords is at least eight apart.
+        let a = rm3014_encode(1);
+        let b = rm3014_encode(0x3fff);
+        assert!((a ^ b).count_ones() >= 8);
+    }
 
     #[test]
     fn puncture_then_depuncture_restores_every_survivor() {

@@ -60,7 +60,7 @@ pub static MODES: &[Mode] = &[
         symbol_period_s: None,
         duration_s: None,
         centre_hz: r(380e6, 430e6),
-        note: "base station downlink; nothing here reads it yet",
+        note: "base station downlink",
     },
     Mode {
         name: "LoRa SF11 BW250",

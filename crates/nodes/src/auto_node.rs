@@ -24,6 +24,7 @@
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
 use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
+use std::collections::HashMap;
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::event::Event;
 use pipeline::graph::Topology;
@@ -271,6 +272,10 @@ struct Slot {
     id: SourceId,
     center_hz: u64,
     members: Vec<Member>,
+    /// A front end has read something from this source. From then on the
+    /// burst front end's measurement of it is not news: a row saying what
+    /// the carrier looks like beside rows saying what it said.
+    heard: bool,
 }
 
 pub struct AutoNode {
@@ -302,6 +307,10 @@ pub struct AutoNode {
     hits: Vec<(Hz, Event)>,
     /// Sources decoders were built for, over the node's life.
     built: u64,
+    /// What each channel has announced about itself, so a source that
+    /// closes and opens again, or decoders rebuilt with the graph, do not
+    /// log the same cell's identity a second time.
+    announced: HashMap<u64, Vec<Vec<u8>>>,
 }
 
 impl AutoNode {
@@ -327,6 +336,7 @@ impl AutoNode {
             blocks: Vec::new(),
             hits: Vec::new(),
             built: 0,
+            announced: HashMap::new(),
         }
     }
 
@@ -524,7 +534,7 @@ impl AutoNode {
                 members.push(m);
             }
         }
-        Ok(Slot { id: b.id, center_hz: b.center_hz, members })
+        Ok(Slot { id: b.id, center_hz: b.center_hz, members, heard: false })
     }
 
 }
@@ -539,14 +549,16 @@ impl AutoNode {
 /// would otherwise measure it slightly differently, cut it out at a
 /// different width, and log it at a frequency nobody's plan lists.
 ///
-/// So: within a third of a step of a channel, and between 0.4 and 1.6 of a
+/// So: within 0.4 of a step of a channel, and between 0.4 and 1.6 of a
 /// step wide, a source is the channel, and takes its centre and its width.
 /// Anything else is left as measured; a plan says where channels are, not
-/// that nothing else transmits.
+/// that nothing else transmits. The reach is what a tuner tens of parts per
+/// million out needs at UHF: a third of a step left one carrier 8.6 kHz off
+/// its channel unlocked while its neighbour 6 kHz off locked.
 fn snap_to_raster(s: &mut dsp::Source, (origin, step): (f64, f64), stream_center_hz: f64) {
     let hz = stream_center_hz + s.center_hz;
     let on = origin + ((hz - origin) / step).round() * step;
-    let near = (hz - on).abs() <= step / 3.0;
+    let near = (hz - on).abs() <= step * 0.4;
     let width = s.bandwidth_hz();
     let fits = width >= step * 0.4 && width <= step * 1.6;
     if near && fits {
@@ -720,7 +732,7 @@ impl Node for AutoNode {
                         // reads it, none writes it.
                         let quiet = (b.state == SourceState::Closed)
                             .then(|| vec![C32::new(0.0, 0.0); (FLUSH_S * b.rate) as usize]);
-                        let per: Vec<(Vec<Event>, Vec<Packet>)> = slot
+                        let per: Vec<(Vec<Event>, Vec<Packet>, bool)> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
@@ -729,14 +741,24 @@ impl Node for AutoNode {
                                 if let Some(q) = &quiet {
                                     ev.extend(m.run(q, at_us, &mut pk));
                                 }
-                                (ev, pk)
+                                let read = m.router.is_none() && !pk.is_empty();
+                                (ev, pk, read)
                             })
                             .collect();
                         let mut ev = Vec::new();
                         let mut pk = Vec::new();
-                        for (e2, p2) in per {
+                        for (e2, p2, read) in per {
                             ev.extend(e2);
                             pk.extend(p2);
+                            slot.heard |= read;
+                        }
+                        // A measurement of a source a front end reads is
+                        // not news.
+                        if slot.heard {
+                            pk.retain(|p| {
+                                !(p.measure.is_some()
+                                    && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
+                            });
                         }
                         let done =
                             matches!(b.state, SourceState::Closed | SourceState::Superseded);
@@ -767,7 +789,18 @@ impl Node for AutoNode {
                 }
                 events.push(e);
             }
-            out.extend(pk);
+            // A cell's identity, once, per channel, whatever the decoders
+            // that read it have been through since.
+            let seen = self.announced.entry(center.0).or_default();
+            out.extend(pk.into_iter().filter(|p| {
+                let PacketBody::Frame(bytes) = &p.body else { return true };
+                let Some(key) = decode::tetra::Event::identity_key(bytes) else { return true };
+                if seen.contains(&key) {
+                    return false;
+                }
+                seen.push(key);
+                true
+            }));
             if done {
                 closed.push(self.slots[k].id);
             }

@@ -436,6 +436,9 @@ pub enum Lchan {
     SchHd,
     /// Full-slot signalling, 268 bits.
     SchF,
+    /// The access assign field every downlink burst carries in its
+    /// broadcast block, 14 bits: what this slot is being used for.
+    Aach,
 }
 
 /// TDMA time as the SYNC PDU counts it: slots 1-4, frames 1-18, multiframes
@@ -509,7 +512,7 @@ impl TetraRx {
     }
 
     /// The cell time at a given slot counter, advanced from the last SYNC.
-    fn time_at(&self, slot: u64) -> Option<TdmaTime> {
+    pub fn time_at(&self, slot: u64) -> Option<TdmaTime> {
         let (t0, s0) = self.time?;
         let mut t = t0;
         t.advance(slot.saturating_sub(s0));
@@ -526,7 +529,36 @@ impl TetraRx {
         }
     }
 
+    /// The broadcast block: 30 bits of every downlink burst, scrambled with
+    /// the cell's own sequence and block coded rather than convolutionally,
+    /// since it has to be read from a single burst.
+    fn aach(&mut self, burst: &Burst, out: &mut Vec<Block>) {
+        let Some(cell) = self.cell else { return };
+        let mut bb = [0u8; 30];
+        match burst.kind {
+            BurstKind::Sync => bb.copy_from_slice(&burst.bits[SB_BB..SB_BLK2]),
+            BurstKind::Normal1 | BurstKind::Normal2 => {
+                bb[..14].copy_from_slice(&burst.bits[NDB_BB1..NDB_TRAIN]);
+                bb[14..].copy_from_slice(&burst.bits[NDB_BB2..NDB_BLK2]);
+            }
+        }
+        coding::scramble(cell.scramb, &mut bb);
+        let word = bits_to_u32(&bb);
+        let (info, distance) = coding::rm3014_decode(word);
+        // The code corrects three errors, but a burst sliced from noise
+        // lands within three of some codeword one time in fourteen, and a
+        // wrong field says a traffic channel opened. A burst worth reading
+        // decodes clean or nearly so.
+        if distance > 1 {
+            self.failed += 1;
+            return;
+        }
+        let bits: Vec<u8> = (0..14).map(|i| ((info >> (13 - i)) & 1) as u8).collect();
+        self.take(Some(bits), Lchan::Aach, burst.slot, out);
+    }
+
     pub fn push(&mut self, burst: &Burst, out: &mut Vec<Block>) {
+        self.aach(burst, out);
         match burst.kind {
             BurstKind::Sync => {
                 let sb1 = coding::decode_block(

@@ -37,6 +37,64 @@ fn main() {
                 }
                 quality.extend(got.iter().map(|b| b.quality));
             }
+            // What the signalling says, with `TETRA_PDUS` set: every call
+            // control PDU, and a tally by name.
+            if std::env::var_os("TETRA_PDUS").is_some() && out_rate > 50_000.0 {
+                let mut tally = std::collections::BTreeMap::new();
+                let mut shown = 0;
+                let mut aach = std::collections::BTreeMap::new();
+                for b in &blocks {
+                    if matches!(b.lchan, dsp::tetra::Lchan::Aach) {
+                        let hdr = (b.bits[0] << 1) | b.bits[1];
+                        let f1: u8 = b.bits[2..8].iter().fold(0, |a, v| a << 1 | v);
+                        let f2: u8 = b.bits[8..14].iter().fold(0, |a, v| a << 1 | v);
+                        let tn = b.time.map(|t| t.tn).unwrap_or(0);
+                        let f18 = b.time.map(|t| t.frame == 18).unwrap_or(false);
+                        *aach.entry(format!("tn{tn} f18={f18} hdr {hdr} f1 {f1} f2 {f2}")).or_insert(0u32) += 1;
+                        continue;
+                    }
+                    if matches!(b.lchan, dsp::tetra::Lchan::Bsch) {
+                        continue;
+                    }
+                    let full = std::env::var_os("TETRA_FULL").is_some();
+                    let head: String = b.bits.iter().take(if full { 268 } else { 40 }).map(|v| char::from(b'0' + v)).collect();
+                    match decode::tetra::Event::from_block(b) {
+                        Some(decode::tetra::Event::Call(c)) => {
+                            *tally.entry(c.name()).or_insert(0u32) += 1;
+                            if shown < 60 {
+                                println!("  {:?} {head} {} {:?} aie {} id {:?} from {:?} group {:?} {:?}",
+                                    b.lchan, c.name(), c.address, c.aie, c.call_id, c.from, c.group, c.time);
+                                shown += 1;
+                            }
+                        }
+                        Some(decode::tetra::Event::Network(n)) => {
+                            *tally.entry("D-NWRK BROADCAST").or_insert(0) += 1;
+                            if shown < 60 {
+                                println!("  {:?} {head} network {:?}", b.lchan, n.neighbours);
+                                shown += 1;
+                            }
+                        }
+                        Some(other) => {
+                            *tally.entry(match other {
+                                decode::tetra::Event::Sync(_) => "SYNC",
+                                decode::tetra::Event::Sysinfo(_) => "SYSINFO",
+                                _ => "?",
+                            }).or_insert(0) += 1;
+                        }
+                        None => {
+                            *tally.entry("unparsed").or_insert(0) += 1;
+                            if shown < 60 {
+                                println!("  {:?} {head} unparsed", b.lchan);
+                                shown += 1;
+                            }
+                        }
+                    }
+                }
+                println!("  tally {tally:?}");
+                for (k, n) in &aach {
+                    println!("  aach {k}: {n}");
+                }
+            }
             let mean_q = quality.iter().sum::<f32>() / quality.len().max(1) as f32;
             println!(
                 "{:.4} MHz @ {:.0} S/s: {} bursts (q~{mean_q:.2}) {kinds:?}, stats {:?}, {} blocks ({} failed), cell {:?}",

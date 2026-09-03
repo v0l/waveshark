@@ -184,8 +184,14 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
     vec![
         (c.system.clone(), theme::LEGEND),
         (format!("{:.4} MHz", c.channel_hz / 1e6), theme::VALUE),
+        // Enciphered traffic is marked with what protects it, so a key
+        // that undoes it later has a name to change.
         (
-            if c.encrypted { format!("{}  ENC", c.to) } else { c.to.clone() },
+            match &c.cipher {
+                Some(how) => format!("{}  {how}", c.to),
+                None if c.encrypted => format!("{}  ENC", c.to),
+                None => c.to.clone(),
+            },
             if c.encrypted { theme::FAULT } else { party },
         ),
         (c.from.clone().unwrap_or_else(|| "-".into()), theme::VALUE),

@@ -549,9 +549,17 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
     // inventing unknown bursts out of Mode S.
     // A capture goes through whatever front end the scanner table puts on
     // its frequency, the same way the live receiver decides.
+    let plan = replay_plan(buf, rec.is_some());
+    Ok(crate::chain::Receiver::build(&plan, crate::chain::Sinks { recorder: rec, ..Default::default() })?)
+}
+
+/// The plan a capture is replayed under, as the live receiver would decide
+/// it from the scanner table.
+pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
+    let rate = buf.rate.as_f64();
     let scanners = crate::scanners::Scanners::load();
     let fronts = scanners.fronts(buf.center.as_f64(), rate);
-    let plan = Plan {
+    Plan {
         center: buf.center,
         rate,
         zoom: 1,
@@ -564,11 +572,10 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         fronts,
         feeds: Vec::new(),
         edits: Default::default(),
-        record: rec.is_some(),
+        record,
         capture_dir: crate::chain::default_capture_dir(),
         log: false,
-    };
-    Ok(crate::chain::Receiver::build(&plan, crate::chain::Sinks { recorder: rec, ..Default::default() })?)
+    }
 }
 
 /// Sweep a capture as the radio thread does, block by block.
@@ -2265,8 +2272,17 @@ pub(crate) mod tests {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
         };
-        let mut rx = replay_receiver(&buf, None).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
+        // Replayed in two halves with the graph rebuilt between them, which
+        // is what a retune or a setting does live: every source's decoders
+        // are built again.
+        let plan = replay_plan(&buf, false);
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).unwrap();
+        let half = buf.samples.len() / 2;
+        let first = common::IqBuf::new(buf.samples[..half].to_vec(), buf.center, buf.rate, 0);
+        let second = common::IqBuf::new(buf.samples[half..].to_vec(), buf.center, buf.rate, half as u64);
+        let mut out = replay_blocks(&mut rx, &first);
+        rx.rebuild(&plan).unwrap();
+        out.extend(replay_blocks(&mut rx, &second));
         let rows: Vec<String> = out
             .iter()
             .map(|r| format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.model, r.modulation, r.detail))
@@ -2285,54 +2301,102 @@ pub(crate) mod tests {
                 hz / 1e6,
                 mine.iter().map(|r| r.freq).collect::<Vec<_>>()
             );
-            // Measured as the phase-keyed carrier it is, and named from the
-            // keying, the rate and the band; not filed as noise, and not as
-            // OFDM for the training sequence repeating every slot.
+            // The cell's identity once, and once only, though its decoders
+            // were built twice.
+            let sync = mine.iter().filter(|r| r.model == "TETRA-Sync").count();
+            let sysinfo = mine.iter().filter(|r| r.model == "TETRA-Sysinfo").count();
+            assert_eq!((sync, sysinfo), (1, 1), "{:.4} MHz: {rows:?}", hz / 1e6);
             assert!(
-                mine.iter().any(|r| r.modulation == "pi/4-DQPSK" && r.detail.contains("TETRA")),
-                "{:.4} MHz was logged as {:?}",
-                hz / 1e6,
-                mine.iter().map(|r| format!("{} {}", r.modulation, r.detail)).collect::<Vec<_>>()
+                mine.iter().any(|r| r.detail.contains("mcc=272")),
+                "{:.4} MHz: the network was not named",
+                hz / 1e6
             );
-            // Once a second or so, not once per block and not once per
-            // capture: the list should say it is still on the air without
-            // being a list of nothing else.
-            assert!(mine.len() >= 2 && mine.len() <= 40, "{} rows for a 12 s carrier", mine.len());
+            // The cell's own map of its neighbours, read off the network
+            // broadcast the control carrier sends: every list it cycles
+            // through once, each cell on this network's band. The other
+            // carrier is an idle traffic carrier and broadcasts nothing but
+            // its identity.
+            let network: Vec<&&DecodeRecord> = mine.iter().filter(|r| r.model == "TETRA-Network").collect();
+            if hz == 391_181_000.0 {
+                assert!(!network.is_empty(), "{:.4} MHz: no network broadcast: {rows:?}", hz / 1e6);
+            }
+            assert!(network.len() <= 8, "{:.4} MHz: {} network rows", hz / 1e6, network.len());
+            for r in &network {
+                let cells: Vec<&(String, common::Value)> =
+                    r.fields.iter().filter(|(k, _)| k.starts_with("cell_")).collect();
+                assert!(!cells.is_empty(), "{:?}", r.fields);
+                for (_, v) in cells {
+                    let text = v.to_string();
+                    let mhz: f64 = text
+                        .split(" at ")
+                        .nth(1)
+                        .and_then(|t| t.split(' ').next())
+                        .and_then(|m| m.parse().ok())
+                        .unwrap_or_else(|| panic!("no frequency in {text:?}"));
+                    assert!((390.0..400.0).contains(&mhz), "{text}");
+                }
+            }
+            // A measurement of what the carrier looks like is not news once
+            // a front end is reading it: at most the one piece cut before
+            // the front end found its first sync burst.
+            let measured: Vec<&&DecodeRecord> = mine.iter().filter(|r| r.model == "unknown").collect();
+            assert!(
+                measured.len() <= 1,
+                "{:.4} MHz measured {} times while being read: {rows:?}",
+                hz / 1e6,
+                measured.len()
+            );
+            assert!(
+                measured.iter().all(|r| r.modulation == "pi/4-DQPSK" && r.detail.contains("TETRA")),
+                "{:.4} MHz was measured as {:?}",
+                hz / 1e6,
+                measured.iter().map(|r| format!("{} {}", r.modulation, r.detail)).collect::<Vec<_>>()
+            );
         }
     }
 
-    /// The same capture, all the way through: the receiver is told nothing
-    /// but the band, finds the carriers itself, and reads who they are.
+    /// The network in the capture enciphers its air interface, so no call
+    /// control PDU is readable; the MAC headers are, and they say which
+    /// groups are being addressed. That reaches the call list, marked with
+    /// what protects it, so a key that undoes it later has a row to change.
     #[test]
-    fn a_tetra_downlink_names_its_network() {
+    fn an_encrypting_tetra_network_still_names_its_busy_groups() {
         let Some(buf) = tetra_fixture() else {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let sync: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.model == "TETRA-Sync").collect();
-        assert!(!sync.is_empty(), "no SYNC PDU from {} rows", out.len());
-        // A cell repeats its identity seventeen times a second; what the
-        // log should hold is one row per cell, not one per repeat.
-        assert!(sync.len() <= 8, "{} sync rows of a continuous broadcast", sync.len());
-        // Both carriers belong to the same Irish network, and every row sat
-        // behind the standard's own CRC: a disagreement here would be a
-        // decoder fault rather than a bad burst. The MNC is what this
-        // network broadcasts, read identically off both carriers.
-        for r in &sync {
-            eprintln!("{} @ {:.4} MHz: {}", r.model, r.freq / 1e6, r.detail);
-            assert!(
-                r.detail.contains("mcc=272 mnc=6838"),
-                "not the recorded network: {}",
-                r.detail
-            );
+        let calls: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "TETRA-Call").collect();
+        assert!(!calls.is_empty(), "no call rows from {} rows", out.len());
+        let field = |r: &DecodeRecord, k: &str| {
+            r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+        };
+        let groups: Vec<String> = calls.iter().filter_map(|r| field(r, "to")).collect();
+        assert!(
+            groups.iter().any(|g| g == "10223295" || g == "15835885"),
+            "addressed {groups:?}"
+        );
+        assert!(
+            calls.iter().all(|r| field(r, "encryption").as_deref() == Some("AIE-3")),
+            "{:?}",
+            calls.iter().map(|r| format!("{:?} {:?} {:?} {:?}", field(r, "pdu"), field(r, "to"), field(r, "encryption"), r.detail)).collect::<Vec<_>>()
+        );
+        // Not a row per slot: an address that keeps being addressed is one
+        // row every couple of seconds.
+        assert!(calls.len() <= 12, "{} rows in twelve seconds", calls.len());
+
+        let mut list = crate::calls::Calls::new();
+        for r in &calls {
+            assert!(list.update(r, r.at), "the call list refused {:?}", r.fields);
         }
-        // One cell per carrier, told apart by colour code.
-        let near = |hz: f64| sync.iter().any(|r| (r.freq - hz).abs() < 12_500.0);
-        assert!(near(391_181_000.0), "nothing read at 391.181 MHz");
-        assert!(near(391_704_500.0), "nothing read at 391.7045 MHz");
+        let now = std::time::Instant::now();
+        let heard = list.active(now);
+        let busy = heard.iter().find(|c| c.to == "10223295" || c.to == "15835885").expect("a busy group");
+        assert_eq!(busy.system, "TETRA");
+        assert!(busy.encrypted);
+        assert_eq!(busy.cipher.as_deref(), Some("AIE-3"));
+        assert!((busy.channel_hz - 391_175_000.0).abs() < 1.0, "on the channel, {}", busy.channel_hz);
     }
 
     #[test]
