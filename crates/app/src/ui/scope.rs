@@ -1,26 +1,98 @@
 //! The spectrum and the waterfall: the trace, the grid, the marks the
 //! scanners and the detectors put on it, and the channel markers over both.
+//!
+//! The pane borrows what it draws and owns none of it. What it cannot do for
+//! itself, because it belongs to the receiver rather than to the drawing, it
+//! asks for by returning an [`Action`]; the caller is then the only place
+//! that talks to the radio.
 
+use super::state::ScopeState;
 use super::*;
 
-impl App {
-    pub(super) fn scope(&mut self, ui: &mut egui::Ui) {
+/// What the pane wants done, once the caller has it back.
+pub(super) enum Action {
+    /// Listen to the channel at this index.
+    Listen(usize),
+    /// Put a new channel at this frequency.
+    Add(f64),
+    /// Move the span's centre.
+    Retune(f64),
+    /// A channel marker was dragged to a new frequency.
+    Moved(usize),
+    /// Open one of the settings panels the pane carries a cog for.
+    Open(Settings),
+}
+
+/// The scope, over the state it draws.
+pub(super) struct Scope<'a> {
+    pub st: &'a mut ScopeState,
+    pub channels: &'a mut [Channel],
+    pub listening: Option<usize>,
+    pub center: f64,
+    pub rate: f64,
+    pub radio: Option<&'a Radio>,
+    pub scanners: &'a crate::scanners::Scanners,
+    pub patch: &'a crate::patch::Patch,
+    pub decode_on: bool,
+    /// What the pane wants done when the frame is over.
+    pub acts: Vec<Action>,
+}
+
+impl Scope<'_> {
+    /// Frequency under `x`, snapped to the band's channel plan while shift is
+    /// held.
+    ///
+    /// Snapping is opt-in rather than always on because most of the spectrum
+    /// has no legal raster, and a band that does still carries signals off it.
+    pub(super) fn hz_at_snapped(&self, rect: &Rect, x: f32, ui: &egui::Ui) -> f64 {
+        let hz = self.hz_at(rect, x);
+        if ui.input(|i| i.modifiers.shift) { bands::snap(hz) } else { hz }
+    }
+
+    pub(super) fn hz_at(&self, rect: &Rect, x: f32) -> f64 {
+        let t = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+        self.center - self.rate / 2.0 + t * self.rate
+    }
+
+    /// Index of the channel marker within grabbing distance of `x`.
+    ///
+    /// Tolerance is in pixels, not Hz: the marker is a line on screen and the
+    /// pointer is aiming at that line, so how close a grab counts as a hit
+    /// must not change with the span.
+    pub(super) fn channel_at(&self, rect: &Rect, x: f32) -> Option<usize> {
+        let tol = GRAB_PX * self.rate / rect.width().max(1.0) as f64;
+        let hz = self.hz_at(rect, x);
+        self.channels
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| (c.freq - hz).abs() < tol)
+            .min_by(|a, b| (a.1.freq - hz).abs().partial_cmp(&(b.1.freq - hz).abs()).unwrap())
+            .map(|(i, _)| i)
+    }
+
+    pub(super) fn x_of(&self, rect: &Rect, hz: f64) -> f32 {
+        let t = (hz - (self.center - self.rate / 2.0)) / self.rate;
+        rect.left() + (t as f32) * rect.width()
+    }
+
+    /// Draw the pane, and collect what it wants done.
+    pub(super) fn show(mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let mut full = ui.available_rect_before_wrap();
         // A spectrum stage the operator added gets a strip of its own under
         // everything else. They cover a band rather than the span, so they
         // cannot share the main plot's axis, and stacking them is what makes
         // watching a decimated band and the whole span at once worth the
         // stage.
-        if !self.scope.extra.is_empty() {
+        if !self.st.extra.is_empty() {
             let each = (full.height() * 0.22).clamp(60.0, 140.0);
-            let n = self.scope.extra.len().min(3);
+            let n = self.st.extra.len().min(3);
             let strips = Rect::from_min_max(
                 Pos2::new(full.left(), full.bottom() - each * n as f32),
                 full.max,
             );
             full = Rect::from_min_max(full.min, Pos2::new(full.right(), strips.top()));
             let p = ui.painter_at(strips).to_owned();
-            for (i, s) in self.scope.extra.iter().take(n).enumerate() {
+            for (i, s) in self.st.extra.iter().take(n).enumerate() {
                 let r = Rect::from_min_size(
                     Pos2::new(strips.left(), strips.top() + each * i as f32),
                     Vec2::new(strips.width(), each),
@@ -30,7 +102,7 @@ impl App {
         }
         let ribbon_h = 16.0;
         let usable = (full.height() - ribbon_h - SPLIT_GRIP_H).max(1.0);
-        let plot_h = usable * self.scope.plot_frac.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
+        let plot_h = usable * self.st.plot_frac.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
         let plot = Rect::from_min_max(full.min, Pos2::new(full.right(), full.top() + plot_h));
         let ribbon = Rect::from_min_max(
             Pos2::new(full.left(), plot.bottom()),
@@ -64,13 +136,13 @@ impl App {
         p.rect_filled(fall, 0.0, theme::CHASSIS);
         {
             let _wf = tracing::info_span!("wf_texture").entered();
-            self.scope.wf.draw(ui.ctx(), &p, fall);
+            self.st.wf.draw(ui.ctx(), &p, fall);
         }
 
         self.markers(&p, &full);
 
         let hover = resp.hover_pos();
-        let grip_hot = self.scope.splitting || hover.is_some_and(|h| grip.contains(h));
+        let grip_hot = self.st.splitting || hover.is_some_and(|h| grip.contains(h));
         split_grip(&p, &grip, grip_hot);
         let plot_hot = hover.is_some_and(|h| plot_cog.contains(h));
         let fall_hot = hover.is_some_and(|h| fall_cog.contains(h));
@@ -86,14 +158,14 @@ impl App {
             self.cursor(&p, &full, &resp, shift);
         }
 
-        if resp.clicked() && self.scope.drag_ch.is_none() {
+        if resp.clicked() && self.st.drag_ch.is_none() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 // Cogs sit inside the pane, so they get first refusal on a
                 // click; otherwise opening settings would also drop a channel.
                 if plot_cog.contains(pos) {
-                    self.open = Some(Settings::Spectrum);
+                    self.acts.push(Action::Open(Settings::Spectrum));
                 } else if fall_cog.contains(pos) {
-                    self.open = Some(Settings::Waterfall);
+                    self.acts.push(Action::Open(Settings::Waterfall));
                 } else if grip.contains(pos) {
                     // Dropping a channel on the divider is never what was
                     // meant; a double click there restores the default split.
@@ -102,8 +174,11 @@ impl App {
                     // new channel lands on is snapped, so shift-clicking an
                     // existing channel still selects it.
                     match self.channel_at(&full, pos.x) {
-                        Some(i) => self.listen(i),
-                        None => self.add_channel(self.hz_at_snapped(&full, pos.x, ui)),
+                        Some(i) => self.acts.push(Action::Listen(i)),
+                        None => {
+                            let hz = self.hz_at_snapped(&full, pos.x, ui);
+                            self.acts.push(Action::Add(hz));
+                        }
                     }
                 }
             }
@@ -121,55 +196,54 @@ impl App {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
                 .or_else(|| resp.interact_pointer_pos());
-            self.scope.splitting = origin.is_some_and(|pos| grip.contains(pos));
-            self.scope.drag_ch = origin.and_then(|pos| {
+            self.st.splitting = origin.is_some_and(|pos| grip.contains(pos));
+            self.st.drag_ch = origin.and_then(|pos| {
                 if plot_cog.contains(pos) || fall_cog.contains(pos) || grip.contains(pos) {
                     return None;
                 }
                 self.channel_at(&full, pos.x)
             });
         }
-        if resp.dragged() && self.scope.splitting {
+        if resp.dragged() && self.st.splitting {
             if let Some(pos) = resp.interact_pointer_pos() {
                 // Follow the pointer rather than accumulating deltas, so the
                 // divider cannot drift away from the cursor over a long drag.
                 let f = (pos.y - full.top() - SPLIT_GRIP_H / 2.0) / usable;
-                self.scope.plot_frac =
+                self.st.plot_frac =
                     f.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
             }
         } else if resp.dragged() {
-            match self.scope.drag_ch {
-                Some(i) if i < self.audio.channels.len() => {
+            match self.st.drag_ch {
+                Some(i) if i < self.channels.len() => {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         // Follow the pointer rather than accumulating deltas,
                         // so the marker cannot drift away from the cursor.
-                        self.audio.channels[i].freq = self.hz_at_snapped(&full, pos.x, ui);
-                        if self.audio.listening == Some(i) {
-                            self.listen(i);
-                        }
+                        self.channels[i].freq = self.hz_at_snapped(&full, pos.x, ui);
+                        self.acts.push(Action::Moved(i));
                     }
                 }
                 _ => {
                     let dx = resp.drag_delta().x as f64;
                     if dx.abs() > 0.0 {
-                        self.retune(self.center - dx * self.rate / full.width() as f64);
+                        let hz = self.center - dx * self.rate / full.width() as f64;
+                        self.acts.push(Action::Retune(hz));
                     }
                 }
             }
         }
         if resp.drag_stopped() {
-            self.scope.drag_ch = None;
-            self.scope.splitting = false;
+            self.st.drag_ch = None;
+            self.st.splitting = false;
         }
 
         if resp.double_clicked() && hover.is_some_and(|h| grip.contains(h)) {
-            self.scope.plot_frac = DEFAULT_PLOT_FRAC;
+            self.st.plot_frac = DEFAULT_PLOT_FRAC;
         }
 
         // A marker under the pointer is draggable, so say so.
         if grip_hot {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        } else if self.scope.drag_ch.is_some() {
+        } else if self.st.drag_ch.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if let Some(h) = hover {
             if !plot_hot && !fall_hot && self.channel_at(&full, h.x).is_some() {
@@ -181,11 +255,13 @@ impl App {
         // twentieth of the span, so the gesture means the same thing at every
         // zoom level.
         if resp.hovered() && !plot_hot && !fall_hot {
-            let n = self.scope.scrub.notches(ui);
+            let n = self.st.scrub.notches(ui);
             if n != 0 {
-                self.retune(self.center - n as f64 * self.rate / 20.0);
+                let hz = self.center - n as f64 * self.rate / 20.0;
+                self.acts.push(Action::Retune(hz));
             }
         }
+        self.acts
     }
 
     /// Where the scanner table is listening, along the foot of the spectrum.
@@ -202,7 +278,7 @@ impl App {
         if !self.decode_on {
             return;
         }
-        let Some(r) = &self.radio else { return };
+        let Some(r) = self.radio else { return };
         let seen = r.status.sources.lock().clone();
         if seen.is_empty() {
             return;
@@ -271,7 +347,7 @@ impl App {
         if !self.decode_on {
             return;
         }
-        let marks = crate::chain::scan_marks(&self.scanners, self.center, self.rate);
+        let marks = crate::chain::scan_marks(self.scanners, self.center, self.rate);
         if marks.is_empty() {
             return;
         }
@@ -384,7 +460,7 @@ impl App {
                 [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
                 Stroke::new(1.0, Color32::from_rgb(0x22, 0x26, 0x2B)),
             );
-            let db = self.scope.ceil - (self.scope.ceil - self.scope.floor) * i as f32 / 4.0;
+            let db = self.st.ceil - (self.st.ceil - self.st.floor) * i as f32 / 4.0;
             // The unit once, on the top line. Repeating it on every gridline
             // is three times the ink for the same fact.
             let text = if i == 1 { format!("{db:.0} dBFS") } else { format!("{db:.0}") };
@@ -417,7 +493,7 @@ impl App {
         _cols: usize,
         n: usize,
     ) -> Option<(usize, usize)> {
-        let lo = self.scope.db_center - self.rate / 2.0;
+        let lo = self.st.db_center - self.rate / 2.0;
         let bin = |f: f64| ((f - lo) / self.rate * n as f64).floor();
         let a = bin(self.hz_at(plot, plot.left() + c as f32));
         let b = bin(self.hz_at(plot, plot.left() + c as f32 + 1.0));
@@ -440,7 +516,7 @@ impl App {
             Stroke::new(1.0, theme::ETCH),
         );
         let plot = Rect::from_min_max(Pos2::new(r.left(), r.top() + 12.0), r.max);
-        let span = (self.scope.ceil - self.scope.floor).max(1.0);
+        let span = (self.st.ceil - self.st.floor).max(1.0);
         let n = s.db.len();
         if n >= 2 {
             let cols = plot.width().max(1.0) as usize;
@@ -449,13 +525,12 @@ impl App {
                 let a = c * n / cols.max(1);
                 let b = (((c + 1) * n) / cols.max(1)).max(a + 1).min(n);
                 let v = s.db[a..b].iter().copied().fold(f32::MIN, f32::max);
-                let t = ((v - self.scope.floor) / span).clamp(0.0, 1.0);
+                let t = ((v - self.st.floor) / span).clamp(0.0, 1.0);
                 pts.push(Pos2::new(plot.left() + c as f32, plot.bottom() - t * plot.height()));
             }
             p.add(egui::Shape::line(pts, Stroke::new(1.0, theme::TRACE)));
         }
-        let name = self.chain
-            .patch
+        let name = self.patch
             .stage(s.tag)
             .map(|st| st.kind.clone())
             .unwrap_or_else(|| "spectrum".into());
@@ -473,11 +548,11 @@ impl App {
     }
 
     fn trace(&self, p: &egui::Painter, plot: &Rect) {
-        if self.scope.db.is_empty() {
+        if self.st.db.is_empty() {
             return;
         }
-        let span = (self.scope.ceil - self.scope.floor).max(1.0);
-        let n = self.scope.db.len();
+        let span = (self.st.ceil - self.st.floor).max(1.0);
+        let n = self.st.db.len();
         let cols = plot.width().max(1.0) as usize;
         // Columns are placed by frequency rather than by bin index. While a
         // retune is pending the held spectrum belongs to a different centre,
@@ -488,8 +563,8 @@ impl App {
         for c in 0..cols {
             let Some((a, b)) = self.column_bins(plot, c, cols, n) else { continue };
             // Max, not mean: averaging hides the narrow carriers that matter.
-            let v = self.scope.db[a..b].iter().copied().fold(f32::MIN, f32::max);
-            let t = ((v - self.scope.floor) / span).clamp(0.0, 1.0);
+            let v = self.st.db[a..b].iter().copied().fold(f32::MIN, f32::max);
+            let t = ((v - self.st.floor) / span).clamp(0.0, 1.0);
             pts.push(Pos2::new(plot.left() + c as f32, plot.bottom() - t * plot.height()));
         }
         if pts.len() < 2 {
@@ -542,12 +617,12 @@ impl App {
 
     fn markers(&self, p: &egui::Painter, full: &Rect) {
         let (lo, hi) = (self.center - self.rate / 2.0, self.center + self.rate / 2.0);
-        for (i, ch) in self.audio.channels.iter().enumerate() {
+        for (i, ch) in self.channels.iter().enumerate() {
             if ch.freq < lo || ch.freq > hi {
                 continue;
             }
             let x = self.x_of(full, ch.freq);
-            let active = self.audio.listening == Some(i);
+            let active = self.listening == Some(i);
             let col = if active { theme::READOUT } else { Color32::from_rgb(0x6E, 0x7A, 0x88) };
 
             // Show what the demodulator actually takes in, not just where it

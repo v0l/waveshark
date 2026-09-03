@@ -931,46 +931,38 @@ impl App {
         self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
     }
 
-    /// Frequency under the pointer, snapped to the band's channel plan while
-    /// shift is held.
+    /// Draw the scope, then do what it asked for.
     ///
-    /// Snapping is opt-in rather than always on because most of the spectrum
-    /// has no legal raster, and a band that does still carries signals off it.
-    fn hz_at_snapped(&self, rect: &Rect, x: f32, ui: &egui::Ui) -> f64 {
-        let hz = self.hz_at(rect, x);
-        if ui.input(|i| i.modifiers.shift) {
-            bands::snap(hz)
-        } else {
-            hz
+    /// The pane cannot reach the radio, so a click that tunes or a marker
+    /// that was dragged comes back as an action and is carried out here,
+    /// which is the only place that knows how to send anything.
+    fn scope_view(&mut self, ui: &mut egui::Ui) {
+        let acts = scope::Scope {
+            st: &mut self.scope,
+            channels: &mut self.audio.channels,
+            listening: self.audio.listening,
+            center: self.center,
+            rate: self.rate,
+            radio: self.radio.as_ref(),
+            scanners: &self.scanners,
+            patch: &self.chain.patch,
+            decode_on: self.decode_on,
+            acts: Vec::new(),
         }
-    }
-
-    fn hz_at(&self, rect: &Rect, x: f32) -> f64 {
-        let t = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-        self.center - self.rate / 2.0 + t * self.rate
-    }
-
-    /// Index of the channel marker within grabbing distance of `x`.
-    ///
-    /// Tolerance is in pixels, not Hz: the marker is a line on screen and the
-    /// pointer is aiming at that line, so how close a grab counts as a hit must
-    /// not change with the span.
-    fn channel_at(&self, rect: &Rect, x: f32) -> Option<usize> {
-        let tol = GRAB_PX * self.rate / rect.width().max(1.0) as f64;
-        let hz = self.hz_at(rect, x);
-        self.audio.channels
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| (c.freq - hz).abs() < tol)
-            .min_by(|a, b| {
-                (a.1.freq - hz).abs().partial_cmp(&(b.1.freq - hz).abs()).unwrap()
-            })
-            .map(|(i, _)| i)
-    }
-
-    fn x_of(&self, rect: &Rect, hz: f64) -> f32 {
-        let t = (hz - (self.center - self.rate / 2.0)) / self.rate;
-        rect.left() + (t as f32) * rect.width()
+        .show(ui);
+        for a in acts {
+            match a {
+                scope::Action::Listen(i) => self.listen(i),
+                scope::Action::Add(hz) => self.add_channel(hz),
+                scope::Action::Retune(hz) => self.retune(hz),
+                scope::Action::Moved(i) => {
+                    if self.audio.listening == Some(i) {
+                        self.listen(i);
+                    }
+                }
+                scope::Action::Open(w) => self.open = Some(w),
+            }
+        }
     }
 
     fn retune(&mut self, hz: f64) {
@@ -1320,7 +1312,7 @@ impl eframe::App for App {
             CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(theme::CHASSIS))
                 .show(ui, |ui| match self.view {
-                    View::Spectrum => self.scope(ui),
+                    View::Spectrum => self.scope_view(ui),
                     View::Chain => self.chain(ui),
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
@@ -2630,9 +2622,26 @@ mod tests {
         assert_eq!(a.log.decodes.last().unwrap().id, (DECODE_LOG_MAX + 120) as u64);
     }
 
+    /// The scope pane over an app's state, for the geometry tests.
+    fn scope_of(a: &mut App) -> scope::Scope<'_> {
+        scope::Scope {
+            st: &mut a.scope,
+            channels: &mut a.audio.channels,
+            listening: a.audio.listening,
+            center: a.center,
+            rate: a.rate,
+            radio: None,
+            scanners: &a.scanners,
+            patch: &a.chain.patch,
+            decode_on: a.decode_on,
+            acts: Vec::new(),
+        }
+    }
+
     #[test]
     fn frequency_mapping_round_trips() {
-        let a = app();
+        let mut a = app();
+        let a = scope_of(&mut a);
         let r = rect();
         for hz in [99_000_000.0, 100_000_000.0, 100_750_000.0] {
             let back = a.hz_at(&r, a.x_of(&r, hz));
@@ -2708,6 +2717,7 @@ mod tests {
         for rate in [250_000.0, 2_400_000.0, 20_000_000.0] {
             let mut a = with_channels(&[95_000_000.0]);
             a.rate = rate;
+            let a = scope_of(&mut a);
             let x = a.x_of(&rect, 95_000_000.0);
             assert_eq!(a.channel_at(&rect, x), Some(0), "rate {rate}");
             // Just inside the grab distance, and just outside it.
@@ -2721,7 +2731,8 @@ mod tests {
         // Taking the first match would grab whichever was added earlier rather
         // than the one being pointed at.
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
-        let a = with_channels(&[95_000_000.0, 95_009_000.0]);
+        let mut a = with_channels(&[95_000_000.0, 95_009_000.0]);
+        let a = scope_of(&mut a);
         let x = a.x_of(&rect, 95_009_000.0);
         assert_eq!(a.channel_at(&rect, x), Some(1));
         let x = a.x_of(&rect, 95_000_000.0);
@@ -2731,7 +2742,8 @@ mod tests {
     #[test]
     fn empty_space_grabs_nothing() {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
-        let a = with_channels(&[95_000_000.0]);
+        let mut a = with_channels(&[95_000_000.0]);
+        let a = scope_of(&mut a);
         assert_eq!(a.channel_at(&rect, a.x_of(&rect, 94_500_000.0)), None);
     }
 
@@ -2742,6 +2754,7 @@ mod tests {
         a.center = 95_000_000.0;
         a.scope.db_center = 95_000_000.0;
         a.rate = 2_400_000.0;
+        let a = scope_of(&mut a);
         assert_eq!(a.column_bins(&rect, 0, 1000, 2048).map(|x| x.0), Some(0));
         assert_eq!(a.column_bins(&rect, 999, 1000, 2048).map(|x| x.0), Some(2045));
     }
@@ -2757,6 +2770,7 @@ mod tests {
         a.scope.db_center = 95_000_000.0;
         // View dragged a quarter span right, data not yet caught up.
         a.center = 95_600_000.0;
+        let a = scope_of(&mut a);
         // A quarter of a 2.4 MHz span is 512 bins of 2048, so the left of the
         // pane now shows what was a quarter of the way in.
         assert_eq!(a.column_bins(&rect, 0, 1000, 2048).map(|x| x.0), Some(512));
@@ -2771,13 +2785,15 @@ mod tests {
         a.rate = 2_400_000.0;
         a.scope.db_center = 95_000_000.0;
         a.center = 94_400_000.0;
+        let a = scope_of(&mut a);
         assert_eq!(a.column_bins(&rect, 0, 1000, 2048), None);
         assert_eq!(a.column_bins(&rect, 999, 1000, 2048).map(|x| x.0), Some(1533));
     }
 
     #[test]
     fn the_edges_are_the_ends_of_the_span() {
-        let a = app();
+        let mut a = app();
+        let a = scope_of(&mut a);
         let r = rect();
         assert!((a.hz_at(&r, r.left()) - 99_000_000.0).abs() < 1.0);
         assert!((a.hz_at(&r, r.right()) - 101_000_000.0).abs() < 1.0);
@@ -2785,7 +2801,8 @@ mod tests {
 
     #[test]
     fn clicks_outside_the_pane_clamp_to_the_span() {
-        let a = app();
+        let mut a = app();
+        let a = scope_of(&mut a);
         let r = rect();
         assert!((a.hz_at(&r, -500.0) - 99_000_000.0).abs() < 1.0);
         assert!((a.hz_at(&r, 5000.0) - 101_000_000.0).abs() < 1.0);
