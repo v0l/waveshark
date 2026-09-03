@@ -1126,6 +1126,56 @@ impl Receiver {
         out
     }
 
+    /// The key status of every TETRA front end in the graph, placed by hand
+    /// or by a scanner: what the key manager shows, and how a recovered key
+    /// reaches persistence. Deduplicated by cell, since two front ends on
+    /// the same carrier report the same cell.
+    pub fn tetra_key_status(&self) -> Vec<nodes::tetra_nodes::KeyStatus> {
+        let mut out: Vec<nodes::tetra_nodes::KeyStatus> = Vec::new();
+        let mut push = |s: nodes::tetra_nodes::KeyStatus| {
+            if !out.iter().any(|e| (e.mcc, e.mnc, e.colour) == (s.mcc, s.mnc, s.colour)) {
+                out.push(s);
+            }
+        };
+        for (id, name) in self.graph.order() {
+            if name == "tetra" {
+                if let Some(t) = downcast::<nodes::TetraNode>(&self.graph, id) {
+                    if let Some(s) = t.key_status() {
+                        push(s);
+                    }
+                }
+            }
+        }
+        for &id in &self.sources {
+            if let Some(a) = downcast::<nodes::AutoNode>(&self.graph, id) {
+                for s in a.inner_tetra_status() {
+                    push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// Install a key for a cell colour on every TETRA front end, so traffic
+    /// on that cell decodes. From the key manager, for a manual key.
+    pub fn set_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
+        let ids: Vec<_> = self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
+        for id in ids {
+            if let Some(n) = self.graph.node_mut(id) {
+                if let Some(t) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TetraNode>()) {
+                    t.add_key(colour, key);
+                }
+            }
+        }
+        for &id in &self.sources.clone() {
+            if let Some(n) = self.graph.node_mut(id) {
+                if let Some(a) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
+                    a.set_inner_tetra_key(colour, key);
+                }
+            }
+        }
+    }
+
     /// The span-wide decoders the auto nodes are running, by stage name.
     fn auto_wide(&self, name: &str) -> bool {
         self.sources

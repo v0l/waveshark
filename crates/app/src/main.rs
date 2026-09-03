@@ -10,6 +10,7 @@ mod calls;
 mod devices;
 mod i18n;
 mod icons;
+mod keystore;
 mod locale;
 mod dial;
 mod tracks;

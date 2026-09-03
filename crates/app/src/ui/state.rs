@@ -383,6 +383,20 @@ pub(super) struct MessagesState {
     pub filter: String,
 }
 
+/// The key manager: the keys known, and what the operator is typing.
+pub(super) struct KeysState {
+    /// Keys stored on disk, loaded at startup and written when one changes.
+    pub store: crate::keystore::KeyStore,
+    /// The hex the operator is typing, per cell tag, before it is applied.
+    pub typing: std::collections::HashMap<String, String>,
+}
+
+impl Default for KeysState {
+    fn default() -> Self {
+        Self { store: crate::keystore::KeyStore::load(), typing: std::collections::HashMap::new() }
+    }
+}
+
 /// The channel strip: every level that reaches the speaker.
 pub(super) struct AudioState {
     pub channels: Vec<Channel>,

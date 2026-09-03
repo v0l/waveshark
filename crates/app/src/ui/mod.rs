@@ -28,6 +28,7 @@ mod burst;
 mod calls_pane;
 mod chain_pane;
 mod head;
+mod keys_pane;
 mod map_pane;
 mod mapview;
 mod messages_pane;
@@ -64,6 +65,7 @@ pub struct App {
     map: map_pane::MapState,
     calls: state::CallsState,
     messages: state::MessagesState,
+    keys: state::KeysState,
     audio: state::AudioState,
     /// Where the interface's waiting work runs: tile fetches now, anything
     /// else that waits on a network later. One per application rather than
@@ -181,6 +183,7 @@ enum View {
     Map,
     Calls,
     Messages,
+    Keys,
 }
 
 impl View {
@@ -191,6 +194,7 @@ impl View {
             View::Map => "Map",
             View::Calls => "Calls",
             View::Messages => "Messages",
+            View::Keys => "Keys",
         }
     }
 }
@@ -320,6 +324,7 @@ impl Default for App {
             rt: background_runtime(),
             calls: state::CallsState::default(),
             messages: state::MessagesState::default(),
+            keys: state::KeysState::default(),
             audio: state::AudioState::default(),
             cmds: Vec::new(),
             record_dir: None,
@@ -1056,6 +1061,12 @@ impl App {
         }
     }
 
+    /// Draw the key manager.
+    fn keys_view(&mut self, ui: &mut egui::Ui) {
+        keys_pane::Keys { st: &mut self.keys, radio: self.radio.as_ref(), cmds: &mut self.cmds }
+            .show(ui);
+    }
+
     /// Draw the scope, then do what it asked for.
     ///
     /// The pane cannot reach the radio, so a click that tunes or a marker
@@ -1239,6 +1250,7 @@ impl eframe::App for App {
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
                     View::Messages => self.message_view(ui),
+                    View::Keys => self.keys_view(ui),
                 });
         }
         self.settings_modal(ui.ctx());

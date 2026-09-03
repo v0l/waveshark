@@ -461,6 +461,53 @@ impl AutoNode {
     /// placed by hand. Taken from the ports rather than from a list of
     /// protocol names kept here, so a voice front end added later is heard
     /// without this file being touched.
+    /// The key status of every TETRA front end the scanner placed inside, so
+    /// a cell heard through the auto node reaches the key manager the same as
+    /// one placed by hand.
+    pub fn inner_tetra_status(&self) -> Vec<crate::tetra_nodes::KeyStatus> {
+        let mut out = Vec::new();
+        for slot in &self.slots {
+            for m in &slot.members {
+                for (id, name) in m.graph.order() {
+                    if name != "tetra" {
+                        continue;
+                    }
+                    if let Some(t) = m
+                        .graph
+                        .node(id)
+                        .and_then(|n| n.as_any())
+                        .and_then(|a| a.downcast_ref::<crate::tetra_nodes::TetraNode>())
+                    {
+                        out.extend(t.key_status());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Install a key on every inner TETRA front end for a cell colour, so a
+    /// manual key entered in the manager reaches a cell heard through the
+    /// scanner as well as one placed by hand.
+    pub fn set_inner_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
+        for slot in &mut self.slots {
+            for m in &mut slot.members {
+                let ids: Vec<_> =
+                    m.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
+                for id in ids {
+                    if let Some(n) = m.graph.node_mut(id) {
+                        if let Some(t) = n
+                            .as_any_mut()
+                            .and_then(|a| a.downcast_mut::<crate::tetra_nodes::TetraNode>())
+                        {
+                            t.add_key(colour, key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn inner_voice(&self, out: &mut Vec<common::Voice>) {
         for slot in &self.slots {
             for m in &slot.members {

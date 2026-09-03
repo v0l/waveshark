@@ -74,6 +74,23 @@ const TRAFFIC_CONFIRM: u32 = 2;
 /// worth starting: three leaves no candidate over the whole register space.
 const COLLISION_QUORUM: usize = 3;
 
+/// What a TETRA front end reports about the cell it hears and its key, for a
+/// key manager to show and act on.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyStatus {
+    pub mcc: u16,
+    pub mnc: u16,
+    pub colour: u8,
+    pub channel_hz: f64,
+    /// The air-interface encryption mode the cell's signalling carries; 0 is
+    /// clear.
+    pub aie: u8,
+    /// The key in force for this cell, if one is known.
+    pub key: Option<Key>,
+    /// Timestamps caught re-using one keystream, waiting for a crib.
+    pub reuse_pairs: usize,
+}
+
 /// A TEA1 register search in flight, on the GPU or the CPU.
 enum RecoveryJob {
     Gpu(Promise<Option<u32>>),
@@ -232,6 +249,21 @@ impl TetraNode {
     /// Give the node a key to try on this colour code's enciphered traffic.
     pub fn add_key(&mut self, colour: u8, key: Key) {
         self.keys.insert(colour, key);
+    }
+
+    /// What this front end knows about the cell it hears and its key: the
+    /// row a key manager shows. `None` until a SYNC PDU has decoded a cell.
+    pub fn key_status(&self) -> Option<KeyStatus> {
+        let cell = self.rx.cell?;
+        Some(KeyStatus {
+            mcc: cell.mcc,
+            mnc: cell.mnc,
+            colour: cell.colour,
+            channel_hz: self.channel_hz,
+            aie: self.last_aie,
+            key: self.keys.get(&cell.colour).copied(),
+            reuse_pairs: self.reuse_pairs.len(),
+        })
     }
 
     pub fn channel_hz(&self) -> f64 {

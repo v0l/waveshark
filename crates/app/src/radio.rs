@@ -310,6 +310,9 @@ pub enum Cmd {
     /// What the operator changed about the graph, as the whole set: it is
     /// put on top of whatever the receiver draws next, so a retune keeps it.
     Edits(crate::patch::Edits),
+    /// Install a TETRA key for a cell colour on every front end, so its
+    /// enciphered traffic decodes. From the key manager.
+    TetraKey { colour: u8, key: decode::tea::Key },
     Stop,
 }
 
@@ -841,6 +844,8 @@ pub struct Status {
     /// "nothing was decoded" from "it was decoded and you still cannot hear
     /// it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    /// The TETRA cells heard and their key state, for the key manager.
+    tetra_keys: parking_lot::Mutex<Vec<nodes::tetra_nodes::KeyStatus>>,
     /// Peak of the whole mix as it left for the speaker, and of the call
     /// bus's share of it, for the meters beside the master and call faders.
     out_level: AtomicU32,
@@ -919,6 +924,7 @@ impl Default for Status {
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            tetra_keys: parking_lot::Mutex::new(Vec::new()),
             out_level: AtomicU32::new(0),
             call_level: AtomicU32::new(0),
             calls_written: AtomicU64::new(0),
@@ -993,6 +999,11 @@ impl Status {
     /// What the call bus's gain control is adding, in dB.
     pub fn call_gain_db(&self) -> f32 {
         f32::from_bits(self.call_gain_db.load(Ordering::Relaxed))
+    }
+
+    /// The TETRA cells heard and their key state, for the key manager.
+    pub fn tetra_keys(&self) -> Vec<nodes::tetra_nodes::KeyStatus> {
+        self.tetra_keys.lock().clone()
     }
 
     /// What each voice source last put into the mix, for the meters.
@@ -1566,6 +1577,7 @@ fn run(
                         rebuild = true;
                     }
                 }
+                Cmd::TetraKey { colour, key } => rx.set_tetra_key(colour, key),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
                     // Voice is written beside the log rather than into it: a
@@ -1869,6 +1881,7 @@ fn run(
         // meters back.
         status.set_channel_states(rx.channel_states());
         status.set_strips(rx.audio_node_id(), rx.strips());
+        *status.tetra_keys.lock() = rx.tetra_key_status();
         if let Some(b) = rx.audio().map(|n| n.bus()) {
             Status::set_level(&status.call_level, b.voice_peak());
             *status.call_levels.lock() = b.levels();
