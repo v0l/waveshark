@@ -733,10 +733,20 @@ fn same_burst(kept: &Reported, new: &DecodeRecord) -> bool {
     // before it keyed up must not stand in for the sensor's packet.
     if new.is_known() && !kept.known {
         return false;
+/// Blocks of speed history kept for the sparkline in the head. At a few
+/// hundred blocks a second this is a second or two of the recent past, which
+/// is as far back as a reading anybody can act on goes.
+pub const SPEED_HISTORY: usize = 96;
+
     }
     let d = (kept.freq - new.freq).abs();
     if d < 1.0 && (kept.channel_hz - new.channel_hz).abs() < 1.0 {
         return kept.modulation != new.modulation;
+    /// How fast the graph ran each block against the time that block
+    /// covered, newest last. One is exactly real time: below it the receiver
+    /// cannot keep up and the radio will start dropping samples, and how far
+    /// above it the trace sits is the headroom left for another channel.
+    speed: parking_lot::Mutex<std::collections::VecDeque<f32>>,
     }
     d <= 2.5 * kept.channel_hz.max(new.channel_hz)
 }
@@ -894,6 +904,9 @@ impl RadioControls {
     fn read(dev: &dyn common::Device) -> Self {
         let now = dev.gains();
         let stages = dev
+            speed: parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(
+                SPEED_HISTORY,
+            )),
             .info()
             .gain_stages
             .iter()
@@ -1048,6 +1061,19 @@ impl Status {
             if let Some(prev) = held.iter().find(|p| p.id == s.id) {
                 s.level = s.level.max(prev.level * METER_FALL);
             }
+    fn push_speed(&self, x: f32) {
+        let mut h = self.speed.lock();
+        if h.len() == SPEED_HISTORY {
+            h.pop_front();
+        }
+        h.push_back(x);
+    }
+
+    /// The recent speed trace, oldest first.
+    pub fn speed_history(&self) -> Vec<f32> {
+        self.speed.lock().iter().copied().collect()
+    }
+
         }
         *held = states;
     }
@@ -1861,6 +1887,33 @@ fn run(
             // no such thing.
             let mut frames = 0usize;
             let mut rate = 48_000.0;
+
+        status.push_speed((block_secs / work.elapsed().as_secs_f64().max(1e-9)) as f32);
+    }
+}
+
+/// Take the levels the nodes hold into the plan, and tell the strip when
+/// they differ from what it last said.
+///
+/// A fader or a squelch set through the chain view lands on the node. The
+/// plan is what the next rebuild draws from, so it has to follow; and the
+/// strip is what the operator reads, so it has to follow too. A revision
+/// moves only when something changed, so what the strip sends itself does
+/// not come back to it.
+fn pull_levels(rx: &crate::chain::Receiver, plan: &mut Plan, status: &Status) {
+    let (audio, chans) = rx.levels();
+    let mut changed = audio != plan.audio;
+    plan.audio = audio;
+    for c in chans {
+        if let Some(have) = plan.channels.iter_mut().find(|h| h.id == c.id) {
+            if *have != c {
+                *have = c;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        status.set_levels(plan.audio, plan.channels.clone());
             mix.clear();
             let mut states = Vec::with_capacity(rx.channels().len());
             for (i, c) in rx.channels().iter().enumerate() {
