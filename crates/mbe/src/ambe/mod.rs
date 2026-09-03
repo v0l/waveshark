@@ -552,14 +552,20 @@ pub struct AmbeFrame {
 }
 
 impl AmbeFrame {
-    /// Decodes a 9-byte (72-bit) AMBE frame.
+    /// Decodes a 9-byte (72-bit) DMR AMBE frame.
     pub fn new(frame_data: &[u8]) -> Self {
-        let frame = BitFrame::from_bytes(frame_data, false);
+        Self::from_bit_frame(&BitFrame::from_bytes(frame_data, false))
+    }
 
-        let mut c0 = extract_vector(&frame, &VECTOR_C0);
-        let mut c1 = extract_vector(&frame, &VECTOR_C1);
-        let c2 = extract_vector(&frame, &VECTOR_C2);
-        let c3 = extract_vector(&frame, &VECTOR_C3);
+    /// Decodes a 72-bit AMBE frame already laid out as a [`BitFrame`], for
+    /// transports other than DMR that carry the same C0..C3 interleave but
+    /// deliver the frame through their own outer FEC (for example YSF V/D
+    /// mode 2, which majority-votes and de-whitens before this point).
+    pub fn from_bit_frame(frame: &BitFrame) -> Self {
+        let mut c0 = extract_vector(frame, &VECTOR_C0);
+        let mut c1 = extract_vector(frame, &VECTOR_C1);
+        let c2 = extract_vector(frame, &VECTOR_C2);
+        let c3 = extract_vector(frame, &VECTOR_C3);
 
         // Error check C0, then descramble and error check C1.
         let mut errors = [0u32; 2];
@@ -726,10 +732,17 @@ impl AmbeSynthesizer {
         self.previous_frame = AmbeModelParameters::new();
     }
 
-    /// Decodes a 9-byte AMBE frame to audio, matching
+    /// Decodes a 9-byte DMR AMBE frame to audio, matching
     /// `AMBEAudioCodec.getAudio(byte[])`.
     pub fn decode(&mut self, frame_data: &[u8]) -> [f32; SAMPLES_PER_FRAME] {
         self.decode_frame(&AmbeFrame::new(frame_data))
+    }
+
+    /// Decodes a 72-bit AMBE frame supplied as bits (index 0 first), for
+    /// transports that recover the frame through their own outer FEC. Feeds
+    /// the same C0..C3 parse as DMR.
+    pub fn decode_bits(&mut self, bits: &[bool]) -> [f32; SAMPLES_PER_FRAME] {
+        self.decode_frame(&AmbeFrame::from_bit_frame(&BitFrame::from_bits(bits)))
     }
 
     /// Port of `AMBESynthesizer.getAudio(AMBEFrame)`.
