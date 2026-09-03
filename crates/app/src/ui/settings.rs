@@ -235,7 +235,7 @@ impl App {
                     self.scanners = table.clone();
                     self.send(Cmd::Scanners(table.clone()));
                 }
-                if self.chain_edit.manual {
+                if self.chain.edit.manual {
                     ui.label(
                         egui::RichText::new(crate::i18n::t("ui.manual_locked"))
                             .color(theme::LEGEND)
@@ -283,7 +283,7 @@ impl App {
         // The log is on by default and stays on: the transmission worth
         // having is always the one before somebody thought to press record.
         // What is settable is where it goes and how large it may get.
-        let mut on = self.packet_log.is_some();
+        let mut on = self.log.path.is_some();
         if ui.checkbox(&mut on, "Write every packet to disk").changed() {
             let dir = if on {
                 self.log_dir
@@ -292,7 +292,7 @@ impl App {
             } else {
                 None
             };
-            self.packet_log = dir.clone();
+            self.log.path = dir.clone();
             self.send(Cmd::PacketLog(dir));
         }
         hint(ui, "Timings and frames as demodulated, a day per file, replayable.");
@@ -301,9 +301,9 @@ impl App {
         // What the list shows, rather than what the receiver does. An
         // unrecognised burst is still reported, logged and replayable with
         // this off; it is only kept out of the table.
-        let mut unknown = self.show_unknown;
+        let mut unknown = self.log.show_unknown;
         if ui.checkbox(&mut unknown, "Show unrecognised bursts").changed() {
-            self.show_unknown = unknown;
+            self.log.show_unknown = unknown;
         }
         hint(
             ui,
@@ -322,7 +322,7 @@ impl App {
                 let dir = std::path::PathBuf::from(self.log_dir_edit.trim());
                 if !self.log_dir_edit.trim().is_empty() {
                     self.log_dir = Some(dir.clone());
-                    self.packet_log = Some(dir.clone());
+                    self.log.path = Some(dir.clone());
                     self.send(Cmd::PacketLog(Some(dir)));
                 }
             }
@@ -952,7 +952,7 @@ impl App {
 
     fn spectrum_settings(&mut self, ui: &mut egui::Ui) {
         row(ui, "FFT bins", |ui| {
-            let mut n = self.fft_size;
+            let mut n = self.scope.fft_size;
             egui::ComboBox::from_id_salt("fft")
                 .selected_text(n.to_string())
                 .width(120.0)
@@ -961,25 +961,25 @@ impl App {
                         ui.selectable_value(&mut n, v, v.to_string());
                     }
                 });
-            if n != self.fft_size {
-                self.fft_size = n;
+            if n != self.scope.fft_size {
+                self.scope.fft_size = n;
                 // The same value the session saves and the radio starts with,
                 // so a chosen FFT size survives a restart rather than only
                 // living in the running spectrum.
-                self.fft = n;
+                self.scope.fft = n;
                 self.send(Cmd::Fft(n));
                 self.reset_waterfall();
             }
         });
         ui.label(
-            egui::RichText::new(bin_hint(self.rate, self.fft_size))
+            egui::RichText::new(bin_hint(self.rate, self.scope.fft_size))
                 .small()
                 .color(theme::LEGEND),
         );
         ui.add_space(8.0);
 
         row(ui, "Refresh", |ui| {
-            let mut v = self.refresh;
+            let mut v = self.scope.refresh;
             egui::ComboBox::from_id_salt("fps")
                 .selected_text(format!("{} fps", v as i32))
                 .width(120.0)
@@ -988,8 +988,8 @@ impl App {
                         ui.selectable_value(&mut v, f, format!("{n} fps"));
                     }
                 });
-            if (v - self.refresh).abs() > 0.01 {
-                self.refresh = v;
+            if (v - self.scope.refresh).abs() > 0.01 {
+                self.scope.refresh = v;
                 self.send(Cmd::Refresh(v));
             }
         });
@@ -997,15 +997,15 @@ impl App {
 
         row(ui, "Averaging", |ui| {
             if ui
-                .add(egui::Slider::new(&mut self.smoothing, 0.02..=1.0).show_value(false))
+                .add(egui::Slider::new(&mut self.scope.smoothing, 0.02..=1.0).show_value(false))
                 .changed()
             {
-                self.send(Cmd::Smoothing(self.smoothing));
+                self.send(Cmd::Smoothing(self.scope.smoothing));
             }
-            ui.label(value(if self.smoothing > 0.95 {
+            ui.label(value(if self.scope.smoothing > 0.95 {
                 "off".to_string()
             } else {
-                format!("{:.0}%", (1.0 - self.smoothing) * 100.0)
+                format!("{:.0}%", (1.0 - self.scope.smoothing) * 100.0)
             }));
         });
         ui.add_space(8.0);
@@ -1026,7 +1026,7 @@ impl App {
 
     fn waterfall_settings(&mut self, ui: &mut egui::Ui) {
         row(ui, "Scroll rate", |ui| {
-            let mut v = self.rows_per_sec;
+            let mut v = self.scope.rows_per_sec;
             egui::ComboBox::from_id_salt("rows")
                 .selected_text(format!("{} rows/s", v as i32))
                 .width(130.0)
@@ -1035,12 +1035,12 @@ impl App {
                         ui.selectable_value(&mut v, f, format!("{n} rows/s"));
                     }
                 });
-            self.rows_per_sec = v;
+            self.scope.rows_per_sec = v;
         });
         ui.add_space(8.0);
 
         row(ui, "History", |ui| {
-            let mut n = self.wf_rows;
+            let mut n = self.scope.wf_rows;
             egui::ComboBox::from_id_salt("hist")
                 .selected_text(format!("{n} rows"))
                 .width(130.0)
@@ -1049,16 +1049,16 @@ impl App {
                         ui.selectable_value(&mut n, v, format!("{v} rows"));
                     }
                 });
-            if n != self.wf_rows {
-                self.wf_rows = n;
-                self.wf.set_height(n);
+            if n != self.scope.wf_rows {
+                self.scope.wf_rows = n;
+                self.scope.wf.set_height(n);
             }
         });
         ui.label(
             egui::RichText::new(format!(
                 "{:.0} s of history at {:.0} rows/s",
-                self.wf.height() as f32 / self.rows_per_sec,
-                self.rows_per_sec
+                self.scope.wf.height() as f32 / self.scope.rows_per_sec,
+                self.scope.rows_per_sec
             ))
             .small()
             .color(theme::LEGEND),
@@ -1066,8 +1066,8 @@ impl App {
         ui.add_space(8.0);
 
         row(ui, "Contrast", |ui| {
-            ui.add(egui::Slider::new(&mut self.wf_top_offset, 0.0..=20.0).show_value(false));
-            ui.label(value(format!("{:.0} dB", self.wf_top_offset)));
+            ui.add(egui::Slider::new(&mut self.scope.wf_top_offset, 0.0..=20.0).show_value(false));
+            ui.label(value(format!("{:.0} dB", self.scope.wf_top_offset)));
         });
         ui.label(
             egui::RichText::new("How far below the trace ceiling the hottest colour sits.")
@@ -1080,14 +1080,14 @@ impl App {
 
     fn scale_settings(&mut self, ui: &mut egui::Ui) {
         row(ui, "Scale", |ui| {
-            ui.checkbox(&mut self.auto_scale, "Auto");
+            ui.checkbox(&mut self.scope.auto_scale, "Auto");
         });
-        ui.add_enabled_ui(!self.auto_scale, |ui| {
+        ui.add_enabled_ui(!self.scope.auto_scale, |ui| {
             row(ui, "Floor", |ui| {
-                ui.add(egui::Slider::new(&mut self.floor, -140.0..=0.0).suffix(" dB"));
+                ui.add(egui::Slider::new(&mut self.scope.floor, -140.0..=0.0).suffix(" dB"));
             });
             row(ui, "Ceiling", |ui| {
-                ui.add(egui::Slider::new(&mut self.ceil, -140.0..=20.0).suffix(" dB"));
+                ui.add(egui::Slider::new(&mut self.scope.ceil, -140.0..=20.0).suffix(" dB"));
             });
         });
     }

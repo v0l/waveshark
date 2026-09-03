@@ -935,7 +935,7 @@ fn main() -> eframe::Result<()> {
             }
             app.shot = args.shot.clone();
             app.shot_after = args.shot_after;
-            app.print_log = args.print_log;
+            app.set_print_log(args.print_log);
             if let Some(dir) = args.record.clone() {
                 app.record_to(dir, args.record_mb);
             }

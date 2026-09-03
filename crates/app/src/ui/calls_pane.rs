@@ -8,7 +8,6 @@
 use super::*;
 use crate::callbus::{Rule, Subscription};
 use crate::calls::Call;
-use std::sync::atomic::Ordering;
 
 /// Columns, and how wide each is.
 ///
@@ -30,7 +29,7 @@ const COLS: [(&str, f32); 10] = [
 impl App {
     pub(super) fn call_view(&mut self, ui: &mut egui::Ui) {
         let now = std::time::Instant::now();
-        let calls: Vec<Call> = self.calls.active(now).into_iter().cloned().collect();
+        let calls: Vec<Call> = self.calls.list.active(now).into_iter().cloned().collect();
         // Every group is listened to unless it was turned off. A scanner that
         // hears nothing until it is configured is a scanner nobody hears
         // anything on, and the box on the row is how it is turned off.
@@ -83,7 +82,7 @@ impl App {
                 Stroke::new(1.0, theme::ETCH),
             );
 
-            let subs = self.call_subs.clone();
+            let subs = self.calls.subs.clone();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (n, c) in calls.iter().enumerate() {
                     let h = Self::ROW_H.max(20.0);
@@ -148,10 +147,10 @@ impl App {
                                 .map(|(_, v)| *v)
                                 .unwrap_or(0.0);
                             let r = Rect::from_min_size(
-                                Pos2::new(x, rect.center().y - super::meter::H / 2.0),
-                                Vec2::new(w - 10.0, super::meter::H),
+                                Pos2::new(x, rect.center().y - super::widgets::VU_H / 2.0),
+                                Vec2::new(w - 10.0, super::widgets::VU_H),
                             );
-                            super::meter::paint(&p, r, peak);
+                            Vu::paint(&p, r, peak);
                         } else {
                             Self::cell(&p, rect, x, *w, text, *col);
                         }
@@ -180,30 +179,30 @@ impl App {
         let mut added = false;
         for c in calls {
             let rule = Rule::Group(c.to.clone());
-            if self.call_optout.contains(&rule) || self.call_subs.iter().any(|s| s.rule == rule) {
+            if self.calls.optout.contains(&rule) || self.calls.subs.iter().any(|s| s.rule == rule) {
                 continue;
             }
-            self.call_subs.push(Subscription::new(rule));
+            self.calls.subs.push(Subscription::new(rule));
             added = true;
         }
         if added {
-            self.send(Cmd::CallSubs(self.call_subs.clone()));
+            self.send(Cmd::CallSubs(self.calls.subs.clone()));
         }
     }
 
     /// Subscribe to a rule, or drop it if it is already there.
     fn toggle_call_sub(&mut self, rule: Rule) {
-        match self.call_subs.iter().position(|s| s.rule == rule) {
+        match self.calls.subs.iter().position(|s| s.rule == rule) {
             Some(i) => {
-                self.call_subs.remove(i);
-                self.call_optout.push(rule);
+                self.calls.subs.remove(i);
+                self.calls.optout.push(rule);
             }
             None => {
-                self.call_optout.retain(|r| r != &rule);
-                self.call_subs.push(Subscription::new(rule));
+                self.calls.optout.retain(|r| r != &rule);
+                self.calls.subs.push(Subscription::new(rule));
             }
         }
-        self.send(Cmd::CallSubs(self.call_subs.clone()));
+        self.send(Cmd::CallSubs(self.calls.subs.clone()));
     }
 }
 

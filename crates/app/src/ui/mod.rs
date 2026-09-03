@@ -3,10 +3,11 @@
 mod calls_pane;
 mod chain_pane;
 mod map_pane;
-mod meter;
 mod packets;
 mod scope;
 mod settings;
+mod state;
+mod widgets;
 
 use crate::bands;
 use crate::dial::Dial;
@@ -14,51 +15,30 @@ use crate::radio::{
     ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
 };
 use crate::theme::{self, legend, value};
-use crate::waterfall::Waterfall;
-use crate::wheel::Wheel;
+use widgets::{Fader, Squelch, Vu};
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
 use egui::{Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Vec2};
 
 pub struct App {
+    /// What each view remembers. A pane is handed its own and nothing else,
+    /// which is what stops one view reaching into another's business.
+    scope: state::ScopeState,
+    chain: state::ChainState,
+    log: state::LogState,
+    map: state::MapState,
+    calls: state::CallsState,
+    audio: state::AudioState,
+
     radio: Option<Radio>,
     err: Option<String>,
 
     center: f64,
     rate: f64,
 
-    db: Vec<f32>,
-    wf: Waterfall,
-    floor: f32,
-    ceil: f32,
-    auto_scale: bool,
 
     dial: Dial,
-    /// Centre the waterfall history currently corresponds to, so a retune can
-    /// slide it instead of throwing it away.
-    wf_center: f64,
-    /// Centre frequency of the spectrum currently held in `db`, which lags the
-    /// requested centre while a retune is pending.
-    db_center: f64,
-    wf_pending: Vec<f32>,
-    /// Where the frames feeding `wf_pending` were tuned, so a retune starts a
-    /// fresh row instead of mixing two spans into one.
-    wf_pending_center: f64,
-    wf_last: Option<std::time::Instant>,
-    rows_per_sec: f32,
-    refresh: f32,
-    fft_size: usize,
-    scrub: Wheel,
     open: Option<Settings>,
-    smoothing: f32,
-    wf_top_offset: f32,
-    wf_rows: usize,
-    channels: Vec<Channel>,
-    /// The channel whose chain the signal chain view shows.
-    listening: Option<usize>,
-    volume: f32,
-    next_id: u32,
-    fft: usize,
     devices: Vec<crate::devices::Entry>,
     device: Option<crate::devices::Entry>,
     spans: Vec<crate::devices::Span>,
@@ -79,116 +59,17 @@ pub struct App {
     /// artefact of the receiver, not something being received.
     dc_block: bool,
     view: View,
-    /// Shape of the running chain, republished by the radio thread whenever it
-    /// rebuilds one. Cloned rather than shared so drawing never blocks the
-    /// thread that has to keep draining USB.
-    chain_topo: Option<pipeline::graph::Topology>,
-    chain_latency: f64,
-    /// Packets decoded anywhere in the span, oldest first.
-    decodes: Vec<Logged>,
-    /// Number given to the next packet.
-    next_packet: u64,
-    /// Packet whose bytes are shown in the dump.
-    selected: Option<u64>,
-    /// Height of the packet inspector inside the log window, dragged by
-    /// its top edge. Held here rather than in a panel's memory so it is
-    /// exactly this for every packet, whatever the packet holds.
-    inspector_h: f32,
-    /// Show bursts no protocol claimed.
-    show_unknown: bool,
     /// Decoding every channel is on by default and can be turned off; it is
     /// the most expensive thing the app does.
     decode_on: bool,
-    /// Print every packet to standard output as well as listing it, timed
-    /// from when the window opened.
-    pub print_log: bool,
-    print_since: std::time::Instant,
-    /// Whether the packet log is showing.
-    log_open: bool,
     /// Whether the raw span capture is wanted. Held rather than sent once:
     /// choosing a device starts a new radio thread with a new graph, and a
     /// capture that quietly stopped there would be worse than none.
     capture: bool,
-    /// Share of the scope pane given to the spectrum, the rest going to the
-    /// waterfall. Dragged rather than fixed: which of the two matters depends
-    /// entirely on what is being looked for.
-    plot_frac: f32,
-    /// The split between spectrum and waterfall is being dragged.
-    splitting: bool,
-    /// Channel whose marker is being dragged in the spectrum.
-    drag_ch: Option<usize>,
-    /// Shared per-digit readout for the channel strip. Only one channel can be
-    /// under the pointer, so one is enough.
-    chan_dial: crate::dial::Dial,
-    /// Settings as last written to disk, and when. Compared against the live
-    /// ones each frame rather than tracked with a dirty flag, because every
-    /// control that changes one would otherwise have to remember to set it.
-    /// Every packet, appended to disk as it arrives. On unless the receiver
-    /// has nowhere to write, which is the case in tests.
-    /// Where the packet log is being written, for the status line. The log
-    /// itself lives in the graph, on the radio thread.
-    packet_log: Option<std::path::PathBuf>,
-    /// Tracks, folded together from whatever on the bus reports a position:
-    /// aircraft from ADS-B, vessels and marks from AIS. The most recent table
-    /// published by the receiver.
-    tracks: Vec<crate::tracks::Track>,
-    /// Who has been talking to whom, folded together from every decode that
-    /// names a destination. Held here rather than in the graph because it is
-    /// assembled from the same records the packet list shows.
-    calls: crate::calls::Calls,
-    /// What the call bus is subscribed to, as the interface holds it. The
-    /// radio thread is sent the whole set whenever it changes.
-    call_subs: Vec<crate::callbus::Subscription>,
-    /// Groups switched off by hand, so a group that was turned off does not
-    /// subscribe itself again the next time somebody transmits on it.
-    call_optout: Vec<crate::callbus::Rule>,
-    /// Level, mute and gain control for all call audio, as the channel strip
-    /// sets them.
-    call_volume: f32,
-    call_muted: bool,
-    call_agc: bool,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
-    /// The stage whose settings the chain view is showing, by node id.
-    chain_sel: Option<usize>,
-    /// Manual mode and where the stages have been dragged to.
-    chain_edit: crate::chainview::Edit,
-    /// Spectrum stages the operator added, from the last frame. Each covers
-    /// whatever was wired into it rather than the span.
-    extra_spectra: Vec<crate::radio::Spectrum>,
-    /// The graph the operator has drawn, when manual mode is on.
-    chain_patch: crate::patch::Patch,
-    /// Which revision of it the radio thread last published, so an edit it
-    /// refused can be noticed and taken back.
-    chain_patch_rev: u64,
-    /// The last patch handed to the radio thread. What comes back matches it
-    /// when the edit built, and is the previous graph when it did not.
-    chain_patch_sent: Option<crate::patch::Patch>,
-    /// The graph as last drawn by hand, which is not the same as the one
-    /// running: in automatic mode the receiver derives its own and this is
-    /// what taking it over goes back to.
-    chain_drawn: Option<crate::patch::Patch>,
-    /// Where the stages were when the graph was last written out, so that
-    /// dragging one is saved without writing the file on every frame of the
-    /// drag.
-    chain_places: crate::patch::Places,
-    chain_saved_at: Option<std::time::Instant>,
-    /// The operator's own stage that is selected, by patch id.
-    chain_pick: Option<u64>,
-    /// The wire that is selected, named by the input it lands on.
-    chain_wire: Option<(u64, usize)>,
-    /// Graphs as they were before each edit, and the ones undone since.
-    /// Snapshots rather than a list of operations: a patch is small, and an
-    /// operation log has to be kept correct against every future edit while a
-    /// snapshot is right by construction.
-    chain_undo: Vec<crate::patch::Patch>,
-    chain_redo: Vec<crate::patch::Patch>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
-    /// Where the flight map is looking, and how far it reaches.
-    map: MapView,
-    /// OSM tiles under it, fetched in the background.
-    tiles: crate::map::Tiles,
     /// Packet feeds from other receivers, as configured here and saved in
     /// the session.
     feeds: Vec<nodes::FeedSpec>,
@@ -478,35 +359,19 @@ fn device_rates(e: &crate::devices::Entry) -> std::ops::RangeInclusive<Sps> {
 impl Default for App {
     fn default() -> Self {
         Self {
+            scope: state::ScopeState::default(),
+            chain: state::ChainState::default(),
+            log: state::LogState::default(),
+            map: state::MapState::default(),
+            calls: state::CallsState::default(),
+            audio: state::AudioState::default(),
             record_dir: None,
             radio: None,
             err: None,
             center: crate::session::DEFAULT_CENTER,
             rate: 2_304_000.0,
-            db: Vec::new(),
-            wf: Waterfall::new(512),
-            floor: -90.0,
-            ceil: -20.0,
-            auto_scale: true,
             dial: Dial::new(),
-            wf_center: crate::session::DEFAULT_CENTER,
-            db_center: crate::session::DEFAULT_CENTER,
-            wf_pending: Vec::new(),
-            wf_pending_center: 0.0,
-            wf_last: None,
-            rows_per_sec: 20.0,
-            refresh: 30.0,
-            fft_size: 2048,
-            scrub: Wheel::default(),
             open: None,
-            smoothing: 0.35,
-            wf_top_offset: 5.0,
-            wf_rows: 512,
-            channels: Vec::new(),
-            listening: None,
-            volume: 0.5,
-            next_id: 1,
-            fft: 2048,
             devices: Vec::new(),
             device: None,
             spans: Vec::new(),
@@ -514,51 +379,14 @@ impl Default for App {
             soak: None,
             shot: None,
             shot_after: 6.0,
-            decodes: Vec::new(),
-            next_packet: 1,
-            selected: None,
-            inspector_h: 116.0 + BURST_VIEW_H + 24.0,
-            show_unknown: true,
             decode_on: true,
-            print_log: false,
-            print_since: std::time::Instant::now(),
-            log_open: true,
             capture: false,
-            plot_frac: DEFAULT_PLOT_FRAC,
-            splitting: false,
-            drag_ch: None,
-            chan_dial: crate::dial::Dial::new(),
             shot_at: None,
             shot_sent: false,
             dc_block: true,
             view: View::Spectrum,
-            calls: crate::calls::Calls::new(),
-            call_subs: Vec::new(),
-            call_optout: Vec::new(),
-            call_volume: 0.8,
-            call_muted: false,
-            call_agc: true,
-            chain_topo: None,
-            chain_latency: 0.0,
-            packet_log: None,
-            tracks: Vec::new(),
             location: None,
-            chain_sel: None,
-            chain_edit: crate::chainview::Edit::default(),
-            extra_spectra: Vec::new(),
-            chain_patch: crate::patch::Patch::default(),
-            chain_patch_rev: 0,
-            chain_patch_sent: None,
-            chain_drawn: None,
-            chain_places: crate::patch::Places::new(),
-            chain_saved_at: None,
-            chain_pick: None,
-            chain_wire: None,
-            chain_undo: Vec::new(),
-            chain_redo: Vec::new(),
             country: String::new(),
-            map: MapView::default(),
-            tiles: crate::map::Tiles::new(),
             feeds: Vec::new(),
             feed_host: String::new(),
             remote: None,
@@ -599,58 +427,38 @@ impl App {
         let mut app = Self {
             devices,
             device,
-            packet_log: crate::packetlog::PacketLog::default_dir(),
-            tracks: Vec::new(),
             center: s.center,
-            wf_center: s.center,
-            db_center: s.center,
             // The file holds the device's own rate; the app works in the
             // effective one, which zoom divides.
             rate: s.rate / s.zoom.max(1) as f64,
             zoom: s.zoom,
-            fft: s.fft,
-            fft_size: s.fft,
             dc_block: s.dc_block,
             decode_on: s.decode_on,
             location: s.location,
             country: s.country.clone(),
-            map: MapView::default(),
-            tiles: crate::map::Tiles::new(),
             feeds: s.feeds.clone(),
-            feed_host: String::new(),
-            feed_kind: nodes::FEED_KINDS[0],
-            scanner_edit: None,
             scanners: crate::scanners::Scanners::load(),
-            log_dir_edit: String::new(),
-            log_dir: None,
-            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
-            station_edit: None,
-            volume: s.volume,
-            rows_per_sec: s.view.rows_per_sec,
-            wf_rows: s.view.wf_rows,
-            wf: Waterfall::new(s.view.wf_rows),
-            wf_top_offset: s.view.wf_top_offset,
-            auto_scale: s.view.auto_scale,
-            floor: s.view.floor,
-            ceil: s.view.ceil,
-            refresh: s.view.refresh,
-            smoothing: s.view.smoothing,
             saved: s.clone(),
-            pending_radio: Some(s),
             ..Default::default()
         };
+        app.scope.restore(&s.view, s.fft);
+        app.scope.db_center = s.center;
+        app.scope.wf_center = s.center;
+        app.audio.volume = s.volume;
+        app.log.path = crate::packetlog::PacketLog::default_dir();
+        app.pending_radio = Some(s);
         // The graph as it was left, if it was ever drawn by hand. Loaded
         // whether or not manual mode is on, so that turning it on comes back
         // to the drawing rather than to the automatic chain.
         if let Some((patch, places)) = crate::patch::Patch::load() {
-            app.chain_drawn = Some(patch);
-            app.chain_edit.pos =
+            app.chain.drawn = Some(patch);
+            app.chain.edit.pos =
                 places.iter().map(|(k, (x, y))| (*k, egui::Pos2::new(*x, *y))).collect();
-            app.chain_places = places;
+            app.chain.places = places;
         }
         // The settings show where the log is going, so they start from where
         // it is actually going.
-        app.log_dir = app.packet_log.clone();
+        app.log_dir = app.log.path.clone();
         app.log_dir_edit =
             app.log_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
         app.connect(&cc.egui_ctx);
@@ -665,7 +473,7 @@ impl App {
             center: self.center,
             rate: self.rate * self.zoom.max(1) as f64,
             zoom: self.zoom,
-            fft: self.fft,
+            fft: self.scope.fft,
             // Read back from the driver rather than from what was asked for,
             // so the file holds the gain the hardware actually took.
             gains: radio
@@ -685,16 +493,7 @@ impl App {
             language: crate::i18n::language().code().to_string(),
             country: self.country.clone(),
             band_plan: crate::bands::plan().id().to_string(),
-            view: crate::session::ViewPrefs {
-                rows_per_sec: self.rows_per_sec,
-                wf_rows: self.wf_rows,
-                wf_top_offset: self.wf_top_offset,
-                auto_scale: self.auto_scale,
-                floor: self.floor,
-                ceil: self.ceil,
-                refresh: self.refresh,
-                smoothing: self.smoothing,
-            },
+            view: self.scope.prefs(),
             feeds: self.feeds.clone(),
             streams: crate::devices::streams()
                 .into_iter()
@@ -702,8 +501,8 @@ impl App {
                 .collect(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
-            volume: self.volume,
-            manual_chain: self.chain_edit.manual,
+            volume: self.audio.volume,
+            manual_chain: self.chain.edit.manual,
         }
     }
 
@@ -770,7 +569,7 @@ impl App {
         // to go back before anything else settles: the alternative is a
         // receiver that runs the automatic chain for a moment and then
         // rebuilds into the one that was saved.
-        if want.manual_chain && self.chain_drawn.is_some() {
+        if want.manual_chain && self.chain.drawn.is_some() {
             self.set_manual_chain(true);
         }
     }
@@ -784,8 +583,8 @@ impl App {
 
     /// Turn the packet log off, or point it somewhere other than the default.
     pub fn set_packet_log(&mut self, off: bool, dir: Option<std::path::PathBuf>) {
-        self.packet_log = if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
-        let dir = self.packet_log.clone();
+        self.log.path = if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
+        let dir = self.log.path.clone();
         self.send(Cmd::PacketLog(dir));
     }
 
@@ -797,6 +596,11 @@ impl App {
     pub fn record_to(&mut self, dir: std::path::PathBuf, budget_mb: Option<u64>) {
         self.record_dir = Some((dir.clone(), budget_mb));
         self.send(Cmd::Record(Some((dir, budget_mb))));
+    }
+
+    /// Print every packet to standard output as it is logged.
+    pub fn set_print_log(&mut self, on: bool) {
+        self.log.print = on;
     }
 
     /// Start or stop writing the raw span to a file.
@@ -833,12 +637,12 @@ impl App {
         // The first channel sets where the receiver points; later ones are
         // added around it, since a second call moving the centre would drag
         // the first channel to the edge of the span or out of it.
-        if self.channels.is_empty() {
+        if self.audio.channels.is_empty() {
             self.center = freq;
             self.send(Cmd::Center(common::Hz(freq as u64)));
         }
-        self.channels.push(Channel {
-            id: self.next_id as u64,
+        self.audio.channels.push(Channel {
+            id: self.audio.next_id as u64,
             freq,
             demod,
             label: format!("{mhz:.1}"),
@@ -848,8 +652,8 @@ impl App {
             squelch_db: None,
             agc: true,
         });
-        self.next_id += 1;
-        self.listen(self.channels.len() - 1);
+        self.audio.next_id += 1;
+        self.listen(self.audio.channels.len() - 1);
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
@@ -873,7 +677,7 @@ impl App {
             // The radio samples at the full rate and the zoom narrows it in
             // software, so it is started at the rate before that division.
             Sps((self.rate * self.zoom.max(1) as f64).round() as u64),
-            self.fft,
+            self.scope.fft,
             move || c.request_repaint(),
         ));
         if self.zoom > 1 {
@@ -887,7 +691,7 @@ impl App {
         }
         // The log is a node in the graph, so a new radio thread means a new
         // graph and it has to be told where to write again.
-        if let Some(d) = self.packet_log.clone() {
+        if let Some(d) = self.log.path.clone() {
             self.send(Cmd::PacketLog(Some(d)));
         }
         // Same for the feeds and the station position: they belong to the
@@ -900,13 +704,13 @@ impl App {
         }
         // The spectrum's frame rate and averaging live in the graph, so a new
         // radio thread has them at their defaults until it is told otherwise.
-        self.send(Cmd::Refresh(self.refresh));
-        self.send(Cmd::Smoothing(self.smoothing));
+        self.send(Cmd::Refresh(self.scope.refresh));
+        self.send(Cmd::Smoothing(self.scope.smoothing));
         // Same for the call bus: a new thread has an empty one.
-        self.send(Cmd::CallVolume { volume: self.call_volume, muted: self.call_muted });
-        self.send(Cmd::CallAgc(self.call_agc));
-        if !self.call_subs.is_empty() {
-            self.send(Cmd::CallSubs(self.call_subs.clone()));
+        self.send(Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted });
+        self.send(Cmd::CallAgc(self.audio.call_agc));
+        if !self.calls.subs.is_empty() {
+            self.send(Cmd::CallSubs(self.calls.subs.clone()));
         }
         // Whatever the radio was set to last time has to be pushed at it
         // again: a new thread means a freshly opened device at its defaults.
@@ -921,7 +725,7 @@ impl App {
     /// device at all.
     fn stop(&mut self) {
         self.radio = None;
-        self.listening = None;
+        self.audio.listening = None;
         self.err = None;
     }
 
@@ -933,11 +737,11 @@ impl App {
         // rather than the samples arriving under whatever it was last on.
         if let Some(f) = e.pinned {
             self.center = f.as_f64();
-            self.wf_center = self.center;
-            self.db_center = self.center;
+            self.scope.wf_center = self.center;
+            self.scope.db_center = self.center;
         }
         self.device = Some(e);
-        self.listening = None;
+        self.audio.listening = None;
         self.connect(ctx);
     }
 
@@ -951,8 +755,8 @@ impl App {
         let Some(radio) = &self.radio else { return };
         // The flight tracker lives in the graph; this is the table it
         // published on the last frame.
-        if self.view == View::Map || !self.tracks.is_empty() {
-            self.tracks = radio.status.track_list.lock().clone();
+        if self.view == View::Map || !self.map.tracks.is_empty() {
+            self.map.tracks = radio.status.track_list.lock().clone();
         }
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
@@ -972,20 +776,20 @@ impl App {
         // dragging a slider repaints continuously, fewer frames were thrown
         // away between drains, and the history visibly changed contrast for as
         // long as the drag lasted.
-        self.chain_topo = radio.status.chain();
-        self.chain_latency = radio.status.chain_latency();
+        self.chain.topo = radio.status.chain();
+        self.chain.latency = radio.status.chain_latency();
         // An edit that will not build is refused and the last one that did
         // goes back, so what is on screen has to be what the receiver is
         // running rather than what was last asked for.
         let (rev, running) = radio.status.patch();
-        if rev != self.chain_patch_rev {
-            self.chain_patch_rev = rev;
+        if rev != self.chain.patch_rev {
+            self.chain.patch_rev = rev;
             let running = running.unwrap_or_default();
             // Only when it is not the edit that was just sent. Adopting our
             // own patch back would undo anything drawn in the meantime, since
             // the receiver is a rebuild behind the pointer.
-            if self.chain_patch_sent.as_ref() != Some(&running) {
-                self.chain_patch = running;
+            if self.chain.patch_sent.as_ref() != Some(&running) {
+                self.chain.patch = running;
             }
         }
         let mut batches = Vec::new();
@@ -1005,29 +809,29 @@ impl App {
             // arrive from the old frequency for a while after a drag moves the
             // view. Adopting their centre would drag the view back under the
             // pointer every time one landed.
-            self.db_center = f.center;
+            self.scope.db_center = f.center;
             self.rate = f.rate;
-            if self.auto_scale {
+            if self.scope.auto_scale {
                 self.rescale(&f.db);
             }
             self.slide_waterfall(f.center, f.db.len());
 
-            let due = self
+            let due = self.scope
                 .wf_last
-                .map(|t| t.elapsed().as_secs_f32() >= 1.0 / self.rows_per_sec)
+                .map(|t| t.elapsed().as_secs_f32() >= 1.0 / self.scope.rows_per_sec)
                 .unwrap_or(true);
             if due {
                 // The waterfall tops out below the trace's ceiling: the plot
                 // wants headroom so peaks are not clipped flat, the colour
                 // ramp wants the opposite or its hottest colours go unused.
-                let pending = std::mem::take(&mut self.wf_pending);
-                    self.wf.push(&pending, self.floor, self.ceil - self.wf_top_offset);
-                self.wf_pending = pending;
-                self.wf_pending.fill(f32::MIN);
-                self.wf_last = Some(std::time::Instant::now());
+                let pending = std::mem::take(&mut self.scope.wf_pending);
+                    self.scope.wf.push(&pending, self.scope.floor, self.scope.ceil - self.scope.wf_top_offset);
+                self.scope.wf_pending = pending;
+                self.scope.wf_pending.fill(f32::MIN);
+                self.scope.wf_last = Some(std::time::Instant::now());
             }
-            self.db = f.db;
-            self.extra_spectra = f.extra;
+            self.scope.db = f.db;
+            self.scope.extra = f.extra;
         }
     }
 
@@ -1038,24 +842,24 @@ impl App {
     /// this list: these are conclusions, and they are bounded.
     fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
         for rec in batch {
-            if self.print_log {
-                println!("{}", rec.line(self.print_since));
+            if self.log.print {
+                println!("{}", rec.line(self.log.print_since));
             }
             // A transmission that names who it is for is also a call, and
             // the call list outlives the packet log: a group heard an hour
             // ago has scrolled out of the log long before it is forgotten
             // here.
-            self.calls.update(&rec, rec.at);
-            let id = self.next_packet;
-            self.next_packet += 1;
-            self.decodes.push(Logged { id, rec });
+            self.calls.list.update(&rec, rec.at);
+            let id = self.log.next_packet;
+            self.log.next_packet += 1;
+            self.log.decodes.push(Logged { id, rec });
         }
         // Listening does not depend on which pane is on screen. The
         // subscriptions used to be made where the call list is drawn, so a
         // receiver sitting on the spectrum heard nothing however much it
         // decoded, and the fault looked like a broken vocoder.
         let heard: Vec<crate::calls::Call> =
-            self.calls.active(std::time::Instant::now()).into_iter().cloned().collect();
+            self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
         self.subscribe_new_groups(&heard);
 
         // A busy band produces packets faster than anyone reads them, and an
@@ -1064,17 +868,17 @@ impl App {
         // is a few hundred bytes; its burst is a few hundred kilobytes, and
         // five hundred of those is the receiver's memory spent on a scroll
         // nobody reads that far back.
-        let keep_from = self.decodes.len().saturating_sub(IQ_KEEP);
-        for l in &mut self.decodes[..keep_from] {
+        let keep_from = self.log.decodes.len().saturating_sub(IQ_KEEP);
+        for l in &mut self.log.decodes[..keep_from] {
             l.rec.iq = None;
         }
-        if self.decodes.len() > DECODE_LOG_MAX {
-            let drop = self.decodes.len() - DECODE_LOG_MAX;
-            self.decodes.drain(..drop);
+        if self.log.decodes.len() > DECODE_LOG_MAX {
+            let drop = self.log.decodes.len() - DECODE_LOG_MAX;
+            self.log.decodes.drain(..drop);
             // A selection that has aged out of the list must not leave the
             // dump showing bytes with no row above them.
-            if self.selected.is_some_and(|id| !self.decodes.iter().any(|l| l.id == id)) {
-                self.selected = None;
+            if self.log.selected.is_some_and(|id| !self.log.decodes.iter().any(|l| l.id == id)) {
+                self.log.selected = None;
             }
         }
     }
@@ -1089,12 +893,12 @@ impl App {
         // A frame from a different place is not the same row. Peak-holding
         // across a retune would smear the old span's carriers onto the new
         // one's frequencies.
-        if self.wf_pending.len() != f.db.len() || self.wf_pending_center != f.center {
-            self.wf_pending = f.db.clone();
-            self.wf_pending_center = f.center;
+        if self.scope.wf_pending.len() != f.db.len() || self.scope.wf_pending_center != f.center {
+            self.scope.wf_pending = f.db.clone();
+            self.scope.wf_pending_center = f.center;
             return;
         }
-        for (a, b) in self.wf_pending.iter_mut().zip(&f.db) {
+        for (a, b) in self.scope.wf_pending.iter_mut().zip(&f.db) {
             *a = a.max(*b);
         }
     }
@@ -1106,10 +910,10 @@ impl App {
         // Aligned to where the rows' data actually is, not to where the view
         // has been moved to, or the history smears as the two drift apart.
         let hz_per_bin = self.rate / bins as f64;
-        let d = ((center - self.wf_center) / hz_per_bin).round();
+        let d = ((center - self.scope.wf_center) / hz_per_bin).round();
         if d != 0.0 {
-            self.wf.shift(d as i32);
-            self.wf_center += d * hz_per_bin;
+            self.scope.wf.shift(d as i32);
+            self.scope.wf_center += d * hz_per_bin;
         }
     }
 
@@ -1123,8 +927,8 @@ impl App {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
         let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + PEAK_HEADROOM_DB);
-        self.floor += (lo - self.floor) * 0.05;
-        self.ceil += (hi.max(lo + MIN_SPAN_DB) - self.ceil) * 0.05;
+        self.scope.floor += (lo - self.scope.floor) * 0.05;
+        self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
     }
 
     /// Frequency under the pointer, snapped to the band's channel plan while
@@ -1154,7 +958,7 @@ impl App {
     fn channel_at(&self, rect: &Rect, x: f32) -> Option<usize> {
         let tol = GRAB_PX * self.rate / rect.width().max(1.0) as f64;
         let hz = self.hz_at(rect, x);
-        self.channels
+        self.audio.channels
             .iter()
             .enumerate()
             .filter(|(_, c)| (c.freq - hz).abs() < tol)
@@ -1177,15 +981,15 @@ impl App {
 
     /// The span or bin count changed, so old rows no longer line up.
     fn reset_waterfall(&mut self) {
-        self.wf.clear();
-        self.wf_center = self.center;
-        self.wf_pending.clear();
+        self.scope.wf.clear();
+        self.scope.wf_center = self.center;
+        self.scope.wf_pending.clear();
     }
 
     fn add_channel(&mut self, freq: f64) {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.channels.push(Channel {
+        let id = self.audio.next_id;
+        self.audio.next_id += 1;
+        self.audio.channels.push(Channel {
             id: id as u64,
             freq,
             demod: bands::demod_at(freq),
@@ -1196,7 +1000,7 @@ impl App {
             squelch_db: None,
             agc: true,
         });
-        self.listening = Some(self.channels.len() - 1);
+        self.audio.listening = Some(self.audio.channels.len() - 1);
         self.send_channels();
     }
 
@@ -1213,7 +1017,7 @@ impl App {
 
     fn channel_specs(&self) -> Vec<ChannelSpec> {
         let center = self.center;
-        self.channels
+        self.audio.channels
             .iter()
             .filter(|c| c.on)
             .map(|c| ChannelSpec {
@@ -1229,16 +1033,16 @@ impl App {
     }
 
     fn listen(&mut self, idx: usize) {
-        if let Some(ch) = self.channels.get_mut(idx) {
+        if let Some(ch) = self.audio.channels.get_mut(idx) {
             ch.on = true;
         }
-        self.listening = Some(idx);
+        self.audio.listening = Some(idx);
         self.send_channels();
     }
 
     fn retune_listener(&mut self) {
-        if self.listening.is_some_and(|i| i >= self.channels.len()) {
-            self.listening = None;
+        if self.audio.listening.is_some_and(|i| i >= self.audio.channels.len()) {
+            self.audio.listening = None;
         }
         self.send_channels();
     }
@@ -1391,49 +1195,6 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 fn modal_title(ui: &mut egui::Ui, text: &str) {
     ui.label(legend(text));
     ui.add_space(10.0);
-}
-
-/// A squelch control that shows what it is deciding against.
-///
-/// A threshold with no meter beside it is a number to guess at: the operator
-/// cannot tell whether 9 dB is one above the noise or ten below the station.
-/// The bar is what the squelch is measuring right now, the marker is where it
-/// opens, and dragging moves the marker.
-fn squelch_meter(
-    ui: &mut egui::Ui,
-    lo: f32,
-    hi: f32,
-    measured: f32,
-    threshold: &mut f32,
-    open: bool,
-) -> bool {
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(120.0, 12.0), egui::Sense::click_and_drag());
-    let at = |v: f32| {
-        let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
-        rect.left() + t * rect.width()
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, 2.0, theme::PANEL);
-    let fill = egui::Rect::from_min_max(rect.min, egui::pos2(at(measured), rect.max.y));
-    // Coloured by the decision rather than by the level, so a glance says
-    // whether audio is getting through without reading the numbers.
-    p.rect_filled(fill, 2.0, if open { theme::TRACE } else { theme::LEGEND });
-    let x = at(*threshold);
-    p.line_segment(
-        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-        egui::Stroke::new(1.5, theme::VALUE),
-    );
-
-    let mut changed = false;
-    if let Some(pos) = resp.interact_pointer_pos() {
-        if resp.dragged() || resp.clicked() {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            *threshold = lo + t * (hi - lo);
-            changed = true;
-        }
-    }
-    changed
 }
 
 /// A labelled settings row: legend on the left, control on the right, so the
@@ -1622,7 +1383,7 @@ impl App {
         // Wait for the tuner to lock and the waterfall to fill; a screenshot
         // taken before that reviews an empty screen, not the design.
         if !self.shot_sent && t0.elapsed().as_secs_f32() > self.shot_after {
-            if self.channels.is_empty() {
+            if self.audio.channels.is_empty() {
                 self.add_channel(95.8e6);
                 self.add_channel(95.35e6);
             }
@@ -1869,11 +1630,11 @@ impl App {
                                 crate::icons::Icon::Log,
                                 crate::i18n::t("ui.log"),
                                 true,
-                                self.log_open,
+                                self.log.open,
                             )
                             .clicked()
                             {
-                                self.log_open = !self.log_open;
+                                self.log.open = !self.log.open;
                             }
                         });
                     });
@@ -1999,7 +1760,7 @@ impl App {
             let mut db = ch.squelch_db.unwrap_or(default);
             ui.horizontal(|ui| {
                 ui.label(legend("sql"));
-                if squelch_meter(ui, lo, hi, measured, &mut db, open) {
+                if ui.add(Squelch::new(&mut db, lo, hi, measured, open)).changed() {
                     ch.squelch_db = Some(db);
                     changed = true;
                 }
@@ -2084,11 +1845,11 @@ impl App {
                     self.radio.as_ref().map(|r| r.status.call_level()).unwrap_or(0.0);
                 ui.horizontal(|ui| {
                     ui.label(legend("master"));
-                    if meter::fader(ui, &mut self.volume, out_level, VU_W).changed() {
-                        self.send(Cmd::Volume(self.volume));
+                    if ui.add(Fader::new(&mut self.audio.volume, out_level).width(VU_W)).changed() {
+                        self.send(Cmd::Volume(self.audio.volume));
                     }
-                    let all_muted = !self.channels.is_empty()
-                        && self.channels.iter().all(|c| c.muted || !c.on);
+                    let all_muted = !self.audio.channels.is_empty()
+                        && self.audio.channels.iter().all(|c| c.muted || !c.on);
                     if crate::icons::icon_button(
                         ui,
                         if all_muted { crate::icons::Icon::Mute } else { crate::icons::Icon::Sound },
@@ -2098,7 +1859,7 @@ impl App {
                     )
                     .clicked()
                     {
-                        for c in &mut self.channels {
+                        for c in &mut self.audio.channels {
                             c.muted = !all_muted;
                         }
                         self.send_channels();
@@ -2111,28 +1872,29 @@ impl App {
                 // in the receiver is set.
                 ui.horizontal(|ui| {
                     ui.label(legend("calls"));
-                    let mut changed =
-                        meter::fader(ui, &mut self.call_volume, call_level, VU_W).changed();
+                    let mut changed = ui
+                        .add(Fader::new(&mut self.audio.call_volume, call_level).width(VU_W))
+                        .changed();
                     if crate::icons::icon_button(
                         ui,
-                        if self.call_muted {
+                        if self.audio.call_muted {
                             crate::icons::Icon::Mute
                         } else {
                             crate::icons::Icon::Sound
                         },
                         "Mute call audio",
                         true,
-                        self.call_muted,
+                        self.audio.call_muted,
                     )
                     .clicked()
                     {
-                        self.call_muted = !self.call_muted;
+                        self.audio.call_muted = !self.audio.call_muted;
                         changed = true;
                     }
                     if changed {
                         self.send(Cmd::CallVolume {
-                            volume: self.call_volume,
-                            muted: self.call_muted,
+                            volume: self.audio.call_volume,
+                            muted: self.audio.call_muted,
                         });
                     }
                 });
@@ -2142,22 +1904,22 @@ impl App {
                 // can fix at the far end.
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
-                    if ui.checkbox(&mut self.call_agc, "AGC").changed() {
-                        self.send(Cmd::CallAgc(self.call_agc));
+                    if ui.checkbox(&mut self.audio.call_agc, "AGC").changed() {
+                        self.send(Cmd::CallAgc(self.audio.call_agc));
                     }
                     let db = self
                         .radio
                         .as_ref()
                         .map(|r| r.status.call_gain_db())
                         .unwrap_or(0.0);
-                    if self.call_agc && db.abs() > 0.1 {
+                    if self.audio.call_agc && db.abs() > 0.1 {
                         ui.label(value(format!("{db:+.0} dB")).size(11.0));
                     }
                 });
 
                 ui.add_space(8.0);
 
-                if self.channels.is_empty() {
+                if self.audio.channels.is_empty() {
                     ui.label(
                         egui::RichText::new("Click the spectrum to tune a channel.")
                             .color(theme::LEGEND)
@@ -2169,8 +1931,8 @@ impl App {
                     self.radio.as_ref().map(|r| r.status.channel_states()).unwrap_or_default();
                 let mut remove = None;
                 let mut tune = None;
-                for (i, ch) in self.channels.iter_mut().enumerate() {
-                    let active = self.listening == Some(i);
+                for (i, ch) in self.audio.channels.iter_mut().enumerate() {
+                    let active = self.audio.listening == Some(i);
                     // Both strips take the panel fill. The selected one used a
                     // lighter wash, which was the exact colour of a slider's
                     // handle and trough, so the volume control disappeared
@@ -2211,7 +1973,7 @@ impl App {
                             // Per-digit, like the main tuner: the wheel over a
                             // digit steps that decade, so tuning is repeatable
                             // rather than depending on pointer speed.
-                            let d = self.chan_dial.compact(ui, ch.freq, 23.0);
+                            let d = self.audio.dial.compact(ui, ch.freq, 23.0);
                             if d.changed {
                                 ch.freq = d.hz;
                                 tune = Some(i);
@@ -2258,7 +2020,7 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.label(legend("vol"));
                                     let level = st.map(|s| s.level).unwrap_or(0.0);
-                                    if meter::fader(ui, &mut ch.volume, level, VU_W).changed() {
+                                    if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
                                         tune = Some(i);
                                     }
                                     if ui.selectable_label(ch.muted, "M").clicked() {
@@ -2290,17 +2052,17 @@ impl App {
                 }
 
                 if let Some(i) = remove {
-                    self.channels.remove(i);
-                    match self.listening {
-                        Some(l) if l == i => self.listening = None,
-                        Some(l) if l > i => self.listening = Some(l - 1),
+                    self.audio.channels.remove(i);
+                    match self.audio.listening {
+                        Some(l) if l == i => self.audio.listening = None,
+                        Some(l) if l > i => self.audio.listening = Some(l - 1),
                         _ => {}
                     }
                     self.retune_listener();
                 }
                 if tune.is_some() {
                     if let Some(i) = tune {
-                        self.listening = Some(i);
+                        self.audio.listening = Some(i);
                     }
                     self.send_channels();
                 }
@@ -2687,22 +2449,23 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        App {
+        let mut a = App {
             center: 100_000_000.0,
             rate: 2_000_000.0,
-            // The waterfall holds history from where the radio actually is,
-            // which after a settled tune is the same place.
-            wf_center: 100_000_000.0,
-            db_center: 100_000_000.0,
             ..Default::default()
-        }
+        };
+        // The waterfall holds history from where the radio actually is,
+        // which after a settled tune is the same place.
+        a.scope.wf_center = 100_000_000.0;
+        a.scope.db_center = 100_000_000.0;
+        a
     }
 
     fn channel(app: &mut App, offset: f64, on: bool, volume: f32) {
         let freq = app.center + offset;
-        let id = app.next_id as u64;
-        app.next_id += 1;
-        app.channels.push(Channel {
+        let id = app.audio.next_id as u64;
+        app.audio.next_id += 1;
+        app.audio.channels.push(Channel {
             id,
             freq,
             demod: Demod::Nfm,
@@ -2740,7 +2503,7 @@ mod tests {
         channel(&mut a, 100_000.0, true, 1.0);
         channel(&mut a, 200_000.0, true, 1.0);
         let second = a.channel_specs()[1].id;
-        a.channels.remove(0);
+        a.audio.channels.remove(0);
         assert_eq!(a.channel_specs()[0].id, second);
     }
 
@@ -2750,7 +2513,7 @@ mod tests {
         // for chains to be rebuilt and AGCs to settle again.
         let mut a = app();
         channel(&mut a, 100_000.0, true, 1.0);
-        for c in &mut a.channels {
+        for c in &mut a.audio.channels {
             c.muted = true;
         }
         let specs = a.channel_specs();
@@ -2788,12 +2551,12 @@ mod tests {
     #[test]
     fn the_scope_split_is_adjustable_and_bounded() {
         let mut a = app();
-        assert_eq!(a.plot_frac, DEFAULT_PLOT_FRAC);
+        assert_eq!(a.scope.plot_frac, DEFAULT_PLOT_FRAC);
         // Dragging past either end clamps rather than collapsing a pane: a
         // two pixel waterfall is not a smaller waterfall, it is a broken one.
         for want in [0.0f32, 1.0, 0.6] {
-            a.plot_frac = want.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
-            assert!(PLOT_FRAC_RANGE.contains(&a.plot_frac), "{want} left {}", a.plot_frac);
+            a.scope.plot_frac = want.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
+            assert!(PLOT_FRAC_RANGE.contains(&a.scope.plot_frac), "{want} left {}", a.scope.plot_frac);
         }
         assert!(*PLOT_FRAC_RANGE.start() > 0.0 && *PLOT_FRAC_RANGE.end() < 1.0);
     }
@@ -2819,8 +2582,8 @@ mod tests {
     fn logged_packets_are_numbered_in_arrival_order() {
         let mut a = app();
         a.log_decodes(vec![record(a.center, None), record(a.center, None)]);
-        assert_eq!(a.decodes[0].id, 1);
-        assert_eq!(a.decodes[1].id, 2);
+        assert_eq!(a.log.decodes[0].id, 1);
+        assert_eq!(a.log.decodes[1].id, 2);
     }
 
     #[test]
@@ -2831,9 +2594,9 @@ mod tests {
         let mut unknown = record(a.center, None);
         unknown.model = "unknown".into();
         a.log_decodes(vec![unknown, record(a.center, Some(true))]);
-        a.show_unknown = false;
-        assert_eq!(a.decodes.len(), 2, "hiding must not drop anything");
-        assert_eq!(a.decodes.iter().filter(|l| !l.rec.is_known()).count(), 1);
+        a.log.show_unknown = false;
+        assert_eq!(a.log.decodes.len(), 2, "hiding must not drop anything");
+        assert_eq!(a.log.decodes.iter().filter(|l| !l.rec.is_known()).count(), 1);
     }
 
     #[test]
@@ -2858,13 +2621,13 @@ mod tests {
         for i in 0..(DECODE_LOG_MAX + 120) {
             a.log_decodes(vec![record(100_000_000.0 + i as f64, Some(true))]);
         }
-        assert_eq!(a.decodes.len(), DECODE_LOG_MAX);
+        assert_eq!(a.log.decodes.len(), DECODE_LOG_MAX);
         // The oldest are the ones dropped, so the newest packet is still there.
         let newest = 100_000_000.0 + (DECODE_LOG_MAX + 119) as f64;
-        assert_eq!(a.decodes.last().unwrap().rec.freq, newest);
+        assert_eq!(a.log.decodes.last().unwrap().rec.freq, newest);
         // Numbers keep counting past what the list holds, so a row keeps the
         // number it was given.
-        assert_eq!(a.decodes.last().unwrap().id, (DECODE_LOG_MAX + 120) as u64);
+        assert_eq!(a.log.decodes.last().unwrap().id, (DECODE_LOG_MAX + 120) as u64);
     }
 
     #[test]
@@ -2882,7 +2645,7 @@ mod tests {
         a.center = 95_000_000.0;
         a.rate = 2_400_000.0;
         for f in freqs {
-            a.channels.push(Channel {
+            a.audio.channels.push(Channel {
                 id: 1,
                 freq: *f,
                 demod: Demod::Wfm,
@@ -2977,7 +2740,7 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
         let mut a = app();
         a.center = 95_000_000.0;
-        a.db_center = 95_000_000.0;
+        a.scope.db_center = 95_000_000.0;
         a.rate = 2_400_000.0;
         assert_eq!(a.column_bins(&rect, 0, 1000, 2048).map(|x| x.0), Some(0));
         assert_eq!(a.column_bins(&rect, 999, 1000, 2048).map(|x| x.0), Some(2045));
@@ -2991,7 +2754,7 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
         let mut a = app();
         a.rate = 2_400_000.0;
-        a.db_center = 95_000_000.0;
+        a.scope.db_center = 95_000_000.0;
         // View dragged a quarter span right, data not yet caught up.
         a.center = 95_600_000.0;
         // A quarter of a 2.4 MHz span is 512 bins of 2048, so the left of the
@@ -3006,7 +2769,7 @@ mod tests {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
         let mut a = app();
         a.rate = 2_400_000.0;
-        a.db_center = 95_000_000.0;
+        a.scope.db_center = 95_000_000.0;
         a.center = 94_400_000.0;
         assert_eq!(a.column_bins(&rect, 0, 1000, 2048), None);
         assert_eq!(a.column_bins(&rect, 999, 1000, 2048).map(|x| x.0), Some(1533));
@@ -3033,37 +2796,37 @@ mod tests {
         let mut a = app();
         a.add_channel(95.8e6);
         a.add_channel(124.0e6);
-        assert_eq!(a.channels[0].demod, Demod::Wfm);
-        assert_eq!(a.channels[1].demod, Demod::Am);
+        assert_eq!(a.audio.channels[0].demod, Demod::Wfm);
+        assert_eq!(a.audio.channels[1].demod, Demod::Am);
     }
 
     #[test]
     fn auto_scale_ignores_a_single_strong_carrier() {
         let mut a = app();
-        a.floor = -90.0;
-        a.ceil = -20.0;
+        a.scope.floor = -90.0;
+        a.scope.ceil = -20.0;
         let mut db = vec![-95.0f32; 1024];
         db[500] = 0.0;
         for _ in 0..200 {
             a.rescale(&db);
         }
-        assert!(a.floor < -95.0, "floor tracked the carrier: {}", a.floor);
-        assert!(a.floor > -110.0, "floor ran away: {}", a.floor);
+        assert!(a.scope.floor < -95.0, "floor tracked the carrier: {}", a.scope.floor);
+        assert!(a.scope.floor > -110.0, "floor ran away: {}", a.scope.floor);
     }
 
     #[test]
     fn auto_scale_keeps_room_above_an_empty_band() {
         let mut a = app();
-        a.floor = -90.0;
-        a.ceil = -20.0;
+        a.scope.floor = -90.0;
+        a.scope.ceil = -20.0;
         let db = vec![-95.0f32; 1024];
         for _ in 0..400 {
             a.rescale(&db);
         }
         assert!(
-            a.ceil - a.floor >= MIN_SPAN_DB - 0.5,
+            a.scope.ceil - a.scope.floor >= MIN_SPAN_DB - 0.5,
             "a flat band was squeezed to {} dB",
-            a.ceil - a.floor
+            a.scope.ceil - a.scope.floor
         );
     }
 

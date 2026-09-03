@@ -15,13 +15,13 @@ impl App {
         // The pane runs to the window edge, and a table that starts there is
         // unreadable.
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
-        self.tiles.poll(ui.ctx());
-        let mut view = self.map;
+        self.map.tiles.poll(ui.ctx());
+        let mut view = self.map.view;
         let mut place = None;
         let mut edit = self.station_edit.take();
         {
-            let tiles = &mut self.tiles;
-            let active: Vec<&crate::tracks::Track> = self.tracks.iter().collect();
+            let tiles = &mut self.map.tiles;
+            let active: Vec<&crate::tracks::Track> = self.map.tracks.iter().collect();
             let home = self.location;
             let body = |ui: &mut egui::Ui| {
                 place = Self::station_row(ui, home, &mut edit);
@@ -38,7 +38,7 @@ impl App {
             };
             margin.show(ui, body);
         }
-        self.map = view;
+        self.map.view = view;
         self.station_edit = edit;
         if let Some((lat, lon)) = place {
             self.set_location(lat, lon);

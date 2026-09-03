@@ -6,7 +6,7 @@ use super::*;
 impl App {
     /// The signal chain the listening channel is running.
     pub(super) fn chain(&mut self, ui: &mut egui::Ui) {
-        let Some(topo) = self.chain_topo.clone() else {
+        let Some(topo) = self.chain.topo.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
                     egui::RichText::new("The radio is stopped, so no chain is running.")
@@ -17,18 +17,18 @@ impl App {
         };
         // Node ids are positions in the built graph, so a rebuild can leave
         // the selection pointing at a stage that is no longer there.
-        if self.chain_sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
-            self.chain_sel = None;
+        if self.chain.sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
+            self.chain.sel = None;
         }
         // The inspector takes a column on the right when a stage is selected,
         // rather than floating over the graph: what a stage is set to is read
         // against where it sits in the chain, and a panel covering the chain
         // hides half of that.
         let mut act = crate::chainview::Interaction {
-            selected: self.chain_sel,
+            selected: self.chain.sel,
             ..Default::default()
         };
-        if self.chain_sel.is_some() {
+        if self.chain.sel.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
                 .frame(
@@ -38,7 +38,7 @@ impl App {
                 )
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(sel) = self.chain_sel {
+                        if let Some(sel) = self.chain.sel {
                             act.changed = crate::chainview::inspector(ui, &topo, sel);
                         }
                     });
@@ -57,7 +57,7 @@ impl App {
         // is not how anyone reads a diagram. In manual mode a drag moves a
         // stage instead, since dragging is how the graph is edited and the
         // two cannot both own the gesture.
-        let manual = self.chain_edit.manual;
+        let manual = self.chain.edit.manual;
         let drawn = egui::ScrollArea::both()
             .scroll_source(egui::containers::scroll_area::ScrollSource {
                 drag: if manual {
@@ -71,32 +71,32 @@ impl App {
                 crate::chainview::draw(
                     ui,
                     &topo,
-                    self.chain_latency,
-                    self.chain_sel,
-                    &mut self.chain_edit,
-                    Some(&self.chain_patch),
-                    self.chain_wire,
+                    self.chain.latency,
+                    self.chain.sel,
+                    &mut self.chain.edit,
+                    Some(&self.chain.patch),
+                    self.chain.wire,
                 )
             })
             .inner;
-        self.chain_sel = drawn.selected;
+        self.chain.sel = drawn.selected;
         if manual {
             if drawn.picked.is_some() {
-                self.chain_pick = drawn.picked;
-                self.chain_wire = None;
+                self.chain.pick = drawn.picked;
+                self.chain.wire = None;
             }
             if drawn.wire.is_some() {
-                self.chain_wire = drawn.wire;
+                self.chain.wire = drawn.wire;
             }
             // Delete takes out whichever of the two is selected, which is
             // what the key does in every editor.
             let del = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
             if del {
-                if let Some(to) = self.chain_wire.take() {
+                if let Some(to) = self.chain.wire.take() {
                     self.edit_patch(|p| p.disconnect(to));
-                } else if let Some(id) = self.chain_pick.take() {
+                } else if let Some(id) = self.chain.pick.take() {
                     self.edit_patch(|p| p.remove(id));
-                    self.chain_sel = None;
+                    self.chain.sel = None;
                 }
             }
             if ui.input_mut(|i| {
@@ -140,47 +140,47 @@ impl App {
     /// in here, and a dropdown makes it two clicks and a hidden inventory:
     /// which stages exist at all is worth being able to read.
     fn chain_palette(&mut self, ui: &mut egui::Ui) {
-        let mut manual = self.chain_edit.manual;
+        let mut manual = self.chain.edit.manual;
         if ui.checkbox(&mut manual, "MANUAL").clicked() {
             self.set_manual_chain(manual);
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(self.chain_edit.moved(), egui::Button::new("ARRANGE"))
+                .add_enabled(self.chain.edit.moved(), egui::Button::new("ARRANGE"))
                 .on_hover_text("Lay the stages out again from the graph")
                 .clicked()
             {
-                self.chain_edit.arrange();
+                self.chain.edit.arrange();
             }
-            let picked = self.chain_pick.filter(|id| self.chain_patch.stage(*id).is_some());
+            let picked = self.chain.pick.filter(|id| self.chain.patch.stage(*id).is_some());
             if ui
                 .add_enabled(
-                    self.chain_edit.manual && (picked.is_some() || self.chain_wire.is_some()),
+                    self.chain.edit.manual && (picked.is_some() || self.chain.wire.is_some()),
                     egui::Button::new("REMOVE"),
                 )
                 .on_hover_text("Delete")
                 .clicked()
             {
-                if let Some(to) = self.chain_wire.take() {
+                if let Some(to) = self.chain.wire.take() {
                     self.edit_patch(|p| p.disconnect(to));
                 } else if let Some(id) = picked {
                     self.edit_patch(|p| p.remove(id));
-                    self.chain_pick = None;
-                    self.chain_sel = None;
+                    self.chain.pick = None;
+                    self.chain.sel = None;
                 }
             }
         });
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.chain_undo.is_empty(), egui::Button::new("UNDO"))
+                .add_enabled(!self.chain.undo.is_empty(), egui::Button::new("UNDO"))
                 .on_hover_text("Ctrl+Z")
                 .clicked()
             {
                 self.undo_patch();
             }
             if ui
-                .add_enabled(!self.chain_redo.is_empty(), egui::Button::new("REDO"))
+                .add_enabled(!self.chain.redo.is_empty(), egui::Button::new("REDO"))
                 .on_hover_text("Ctrl+Shift+Z")
                 .clicked()
             {
@@ -191,11 +191,11 @@ impl App {
         ui.add_space(8.0);
         // Which gestures exist, and the one thing that is not editable: only
         // the stages added here have live ports.
-        let hint = if !self.chain_edit.manual {
+        let hint = if !self.chain.edit.manual {
             "built from the scanner table for this span"
-        } else if self.chain_wire.is_some() {
+        } else if self.chain.wire.is_some() {
             "wire selected; DELETE removes it"
-        } else if self.chain_patch.stages().is_empty() {
+        } else if self.chain.patch.stages().is_empty() {
             "add a stage: only stages added here can be wired"
         } else {
             "drag a port to wire, drag a wire off an input to move it"
@@ -216,7 +216,7 @@ impl App {
                 None => by_category.push((d.category, vec![(d.name, d.summary)])),
             }
         }
-        let manual = self.chain_edit.manual;
+        let manual = self.chain.edit.manual;
         let mut add: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (category, stages) in &by_category {
@@ -235,43 +235,43 @@ impl App {
         if let Some(kind) = add {
             let mut added = None;
             self.edit_patch(|p| added = Some(p.add(&kind)));
-            self.chain_pick = added;
-            self.chain_wire = None;
+            self.chain.pick = added;
+            self.chain.wire = None;
         }
     }
 
     /// Change the graph, keeping what it was so the change can be taken back.
     fn edit_patch(&mut self, f: impl FnOnce(&mut crate::patch::Patch)) {
-        let before = self.chain_patch.clone();
-        f(&mut self.chain_patch);
-        if self.chain_patch == before {
+        let before = self.chain.patch.clone();
+        f(&mut self.chain.patch);
+        if self.chain.patch == before {
             return;
         }
-        self.chain_undo.push(before);
+        self.chain.undo.push(before);
         // Undoing and then drawing something else abandons what was undone,
         // which is what makes redo mean anything: a branch nobody can reach
         // is a trap rather than a history.
-        self.chain_redo.clear();
+        self.chain.redo.clear();
         // A hundred edits is more than anybody backs out of in one sitting
         // and small enough to keep in hand: a patch is a few dozen stages.
-        if self.chain_undo.len() > 100 {
-            self.chain_undo.remove(0);
+        if self.chain.undo.len() > 100 {
+            self.chain.undo.remove(0);
         }
         self.send_patch();
     }
 
     fn undo_patch(&mut self) {
-        if let Some(was) = self.chain_undo.pop() {
-            self.chain_redo.push(std::mem::replace(&mut self.chain_patch, was));
-            self.chain_wire = None;
+        if let Some(was) = self.chain.undo.pop() {
+            self.chain.redo.push(std::mem::replace(&mut self.chain.patch, was));
+            self.chain.wire = None;
             self.send_patch();
         }
     }
 
     fn redo_patch(&mut self) {
-        if let Some(next) = self.chain_redo.pop() {
-            self.chain_undo.push(std::mem::replace(&mut self.chain_patch, next));
-            self.chain_wire = None;
+        if let Some(next) = self.chain.redo.pop() {
+            self.chain.undo.push(std::mem::replace(&mut self.chain.patch, next));
+            self.chain.wire = None;
             self.send_patch();
         }
     }
@@ -279,18 +279,18 @@ impl App {
     /// Hand the patch to the radio thread, remembering what was sent so that
     /// one handed back after a refusal can be told apart from an echo.
     fn send_patch(&mut self) {
-        self.chain_drawn = Some(self.chain_patch.clone());
-        self.chain_patch_sent = Some(self.chain_patch.clone());
-        self.send(Cmd::Patch(self.chain_patch.clone()));
+        self.chain.drawn = Some(self.chain.patch.clone());
+        self.chain.patch_sent = Some(self.chain.patch.clone());
+        self.send(Cmd::Patch(self.chain.patch.clone()));
         self.save_patch();
     }
 
     /// Write the graph out, with where its stages were put.
     fn save_patch(&mut self) {
-        self.chain_places =
-            self.chain_edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
-        self.chain_patch.save(&self.chain_places);
-        self.chain_saved_at = Some(std::time::Instant::now());
+        self.chain.places =
+            self.chain.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        self.chain.patch.save(&self.chain.places);
+        self.chain.saved_at = Some(std::time::Instant::now());
     }
 
     /// Write it out again when a stage has been moved and the pointer has
@@ -298,15 +298,15 @@ impl App {
     /// written sixty times a second to record where a box ended up is a lot
     /// of writes for one arrangement.
     fn save_places(&mut self) {
-        if !self.chain_edit.manual {
+        if !self.chain.edit.manual {
             return;
         }
         let now: crate::patch::Places =
-            self.chain_edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
-        if now == self.chain_places {
+            self.chain.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        if now == self.chain.places {
             return;
         }
-        let due = self.chain_saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.0);
+        let due = self.chain.saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.0);
         if due {
             self.save_patch();
         }
@@ -315,24 +315,24 @@ impl App {
     /// Hand the shape of the graph to the operator, or give it back to the
     /// scanner table.
     pub fn set_manual_chain(&mut self, on: bool) {
-        self.chain_edit.manual = on;
+        self.chain.edit.manual = on;
         if !on {
-            self.chain_edit.arrange();
-            self.chain_pick = None;
+            self.chain.edit.arrange();
+            self.chain.pick = None;
         }
-        match (on, self.chain_drawn.clone()) {
+        match (on, self.chain.drawn.clone()) {
             // Back to the graph that was drawn, which is what a saved
             // drawing is for. Turning manual mode off and on again is not a
             // request to throw it away.
             (true, Some(drawn)) => {
-                self.chain_patch = drawn;
+                self.chain.patch = drawn;
                 self.send(Cmd::Manual(true));
                 self.send_patch();
             }
             // Nothing drawn yet, so the radio thread answers with the graph
             // it is running: taking it over means taking that over.
             _ => {
-                self.chain_patch_sent = None;
+                self.chain.patch_sent = None;
                 self.send(Cmd::Manual(on));
             }
         }
