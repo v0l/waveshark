@@ -209,14 +209,13 @@ impl MapView {
         let clip = p.with_clip_rect(rect);
         Self::draw_tiles(&clip, &mut self.tiles, rect, (cx, cy), z, scale, rt);
 
-        let m_px = crate::map::resolution(center.0, z) * crate::map::TILE_PX / scale;
         let canvas = Canvas {
             p: clip,
             rect,
             mid,
             center,
             zoom,
-            nm_px: 1852.0 / m_px,
+            nm_px: crate::map::nm_px(center.0, zoom),
             // Nothing is hovered while the map is being dragged: the pointer
             // is moving the world, not pointing at it.
             hover: resp.hover_pos().filter(|_| !resp.dragged()),
@@ -352,10 +351,12 @@ impl Canvas {
         self.zoom
     }
 
-    /// Screen pixels per nautical mile, for anything drawn at a real
-    /// distance rather than a screen one.
-    pub fn nm_px(&self) -> f64 {
-        self.nm_px
+    /// Screen pixels per nautical mile at a latitude, for anything drawn at
+    /// a real distance from a real place. Mercator stretches with latitude,
+    /// so a ring sized at the view's centre changes size as the map is
+    /// dragged north and south while the place it is around does not move.
+    pub fn nm_px_at(&self, lat: f64) -> f64 {
+        crate::map::nm_px(lat, self.zoom)
     }
 
     /// Where the pointer is, or `None` while the map is being dragged.

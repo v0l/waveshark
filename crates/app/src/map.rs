@@ -307,8 +307,29 @@ pub fn resolution(lat: f64, z: u8) -> f64 {
     40_075_016.686 * lat.to_radians().cos() / (TILE_PX * f64::from(1u32 << z))
 }
 
+/// Screen pixels per nautical mile at a latitude and a continuous zoom.
+///
+/// Mercator stretches with latitude, so a distance is only a number of
+/// pixels at the place it is measured from: rings around an antenna are
+/// sized at the antenna, not at whatever the view happens to be centred on,
+/// or they breathe as the map is dragged north and south.
+pub fn nm_px(lat: f64, zoom: f64) -> f64 {
+    let m_px = resolution(lat, level(zoom)) * TILE_PX / tile_scale(zoom);
+    1852.0 / m_px
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_distance_is_measured_where_it_is_drawn() {
+        // The same ring is more pixels across in Tromso than in Dublin, and
+        // the same pixels in Dublin whatever the view is centred on.
+        let dublin = super::nm_px(53.35, 8.0);
+        let tromso = super::nm_px(69.65, 8.0);
+        assert!(tromso > dublin * 1.5, "{tromso} vs {dublin}");
+        assert_eq!(super::nm_px(53.35, 8.0), dublin);
+    }
+
     use super::*;
 
     #[test]

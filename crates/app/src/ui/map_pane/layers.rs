@@ -29,15 +29,18 @@ impl Layer for RingLayer {
     fn draw(&mut self, c: &Canvas) {
         let Some((lat, lon)) = self.home else { return };
         let at = c.at(lat, lon);
+        // Sized at the antenna, not at the view: the rings are around a
+        // place, and that place does not move when the map is dragged.
+        let nm_px = c.nm_px_at(lat);
         // Rings at a round distance that fits the window, rather than a
         // fraction of a zoom: 25 nm is 25 nm at every scale.
-        let span = f64::from(c.rect.width().min(c.rect.height())) / 2.0 / c.nm_px();
+        let span = f64::from(c.rect.width().min(c.rect.height())) / 2.0 / nm_px;
         let step = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
             .into_iter()
             .find(|s| s * 2.0 >= span)
             .unwrap_or(1000.0);
         for k in 1..=3 {
-            let r = (step * f64::from(k) * c.nm_px()) as f32;
+            let r = (step * f64::from(k) * nm_px) as f32;
             c.p.circle_stroke(at, r, Stroke::new(1.0, theme::READOUT.gamma_multiply(0.30)));
             c.p.text(
                 Pos2::new(at.x + 4.0, at.y - r),
