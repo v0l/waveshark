@@ -660,6 +660,10 @@ struct Args {
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "captures")]
     record: Option<PathBuf>,
 
+    /// Start writing the raw span to a file as soon as the radio is running
+    #[arg(long)]
+    capture_iq: bool,
+
     /// Where decoded packets are appended as JSON lines. Defaults to
     /// $XDG_DATA_HOME/waveshark/packets
     #[arg(long, value_name = "DIR")]
@@ -934,6 +938,9 @@ fn main() -> eframe::Result<()> {
             app.print_log = args.print_log;
             if let Some(dir) = args.record.clone() {
                 app.record_to(dir, args.record_mb);
+            }
+            if args.capture_iq {
+                app.set_capture(true);
             }
             if args.gain {
                 app.show_radio_settings();

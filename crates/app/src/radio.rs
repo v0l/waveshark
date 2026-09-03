@@ -169,6 +169,14 @@ impl Demod {
 /// The gain is applied here rather than in the chain because the chain is
 /// shared: a recording, a decoder or a level meter reading the same tap wants
 /// the signal as received, not as somebody set the volume slider.
+/// How much of a meter's reading survives a block once the sound stops.
+const METER_FALL: f32 = 0.88;
+
+/// Largest sample in a buffer, which is what a meter reads.
+fn peak_of(pcm: &[f32]) -> f32 {
+    pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
+}
+
 fn mix_gain_into(mix: &mut Vec<f32>, pcm: &[f32], stereo: bool, gain: f32) -> usize {
     let scaled: Vec<f32> = pcm.iter().map(|v| v * gain).collect();
     mix_into(mix, &scaled, stereo)
@@ -318,6 +326,8 @@ pub enum Cmd {
     /// Write every burst that decodes to this directory, with an optional
     /// budget in megabytes, or stop recording.
     Record(Option<(std::path::PathBuf, Option<u64>)>),
+    /// Start or stop writing the raw span to a file.
+    CaptureIq(bool),
     /// Where the receiver is, in degrees, which lets the flight tracker
     /// resolve a position from a single frame instead of waiting for a pair.
     Location(f64, f64),
@@ -378,6 +388,9 @@ pub struct ChannelState {
     pub squelch_open: bool,
     pub squelch_db: f32,
     pub stereo_blend: f32,
+    /// What it is putting into the mix, at its own fader setting, for the
+    /// meter beside that fader.
+    pub level: f32,
 }
 
 /// One spectrum update.
@@ -595,6 +608,7 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
         feeds: Vec::new(),
         patch: None,
         record: rec.is_some(),
+        capture_dir: crate::chain::default_capture_dir(),
         log: false,
     };
     Ok(crate::chain::Receiver::build(&plan, crate::chain::Sinks { recorder: rec, ..Default::default() })?)
@@ -613,6 +627,31 @@ pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Re
 /// took, which on a loaded machine is longer than the block itself.
 fn block_start(finished: std::time::Instant, samples: usize, rate: f64) -> std::time::Instant {
     finished - std::time::Duration::from_secs_f64(samples as f64 / rate.max(1.0))
+}
+
+/// Standing instructions for the call bus, kept where a rebuild cannot lose
+/// them: the bus is a node, and the graph is rebuilt on every retune.
+struct CallSettings {
+    subs: Vec<crate::callbus::Subscription>,
+    master: (f32, bool),
+    agc: bool,
+}
+
+impl Default for CallSettings {
+    fn default() -> Self {
+        Self { subs: Vec::new(), master: (0.8, false), agc: true }
+    }
+}
+
+impl CallSettings {
+    /// Give a freshly built bus everything it was told before.
+    fn apply(&self, rx: &mut crate::chain::Receiver) {
+        let Some(n) = rx.calls_mut() else { return };
+        let b = n.bus_mut();
+        b.set_subscriptions(self.subs.clone());
+        b.set_master(self.master.0, self.master.1);
+        b.set_agc(self.agc);
+    }
 }
 
 pub(crate) fn replay_blocks(rx: &mut crate::chain::Receiver, buf: &common::IqBuf) -> Vec<DecodeRecord> {
@@ -784,6 +823,12 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub track_list: parking_lot::Mutex<Vec<crate::tracks::Track>>,
+    /// What the raw span capture has written, and where. Off unless somebody
+    /// switched it on, which is the usual state.
+    pub capture_on: AtomicBool,
+    pub capture_bytes: AtomicU64,
+    pub capture_full: AtomicBool,
+    pub capture_file: parking_lot::Mutex<Option<String>>,
     /// Size of the day's log file, and whether it has stopped growing.
     pub log_bytes: AtomicU64,
     pub log_full: std::sync::atomic::AtomicBool,
@@ -821,6 +866,10 @@ pub struct Status {
     /// "nothing was decoded" from "it was decoded and you still cannot hear
     /// it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    /// Peak of the whole mix as it left for the speaker, and of the call
+    /// bus's share of it, for the meters beside the master and call faders.
+    out_level: AtomicU32,
+    call_level: AtomicU32,
     /// Voice transmissions written to disk since the receiver started.
     pub calls_written: AtomicU64,
     /// What the call bus's gain control is adding, in dB, as f32 bits.
@@ -891,6 +940,8 @@ impl Default for Status {
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            out_level: AtomicU32::new(0),
+            call_level: AtomicU32::new(0),
             calls_written: AtomicU64::new(0),
             call_gain_db: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
@@ -909,6 +960,10 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
+            capture_on: AtomicBool::new(false),
+            capture_bytes: AtomicU64::new(0),
+            capture_full: AtomicBool::new(false),
+            capture_file: parking_lot::Mutex::new(None),
             log_bytes: AtomicU64::new(0),
             log_full: std::sync::atomic::AtomicBool::new(false),
             feeds: parking_lot::Mutex::new(Vec::new()),
@@ -952,6 +1007,23 @@ impl Status {
         self.call_levels.lock().clone()
     }
 
+    /// The mix's own level, and the call bus's share of it.
+    pub fn out_level(&self) -> f32 {
+        f32::from_bits(self.out_level.load(Ordering::Relaxed))
+    }
+
+    pub fn call_level(&self) -> f32 {
+        f32::from_bits(self.call_level.load(Ordering::Relaxed))
+    }
+
+    /// Rise instantly, fall slowly. A meter that tracked the block peak both
+    /// ways flickers at the block rate and reads as noise; speech is mostly
+    /// gaps, and the gaps are not what anybody is trying to see.
+    fn set_level(cell: &AtomicU32, peak: f32) {
+        let prev = f32::from_bits(cell.load(Ordering::Relaxed));
+        cell.store(peak.max(prev * METER_FALL).to_bits(), Ordering::Relaxed);
+    }
+
     pub fn radio(&self) -> RadioControls {
         self.radio.lock().clone()
     }
@@ -970,8 +1042,14 @@ impl Status {
         self.channels.lock().iter().find(|c| c.id == id).copied()
     }
 
-    fn set_channel_states(&self, states: Vec<ChannelState>) {
-        *self.channels.lock() = states;
+    fn set_channel_states(&self, mut states: Vec<ChannelState>) {
+        let mut held = self.channels.lock();
+        for s in &mut states {
+            if let Some(prev) = held.iter().find(|p| p.id == s.id) {
+                s.level = s.level.max(prev.level * METER_FALL);
+            }
+        }
+        *held = states;
     }
 
     fn set_blend(&self, v: f32) {
@@ -1127,6 +1205,7 @@ impl Audio {
             fronts: Vec::new(),
             patch: None,
             record: false,
+            capture_dir: crate::chain::default_capture_dir(),
             log: false,
             feeds: Vec::new(),
         };
@@ -1227,6 +1306,7 @@ fn run(
         fronts: Vec::new(),
         patch: None,
         record: false,
+        capture_dir: crate::chain::default_capture_dir(),
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
         log: false,
@@ -1242,6 +1322,9 @@ fn run(
 
     let mut mix: Vec<f32> = Vec::new();
     let mut records: Vec<DecodeRecord> = Vec::new();
+    // Whether the raw span is being written, held here because the stage is
+    // rebuilt with the graph and comes back switched off.
+    let mut capture_on = false;
     let mut dedupe = Dedupe::default();
     let mut hits = 0u64;
     let mut volume = 0.5f32;
@@ -1257,7 +1340,9 @@ fn run(
     let mut want_center: Option<Hz> = None;
     let mut last_chain = std::time::Instant::now();
     // Where voice from every front end meets what the operator asked to hear.
-    let mut calls = crate::callbus::CallBus::new(48_000.0);
+    // What the call bus has been told, kept outside the graph because the
+    // bus is a node and a rebuild can hand back a new one.
+    let mut calls = CallSettings::default();
     let mut call_dir: Option<std::path::PathBuf> = None;
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
@@ -1419,6 +1504,13 @@ fn run(
                     rx.set_recorder(rec);
                     rebuild = true;
                 }
+                // No rebuild: the graph already holds the stage, switched
+                // off, so a capture starts on the block after the button and
+                // keeps every source the auto node has open.
+                Cmd::CaptureIq(on) => {
+                    capture_on = on;
+                    rx.set_capture(on);
+                }
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::Feeds(feeds) => {
@@ -1483,11 +1575,37 @@ fn run(
                     scan_on = on;
                     rebuild = !manual;
                 }
-                Cmd::CallSubs(subs) => calls.set_subscriptions(subs),
-                Cmd::StopPlay => calls.stop_replay(),
-                Cmd::CallVolume { volume, muted } => calls.set_master(volume, muted),
-                Cmd::CallAgc(on) => calls.set_agc(on),
-                Cmd::Play(speech) => calls.play(&speech),
+                // The bus is a node, so it is rebuilt with the graph. What
+                // it was told is kept here as well, and given to whatever
+                // bus comes back: a retune must not silently unsubscribe.
+                Cmd::CallSubs(subs) => {
+                    calls.subs = subs.clone();
+                    if let Some(b) = rx.calls_mut() {
+                        b.bus_mut().set_subscriptions(subs);
+                    }
+                }
+                Cmd::StopPlay => {
+                    if let Some(b) = rx.calls_mut() {
+                        b.bus_mut().stop_replay();
+                    }
+                }
+                Cmd::CallVolume { volume, muted } => {
+                    calls.master = (volume, muted);
+                    if let Some(b) = rx.calls_mut() {
+                        b.bus_mut().set_master(volume, muted);
+                    }
+                }
+                Cmd::CallAgc(on) => {
+                    calls.agc = on;
+                    if let Some(b) = rx.calls_mut() {
+                        b.bus_mut().set_agc(on);
+                    }
+                }
+                Cmd::Play(speech) => {
+                    if let Some(b) = rx.calls_mut() {
+                        b.bus_mut().play(&speech);
+                    }
+                }
             }
         }
 
@@ -1556,6 +1674,14 @@ fn run(
                 r.retune(plan.eff_rate(), plan.center);
             }
             status.logged.store(rx.logged(), Ordering::Relaxed);
+            // The stage comes back switched off, as the derived graph draws
+            // it. A capture running across a retune has to be switched on
+            // again, and it starts a new file: the old one's name says which
+            // frequency and rate every sample in it was taken at.
+            rx.set_capture(capture_on);
+            // The call bus comes back from a rebuild subscribed to nothing,
+            // exactly as the capture comes back switched off.
+            calls.apply(&mut rx);
             // What is running, described the way the view draws it. Published
             // whether or not anybody is editing: in automatic mode it is the
             // graph the receiver derived, and that is what the chain view
@@ -1631,6 +1757,14 @@ fn run(
         status.aprs_on.store(rx.aprs_on(), Ordering::Relaxed);
         status.pocsag_on.store(rx.pocsag_on(), Ordering::Relaxed);
         status.m17_on.store(rx.m17_on(), Ordering::Relaxed);
+        {
+            let cap = rx.capture();
+            status.capture_on.store(rx.capturing(), Ordering::Relaxed);
+            status.capture_bytes.store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
+            status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
+            *status.capture_file.lock() =
+                cap.and_then(|c| c.path()).map(|p| p.display().to_string());
+        }
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);
@@ -1740,39 +1874,36 @@ fn run(
                     squelch_open: c.squelch_open,
                     squelch_db: c.squelch_db,
                     stereo_blend: c.blend,
+                    level: peak_of(pcm) * if c.spec.muted { 0.0 } else { c.spec.volume },
                 });
             }
             status.set_channel_states(states);
 
-            // Voice, live and replayed, through the call bus: what reaches
-            // the speaker is what somebody subscribed to, and a replay is
-            // mixed rather than switched in so it cannot silence a live call.
-            for v in rx.voice_now() {
-                calls.push(crate::callbus::Voice {
-                    system: &v.system,
-                    channel_hz: v.channel_hz,
-                    to: &v.to,
-                    from: v.from.as_deref(),
-                    pcm: &v.pcm,
-                    rate: v.rate,
-                });
-            }
-            let voice = calls.take(frames);
+            // Voice, live and replayed, mixed by the call bus in the graph:
+            // what reaches the speaker is what somebody subscribed to, and a
+            // replay is mixed rather than switched in so it cannot silence a
+            // live call.
+            let voice = rx.call_audio();
+            Status::set_level(&status.call_level, peak_of(voice));
             if !voice.is_empty() {
                 let n = mix_gain_into(&mut mix, voice, false, volume);
                 frames = frames.max(n);
             }
-            *status.call_levels.lock() = calls.levels();
-            status.call_gain_db.store(calls.agc_gain_db().to_bits(), Ordering::Relaxed);
-            calls.clear();
-            status.call_audio.store(calls.listening(), Ordering::Relaxed);
-            status.replaying.store(calls.replaying(), Ordering::Relaxed);
-            *status.call_heard.lock() = calls.last_heard().map(str::to_string);
+            if let Some(b) = rx.calls().map(|n| n.bus()) {
+                *status.call_levels.lock() = b.levels();
+                status.call_gain_db.store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
+                status.call_audio.store(b.listening(), Ordering::Relaxed);
+                status.replaying.store(b.replaying(), Ordering::Relaxed);
+                *status.call_heard.lock() = b.last_heard().map(str::to_string);
+            }
 
             if frames > 0 {
                 clip(&mut mix[..frames * 2]);
+                Status::set_level(&status.out_level, peak_of(&mix[..frames * 2]));
                 s.write_adaptive_stereo(&mix[..frames * 2], rate);
                 status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
+            } else {
+                Status::set_level(&status.out_level, 0.0);
             }
             for w in rx.channels().iter().filter(|c| c.spec.demod == Demod::Wfm) {
                 let (g, e, sy) = w.rds_stats;
@@ -1828,6 +1959,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         }],
         patch: None,
         record: false,
+        capture_dir: crate::chain::default_capture_dir(),
         log: false,
         feeds: Vec::new(),
     }
@@ -2073,6 +2205,99 @@ pub(crate) mod tests {
             nodes::BankNode::channels_for(1e9, OOK_CHANNEL_HZ) <= 1024,
             "the count has to stay bounded"
         );
+    }
+
+    /// The M17 capture: three seconds of a busy 433 MHz band with an
+    /// OpenRTX handheld on the calling channel, recorded 550 kHz off centre.
+    fn m17_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/m17_openrtx_434.02M_2400k.cu8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    #[test]
+    fn an_m17_handheld_on_a_busy_band_is_found_and_read() {
+        // Synthesised M17 does not fail the way this capture did. A generated
+        // transmission is measured wide enough to clear every width threshold
+        // in the receiver; a real one, cleanly shaped, measures a couple of
+        // kilohertz at the detector's twenty decibel extent, and three
+        // thresholds threw it away in turn: the channel decoders were not
+        // built for a source that narrow, the extraction filtered the stream
+        // down to the two bins that were measured, and the tracker let a
+        // neighbouring signal take the runs it needed to stay open.
+        let Some(buf) = m17_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+
+        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
+        // The callsign is in the link setup frame that opens the
+        // transmission and repeated across the link information channel, so
+        // reading it back means the demodulator, the framing, the Golay and
+        // the CRC all worked on a signal nobody synthesised.
+        assert!(
+            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            "no callsign: {:?}",
+            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+        );
+        // The receiver was told no frequency at all, so this is the
+        // detector's own answer, within a couple of channel widths of the
+        // calling channel.
+        let hz = m17[0].freq;
+        assert!((hz - 433_475_000.0).abs() < 25_000.0, "read at {hz} Hz");
+        // Most of the over, not a frame or two of it. A receiver that opens a
+        // source, reads three frames and loses it is the failure this capture
+        // was recorded for.
+        let voice = m17.iter().filter(|r| r.model == "M17-Voice").count();
+        assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
+    }
+
+    #[test]
+    fn a_transmission_the_receiver_found_itself_is_audible() {
+        // Decoding a call and being able to hear it are two different
+        // things, and for a while this receiver did the first without the
+        // second: live speech was read from the one M17 stage the scanner
+        // table places, so every transmission the auto node found for itself
+        // played back as silence. Speech is a port now and the call bus is a
+        // node on the end of it, so this is the whole path from the air to
+        // the mixer.
+        let Some(buf) = m17_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let bus = rx.calls_mut().expect("a call bus, since the auto node carries voice");
+        bus.bus_mut().set_subscriptions(vec![crate::callbus::Subscription::new(
+            crate::callbus::Rule::Everything,
+        )]);
+
+        let mut pcm: Vec<f32> = Vec::new();
+        let mut heard = None;
+        for block in buf.samples.chunks(16_384) {
+            if rx.process(block).is_err() {
+                break;
+            }
+            pcm.extend_from_slice(rx.call_audio());
+            heard = heard.or_else(|| {
+                rx.calls().and_then(|c| c.bus().last_heard()).map(str::to_string)
+            });
+        }
+        assert_eq!(heard.as_deref(), Some("OPNRTX to BROADCAST"), "nobody was heard");
+        // The bus resamples to its output rate, and the over is seconds
+        // long. Half a second of it is enough to say the vocoder ran on live
+        // frames and the mix reached the far end.
+        let seconds = pcm.len() as f64 / rx.calls().unwrap().bus().out_rate();
+        assert!(seconds > 0.5, "only {seconds:.2} s of speech");
+        // Speech, not a run of zeros: a decoder that returns silence for
+        // every frame would pass every assertion above.
+        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
+        assert!(rms > 1e-3, "the mix is silent at {rms:e} rms");
     }
 
     #[test]

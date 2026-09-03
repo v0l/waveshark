@@ -119,6 +119,8 @@ const EN: &[(&str, &str)] = &[
     ("settings.position.hint", "lat, lon"),
     ("settings.title", "Setup"),
     ("ui.bandwidth", "bandwidth"),
+    ("ui.capture", "Write the raw span to a file, to work on it off the air"),
+    ("ui.capture_stop", "Stop capturing, and close the file"),
     ("ui.close", "CLOSE"),
     ("ui.decode", "decode"),
     ("ui.decode_all", "Decode everything in the span"),

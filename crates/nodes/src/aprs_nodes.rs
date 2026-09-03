@@ -87,7 +87,7 @@ impl Simple for AprsNode {
             return Err(common::Error::other("aprs reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ {
+        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
             return Err(common::Error::other("aprs needs its channel inside the span"));
         }
         // Decimate to an audio rate the tone correlators can work at. The
@@ -234,7 +234,8 @@ mod tests {
         let mut n = AprsNode::default();
         assert!(n.negotiate(&spec(2_400_000.0, 144_800_000.0)).is_ok());
         assert!(n.negotiate(&spec(2_400_000.0, 150_000_000.0)).is_err());
-        assert!(n.negotiate(&spec(20_000.0, 144_800_000.0)).is_err());
+        assert!(n.negotiate(&spec(25_000.0, 144_800_000.0)).is_ok());
+        assert!(n.negotiate(&spec(12_000.0, 144_800_000.0)).is_err());
     }
 
     /// The whole path on synthetic RF: an FM carrier keyed with Bell 202

@@ -84,7 +84,7 @@ impl Simple for PocsagNode {
             return Err(common::Error::other("pocsag reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ {
+        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
             return Err(common::Error::other("pocsag needs its channel inside the span"));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
@@ -191,7 +191,8 @@ mod tests {
         let mut n = PocsagNode::default();
         assert!(n.negotiate(&spec(2_400_000.0, DEFAULT_HZ)).is_ok());
         assert!(n.negotiate(&spec(2_400_000.0, 160_000_000.0)).is_err());
-        assert!(n.negotiate(&spec(20_000.0, DEFAULT_HZ)).is_err());
+        assert!(n.negotiate(&spec(25_000.0, DEFAULT_HZ)).is_ok());
+        assert!(n.negotiate(&spec(10_000.0, DEFAULT_HZ)).is_err());
     }
 
     /// The whole path on synthetic RF: an FM carrier keyed with POCSAG bits,

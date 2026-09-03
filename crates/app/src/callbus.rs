@@ -21,7 +21,9 @@
 //! because it is the same audio path and the master level should mean the
 //! same thing for both.
 
-use common::Speech;
+use common::{Error, Result, Speech};
+use pipeline::node::{NodeCtx, PortSpec};
+use pipeline::port::{Payload, PortKind, StreamSpec};
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -173,6 +175,10 @@ impl CallBus {
             agc_on: true,
             last: None,
         }
+    }
+
+    pub fn out_rate(&self) -> f64 {
+        self.out_rate
     }
 
     pub fn subscriptions(&self) -> &[Subscription] {
@@ -389,6 +395,113 @@ pub fn levels_db(speech: &Speech) -> (f32, f32) {
         .sqrt();
     let db = |v: f32| if v > 0.0 { 20.0 * v.log10() } else { -120.0 };
     (db(peak), db(rms))
+}
+
+/// The bus as a node, which is the only way it is ever built.
+///
+/// One input per voice front end and one output carrying the mix, so the
+/// speech path is drawn like everything else the receiver does. Nothing else
+/// is wired to it: a replayed transmission is paced by the run's own clock,
+/// which the graph reports, rather than by counting samples off a span the
+/// bus does not otherwise read.
+pub struct CallBusNode {
+    bus: CallBus,
+    inputs: usize,
+}
+
+impl CallBusNode {
+    pub fn new(out_rate: f64, inputs: usize) -> Self {
+        Self { bus: CallBus::new(out_rate), inputs }
+    }
+
+    pub fn bus(&self) -> &CallBus {
+        &self.bus
+    }
+
+    pub fn bus_mut(&mut self) -> &mut CallBus {
+        &mut self.bus
+    }
+
+    /// Change how many sources feed it, for the same reason the packet bus
+    /// can: the set of front ends changes with every retune, and a bus that
+    /// still claims the old count fails the build with a port nothing
+    /// connected.
+    pub fn set_inputs(&mut self, n: usize) {
+        self.inputs = n;
+    }
+}
+
+impl pipeline::node::Node for CallBusNode {
+    fn name(&self) -> &str {
+        "call_bus"
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    /// So a rebuild carries the bus across rather than dropping what it was
+    /// subscribed to, its levels and whatever it was playing.
+    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
+        Some(self)
+    }
+
+    fn num_inputs(&self) -> usize {
+        self.inputs
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        for i in inputs {
+            if i.spec.kind != PortKind::Voice {
+                return Err(Error::other("the call bus takes speech from voice front ends"));
+            }
+        }
+        let mut out = inputs[0].spec.with_kind(PortKind::Real);
+        out.rate = self.bus.out_rate();
+        out.channels = 1;
+        out.bandwidth = 0.0;
+        out.center = common::Hz(0);
+        Ok(vec![out])
+    }
+
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        for p in inputs.iter() {
+            for v in p.as_voice().unwrap_or(&[]) {
+                let Some(to) = v.to.as_deref() else { continue };
+                if v.pcm.is_empty() {
+                    continue;
+                }
+                self.bus.push(Voice {
+                    system: v.system,
+                    channel_hz: v.channel_hz,
+                    to,
+                    from: v.from.as_deref(),
+                    pcm: &v.pcm,
+                    rate: v.rate,
+                });
+            }
+        }
+        // What this block is worth in audio, from the run's own clock.
+        let frames = (ctx.block_seconds * self.bus.out_rate()).round() as usize;
+        let out = outputs[0].real_mut();
+        out.extend_from_slice(self.bus.take(frames));
+        self.bus.clear();
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.bus.stop_replay();
+        self.bus.clear();
+    }
 }
 
 #[cfg(test)]

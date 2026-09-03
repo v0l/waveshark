@@ -46,6 +46,16 @@ pub enum PortKind {
     /// kind carries many streams at once, which is why it is not
     /// [`PortKind::Iq`]: a single rate and centre cannot describe it.
     Sources,
+    /// Speech as it is decoded, with who is talking and on what channel.
+    ///
+    /// The junction between the front ends that carry voice and whoever is
+    /// listening, the way [`PortKind::Packets`] is the junction for what is
+    /// decoded. Not [`PortKind::Real`], because a vocoder's output is not a
+    /// sampled stream at the rate the graph was negotiated at: it arrives in
+    /// bursts of a frame's worth, at the codec's own rate, and it carries
+    /// the call it belongs to. A port of this kind carries several channels
+    /// at once, since a receiver hears more than one conversation.
+    Voice,
 }
 
 /// A reusable buffer. Stages write into the caller's buffer rather than
@@ -60,6 +70,7 @@ pub enum Payload {
     Frames(Vec<Vec<u8>>),
     Packets(Vec<common::Packet>),
     Sources(Vec<SourceBlock>),
+    Voice(Vec<common::Voice>),
 }
 
 impl Payload {
@@ -73,6 +84,7 @@ impl Payload {
             PortKind::Frames => Payload::Frames(Vec::new()),
             PortKind::Packets => Payload::Packets(Vec::new()),
             PortKind::Sources => Payload::Sources(Vec::new()),
+            PortKind::Voice => Payload::Voice(Vec::new()),
         }
     }
 
@@ -86,6 +98,7 @@ impl Payload {
             Payload::Frames(_) => PortKind::Frames,
             Payload::Packets(_) => PortKind::Packets,
             Payload::Sources(_) => PortKind::Sources,
+            Payload::Voice(_) => PortKind::Voice,
         }
     }
 
@@ -98,6 +111,7 @@ impl Payload {
             Payload::Frames(v) => v.len(),
             Payload::Packets(v) => v.len(),
             Payload::Sources(v) => v.len(),
+            Payload::Voice(v) => v.len(),
         }
     }
 
@@ -115,6 +129,7 @@ impl Payload {
             Payload::Frames(v) => v.clear(),
             Payload::Packets(v) => v.clear(),
             Payload::Sources(v) => v.clear(),
+            Payload::Voice(v) => v.clear(),
         }
     }
 
@@ -164,6 +179,20 @@ impl Payload {
         match self {
             Payload::Sources(v) => Some(v),
             _ => None,
+        }
+    }
+
+    pub fn as_voice(&self) -> Option<&[common::Voice]> {
+        match self {
+            Payload::Voice(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn voice_mut(&mut self) -> &mut Vec<common::Voice> {
+        match self {
+            Payload::Voice(v) => v,
+            _ => panic!("payload is {:?}, not Voice", self.kind()),
         }
     }
 

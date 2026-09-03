@@ -120,3 +120,38 @@ reference_frames = 40
 matched_min = 25
 false_positives = 0
 icao = 0x4b1880
+
+[[capture]]
+name = "m17_openrtx_434.02M_2400k.cu8"
+sha256 = "37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a"
+url = "https://nostr.download/37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a.xz"
+compression = "xz"
+center_hz = 434_020_000
+rate_sps = 2_400_000
+format = "cu8"
+description = """
+Three seconds of 433 MHz ISM with one M17 transmission in it, from an OpenRTX
+handheld on the 433.475 MHz calling channel. HackRF One, tuned 550 kHz above
+the channel so the transmission is nowhere near the centre and nothing about
+its position is convenient.
+
+This is here because the receiver failed on it while the operator watched. The
+band is busy: sensors, remotes and a wideband burst that crosses the M17
+channel, and the auto node found the transmission, cut it out, and read nothing
+from it. Three separate faults had to be fixed before it decoded, and every one
+of them was invisible on synthesised M17, which is measured wide enough to
+avoid all three. A capture of the real thing on a real band is the only test
+that would have caught them.
+
+The callsign is the assertion worth making. It is carried in the link setup
+frame at the start of the transmission and repeated across the link information
+channel, so reading it back means the demodulator, the framing, the Golay and
+the CRC all worked on a signal nobody synthesised.
+"""
+
+[capture.expect]
+protocol = "M17"
+from = "OPNRTX"
+to = "BROADCAST"
+channel_hz = 433_475_000
+frames_min = 20

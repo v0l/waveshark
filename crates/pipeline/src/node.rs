@@ -23,6 +23,15 @@ pub struct PortSpec {
 pub struct NodeCtx<'a> {
     /// Index of the first input sample in this call, from stream start.
     pub sample_index: u64,
+    /// How much time the block being processed covers, in seconds, measured
+    /// at the graph's own input.
+    ///
+    /// The run's clock, for a node whose output is paced by time rather than
+    /// by its input: a bus mixing speech has to produce a block's worth of
+    /// audio whether or not anybody spoke during it. Taking the span as an
+    /// input to count its samples worked and drew a wire that carried
+    /// nothing, which is a worse lie than no wire at all.
+    pub block_seconds: f64,
     /// Specs of each input port.
     pub inputs: &'a [PortSpec],
     /// Tags landing within this call's input window, sorted by index.
@@ -39,7 +48,13 @@ impl<'a> NodeCtx<'a> {
         events: &'a mut Vec<Event>,
         out_tags: &'a mut Vec<Tag>,
     ) -> Self {
-        Self { sample_index, inputs, in_tags, events, out_tags }
+        Self { sample_index, block_seconds: 0.0, inputs, in_tags, events, out_tags }
+    }
+
+    /// The same with the run's clock, which only the graph knows.
+    pub fn with_block_seconds(mut self, secs: f64) -> Self {
+        self.block_seconds = secs;
+        self
     }
 
     /// Report something that is not a sample: a detection, a decoded frame.

@@ -630,7 +630,9 @@ noise floor with this off and 1 dB below it with this on.
 Recorded IQ lives on nostr.download, not in git; it is near-incompressible and
 would bloat history permanently. `./testdata/fetch.sh` pulls it. Tests that
 need a fixture skip cleanly when it is missing, so a fresh clone builds and
-passes without network access.
+passes without network access. [`AGENTS.md`](../AGENTS.md) has the process for
+adding one: trimming, naming, uploading, and what the manifest entry has to
+say.
 
 The same script fetches the rtl_433 corpus samples listed in
 `testdata/rtl433.toml`: a capture and the reference decode beside it, straight

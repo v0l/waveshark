@@ -27,7 +27,7 @@ use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState,
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::event::Event;
 use pipeline::graph::Topology;
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::Registry;
@@ -36,9 +36,17 @@ use rayon::prelude::*;
 
 use crate::{build_chain, NodeSpec};
 
-/// Widths a source can have and still be a narrowband voice or data
-/// channel worth trying the frame decoders on, in hertz.
-const NARROW_HZ: std::ops::RangeInclusive<f64> = 6_000.0..=40_000.0;
+/// Widest a source can be and still be a narrowband voice or data channel
+/// worth trying the frame decoders on, in hertz.
+///
+/// There is no lower bound worth writing here. What the detector measures is
+/// the bins within [`SourceConfig::extent_db`] of the peak, which for a clean
+/// 12.5 kHz channel is a few kilohertz and can be the two-bin minimum: an M17
+/// transmission on 433.475 MHz measured 4 kHz, and a 6 kHz floor threw away
+/// its decoders before they saw a sample. The decoders each decide for
+/// themselves whether the bits are theirs, so the cost of trying is CPU and
+/// the cost of not trying is silence.
+const NARROW_MAX_HZ: f64 = 40_000.0;
 
 /// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
 /// with what the extraction adds around it.
@@ -61,6 +69,8 @@ struct Member {
     /// Front ends that build their own packets, because what they produce is
     /// more than bytes: an M17 voice stream carries speech beside them.
     packets: Vec<Out>,
+    /// Front ends that carry speech, on the port it travels out on.
+    voice: Vec<Out>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -74,8 +84,9 @@ impl Member {
         let pulses = taps(&graph, PortKind::Pulses);
         let frames = taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
+        let voice = taps(&graph, PortKind::Voice);
         let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
-        Ok(Self { name, graph, pulses, frames, packets, router })
+        Ok(Self { name, graph, pulses, frames, packets, voice, router })
     }
 
     /// Run one block through and collect what came out as packets.
@@ -201,11 +212,16 @@ impl Member {
 
 /// Every output of a graph carrying a given kind.
 fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
+    // Every port, not only the first. A front end that carries speech
+    // alongside its packets puts it on a second output, and a scan that
+    // stopped at port zero found the packets and left the audio where it
+    // was: decoded, and never heard.
     g.order()
-        .filter_map(|(id, _)| {
-            let out = id.o();
-            (g.spec_of(out).map(|s| s.kind) == Some(kind)).then_some(out)
+        .flat_map(|(id, _)| {
+            let outs = g.node(id).map(|n| n.num_outputs()).unwrap_or(1);
+            (0..outs).map(move |p| id.out(p))
         })
+        .filter(|o| g.spec_of(*o).map(|s| s.kind) == Some(kind))
         .collect()
 }
 
@@ -332,6 +348,25 @@ impl AutoNode {
         self.wide.iter().map(|m| m.name).collect()
     }
 
+    /// Speech from every front end inside, read off the ports it came out
+    /// on, whatever protocol produced it.
+    ///
+    /// A source found a moment ago has decoders built for it there and then,
+    /// and they are as much a part of the receiver as a stage somebody
+    /// placed by hand. Taken from the ports rather than from a list of
+    /// protocol names kept here, so a voice front end added later is heard
+    /// without this file being touched.
+    fn inner_voice(&self, out: &mut Vec<common::Voice>) {
+        for slot in &self.slots {
+            for m in &slot.members {
+                for t in &m.voice {
+                    let Some(v) = m.graph.buf(*t).and_then(|p| p.as_voice()) else { continue };
+                    out.extend(v.iter().cloned());
+                }
+            }
+        }
+    }
+
     fn rebuild(&mut self) -> Result<()> {
         if self.rate <= 0.0 {
             return Ok(());
@@ -381,9 +416,13 @@ impl AutoNode {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
         let mut members = vec![Member::build("burst_route", spec, NodeSpec::new("burst_route"), &self.reg)?];
-        if NARROW_HZ.contains(&b.bandwidth_hz) {
+        if b.bandwidth_hz <= NARROW_MAX_HZ {
             let hz = b.center_hz as f64;
-            let fits = |width: f64| b.rate / 2.0 - width > 0.0;
+            // The channel is centred on the source, so it fits when the
+            // stream is wider than the channel. Asking for twice the width
+            // rules out every source extracted at the 25 kHz floor, which is
+            // where a clean 12.5 kHz transmission lands.
+            let fits = |width: f64| b.rate > width;
             if fits(crate::pocsag_nodes::CHANNEL_WIDTH_HZ) {
                 if let Ok(m) = Member::build("pocsag", spec, NodeSpec::new("pocsag").f("channel_hz", hz), &self.reg) {
                     members.push(m);
@@ -421,9 +460,29 @@ fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-impl Simple for AutoNode {
+/// What comes out: everything decoded, and everything heard.
+const OUT_PACKETS: usize = 0;
+const OUT_VOICE: usize = 1;
+
+impl Node for AutoNode {
     fn name(&self) -> &str {
         &self.label
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn num_outputs(&self) -> usize {
+        2
     }
 
     fn subgraph(&self) -> Option<Topology> {
@@ -438,7 +497,8 @@ impl Simple for AutoNode {
         self.slots.len().max(1)
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other(format!("{}: needs IQ", self.label)));
         }
@@ -451,18 +511,27 @@ impl Simple for AutoNode {
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.rate = 0.0;
         out.bandwidth = 0.0;
-        Ok(out)
+        // Speech from whatever front end inside is carrying it, at the
+        // vocoder's rate rather than the radio's.
+        let mut voice = out.with_kind(PortKind::Voice);
+        voice.rate = crate::m17_nodes::VOICE_HZ;
+        Ok(vec![out, voice])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
         self.hits.clear();
-        let iq = i.as_iq().unwrap_or(&[]);
+        let iq = inputs[0].as_iq().unwrap_or(&[]);
         let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
             return Ok(());
         };
         let at_us = now_us();
         let rate = c.inputs[0].spec.rate.max(1.0);
-        let out = o.packets_mut();
+        let out = outputs[OUT_PACKETS].packets_mut();
 
         // The span-wide decoders see every block.
         let mut events: Vec<Event> = Vec::new();
@@ -558,6 +627,7 @@ impl Simple for AutoNode {
             }
         }
         self.slots.retain(|s| !closed.contains(&s.id));
+        self.inner_voice(outputs[OUT_VOICE].voice_mut());
 
         for e in events {
             match &e {
@@ -741,6 +811,32 @@ mod tests {
         }
         assert!(opened.iter().any(|o| (o - 350_000.0).abs() < 10_000.0), "the real one opened: {opened:?}");
         assert!(!opened.iter().any(|o| o.abs() < 10_000.0), "the spur opened: {opened:?}");
+    }
+
+    #[test]
+    fn a_source_at_the_extraction_floor_still_gets_the_channel_decoders() {
+        // A clean 12.5 kHz transmission measures a few kilohertz across at
+        // the detector's 20 dB extent, so its extraction lands on the
+        // 25 kHz floor. That is wide enough to hold the channel, and every
+        // narrowband decoder has to be built for it.
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
+        let b = SourceBlock {
+            id: SourceId(1),
+            state: SourceState::Opened,
+            center_hz: 433_475_000,
+            // The two-bin minimum the detector can report, which is what a
+            // clean 12.5 kHz channel measures at its 20 dB extent.
+            bandwidth_hz: 4_000.0,
+            rate: n.cfg.min_rate_hz,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b).unwrap();
+        let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
+        assert!(names.contains(&"m17"), "{names:?}");
+        assert!(names.contains(&"pocsag"), "{names:?}");
     }
 
     #[test]

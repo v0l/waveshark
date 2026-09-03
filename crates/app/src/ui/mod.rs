@@ -3,6 +3,7 @@
 mod calls_pane;
 mod chain_pane;
 mod map_pane;
+mod meter;
 mod packets;
 mod scope;
 mod settings;
@@ -104,6 +105,10 @@ pub struct App {
     print_since: std::time::Instant,
     /// Whether the packet log is showing.
     log_open: bool,
+    /// Whether the raw span capture is wanted. Held rather than sent once:
+    /// choosing a device starts a new radio thread with a new graph, and a
+    /// capture that quietly stopped there would be worse than none.
+    capture: bool,
     /// Share of the scope pane given to the spectrum, the rest going to the
     /// waterfall. Dragged rather than fixed: which of the two matters depends
     /// entirely on what is being looked for.
@@ -435,6 +440,10 @@ impl Default for MapView {
 /// Colour of a packet whose integrity check passed.
 const CRC_OK: Color32 = Color32::from_rgb(0x6F, 0xD1, 0x8A);
 
+/// How wide a fader is drawn. The channel panel is a fixed width and every
+/// one of these rows ends in a mute button, which needs the rest of it.
+const VU_W: f32 = 130.0;
+
 /// Share of the scope pane the spectrum gets by default.
 const DEFAULT_PLOT_FRAC: f32 = 0.34;
 /// Range the split can be dragged to. Neither pane may be squeezed to nothing:
@@ -503,6 +512,7 @@ impl Default for App {
             print_log: false,
             print_since: std::time::Instant::now(),
             log_open: true,
+            capture: false,
             plot_frac: DEFAULT_PLOT_FRAC,
             splitting: false,
             drag_ch: None,
@@ -778,6 +788,12 @@ impl App {
         self.send(Cmd::Record(Some((dir, budget_mb))));
     }
 
+    /// Start or stop writing the raw span to a file.
+    pub fn set_capture(&mut self, on: bool) {
+        self.capture = on;
+        self.send(Cmd::CaptureIq(on));
+    }
+
     /// Pick the span closest to `hz`, narrowing in software if the radio
     /// cannot sample that slowly.
     pub fn set_span(&mut self, hz: f64) {
@@ -854,6 +870,9 @@ impl App {
         }
         if let Some(r) = self.record_dir.clone() {
             self.send(Cmd::Record(Some(r)));
+        }
+        if self.capture {
+            self.send(Cmd::CaptureIq(true));
         }
         // The log is a node in the graph, so a new radio thread means a new
         // graph and it has to be told where to write again.
@@ -1020,6 +1039,14 @@ impl App {
             self.next_packet += 1;
             self.decodes.push(Logged { id, rec });
         }
+        // Listening does not depend on which pane is on screen. The
+        // subscriptions used to be made where the call list is drawn, so a
+        // receiver sitting on the spectrum heard nothing however much it
+        // decoded, and the fault looked like a broken vocoder.
+        let heard: Vec<crate::calls::Call> =
+            self.calls.active(std::time::Instant::now()).into_iter().cloned().collect();
+        self.subscribe_new_groups(&heard);
+
         // A busy band produces packets faster than anyone reads them, and an
         // unbounded log is a slow memory leak with a scrollbar.
         // The samples of a burst are kept for the newest rows only. A row
@@ -1738,6 +1765,19 @@ impl App {
                             {
                                 self.open = Some(Settings::Radio);
                             }
+                            // Beside the transport, because that is what it
+                            // is: the span is running and this writes it
+                            // down. A signal nothing decodes is worth
+                            // capturing while it is still transmitting, and
+                            // anything behind a modal is too slow for that.
+                            let capturing = self
+                                .radio
+                                .as_ref()
+                                .is_some_and(|r| r.status.capture_on.load(std::sync::atomic::Ordering::Relaxed));
+                            let tip = if capturing { t("ui.capture_stop") } else { t("ui.capture") };
+                            if icon_button(ui, Icon::Capture, tip, on, capturing).clicked() {
+                                self.set_capture(!capturing);
+                            }
                         });
                     });
 
@@ -2028,12 +2068,12 @@ impl App {
                 ui.add_space(6.0);
 
                 // The master, which every channel's own level runs into.
+                let out_level = self.radio.as_ref().map(|r| r.status.out_level()).unwrap_or(0.0);
+                let call_level =
+                    self.radio.as_ref().map(|r| r.status.call_level()).unwrap_or(0.0);
                 ui.horizontal(|ui| {
                     ui.label(legend("master"));
-                    if ui
-                        .add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false))
-                        .changed()
-                    {
+                    if meter::fader(ui, &mut self.volume, out_level, VU_W).changed() {
                         self.send(Cmd::Volume(self.volume));
                     }
                     let all_muted = !self.channels.is_empty()
@@ -2060,9 +2100,8 @@ impl App {
                 // in the receiver is set.
                 ui.horizontal(|ui| {
                     ui.label(legend("calls"));
-                    let mut changed = ui
-                        .add(egui::Slider::new(&mut self.call_volume, 0.0..=1.0).show_value(false))
-                        .changed();
+                    let mut changed =
+                        meter::fader(ui, &mut self.call_volume, call_level, VU_W).changed();
                     if crate::icons::icon_button(
                         ui,
                         if self.call_muted {
@@ -2201,17 +2240,14 @@ impl App {
                                 }
                             });
                             if ch.on {
-                                // Its own level, which runs into the master.
+                                // Its own level, which runs into the master,
+                                // read against what it is contributing.
+                                let st = states.iter().find(|s| s.id == ch.id).copied();
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     ui.label(legend("vol"));
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut ch.volume, 0.0..=1.0)
-                                                .show_value(false),
-                                        )
-                                        .changed()
-                                    {
+                                    let level = st.map(|s| s.level).unwrap_or(0.0);
+                                    if meter::fader(ui, &mut ch.volume, level, VU_W).changed() {
                                         tune = Some(i);
                                     }
                                     if ui.selectable_label(ch.muted, "M").clicked() {
@@ -2219,7 +2255,6 @@ impl App {
                                         tune = Some(i);
                                     }
                                 });
-                                let st = states.iter().find(|s| s.id == ch.id).copied();
                                 if ch.demod == Demod::Wfm {
                                     // Each channel's own RDS, not the first
                                     // channel's: two WFM channels are usually

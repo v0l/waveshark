@@ -373,6 +373,57 @@ impl App {
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(6.0);
+        ui.label(legend("raw capture"));
+        hint(
+            ui,
+            "The whole span to one file, as it arrives. This is the recording to \
+             make when the receiver shows a transmission and reads nothing from \
+             it: replaying the file puts the same samples through the same \
+             graph, so a decoder can be changed and tried again.",
+        );
+        ui.add_space(8.0);
+
+        let (cap_on, cap_bytes, cap_full, cap_file) = match &self.radio {
+            Some(r) => {
+                use std::sync::atomic::Ordering;
+                (
+                    r.status.capture_on.load(Ordering::Relaxed),
+                    r.status.capture_bytes.load(Ordering::Relaxed),
+                    r.status.capture_full.load(Ordering::Relaxed),
+                    r.status.capture_file.lock().clone(),
+                )
+            }
+            None => (false, 0, false, None),
+        };
+        let mut on = cap_on;
+        if ui.checkbox(&mut on, "Capture the raw span").changed() {
+            self.set_capture(on);
+        }
+        row(ui, "written", |ui| {
+            ui.label(value(human_bytes(cap_bytes)).size(11.0));
+        });
+        if let Some(f) = &cap_file {
+            row(ui, "file", |ui| {
+                ui.add(egui::Label::new(value(f).size(11.0)).wrap());
+            });
+        }
+        if cap_full {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "The capture stopped at its size limit. Switch it off and \
+                         on again for a new file.",
+                    )
+                    .small()
+                    .color(theme::FAULT),
+                )
+                .wrap(),
+            );
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
         ui.label(legend("feeds"));
         hint(ui, "Packets from another receiver, over TCP.");
         ui.add_space(8.0);

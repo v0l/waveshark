@@ -29,6 +29,50 @@ impl SampleFormat {
         }
     }
 
+    /// The filename extension a capture of this format is read back from.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Cu8 => "cu8",
+            Self::Cs8 => "cs8",
+            Self::Cs16 => "cs16",
+            Self::Cf32 => "cf32",
+        }
+    }
+
+    /// The format written under a given extension, for a caller that has a
+    /// name rather than a format.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "cu8" | "data" => Some(Self::Cu8),
+            "cs8" => Some(Self::Cs8),
+            "cs16" | "sigmf-data" => Some(Self::Cs16),
+            "cf32" | "complex16f" | "fc32" => Some(Self::Cf32),
+            _ => None,
+        }
+    }
+
+    /// The inverse of [`Self::convert`]: normalised samples back to the bytes
+    /// a receiver would have delivered, appended to `out`.
+    ///
+    /// Clipped rather than scaled. A sample past full scale was clipping in
+    /// the receiver too, and rescaling here would hide that from whoever
+    /// replays the file later.
+    pub fn encode(self, iq: &[C32], out: &mut Vec<u8>) {
+        out.reserve(iq.len() * self.bytes_per_sample());
+        for s in iq {
+            for v in [s.re, s.im] {
+                match self {
+                    Self::Cu8 => out.push((v * 127.5 + 127.5).round().clamp(0.0, 255.0) as u8),
+                    Self::Cs8 => out.push((v * 128.0).round().clamp(-128.0, 127.0) as i8 as u8),
+                    Self::Cs16 => out.extend_from_slice(
+                        &((v * 32768.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes(),
+                    ),
+                    Self::Cf32 => out.extend_from_slice(&v.to_le_bytes()),
+                }
+            }
+        }
+    }
+
     /// Convert a raw interleaved byte slice into normalised complex floats,
     /// appending to `out`. Output is scaled to roughly [-1.0, 1.0].
     ///

@@ -10,6 +10,7 @@ pub mod ais_nodes;
 pub mod auto_node;
 pub mod aprs_nodes;
 pub mod bank;
+pub mod capture_nodes;
 pub mod decode_nodes;
 pub mod dsp_nodes;
 pub mod m17_nodes;
@@ -25,6 +26,7 @@ pub mod wfm;
 pub mod wmbus_nodes;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
+pub use capture_nodes::IqCaptureNode;
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
@@ -315,6 +317,32 @@ pub fn registry() -> Registry {
             // A power of two, because that is what the transform takes.
             let size = 1usize << (usize::BITS - 1 - size.leading_zeros()) as usize;
             Ok(Box::new(SpectrumNode::new(size)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "iq_capture",
+            summary: "Write the span to a file as it arrives, so a signal \
+                      nothing decodes can be worked on off the air",
+            category: "sink",
+        },
+        |s: &Settings| {
+            let format = common::SampleFormat::from_extension(s.str_or("format", "cu8"))
+                .unwrap_or(common::SampleFormat::Cu8);
+            let mb = s.f64_or("budget_mb", 0.0);
+            let budget = if mb > 0.0 {
+                (mb * (1u64 << 20) as f64) as u64
+            } else {
+                capture_nodes::DEFAULT_BUDGET
+            };
+            Ok(Box::new(
+                IqCaptureNode::new(s.str_or("dir", "."))
+                    .with_name(s.str_or("name", "capture"))
+                    .with_format(format)
+                    .with_budget(budget)
+                    .with_enabled(s.bool_or("enabled", true)),
+            ) as Box<dyn Node>)
         },
     );
 

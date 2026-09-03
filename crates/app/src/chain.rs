@@ -32,7 +32,7 @@ use nodes::{
     AgcNode, BankNode, DecimateNode, SpectrumNode, SquelchNode, WfmDemodNode,
 };
 use pipeline::graph::{NodePart, Topology};
-use pipeline::{Graph, GraphBuilder, NodeId, Out, StreamSpec};
+use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
 use crate::radio::{ChannelSpec, DecodeRecord, Demod};
 use crate::record::Recorder;
@@ -218,6 +218,11 @@ pub struct Receiver {
     /// The graph as a description: what is running, in the operator's terms.
     patch: crate::patch::Patch,
     record: Option<NodeId>,
+    /// The raw span capture, which is always in the graph and almost always
+    /// switched off; see [`Receiver::set_capture`].
+    capture: Option<NodeId>,
+    /// The call bus, where every voice front end meets.
+    calls: Option<NodeId>,
     modes: Option<NodeId>,
     ais: Option<NodeId>,
     aprs: Option<NodeId>,
@@ -282,6 +287,9 @@ pub struct Plan {
     /// the listening channels are not the patch's to remove.
     pub patch: Option<crate::patch::Patch>,
     pub record: bool,
+    /// Where a raw span capture is written when one is switched on. The
+    /// stage is always in the graph, so this is always needed.
+    pub capture_dir: PathBuf,
     /// Log every burst the front ends detect.
     pub log: bool,
     /// Other receivers feeding the same packet bus.
@@ -328,6 +336,8 @@ impl Receiver {
             spectrum: None,
             patch: crate::patch::Patch::default(),
             record: None,
+            capture: None,
+            calls: None,
             modes: None,
             ais: None,
             aprs: None,
@@ -404,6 +414,8 @@ impl Receiver {
         });
 
         self.record = None;
+        self.capture = None;
+        self.calls = None;
         self.modes = None;
         self.ais = None;
         self.aprs = None;
@@ -481,6 +493,8 @@ impl Receiver {
         let dc = stage_of("dc_block");
         let spectrum = stage_of("spectrum");
         let record = stage_of(RING);
+        let capture = stage_of("iq_capture");
+        let calls = stage_of("call_bus");
 
         // The front ends are stages in the patch now, so what runs is what
         // the graph says rather than a second reading of the scanner table.
@@ -684,6 +698,8 @@ impl Receiver {
         self.roles = roles;
         self.spectrum = spectrum;
         self.record = record;
+        self.capture = capture;
+        self.calls = calls;
         self.bus = bus;
         self.decode = decode;
         self.ais = ais;
@@ -854,34 +870,54 @@ impl Receiver {
         self.pocsag.is_some()
     }
 
-    /// Speech decoded in this block by every front end that carries voice,
-    /// labelled with who is talking and to whom.
-    ///
-    /// Read like the spectrum rather than carried on a port: audio at the
-    /// codec's own rate has no business in a graph negotiated for the rate
-    /// the radio is running at, and only the mixer wants it.
-    pub fn voice_now(&self) -> Vec<VoiceBlock> {
-        let mut out = Vec::new();
-        if let Some(n) =
-            self.m17.and_then(|id| downcast::<nodes::m17_nodes::M17Node>(&self.graph, id))
-        {
-            let pcm = n.voice_now();
-            if let (false, Some((from, to))) = (pcm.is_empty(), n.talking()) {
-                out.push(VoiceBlock {
-                    system: "M17".to_string(),
-                    channel_hz: n.channel_hz(),
-                    to: to.to_string(),
-                    from: Some(from.to_string()),
-                    pcm: pcm.to_vec(),
-                    rate: nodes::m17_nodes::VOICE_HZ,
-                });
-            }
-        }
-        out
+    /// The call bus, for the subscriptions, the meters and what it is
+    /// playing. `None` before anything that carries voice is running.
+    pub fn calls(&self) -> Option<&crate::callbus::CallBusNode> {
+        downcast::<crate::callbus::CallBusNode>(&self.graph, self.calls?)
     }
 
+    pub fn calls_mut(&mut self) -> Option<&mut crate::callbus::CallBusNode> {
+        let id = self.calls?;
+        self.graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<crate::callbus::CallBusNode>())
+    }
+
+    /// This block's call audio, mixed by the bus at the output rate.
+    pub fn call_audio(&self) -> &[f32] {
+        self.calls
+            .and_then(|id| self.graph.buf(id.o()))
+            .and_then(|p| p.as_real())
+            .unwrap_or(&[])
+    }
+
+    /// Every voice front end running, talking or not, read off the ports
+    /// they publish on.
+    fn voices(&self) -> Vec<common::Voice> {
+        self.graph
+            .order()
+            .flat_map(|(id, _)| {
+                let out = id.o();
+                let voice = self.graph.spec_of(out).map(|s| s.kind) == Some(PortKind::Voice);
+                let outs = self.graph.node(id).map(|n| n.num_outputs()).unwrap_or(1);
+                let mut ports: Vec<Out> = voice.then_some(out).into_iter().collect();
+                ports.extend(
+                    (1..outs)
+                        .map(|p| id.out(p))
+                        .filter(|o| self.graph.spec_of(*o).map(|s| s.kind) == Some(PortKind::Voice)),
+                );
+                ports
+            })
+            .filter_map(|o| self.graph.buf(o).and_then(|p| p.as_voice()))
+            .flat_map(|v| v.iter().cloned())
+            .collect()
+    }
+
+    /// Whether an M17 front end is running anywhere: a stage on a channel,
+    /// or one the auto node built for a source it found.
     pub fn m17_on(&self) -> bool {
-        self.m17.is_some()
+        self.voices().iter().any(|v| v.system == "M17")
     }
 
     /// Whether anything is tracking aircraft, from the local demodulator or
@@ -931,6 +967,33 @@ impl Receiver {
             .iter()
             .filter_map(|&id| downcast::<nodes::AutoNode>(&self.graph, id))
             .any(|n| n.wide().contains(&name))
+    }
+
+    /// The raw span capture, for switching on and for reading how far it has
+    /// got.
+    pub fn capture(&self) -> Option<&nodes::IqCaptureNode> {
+        downcast::<nodes::IqCaptureNode>(&self.graph, self.capture?)
+    }
+
+    /// Start or stop writing the span to disk.
+    ///
+    /// A parameter rather than a rebuild: the point of a capture is the
+    /// transmission happening right now, and rebuilding the graph to add a
+    /// stage would drop every source the auto node has open.
+    pub fn set_capture(&mut self, on: bool) {
+        let Some(id) = self.capture else { return };
+        if let Some(n) = self
+            .graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::IqCaptureNode>())
+        {
+            n.set_enabled(on);
+        }
+    }
+
+    pub fn capturing(&self) -> bool {
+        self.capture().is_some_and(|n| n.is_enabled() && !n.is_full())
     }
 
     pub fn recorder_mut(&mut self) -> Option<&mut Recorder> {
@@ -1261,6 +1324,14 @@ const BUS_TAILS: [&str; 11] = [
     "m17",
 ];
 
+/// Stages that carry speech, and the output port it leaves on.
+///
+/// The same arrangement as [`BUS_TAILS`], and for the same reason: the patch
+/// is a description, written before any node exists to be asked. What each
+/// front end does with the port is its own business; this only says which
+/// wire to draw.
+const VOICE_TAILS: [(&str, usize); 2] = [("m17", 1), ("auto", 1)];
+
 /// Stages that report something a position can be resolved from, so the
 /// tracker is worth attaching to the bus.
 const TRACK_SOURCES: [&str; 4] = ["mode_s", "ais", "aprs", "auto"];
@@ -1284,6 +1355,8 @@ pub mod derived {
     pub const BUS: u64 = Patch::DERIVED_BASE + 5;
     pub const PROTOCOLS: u64 = Patch::DERIVED_BASE + 6;
     pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
+    pub const CAPTURE: u64 = Patch::DERIVED_BASE + 8;
+    pub const CALLS: u64 = Patch::DERIVED_BASE + 9;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -1345,6 +1418,23 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     if plan.record {
         p.add_derived(derived::RING, RING, Settings::new());
         p.connect(head, (derived::RING, 0));
+    }
+
+    // The raw capture is always in the graph and switched off, because the
+    // transmission worth having is the one already on the screen. Adding the
+    // stage when somebody asks for it would rebuild the graph first, and a
+    // rebuild loses the source the auto node has open, which is exactly the
+    // signal they were trying to capture. Switched on it costs a parameter;
+    // switched off it costs a memcpy of nothing.
+    {
+        let mut s = Settings::new();
+        s.insert(
+            "dir".into(),
+            pipeline::ParamValue::Text(plan.capture_dir.display().to_string()),
+        );
+        s.insert("enabled".into(), pipeline::ParamValue::Bool(false));
+        p.add_derived(derived::CAPTURE, "iq_capture", s);
+        p.connect(head, (derived::CAPTURE, 0));
     }
 
     // The front ends the scanner table put on this span. Which demodulator
@@ -1541,6 +1631,31 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         if makes_tracks {
             let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
             p.connect(Source::Stage(bus, 0), (t, 0));
+        }
+    }
+
+    // And the same for speech. Every front end that carries voice meets at
+    // one bus, and what reaches the speaker is decided there by
+    // subscription: a receiver watching a band can have three people talking
+    // at once, and "play whatever decoded last" is not a receiver anybody can
+    // use.
+    let voices: Vec<(u64, usize)> = p
+        .stages()
+        .iter()
+        .filter_map(|s| {
+            VOICE_TAILS
+                .iter()
+                .find(|(kind, _)| *kind == s.kind)
+                .map(|(_, port)| (s.id, *port))
+        })
+        .collect();
+    if !voices.is_empty() {
+        let mut s = Settings::new();
+        s.insert("inputs".into(), pipeline::ParamValue::Int(voices.len() as i64));
+        s.insert("label".into(), pipeline::ParamValue::Text("Calls".into()));
+        let calls = p.add_derived(derived::CALLS, "call_bus", s);
+        for (k, (from, port)) in voices.iter().enumerate() {
+            p.connect(Source::Stage(*from, *port), (calls, k));
         }
     }
     p
@@ -1823,6 +1938,21 @@ pub fn registry() -> pipeline::registry::Registry {
         },
         |_s| Ok(Box::new(crate::tracks::TracksNode::new()) as Box<dyn pipeline::node::Node>),
     );
+    r.register(
+        StageDesc {
+            name: "call_bus",
+            summary: "Every voice front end in one place: what reaches the \
+                      speaker is what somebody subscribed to",
+            category: "sink",
+        },
+        |s: &pipeline::registry::Settings| {
+            use pipeline::registry::SettingsExt;
+            Ok(Box::new(crate::callbus::CallBusNode::new(
+                s.f64_or("out_rate", 48_000.0),
+                s.i64_or("inputs", 1).max(1) as usize,
+            )) as Box<dyn pipeline::node::Node>)
+        },
+    );
     r
 }
 
@@ -1903,6 +2033,15 @@ fn add_patch(
         // rebuilds because it holds the open log file, so it has to be told.
         if st.kind == "packet_bus" {
             if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+            {
+                n.set_inputs(st.settings.i64_or("inputs", 1).max(1) as usize);
+            }
+        }
+        // The call bus is the same shape of thing, and carried across for
+        // the same kind of reason: it holds what somebody subscribed to.
+        if st.kind == "call_bus" {
+            if let Some(n) =
+                node.as_any_mut().and_then(|a| a.downcast_mut::<crate::callbus::CallBusNode>())
             {
                 n.set_inputs(st.settings.i64_or("inputs", 1).max(1) as usize);
             }
@@ -2179,6 +2318,14 @@ fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
     }
 }
 
+/// Where raw span captures go when nobody says otherwise: beside the packet
+/// log, since both are recordings of what was on the air.
+pub fn default_capture_dir() -> PathBuf {
+    crate::packetlog::PacketLog::default_dir()
+        .map(|d| d.with_file_name("captures"))
+        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-captures"))
+}
+
 fn downcast<T: 'static>(g: &Graph, id: NodeId) -> Option<&T> {
     g.node(id).and_then(|n| n.as_any()).and_then(|a| a.downcast_ref::<T>())
 }
@@ -2241,6 +2388,7 @@ mod tests {
                 band: (0.0, f64::INFINITY),
             }],
             record: false,
+            capture_dir: crate::chain::default_capture_dir(),
             log: false,
             feeds: Vec::new(),
         }
@@ -2300,6 +2448,28 @@ mod tests {
             bus.inputs.iter().any(|(s, _)| detector.outputs.iter().any(|(o, _)| o == s)),
             "the bursts have to arrive somewhere"
         );
+    }
+
+    #[test]
+    fn the_capture_is_always_there_and_always_off() {
+        // Switching it on must not rebuild the graph: a rebuild drops every
+        // source the auto node has open, which is the transmission somebody
+        // pressed the button for. So the stage is in every graph, doing
+        // nothing, until it is told otherwise.
+        let plan = plan(2_400_000.0, Hz::mhz(433));
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let cap = rx.capture().expect("a capture stage");
+        assert!(!cap.is_enabled(), "a capture nobody asked for was running");
+        assert!(cap.path().is_none());
+        assert!(!rx.capturing());
+        rx.set_capture(true);
+        assert!(rx.capturing());
+        // And it survives a rebuild only because the caller says so again,
+        // which is what the radio thread does.
+        rx.rebuild(&plan).expect("rebuilt");
+        assert!(!rx.capturing(), "the stage comes back as the graph draws it");
+        rx.set_capture(true);
+        assert!(rx.capturing());
     }
 
     #[test]
@@ -2453,6 +2623,46 @@ mod tests {
         p.channels = vec![chan(1, 300_000.0, Demod::Wfm)];
         rx.rebuild(&p).unwrap();
         assert!(!rx.channels()[0].kept);
+    }
+
+    #[test]
+    fn the_speech_path_is_on_the_graph_like_everything_else() {
+        // The call bus used to be a struct in the radio thread fed by hand,
+        // so the drawing of the receiver said nothing about where the audio
+        // went. Every front end that carries voice now publishes it on a
+        // port, and the bus is the node on the end of them.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts = vec![crate::scanners::FrontAt {
+            front: Front::M17(433_475_000.0),
+            band: (0.0, f64::INFINITY),
+        }];
+        let rx = Receiver::build(&p, Sinks::default()).expect("a receiver");
+        let topo = rx.topology();
+        let m17 = topo.nodes.iter().find(|n| n.label.contains("M17")).expect("an M17 front end");
+        let bus = topo.nodes.iter().find(|n| n.label == "Calls").expect("a call bus");
+        let voice = m17
+            .outputs
+            .iter()
+            .find(|(_, s)| s.kind == PortKind::Voice)
+            .expect("speech leaves on a port of its own");
+        assert!(
+            bus.inputs.iter().any(|(o, _)| *o == voice.0),
+            "the speech has to arrive somewhere"
+        );
+        // And it comes out as audio, at the rate the mixer wants.
+        assert_eq!(bus.outputs[0].1.kind, PortKind::Real);
+        assert!(bus.outputs[0].1.rate > 0.0);
+        assert!(rx.calls().is_some());
+        // Speech and nothing else. A wire the bus does not read is worse
+        // than no wire: it says the audio depends on something it does not.
+        assert!(
+            bus.inputs.iter().all(|(o, s)| {
+                let _ = o;
+                s.kind == PortKind::Voice
+            }),
+            "the call bus reads {:?}",
+            bus.inputs.iter().map(|(_, s)| s.kind).collect::<Vec<_>>()
+        );
     }
 
     #[test]

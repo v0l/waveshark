@@ -30,6 +30,8 @@ pub enum Icon {
     /// and colour alone does not carry that.
     Sound,
     Mute,
+    /// Write the raw span to a file.
+    Capture,
 }
 
 /// Side of the clickable square, in points.
@@ -163,6 +165,14 @@ impl Icon {
                         Stroke::new(sw * 1.1, col),
                     );
                 }
+            }
+            Icon::Capture => {
+                // The recording dot every tape machine has had, with a ring
+                // around it so an off state is still a shape rather than a
+                // dim smudge.
+                let rad = b.width() * 0.46;
+                p.circle_stroke(c, rad, s);
+                p.circle_filled(c, rad * 0.45, col);
             }
             Icon::Log => {
                 // Rows with a mark against each, which is what the log is.

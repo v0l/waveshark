@@ -1226,8 +1226,10 @@ impl SourceExtractor {
     /// its width with room for the edges the detector did not see.
     fn open(&mut self, s: &Source) {
         let bw = (s.bandwidth_hz() * self.cfg.width_margin).max(self.cfg.bin_hz * 2.0);
-        let pb = bw / 2.0;
         let want = (bw * self.cfg.oversample).max(self.cfg.min_rate_hz);
+        // Whether the rate came from the width or from the floor, which
+        // decides what the extraction filter should keep; see below.
+        let floored = bw * self.cfg.oversample < self.cfg.min_rate_hz;
         let total = ((self.rate / want).floor() as usize).max(1);
         // Coarse by as much as leaves the sharp stage a few times the width
         // to work in, and only when there is enough decimation to share.
@@ -1235,6 +1237,17 @@ impl SourceExtractor {
         let (f1, f2) = if f1 >= 2 && total / f1 >= 1 { (f1, total / f1) } else { (1, total) };
         let rate1 = self.rate / f1 as f64;
         let out_rate = rate1 / f2 as f64;
+        // Normally the measured half-width: the stream is cut out around the
+        // signal and its neighbours are filtered away. A narrow source is
+        // different, because its rate comes from the floor rather than from
+        // its width, and there the measurement is the wrong thing to filter
+        // to. What is measured is the bins within `extent_db` of the peak,
+        // which for a clean 12.5 kHz channel can be the two-bin minimum: a
+        // 2 kHz passband over a 25 kHz stream cut the sidebands off an M17
+        // transmission and left a demodulator that could see the carrier and
+        // read nothing from it. When the rate is at the floor the stream is
+        // wider than the signal asked for, so it is filled.
+        let pb = if floored { (out_rate * 0.4).max(bw / 2.0) } else { bw / 2.0 };
         let coarse =
             (f1 > 1).then(|| FirDecim::design_hz(self.rate, f1, pb, self.cfg.atten_db));
         let fir = sharp_decimator(rate1, f2, pb, self.cfg.atten_db);
@@ -1484,6 +1497,65 @@ mod tests {
         assert_eq!(opened.len(), 2, "{opened:?}");
         assert!((opened[0] + 200_000.0).abs() < 2.0 * d.bin_hz(), "{opened:?}");
         assert!((opened[1] - 310_000.0).abs() < 2.0 * d.bin_hz(), "{opened:?}");
+    }
+
+    #[test]
+    fn a_narrow_source_is_given_the_whole_stream_it_was_cut_at() {
+        // A clean narrowband channel measures a couple of bins across, its
+        // rate comes from the floor rather than from that measurement, and
+        // the extraction must not then filter the stream down to the two
+        // bins that were measured. The source is handed to the extractor
+        // rather than detected, so the width under test is exactly the one
+        // written here: a signal 4 kHz off the centre, which is where M17's
+        // outer symbols and a pager's deviation both sit, has to survive.
+        let c = cfg();
+        let at = 120_000.0;
+        let mut x = noise(400_000, 0.05, 17);
+        for (i, s) in tone(300_000, at, RATE, 0.4).iter().enumerate() {
+            x[50_000 + i] += *s;
+        }
+        for (i, s) in tone(300_000, at + 4_000.0, RATE, 0.4).iter().enumerate() {
+            x[50_000 + i] += *s;
+        }
+        let src = Source {
+            id: SourceId(1),
+            lo_hz: at - c.bin_hz,
+            hi_hz: at + c.bin_hz,
+            center_hz: at,
+            start_sample: 50_000,
+            end_sample: None,
+            peak_snr_db: 30.0,
+            frames: 4,
+        };
+        assert!(src.bandwidth_hz() * c.width_margin * c.oversample < c.min_rate_hz);
+
+        // Opened once the ring holds the samples the source began in, as
+        // the detector's own latency arranges on a live stream.
+        let mut e = SourceExtractor::new(RATE, 100e6, 40_000, c);
+        let mut blocks = Vec::new();
+        let ev = [SourceEvent::Opened(src)];
+        for (k, chunk) in x.chunks(8192).enumerate() {
+            e.process(chunk, if k == 8 { &ev } else { &[] }, &mut blocks);
+        }
+        let rate = blocks.first().expect("nothing extracted").rate;
+        // The floor, not the width, decided the rate: the integer split
+        // between the two decimation stages can leave it a little above.
+        assert!(rate >= c.min_rate_hz, "rate {rate} under the floor");
+        let all: Vec<C32> = blocks.iter().flat_map(|b| b.samples.iter().copied()).collect();
+        let body = &all[all.len() / 3..all.len() * 2 / 3];
+        // Each tone against its own frequency in the extracted stream. Both
+        // were sent at the same level, so filtering to the measured width
+        // shows up as one of them arriving quieter than the other.
+        let level = |hz: f64| {
+            let mut acc = C32::new(0.0, 0.0);
+            for (i, s) in body.iter().enumerate() {
+                let ph = -std::f64::consts::TAU * hz * i as f64 / rate;
+                acc += s * C32::new(ph.cos() as f32, ph.sin() as f32);
+            }
+            acc.norm() / body.len() as f32
+        };
+        let ratio = 20.0 * (level(4_000.0) / level(0.0)).log10();
+        assert!(ratio > -6.0, "the signal 4 kHz out came through {ratio:.0} dB down");
     }
 
     #[test]

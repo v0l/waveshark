@@ -618,6 +618,10 @@ impl Graph {
     pub fn run(&mut self) -> Result<&[Event]> {
         self.events.clear();
         let n_in = self.bufs[INPUT_SLOT].len() as u64;
+        // What this block is worth in time, from the rate the graph was
+        // negotiated at, for the nodes that are paced by the clock rather
+        // than by a stream.
+        let block_seconds = n_in as f64 / self.specs[INPUT_SLOT].rate.max(1.0);
 
         for oi in 0..self.order.len() {
             let k = self.order[oi];
@@ -672,7 +676,8 @@ impl Graph {
                     scratch_tags,
                     events,
                     scratch_new_tags,
-                );
+                )
+                .with_block_seconds(block_seconds);
                 e.node.process(&ins, scratch_out, &mut ctx)
             };
 

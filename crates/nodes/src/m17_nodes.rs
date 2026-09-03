@@ -17,7 +17,7 @@ use decode::m17::{self, Assembler, DataType, Event};
 use dsp::m17::{Body, Frame, M17Config, M17Demod, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ};
 use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::{media, Decoded};
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
 /// The M17 calling frequency in Region 1, and only the default the node is
@@ -164,17 +164,44 @@ impl M17Node {
     }
 }
 
-impl Simple for M17Node {
+/// Two outputs: what was decoded, and what it sounded like.
+///
+/// The speech is a port rather than something a listener reaches in and
+/// reads, because a receiver's audio path is part of what it is doing and
+/// belongs in the drawing of it. It cannot share the packet port: a packet is
+/// a conclusion that travels once, and this is forty milliseconds of a
+/// conversation that has to reach the mixer while it is still worth hearing.
+const OUT_PACKETS: usize = 0;
+const OUT_VOICE: usize = 1;
+
+impl Node for M17Node {
     fn name(&self) -> &str {
         "m17"
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("m17 reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ {
+        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
             return Err(common::Error::other("m17 needs its channel inside the span"));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
@@ -197,11 +224,19 @@ impl Simple for M17Node {
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         out.rate = 0.0;
-        Ok(out)
+        let mut voice = out.with_kind(PortKind::Voice);
+        // The vocoder's rate, not the graph's: a listener resamples from it.
+        voice.rate = VOICE_HZ;
+        Ok(vec![out, voice])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        let Some(iq) = i.as_iq() else { return Ok(()) };
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        _c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
@@ -247,12 +282,28 @@ impl Simple for M17Node {
         // arrived.
         events.extend(self.assembler.poll(self.samples));
 
+        // The channel is reported whether or not anybody is on it, so a
+        // listener can see the front end is there before it has heard
+        // anything, and so a meter has a row to sit on.
+        let (from, to) = match self.talking() {
+            Some((f, t)) => (Some(f.to_string()), Some(t.to_string())),
+            None => (None, None),
+        };
+        outputs[OUT_VOICE].voice_mut().push(common::Voice {
+            system: "M17",
+            channel_hz: self.channel_hz,
+            to,
+            from,
+            rate: VOICE_HZ,
+            pcm: std::mem::take(&mut self.voice_now),
+        });
+
         let center_hz = self.channel_hz as u64;
         let at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let out = o.packets_mut();
+        let out = outputs[OUT_PACKETS].packets_mut();
         for e in &events {
             self.accepted += 1;
             // The speech goes with the row that ends the transmission, which
@@ -421,9 +472,12 @@ mod tests {
     #[test]
     fn the_node_refuses_a_span_without_its_channel() {
         let mut n = M17Node::default();
-        assert!(n.negotiate(&spec(2_400_000.0, DEFAULT_HZ)).is_ok());
-        assert!(n.negotiate(&spec(2_400_000.0, 145_000_000.0)).is_err());
-        assert!(n.negotiate(&spec(20_000.0, DEFAULT_HZ)).is_err());
+        assert!(n.negotiate(&[spec(2_400_000.0, DEFAULT_HZ)]).is_ok());
+        assert!(n.negotiate(&[spec(2_400_000.0, 145_000_000.0)]).is_err());
+        // A stream that holds the channel is enough, even at the source
+        // extractor's 25 kHz floor; one narrower than the channel is not.
+        assert!(n.negotiate(&[spec(25_000.0, DEFAULT_HZ)]).is_ok());
+        assert!(n.negotiate(&[spec(10_000.0, DEFAULT_HZ)]).is_err());
     }
 
     fn link_setup(dst: &str, src: &str, type_field: u16) -> [u8; 30] {
@@ -458,7 +512,7 @@ mod tests {
     /// transmission carries its speech as well as its bytes.
     fn run(iq: &[common::C32], rate: f64, center: f64) -> Vec<Vec<u8>> {
         let mut node = M17Node::default();
-        node.negotiate(&spec(rate, center)).unwrap();
+        node.negotiate(&[spec(rate, center)]).unwrap();
         let ins = [spec(rate, center)];
         let tags = Vec::new();
         let mut frames = Vec::new();
@@ -469,7 +523,7 @@ mod tests {
                 let mut out = Payload::Packets(Vec::new());
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-                node.process(&input, &mut out, &mut ctx).unwrap();
+                node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
                 if let Payload::Packets(ps) = out {
                     frames.extend(ps.into_iter().filter_map(|p| match p.body {
                         common::PacketBody::Frame(b) => Some(b),
@@ -609,7 +663,7 @@ mod tests {
         let iq = modulate(&symbols, rate, 1_000.0);
 
         let mut node = M17Node::default();
-        node.negotiate(&spec(rate, center)).unwrap();
+        node.negotiate(&[spec(rate, center)]).unwrap();
         let ins = [spec(rate, center)];
         let tags = Vec::new();
         let quiet = vec![common::C32::new(0.0, 0.0); (rate * 0.5) as usize];
@@ -621,7 +675,7 @@ mod tests {
                 let mut out = Payload::Packets(Vec::new());
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-                node.process(&input, &mut out, &mut ctx).unwrap();
+                node.process(&[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
                 live += node.voice_now().len();
                 if let Payload::Packets(ps) = out {
                     for p in ps {

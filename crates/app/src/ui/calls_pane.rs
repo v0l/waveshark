@@ -147,7 +147,11 @@ impl App {
                                 .find(|(k, _)| *k == key)
                                 .map(|(_, v)| *v)
                                 .unwrap_or(0.0);
-                            meter(&p, rect, x, *w, peak);
+                            let r = Rect::from_min_size(
+                                Pos2::new(x, rect.center().y - super::meter::H / 2.0),
+                                Vec2::new(w - 10.0, super::meter::H),
+                            );
+                            super::meter::paint(&p, r, peak);
                         } else {
                             Self::cell(&p, rect, x, *w, text, *col);
                         }
@@ -172,7 +176,7 @@ impl App {
     ///
     /// The opt-outs are remembered separately, so a group turned off does not
     /// come back the next time somebody transmits on it.
-    fn subscribe_new_groups(&mut self, calls: &[Call]) {
+    pub(super) fn subscribe_new_groups(&mut self, calls: &[Call]) {
         let mut added = false;
         for c in calls {
             let rule = Rule::Group(c.to.clone());
@@ -205,25 +209,6 @@ impl App {
 
 /// Which of the columns after the checkboxes is the meter.
 const LEVEL_COL: usize = 4;
-
-/// The level bar in a row, drawn in the cell rather than as a widget: the
-/// whole table is painted, and a bar is two rectangles.
-fn meter(p: &egui::Painter, row: Rect, x: f32, w: f32, peak: f32) {
-    let h = 6.0;
-    let r = Rect::from_min_size(
-        Pos2::new(x, row.center().y - h / 2.0),
-        Vec2::new(w - 10.0, h),
-    );
-    p.rect_filled(r, 1.0, theme::WELL);
-    if peak > 0.001 {
-        let filled = (peak.clamp(0.0, 1.0).sqrt() * r.width()).max(2.0);
-        p.rect_filled(
-            Rect::from_min_size(r.min, Vec2::new(filled, r.height())),
-            1.0,
-            if peak > 0.98 { theme::FAULT } else { CRC_OK },
-        );
-    }
-}
 
 /// One row's text and colours, from the system column onwards.
 fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Color32)> {

@@ -325,6 +325,30 @@ impl Speech {
     }
 }
 
+/// Speech a front end is producing right now, and who is producing it.
+///
+/// The recorded [`Speech`] of a transmission travels with the packet that
+/// ends it. This is the other half, and it cannot travel that way: somebody
+/// listening wants the forty milliseconds that were just decoded, not the
+/// whole over once it is finished. Every front end that carries voice reports
+/// it the same way, so a listener is written once rather than once per
+/// protocol.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Voice {
+    /// The system it belongs to: "M17", "DMR". What a subscription names.
+    pub system: &'static str,
+    /// Centre of the channel it was heard on, in hertz.
+    pub channel_hz: f64,
+    /// The group or party being called, when a transmission is in progress.
+    pub to: Option<String>,
+    /// Who is talking, when the system says.
+    pub from: Option<String>,
+    pub rate: f64,
+    /// Decoded in the last block. Empty when the channel is idle, which is
+    /// still worth reporting: it says the front end is there and listening.
+    pub pcm: Vec<f32>,
+}
+
 /// What the demodulator actually produced.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PacketBody {
