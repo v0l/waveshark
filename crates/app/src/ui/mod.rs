@@ -42,13 +42,12 @@ use crate::dial::Dial;
 use crate::radio::{
     ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
 };
-use burst::*;
-use settings::{RemoteEdit, RemoteKind};
-use state::{Channel, Logged, MapView};
-use settings_rows::{mhz_field, ScannerRow};
-use widgets::{bin_hint, cog, cog_rect, hint, modal_title, row};
 use crate::theme::{self, legend, value};
-use widgets::{Fader, Squelch, Vu};
+use burst::*;
+use settings::RemoteEdit;
+use settings_rows::{mhz_field, ScannerRow};
+use state::{Channel, Logged, MapView};
+use widgets::{bin_hint, cog, cog_rect, hint, modal_title, row, Fader, Squelch, Vu};
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
 use egui::{Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Vec2};
