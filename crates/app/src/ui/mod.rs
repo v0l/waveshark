@@ -2278,6 +2278,11 @@ impl App {
         self.open = Some(Settings::Scanners);
     }
 
+    /// Open setup: language, country, band plan, position, cached data.
+    pub fn show_setup(&mut self) {
+        self.open = Some(Settings::App);
+    }
+
     pub fn show_map(&mut self) {
         self.view = View::Map;
     }

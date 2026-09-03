@@ -11,7 +11,7 @@
 //! binary, which made the release the only way to fix a wrong frequency and
 //! made a receiver anywhere else stare at an empty map.
 
-use crate::cache::{Cache, Error, Source};
+use crate::cache::{Cache, Error, Source, When};
 use std::time::Duration;
 
 /// OurAirports publishes a daily rebuild, so a check a day apart cannot miss
@@ -119,11 +119,11 @@ pub fn load(cache: &Cache) -> Result<Vec<Airport>, Error> {
 
 /// Check both files and reparse if either changed. `None` means the cached
 /// airports are still current.
-pub fn refresh(cache: &Cache) -> Result<Option<Vec<Airport>>, Error> {
+pub fn refresh(cache: &Cache, when: When) -> Result<Option<Vec<Airport>>, Error> {
     let (asrc, fsrc) = (airports_source(), frequencies_source());
     // Both are asked before either result is used: a changed airport list
     // with last week's frequencies is a worse state than either alone.
-    let changed = cache.refresh(&asrc)?.is_some() | cache.refresh(&fsrc)?.is_some();
+    let changed = cache.refresh(&asrc, when)?.is_some() | cache.refresh(&fsrc, when)?.is_some();
     if !changed {
         return Ok(None);
     }

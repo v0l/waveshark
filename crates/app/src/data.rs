@@ -1,4 +1,4 @@
-//! The cached reference datasets, and the thread that keeps them current.
+//! The cached reference datasets, and the threads that keep them current.
 //!
 //! `datasets` knows how to fetch and parse; this decides when, and holds what
 //! came back where a frame can read it without waiting. Nothing here blocks
@@ -12,26 +12,296 @@
 
 use datasets::airports::Airport;
 use datasets::radioid::{Repeater, Users};
-use datasets::Cache;
+use datasets::{Cache, When};
 use parking_lot::RwLock;
-use std::sync::{Arc, OnceLock};
-
-/// The airports the map draws.
-///
-/// Handed out as `&'static [Airport]` because a tooltip borrows an airport
-/// across a frame and the alternative is cloning the row on every hover. The
-/// snapshot is leaked rather than freed: it is replaced at most once per run,
-/// when a refresh finds a new file, and a reader holding the old one has no
-/// way to say when it is done with it.
-static AIRPORTS: RwLock<&'static [Airport]> = RwLock::new(&[]);
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The zoom at which airports first appear on the map. Below this the view is
 /// wide enough that every marker would be a blob under a handful of aircraft,
 /// and the range rings already say where the interesting things are.
 pub const SHOW_ZOOM: f64 = 9.0;
 
+/// The airports the map draws.
+///
+/// Handed out as `&'static [Airport]` because a tooltip borrows an airport
+/// across a frame and the alternative is cloning the row on every hover. The
+/// snapshot is leaked rather than freed: it is replaced only when a refresh
+/// finds a new file, and a reader holding the old one has no way to say when
+/// it is done with it.
+static AIRPORTS: RwLock<&'static [Airport]> = RwLock::new(&[]);
+
 pub fn airports() -> &'static [Airport] {
     *AIRPORTS.read()
+}
+
+static USERS: RwLock<Option<Arc<Users>>> = RwLock::new(None);
+static NXDN: RwLock<Option<Arc<Users>>> = RwLock::new(None);
+static REPEATERS: RwLock<Option<Arc<Vec<Repeater>>>> = RwLock::new(None);
+
+/// The DMR ID registry: what the number in a DMR frame belongs to.
+///
+/// Asking starts the load and returns nothing; the answer is there a few
+/// seconds later. Nothing decodes DMR yet, so this and the two below have no
+/// caller in the tree: they are the half of the lookup that does not depend
+/// on the decoder.
+#[allow(dead_code)]
+pub fn dmr_users() -> Option<Arc<Users>> {
+    on_demand(Which::DmrIds, &USERS)
+}
+
+/// The NXDN ID registry, the same question for NXDN.
+#[allow(dead_code)]
+pub fn nxdn_users() -> Option<Arc<Users>> {
+    on_demand(Which::NxdnIds, &NXDN)
+}
+
+/// Registered DMR repeaters, with their output frequency and colour code.
+#[allow(dead_code)]
+pub fn dmr_repeaters() -> Option<Arc<Vec<Repeater>>> {
+    on_demand(Which::Repeaters, &REPEATERS)
+}
+
+fn on_demand<T>(which: Which, held: &'static RwLock<Option<Arc<T>>>) -> Option<Arc<T>> {
+    if let Some(v) = held.read().clone() {
+        return Some(v);
+    }
+    // A dataset that failed to download is not going to download on the next
+    // frame either, so the attempt is made once and then only on request.
+    if !which.attempted() {
+        load(which, When::IfDue);
+    }
+    None
+}
+
+/// One cached dataset, as the settings pane lists them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Which {
+    Airports,
+    Repeaters,
+    DmrIds,
+    NxdnIds,
+}
+
+impl Which {
+    pub const ALL: [Which; 4] = [Which::Airports, Which::Repeaters, Which::DmrIds, Which::NxdnIds];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Which::Airports => "Airports",
+            Which::Repeaters => "DMR repeaters",
+            Which::DmrIds => "DMR IDs",
+            Which::NxdnIds => "NXDN IDs",
+        }
+    }
+
+    /// Where it comes from, for the line under the name.
+    pub fn publisher(self) -> &'static str {
+        match self {
+            Which::Airports => "ourairports.com",
+            _ => "radioid.net",
+        }
+    }
+
+    /// What the dataset is for, so the pane says why it is being downloaded.
+    pub fn about(self) -> &'static str {
+        match self {
+            Which::Airports => {
+                "Airfields and their tower, ground and ATIS frequencies, drawn on the map \
+                 under the aircraft."
+            }
+            Which::Repeaters => {
+                "Registered DMR repeaters with their output frequency, offset and colour code."
+            }
+            Which::DmrIds => {
+                "Every registered DMR ID. A digital voice frame carries a number, and this \
+                 is what turns it into a callsign without asking anybody over the network."
+            }
+            Which::NxdnIds => "The same registry for NXDN.",
+        }
+    }
+
+    fn sources(self) -> Vec<datasets::Source> {
+        use datasets::{airports, radioid};
+        match self {
+            Which::Airports => vec![airports::airports_source(), airports::frequencies_source()],
+            Which::Repeaters => vec![radioid::repeaters_source()],
+            Which::DmrIds => vec![radioid::users_source()],
+            Which::NxdnIds => vec![radioid::nxdn_source()],
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
+    }
+
+    /// How many rows are held, or `None` when it is not loaded.
+    fn rows(self) -> Option<usize> {
+        match self {
+            Which::Airports => match airports().len() {
+                0 => None,
+                n => Some(n),
+            },
+            Which::Repeaters => REPEATERS.read().as_ref().map(|r| r.len()),
+            Which::DmrIds => USERS.read().as_ref().map(|u| u.len()),
+            Which::NxdnIds => NXDN.read().as_ref().map(|u| u.len()),
+        }
+    }
+
+    fn attempted(self) -> bool {
+        WORK[self.index()].attempted.load(Ordering::Acquire)
+    }
+}
+
+/// What a load or refresh is doing, for the settings pane to draw. One slot
+/// per dataset, in [`Which::ALL`] order.
+struct Work {
+    busy: AtomicBool,
+    attempted: AtomicBool,
+    error: RwLock<Option<String>>,
+}
+
+impl Work {
+    const fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            attempted: AtomicBool::new(false),
+            error: RwLock::new(None),
+        }
+    }
+}
+
+static WORK: [Work; 4] = [Work::new(), Work::new(), Work::new(), Work::new()];
+
+/// A dataset as the settings pane shows it: what is held, how big it is on
+/// disk, when it was last checked, and whatever went wrong last time.
+pub struct Row {
+    pub which: Which,
+    pub rows: Option<usize>,
+    /// Bytes on disk across the dataset's files. Zero when nothing is cached.
+    pub bytes: u64,
+    /// Seconds since the last successful check, or `None` if never checked.
+    pub checked_ago: Option<u64>,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+pub fn status() -> Vec<Row> {
+    let cache = cache();
+    Which::ALL
+        .into_iter()
+        .map(|which| {
+            let mut bytes = 0;
+            let mut oldest: Option<u64> = None;
+            let mut present = true;
+            for src in which.sources() {
+                let s = cache.map(|c| c.status(&src)).unwrap_or_default();
+                match s.bytes {
+                    Some(b) => bytes += b,
+                    None => present = false,
+                }
+                // A dataset of two files is as fresh as its stalest half. A
+                // stamp of zero is a clock that was not readable when the
+                // file landed, which is not a check in 1970.
+                if let Some(c) = s.checked.filter(|c| *c > 0) {
+                    oldest = Some(oldest.map_or(c, |o: u64| o.min(c)));
+                }
+            }
+            let w = &WORK[which.index()];
+            Row {
+                which,
+                rows: which.rows(),
+                bytes,
+                checked_ago: present.then(|| oldest.map(|c| now().saturating_sub(c))).flatten(),
+                busy: w.busy.load(Ordering::Acquire),
+                error: w.error.read().clone(),
+            }
+        })
+        .collect()
+}
+
+pub fn cache_dir() -> Option<PathBuf> {
+    cache().map(|c| c.dir().to_path_buf())
+}
+
+/// Check now, whatever the age of the last check, and reload what changed.
+/// This is the refresh button.
+pub fn refresh(which: Which) {
+    load(which, When::Now);
+}
+
+/// Load or refresh one dataset on a thread of its own, so a slow 85 MB
+/// download does not hold up the three small ones or the frame.
+fn load(which: Which, when: When) {
+    let w = &WORK[which.index()];
+    if w.busy.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    w.attempted.store(true, Ordering::Release);
+    let name = which.label();
+    let started = std::thread::Builder::new()
+        .name(format!("dataset-{}", which.index()))
+        .spawn(move || {
+            let outcome = cache().map_or_else(
+                || Err("no cache directory".to_string()),
+                |c| work(which, c, when).map_err(|e| e.to_string()),
+            );
+            match &outcome {
+                Ok(()) => tracing::info!(dataset = name, "dataset ready"),
+                Err(e) => tracing::warn!(dataset = name, "dataset unavailable: {e}"),
+            }
+            *WORK[which.index()].error.write() = outcome.err();
+            WORK[which.index()].busy.store(false, Ordering::Release);
+        })
+        .is_ok();
+    if !started {
+        w.busy.store(false, Ordering::Release);
+    }
+}
+
+/// Read what is cached, then ask whether it changed. On a cold cache the
+/// first step is the download and the second answers 304 straight away; on a
+/// warm one the first step is a file read.
+fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> {
+    use datasets::{airports, radioid};
+    match which {
+        Which::Airports => {
+            if airports().is_empty() {
+                publish_airports(airports::load(cache)?);
+            }
+            if let Some(a) = airports::refresh(cache, when)? {
+                publish_airports(a);
+            }
+        }
+        Which::Repeaters => {
+            if REPEATERS.read().is_none() {
+                *REPEATERS.write() = Some(Arc::new(radioid::load_repeaters(cache)?));
+            }
+            if let Some(r) = radioid::refresh_repeaters(cache, when)? {
+                *REPEATERS.write() = Some(Arc::new(r));
+            }
+        }
+        Which::DmrIds => {
+            if USERS.read().is_none() {
+                *USERS.write() = Some(Arc::new(radioid::load_users(cache)?));
+            }
+            if let Some(u) = radioid::refresh_users(cache, when)? {
+                *USERS.write() = Some(Arc::new(u));
+            }
+        }
+        Which::NxdnIds => {
+            if NXDN.read().is_none() {
+                *NXDN.write() = Some(Arc::new(radioid::load_nxdn(cache)?));
+            }
+            if let Some(u) = radioid::refresh_nxdn(cache, when)? {
+                *NXDN.write() = Some(Arc::new(u));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn publish_airports(v: Vec<Airport>) {
@@ -52,88 +322,14 @@ fn cache() -> Option<&'static Cache> {
         .as_ref()
 }
 
-/// Load what the map needs, then ask whether it changed. Both happen on one
-/// background thread: the first call is a download on a cold cache and a file
-/// read on a warm one, and the second is a conditional request that usually
-/// answers 304 and costs nothing.
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Load what the map needs. The registries are left alone: they are large,
+/// and nothing has asked them a question yet.
 pub fn start() {
-    std::thread::Builder::new()
-        .name("datasets".into())
-        .spawn(|| {
-            let Some(cache) = cache() else { return };
-            match datasets::airports::load(cache) {
-                Ok(a) => publish_airports(a),
-                Err(e) => tracing::warn!("airports unavailable: {e}"),
-            }
-            match datasets::airports::refresh(cache) {
-                Ok(Some(a)) => publish_airports(a),
-                Ok(None) => {}
-                Err(e) => tracing::warn!("airports not refreshed: {e}"),
-            }
-        })
-        .ok();
-}
-
-/// A dataset loaded the first time something asks for it, on a thread of its
-/// own, and then held. Reading it while it loads gives `None`, which is the
-/// same answer as a machine with no network: a caller that cannot cope with
-/// that has no business asking.
-struct Lazy<T> {
-    held: RwLock<Option<Arc<T>>>,
-    loading: std::sync::atomic::AtomicBool,
-}
-
-impl<T: Send + Sync + 'static> Lazy<T> {
-    const fn new() -> Self {
-        Self { held: RwLock::new(None), loading: std::sync::atomic::AtomicBool::new(false) }
-    }
-
-    fn get(&'static self, what: &'static str, load: fn(&Cache) -> Result<T, datasets::Error>) -> Option<Arc<T>> {
-        if let Some(v) = self.held.read().clone() {
-            return Some(v);
-        }
-        if self.loading.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            return None;
-        }
-        std::thread::Builder::new()
-            .name(format!("dataset-{what}"))
-            .spawn(move || {
-                let Some(cache) = cache() else { return };
-                match load(cache) {
-                    Ok(v) => *self.held.write() = Some(Arc::new(v)),
-                    Err(e) => tracing::warn!("{what} unavailable: {e}"),
-                }
-                // Left set on failure: a dump that would not download is not
-                // going to download on the next frame either, and retrying
-                // per frame would hammer the registry.
-            })
-            .ok();
-        None
-    }
-}
-
-static USERS: Lazy<Users> = Lazy::new();
-static NXDN: Lazy<Users> = Lazy::new();
-static REPEATERS: Lazy<Vec<Repeater>> = Lazy::new();
-
-/// The DMR ID registry: what the number in a DMR frame belongs to. Nothing
-/// decodes DMR yet, so these three have no caller in the tree; they are the
-/// half of the lookup that does not depend on the decoder.
-#[allow(dead_code)]
-pub fn dmr_users() -> Option<Arc<Users>> {
-    USERS.get("dmr-users", datasets::radioid::load_users)
-}
-
-/// The NXDN ID registry, the same question for NXDN.
-#[allow(dead_code)]
-pub fn nxdn_users() -> Option<Arc<Users>> {
-    NXDN.get("nxdn-users", datasets::radioid::load_nxdn)
-}
-
-/// Registered DMR repeaters, with their output frequency and colour code.
-#[allow(dead_code)]
-pub fn dmr_repeaters() -> Option<Arc<Vec<Repeater>>> {
-    REPEATERS.get("dmr-repeaters", datasets::radioid::load_repeaters)
+    load(Which::Airports, When::IfDue);
 }
 
 /// Download or revalidate every dataset and report what happened, for
@@ -149,27 +345,31 @@ pub fn fetch_all() {
     // the count reported is of the file after any update rather than before.
     each(
         "airports",
-        datasets::airports::refresh(&cache).map(|u| u.is_some()),
+        datasets::airports::refresh(&cache, When::Now).map(|u| u.is_some()),
         datasets::airports::load(&cache).map(|a| a.len()),
     );
     each(
         "dmr repeaters",
-        datasets::radioid::refresh_repeaters(&cache).map(|u| u.is_some()),
+        datasets::radioid::refresh_repeaters(&cache, When::Now).map(|u| u.is_some()),
         datasets::radioid::load_repeaters(&cache).map(|r| r.len()),
     );
     each(
         "nxdn ids",
-        datasets::radioid::refresh_nxdn(&cache).map(|u| u.is_some()),
+        datasets::radioid::refresh_nxdn(&cache, When::Now).map(|u| u.is_some()),
         datasets::radioid::load_nxdn(&cache).map(|u| u.len()),
     );
     each(
         "dmr ids",
-        datasets::radioid::refresh_users(&cache).map(|u| u.is_some()),
+        datasets::radioid::refresh_users(&cache, When::Now).map(|u| u.is_some()),
         datasets::radioid::load_users(&cache).map(|u| u.len()),
     );
 }
 
-fn each(what: &str, refreshed: Result<bool, datasets::Error>, count: Result<usize, datasets::Error>) {
+fn each(
+    what: &str,
+    refreshed: Result<bool, datasets::Error>,
+    count: Result<usize, datasets::Error>,
+) {
     let state = match refreshed {
         Ok(true) => "updated".to_string(),
         Ok(false) => "current".to_string(),
@@ -178,5 +378,55 @@ fn each(what: &str, refreshed: Result<bool, datasets::Error>, count: Result<usiz
     match count {
         Ok(n) => println!("{what}: {n}, {state}"),
         Err(e) => println!("{what}: {e}"),
+    }
+}
+
+/// Sizes in the settings pane, where a byte count is noise and a rounded
+/// number is the whole point.
+pub fn fmt_bytes(b: u64) -> String {
+    match b {
+        0 => "—".into(),
+        b if b < 1 << 20 => format!("{} kB", b >> 10),
+        b => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+    }
+}
+
+/// How long ago, in the coarsest unit that still says something.
+pub fn fmt_ago(secs: u64) -> String {
+    match secs {
+        s if s < 90 => "just now".into(),
+        s if s < 5400 => format!("{} min ago", s / 60),
+        s if s < 172_800 => format!("{} h ago", s / 3600),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_round_to_something_readable() {
+        assert_eq!(fmt_bytes(0), "—");
+        assert_eq!(fmt_bytes(930_667), "908 kB");
+        assert_eq!(fmt_bytes(84_506_836), "80.6 MB");
+    }
+
+    #[test]
+    fn ages_read_as_a_person_would_say_them() {
+        assert_eq!(fmt_ago(5), "just now");
+        assert_eq!(fmt_ago(600), "10 min ago");
+        assert_eq!(fmt_ago(7200), "2 h ago");
+        assert_eq!(fmt_ago(400_000), "4 days ago");
+    }
+
+    #[test]
+    fn every_dataset_has_at_least_one_source_and_its_own_slot() {
+        for w in Which::ALL {
+            assert!(!w.sources().is_empty(), "{} has no source", w.label());
+        }
+        let idx: Vec<usize> = Which::ALL.iter().map(|w| w.index()).collect();
+        assert_eq!(idx, [0, 1, 2, 3], "slot indices must be distinct");
+        assert_eq!(WORK.len(), Which::ALL.len());
     }
 }

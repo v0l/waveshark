@@ -20,7 +20,8 @@ impl App {
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(match which {
-                    Settings::Radio | Settings::PacketLog | Settings::App => 420.0,
+                    Settings::Radio | Settings::PacketLog => 420.0,
+                    Settings::App => 520.0,
                     Settings::Scanners => 560.0,
                     _ => 320.0,
                 });
@@ -538,6 +539,96 @@ impl App {
             self.station_edit = None;
         }
         hint(ui, t("settings.position.help"));
+        ui.add_space(10.0);
+
+        ui.separator();
+        ui.add_space(6.0);
+        Self::data_settings(ui);
+    }
+
+    /// What is in the dataset cache, and the button that goes and asks.
+    ///
+    /// The airports, repeaters and ID registries are somebody else's files
+    /// kept on this machine, so the questions an operator has about them are
+    /// how old the copy is, how much disc it is using, and whether the last
+    /// attempt to update it worked. Those are the three columns.
+    fn data_settings(ui: &mut egui::Ui) {
+        let t = crate::i18n::t;
+        ui.label(legend(t("settings.data")));
+        ui.add_space(4.0);
+
+        let rows = crate::data::status();
+        let busy = rows.iter().any(|r| r.busy);
+        for r in &rows {
+            let frame = egui::Frame::NONE
+                .fill(theme::WELL)
+                .stroke(Stroke::new(1.0, theme::ETCH))
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .corner_radius(2);
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(value(r.which.label()).size(13.0));
+                    ui.label(egui::RichText::new(r.which.publisher()).small().color(theme::LEGEND));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Disabled rather than hidden while it works: a
+                        // button that vanishes under the pointer is a button
+                        // that gets pressed twice.
+                        let label = if r.busy { "CHECKING" } else { t("ui.refresh") };
+                        if ui
+                            .add_enabled(!r.busy, egui::Button::new(legend(label)))
+                            .on_hover_text(r.which.about())
+                            .clicked()
+                        {
+                            crate::data::refresh(r.which);
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(legend("held"));
+                    ui.label(match r.rows {
+                        Some(n) => value(format!("{n} rows")).size(12.0),
+                        // Cached but not parsed is the ordinary state for the
+                        // registries, which are read the first time something
+                        // asks them a question.
+                        None if r.bytes > 0 => value("on disc").size(12.0),
+                        None => value("not downloaded").size(12.0),
+                    });
+                    ui.add_space(10.0);
+                    ui.label(legend("size"));
+                    ui.label(value(crate::data::fmt_bytes(r.bytes)).size(12.0));
+                    ui.add_space(10.0);
+                    ui.label(legend("checked"));
+                    ui.label(match r.checked_ago {
+                        Some(s) => value(crate::data::fmt_ago(s)).size(12.0),
+                        None => value("never").size(12.0),
+                    });
+                });
+                if let Some(e) = &r.error {
+                    ui.label(egui::RichText::new(e).small().color(theme::FAULT));
+                }
+            });
+            ui.add_space(4.0);
+        }
+
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all")))).clicked() {
+                for w in crate::data::Which::ALL {
+                    crate::data::refresh(w);
+                }
+            }
+            if let Some(dir) = crate::data::cache_dir() {
+                ui.label(
+                    egui::RichText::new(dir.display().to_string()).small().color(theme::LEGEND),
+                );
+            }
+        });
+        hint(ui, t("settings.data.help"));
+        // A check runs on its own thread and finishes without an event, so
+        // the pane has to come back and look, or a finished download stays
+        // reading CHECKING until the pointer moves.
+        if busy {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+        }
     }
 
     /// Create a radio that is not on this machine.

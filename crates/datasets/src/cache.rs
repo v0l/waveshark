@@ -189,6 +189,29 @@ struct Meta {
     checked: u64,
 }
 
+/// Whether a refresh is allowed to skip the round trip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum When {
+    /// Only if the last check is older than [`Source::max_age`]. What a
+    /// startup does.
+    IfDue,
+    /// Ask now regardless. What a person pressing refresh means.
+    Now,
+}
+
+/// What the cache holds for one source, for a view that reports it.
+#[derive(Clone, Debug, Default)]
+pub struct Status {
+    pub origin: String,
+    /// Absent when nothing complete is cached.
+    pub bytes: Option<u64>,
+    /// Unix seconds at the last successful check, new bytes or not.
+    pub checked: Option<u64>,
+    /// What the far end called this version, for a view that wants to show
+    /// which one is held.
+    pub last_modified: Option<String>,
+}
+
 /// The cached files themselves, under one directory.
 #[derive(Clone)]
 pub struct Cache {
@@ -265,14 +288,26 @@ impl Cache {
         std::fs::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))
     }
 
+    /// What is held for this source, and when it was last checked.
+    pub fn status(&self, src: &Source) -> Status {
+        let meta = self.meta(src);
+        Status {
+            origin: src.from.origin(),
+            bytes: meta.as_ref().map(|m| m.len),
+            checked: meta.as_ref().map(|m| m.checked),
+            last_modified: meta.and_then(|m| m.seen.last_modified),
+        }
+    }
+
     /// Ask whether the file changed, and return its path if it did.
     ///
     /// `None` means there is nothing new to do: either the far end said so,
-    /// or the last check was more recent than [`Source::max_age`].
-    pub fn refresh(&self, src: &Source) -> Result<Option<PathBuf>, Error> {
+    /// or the check was not due and `when` allowed skipping it.
+    pub fn refresh(&self, src: &Source, when: When) -> Result<Option<PathBuf>, Error> {
         let meta = self.meta(src);
         if let Some(m) = &meta {
-            if now().saturating_sub(m.checked) < src.max_age.as_secs() && !m.seen.is_empty() {
+            let due = now().saturating_sub(m.checked) >= src.max_age.as_secs();
+            if when == When::IfDue && !due && !m.seen.is_empty() {
                 return Ok(None);
             }
         }
@@ -386,8 +421,22 @@ mod tests {
         assert_eq!(cache.read(&src).unwrap(), b"one");
         assert_eq!(from.fetches.load(Ordering::Relaxed), 1);
         // And inside max_age a refresh does not even revalidate.
-        assert!(cache.refresh(&src).unwrap().is_none());
+        assert!(cache.refresh(&src, When::IfDue).unwrap().is_none());
         assert_eq!(from.fetches.load(Ordering::Relaxed), 1);
+        // Unless somebody asked for it, which is what the button does.
+        assert!(cache.refresh(&src, When::Now).unwrap().is_none());
+        assert_eq!(from.fetches.load(Ordering::Relaxed), 2, "a forced check must go out");
+    }
+
+    #[test]
+    fn a_status_says_what_is_held_and_when_it_was_checked() {
+        let dir = tmpdir("status");
+        let (cache, src, _) = counted(&dir, Duration::from_secs(3600));
+        assert_eq!(cache.status(&src).bytes, None, "nothing cached yet");
+        cache.read(&src).unwrap();
+        let s = cache.status(&src);
+        assert_eq!(s.bytes, Some(3));
+        assert!(s.checked.is_some_and(|c| c > 0));
     }
 
     #[test]
@@ -396,10 +445,10 @@ mod tests {
         let (cache, src, from) = counted(&dir, Duration::ZERO);
         assert_eq!(cache.read(&src).unwrap(), b"one");
         // Same tag: revalidated, no new bytes.
-        assert!(cache.refresh(&src).unwrap().is_none());
+        assert!(cache.refresh(&src, When::IfDue).unwrap().is_none());
         *from.body.lock() = b"two".to_vec();
         *from.tag.lock() = "v2".into();
-        assert!(cache.refresh(&src).unwrap().is_some());
+        assert!(cache.refresh(&src, When::IfDue).unwrap().is_some());
         assert_eq!(cache.read(&src).unwrap(), b"two");
     }
 
@@ -428,7 +477,7 @@ mod tests {
         let (cache, src, _) = counted(&dir, Duration::ZERO);
         cache.read(&src).unwrap();
         let broken = Source { name: src.name, from: Arc::new(Broken), max_age: Duration::ZERO };
-        assert!(cache.refresh(&broken).is_err());
+        assert!(cache.refresh(&broken, When::Now).is_err());
         assert_eq!(cache.read(&src).unwrap(), b"one");
     }
 
@@ -444,11 +493,11 @@ mod tests {
             max_age: Duration::ZERO,
         };
         assert_eq!(cache.read(&src).unwrap(), b"hello");
-        assert!(cache.refresh(&src).unwrap().is_none());
+        assert!(cache.refresh(&src, When::Now).unwrap().is_none());
         // Rewriting moves the mtime, which is this source's validator.
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&src_path, b"goodbye").unwrap();
-        assert!(cache.refresh(&src).unwrap().is_some());
+        assert!(cache.refresh(&src, When::Now).unwrap().is_some());
         assert_eq!(cache.read(&src).unwrap(), b"goodbye");
     }
 }

@@ -101,6 +101,11 @@ const EN: &[(&str, &str)] = &[
         "settings.country.help",
         "Sets the band plan to the one that applies here, and gives the map somewhere to start. Both stay changeable afterwards.",
     ),
+    ("settings.data", "Cached data"),
+    (
+        "settings.data.help",
+        "Airports, repeaters and ID registries are published elsewhere and kept here so the receiver works without a connection. They are checked once a day; refresh asks now. Deleting the folder loses nothing that is yours.",
+    ),
     ("settings.language", "Language"),
     (
         "settings.language.help",
@@ -120,6 +125,8 @@ const EN: &[(&str, &str)] = &[
     ("ui.log", "Packet log"),
     ("ui.manual_locked", "The chain is in manual mode, so this no longer rebuilds it"),
     ("ui.radio", "radio"),
+    ("ui.refresh", "REFRESH"),
+    ("ui.refresh_all", "REFRESH ALL"),
     ("ui.scan", "Scanners: which decoder runs where"),
     ("ui.set", "SET"),
     ("ui.settings", "Radio controls: gain, switches, correction"),

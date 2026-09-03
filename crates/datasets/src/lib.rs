@@ -12,4 +12,4 @@ pub mod airports;
 pub mod cache;
 pub mod radioid;
 
-pub use cache::{Cache, Error, Source};
+pub use cache::{Cache, Error, Source, Status, When};

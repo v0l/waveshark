@@ -652,6 +652,10 @@ struct Args {
     #[arg(long)]
     scanners: bool,
 
+    /// Open setup, which is where the cached datasets are listed
+    #[arg(long)]
+    setup: bool,
+
     /// Write every burst that decodes into this directory
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "captures")]
     record: Option<PathBuf>,
@@ -936,6 +940,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.scanners {
                 app.show_scanner_settings();
+            }
+            if args.setup {
+                app.show_setup();
             }
             if let Some(mhz) = args.center {
                 app.set_center(mhz);

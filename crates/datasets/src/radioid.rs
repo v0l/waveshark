@@ -11,7 +11,7 @@
 //! allocation per entry for a table that is built once, read often and never
 //! changed.
 
-use crate::cache::{Cache, Error, Source};
+use crate::cache::{Cache, Error, Source, When};
 use std::path::Path;
 use std::time::Duration;
 
@@ -99,9 +99,9 @@ pub fn load_repeaters(cache: &Cache) -> Result<Vec<Repeater>, Error> {
     parse_repeaters(&cache.read(&repeaters_source())?)
 }
 
-pub fn refresh_repeaters(cache: &Cache) -> Result<Option<Vec<Repeater>>, Error> {
+pub fn refresh_repeaters(cache: &Cache, when: When) -> Result<Option<Vec<Repeater>>, Error> {
     let src = repeaters_source();
-    match cache.refresh(&src)? {
+    match cache.refresh(&src, when)? {
         None => Ok(None),
         Some(_) => parse_repeaters(&cache.read(&src)?).map(Some),
     }
@@ -113,8 +113,8 @@ pub fn load_users(cache: &Cache) -> Result<Users, Error> {
     parse_users(&cache.get(&users_source())?)
 }
 
-pub fn refresh_users(cache: &Cache) -> Result<Option<Users>, Error> {
-    match cache.refresh(&users_source())? {
+pub fn refresh_users(cache: &Cache, when: When) -> Result<Option<Users>, Error> {
+    match cache.refresh(&users_source(), when)? {
         None => Ok(None),
         Some(path) => parse_users(&path).map(Some),
     }
@@ -124,9 +124,9 @@ pub fn load_nxdn(cache: &Cache) -> Result<Users, Error> {
     parse_nxdn(&cache.read(&nxdn_source())?)
 }
 
-pub fn refresh_nxdn(cache: &Cache) -> Result<Option<Users>, Error> {
+pub fn refresh_nxdn(cache: &Cache, when: When) -> Result<Option<Users>, Error> {
     let src = nxdn_source();
-    match cache.refresh(&src)? {
+    match cache.refresh(&src, when)? {
         None => Ok(None),
         Some(_) => parse_nxdn(&cache.read(&src)?).map(Some),
     }
