@@ -74,6 +74,22 @@ const TRAFFIC_CONFIRM: u32 = 2;
 /// worth starting: three leaves no candidate over the whole register space.
 const COLLISION_QUORUM: usize = 3;
 
+/// Where the TEA1 key search is for a cell, so the manager can show it
+/// happening rather than only its result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Nothing gathered yet, or the cell is clear.
+    Idle,
+    /// Gathering retransmissions of one message: `have` of the quorum a
+    /// search needs, across `messages` distinct messages being watched.
+    Gathering { have: usize, need: usize, messages: usize },
+    /// A register search is running, on the GPU or across CPU threads.
+    Searching { gpu: bool },
+    /// The search swept the whole space and found nothing: not a TEA1 key,
+    /// or the wrong hyperframe. `dropped` messages have been given up on.
+    Exhausted { dropped: usize },
+}
+
 /// What a TETRA front end reports about the cell it hears and its key, for a
 /// key manager to show and act on.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +105,8 @@ pub struct KeyStatus {
     pub key: Option<Key>,
     /// Timestamps caught re-using one keystream, waiting for a crib.
     pub reuse_pairs: usize,
+    /// Where the key search is: gathering, running, or spent.
+    pub recovery: Recovery,
 }
 
 /// A TEA1 register search in flight, on the GPU or the CPU.
@@ -263,7 +281,26 @@ impl TetraNode {
             aie: self.last_aie,
             key: self.keys.get(&cell.colour).copied(),
             reuse_pairs: self.reuse_pairs.len(),
+            recovery: self.recovery_phase(),
         })
+    }
+
+    /// Where the key search is, for the manager to show.
+    fn recovery_phase(&self) -> Recovery {
+        if let Some((_, _, job)) = &self.recovery {
+            return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_)) };
+        }
+        if !self.dead_sigs.is_empty() && self.collisions.is_empty() {
+            return Recovery::Exhausted { dropped: self.dead_sigs.len() };
+        }
+        if let Some(most) = self.collisions.values().map(Vec::len).max() {
+            return Recovery::Gathering {
+                have: most,
+                need: COLLISION_QUORUM,
+                messages: self.collisions.len(),
+            };
+        }
+        Recovery::Idle
     }
 
     pub fn channel_hz(&self) -> f64 {

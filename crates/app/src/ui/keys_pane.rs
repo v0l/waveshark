@@ -1,18 +1,24 @@
-//! The key manager: the cells heard, their encryption, and the keys held.
+//! The key manager: the enciphered channels heard, and the keys held.
 //!
-//! A row per cell the receiver has heard a SYNC PDU from, showing its
-//! identity, whether its traffic is enciphered, and the key in force: none,
-//! one an operator typed, or one the receiver recovered from the air. A cell
-//! with no key and enciphered traffic gets a box to type a key into; entering
-//! one installs it on the front ends and writes it to disk, so it is there
-//! the next time the network is heard. A recovered key appears in the same
-//! list, marked as recovered, and is persisted the same way.
+//! A row per channel whose traffic is enciphered, showing what it is, the
+//! encryption in force, and the key: none, one an operator typed, or one the
+//! receiver recovered from the air. A channel with no key gets a box to type
+//! one into; entering it installs the key on the front ends and writes it to
+//! disk, so it is there the next time the network is heard. A recovered key
+//! appears in the same list, marked as recovered, and is persisted the same
+//! way. While a recovery runs, the row shows where it is: gathering the
+//! retransmissions it needs, searching, or spent.
+//!
+//! TETRA is the one enciphered mode read today, so the identity a row shows
+//! is a cell; the view is written to hold any enciphered channel a front end
+//! reports, and reads as one, so a mode added later joins it without this
+//! file changing.
 
 use super::state::KeysState;
 use super::*;
 use crate::keystore::{CellId, Origin};
 use decode::tea::Key;
-use nodes::tetra_nodes::KeyStatus;
+use nodes::tetra_nodes::{KeyStatus, Recovery};
 
 /// The key manager, over the live cell status and the stored keys.
 pub(super) struct Keys<'a> {
@@ -28,9 +34,9 @@ impl Keys<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            ui.label(legend("tetra keys"));
+            ui.label(legend("encryption keys"));
             let enc = live.iter().filter(|s| s.aie != 0).count();
-            ui.label(value(format!("{} cells, {enc} enciphered", live.len())).size(11.0));
+            ui.label(value(format!("{} channels, {enc} enciphered", live.len())).size(11.0));
         });
         ui.add_space(6.0);
 
@@ -39,9 +45,9 @@ impl Keys<'_> {
             ui.vertical_centered(|ui| {
                 hint(
                     ui,
-                    "No TETRA cell heard yet. Tune a downlink and its identity appears here; \
-                     an enciphered cell gets a box to enter a key, and a TEA1 key the receiver \
-                     recovers from traffic shows up on its own.",
+                    "No enciphered channel heard yet. Tune one and it appears here; a channel \
+                     with no key gets a box to enter one, and a key the receiver recovers from \
+                     traffic shows up on its own.",
                 );
             });
             return;
@@ -87,6 +93,14 @@ impl Keys<'_> {
 
                 if s.reuse_pairs > 0 {
                     ui.label(legend(&format!("{} reuse", s.reuse_pairs)).size(11.0));
+                }
+
+                // The key search, shown as it happens rather than only when
+                // it lands: what a key with no manual entry is doing.
+                if s.key.is_none() {
+                    if let Some((text, colour)) = recovery_label(s.recovery) {
+                        ui.label(egui::RichText::new(text).color(colour).size(11.0));
+                    }
                 }
 
                 // Manual entry for an enciphered cell with no key.
@@ -135,5 +149,23 @@ impl Keys<'_> {
     fn persist(&mut self, cell: CellId, key: Key, origin: Origin) {
         self.st.store.insert(cell, key, origin);
         let _ = self.st.store.save();
+    }
+}
+
+/// A short line for where the key search is, and the colour to draw it. None
+/// when idle, so a channel not being worked shows nothing.
+fn recovery_label(r: Recovery) -> Option<(String, Color32)> {
+    match r {
+        Recovery::Idle => None,
+        Recovery::Gathering { have, need, messages } => Some((
+            format!("gathering {have}/{need} ({messages} msgs)"),
+            theme::LEGEND,
+        )),
+        Recovery::Searching { gpu } => {
+            Some((format!("searching ({})", if gpu { "GPU" } else { "CPU" }), theme::READOUT))
+        }
+        Recovery::Exhausted { dropped } => {
+            Some((format!("no TEA1 key ({dropped} tried)"), theme::LEGEND))
+        }
     }
 }
