@@ -444,6 +444,17 @@ const CRC_OK: Color32 = Color32::from_rgb(0x6F, 0xD1, 0x8A);
 /// one of these rows ends in a mute button, which needs the rest of it.
 const VU_W: f32 = 130.0;
 
+/// How far the auto scale keeps its ceiling above the loudest bin, and the
+/// least range it will show whatever the band is doing.
+///
+/// A quiet band with nothing in it used to be scaled to a twenty decibel
+/// window, which turns the noise floor's own wobble into a trace filling half
+/// the plot and leaves a signal arriving on top of it nowhere to go. Thirty
+/// five keeps the floor down where it belongs and leaves room above it for
+/// something to appear in.
+const PEAK_HEADROOM_DB: f32 = 8.0;
+const MIN_SPAN_DB: f32 = 35.0;
+
 /// Share of the scope pane the spectrum gets by default.
 const DEFAULT_PLOT_FRAC: f32 = 0.34;
 /// Range the split can be dragged to. Neither pane may be squeezed to nothing:
@@ -1111,9 +1122,9 @@ impl App {
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
-        let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + 3.0);
+        let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + PEAK_HEADROOM_DB);
         self.floor += (lo - self.floor) * 0.05;
-        self.ceil += (hi.max(lo + 20.0) - self.ceil) * 0.05;
+        self.ceil += (hi.max(lo + MIN_SPAN_DB) - self.ceil) * 0.05;
     }
 
     /// Frequency under the pointer, snapped to the band's channel plan while
@@ -3038,6 +3049,22 @@ mod tests {
         }
         assert!(a.floor < -95.0, "floor tracked the carrier: {}", a.floor);
         assert!(a.floor > -110.0, "floor ran away: {}", a.floor);
+    }
+
+    #[test]
+    fn auto_scale_keeps_room_above_an_empty_band() {
+        let mut a = app();
+        a.floor = -90.0;
+        a.ceil = -20.0;
+        let db = vec![-95.0f32; 1024];
+        for _ in 0..400 {
+            a.rescale(&db);
+        }
+        assert!(
+            a.ceil - a.floor >= MIN_SPAN_DB - 0.5,
+            "a flat band was squeezed to {} dB",
+            a.ceil - a.floor
+        );
     }
 
     #[test]

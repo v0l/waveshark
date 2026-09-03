@@ -156,14 +156,15 @@ impl Icon {
                         p.line_segment([Pos2::new(x, c.y - dy), Pos2::new(x, c.y + dy)], s);
                     }
                 } else {
-                    // The slash, which is what says muted at a glance.
-                    p.line_segment(
-                        [
-                            Pos2::new(b.left() + w * 0.66, c.y - h * 0.3),
-                            Pos2::new(b.right(), c.y + h * 0.3),
-                        ],
-                        Stroke::new(sw * 1.1, col),
-                    );
+                    // A cross where the sound would have come out, rather
+                    // than a slash laid over the speaker. The slash version
+                    // crosses the cone, and at fourteen points the two fills
+                    // merge into one blob that reads as neither.
+                    let (x0, x1) = (b.left() + w * 0.66, b.right());
+                    let d = h * 0.17;
+                    let x = Stroke::new(sw * 1.1, col);
+                    p.line_segment([Pos2::new(x0, c.y - d), Pos2::new(x1, c.y + d)], x);
+                    p.line_segment([Pos2::new(x0, c.y + d), Pos2::new(x1, c.y - d)], x);
                 }
             }
             Icon::Capture => {
