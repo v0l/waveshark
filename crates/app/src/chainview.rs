@@ -208,6 +208,10 @@ enum Drag {
         to: Option<(u64, usize)>,
         at: Pos2,
     },
+    /// Moving the view. A drag that started on nothing is a drag of the
+    /// canvas: in manual mode the pane takes every drag so that a stage can
+    /// be moved, and without this the graph could not be panned at all.
+    Pan,
 }
 
 /// How a node is recognised between one rebuild and the next.
@@ -297,6 +301,8 @@ pub struct Interaction {
     /// takes one producer, so the stage and port it lands on says which wire
     /// is meant.
     pub wire: Option<(u64, usize)>,
+    /// How far the canvas was dragged this frame.
+    pub pan: Vec2,
 }
 
 /// The selected node's settings, as controls.
@@ -558,6 +564,13 @@ pub fn draw(
             &mut act,
             patch,
         );
+        // Dragging empty canvas moves the view. The pane owns every drag in
+        // manual mode so that a stage can be moved, which leaves the scroll
+        // area nothing to scroll with, so the drag is handed back to it here.
+        if act.pan != Vec2::ZERO {
+            ui.scroll_with_delta(act.pan);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
         for i in 0..topo.nodes.len() {
             if let Some(p) = edit.pos.get(&node_keys[i]) {
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
@@ -873,8 +886,10 @@ fn interact(
             if src.contains(q) {
                 return Some(Drag::Node(crate::patch::builtin::SPAN, src.center() - q));
             }
-            let i = rects.iter().position(|r| r.contains(q))?;
-            Some(Drag::Node(node_keys[i], rects[i].center() - q))
+            match rects.iter().position(|r| r.contains(q)) {
+                Some(i) => Some(Drag::Node(node_keys[i], rects[i].center() - q)),
+                None => Some(Drag::Pan),
+            }
         });
     }
 
@@ -886,6 +901,7 @@ fn interact(
             Drag::Wire { from, to, .. } if resp.dragged() => {
                 edit.drag = Some(Drag::Wire { from, to, at: q })
             }
+            Drag::Pan if resp.dragged() => act.pan = resp.drag_delta(),
             _ => {}
         }
         // Where the wire lands decides what it means: on an input, whatever
@@ -1436,6 +1452,28 @@ mod tests {
             Some((id, 0)),
             "the wire should land on the stage's input"
         );
+    }
+
+    #[test]
+    fn dragging_empty_canvas_moves_the_view() {
+        // In manual mode the pane takes every drag so a stage can be moved,
+        // which left nothing to pan the graph with: on a chain wider than the
+        // window, the stages off the right edge could not be reached at all.
+        let (topo, patch, id) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        // Somewhere no box is: below everything the layout drew.
+        let empty = Pos2::new(
+            h.edit.drawn_src.left() + 4.0,
+            h.edit.drawn.values().fold(0.0f32, |a, r| a.max(r.bottom())) + 60.0,
+        );
+        h.press(empty);
+        let act = h.move_to(empty + Vec2::new(-40.0, -25.0));
+        assert!(act.pan != Vec2::ZERO, "an empty-canvas drag has to pan the view");
+        // And it must not have moved a stage while doing it.
+        let before = h.edit.pos.get(&id).copied();
+        h.move_to(empty + Vec2::new(-80.0, -50.0));
+        assert_eq!(h.edit.pos.get(&id).copied(), before, "panning moved a stage");
     }
 
     #[test]
