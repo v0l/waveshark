@@ -574,7 +574,9 @@ impl App {
         // receiver that runs the automatic chain for a moment and then
         // rebuilds into the one that was saved.
         if want.manual_chain && self.chain.drawn.is_some() {
-            self.set_manual_chain(true);
+            let mut cmds = std::mem::take(&mut self.cmds);
+            self.chain.set_manual(true, &mut cmds);
+            self.cmds = cmds;
         }
     }
 
@@ -946,6 +948,11 @@ impl App {
         let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + PEAK_HEADROOM_DB);
         self.scope.floor += (lo - self.scope.floor) * 0.05;
         self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
+    }
+
+    /// Draw the chain view over the graph it edits.
+    fn chain_view(&mut self, ui: &mut egui::Ui) {
+        chain_pane::Chain { st: &mut self.chain, cmds: &mut self.cmds }.show(ui);
     }
 
     /// Draw the map, and take the station position it was given.
@@ -1379,7 +1386,7 @@ impl eframe::App for App {
                 .frame(egui::Frame::NONE.fill(theme::CHASSIS))
                 .show(ui, |ui| match self.view {
                     View::Spectrum => self.scope_view(ui),
-                    View::Chain => self.chain(ui),
+                    View::Chain => self.chain_view(ui),
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
                 });

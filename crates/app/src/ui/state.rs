@@ -9,6 +9,7 @@
 //! works out again each frame stays a local.
 
 use super::{Channel, Logged, MapView};
+use crate::radio::Cmd;
 use crate::dial::Dial;
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
@@ -153,6 +154,106 @@ pub(super) struct ChainState {
     /// snapshot is right by construction.
     pub undo: Vec<crate::patch::Patch>,
     pub redo: Vec<crate::patch::Patch>,
+}
+
+impl ChainState {
+    /// Change the graph, keeping what it was so the change can be taken back.
+    pub fn edit(&mut self, cmds: &mut Vec<Cmd>, f: impl FnOnce(&mut crate::patch::Patch)) {
+        let before = self.patch.clone();
+        f(&mut self.patch);
+        if self.patch == before {
+            return;
+        }
+        self.undo.push(before);
+        // Undoing and then drawing something else abandons what was undone,
+        // which is what makes redo mean anything: a branch nobody can reach
+        // is a trap rather than a history.
+        self.redo.clear();
+        // A hundred edits is more than anybody backs out of in one sitting
+        // and small enough to keep in hand: a patch is a few dozen stages.
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.send_patch(cmds);
+    }
+
+    pub fn undo(&mut self, cmds: &mut Vec<Cmd>) {
+        if let Some(was) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.patch, was));
+            self.wire = None;
+            self.send_patch(cmds);
+        }
+    }
+
+    pub fn redo(&mut self, cmds: &mut Vec<Cmd>) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.patch, next));
+            self.wire = None;
+            self.send_patch(cmds);
+        }
+    }
+
+    /// Hand the patch to the radio thread, remembering what was sent so that
+    /// one handed back after a refusal can be told apart from an echo.
+    pub fn send_patch(&mut self, cmds: &mut Vec<Cmd>) {
+        self.drawn = Some(self.patch.clone());
+        self.patch_sent = Some(self.patch.clone());
+        cmds.push(Cmd::Patch(self.patch.clone()));
+        self.save_patch();
+    }
+
+    /// Write the graph out, with where its stages were put.
+    pub fn save_patch(&mut self) {
+        self.places =
+            self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        self.patch.save(&self.places);
+        self.saved_at = Some(std::time::Instant::now());
+    }
+
+    /// Write it out again when a stage has been moved and the pointer has
+    /// settled. Dragging changes a position on every frame, and a file
+    /// written sixty times a second to record where a box ended up is a lot
+    /// of writes for one arrangement.
+    pub fn save_places(&mut self) {
+        if !self.edit.manual {
+            return;
+        }
+        let now: crate::patch::Places =
+            self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        if now == self.places {
+            return;
+        }
+        let due = self.saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.0);
+        if due {
+            self.save_patch();
+        }
+    }
+
+    /// Hand the shape of the graph to the operator, or give it back to the
+    /// scanner table.
+    pub fn set_manual(&mut self, on: bool, cmds: &mut Vec<Cmd>) {
+        self.edit.manual = on;
+        if !on {
+            self.edit.arrange();
+            self.pick = None;
+        }
+        match (on, self.drawn.clone()) {
+            // Back to the graph that was drawn, which is what a saved
+            // drawing is for. Turning manual mode off and on again is not a
+            // request to throw it away.
+            (true, Some(drawn)) => {
+                self.patch = drawn;
+                cmds.push(Cmd::Manual(true));
+                self.send_patch(cmds);
+            }
+            // Nothing drawn yet, so the radio thread answers with the graph
+            // it is running: taking it over means taking that over.
+            _ => {
+                self.patch_sent = None;
+                cmds.push(Cmd::Manual(on));
+            }
+        }
+    }
 }
 
 /// The packet log and its inspector.
