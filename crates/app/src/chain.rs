@@ -601,6 +601,10 @@ impl Receiver {
             b.output(c.tail);
         }
 
+        // Every spectrum stage except the one already behind the waterfall.
+        // That stage is the main plot, and reporting it here as well drew the
+        // same trace twice: a manual graph with a single spectrum in it came
+        // up with a strip underneath showing exactly what was above it.
         self.patch_spectra = plan
             .patch
             .as_ref()
@@ -609,6 +613,7 @@ impl Receiver {
                     .iter()
                     .filter(|s| s.kind == "spectrum")
                     .filter_map(|s| patch_ids.get(&s.id).map(|id| (s.id, *id)))
+                    .filter(|(_, id)| Some(*id) != spectrum)
                     .collect()
             })
             .unwrap_or_default();
@@ -2507,20 +2512,37 @@ mod tests {
         // the reason to draw a graph rather than read one.
         use crate::patch::Source;
         let mut patch = crate::patch::Patch::default();
+        let span = patch.add("spectrum");
         let dec = patch.add("decimate");
         let view = patch.add("spectrum");
         let n = patch.stages().iter().position(|s| s.id == dec).unwrap();
         patch.stages_mut()[n].settings.insert("factor".into(), pipeline::ParamValue::Int(8));
+        patch.connect(Source::Span, (span, 0));
         patch.connect(Source::Span, (dec, 0));
         patch.connect(Source::Stage(dec, 0), (view, 0));
         let plan = manual(patch);
         let mut rx = Receiver::build(&plan, Default::default()).expect("a second spectrum");
         let seen = rx.patch_spectra();
+        // One strip, not two: the first spectrum is the main plot, and only
+        // the other one is a band of its own worth a strip underneath.
         assert_eq!(seen.len(), 1, "the stage should report a spectrum of its own");
         assert_eq!(seen[0].0, view);
         // Its own band, not the span's: a strip drawn from the dial's rate
         // would put every signal in it at eight times the offset.
         assert_eq!(seen[0].3, plan.eff_rate() / 8.0);
+    }
+
+    #[test]
+    fn one_spectrum_is_drawn_once() {
+        // The plot behind the waterfall is a spectrum stage like any other,
+        // so a graph holding a single one has nothing left to put in a strip.
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let view = patch.add("spectrum");
+        patch.connect(Source::Span, (view, 0));
+        let plan = manual(patch);
+        let mut rx = Receiver::build(&plan, Default::default()).expect("one spectrum");
+        assert!(rx.patch_spectra().is_empty(), "the main plot was reported as an extra too");
     }
 
     #[test]
