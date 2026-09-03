@@ -13,6 +13,7 @@ pub mod airports;
 pub mod cache;
 pub mod gateways;
 pub mod m17;
+pub mod pistar;
 pub mod radioid;
 
 pub use cache::{Cache, Error, Source, Status, When};

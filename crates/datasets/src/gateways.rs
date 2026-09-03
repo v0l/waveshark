@@ -27,6 +27,10 @@ pub struct HostFile {
     pub url: &'static str,
     /// Who publishes it, for the line under the name in the settings pane.
     pub publisher: &'static str,
+    /// Where to connect when the file publishes no port of its own. For the
+    /// D-Star networks that is the port of the protocol itself, and a file
+    /// listing it per reflector would be the same number 1500 times.
+    pub default_port: u16,
     /// How often it is worth asking whether the file changed.
     pub max_age: Duration,
     pub parse: fn(&'static HostFile, &[u8]) -> Result<Vec<Gateway>, Error>,
@@ -58,12 +62,58 @@ pub static M17: HostFile = HostFile {
     file: "m17-hosts.json",
     url: "https://m17-project.github.io/hostfiles/M17Hosts.json",
     publisher: "m17project.org",
+    default_port: 17000,
     max_age: DAILY,
     parse: crate::m17::parse,
 };
 
+pub static DMR: HostFile = HostFile {
+    name: "DMR",
+    file: "pistar-dmr-hosts.txt",
+    url: "https://www.pistar.uk/downloads/DMR_Hosts.txt",
+    publisher: "pistar.uk",
+    default_port: 62030,
+    max_age: DAILY,
+    parse: crate::pistar::dmr,
+};
+
+pub static DPLUS: HostFile = HostFile {
+    name: "D-Star (DPlus)",
+    file: "pistar-dplus-hosts.txt",
+    url: "https://www.pistar.uk/downloads/DPlus_Hosts.txt",
+    publisher: "pistar.uk",
+    default_port: 20001,
+    max_age: DAILY,
+    parse: crate::pistar::dstar,
+};
+
+pub static DEXTRA: HostFile = HostFile {
+    name: "D-Star (DExtra)",
+    file: "pistar-dextra-hosts.txt",
+    url: "https://www.pistar.uk/downloads/DExtra_Hosts.txt",
+    publisher: "pistar.uk",
+    default_port: 30001,
+    max_age: DAILY,
+    parse: crate::pistar::dstar,
+};
+
+pub static DCS: HostFile = HostFile {
+    name: "D-Star (DCS)",
+    file: "pistar-dcs-hosts.txt",
+    url: "https://www.pistar.uk/downloads/DCS_Hosts.txt",
+    publisher: "pistar.uk",
+    default_port: 30051,
+    max_age: DAILY,
+    parse: crate::pistar::dstar,
+};
+
 /// Every host file that is read, in the order a view lists them.
-pub static HOST_FILES: &[&HostFile] = &[&M17];
+///
+/// Only M17 is decodable here today: the rest speak AMBE, which needs a
+/// vocoder this receiver does not have. They are listed anyway because the
+/// list is reference data about where the networks are, and a view filters
+/// on [`Gateway::kind`] rather than this deciding for it.
+pub static HOST_FILES: &[&HostFile] = &[&M17, &DMR, &DPLUS, &DEXTRA, &DCS];
 
 pub fn host_file(name: &str) -> Option<&'static HostFile> {
     HOST_FILES.iter().copied().find(|h| h.name.eq_ignore_ascii_case(name))
@@ -107,6 +157,10 @@ pub struct Gateway {
     /// Only the channels that carry this gateway's mode. A bridge carries
     /// several, and connecting to the wrong one succeeds and stays silent.
     pub channels: Vec<Channel>,
+    /// The shared password the host file publishes, where it publishes one.
+    /// This is the network's, not the operator's: BrandMeister ignores it
+    /// and wants a hotspot security password set per DMR ID instead.
+    pub password: Option<String>,
     pub sponsor: String,
     /// Two-letter code, as published.
     pub country: String,

@@ -10,9 +10,6 @@
 use crate::cache::Error;
 use crate::gateways::{Channel, Gateway, HostFile};
 
-/// The port an M17 client connects to when nobody says otherwise.
-const DEFAULT_PORT: u16 = 17000;
-
 mod wire {
     //! The published shape. Nearly every field is nullable and two of them
     //! are absent entirely on a URF row, so everything is optional and the
@@ -117,8 +114,9 @@ fn gateway(kind: &'static HostFile, r: wire::Reflector) -> Gateway {
         // urfd listens on 17000 unless its owner moved it. One that did will
         // simply not answer, which is a better failure than dropping every
         // URF reflector from the list.
-        port: r.port.unwrap_or(DEFAULT_PORT),
+        port: r.port.unwrap_or(kind.default_port),
         channels,
+        password: None,
         sponsor: r.sponsor.unwrap_or_default(),
         country: r.country,
     }
@@ -197,7 +195,7 @@ mod tests {
 
     #[test]
     fn a_urf_reflector_without_a_published_port_is_assumed_to_be_on_the_default() {
-        assert_eq!(parsed()[2].port, DEFAULT_PORT);
+        assert_eq!(parsed()[2].port, gateways::M17.default_port);
     }
 
     #[test]
