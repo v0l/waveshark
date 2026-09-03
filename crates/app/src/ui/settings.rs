@@ -27,8 +27,8 @@ impl App {
                 });
                 modal_title(ui, title);
                 match which {
-                    Settings::Spectrum => self.spectrum_settings(ui),
-                    Settings::Waterfall => self.waterfall_settings(ui),
+                    Settings::Spectrum => self.scope_settings(ui, true),
+                    Settings::Waterfall => self.scope_settings(ui, false),
                     Settings::Radio => self.radio_settings(ui),
                     Settings::PacketLog => self.packet_log_settings(ui),
                     Settings::Scanners => self.scanner_settings(ui),
@@ -57,6 +57,28 @@ impl App {
     /// question this pane answers is "why is nothing decoding here", and the
     /// answer is a frequency compared against a list of ranges. That is a
     /// thing to show, not a thing to make somebody read.
+    /// The scope's own panels, and whatever they asked for afterwards.
+    fn scope_settings(&mut self, ui: &mut egui::Ui, spectrum: bool) {
+        let mut pane = scope_settings::ScopeSettings {
+            st: &mut self.scope,
+            dc_block: &mut self.dc_block,
+            rate: self.rate,
+            cmds: &mut self.cmds,
+            acts: Vec::new(),
+        };
+        if spectrum {
+            pane.spectrum(ui);
+        } else {
+            pane.waterfall(ui);
+        }
+        let acts = pane.acts;
+        for a in acts {
+            match a {
+                scope_settings::Action::ResetWaterfall => self.reset_waterfall(),
+            }
+        }
+    }
+
     fn scanner_settings(&mut self, ui: &mut egui::Ui) {
         let (center, rate) = (self.center, self.rate);
         // Taken out of `self` so the closures below can borrow the rest of
@@ -950,145 +972,4 @@ impl App {
         );
     }
 
-    fn spectrum_settings(&mut self, ui: &mut egui::Ui) {
-        row(ui, "FFT bins", |ui| {
-            let mut n = self.scope.fft_size;
-            egui::ComboBox::from_id_salt("fft")
-                .selected_text(n.to_string())
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for v in FFTS {
-                        ui.selectable_value(&mut n, v, v.to_string());
-                    }
-                });
-            if n != self.scope.fft_size {
-                self.scope.fft_size = n;
-                // The same value the session saves and the radio starts with,
-                // so a chosen FFT size survives a restart rather than only
-                // living in the running spectrum.
-                self.scope.fft = n;
-                self.send(Cmd::Fft(n));
-                self.reset_waterfall();
-            }
-        });
-        ui.label(
-            egui::RichText::new(bin_hint(self.rate, self.scope.fft_size))
-                .small()
-                .color(theme::LEGEND),
-        );
-        ui.add_space(8.0);
-
-        row(ui, "Refresh", |ui| {
-            let mut v = self.scope.refresh;
-            egui::ComboBox::from_id_salt("fps")
-                .selected_text(format!("{} fps", v as i32))
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for (n, f) in REFRESH {
-                        ui.selectable_value(&mut v, f, format!("{n} fps"));
-                    }
-                });
-            if (v - self.scope.refresh).abs() > 0.01 {
-                self.scope.refresh = v;
-                self.send(Cmd::Refresh(v));
-            }
-        });
-        ui.add_space(8.0);
-
-        row(ui, "Averaging", |ui| {
-            if ui
-                .add(egui::Slider::new(&mut self.scope.smoothing, 0.02..=1.0).show_value(false))
-                .changed()
-            {
-                self.send(Cmd::Smoothing(self.scope.smoothing));
-            }
-            ui.label(value(if self.scope.smoothing > 0.95 {
-                "off".to_string()
-            } else {
-                format!("{:.0}%", (1.0 - self.scope.smoothing) * 100.0)
-            }));
-        });
-        ui.add_space(8.0);
-
-        row(ui, "Centre spur", |ui| {
-            if ui.checkbox(&mut self.dc_block, "Remove").changed() {
-                self.send(Cmd::DcBlock(self.dc_block));
-            }
-            ui.label(
-                egui::RichText::new("LO leakage at the tuned frequency")
-                    .color(theme::LEGEND)
-                    .size(10.0),
-            );
-        });
-        ui.add_space(8.0);
-        self.scale_settings(ui);
-    }
-
-    fn waterfall_settings(&mut self, ui: &mut egui::Ui) {
-        row(ui, "Scroll rate", |ui| {
-            let mut v = self.scope.rows_per_sec;
-            egui::ComboBox::from_id_salt("rows")
-                .selected_text(format!("{} rows/s", v as i32))
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for (n, f) in SPEEDS {
-                        ui.selectable_value(&mut v, f, format!("{n} rows/s"));
-                    }
-                });
-            self.scope.rows_per_sec = v;
-        });
-        ui.add_space(8.0);
-
-        row(ui, "History", |ui| {
-            let mut n = self.scope.wf_rows;
-            egui::ComboBox::from_id_salt("hist")
-                .selected_text(format!("{n} rows"))
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for v in [256usize, 512, 1024, 2048] {
-                        ui.selectable_value(&mut n, v, format!("{v} rows"));
-                    }
-                });
-            if n != self.scope.wf_rows {
-                self.scope.wf_rows = n;
-                self.scope.wf.set_height(n);
-            }
-        });
-        ui.label(
-            egui::RichText::new(format!(
-                "{:.0} s of history at {:.0} rows/s",
-                self.scope.wf.height() as f32 / self.scope.rows_per_sec,
-                self.scope.rows_per_sec
-            ))
-            .small()
-            .color(theme::LEGEND),
-        );
-        ui.add_space(8.0);
-
-        row(ui, "Contrast", |ui| {
-            ui.add(egui::Slider::new(&mut self.scope.wf_top_offset, 0.0..=20.0).show_value(false));
-            ui.label(value(format!("{:.0} dB", self.scope.wf_top_offset)));
-        });
-        ui.label(
-            egui::RichText::new("How far below the trace ceiling the hottest colour sits.")
-                .small()
-                .color(theme::LEGEND),
-        );
-        ui.add_space(8.0);
-        self.scale_settings(ui);
-    }
-
-    fn scale_settings(&mut self, ui: &mut egui::Ui) {
-        row(ui, "Scale", |ui| {
-            ui.checkbox(&mut self.scope.auto_scale, "Auto");
-        });
-        ui.add_enabled_ui(!self.scope.auto_scale, |ui| {
-            row(ui, "Floor", |ui| {
-                ui.add(egui::Slider::new(&mut self.scope.floor, -140.0..=0.0).suffix(" dB"));
-            });
-            row(ui, "Ceiling", |ui| {
-                ui.add(egui::Slider::new(&mut self.scope.ceil, -140.0..=20.0).suffix(" dB"));
-            });
-        });
-    }
 }

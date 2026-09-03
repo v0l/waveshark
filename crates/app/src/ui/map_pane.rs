@@ -830,3 +830,96 @@ impl Map<'_> {
         });
     }
 }
+
+/// Where each line of the airport card sits, and how big the card has to be
+/// to hold them all.
+struct CardLayout {
+    size: Vec2,
+    /// Top of each line from the card's top edge: the head lines, then the
+    /// rows below the rule, in the order they are drawn.
+    ys: Vec<f32>,
+    rule_y: f32,
+    text_x: f32,
+}
+
+/// Lay the card out from the measured size of every line it will draw.
+///
+/// Pure arithmetic, and separate from the drawing, because the two ways this
+/// went wrong were both a line drawn that the size had not accounted for: the
+/// width left no room for the margin the text was drawn at, and the "+N more"
+/// row was painted below a card measured without it. Measuring and drawing
+/// from one list is what stops that, and it can be checked without a font.
+fn card_layout(head: &[Vec2], rows: &[Vec2], pad: f32, sep: f32, rule_gap: f32) -> CardLayout {
+    let text_w = head
+        .iter()
+        .chain(rows)
+        .map(|s| s.x)
+        .fold(0.0f32, f32::max);
+    let mut ys = Vec::with_capacity(head.len() + rows.len());
+    let mut y = pad;
+    for (i, s) in head.iter().enumerate() {
+        if i > 0 {
+            y += sep;
+        }
+        ys.push(y);
+        y += s.y;
+    }
+    y += rule_gap;
+    let rule_y = y;
+    y += 1.0 + rule_gap;
+    for (i, s) in rows.iter().enumerate() {
+        if i > 0 {
+            y += sep;
+        }
+        ys.push(y);
+        y += s.y;
+    }
+    CardLayout {
+        size: Vec2::new(text_w + pad * 2.0, y + pad),
+        ys,
+        rule_y,
+        text_x: pad,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The airport card must be big enough for every line it draws.
+    ///
+    /// It twice was not: the width was the widest line with no room for the
+    /// margin the text is drawn at, so every row ran over the right edge, and
+    /// the "+N more" row was drawn below a card measured without it. Both are
+    /// a line outside the box, so that is what this checks.
+    #[test]
+    fn the_airport_card_holds_every_line_it_draws() {
+        let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
+        let head = [
+            Vec2::new(180.0, 15.0),
+            Vec2::new(90.0, 11.0),
+            Vec2::new(40.0, 13.0),
+        ];
+        // Eleven rows: ten frequencies and the "+N more" that follows them.
+        let rows: Vec<Vec2> = (0..11).map(|_| Vec2::new(150.0, 13.0)).collect();
+        let l = card_layout(&head, &rows, pad, sep, rule_gap);
+
+        for (i, s) in head.iter().chain(rows.iter()).enumerate() {
+            let right = l.text_x + s.x;
+            assert!(
+                right <= l.size.x - pad + 1e-3,
+                "line {i} ends at {right}, past the {} the card is wide",
+                l.size.x
+            );
+            let bottom = l.ys[i] + s.y;
+            assert!(
+                bottom <= l.size.y - pad + 1e-3,
+                "line {i} ends at {bottom}, past the {} the card is tall",
+                l.size.y
+            );
+        }
+        // The rule sits between the head and the rows, not on top of either.
+        assert!(l.rule_y > l.ys[head.len() - 1]);
+        assert!(l.rule_y < l.ys[head.len()]);
+    }
+}

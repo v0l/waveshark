@@ -9,7 +9,7 @@
 //! these compose with `add_sized`, `add_enabled` and the rest of egui's
 //! layout without any of it being re-implemented here.
 
-use crate::theme;
+use crate::theme::{self, legend};
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, Widget};
 
 /// Height of a level bar. Short enough to sit on a row with a slider without
@@ -245,4 +245,50 @@ pub fn cell(p: &egui::Painter, row: Rect, x: f32, w: f32, text: &str, col: Color
         egui::FontId::new(11.0, egui::FontFamily::Name(theme::READOUT_FONT.into())),
         col,
     );
+}
+
+/// A line of explanation under a control.
+///
+/// Added through `Label` with wrapping asked for explicitly: inside a modal
+/// the surrounding layout justifies text, which spreads a wrapped sentence
+/// across the full width and leaves holes in the middle of it.
+pub fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
+}
+
+/// The heading every modal wears, so one dialog does not announce itself in a
+/// different voice from the next.
+pub fn modal_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(legend(text));
+    ui.add_space(10.0);
+}
+
+/// A labelled settings row: legend on the left, control on the right, so the
+/// modal reads as a column of settings rather than a wall of widgets.
+pub fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized([90.0, 18.0], egui::Label::new(legend(label)));
+        add(ui);
+    });
+}
+
+/// Resolution bandwidth, which is what the bin count actually buys you.
+pub fn bin_hint(rate: f64, bins: usize) -> String {
+    let hz = rate / bins as f64;
+    if hz >= 1000.0 {
+        format!("{:.1} kHz per bin", hz / 1e3)
+    } else {
+        format!("{hz:.0} Hz per bin")
+    }
+}
+
+/// Settings affordance in a pane corner.
+pub fn cog_rect(pane: &Rect) -> Rect {
+    let s = 18.0;
+    Rect::from_min_size(Pos2::new(pane.right() - s - 6.0, pane.top() + 6.0), Vec2::splat(s))
+}
+
+pub fn cog(p: &egui::Painter, r: &Rect, hot: bool) {
+    let col = if hot { theme::READOUT } else { Color32::from_rgb(0x6A, 0x72, 0x7C) };
+    crate::icons::Icon::Setup.paint(p, *r, col);
 }
