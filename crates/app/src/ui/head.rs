@@ -216,7 +216,9 @@ impl App {
                             .selected_text(v.label())
                             .width(120.0)
                             .show_ui(ui, |ui| {
-                                for opt in [View::Spectrum, View::Chain, View::Map, View::Calls] {
+                                for opt in
+                                    [View::Spectrum, View::Chain, View::Map, View::Calls, View::Messages]
+                                {
                                     ui.selectable_value(&mut v, opt, opt.label());
                                 }
                             });

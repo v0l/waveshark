@@ -9,6 +9,10 @@ pub(super) enum Action {
     Decode(bool),
     /// Open one of the settings panels the header carries a button for.
     Open(Settings),
+    /// Open the scanner table with a new block prefilled from this row's
+    /// frequency and protocol: the (+) that turns a packet seen once into a
+    /// channel kept.
+    Pin { freq: f64, model: String },
 }
 
 /// The log, over the packets it lists.
@@ -258,6 +262,10 @@ impl Log<'_> {
         Self::COLS.iter().map(|(_, w)| w).sum::<f32>() + 340.0
     }
 
+    /// Room at the right of every row for the pin button, so the detail text
+    /// does not run under it.
+    const PIN_W: f32 = 22.0;
+
     /// The heading strip, above the rows and outside their vertical scroll, so
     /// it cannot scroll away from what it labels.
     fn log_header_row(&self, ui: &mut egui::Ui, w: f32) {
@@ -296,6 +304,7 @@ impl Log<'_> {
         }
         let t0 = self.st.decodes.first().map(|l| l.rec.at);
         let mut clicked = None;
+        let mut pin: Option<(f64, String)> = None;
 
         // Striping counts the rows actually drawn, not their place in the
         // list: with unknowns hidden the drawn rows are not contiguous in
@@ -357,12 +366,47 @@ impl Log<'_> {
                 widgets::cell(&p, rect, x, cw, t, *c);
                 x += cw;
             }
-            widgets::cell(&p, rect, x, rect.right() - x, &rec.detail, theme::VALUE);
+            let info_w = (rect.right() - x - Self::PIN_W).max(0.0);
+            widgets::cell(&p, rect, x, info_w, &rec.detail, theme::VALUE);
+
+            // The (+): a hit target of its own at the right edge, so clicking
+            // it prefills a scanner block rather than selecting the row. Only
+            // for a decode that names a protocol; an unknown burst has no
+            // front end to pin. Interacted after the row so its click wins
+            // over the row's inside its rect.
+            if rec.is_known() {
+                let pr = Rect::from_min_size(
+                    Pos2::new(rect.right() - Self::PIN_W, rect.top()),
+                    Vec2::new(Self::PIN_W, rect.height()),
+                );
+                let presp = ui.interact(pr, ui.id().with(("pin", log.id)), Sense::click());
+                let hot = presp.hovered();
+                if hot {
+                    p.rect_filled(pr, 2.0, theme::ETCH);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                p.text(
+                    pr.center(),
+                    Align2::CENTER_CENTER,
+                    "+",
+                    FontId::proportional(15.0),
+                    if hot { theme::READOUT } else { theme::LEGEND },
+                );
+                if presp.clicked() {
+                    pin = Some((rec.freq, rec.model.clone()));
+                }
+                if presp.hovered() {
+                    presp.on_hover_text("add a scanner channel here");
+                }
+            }
         }
 
         if let Some(id) = clicked {
             // Clicking the selected packet again closes the dump.
             self.st.selected = (self.st.selected != Some(id)).then_some(id);
+        }
+        if let Some((freq, model)) = pin {
+            self.acts.push(Action::Pin { freq, model });
         }
     }
 }

@@ -10,7 +10,8 @@
 //!
 //! Then the panes. Each is a struct that borrows its own slice of [`state`]
 //! and nothing else: [`scope::Scope`], [`strip::Strip`], [`packets::Log`],
-//! [`map_pane::Map`], [`chain_pane::Chain`], [`calls_pane::CallList`]. A pane
+//! [`map_pane::Map`], [`chain_pane::Chain`], [`calls_pane::CallList`],
+//! [`messages_pane::Msgs`]. A pane
 //! cannot reach the radio. What it wants done it either pushes into the
 //! command queue, for the things the receiver does, or returns as its own
 //! `Action`, for the things the application does. That is what keeps a view
@@ -29,6 +30,7 @@ mod chain_pane;
 mod head;
 mod map_pane;
 mod mapview;
+mod messages_pane;
 mod packets;
 mod scope;
 mod scope_settings;
@@ -61,6 +63,7 @@ pub struct App {
     log: state::LogState,
     map: map_pane::MapState,
     calls: state::CallsState,
+    messages: state::MessagesState,
     audio: state::AudioState,
     /// Where the interface's waiting work runs: tile fetches now, anything
     /// else that waits on a network later. One per application rather than
@@ -177,6 +180,7 @@ enum View {
     Chain,
     Map,
     Calls,
+    Messages,
 }
 
 impl View {
@@ -186,6 +190,7 @@ impl View {
             View::Chain => "Signal chain",
             View::Map => "Map",
             View::Calls => "Calls",
+            View::Messages => "Messages",
         }
     }
 }
@@ -314,6 +319,7 @@ impl Default for App {
             map: map_pane::MapState::default(),
             rt: background_runtime(),
             calls: state::CallsState::default(),
+            messages: state::MessagesState::default(),
             audio: state::AudioState::default(),
             cmds: Vec::new(),
             record_dir: None,
@@ -870,6 +876,9 @@ impl App {
             // ago has scrolled out of the log long before it is forgotten
             // here.
             self.calls.list.update(&rec, rec.at);
+            // Text outlives the log for the same reason a call does: a page
+            // read half an hour later is still the page that was sent.
+            self.messages.list.update(&rec, rec.at);
             let id = self.log.next_packet;
             self.log.next_packet += 1;
             self.log.decodes.push(Logged { id, rec });
@@ -1008,8 +1017,22 @@ impl App {
                     self.send(Cmd::Decode(on));
                 }
                 packets::Action::Open(w) => self.open = Some(w),
+                packets::Action::Pin { freq, model } => self.pin_scanner(freq, &model),
             }
         }
+    }
+
+    /// Open the scanner table with a block prefilled from a packet, the (+) on
+    /// a log row. The edit buffer is seeded from whatever is there now, so a
+    /// pin adds to unsaved edits rather than discarding them, and the new row
+    /// is left unsaved: the operator sees what will run before it does.
+    fn pin_scanner(&mut self, freq: f64, model: &str) {
+        let mut rows = self.scanner_edit.take().unwrap_or_else(|| {
+            self.scanners.list.iter().map(ScannerRow::from_scanner).collect()
+        });
+        rows.push(ScannerRow::for_packet(freq, model, self.rate));
+        self.scanner_edit = Some(rows);
+        self.open = Some(Settings::Scanners);
     }
 
     /// Draw the call list, then tune to the row that was clicked.
@@ -1020,6 +1043,14 @@ impl App {
             cmds: &mut self.cmds,
         }
         .show(ui);
+        if let Some(hz) = tune {
+            self.set_center(hz / 1e6);
+        }
+    }
+
+    /// Draw the message list, then tune to the row that was clicked.
+    fn message_view(&mut self, ui: &mut egui::Ui) {
+        let tune = messages_pane::Msgs { st: &mut self.messages }.show(ui);
         if let Some(hz) = tune {
             self.set_center(hz / 1e6);
         }
@@ -1207,6 +1238,7 @@ impl eframe::App for App {
                     View::Chain => self.chain_view(ui),
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
+                    View::Messages => self.message_view(ui),
                 });
         }
         self.settings_modal(ui.ctx());
@@ -1318,6 +1350,10 @@ impl App {
 
     pub fn show_calls(&mut self) {
         self.view = View::Calls;
+    }
+
+    pub fn show_messages(&mut self) {
+        self.view = View::Messages;
     }
 
     /// Point the receiver at a frequency without opening a channel on it.

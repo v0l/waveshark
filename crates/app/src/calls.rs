@@ -18,6 +18,18 @@
 //! since a trunked network distinguishes a talkgroup from a private call
 //! outright. Where it is absent the destination decides, and that is a guess:
 //! see [`is_group`].
+//!
+//! # Voice only, and the decoder has to say so
+//!
+//! This table is for people talking. A destination is not enough to earn a
+//! row: an APRS frame has one, so does a TETRA short data message and so
+//! does a MAC header addressed to a radio that is registering. Each of those
+//! put rows on the list that no operator could listen to. So a decode has to
+//! assert `voice`, and only a decoder that knows the transmission carries
+//! speech sets it: M17 from the link setup's data type, TETRA from the
+//! circuit mode in the basic service information, or from traffic on a
+//! channel a call was granted. Everything else stays in the packet log where
+//! it belongs.
 
 use crate::radio::DecodeRecord;
 use common::Value;
@@ -126,9 +138,13 @@ impl Calls {
 
     /// Fold one decode in, if it is a call at all.
     ///
-    /// Returns whether it was. Anything without a destination is somebody
-    /// else's business: a sensor reading, a pager message, an aircraft.
+    /// Returns whether it was. Anything the decoder did not say is voice is
+    /// somebody else's business: a sensor reading, a pager message, an
+    /// aircraft, a data call, a radio registering on a trunked network.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
+        if !rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("voice", Value::Bool(true)))) {
+            return false;
+        }
         let Some(to) = text(rec, &["to", "dst", "destination", "talkgroup", "group"]) else {
             return false;
         };
@@ -249,6 +265,13 @@ mod tests {
         r
     }
 
+    /// A decode from a mode that knows it is carrying speech.
+    fn voice(model: &str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+        let mut f = fields.to_vec();
+        f.push(("voice", Value::Bool(true)));
+        rec(model, freq, &f)
+    }
+
     fn t(secs: u64) -> Instant {
         Instant::now() + Duration::from_secs(secs)
     }
@@ -263,9 +286,27 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_alone_is_not_a_call() {
+        // An APRS frame is addressed, a TETRA short data message is
+        // addressed, and a MAC header naming a radio that is registering is
+        // addressed. None of them is somebody talking, and a list of them is
+        // not a call list. Only a decoder that knows there is speech says so.
+        let mut c = Calls::new();
+        let addressed = [
+            rec("APRS", 144.8e6, &[("from", Value::Text("M0ABC-9".into())), ("to", Value::Text("APRS".into()))]),
+            rec("TETRA-SDS", 391.1e6, &[("to", Value::Text("10223295".into())), ("text", Value::Text("ok".into()))]),
+            rec("TETRA-Call", 391.1e6, &[("pdu", Value::Text("MAC-RESOURCE".into())), ("to", Value::Text("10223295".into()))]),
+        ];
+        for r in &addressed {
+            assert!(!c.update(r, t(0)), "{} earned a row", r.model);
+        }
+        assert!(c.is_empty());
+    }
+
+    #[test]
     fn overs_on_one_group_stay_one_call() {
         let mut c = Calls::new();
-        let over = rec(
+        let over = voice(
             "M17-Voice",
             433.475e6,
             &[
@@ -290,7 +331,7 @@ mod tests {
         // Otherwise a group heard once an hour reads as a call that has been
         // running for an hour.
         let mut c = Calls::new();
-        let over = rec(
+        let over = voice(
             "M17-Voice",
             433.475e6,
             &[("from", Value::Text("M0ABC".into())), ("to", Value::Text("ALL".into())),
@@ -311,8 +352,8 @@ mod tests {
         // the first.
         let mut c = Calls::new();
         let to = ("to", Value::Text("91".into()));
-        c.update(&rec("DMR-Voice", 446.1e6, &[("from", Value::Text("2345001".into())), to.clone()]), t(0));
-        c.update(&rec("DMR-Voice", 446.1e6, &[("from", Value::Text("2345002".into())), to.clone()]), t(1));
+        c.update(&voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345001".into())), to.clone()]), t(0));
+        c.update(&voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345002".into())), to.clone()]), t(1));
         let list = c.active(t(1));
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].from.as_deref(), Some("2345002"), "the newest is first");
@@ -323,7 +364,7 @@ mod tests {
     fn a_direct_call_is_told_from_a_group_one() {
         let mut c = Calls::new();
         c.update(
-            &rec(
+            &voice(
                 "M17-Voice",
                 433.475e6,
                 &[("from", Value::Text("M0ABC".into())), ("to", Value::Text("M0XYZ".into()))],
@@ -341,7 +382,7 @@ mod tests {
         // wrong for a private call to a radio id. A system that knows says so.
         let mut c = Calls::new();
         c.update(
-            &rec(
+            &voice(
                 "DMR-Voice",
                 446.1e6,
                 &[
@@ -359,7 +400,7 @@ mod tests {
     fn encrypted_traffic_says_so() {
         let mut c = Calls::new();
         c.update(
-            &rec(
+            &voice(
                 "M17-Voice",
                 433.475e6,
                 &[

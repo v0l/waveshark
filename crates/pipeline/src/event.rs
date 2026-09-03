@@ -168,6 +168,14 @@ impl Decoded {
         self
     }
 
+    /// Signal to noise alone, in dB, for a decode whose level was measured
+    /// for the whole transmission rather than for this frame: a pager page
+    /// or an M17 stream carries the source's SNR but no per-frame RSSI.
+    pub fn with_snr(mut self, snr_db: f32) -> Self {
+        self.snr_db = Some(snr_db);
+        self
+    }
+
     /// The channel width the frame was heard through.
     pub fn with_bandwidth(mut self, hz: f64) -> Self {
         self.bandwidth_hz = Some(hz);

@@ -128,9 +128,14 @@ impl App {
                     .corner_radius(2);
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        // The switch that keeps a block in the table without
+                        // running it, so turning auto off after pinning a few
+                        // channels does not throw it away.
+                        ui.checkbox(&mut r.enabled, "")
+                            .on_hover_text(if r.enabled { "running: click to switch off" } else { "off: click to run" });
                         ui.add(
                             egui::TextEdit::singleline(&mut r.name)
-                                .desired_width(120.0)
+                                .desired_width(112.0)
                                 .hint_text("name"),
                         );
                         ui.add_space(4.0);

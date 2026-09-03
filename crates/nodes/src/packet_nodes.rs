@@ -99,6 +99,25 @@ impl PacketDecodeNode {
     /// the bus is deliberate: what travels is the evidence, and every consumer
     /// draws its own conclusions from it.
     fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
+        // A frame demodulator reads bits, not power, so its decodes carry no
+        // level of their own. The source they came from was measured,
+        // though, and that SNR belongs on every row this frame produces: a
+        // pager page with a blank SNR column looks weaker than a sensor
+        // reading beside it, which is backwards. RSSI stays absent, since
+        // what the detector has is a ratio and not an absolute level.
+        let start = self.hits.len();
+        self.decode_frame_inner(p, bytes);
+        for d in &mut self.hits[start..] {
+            if d.snr_db.is_none() && p.snr_db.is_finite() {
+                d.snr_db = Some(p.snr_db);
+            }
+            if d.rssi_dbfs.is_none() && p.rssi_dbfs.is_finite() {
+                d.rssi_dbfs = Some(p.rssi_dbfs);
+            }
+        }
+    }
+
+    fn decode_frame_inner(&mut self, p: &Packet, bytes: &[u8]) {
         let center = common::Hz(p.center_hz);
         // M17 is the one protocol here that its own frequency cannot
         // identify: it runs wherever an amateur puts it, which includes the

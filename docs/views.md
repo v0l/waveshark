@@ -44,7 +44,15 @@ claims what it can render.
   hex dump. The burst view is what an unknown device is worked out from, the
   way Universal Radio Hacker shows a burst beside its bits; the samples are
   kept for the newest rows only.
-It is a view by this definition. It knows nothing about a protocol.
+- **Messages**: every record carrying a `text`, `message` or `sms` field,
+  newest first, each drawn as a header line and the words underneath at full
+  width rather than clipped to a column. The recipient is read from
+  `addressee`, `to`, `dst`, `destination`, `talkgroup` or `address`, so a
+  pager's capcode and a TETRA talkgroup land in the same place. Identical
+  words from the same sender inside two minutes are one message with a count,
+  because a pager sends every page twice and TETRA retransmits until it is
+  acknowledged. `crates/app/src/messages.rs`.
+Both are views by this definition. Neither knows anything about a protocol.
 
 ## Planned views
 
@@ -90,11 +98,13 @@ tyre pressure, battery voltage. Reads `fields` and needs nothing else, which
 makes it the cheapest of the three and the best first proof that the bus works.
 The Fine Offset decoder already produces everything it needs.
 
-### Text pane, for pager and message traffic
+### More into the message view
 
-POCSAG, FLEX, ACARS, AIS text messages. Wants `media_type` of `text/plain` and
-the message in `bytes`, or a `message` field. Mostly a filtered list with
-wrapping, which is why it is not urgent.
+The message view exists and takes any decode with a text field, so FLEX, ACARS
+and AIS safety messages join it by naming their fields the way POCSAG, M17,
+TETRA and APRS already do. What it does not yet take is a payload that is text
+without being a field: `media_type` of `text/plain` with the words in `bytes`
+should be read as the message body.
 
 ## What the bus needs before it grows
 

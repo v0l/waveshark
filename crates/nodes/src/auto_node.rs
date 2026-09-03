@@ -86,6 +86,18 @@ struct Member {
     /// leaves with its measurement, and a burst no front end reads leaves
     /// as a packet of nothing but the measurement.
     router: Option<pipeline::NodeId>,
+    /// The SNR the detector measured for the source this member reads, so a
+    /// frame decoder that measures no level of its own still reports the
+    /// level of the transmission it came from rather than nothing. NaN
+    /// until [`Slot::open`] sets it from the source block.
+    source_snr_db: f32,
+    /// Peak mean-square power of the extracted stream since the last frame
+    /// left, held across the blocks a transmission spans. A frame decoder
+    /// reads bits and reports no level, but the samples it read have one,
+    /// and the loudest block of a page is the page's RSSI. Reset when a
+    /// frame is emitted, so the tail silence after it does not drag the
+    /// next transmission's level down.
+    peak_pow: f32,
     /// When a transmission still going was last reported, in seconds of
     /// stream, so it is reported every [`REPORT_S`] rather than every piece.
     last_report_s: Option<f64>,
@@ -99,11 +111,26 @@ impl Member {
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
-        Ok(Self { name, graph, pulses, frames, packets, voice, router, last_report_s: None })
+        Ok(Self {
+            name,
+            graph,
+            pulses,
+            frames,
+            packets,
+            voice,
+            router,
+            source_snr_db: f32::NAN,
+            peak_pow: 0.0,
+            last_report_s: None,
+        })
     }
 
     /// Run one block through and collect what came out as packets.
     fn run(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
+        if !iq.is_empty() {
+            let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
+            self.peak_pow = self.peak_pow.max(pow);
+        }
         let buf = self.graph.input_buf();
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
@@ -238,14 +265,19 @@ impl Member {
                     at_us,
                     center_hz: spec.map(|s| s.center.0).unwrap_or(0),
                     bandwidth_hz: spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    rssi_dbfs: f32::NAN,
-                    snr_db: f32::NAN,
+                    rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(),
+                    snr_db: self.source_snr_db,
                     modulation: None,
                     body: PacketBody::Frame(f.clone()),
                     measure: None,
                     audio: None,
                     iq: None,
                 });
+            }
+            // The page has left carrying the loudest block it was read
+            // from; the next transmission on this source measures its own.
+            if !frames.is_empty() {
+                self.peak_pow = 0.0;
             }
         }
         events
@@ -533,6 +565,9 @@ impl AutoNode {
             if let Ok(m) = Member::build("wmbus", spec, NodeSpec::new("wmbus"), &self.reg) {
                 members.push(m);
             }
+        }
+        for m in &mut members {
+            m.source_snr_db = b.snr_db;
         }
         Ok(Slot { id: b.id, center_hz: b.center_hz, members, heard: false })
     }

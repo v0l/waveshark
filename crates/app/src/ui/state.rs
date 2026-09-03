@@ -373,6 +373,16 @@ impl Default for CallsState {
     }
 }
 
+/// The message view: what was written over the air.
+#[derive(Default)]
+pub(super) struct MessagesState {
+    /// Every decode that carried text, newest last.
+    pub list: crate::messages::Messages,
+    /// What the operator typed in the filter box. Kept here rather than in
+    /// the pane so it survives a look at the spectrum and back.
+    pub filter: String,
+}
+
 /// The channel strip: every level that reaches the speaker.
 pub(super) struct AudioState {
     pub channels: Vec<Channel>,

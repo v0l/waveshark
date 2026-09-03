@@ -118,7 +118,7 @@ class Flipper:
         # A write with no timeout blocks forever when the firmware reboots and
         # stops draining the CDC endpoint, which is the one way this tool can
         # hang with nothing on screen.
-        s = serial.Serial(port, 230400, timeout=1, write_timeout=3)
+        s = serial.Serial(port, 230400, timeout=1, write_timeout=10)
         time.sleep(0.3)
         s.reset_input_buffer()
         return s
@@ -194,7 +194,16 @@ class Flipper:
             return "<device gone>"
         time.sleep(0.4)
         self.s.read(4096)
-        self.write(text.encode())
+        # `storage write` echoes what it is given and writes it a line at a
+        # time. A RAW sub-GHz file is kilobytes rather than the few hundred
+        # bytes a key file is, and handing it over in one write times out with
+        # the file half written; this is slower and finishes.
+        data = text.encode()
+        for at in range(0, len(data), 256):
+            if not self.write(data[at : at + 256]):
+                return "<device gone>"
+            self.s.read(4096)
+            time.sleep(0.03)
         time.sleep(0.3)
         self.write(b"\x03")
         self.read_to_prompt(5.0)
@@ -277,9 +286,15 @@ def replay(path):
     r = subprocess.run([WAVESHARK, "--replay", path], capture_output=True, text=True)
     decodes = []
     for line in r.stdout.splitlines():
-        m = re.search(r"MHz\s+(\w+)\s+(-?[\d.]+) dBFS\s+([\d.]+) dB\s+(\S+)\s+(.*)", line)
+        # A frame decoder that produces bytes reports no signal level of its
+        # own, so the dBFS and dB columns are NaN on exactly the rows that
+        # decoded. Matching only a number here dropped every real decode.
+        m = re.search(
+            r"MHz\s+(\S+)\s+(?:-?[\d.]+|NaN) dBFS\s+(?:[\d.]+|NaN) dB\s+(\S+)\s+(.*)",
+            line,
+        )
         if m:
-            decodes.append((m.group(4), m.group(5).strip()))
+            decodes.append((m.group(2), m.group(3).strip()))
     return decodes, r.stdout
 
 

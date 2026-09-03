@@ -233,6 +233,12 @@ pub struct Scanner {
     /// skirt, which reads as silence and looks exactly like an empty band.
     pub margin_hz: f64,
     pub front: Front,
+    /// Whether this block runs. A block switched off stays in the table with
+    /// everything it was configured with, so turning `auto` off once a few
+    /// channels are pinned does not mean losing it: it is one click back.
+    /// Written to the file as `enabled = false`; absent means on, so every
+    /// block that predates this field keeps running.
+    pub enabled: bool,
 }
 
 impl Scanner {
@@ -327,7 +333,7 @@ impl Scanners {
     /// expensive one, and they are still bounded by the block's own range
     /// overlapping the span at all.
     pub fn active(&self, center: f64, rate: f64) -> Vec<&Scanner> {
-        self.list.iter().filter(|s| s.applies(center, rate)).collect()
+        self.list.iter().filter(|s| s.enabled && s.applies(center, rate)).collect()
     }
 
     /// The front ends the span covers, deduplicated.
@@ -404,6 +410,11 @@ impl Scanners {
             if sc.margin_hz > 0.0 {
                 s.push_str(&format!("margin = {} kHz\n", num(sc.margin_hz / 1e3)));
             }
+            // Only written when off: the absence of the key is the common
+            // case and reads as running, so a file stays terse.
+            if !sc.enabled {
+                s.push_str("enabled = false\n");
+            }
         }
         s
     }
@@ -443,6 +454,7 @@ impl Scanners {
                     channels: Vec::new(),
                     margin_hz: 0.0,
                     front: Front::Auto,
+                    enabled: true,
                 });
                 continue;
             }
@@ -470,6 +482,7 @@ impl Scanners {
                     s.channels = v.split(',').filter_map(hz).collect();
                 }
                 "margin" => s.margin_hz = hz(v).unwrap_or(0.0),
+                "enabled" => s.enabled = !matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "0" | "off"),
                 "widths" => {
                     let w: Vec<f64> = v.split(',').filter_map(hz).collect();
                     if !w.is_empty() {
@@ -702,6 +715,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_disabled_block_does_not_run_but_survives_the_file() {
+        // Turning auto off after pinning channels must keep it in the table:
+        // a switch, not a delete. And an absent `enabled` key is on, so a
+        // file that predates the field keeps running.
+        let s = Scanners::parse(
+            "[Auto]\nrange = 400 - 470 MHz\nspan = 250 kHz\nfront = auto\nenabled = false\n\
+             [Pager]\nrange = 439.9 - 440.1 MHz\nspan = 25 kHz\nfront = pocsag\n\
+             channels = 439.9875 MHz\n",
+        );
+        assert_eq!(s.list.len(), 2);
+        assert!(!s.list[0].enabled, "the auto block is off");
+        assert!(s.list[1].enabled, "an absent enabled key is on");
+        // At a tuning both cover, only the pager runs.
+        let running: Vec<&str> =
+            s.active(439_987_500.0, 2_400_000.0).iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(running, ["Pager"]);
+        // The off state round-trips through the file.
+        assert!(Scanners::parse(&s.render()).list[0].enabled == false);
+    }
 
     #[test]
     fn a_file_written_from_the_old_defaults_is_read_as_sources() {

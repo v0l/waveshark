@@ -21,3 +21,6 @@ out/
 # Python bytecode from the tools directory.
 __pycache__/
 *.pyc
+
+# Playwright MCP scratch output
+.playwright-mcp/

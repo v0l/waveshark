@@ -14,6 +14,7 @@ mod locale;
 mod dial;
 mod tracks;
 mod map;
+mod messages;
 mod data;
 mod packetlog;
 mod patch;
@@ -646,6 +647,10 @@ struct Args {
     #[arg(long)]
     calls: bool,
 
+    /// Open on the messages received
+    #[arg(long)]
+    messages: bool,
+
     /// Tune here, in MHz, without opening a channel on it
     #[arg(long, value_name = "MHZ")]
     center: Option<f64>,
@@ -974,6 +979,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.calls {
                 app.show_calls();
+            }
+            if args.messages {
+                app.show_messages();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

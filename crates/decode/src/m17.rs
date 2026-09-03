@@ -581,6 +581,9 @@ pub fn fields(lsf: &Lsf) -> Vec<(String, Value)> {
         (true, DataType::Reserved) => "stream",
     };
     f.push(("mode".into(), Value::Text(mode.into())));
+    if matches!(mode, "voice" | "voice+data") {
+        f.push(("voice".into(), Value::Bool(true)));
+    }
     if lsf.encryption() != Encryption::None {
         let e = match lsf.encryption() {
             Encryption::Scrambler => "scrambler",
