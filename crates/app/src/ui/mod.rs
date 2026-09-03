@@ -29,6 +29,9 @@ pub struct App {
     map: state::MapState,
     calls: state::CallsState,
     audio: state::AudioState,
+    /// What the panes asked the receiver for this frame, sent once drawing
+    /// is over.
+    cmds: Vec<Cmd>,
 
     radio: Option<Radio>,
     err: Option<String>,
@@ -365,6 +368,7 @@ impl Default for App {
             map: state::MapState::default(),
             calls: state::CallsState::default(),
             audio: state::AudioState::default(),
+            cmds: Vec::new(),
             record_dir: None,
             radio: None,
             err: None,
@@ -751,6 +755,17 @@ impl App {
         }
     }
 
+    /// Hand the radio everything the panes asked for this frame.
+    ///
+    /// A pane cannot reach the radio: it pushes commands into a queue and
+    /// this is where they leave. That is what lets a pane borrow only its own
+    /// state and still change what the receiver is doing.
+    fn flush_cmds(&mut self) {
+        for c in std::mem::take(&mut self.cmds) {
+            self.send(c);
+        }
+    }
+
     fn drain(&mut self) {
         let Some(radio) = &self.radio else { return };
         // The flight tracker lives in the graph; this is the table it
@@ -860,7 +875,9 @@ impl App {
         // decoded, and the fault looked like a broken vocoder.
         let heard: Vec<crate::calls::Call> =
             self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
-        self.subscribe_new_groups(&heard);
+        let mut cmds = std::mem::take(&mut self.cmds);
+        self.calls.subscribe_new(&heard, &mut cmds);
+        self.cmds = cmds;
 
         // A busy band produces packets faster than anyone reads them, and an
         // unbounded log is a slow memory leak with a scrollbar.
@@ -929,6 +946,19 @@ impl App {
         let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + PEAK_HEADROOM_DB);
         self.scope.floor += (lo - self.scope.floor) * 0.05;
         self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
+    }
+
+    /// Draw the call list, then tune to the row that was clicked.
+    fn call_view(&mut self, ui: &mut egui::Ui) {
+        let tune = calls_pane::CallList {
+            st: &mut self.calls,
+            radio: self.radio.as_ref(),
+            cmds: &mut self.cmds,
+        }
+        .show(ui);
+        if let Some(hz) = tune {
+            self.set_center(hz / 1e6);
+        }
     }
 
     /// Draw the scope, then do what it asked for.
@@ -1320,6 +1350,7 @@ impl eframe::App for App {
         }
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
+        self.flush_cmds();
         self.restore_radio_settings();
         self.save_session();
     }

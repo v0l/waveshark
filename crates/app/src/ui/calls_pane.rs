@@ -5,8 +5,9 @@
 //! whole of the call bus's configuration. Anything more elaborate would be a
 //! rules editor for a decision an operator makes by pointing at the row.
 
+use super::state::CallsState;
 use super::*;
-use crate::callbus::{Rule, Subscription};
+use crate::callbus::Rule;
 use crate::calls::Call;
 
 /// Columns, and how wide each is.
@@ -26,19 +27,21 @@ const COLS: [(&str, f32); 10] = [
     ("last", 56.0),
 ];
 
-impl App {
-    pub(super) fn call_view(&mut self, ui: &mut egui::Ui) {
+/// The call list, over what it lists and what it has subscribed to.
+pub(super) struct CallList<'a> {
+    pub st: &'a mut CallsState,
+    pub radio: Option<&'a Radio>,
+    /// Where the pane puts what it wants the receiver to do.
+    pub cmds: &'a mut Vec<Cmd>,
+}
+
+impl CallList<'_> {
+    /// Draw the list, and say which channel a click asked to tune to.
+    pub(super) fn show(self, ui: &mut egui::Ui) -> Option<f64> {
         let now = std::time::Instant::now();
-        let calls: Vec<Call> = self.calls.list.active(now).into_iter().cloned().collect();
-        // Every group is listened to unless it was turned off. A scanner that
-        // hears nothing until it is configured is a scanner nobody hears
-        // anything on, and the box on the row is how it is turned off.
-        self.subscribe_new_groups(&calls);
-        let levels = self
-            .radio
-            .as_ref()
-            .map(|r| r.status.call_levels())
-            .unwrap_or_default();
+        let calls: Vec<Call> = self.st.list.active(now).into_iter().cloned().collect();
+        self.st.subscribe_new(&calls, self.cmds);
+        let levels = self.radio.map(|r| r.status.call_levels()).unwrap_or_default();
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -62,7 +65,7 @@ impl App {
                      fields the same way.",
                 );
             });
-            return;
+            return None;
         }
 
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
@@ -70,11 +73,11 @@ impl App {
         let mut toggled: Vec<Rule> = Vec::new();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
             let p = ui.painter_at(rect);
             let mut x = rect.left() + 12.0;
             for (name, w) in COLS {
-                Self::cell(&p, rect, x, w, name, theme::LEGEND);
+                widgets::cell(&p, rect, x, w, name, theme::LEGEND);
                 x += w;
             }
             p.line_segment(
@@ -82,10 +85,10 @@ impl App {
                 Stroke::new(1.0, theme::ETCH),
             );
 
-            let subs = self.calls.subs.clone();
+            let subs = self.st.subs.clone();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (n, c) in calls.iter().enumerate() {
-                    let h = Self::ROW_H.max(20.0);
+                    let h = widgets::ROW_H.max(20.0);
                     let (rect, resp) =
                         ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
                     if !ui.is_rect_visible(rect) {
@@ -152,7 +155,7 @@ impl App {
                             );
                             Vu::paint(&p, r, peak);
                         } else {
-                            Self::cell(&p, rect, x, *w, text, *col);
+                            widgets::cell(&p, rect, x, *w, text, *col);
                         }
                         x += w;
                     }
@@ -161,49 +164,13 @@ impl App {
         });
 
         for rule in toggled {
-            self.toggle_call_sub(rule);
+            self.st.toggle(rule, self.cmds);
         }
         // Clicking a row puts the dial on its channel, which is the only
         // other thing anybody wants to do with a call.
-        if let Some(hz) = tune_to {
-            self.set_center(hz / 1e6);
-        }
+        tune_to
     }
 
-    /// Subscribe to any group not heard of before, unless it was switched
-    /// off by hand.
-    ///
-    /// The opt-outs are remembered separately, so a group turned off does not
-    /// come back the next time somebody transmits on it.
-    pub(super) fn subscribe_new_groups(&mut self, calls: &[Call]) {
-        let mut added = false;
-        for c in calls {
-            let rule = Rule::Group(c.to.clone());
-            if self.calls.optout.contains(&rule) || self.calls.subs.iter().any(|s| s.rule == rule) {
-                continue;
-            }
-            self.calls.subs.push(Subscription::new(rule));
-            added = true;
-        }
-        if added {
-            self.send(Cmd::CallSubs(self.calls.subs.clone()));
-        }
-    }
-
-    /// Subscribe to a rule, or drop it if it is already there.
-    fn toggle_call_sub(&mut self, rule: Rule) {
-        match self.calls.subs.iter().position(|s| s.rule == rule) {
-            Some(i) => {
-                self.calls.subs.remove(i);
-                self.calls.optout.push(rule);
-            }
-            None => {
-                self.calls.optout.retain(|r| r != &rule);
-                self.calls.subs.push(Subscription::new(rule));
-            }
-        }
-        self.send(Cmd::CallSubs(self.calls.subs.clone()));
-    }
 }
 
 /// Which of the columns after the checkboxes is the meter.

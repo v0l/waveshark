@@ -697,14 +697,14 @@ impl App {
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 60.0;
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         ui.set_min_width(width);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
         let p = ui.painter_at(rect);
         let mut x = rect.left();
         for (name, w) in COLS {
-            Self::cell(&p, rect, x, w, name, theme::LEGEND);
+            widgets::cell(&p, rect, x, w, name, theme::LEGEND);
             x += w;
         }
-        Self::cell(&p, rect, x, rect.right() - x, "age", theme::LEGEND);
+        widgets::cell(&p, rect, x, rect.right() - x, "age", theme::LEGEND);
         p.line_segment(
             [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
             Stroke::new(1.0, theme::ETCH),
@@ -713,7 +713,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (n, a) in active.iter().enumerate() {
                 let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
@@ -806,11 +806,11 @@ impl App {
                 ];
                 let mut x = rect.left();
                 for ((t, c), (_, w)) in text.iter().zip(COLS) {
-                    Self::cell(&p, rect, x, w, t, *c);
+                    widgets::cell(&p, rect, x, w, t, *c);
                     x += w;
                 }
                 let age = a.age(now).as_secs();
-                Self::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
+                widgets::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
             }
         });
         });

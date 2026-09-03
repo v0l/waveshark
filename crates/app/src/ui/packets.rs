@@ -69,7 +69,7 @@ impl App {
                     }
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .max_height((list_h - Self::ROW_H).max(16.0))
+                        .max_height((list_h - widgets::ROW_H).max(16.0))
                         .stick_to_bottom(true)
                         .id_salt("packet_rows")
                         .show(ui, |ui| self.log_rows(ui, w));
@@ -236,7 +236,6 @@ impl App {
         ("protocol", 140.0),
         ("len", 38.0),
     ];
-    pub(super) const ROW_H: f32 = 16.0;
 
     /// Width the table needs before the info column starts being squeezed.
     fn table_width() -> f32 {
@@ -246,30 +245,17 @@ impl App {
     /// The heading strip, above the rows and outside their vertical scroll, so
     /// it cannot scroll away from what it labels.
     fn log_header_row(&self, ui: &mut egui::Ui, w: f32) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, Self::ROW_H), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, widgets::ROW_H), Sense::hover());
         let p = ui.painter_at(rect);
         let mut x = rect.left();
         for (name, cw) in Self::COLS {
-            Self::cell(&p, rect, x, cw, name, theme::LEGEND);
+            widgets::cell(&p, rect, x, cw, name, theme::LEGEND);
             x += cw;
         }
-        Self::cell(&p, rect, x, rect.right() - x, "info", theme::LEGEND);
+        widgets::cell(&p, rect, x, rect.right() - x, "info", theme::LEGEND);
         p.line_segment(
             [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
             Stroke::new(1.0, theme::ETCH),
-        );
-    }
-
-    /// One cell of text, clipped to its column so a long field cannot push the
-    /// ones after it sideways.
-    pub(super) fn cell(p: &egui::Painter, row: Rect, x: f32, w: f32, text: &str, col: Color32) {
-        let r = Rect::from_min_max(Pos2::new(x, row.top()), Pos2::new(x + w - 6.0, row.bottom()));
-        p.with_clip_rect(r.intersect(p.clip_rect())).text(
-            Pos2::new(r.left(), r.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            FontId::new(11.0, FontFamily::Name(theme::READOUT_FONT.into())),
-            col,
         );
     }
 
@@ -313,7 +299,7 @@ impl App {
             // from widgets, which is also what keeps a five hundred row list
             // cheap to draw.
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(width, Self::ROW_H), Sense::click());
+                ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::click());
             if !ui.is_rect_visible(rect) {
                 continue;
             }
@@ -352,10 +338,10 @@ impl App {
             ];
             let mut x = rect.left();
             for ((t, c), (_, cw)) in text.iter().zip(Self::COLS) {
-                Self::cell(&p, rect, x, cw, t, *c);
+                widgets::cell(&p, rect, x, cw, t, *c);
                 x += cw;
             }
-            Self::cell(&p, rect, x, rect.right() - x, &rec.detail, theme::VALUE);
+            widgets::cell(&p, rect, x, rect.right() - x, &rec.detail, theme::VALUE);
         }
 
         if let Some(id) = clicked {

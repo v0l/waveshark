@@ -223,6 +223,44 @@ pub(super) struct CallsState {
     pub optout: Vec<crate::callbus::Rule>,
 }
 
+impl CallsState {
+    /// Subscribe to any group not heard of before, unless it was switched off
+    /// by hand.
+    ///
+    /// Every group is listened to until it is turned off. A scanner that
+    /// hears nothing until it is configured is a scanner nobody hears
+    /// anything on, and the box on the row is how it is turned off.
+    pub fn subscribe_new(&mut self, calls: &[crate::calls::Call], cmds: &mut Vec<crate::radio::Cmd>) {
+        let mut added = false;
+        for c in calls {
+            let rule = crate::callbus::Rule::Group(c.to.clone());
+            if self.optout.contains(&rule) || self.subs.iter().any(|s| s.rule == rule) {
+                continue;
+            }
+            self.subs.push(crate::callbus::Subscription::new(rule));
+            added = true;
+        }
+        if added {
+            cmds.push(crate::radio::Cmd::CallSubs(self.subs.clone()));
+        }
+    }
+
+    /// Subscribe to a rule, or drop it if it is already there.
+    pub fn toggle(&mut self, rule: crate::callbus::Rule, cmds: &mut Vec<crate::radio::Cmd>) {
+        match self.subs.iter().position(|s| s.rule == rule) {
+            Some(i) => {
+                self.subs.remove(i);
+                self.optout.push(rule);
+            }
+            None => {
+                self.optout.retain(|r| r != &rule);
+                self.subs.push(crate::callbus::Subscription::new(rule));
+            }
+        }
+        cmds.push(crate::radio::Cmd::CallSubs(self.subs.clone()));
+    }
+}
+
 impl Default for CallsState {
     fn default() -> Self {
         Self { list: crate::calls::Calls::new(), subs: Vec::new(), optout: Vec::new() }

@@ -226,3 +226,23 @@ impl Widget for Squelch<'_> {
         resp
     }
 }
+
+/// Height of a row in the painted tables.
+///
+/// The call list, the packet log and the track list are painted rather than
+/// filled with widgets: a table of a thousand rows is a thousand allocations
+/// a frame otherwise, and every one of them is a rectangle and some text.
+pub const ROW_H: f32 = 16.0;
+
+/// One cell of text, clipped to its column so a long field cannot push the
+/// ones after it sideways.
+pub fn cell(p: &egui::Painter, row: Rect, x: f32, w: f32, text: &str, col: Color32) {
+    let r = Rect::from_min_max(Pos2::new(x, row.top()), Pos2::new(x + w - 6.0, row.bottom()));
+    p.with_clip_rect(r.intersect(p.clip_rect())).text(
+        Pos2::new(r.left(), r.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::new(11.0, egui::FontFamily::Name(theme::READOUT_FONT.into())),
+        col,
+    );
+}
