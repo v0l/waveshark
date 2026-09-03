@@ -27,6 +27,7 @@
 use crate::event::Event;
 use crate::node::{Node, NodeCtx, PortSpec};
 use crate::port::{Payload, StreamSpec, Tag};
+use rayon::prelude::*;
 
 /// How often slot throughput is recomputed.
 const RATE_WINDOW: f32 = 0.25;
@@ -88,6 +89,48 @@ struct Entry {
     in_slots: Vec<Slot>,
     /// Slot each output port writes to.
     out_slots: Vec<Slot>,
+    /// Per-call working state, kept on the entry so nodes of one level can
+    /// run on the pool without sharing anything: each task touches its own
+    /// entry and reads the arena, and the arena is written only between
+    /// levels.
+    scratch_out: Vec<Payload>,
+    scratch_specs: Vec<PortSpec>,
+    scratch_in_tags: Vec<Tag>,
+    scratch_new_tags: Vec<Tag>,
+    scratch_events: Vec<Event>,
+    base_index: u64,
+    error: Option<Error>,
+    /// Smoothed cost of one call, in microseconds, for deciding whether
+    /// this node is worth a task of its own.
+    cost_us: f32,
+    /// Total time spent in the node, for finding where a slow graph goes.
+    total_us: u64,
+}
+
+impl Entry {
+    /// Run the node over the buffers staged by the pre-pass. Errors are
+    /// parked on the entry so the post-pass can put every buffer back
+    /// before one failing node aborts the call.
+    fn run(&mut self, bufs: &[Payload], block_seconds: f64) {
+        self.scratch_events.clear();
+        self.scratch_new_tags.clear();
+        let ins: Vec<&Payload> = self.in_slots.iter().map(|&s| &bufs[s]).collect();
+        let mut ctx = NodeCtx::new(
+            self.base_index,
+            &self.scratch_specs,
+            &self.scratch_in_tags,
+            &mut self.scratch_events,
+            &mut self.scratch_new_tags,
+        )
+        .with_block_seconds(block_seconds);
+        let t = std::time::Instant::now();
+        if let Err(err) = self.node.process(&ins, &mut self.scratch_out, &mut ctx) {
+            self.error = Some(err);
+        }
+        let us = t.elapsed().as_micros() as u64;
+        self.cost_us += 0.2 * (us as f32 - self.cost_us);
+        self.total_us += us;
+    }
 }
 
 pub struct GraphBuilder {
@@ -263,6 +306,11 @@ pub struct Graph {
     entries: Vec<Entry>,
     /// Execution order, a topological sort of `entries`.
     order: Vec<usize>,
+    /// The same order cut into waves: every node in a level reads only what
+    /// earlier levels wrote, so a level's nodes are independent of each
+    /// other and run together on the pool. A linear chain is one node per
+    /// level and runs exactly as it would serially.
+    levels: Vec<Vec<usize>>,
     bufs: Vec<Payload>,
     specs: Vec<StreamSpec>,
     latency: Vec<u64>,
@@ -279,11 +327,6 @@ pub struct Graph {
     rate_at: std::time::Instant,
     output_slot: Slot,
     events: Vec<Event>,
-    /// Reused per-call scratch so steady state never allocates.
-    scratch_out: Vec<Payload>,
-    scratch_specs: Vec<PortSpec>,
-    scratch_tags: Vec<Tag>,
-    scratch_new_tags: Vec<Tag>,
 }
 
 impl std::fmt::Debug for Graph {
@@ -392,9 +435,27 @@ impl Graph {
             )));
         }
 
+        // Cut the order into levels: a node's level is one past the deepest
+        // of its producers, so everything a level reads was written by an
+        // earlier one.
+        let mut level_of = vec![0usize; n];
+        for &k in &order {
+            level_of[k] = in_slots[k]
+                .iter()
+                .filter_map(|s| producer_of.get(s))
+                .map(|&p| level_of[p] + 1)
+                .max()
+                .unwrap_or(0);
+        }
+        let mut levels = vec![Vec::new(); order.iter().map(|&k| level_of[k] + 1).max().unwrap_or(0)];
+        for &k in &order {
+            levels[level_of[k]].push(k);
+        }
+
         let mut g = Graph {
             entries: Vec::with_capacity(n),
             order,
+            levels,
             bufs: Vec::new(),
             specs: vec![b.input; n_slots],
             latency: vec![0; n_slots],
@@ -405,10 +466,6 @@ impl Graph {
             rate_at: std::time::Instant::now(),
             output_slot: INPUT_SLOT,
             events: Vec::new(),
-            scratch_out: Vec::new(),
-            scratch_specs: Vec::new(),
-            scratch_tags: Vec::new(),
-            scratch_new_tags: Vec::new(),
         };
 
         let mut nodes = b.nodes;
@@ -420,6 +477,15 @@ impl Graph {
                 tag: b.tags[k],
                 in_slots: in_slots[k].clone(),
                 out_slots: (0..outs).map(|p| out_slot_base[k] + p).collect(),
+                scratch_out: Vec::new(),
+                scratch_specs: Vec::new(),
+                scratch_in_tags: Vec::new(),
+                scratch_new_tags: Vec::new(),
+                scratch_events: Vec::new(),
+                base_index: 0,
+                error: None,
+                cost_us: 0.0,
+                total_us: 0,
             });
         }
 
@@ -537,6 +603,26 @@ impl Graph {
         self.order.iter().map(|&k| (NodeId(k), self.entries[k].label.as_str()))
     }
 
+    /// The levels the run executes, each a set of independent nodes, for
+    /// debugging what runs beside what.
+    pub fn run_levels(&self) -> Vec<Vec<&str>> {
+        self.levels
+            .iter()
+            .map(|l| l.iter().map(|&k| self.entries[k].label.as_str()).collect())
+            .collect()
+    }
+
+    /// Each node's smoothed cost per call, in microseconds, for finding
+    /// where a slow graph spends its time.
+    pub fn run_costs(&self) -> Vec<(&str, f32)> {
+        self.order.iter().map(|&k| (self.entries[k].label.as_str(), self.entries[k].cost_us)).collect()
+    }
+
+    /// Total microseconds spent in each node since it was built.
+    pub fn total_costs(&self) -> Vec<(&str, u64)> {
+        self.order.iter().map(|&k| (self.entries[k].label.as_str(), self.entries[k].total_us)).collect()
+    }
+
     /// Structure and negotiated rates, for drawing the graph.
     ///
     /// Reported from the built graph rather than from whatever assembled it, so
@@ -638,6 +724,11 @@ impl Graph {
     }
 
     /// Run every node once over the current input buffer.
+    ///
+    /// Levels run in order; within a level the nodes are independent by
+    /// construction and run together on the pool. A level of one node, which
+    /// is every level of a linear chain, runs inline on the calling thread
+    /// so a plain chain pays nothing for the machinery.
     pub fn run(&mut self) -> Result<&[Event]> {
         self.events.clear();
         let n_in = self.bufs[INPUT_SLOT].len() as u64;
@@ -646,90 +737,102 @@ impl Graph {
         // than by a stream.
         let block_seconds = n_in as f64 / self.specs[INPUT_SLOT].rate.max(1.0);
 
-        for oi in 0..self.order.len() {
-            let k = self.order[oi];
+        let levels = std::mem::take(&mut self.levels);
+        let mut failed: Option<Error> = None;
+        'levels: for level in &levels {
+            let Graph { entries, bufs, specs, latency, tags, produced, events, .. } = &mut *self;
 
-            // Destructure so the node, its output buffers, and its input
-            // buffers can be borrowed simultaneously without cloning.
-            let Graph {
-                entries,
-                bufs,
-                specs,
-                latency,
-                tags,
-                produced,
-                events,
-                scratch_out,
-                scratch_specs,
-                scratch_tags,
-                scratch_new_tags,
-                ..
-            } = self;
-            let e = &mut entries[k];
-
-            scratch_specs.clear();
-            scratch_specs.extend(
-                e.in_slots.iter().map(|&s| PortSpec { spec: specs[s], latency: latency[s] }),
-            );
-
-            // Tags arriving on the primary input port for this call's window.
-            scratch_tags.clear();
-            if let Some(&s0) = e.in_slots.first() {
-                scratch_tags.extend_from_slice(&tags[s0]);
-            }
-            let base_index = e.in_slots.first().map(|&s| produced[s]).unwrap_or(0);
-            let in_rate = scratch_specs.first().map(|p| p.spec.rate).unwrap_or(1.0);
-
-            // Move this node's output buffers out of the arena. Outputs belong
-            // to this node and inputs belong to others, so after this the
-            // remaining arena can be borrowed immutably without conflict.
-            scratch_out.clear();
-            for &s in &e.out_slots {
-                let mut b = std::mem::replace(&mut bufs[s], Payload::Bytes(Vec::new()));
-                b.clear();
-                scratch_out.push(b);
-            }
-
-            scratch_new_tags.clear();
-            let res = {
-                let ins: Vec<&Payload> = e.in_slots.iter().map(|&s| &bufs[s]).collect();
-                let mut ctx = NodeCtx::new(
-                    base_index,
-                    scratch_specs,
-                    scratch_tags,
-                    events,
-                    scratch_new_tags,
-                )
-                .with_block_seconds(block_seconds);
-                e.node.process(&ins, scratch_out, &mut ctx)
-            };
-
-            // Put the buffers back before propagating any error, so a failing
-            // node does not leave the arena holding placeholder payloads.
-            for (p, &s) in e.out_slots.iter().enumerate() {
-                bufs[s] = std::mem::replace(&mut scratch_out[p], Payload::Bytes(Vec::new()));
-            }
-
-            res.map_err(|err| Error::other(format!("node {k} ({}): {err}", e.label)))?;
-
-            for (p, &s) in e.out_slots.iter().enumerate() {
-                debug_assert_eq!(
-                    bufs[s].kind(),
-                    specs[s].kind,
-                    "node {} wrote the wrong payload kind on port {p}",
-                    e.label
-                );
-                // Rate-scale inbound tags onto this output, then append the
-                // node's own.
-                let out_rate = specs[s].rate;
-                tags[s].clear();
-                for t in scratch_tags.iter() {
-                    tags[s].push(t.rescale(in_rate, out_rate));
+            // Stage: copy in what each node will read and move its output
+            // buffers out of the arena, so the arena can then be shared
+            // immutably across the level.
+            for &k in level {
+                let e = &mut entries[k];
+                e.scratch_specs.clear();
+                e.scratch_in_tags.clear();
+                for &s in &e.in_slots {
+                    e.scratch_specs.push(PortSpec { spec: specs[s], latency: latency[s] });
                 }
-                tags[s].extend(scratch_new_tags.iter().cloned());
-                tags[s].sort_by_key(|t| t.index);
-                produced[s] += bufs[s].len() as u64;
+                // Tags arriving on the primary input port for this call's
+                // window.
+                if let Some(&s0) = e.in_slots.first() {
+                    e.scratch_in_tags.extend_from_slice(&tags[s0]);
+                }
+                e.base_index = e.in_slots.first().map(|&s| produced[s]).unwrap_or(0);
+                e.scratch_out.clear();
+                for &s in &e.out_slots {
+                    let mut b = std::mem::replace(&mut bufs[s], Payload::Bytes(Vec::new()));
+                    b.clear();
+                    e.scratch_out.push(b);
+                }
             }
+
+            // Run. The pool is worth a fork only when a second node in the
+            // level costs real time by itself: a level of one FFT and four
+            // bookkeeping nodes runs faster inline than forked, and most
+            // levels of most graphs are exactly that. The cost is measured,
+            // not guessed, so a node that grows expensive is promoted on
+            // the next block.
+            const FORK_US: f32 = 50.0;
+            let heavy = level.iter().filter(|&&k| entries[k].cost_us > FORK_US).count();
+            if level.len() > 1 && heavy > 1 {
+                let bufs = &*bufs;
+                let ks = level.as_slice();
+                entries
+                    .par_iter_mut()
+                    .enumerate()
+                    .filter(|(k, _)| ks.contains(k))
+                    .for_each(|(_, e)| e.run(bufs, block_seconds));
+            } else {
+                for &k in level {
+                    let e = &mut entries[k];
+                    // Split the borrow: the entry's own output buffers were
+                    // moved out in the pre-pass, so the arena holds nothing
+                    // this node writes.
+                    let bufs = &*bufs;
+                    e.run(bufs, block_seconds);
+                }
+            }
+
+            // Unstage, in node order so the outcome is deterministic. The
+            // buffers all go back before any error propagates, so a failing
+            // node does not leave the arena holding placeholders.
+            for &k in level {
+                let e = &mut entries[k];
+                for (p, &s) in e.out_slots.iter().enumerate() {
+                    bufs[s] = std::mem::replace(&mut e.scratch_out[p], Payload::Bytes(Vec::new()));
+                }
+            }
+            for &k in level {
+                let e = &mut entries[k];
+                if let Some(err) = e.error.take() {
+                    failed = Some(Error::other(format!("node {k} ({}): {err}", e.label)));
+                    break 'levels;
+                }
+                let in_rate = e.scratch_specs.first().map(|p| p.spec.rate).unwrap_or(1.0);
+                for (p, &s) in e.out_slots.iter().enumerate() {
+                    debug_assert_eq!(
+                        bufs[s].kind(),
+                        specs[s].kind,
+                        "node {} wrote the wrong payload kind on port {p}",
+                        e.label
+                    );
+                    // Rate-scale inbound tags onto this output, then append
+                    // the node's own.
+                    let out_rate = specs[s].rate;
+                    tags[s].clear();
+                    for t in e.scratch_in_tags.iter() {
+                        tags[s].push(t.rescale(in_rate, out_rate));
+                    }
+                    tags[s].extend(e.scratch_new_tags.iter().cloned());
+                    tags[s].sort_by_key(|t| t.index);
+                    produced[s] += bufs[s].len() as u64;
+                }
+                events.append(&mut e.scratch_events);
+            }
+        }
+        self.levels = levels;
+        if let Some(err) = failed {
+            return Err(err);
         }
 
         self.tags[INPUT_SLOT].clear();

@@ -1175,6 +1175,21 @@ impl Receiver {
         self.graph.topology()
     }
 
+    /// The waves the graph runs in, for debugging what runs beside what.
+    pub fn run_levels(&self) -> Vec<Vec<&str>> {
+        self.graph.run_levels()
+    }
+
+    /// Each node's smoothed cost per call, for finding where the time goes.
+    pub fn run_costs(&self) -> Vec<(&str, f32)> {
+        self.graph.run_costs()
+    }
+
+    /// Total microseconds each node has cost since the build.
+    pub fn total_costs(&self) -> Vec<(&str, u64)> {
+        self.graph.total_costs()
+    }
+
     /// Set one node's own parameter, by the id the topology gave it.
     ///
     /// Returns whether the change alters the stream's shape, which the caller

@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 common.workspace = true
 num-complex.workspace = true
+rayon.workspace = true
 serde.workspace = true
