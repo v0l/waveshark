@@ -211,6 +211,10 @@ pub fn registry() -> Registry {
             if spur > 0.0 {
                 n.set_spur(Some(spur));
             }
+            let step = s.f64_or("raster_hz", 0.0);
+            if step > 0.0 {
+                n.set_raster(Some((s.f64_or("raster_origin_hz", 0.0), step)));
+            }
             Ok(Box::new(n) as Box<dyn Node>)
         },
     );
@@ -511,6 +515,7 @@ pub fn registry() -> Registry {
                 reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
                 margin_us: s.f64_or("margin_us", d.margin_us as f64) as u32,
                 min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
+                source_snr_db: s.f64_or("source_snr_db", 0.0) as f32,
                 classify: dsp::ClassifyConfig {
                     min_score: s.f64_or("min_score", d.classify.min_score as f64) as f32,
                     min_margin: s.f64_or("min_margin", d.classify.min_margin as f64) as f32,

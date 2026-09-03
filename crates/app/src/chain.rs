@@ -1749,6 +1749,12 @@ fn channel_stages(
         s.insert("threshold_db".into(), V::Float(db as f64));
         let sq = at(p, "chan_squelch", "squelch", s);
         p.connect(tail, (sq, 0));
+                // The channel plan for the band, so a source found on a
+                // channel is locked to it rather than measured afresh.
+                if let Some(r) = crate::bands::raster_at((band.0 + band.1) / 2.0) {
+                    s.insert("raster_hz".into(), pipeline::ParamValue::Float(r.step));
+                    s.insert("raster_origin_hz".into(), pipeline::ParamValue::Float(r.origin));
+                }
         tail = Source::Stage(sq, 0);
     }
 
@@ -2424,6 +2430,8 @@ mod tests {
         assert!(!topo.nodes.iter().any(|n| n.tag == Some(env)), "the unwired one waits");
     }
 
+                let step = st.settings.f64_or("raster_hz", 0.0);
+                n.set_raster((step > 0.0).then(|| (st.settings.f64_or("raster_origin_hz", 0.0), step)));
     #[test]
     fn a_patch_that_decodes_reaches_the_packet_bus() {
         // Everything that produces packets meets at the bus, and a decoder

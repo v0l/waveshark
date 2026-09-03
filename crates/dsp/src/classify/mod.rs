@@ -72,6 +72,7 @@ pub fn hypotheses() -> &'static [&'static dyn Hypothesis] {
         &frequency::Fsk4,
         &phase::Psk2,
         &phase::Psk4,
+        &phase::Dqpsk,
         &chirp::Chirp,
         &ofdm::Ofdm,
         &dsss::Dsss,
@@ -101,6 +102,11 @@ pub enum Modulation {
     Psk2,
     /// Phase keyed, four states.
     Psk4,
+    /// Four phases shifted by an eighth of a turn every symbol, which is
+    /// what TETRA and the trunked systems key. The fourth power alternates
+    /// sign each symbol, so instead of one line it shows a pair a symbol
+    /// rate apart.
+    Dqpsk,
     /// Frequency swept linearly, which is chirp spread spectrum and radar.
     Chirp,
     /// Many carriers with a cyclic prefix. Told from the rest of the
@@ -130,6 +136,7 @@ impl Modulation {
             Modulation::Msk => "MSK",
             Modulation::Psk2 => "BPSK",
             Modulation::Psk4 => "QPSK",
+            Modulation::Dqpsk => "pi/4-DQPSK",
             Modulation::Chirp => "chirp",
             Modulation::Ofdm => "OFDM",
             Modulation::Dsss => "DSSS",
@@ -212,6 +219,16 @@ pub struct Features {
     /// which is how a phase-keyed carrier gives itself away.
     pub square_line: f32,
     pub quartic_line: f32,
+    /// Share of the fourth-power spectrum in a pair of lines, which is what
+    /// pi/4-shifted QPSK leaves there: its two constellations differ by an
+    /// eighth of a turn, so the fourth power flips sign every symbol and
+    /// its line splits in two, a symbol rate apart. When a pair is found
+    /// `baud` is their separation, which is a better measurement of the
+    /// rate than the transition spectrum gives at a few samples a symbol.
+    /// The eighth power would collapse the pair to one line, and was tried;
+    /// on a pulse-shaped carrier at seven samples a symbol it is too weak
+    /// to read.
+    pub quartic_pair: f32,
     /// Kurtosis of the envelope, 3.0 for a Gaussian. Multi-carrier signals sit
     /// near 3; a keyed single carrier sits well below.
     pub kurtosis: f32,
@@ -605,6 +622,14 @@ impl Classifier {
 
         f.square_line = self.power_line(iq, 2);
         f.quartic_line = self.power_line(iq, 4);
+        let (pair, sep_hz) = self.line_pair();
+        f.quartic_pair = pair;
+        // The pair is a symbol rate only for one carrier keyed in phase: two
+        // tones give the fourth power two lines as well, a tone's spacing
+        // apart, and that is not a clock.
+        if pair > 0.0 && f.tones == 1 && f.square_line < 0.2 {
+            f.baud = sep_hz;
+        }
 
         // Cyclostationarity last, because it needs the occupied fraction to
         // know which lags are meaningful: inside a signal's own correlation
@@ -710,9 +735,12 @@ impl Classifier {
         self.welch_real(n);
         // Between four and a thousand samples per symbol. Below four there is
         // nothing to interpolate and above a thousand a burst holds too few
-        // symbols to have a rate.
+        // symbols to have a rate. Eight was the limit here for a while, and
+        // an 18 kbaud carrier in a stream at 120 kS/s sits under seven: its
+        // clock was outside the search and a slot-rate leak in the lowest
+        // bin was reported as its symbol rate.
         let lo = (n / 1000).max(2);
-        let hi = n / 8;
+        let hi = n / 4;
         if hi <= lo + 2 {
             return (0.0, 0.0);
         }
@@ -836,6 +864,61 @@ impl Classifier {
             best = best.max(a + self.spec_pow[i] + c);
         }
         best / total
+    }
+
+    /// Share of the last power-law spectrum held by its strongest line and
+    /// a partner of comparable strength elsewhere, and how far apart they
+    /// are in hertz.
+    ///
+    /// Read off `self.spec_pow` as [`Self::power_line`] left it, so it is
+    /// asked right after the fourth power. Zero when the strongest line
+    /// stands alone, which is what plain phase keying leaves: the second
+    /// strongest bin of a spectrum that is one line and noise is noise.
+    fn line_pair(&self) -> (f32, f32) {
+        let n = self.spec_pow.len();
+        if n < 16 {
+            return (0.0, 0.0);
+        }
+        let total: f32 = self.spec_pow.iter().sum();
+        if total <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let tri = |i: usize| -> f32 {
+            let i = i % n;
+            self.spec_pow[(i + n - 1) % n] + self.spec_pow[i] + self.spec_pow[(i + 1) % n]
+        };
+        let (mut best, mut at) = (0.0f32, 0usize);
+        for i in 0..n {
+            let t = tri(i);
+            if t > best {
+                best = t;
+                at = i;
+            }
+        }
+        // The partner: a peak of its own, clear of the first line's skirt.
+        let guard = 4usize;
+        let (mut partner, mut at2) = (0.0f32, 0usize);
+        for i in 0..n {
+            let d = (i + n - at) % n;
+            if d.min(n - d) < guard {
+                continue;
+            }
+            let t = tri(i);
+            if t > partner && t >= tri(i + n - 1) && t >= tri(i + 1) {
+                partner = t;
+                at2 = i;
+            }
+        }
+        // Two lines, not the two tallest bumps of a spectrum that has none:
+        // each has to hold a share of the whole that noise never puts in
+        // three bins.
+        if partner < best * 0.3 || partner < total * 0.05 {
+            return (0.0, 0.0);
+        }
+        let d = (at2 + n - at) % n;
+        let sep_bins = d.min(n - d);
+        let sep_hz = sep_bins as f64 * self.rate / n as f64;
+        ((best + partner) / total, sep_hz as f32)
     }
 }
 
@@ -1236,6 +1319,38 @@ fn chirp_fit(freq: &[f32], rate: f64) -> (f32, f32) {
 mod tests {
     use super::*;
 
+    /// Score a burst dumped from the receiver, for reading why a verdict
+    /// came out as it did: `SR_BURST_FILE` names interleaved f32 IQ and
+    /// `SR_BURST_RATE` its rate. Does nothing without them.
+    #[test]
+    fn score_a_dumped_burst() {
+        let (Some(path), Some(rate)) = (std::env::var_os("SR_BURST_FILE"), std::env::var("SR_BURST_RATE").ok())
+        else {
+            return;
+        };
+        let rate: f64 = rate.parse().unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let iq: Vec<C32> = bytes
+            .chunks_exact(8)
+            .map(|b| {
+                C32::new(
+                    f32::from_le_bytes(b[0..4].try_into().unwrap()),
+                    f32::from_le_bytes(b[4..8].try_into().unwrap()),
+                )
+            })
+            .collect();
+        let mut c = Classifier::new(rate, ClassifyConfig::default());
+        let f = c.features(&iq);
+        eprintln!("features: {f:#?}");
+        let e = Evidence::from(&f);
+        eprintln!("evidence: {e:#?}");
+        for h in hypotheses() {
+            eprintln!("{:?}: {:.3}", h.modulation(), h.score(&f, &e));
+        }
+        let class = decide(&f, &ClassifyConfig::default());
+        eprintln!("verdict: {:?} conf {:.2}", class.modulation, class.confidence);
+    }
+
     const RATE: f64 = 200_000.0;
 
     struct Gen {
@@ -1335,6 +1450,19 @@ mod tests {
         g.out
     }
 
+    /// Four phases shifted by an eighth of a turn every symbol, which is
+    /// what TETRA keys.
+    fn dqpsk() -> Vec<C32> {
+        let mut g = Gen::new(0.01);
+        let mut phase = 0.0f64;
+        for _ in 0..300 {
+            let sym = g.bit() % 4;
+            phase += std::f64::consts::TAU * (sym as f64 / 4.0 + 1.0 / 8.0);
+            g.phase_symbol(500.0, phase.rem_euclid(std::f64::consts::TAU), SPS);
+        }
+        g.out
+    }
+
     fn chirp() -> Vec<C32> {
         let mut g = Gen::new(0.01);
         // Eight sweeps across 40 kHz, which is the shape chirp spread spectrum
@@ -1397,6 +1525,13 @@ mod tests {
     fn tells_phase_keying_from_frequency_keying() {
         assert_eq!(classify(&psk(2)).modulation, Modulation::Psk2);
         assert_eq!(classify(&psk(4)).modulation, Modulation::Psk4);
+        // The shifted kind is told apart by what its fourth power leaves: a
+        // pair of lines a symbol rate apart rather than one. It was read as
+        // OFDM off the air, on the slot structure alone, until it was.
+        let c = classify(&dqpsk());
+        assert_eq!(c.modulation, Modulation::Dqpsk, "{:?}", c.features);
+        assert!(c.features.quartic_pair > 0.3, "pair {}", c.features.quartic_pair);
+        assert!((c.features.baud - 2_000.0).abs() < 100.0, "baud {}", c.features.baud);
     }
 
     #[test]

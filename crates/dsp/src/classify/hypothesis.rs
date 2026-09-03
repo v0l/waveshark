@@ -20,6 +20,7 @@ use super::{Features, Modulation};
 /// Shared so that "constant envelope" means one thing across every class, and
 /// changing what it means changes it everywhere at once rather than in the
 /// four places that happened to spell it out.
+#[derive(Clone, Copy, Debug)]
 pub struct Evidence {
     /// How far the envelope is keyed down. 1 is on-off, 0 is steady.
     pub keyed_amplitude: f32,

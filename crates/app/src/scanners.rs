@@ -669,8 +669,10 @@ margin   = 12.5 kHz
 # so move the range if that is what is above you.
 #
 # Nothing here decodes TETRA. The carriers are pi/4-DQPSK at 18 kbaud on a
-# 25 kHz raster, and this finds them, measures each one and logs it as a
-# burst: it says which channels are busy and when, not what was said.
+# 25 kHz raster, and this finds them, measures each one and names it from
+# the keying, the rate and the band, once when it is found and then every
+# few seconds while it stays on: it says which channels are busy and when,
+# not what was said.
 range = 390 - 400 MHz
 span  = 250 kHz
 front = auto

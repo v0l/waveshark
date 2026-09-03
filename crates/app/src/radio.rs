@@ -2255,6 +2255,52 @@ pub(crate) mod tests {
     #[test]
     fn an_m17_handheld_on_a_busy_band_is_found_and_read() {
         // Synthesised M17 does not fail the way this capture did. A generated
+    /// Finding the carriers is half of it. The scanner block promises that
+    /// each is measured and logged, so the list says which channels are
+    /// busy; a source that never closes never used to reach the list at all,
+    /// because a burst front end reports a burst when it ends.
+    #[test]
+    fn a_permanent_tetra_downlink_is_logged_with_its_measurement() {
+        let Some(buf) = tetra_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let rows: Vec<String> = out
+            .iter()
+            .map(|r| format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.model, r.modulation, r.detail))
+            .collect();
+        for hz in [391_181_000.0, 391_704_500.0] {
+            let mine: Vec<&DecodeRecord> =
+                out.iter().filter(|r| (r.freq - hz).abs() < 12_500.0).collect();
+            assert!(!mine.is_empty(), "{:.4} MHz was never logged: {rows:?}", hz / 1e6);
+            // Logged as the channel the plan lists, not as this tuner's
+            // measurement of it: the band is on a 25 kHz raster and the
+            // carrier was found a few kilohertz off it.
+            let channel = (hz / 25_000.0).round() * 25_000.0;
+            assert!(
+                mine.iter().all(|r| (r.freq - channel).abs() < 1.0),
+                "{:.4} MHz was logged at {:?}",
+                hz / 1e6,
+                mine.iter().map(|r| r.freq).collect::<Vec<_>>()
+            );
+            // Measured as the phase-keyed carrier it is, and named from the
+            // keying, the rate and the band; not filed as noise, and not as
+            // OFDM for the training sequence repeating every slot.
+            assert!(
+                mine.iter().any(|r| r.modulation == "pi/4-DQPSK" && r.detail.contains("TETRA")),
+                "{:.4} MHz was logged as {:?}",
+                hz / 1e6,
+                mine.iter().map(|r| format!("{} {}", r.modulation, r.detail)).collect::<Vec<_>>()
+            );
+            // Once a second or so, not once per block and not once per
+            // capture: the list should say it is still on the air without
+            // being a list of nothing else.
+            assert!(mine.len() >= 2 && mine.len() <= 40, "{} rows for a 12 s carrier", mine.len());
+        }
+    }
+
         // transmission is measured wide enough to clear every width threshold
         // in the receiver; a real one, cleanly shaped, measures a couple of
         // kilohertz at the detector's twenty decibel extent, and three

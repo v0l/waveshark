@@ -60,6 +60,15 @@ const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
 /// source closes would drop the page with it.
 const FLUSH_S: f64 = 0.25;
 
+/// How often a transmission that never ends is reported, in seconds.
+///
+/// A base station carrier is on all day. The burst front end cuts it into
+/// pieces of half a second to have something to measure, and a row per
+/// piece would be a list of nothing else. One when it is found, then one
+/// every so often to say it is still there, is what "which channels are
+/// busy" needs.
+const REPORT_S: f64 = 5.0;
+
 /// One decoder over one stream: a graph, and where its packets come out.
 struct Member {
     name: &'static str,
@@ -76,6 +85,9 @@ struct Member {
     /// leaves with its measurement, and a burst no front end reads leaves
     /// as a packet of nothing but the measurement.
     router: Option<pipeline::NodeId>,
+    /// When a transmission still going was last reported, in seconds of
+    /// stream, so it is reported every [`REPORT_S`] rather than every piece.
+    last_report_s: Option<f64>,
 }
 
 impl Member {
@@ -86,7 +98,7 @@ impl Member {
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
-        Ok(Self { name, graph, pulses, frames, packets, voice, router })
+        Ok(Self { name, graph, pulses, frames, packets, voice, router, last_report_s: None })
     }
 
     /// Run one block through and collect what came out as packets.
@@ -112,6 +124,26 @@ impl Member {
             // packet stream and carries no rate.
             let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
+                // A diagnostic: with `SR_DUMP_BURSTS` naming a directory,
+                // every burst the router cut is written there as
+                // interleaved f32 IQ, named with the centre, the rate and
+                // the start sample, which is what the classifier's
+                // `score_a_dumped_burst` test reads. How
+                // a verdict on a real signal came out is otherwise
+                // invisible, and that is how the TETRA carriers were found
+                // to be read as OFDM.
+                if let Some(dir) = std::env::var_os("SR_DUMP_BURSTS") {
+                    let path = std::path::Path::new(&dir)
+                        .join(format!("burst_{}_{}_{}.c64", center_hz, rate as u64, b.start_sample));
+                    if !path.exists() {
+                        let mut bytes = Vec::with_capacity(b.iq.len() * 8);
+                        for c in &b.iq {
+                            bytes.extend_from_slice(&c.re.to_le_bytes());
+                            bytes.extend_from_slice(&c.im.to_le_bytes());
+                        }
+                        let _ = std::fs::write(path, bytes);
+                    }
+                }
                 let m = crate::decode_nodes::measure_of(b, center_hz as f64);
                 let iq = Some(std::sync::Arc::new(common::IqBurst {
                     rate,
@@ -128,6 +160,15 @@ impl Member {
                     // list of those is a list of nothing.
                     if b.routed_to != "none" || b.class.confidence < 0.5 {
                         continue;
+                    }
+                    // A piece of a transmission that is still going is the
+                    // same news as the last piece, most of the time.
+                    if b.continuous {
+                        let t = b.start_sample as f64 / rate.max(1.0);
+                        if self.last_report_s.is_some_and(|l| t - l < REPORT_S) {
+                            continue;
+                        }
+                        self.last_report_s = Some(t);
                     }
                     out.push(Packet {
                         at_us,
@@ -242,6 +283,9 @@ pub struct AutoNode {
     spur: Option<f64>,
     /// Around the spur, in absolute hertz, once the resolution is known.
     spur_band: Option<(f64, f64)>,
+    /// The channel plan on this band, as an origin and a step in hertz, when
+    /// there is one. See [`snap_to_raster`].
+    raster: Option<(f64, f64)>,
     detector: Option<SourceDetector>,
     extractor: Option<SourceExtractor>,
     reg: Registry,
@@ -271,6 +315,7 @@ impl AutoNode {
             band: None,
             spur: None,
             spur_band: None,
+            raster: None,
             detector: None,
             extractor: None,
             reg: crate::registry(),
@@ -309,6 +354,17 @@ impl AutoNode {
 
     pub fn band(&self) -> Option<(f64, f64)> {
         self.band
+    }
+
+    /// The channel plan on this band: a frequency the plan lands on and the
+    /// spacing, in hertz. A source found close to a channel is locked to it;
+    /// see [`snap_to_raster`].
+    pub fn set_raster(&mut self, raster: Option<(f64, f64)>) {
+        self.raster = raster.filter(|(_, step)| *step > 0.0);
+    }
+
+    pub fn raster(&self) -> Option<(f64, f64)> {
+        self.raster
     }
 
     fn apply_band(&mut self) {
@@ -422,7 +478,11 @@ impl AutoNode {
     fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
-        let mut members = vec![Member::build("burst_route", spec, NodeSpec::new("burst_route"), &self.reg)?];
+        // The front end is told how strong the detector found the source,
+        // so a stream that begins inside a transmission is not read as
+        // noise from its first sample to its last.
+        let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
+        let mut members = vec![Member::build("burst_route", spec, route, &self.reg)?];
         if b.bandwidth_hz <= NARROW_MAX_HZ {
             let hz = b.center_hz as f64;
             // The channel is centred on the source, so it fits when the
@@ -458,6 +518,33 @@ impl AutoNode {
         Ok(Slot { id: b.id, center_hz: b.center_hz, members })
     }
 
+}
+
+/// Lock a source onto the channel plan when it is plainly on it.
+///
+/// A source is a measurement: the power centroid of the bins that stood over
+/// the floor in its first frames, and the run of them with a margin. On a
+/// band with a plan that is the wrong answer to a right question. A TETRA
+/// carrier found at 391.1812 MHz, 24.6 kHz wide, is the 391.175 MHz channel
+/// seen through a tuner a few parts per million out, and every opening
+/// would otherwise measure it slightly differently, cut it out at a
+/// different width, and log it at a frequency nobody's plan lists.
+///
+/// So: within a third of a step of a channel, and between 0.4 and 1.6 of a
+/// step wide, a source is the channel, and takes its centre and its width.
+/// Anything else is left as measured; a plan says where channels are, not
+/// that nothing else transmits.
+fn snap_to_raster(s: &mut dsp::Source, (origin, step): (f64, f64), stream_center_hz: f64) {
+    let hz = stream_center_hz + s.center_hz;
+    let on = origin + ((hz - origin) / step).round() * step;
+    let near = (hz - on).abs() <= step / 3.0;
+    let width = s.bandwidth_hz();
+    let fits = width >= step * 0.4 && width <= step * 1.6;
+    if near && fits {
+        s.center_hz = on - stream_center_hz;
+        s.lo_hz = s.center_hz - step / 2.0;
+        s.hi_hz = s.center_hz + step / 2.0;
+    }
 }
 
 fn now_us() -> u64 {
@@ -566,6 +653,16 @@ impl Node for AutoNode {
             // offset following that something's envelope.
             !(others > 0 && spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&hz)))
         }));
+        // A source plainly on a channel of the plan is that channel: what
+        // is cut out, and what is reported, is the channel rather than
+        // this frame's measurement of it.
+        if let Some(raster) = self.raster {
+            for ev in self.events.iter_mut() {
+                if let SourceEvent::Opened(s) = ev {
+                    snap_to_raster(s, raster, c0);
+                }
+            }
+        }
         self.blocks.clear();
         e.process(iq, &self.events, &mut self.blocks);
         for ev in &self.events {
@@ -704,6 +801,15 @@ impl Node for AutoNode {
                 self.cfg.bin_hz = f.max(1.0);
                 return self.rebuild();
             }
+            "raster_hz" => {
+                let origin = self.raster.map(|(o, _)| o).unwrap_or(0.0);
+                self.set_raster((f > 0.0).then_some((origin, f)));
+            }
+            "raster_origin_hz" => {
+                if let Some((_, step)) = self.raster {
+                    self.raster = Some((f, step));
+                }
+            }
             _ => {
                 // A front end's own knob: set on the template, so sources
                 // that open later start with it, and on every running copy.
@@ -768,6 +874,81 @@ mod tests {
         assert!(Node::subgraph(&n).is_some(), "the burst front end is shown before any source");
     }
 
+    /// Noise with a keyed carrier `offset` hertz up from the centre for the
+    /// last stretch of it.
+    fn keyed(rate: f64, offset: f64) -> Vec<C32> {
+        let mut seed = 0x51u64;
+        let mut iq: Vec<C32> = (0..600_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let a = (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5;
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let b = (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5;
+                C32::new(a * 0.05, b * 0.05)
+            })
+            .collect();
+        for i in 0..100_000usize {
+            if (i / 500) % 2 == 0 {
+                let ph = std::f64::consts::TAU * offset * i as f64 / rate;
+                iq[300_000 + i] += C32::new(0.3 * ph.cos() as f32, 0.3 * ph.sin() as f32);
+            }
+        }
+        iq
+    }
+
+    /// Where the node said sources opened, as offsets from the centre.
+    fn openings(n: &mut AutoNode, rate: f64, center: Hz, iq: &[C32]) -> Vec<f64> {
+        let ins = [spec(rate, center)];
+        let mut opened = Vec::new();
+        for block in iq.chunks(16_384) {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let (mut events, mut tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+            Node::process(n, &[&input], &mut out, &mut ctx).unwrap();
+            opened.extend(events.iter().filter_map(|e| match e {
+                Event::Detection { center: c, .. } => Some(c.as_f64() - center.as_f64()),
+                _ => None,
+            }));
+        }
+        opened
+    }
+
+    #[test]
+    fn a_source_near_a_channel_of_the_plan_is_that_channel() {
+        // A source is a measurement, and a measurement of a channel that a
+        // plan lists is the channel seen through a tuner a few parts per
+        // million out. Locked, it is cut out and logged as the channel;
+        // left as measured it is a different frequency every time it opens.
+        let rate = 1_000_000.0;
+        let center = Hz::mhz(434);
+        let iq = keyed(rate, 356_000.0);
+        let mut plain = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut plain, &[spec(rate, center)]).unwrap();
+        let measured = openings(&mut plain, rate, center, &iq);
+        assert!(measured.iter().any(|o| (o - 356_000.0).abs() < 5_000.0), "{measured:?}");
+        assert!(!measured.iter().any(|o| (o - 350_000.0).abs() < 1.0), "not on the grid yet");
+
+        let mut planned = AutoNode::new("auto", SourceConfig::default());
+        planned.set_raster(Some((0.0, 25_000.0)));
+        Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
+        let locked = openings(&mut planned, rate, center, &iq);
+        assert!(locked.iter().any(|o| (o - 350_000.0).abs() < 1.0), "{locked:?}");
+
+        // Half a channel off the grid is not on it, and stays as measured.
+        let iq = keyed(rate, 362_500.0);
+        let mut planned = AutoNode::new("auto", SourceConfig::default());
+        planned.set_raster(Some((0.0, 25_000.0)));
+        Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
+        let between = openings(&mut planned, rate, center, &iq);
+        assert!(between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0), "{between:?}");
+        assert!(!between.iter().any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0));
+    }
+
     #[test]
     fn nothing_opens_on_the_tuner_s_own_centre() {
         // A direct-conversion receiver's offset follows a strong signal's
@@ -807,7 +988,8 @@ mod tests {
         let mut opened = Vec::new();
         for block in iq.chunks(16_384) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = [Payload::Packets(Vec::new())];
+            // Packets and speech: the node has a port for each.
+            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
             Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();

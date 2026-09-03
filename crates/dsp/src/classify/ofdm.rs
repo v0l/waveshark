@@ -31,6 +31,15 @@ impl Hypothesis for Ofdm {
         // somewhere, because a keyed signal repeats at its symbol rate too.
         // Sub-Gaussian samples are a spread single carrier, not a sum of
         // subcarriers, which is what keeps this apart from DSSS.
-        e.noise_like * e.prefix * ramp(f.kurtosis, 2.3, 2.7)
+        //
+        // And no phase line at any power. A sum of subcarriers has none;
+        // a phase-keyed carrier with a training sequence every slot has a
+        // repeat at the slot period that reads as a prefix, and a TETRA
+        // downlink was called OFDM on that alone.
+        e.noise_like
+            * e.prefix
+            * ramp(f.kurtosis, 2.3, 2.7)
+            * (1.0 - ramp(f.square_line.max(f.quartic_line), 0.2, 0.5))
+            * (1.0 - ramp(f.quartic_pair, 0.15, 0.35))
     }
 }

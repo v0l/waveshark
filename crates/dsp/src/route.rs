@@ -64,6 +64,11 @@ pub struct RouterConfig {
     /// Minimum SNR before a burst is opened at all.
     pub min_snr_db: f32,
     pub noise_threshold_ratio: f32,
+    /// How far over the noise the detector that cut this stream out found
+    /// its source, in dB, or zero when nothing said. Lets the gate recognise
+    /// a stream that begins inside a transmission; see
+    /// [`LevelGate::expect_signal`].
+    pub source_snr_db: f32,
     pub classify: ClassifyConfig,
     pub ook: PulseConfig,
     pub ask: AskConfig,
@@ -81,6 +86,7 @@ impl Default for RouterConfig {
             tau_us: 500.0,
             min_snr_db: 6.0,
             noise_threshold_ratio: 3.5,
+            source_snr_db: 0.0,
             classify: ClassifyConfig::default(),
             ook: PulseConfig { min_pulses: 8, ..Default::default() },
             ask: AskConfig::default(),
@@ -107,6 +113,9 @@ pub struct RoutedBurst {
     /// The burst as it was read: the margin before it, the burst, and the
     /// margin after, at the router's rate.
     pub iq: Vec<C32>,
+    /// Cut for length with the gate still high: a piece of a transmission
+    /// that is still going, not a burst that ended.
+    pub continuous: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -158,10 +167,13 @@ impl BurstRouter {
         cfg.ook.reset_us = cfg.ook.reset_us.max(cfg.reset_us);
         cfg.ask.reset_us = cfg.ask.reset_us.max(cfg.reset_us);
         cfg.fsk.reset_us = cfg.fsk.reset_us.max(cfg.reset_us);
+        let mut gate =
+            LevelGate::new(rate, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio);
+        gate.expect_signal(rate, cfg.source_snr_db);
         Self {
             cfg,
             rate,
-            gate: LevelGate::new(rate, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
+            gate,
             classifier: Classifier::new(rate, cfg.classify),
             pre: VecDeque::with_capacity(margin + 1),
             margin,
@@ -223,7 +235,7 @@ impl BurstRouter {
                     self.burst.push(x);
                     self.tail += 1;
                     if self.low_run >= reset_samples {
-                        self.finish(out);
+                        self.finish(out, false);
                     }
                 }
             }
@@ -234,7 +246,7 @@ impl BurstRouter {
             self.pre.push_back(x);
 
             if self.in_burst && self.burst.len() >= max_samples {
-                self.finish(out);
+                self.finish(out, true);
             }
         }
     }
@@ -242,11 +254,11 @@ impl BurstRouter {
     /// Force out any burst still being collected, for the end of a file.
     pub fn flush(&mut self, out: &mut Vec<RoutedBurst>) {
         if self.in_burst {
-            self.finish(out);
+            self.finish(out, false);
         }
     }
 
-    fn finish(&mut self, out: &mut Vec<RoutedBurst>) {
+    fn finish(&mut self, out: &mut Vec<RoutedBurst>, continuous: bool) {
         self.in_burst = false;
         // What was loud, between the margins: a burst shorter than the least
         // worth measuring is the gate opening on a blip, and is dropped.
@@ -319,6 +331,7 @@ impl BurstRouter {
             symbols,
             start_sample: self.burst_start,
             iq: burst,
+            continuous,
         });
     }
 

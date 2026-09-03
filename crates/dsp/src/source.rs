@@ -167,7 +167,20 @@ pub struct SourceConfig {
     /// that a genuinely unmodulated carrier, a beacon sending nothing, is
     /// never reported; it is indistinguishable from a spur by any measure
     /// this detector has.
+    ///
+    /// Asked only of a candidate that appeared when the floor cap first
+    /// did, within `fixture_s` of it. Minimum statistics hide a fixture
+    /// until the cap unhides it, so that is the frame every fixture is born
+    /// in; a candidate born later came from nothing, and that is movement
+    /// enough. Asked of everything, it cost a short on-off keyed burst:
+    /// smoothed over the integration, its peak did not move three decibels
+    /// in the whole of its life.
     pub steady_db: f32,
+    /// How long after the floor cap is first measured a new candidate is
+    /// still taken to be possibly a fixture, in seconds, and so has to move
+    /// `steady_db` before it opens. A few frames of integration is all a
+    /// fixture needs to appear once it is unhidden.
+    pub fixture_s: f64,
     /// Fewest bins a run must occupy to open a source.
     ///
     /// Two, because nothing keyed is one bin wide, and what is one bin wide
@@ -213,6 +226,7 @@ impl Default for SourceConfig {
             extent_db: 20.0,
             atten_db: 60.0,
             steady_db: 3.0,
+            fixture_s: 0.05,
             min_bins: 2,
             regrow: 1.5,
             history_s: 0.3,
@@ -445,6 +459,8 @@ struct Track {
     /// Consecutive frames unmatched, for the hang.
     misses: usize,
     open: bool,
+    /// Frame index the candidate was first seen in.
+    born: u64,
     /// Frame index the source was last seen in.
     last_frame: u64,
     /// Width the source opened at, in hertz, which is what its extraction
@@ -493,6 +509,9 @@ pub struct SourceDetector {
     /// noise is and not what is transmitting.
     cap_bins: usize,
     cap_at: u64,
+    /// The frame the caps were first measured in, which is when a fixture
+    /// of the receiver first shows; zero until then.
+    cap_first: u64,
     /// Scratch for the median, kept so a chunk is not allocated per frame.
     cap_scratch: Vec<f32>,
     /// Bins the cap leaves alone, where minimum statistics rule as they
@@ -569,12 +588,16 @@ impl SourceDetector {
             power: vec![0.0; n],
             floor: FloorBank::new(n, sub_len, sub_count),
             cap: vec![f32::INFINITY; n],
+            // At least 64 bins to take a median over, and never more than
+            // there are: a narrow stream's detector has fewer, and a clamp
+            // with its bounds crossed is a panic rather than a floor.
             cap_bins: if cfg.floor_chunk_bins > 0 {
                 cfg.floor_chunk_bins.min(n)
             } else {
-                (n / 8).clamp(64, n)
+                (n / 8).max(64).min(n)
             },
             cap_at: 0,
+            cap_first: 0,
             cap_scratch: Vec::new(),
             cap_skip: None,
             floor_lin: vec![0.0; n],
@@ -671,6 +694,7 @@ impl SourceDetector {
         self.floor.reset();
         self.cap.fill(f32::INFINITY);
         self.cap_at = 0;
+        self.cap_first = 0;
         self.floor_lin.fill(0.0);
         self.ratio.fill(0.0);
         self.raw_ratio.fill(0.0);
@@ -855,6 +879,9 @@ impl SourceDetector {
             return;
         }
         self.cap_at = self.frame.max(1);
+        if self.cap_first == 0 {
+            self.cap_first = self.cap_at;
+        }
         let ratio = 10f32.powf(self.cfg.floor_cap_db / 10.0);
         let width = self.cap_bins.max(1);
         let mut lo = self.bin_lo;
@@ -1119,6 +1146,7 @@ impl SourceDetector {
                 peak_hi: s.peak_db,
                 misses: 0,
                 open: false,
+                born: self.frame,
                 last_frame: self.frame,
                 opened_hz: 0.0,
                 centres: [0.0; GROWTH_FRAMES],
@@ -1164,6 +1192,15 @@ impl SourceDetector {
         let hop = self.hop as u64;
         let min_frames = self.cfg.min_frames;
         let steady_db = self.cfg.steady_db;
+        // Candidates born before this frame appeared with the floor cap,
+        // as a fixture of the receiver does, and have to move before they
+        // are believed. Before the cap exists nothing steady can be a
+        // candidate at all, so until then every candidate is a transmission.
+        let fixture_until = if self.cap_first == 0 {
+            0
+        } else {
+            self.cap_first + (self.cfg.fixture_s * self.rate / self.hop as f64) as u64
+        };
         let hang = self.hang_frames;
         let regrow = self.cfg.regrow;
         let integrate = self.cfg.integrate_frames.max(1);
@@ -1205,7 +1242,8 @@ impl SourceDetector {
                 } else {
                     t.src.lo_hz = lo_hz;
                     t.src.hi_hz = hi_hz;
-                    if t.hits >= min_frames && t.peak_hi - t.peak_lo >= steady_db {
+                    let moved = t.peak_hi - t.peak_lo >= steady_db;
+                    if t.hits >= min_frames && (moved || t.born >= fixture_until) {
                         t.open = true;
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = (c + 0.5 - (n / 2) as f64) * bin_hz;

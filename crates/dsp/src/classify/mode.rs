@@ -48,6 +48,21 @@ const fn r(lo: f64, hi: f64) -> Range {
 /// Every known mode. Ordered most specific first; the first match wins.
 pub static MODES: &[Mode] = &[
     Mode {
+        name: "TETRA",
+        // pi/4-DQPSK at 18 kbaud on a 25 kHz raster, and a base station's
+        // downlink is on all day. What the family and the rate leave open,
+        // the band closes: 380 to 400 MHz is the emergency services across
+        // Europe, 410 to 430 the commercial networks.
+        family: Modulation::Dqpsk,
+        baud: r(16_500.0, 19_500.0),
+        tone_sep_hz: None,
+        sweep_hz_per_s: None,
+        symbol_period_s: None,
+        duration_s: None,
+        centre_hz: r(380e6, 430e6),
+        note: "base station downlink; nothing here reads it yet",
+    },
+    Mode {
         name: "LoRa SF11 BW250",
         family: Modulation::Chirp,
         baud: None,

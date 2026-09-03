@@ -111,6 +111,41 @@ pub struct LevelGate {
     /// Measured peak of the quietest recent stretch, or `None` while the
     /// window is still filling. See [`QuietPeak`].
     quiet: Option<QuietPeak>,
+    /// Whether the stream is being watched for having begun inside a
+    /// transmission. See [`HotCheck`].
+    hot: Option<HotCheck>,
+    /// The stream began inside a transmission and the gate holds open.
+    hot_stream: bool,
+}
+
+/// Watches a freshly seeded gate for a stream that began inside a
+/// transmission.
+///
+/// The seed is the mean of the first stretch of the stream, taken to be
+/// noise. A stream cut out around a source the detector found usually starts
+/// with a lead-in of noise and that is right; one cut out around a carrier
+/// that was already on when the receiver tuned starts with the carrier, the
+/// seed is the signal, the threshold sits above it, and the gate never opens
+/// on a signal thirty decibels clear of the floor. So for a stream the
+/// detector says holds a strong source, the first fifth of a second is
+/// watched: if it is steady, and nothing has crossed the threshold, the
+/// stream is signal from its first sample.
+///
+/// From then on the gate holds open. Opening it and letting it follow the
+/// envelope was tried and does not work for what such a stream carries: a
+/// phase-keyed carrier's envelope dips at every symbol, the gate dropped on
+/// a dip, learned the carrier as noise during it, and never opened again.
+/// The detector that cut the stream out is the gate here, and it closes
+/// the stream when the transmission stops.
+#[derive(Clone, Debug)]
+struct HotCheck {
+    /// The source's level over the noise, as a ratio of amplitudes.
+    ratio: f32,
+    chunk: usize,
+    sum: f64,
+    filled: usize,
+    means: Vec<f32>,
+    want: usize,
 }
 
 /// The loudest sample in the quietest recent stretch of the envelope.
@@ -216,7 +251,33 @@ impl LevelGate {
             warm_sum: 0.0,
             warm_n: 0,
             quiet: None,
+            hot: None,
+            hot_stream: false,
         }
+    }
+
+    /// Whether the stream was found to have begun inside a transmission,
+    /// and is being passed whole.
+    pub fn is_hot_stream(&self) -> bool {
+        self.hot_stream
+    }
+
+    /// Tell the gate the stream holds a source `snr_db` over the noise, so a
+    /// stream that begins inside that source can be recognised as such
+    /// rather than read as noise. See [`HotCheck`]. Ignored below 10 dB,
+    /// where the seed and the signal cannot be told apart by steadiness.
+    pub fn expect_signal(&mut self, rate: f64, snr_db: f32) {
+        if snr_db < 10.0 {
+            return;
+        }
+        self.hot = Some(HotCheck {
+            ratio: 10f32.powf(snr_db / 20.0),
+            chunk: ((rate / 1_000.0) as usize).max(16),
+            sum: 0.0,
+            filled: 0,
+            means: Vec::new(),
+            want: 200,
+        });
     }
 
     /// Take the floor under the threshold from the measured noise peak rather
@@ -254,6 +315,12 @@ impl LevelGate {
         if let Some(q) = self.quiet.as_mut() {
             q.reset();
         }
+        if let Some(h) = self.hot.as_mut() {
+            h.sum = 0.0;
+            h.filled = 0;
+            h.means.clear();
+        }
+        self.hot_stream = false;
     }
 
     /// Feed one envelope sample and return whether it is above threshold.
@@ -287,6 +354,11 @@ impl LevelGate {
             self.noise = self.warm_sum / self.warm_n as f32;
             self.signal = self.noise * 4.0;
             self.seeded = true;
+        }
+        if self.hot_stream {
+            self.signal += self.alpha * (v - self.signal);
+            self.high = true;
+            return true;
         }
 
         // The floor under the threshold: measured if there is a measurement,
@@ -333,6 +405,36 @@ impl LevelGate {
             let rest = self.noise * self.min_ratio;
             if self.signal > rest {
                 self.signal -= self.alpha * 0.0625 * (self.signal - rest);
+            }
+        }
+
+        // A stream that began inside its transmission: steady for the whole
+        // watch and never once over the threshold. The seed was the signal.
+        if let Some(h) = self.hot.as_mut() {
+            if now_high {
+                self.hot = None;
+            } else {
+                h.sum += v as f64;
+                h.filled += 1;
+                if h.filled >= h.chunk {
+                    h.means.push((h.sum / h.filled as f64) as f32);
+                    h.sum = 0.0;
+                    h.filled = 0;
+                    if h.means.len() >= h.want {
+                        let lo = h.means.iter().copied().fold(f32::MAX, f32::min);
+                        let hi = h.means.iter().copied().fold(0.0f32, f32::max);
+                        let mean = h.means.iter().sum::<f32>() / h.means.len() as f32;
+                        let ratio = h.ratio;
+                        self.hot = None;
+                        if hi < lo * 2.0 {
+                            self.signal = mean;
+                            self.noise = mean / ratio;
+                            self.hot_stream = true;
+                            self.high = true;
+                            return true;
+                        }
+                    }
+                }
             }
         }
 
@@ -584,6 +686,48 @@ impl OokDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_begins_inside_a_transmission_is_passed_whole() {
+        // A carrier that was on when the receiver tuned starts the stream,
+        // so the seed the gate takes for noise is the signal. Told how far
+        // the detector found it over the floor, the gate notices the stream
+        // is steady and never once over its threshold, and holds open.
+        let rate = 120_000.0;
+        let mut hot = LevelGate::new(rate, 500.0, 0.3, 6.0, 3.5);
+        hot.expect_signal(rate, 30.0);
+        let mut cold = LevelGate::new(rate, 500.0, 0.3, 6.0, 3.5);
+        let carrier = |i: usize| 0.5 + 0.05 * ((i as f32) * 0.7).sin();
+        let mut high_hot = 0;
+        let mut high_cold = 0;
+        for i in 0..(rate as usize / 2) {
+            high_hot += usize::from(hot.update(carrier(i)));
+            high_cold += usize::from(cold.update(carrier(i)));
+        }
+        assert!(hot.is_hot_stream(), "the steady stream was not recognised");
+        assert!(high_hot > rate as usize / 4, "held open for {high_hot} samples of half a second");
+        assert!(!cold.is_hot_stream());
+        assert_eq!(high_cold, 0, "without the hint the gate has no reason to open");
+
+        // A stream that starts in noise and then carries a burst is what
+        // the seed is for, and the watch must not touch it.
+        let mut gate = LevelGate::new(rate, 500.0, 0.3, 6.0, 3.5);
+        gate.expect_signal(rate, 30.0);
+        let mut seed = 12345u32;
+        let mut noise = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            0.01 + 0.005 * (seed >> 16) as f32 / 65_536.0
+        };
+        for _ in 0..(rate as usize / 10) {
+            gate.update(noise());
+        }
+        let mut opened = 0;
+        for _ in 0..(rate as usize / 100) {
+            opened += usize::from(gate.update(0.5));
+        }
+        assert!(opened > 0, "the burst did not open the gate");
+        assert!(!gate.is_hot_stream(), "a burst after a lead-in is not a hot stream");
+    }
 
     const RATE: f64 = 250_000.0;
 

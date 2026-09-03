@@ -260,8 +260,8 @@ pub struct Measure {
 
 /// The classifier's labels, so a label read back from a file is the same
 /// static string the classifier uses.
-pub const MODULATION_LABELS: [&str; 13] = [
-    "OOK", "ASK", "2-FSK", "4-FSK", "MSK", "BPSK", "QPSK", "chirp", "OFDM", "DSSS",
+pub const MODULATION_LABELS: [&str; 14] = [
+    "OOK", "ASK", "2-FSK", "4-FSK", "MSK", "BPSK", "QPSK", "pi/4-DQPSK", "chirp", "OFDM", "DSSS",
     "noise-like", "carrier", "unknown",
 ];
 
@@ -294,7 +294,10 @@ impl Measure {
         if self.bandwidth_hz > 0.0 {
             parts.push(format!("{:.1} kHz wide", self.bandwidth_hz / 1e3));
         }
-        let keyed = matches!(self.modulation, "OOK" | "ASK" | "2-FSK" | "4-FSK" | "MSK" | "BPSK" | "QPSK");
+        let keyed = matches!(
+            self.modulation,
+            "OOK" | "ASK" | "2-FSK" | "4-FSK" | "MSK" | "BPSK" | "QPSK" | "pi/4-DQPSK"
+        );
         if keyed && self.baud > 0.0 {
             parts.push(format!("{:.0} baud", self.baud));
         }
