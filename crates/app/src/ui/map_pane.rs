@@ -1,28 +1,42 @@
 //! The map: tiles, aircraft and vessels from the tracker, airports, and the
 //! table beside them.
 
+use super::state::MapState;
 use super::*;
 
-impl App {
+/// The map, over where it is looking and what is on it.
+pub(super) struct Map<'a> {
+    pub st: &'a mut MapState,
+    /// Where the receiver is, when it has been told.
+    pub home: Option<(f64, f64)>,
+    /// The position being typed, while it is being typed. Kept apart from the
+    /// real one so a half-finished latitude does not move the map.
+    pub edit: &'a mut Option<String>,
+}
+
+impl Map<'_> {
     /// Everything the tracker in the graph is holding: aircraft from ADS-B,
     /// vessels and navigation marks from AIS.
     ///
     /// Read from the receiver rather than assembled here: the tracker is a
     /// node fed by the bus, so it sees every frame rather than the ones still
     /// in the on-screen packet list.
-    pub(super) fn map_view(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Returns a position the operator dropped or typed, for the caller to
+    /// tell the receiver about.
+    pub(super) fn show(self, ui: &mut egui::Ui) -> Option<(f64, f64)> {
         let now = std::time::Instant::now();
         // The pane runs to the window edge, and a table that starts there is
         // unreadable.
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
-        self.map.tiles.poll(ui.ctx());
-        let mut view = self.map.view;
+        self.st.tiles.poll(ui.ctx());
+        let mut view = self.st.view;
         let mut place = None;
-        let mut edit = self.station_edit.take();
+        let mut edit = self.edit.take();
         {
-            let tiles = &mut self.map.tiles;
-            let active: Vec<&crate::tracks::Track> = self.map.tracks.iter().collect();
-            let home = self.location;
+            let tiles = &mut self.st.tiles;
+            let active: Vec<&crate::tracks::Track> = self.st.tracks.iter().collect();
+            let home = self.home;
             let body = |ui: &mut egui::Ui| {
                 place = Self::station_row(ui, home, &mut edit);
                 ui.add_space(6.0);
@@ -38,12 +52,12 @@ impl App {
             };
             margin.show(ui, body);
         }
-        self.map.view = view;
-        self.station_edit = edit;
-        if let Some((lat, lon)) = place {
-            self.set_location(lat, lon);
-            self.station_edit = None;
+        self.st.view = view;
+        *self.edit = edit;
+        if place.is_some() {
+            *self.edit = None;
         }
+        place
     }
 
     /// The station position, shown and editable.

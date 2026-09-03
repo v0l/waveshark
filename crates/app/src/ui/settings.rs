@@ -583,7 +583,7 @@ impl App {
         ui.add_space(6.0);
         ui.label(legend(t("settings.position")));
         let mut edit = self.station_edit.take();
-        let set = Self::station_row(ui, self.location, &mut edit);
+        let set = map_pane::Map::station_row(ui, self.location, &mut edit);
         self.station_edit = edit;
         if let Some((lat, lon)) = set {
             self.set_location(lat, lon);

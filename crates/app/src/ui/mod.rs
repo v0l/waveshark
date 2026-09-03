@@ -948,6 +948,42 @@ impl App {
         self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
     }
 
+    /// Draw the map, and take the station position it was given.
+    fn map_view(&mut self, ui: &mut egui::Ui) {
+        let mut edit = self.station_edit.take();
+        let place = map_pane::Map { st: &mut self.map, home: self.location, edit: &mut edit }
+            .show(ui);
+        self.station_edit = edit;
+        if let Some((lat, lon)) = place {
+            self.set_location(lat, lon);
+        }
+    }
+
+    /// Draw the packet log, then do what its buttons asked for.
+    fn log_view(&mut self, ui: &mut egui::Ui) {
+        let acts = packets::Log {
+            st: &mut self.log,
+            radio: self.radio.as_ref(),
+            scanners: &self.scanners,
+            center: self.center,
+            rate: self.rate,
+            decode_on: self.decode_on,
+            manual: self.chain.edit.manual,
+            cmds: &mut self.cmds,
+            acts: Vec::new(),
+        }
+        .show(ui);
+        for a in acts {
+            match a {
+                packets::Action::Decode(on) => {
+                    self.decode_on = on;
+                    self.send(Cmd::Decode(on));
+                }
+                packets::Action::Open(w) => self.open = Some(w),
+            }
+        }
+    }
+
     /// Draw the call list, then tune to the row that was clicked.
     fn call_view(&mut self, ui: &mut egui::Ui) {
         let tune = calls_pane::CallList {
@@ -1335,7 +1371,7 @@ impl eframe::App for App {
         }
         {
             let _s = tracing::info_span!("log").entered();
-            self.decode_log(ui);
+            self.log_view(ui);
         }
         {
             let _s = tracing::info_span!("scope").entered();

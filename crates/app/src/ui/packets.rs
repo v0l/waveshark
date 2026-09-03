@@ -1,12 +1,36 @@
 //! The packet log and its inspector.
 
+use super::state::LogState;
 use super::*;
 
-impl App {
+/// What the log wants done that it cannot do itself.
+pub(super) enum Action {
+    /// Turn decoding of the whole span on or off.
+    Decode(bool),
+    /// Open one of the settings panels the header carries a button for.
+    Open(Settings),
+}
+
+/// The log, over the packets it lists.
+pub(super) struct Log<'a> {
+    pub st: &'a mut LogState,
+    pub radio: Option<&'a Radio>,
+    pub scanners: &'a crate::scanners::Scanners,
+    pub center: f64,
+    pub rate: f64,
+    pub decode_on: bool,
+    /// Whether the receiver is running the operator's own graph, in which
+    /// case the decode switch is not the pane's to throw.
+    pub manual: bool,
+    pub cmds: &'a mut Vec<Cmd>,
+    pub acts: Vec<Action>,
+}
+
+impl Log<'_> {
     /// The packet log: everything decoded anywhere in the span.
-    pub(super) fn decode_log(&mut self, ui: &mut egui::Ui) {
-        if !self.log.open {
-            return;
+    pub(super) fn show(mut self, ui: &mut egui::Ui) -> Vec<Action> {
+        if !self.st.open {
+            return self.acts;
         }
         Panel::bottom("decodes")
             .default_size(230.0)
@@ -24,9 +48,10 @@ impl App {
             .show(ui, |ui| {
                 self.log_header(ui);
                 ui.add_space(4.0);
-                let selected = self.log
+                let selected = self
+                    .st
                     .selected
-                    .and_then(|id| self.log.decodes.iter().find(|l| l.id == id))
+                    .and_then(|id| self.st.decodes.iter().find(|l| l.id == id))
                     .map(|l| l.rec.clone());
                 // The inspector lives inside this window and takes its room
                 // from the list, so the window itself stays the size it was
@@ -44,8 +69,8 @@ impl App {
                 // outside the panel's clip rect.
                 let gap = ui.spacing().item_spacing.y;
                 let (inspect_h, gaps) = if selected.is_some() {
-                    self.log.inspector_h = self.log.inspector_h.clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
-                    (self.log.inspector_h, gap * 2.0)
+                    self.st.inspector_h = self.st.inspector_h.clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
+                    (self.st.inspector_h, gap * 2.0)
                 } else {
                     (0.0, 0.0)
                 };
@@ -64,7 +89,7 @@ impl App {
                     .show(ui, |ui| {
                     let w = ui.available_width().max(Self::table_width());
                     ui.set_min_width(w);
-                    if !self.log.decodes.is_empty() {
+                    if !self.st.decodes.is_empty() {
                         self.log_header_row(ui, w);
                     }
                     egui::ScrollArea::vertical()
@@ -78,6 +103,7 @@ impl App {
                     self.inspector(ui, rec, inspect_h, avail);
                 }
             });
+        self.acts
     }
 
     /// The packet inspector under the list: a drag handle, then the burst
@@ -89,7 +115,7 @@ impl App {
         let (hrect, hresp) = ui.allocate_exact_size(Vec2::new(w, HANDLE_H), Sense::drag());
         if hresp.dragged() {
             let gap = ui.spacing().item_spacing.y;
-            self.log.inspector_h = (self.log.inspector_h - hresp.drag_delta().y)
+            self.st.inspector_h = (self.st.inspector_h - hresp.drag_delta().y)
                 .clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
         }
         if hresp.hovered() || hresp.dragged() {
@@ -107,7 +133,7 @@ impl App {
         child.set_clip_rect(rect);
         if packet_detail(&mut child, rec) {
             if let Some(a) = rec.audio.clone() {
-                self.send(Cmd::Play(a));
+                self.cmds.push(Cmd::Play(a));
             }
         }
     }
@@ -121,7 +147,7 @@ impl App {
             // Off while the graph is the operator's: the switch rebuilds the
             // whole front end, which is the one thing manual mode promises
             // will not happen behind your back.
-            let auto = !self.chain.edit.manual;
+            let auto = !self.manual;
             if crate::icons::icon_button(
                 ui,
                 crate::icons::Icon::Decode,
@@ -131,15 +157,14 @@ impl App {
             )
             .clicked()
             {
-                self.decode_on = !self.decode_on;
-                self.send(Cmd::Decode(self.decode_on));
+                self.acts.push(Action::Decode(!self.decode_on));
             }
             ui.add_space(6.0);
             // No row count here. The list keeps the last 500 and drops the
             // rest, so the number stops meaning anything the moment a band
             // gets busy, which is exactly when it would be looked at. The
             // frame total below is a real total and is worth printing.
-            if let Some(r) = &self.radio {
+            if let Some(r) = self.radio {
                 use std::sync::atomic::Ordering;
                 let narrow = r.status.scan_channels.load(Ordering::Relaxed);
                 let wide = r.status.scan_channels_wide.load(Ordering::Relaxed);
@@ -194,18 +219,18 @@ impl App {
             if logged > 0 {
                 ui.add_space(10.0);
                 ui.label(legend(&format!("{logged} saved")))
-                    .on_hover_text(match &self.log.path {
+                    .on_hover_text(match &self.st.path {
                         Some(d) => format!("appended to {}", d.display()),
                         None => "appended to the packet log".into(),
                     });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {
-                    self.log.decodes.clear();
-                    self.log.selected = None;
+                    self.st.decodes.clear();
+                    self.st.selected = None;
                 }
                 if ui.button("SETTINGS").clicked() {
-                    self.open = Some(Settings::PacketLog);
+                    self.acts.push(Action::Open(Settings::PacketLog));
                 }
 
                 // Which front end runs on which frequency. Named rather than
@@ -217,7 +242,7 @@ impl App {
                     .on_disabled_hover_text(crate::i18n::t("ui.manual_locked"))
                     .clicked()
                 {
-                    self.open = Some(Settings::Scanners);
+                    self.acts.push(Action::Open(Settings::Scanners));
                 }
             });
         });
@@ -260,7 +285,7 @@ impl App {
     }
 
     fn log_rows(&mut self, ui: &mut egui::Ui, width: f32) {
-        if self.log.decodes.is_empty() {
+        if self.st.decodes.is_empty() {
             // What is actually running here, rather than a claim about
             // sweeping the span that has not been true since the front end
             // became a table lookup.
@@ -278,7 +303,7 @@ impl App {
             ui.label(legend(&waiting));
             return;
         }
-        let t0 = self.log.decodes.first().map(|l| l.rec.at);
+        let t0 = self.st.decodes.first().map(|l| l.rec.at);
         let mut clicked = None;
 
         // Striping counts the rows actually drawn, not their place in the
@@ -286,9 +311,9 @@ impl App {
         // it, and striping on the list index made the shading of a row jump
         // as the hidden rows above it scrolled past.
         let mut shown = 0usize;
-        for log in self.log.decodes.iter() {
+        for log in self.st.decodes.iter() {
             let rec = &log.rec;
-            if !self.log.show_unknown && !rec.is_known() {
+            if !self.st.show_unknown && !rec.is_known() {
                 continue;
             }
             let n = shown;
@@ -303,7 +328,7 @@ impl App {
             if !ui.is_rect_visible(rect) {
                 continue;
             }
-            let on = self.log.selected == Some(log.id);
+            let on = self.st.selected == Some(log.id);
             let p = ui.painter_at(rect);
             if on {
                 p.rect_filled(rect, 0.0, theme::ETCH);
@@ -346,7 +371,7 @@ impl App {
 
         if let Some(id) = clicked {
             // Clicking the selected packet again closes the dump.
-            self.log.selected = (self.log.selected != Some(id)).then_some(id);
+            self.st.selected = (self.st.selected != Some(id)).then_some(id);
         }
     }
 }
