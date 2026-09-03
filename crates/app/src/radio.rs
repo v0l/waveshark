@@ -308,6 +308,8 @@ pub enum Cmd {
     StopPlay,
     /// The level all call audio is heard at, from the channel strip.
     CallVolume { volume: f32, muted: bool },
+    /// Whether the call bus levels what it passes on.
+    CallAgc(bool),
     /// Play a transmission that has already been decoded, once.
     ///
     /// The sink belongs to this thread, so replaying from the packet list is
@@ -821,6 +823,8 @@ pub struct Status {
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
     /// Voice transmissions written to disk since the receiver started.
     pub calls_written: AtomicU64,
+    /// What the call bus's gain control is adding, in dB, as f32 bits.
+    call_gain_db: AtomicU32,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -888,6 +892,7 @@ impl Default for Status {
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
             calls_written: AtomicU64::new(0),
+            call_gain_db: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
@@ -937,6 +942,11 @@ impl Status {
     }
 
     /// The radio's gain stages and switches, as they currently are.
+    /// What the call bus's gain control is adding, in dB.
+    pub fn call_gain_db(&self) -> f32 {
+        f32::from_bits(self.call_gain_db.load(Ordering::Relaxed))
+    }
+
     /// What each voice source last put into the mix, for the meters.
     pub fn call_levels(&self) -> Vec<(String, f32)> {
         self.call_levels.lock().clone()
@@ -1476,6 +1486,7 @@ fn run(
                 Cmd::CallSubs(subs) => calls.set_subscriptions(subs),
                 Cmd::StopPlay => calls.stop_replay(),
                 Cmd::CallVolume { volume, muted } => calls.set_master(volume, muted),
+                Cmd::CallAgc(on) => calls.set_agc(on),
                 Cmd::Play(speech) => calls.play(&speech),
             }
         }
@@ -1752,6 +1763,7 @@ fn run(
                 frames = frames.max(n);
             }
             *status.call_levels.lock() = calls.levels();
+            status.call_gain_db.store(calls.agc_gain_db().to_bits(), Ordering::Relaxed);
             calls.clear();
             status.call_audio.store(calls.listening(), Ordering::Relaxed);
             status.replaying.store(calls.replaying(), Ordering::Relaxed);

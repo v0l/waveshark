@@ -26,14 +26,15 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Level the makeup gain aims a transmission at.
-const TARGET_PEAK: f32 = 0.5;
-/// Most it will lift one. Thirty decibels covers a handheld with its
-/// microphone gain low; beyond that it is amplifying the vocoder's own noise
-/// between words.
-const MAX_MAKEUP: f32 = 32.0;
-/// How quickly the tracked peak falls back when a transmission goes quiet.
-const RELEASE_S: f32 = 2.0;
+/// Most the gain control will lift a transmission, in decibels.
+///
+/// A vocoder's output level is whatever the transmitting radio's microphone
+/// gain was, and that is not something a listener can fix at the far end:
+/// measured on real M17 traffic here, speech peaked at -37 dBFS and averaged
+/// -57, which is inaudible once the call and master levels have had their
+/// share. Thirty decibels covers a handheld set low. More than that and the
+/// vocoder's own noise between words comes up with the speech.
+const MAX_GAIN_DB: f32 = 30.0;
 
 /// What a subscription matches on.
 ///
@@ -138,17 +139,16 @@ pub struct CallBus {
     scratch: Vec<f32>,
     /// A transmission being replayed, already at `out_rate`.
     replay: std::collections::VecDeque<f32>,
-    /// Makeup gain, and the peak it is tracking.
+    /// The gain control every call passes through, and whether it is on.
     ///
-    /// A vocoder's output level follows whatever the transmitting radio's
-    /// microphone gain was, and on a handheld that is often thirty decibels
-    /// below full scale: measured on a real M17 transmission here, the speech
-    /// peaked at -37 dBFS and averaged -57, which is inaudible once the
-    /// channel and master levels have had their share of it. This brings a
-    /// transmission up to a usable level the way a receiver's AGC does,
-    /// slowly and per source rather than per syllable.
-    makeup: f32,
-    tracked_peak: f32,
+    /// The same [`dsp::agc::Agc`] a listening channel uses, with the same voice
+    /// constants: attack fast enough that a loud caller cannot blast, release
+    /// slow enough that the gain does not climb audibly between words, and a
+    /// hang time so a pause is not treated as a fade. One instance for the
+    /// hub rather than one per source, because what it is levelling is the
+    /// output somebody is listening to.
+    agc: dsp::agc::Agc,
+    agc_on: bool,
     /// What was last heard through the bus, for the interface to show.
     last: Option<String>,
 }
@@ -165,8 +165,12 @@ impl CallBus {
             mix: Vec::new(),
             scratch: Vec::new(),
             replay: std::collections::VecDeque::new(),
-            makeup: 1.0,
-            tracked_peak: 0.0,
+            agc: {
+                let mut a = dsp::agc::Agc::voice(out_rate);
+                a.set_max_gain_db(MAX_GAIN_DB);
+                a
+            },
+            agc_on: true,
             last: None,
         }
     }
@@ -177,6 +181,27 @@ impl CallBus {
 
     pub fn set_subscriptions(&mut self, subs: Vec<Subscription>) {
         self.subs = subs;
+    }
+
+    /// Whether the gain control is levelling calls, and what it is applying.
+    pub fn set_agc(&mut self, on: bool) {
+        if on != self.agc_on {
+            self.agc.reset();
+        }
+        self.agc_on = on;
+    }
+
+    pub fn agc_on(&self) -> bool {
+        self.agc_on
+    }
+
+    /// What the gain control is adding right now, in decibels.
+    pub fn agc_gain_db(&self) -> f32 {
+        if self.agc_on {
+            self.agc.gain_db()
+        } else {
+            0.0
+        }
     }
 
     /// The level every subscription is heard at, and whether the lot is
@@ -237,23 +262,12 @@ impl CallBus {
         self.scratch.clear();
         rs.process(v.pcm, &mut self.scratch);
 
-        // Track the loudest thing heard lately and lift it towards the
-        // target. Attack is immediate so the first syllable is not lost;
-        // release runs on a time constant so a gap between words does not
-        // wind the gain up on the silence.
-        let block_peak = self.scratch.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        if block_peak > self.tracked_peak {
-            self.tracked_peak = block_peak;
-        } else {
-            let secs = self.scratch.len() as f32 / self.out_rate as f32;
-            self.tracked_peak *= (-secs / RELEASE_S).exp();
+        // Levelled before the subscription's own volume, so what an operator
+        // sets is a level relative to other calls rather than a fight with
+        // whoever transmitted loudest.
+        if self.agc_on {
+            self.agc.process(&mut self.scratch);
         }
-        self.makeup = if self.tracked_peak > 1e-5 {
-            (TARGET_PEAK / self.tracked_peak).clamp(1.0, MAX_MAKEUP)
-        } else {
-            1.0
-        };
-        let gain = gain * self.makeup;
         if self.mix.len() < self.scratch.len() {
             self.mix.resize(self.scratch.len(), 0.0);
         }
@@ -506,21 +520,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A tone at a given level, for feeding the gain control something with
+    /// an envelope rather than a step.
+    fn tone(level: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| level * (i as f32 * 0.3).sin())
+            .collect()
+    }
+
     #[test]
     fn a_quiet_transmission_is_brought_up_to_a_usable_level() {
         // The level a vocoder produces is whoever transmitted's microphone
         // gain, and on the real M17 traffic measured here that was -37 dBFS
         // peak. Passing that on as it is means an operator hears nothing.
         let mut b = bus(&[Rule::Everything]);
-        let quiet = vec![0.01f32; 1600];
-        for _ in 0..4 {
+        let quiet = tone(0.01, 1600);
+        for _ in 0..8 {
             assert!(b.push(voice("ALL", "M0ABC", &quiet)));
             b.clear();
         }
         b.push(voice("ALL", "M0ABC", &quiet));
         let peak = b.take(0).iter().fold(0.0f32, |a, v| a.max(v.abs()));
-        assert!(peak > 0.1, "a quiet call came through at {peak:.3}");
+        assert!(peak > 0.05, "a quiet call came through at {peak:.3}");
         assert!(peak <= 1.0, "and it must not be lifted past full scale: {peak:.3}");
+        assert!(b.agc_gain_db() > 12.0, "the gain control barely moved: {:.1} dB", b.agc_gain_db());
+    }
+
+    #[test]
+    fn a_loud_transmission_is_not_lifted_further() {
+        let mut b = bus(&[Rule::Everything]);
+        let loud = tone(0.6, 1600);
+        for _ in 0..8 {
+            b.push(voice("ALL", "M0ABC", &loud));
+            b.clear();
+        }
+        assert!(
+            b.agc_gain_db() <= 0.1,
+            "a loud call was given {:.1} dB it did not need",
+            b.agc_gain_db()
+        );
+    }
+
+    #[test]
+    fn the_gain_control_can_be_switched_off() {
+        // An operator comparing two signals wants what arrived, not what a
+        // gain control made of it.
+        let mut b = bus(&[Rule::Everything]);
+        b.set_agc(false);
+        let quiet = tone(0.01, 1600);
+        for _ in 0..8 {
+            b.push(voice("ALL", "M0ABC", &quiet));
+            b.clear();
+        }
+        b.push(voice("ALL", "M0ABC", &quiet));
+        let peak = b.take(0).iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        assert!(peak < 0.02, "the level was changed with the control off: {peak:.3}");
+        assert_eq!(b.agc_gain_db(), 0.0);
     }
 
     #[test]

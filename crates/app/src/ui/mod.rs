@@ -137,9 +137,11 @@ pub struct App {
     /// Groups switched off by hand, so a group that was turned off does not
     /// subscribe itself again the next time somebody transmits on it.
     call_optout: Vec<crate::callbus::Rule>,
-    /// Level and mute for all call audio, as the channel strip sets it.
+    /// Level, mute and gain control for all call audio, as the channel strip
+    /// sets them.
     call_volume: f32,
     call_muted: bool,
+    call_agc: bool,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
     /// The stage whose settings the chain view is showing, by node id.
@@ -514,6 +516,7 @@ impl Default for App {
             call_optout: Vec::new(),
             call_volume: 0.8,
             call_muted: false,
+            call_agc: true,
             chain_topo: None,
             chain_latency: 0.0,
             packet_log: None,
@@ -871,6 +874,7 @@ impl App {
         self.send(Cmd::Smoothing(self.smoothing));
         // Same for the call bus: a new thread has an empty one.
         self.send(Cmd::CallVolume { volume: self.call_volume, muted: self.call_muted });
+        self.send(Cmd::CallAgc(self.call_agc));
         if !self.call_subs.is_empty() {
             self.send(Cmd::CallSubs(self.call_subs.clone()));
         }
@@ -2080,6 +2084,24 @@ impl App {
                             volume: self.call_volume,
                             muted: self.call_muted,
                         });
+                    }
+                });
+                // The gain control, with what it is doing beside it: a call
+                // arrives at whatever level the transmitting radio's
+                // microphone was set to, which is not something a listener
+                // can fix at the far end.
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.call_agc, "AGC").changed() {
+                        self.send(Cmd::CallAgc(self.call_agc));
+                    }
+                    let db = self
+                        .radio
+                        .as_ref()
+                        .map(|r| r.status.call_gain_db())
+                        .unwrap_or(0.0);
+                    if self.call_agc && db.abs() > 0.1 {
+                        ui.label(value(format!("{db:+.0} dB")).size(11.0));
                     }
                 });
 
