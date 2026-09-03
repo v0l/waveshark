@@ -112,6 +112,15 @@ impl PacketDecodeNode {
             self.hits.push(d.with_audio(p.audio.clone()));
             return;
         }
+        // A TETRA broadcast identifies itself twice over: it arrives from a
+        // downlink band, and its bytes are a tagged PDU that had to pass the
+        // standard's own CRC to exist at all.
+        if dsp::tetra::is_downlink_band(p.center_hz as f64) {
+            if let Some(d) = crate::tetra_nodes::tetra_decoded(bytes, center) {
+                self.hits.push(d);
+            }
+            return;
+        }
         if dsp::ais::is_ais_band(p.center_hz as f64) {
             let Ok(frame) = decode::ais::parse(bytes) else { return };
             self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));

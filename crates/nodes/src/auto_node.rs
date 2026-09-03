@@ -509,6 +509,15 @@ impl AutoNode {
                     members.push(m);
                 }
             }
+            // TETRA only where a downlink band puts it: unlike M17 the
+            // carriers live in licensed allocations, and the node's hunt
+            // correlates continuously, which is not worth paying on every
+            // meter burst at 433 MHz.
+            if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
+                if let Ok(m) = Member::build("tetra", spec, NodeSpec::new("tetra").f("channel_hz", hz), &self.reg) {
+                    members.push(m);
+                }
+            }
         }
         if METER_HZ.contains(&b.bandwidth_hz) {
             if let Ok(m) = Member::build("wmbus", spec, NodeSpec::new("wmbus"), &self.reg) {

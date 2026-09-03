@@ -2301,6 +2301,40 @@ pub(crate) mod tests {
         }
     }
 
+    /// The same capture, all the way through: the receiver is told nothing
+    /// but the band, finds the carriers itself, and reads who they are.
+    #[test]
+    fn a_tetra_downlink_names_its_network() {
+        let Some(buf) = tetra_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let sync: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.model == "TETRA-Sync").collect();
+        assert!(!sync.is_empty(), "no SYNC PDU from {} rows", out.len());
+        // A cell repeats its identity seventeen times a second; what the
+        // log should hold is one row per cell, not one per repeat.
+        assert!(sync.len() <= 8, "{} sync rows of a continuous broadcast", sync.len());
+        // Both carriers belong to the same Irish network, and every row sat
+        // behind the standard's own CRC: a disagreement here would be a
+        // decoder fault rather than a bad burst. The MNC is what this
+        // network broadcasts, read identically off both carriers.
+        for r in &sync {
+            eprintln!("{} @ {:.4} MHz: {}", r.model, r.freq / 1e6, r.detail);
+            assert!(
+                r.detail.contains("mcc=272 mnc=6838"),
+                "not the recorded network: {}",
+                r.detail
+            );
+        }
+        // One cell per carrier, told apart by colour code.
+        let near = |hz: f64| sync.iter().any(|r| (r.freq - hz).abs() < 12_500.0);
+        assert!(near(391_181_000.0), "nothing read at 391.181 MHz");
+        assert!(near(391_704_500.0), "nothing read at 391.7045 MHz");
+    }
+
     #[test]
     fn an_m17_handheld_on_a_busy_band_is_found_and_read() {
         // Synthesised M17 does not fail the way this capture did. A generated

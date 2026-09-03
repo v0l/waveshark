@@ -25,6 +25,7 @@ pub mod pocsag;
 pub mod protocol;
 pub mod protocols;
 pub mod slicer;
+pub mod tetra;
 pub mod wmbus;
 
 pub use analyze::{analyze, Analysis};

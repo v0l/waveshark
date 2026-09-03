@@ -668,11 +668,11 @@ margin   = 12.5 kHz
 # handsets answering 10 MHz lower. Commercial networks sit at 415 to 430 MHz,
 # so move the range if that is what is above you.
 #
-# Nothing here decodes TETRA. The carriers are pi/4-DQPSK at 18 kbaud on a
-# 25 kHz raster, and this finds them, measures each one and names it from
-# the keying, the rate and the band, once when it is found and then every
-# few seconds while it stays on: it says which channels are busy and when,
-# not what was said.
+# The carriers are pi/4-DQPSK at 18 kbaud on a 25 kHz raster. Each one is
+# found, measured, and read: the control channels decode, so a carrier is
+# logged as who it is, MCC, MNC, colour code and location area, beside the
+# measurement rows that say it is still on the air. Traffic is not decoded,
+# and on these networks it is encrypted anyway.
 range = 390 - 400 MHz
 span  = 250 kHz
 front = auto
@@ -753,9 +753,8 @@ mod tests {
         assert_eq!(fronts(433_920_000.0, 2_400_000.0), [Front::Auto]);
         assert_eq!(fronts(433_920_000.0, 250_000.0), [Front::Auto]);
         assert_eq!(fronts(868_300_000.0, 2_400_000.0), [Front::Auto]);
-        // The TETRA downlinks, where the detector finds carriers it cannot
-        // read. Worth running: on that band the question is which channels
-        // are busy, and that is what a source detector answers.
+        // The TETRA downlinks: the detector finds the carriers and the
+        // auto node gives each one the decoder that reads its identity.
         assert_eq!(fronts(395_000_000.0, 2_400_000.0), [Front::Auto]);
         assert_eq!(fronts(380_000_000.0, 250_000.0), [], "the uplink half is not covered");
     }
