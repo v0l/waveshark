@@ -1,4 +1,27 @@
 //! Instrument front panel: readout, spectrum, waterfall, channel strips.
+//!
+//! Three layers, and which one a thing belongs in is decided by what it needs
+//! to see.
+//!
+//! [`widgets`] holds the controls: a meter, a fader, a squelch, a table cell.
+//! Each is an `egui::Widget` over the one value it edits and knows nothing
+//! about the receiver, so it can be used by any pane, twice on a row, or in a
+//! test.
+//!
+//! Then the panes. Each is a struct that borrows its own slice of [`state`]
+//! and nothing else: [`scope::Scope`], [`strip::Strip`], [`packets::Log`],
+//! [`map_pane::Map`], [`chain_pane::Chain`], [`calls_pane::CallList`]. A pane
+//! cannot reach the radio. What it wants done it either pushes into the
+//! command queue, for the things the receiver does, or returns as its own
+//! `Action`, for the things the application does. That is what keeps a view
+//! from quietly depending on another view's field, which is how this file
+//! grew to three thousand lines the first time.
+//!
+//! `App` is the third layer: it owns the state, hands each pane its part,
+//! carries out the actions, and drains the queue once a frame in
+//! [`App::flush_cmds`]. Two things stay on it rather than becoming panes,
+//! [`head`] and [`settings`], because neither is a view of anything: both set
+//! the receiver itself, so what they borrow is most of the application.
 
 mod burst;
 mod calls_pane;
@@ -20,6 +43,8 @@ use crate::radio::{
     ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
 };
 use burst::*;
+use settings::{RemoteEdit, RemoteKind};
+use state::{Channel, Logged, MapView};
 use settings_rows::{mhz_field, ScannerRow};
 use widgets::{bin_hint, cog, cog_rect, hint, modal_title, row};
 use crate::theme::{self, legend, value};
@@ -128,92 +153,6 @@ pub enum Settings {
     App,
 }
 
-/// A radio reached over the network, as the dialog that creates one asks for
-/// it.
-///
-/// The protocol is a choice rather than an assumption: rtl_tcp and airspy's
-/// own network server are the same shape of thing, and the dialog is where
-/// they will be offered.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RemoteKind {
-    IqStream,
-}
-
-impl RemoteKind {
-    pub const ALL: &'static [RemoteKind] = &[RemoteKind::IqStream];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::IqStream => "iqstream",
-        }
-    }
-
-    fn help(self) -> &'static str {
-        match self {
-            Self::IqStream => {
-                "One tuner shared with many readers, so a dongle already feeding a decoder \
-                 elsewhere can still be listened to here. The frequency and the span belong \
-                 to whoever owns that tuner and cannot be changed from this end."
-            }
-        }
-    }
-
-    fn placeholder(self) -> &'static str {
-        match self {
-            Self::IqStream => "host, or host:port (1234)",
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct RemoteEdit {
-    kind: RemoteKind,
-    host: String,
-    /// What to call it in the radio list. Optional, and worth having: an
-    /// address says which machine and nothing about which aerial.
-    label: String,
-    /// Why the last attempt was refused, kept beside the field it belongs to
-    /// rather than in the status line under the dial.
-    err: Option<String>,
-}
-
-impl Default for RemoteEdit {
-    fn default() -> Self {
-        Self {
-            kind: RemoteKind::IqStream,
-            host: String::new(),
-            label: String::new(),
-            err: None,
-        }
-    }
-}
-
-/// A decode, as shown in the packet log.
-pub struct Logged {
-    /// Position in the capture, counted from the first packet and never
-    /// reused, so a row keeps its number as the list scrolls.
-    id: u64,
-    rec: DecodeRecord,
-}
-
-pub struct Channel {
-    /// Stable for the life of the channel, so the radio thread can keep its
-    /// chain when a different channel is removed.
-    id: u64,
-    freq: f64,
-    demod: Demod,
-    label: String,
-    /// Whether this channel is being demodulated into the mix.
-    on: bool,
-    /// Its own level in the mix, before the master volume.
-    volume: f32,
-    muted: bool,
-    /// Where the squelch opens. None means the mode's own default, which is
-    /// what an operator who has never touched the control should get.
-    squelch_db: Option<f32>,
-    agc: bool,
-}
-
 const FFTS: [usize; 6] = [512, 1024, 2048, 4096, 8192, 16384];
 /// Spectrum refresh rates in frames per second.
 const REFRESH: [(&str, f32); 4] = [("10", 10.0), ("20", 20.0), ("30", 30.0), ("60", 60.0)];
@@ -309,24 +248,6 @@ fn mean_position(active: &[&crate::tracks::Track]) -> Option<(f64, f64)> {
         fixes.iter().map(|f| f.0).sum::<f64>() / n,
         fixes.iter().map(|f| f.1).sum::<f64>() / n,
     ))
-}
-
-/// Where the map is looking. `center` is `None` until something has been
-/// heard, so the first track decides where the map opens rather than the map
-/// opening on the ocean.
-#[derive(Clone, Copy)]
-struct MapView {
-    center: Option<(f64, f64)>,
-    /// Continuous, not a tile level: the tile level is where the pictures
-    /// come from, and rounding the view to it would make most scroll notches
-    /// do nothing.
-    zoom: f64,
-}
-
-impl Default for MapView {
-    fn default() -> Self {
-        Self { center: None, zoom: DEFAULT_MAP_ZOOM }
-    }
 }
 
 /// Colour of a packet whose integrity check passed.

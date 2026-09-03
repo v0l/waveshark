@@ -8,12 +8,56 @@
 //! These are the parts of the interface that survive a frame. Anything a pane
 //! works out again each frame stays a local.
 
-use super::{Channel, Logged, MapView};
-use crate::radio::Cmd;
+use super::DEFAULT_MAP_ZOOM;
+use crate::radio::{Cmd, DecodeRecord, Demod};
 use crate::dial::Dial;
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
 use std::time::Instant;
+
+/// A decode, as shown in the packet log.
+pub struct Logged {
+    /// Position in the capture, counted from the first packet and never
+    /// reused, so a row keeps its number as the list scrolls.
+    pub(super) id: u64,
+    pub(super) rec: DecodeRecord,
+}
+
+pub struct Channel {
+    /// Stable for the life of the channel, so the radio thread can keep its
+    /// chain when a different channel is removed.
+    pub(super) id: u64,
+    pub(super) freq: f64,
+    pub(super) demod: Demod,
+    pub(super) label: String,
+    /// Whether this channel is being demodulated into the mix.
+    pub(super) on: bool,
+    /// Its own level in the mix, before the master volume.
+    pub(super) volume: f32,
+    pub(super) muted: bool,
+    /// Where the squelch opens. None means the mode's own default, which is
+    /// what an operator who has never touched the control should get.
+    pub(super) squelch_db: Option<f32>,
+    pub(super) agc: bool,
+}
+
+/// Where the map is looking. `center` is `None` until something has been
+/// heard, so the first track decides where the map opens rather than the map
+/// opening on the ocean.
+#[derive(Clone, Copy)]
+pub(super) struct MapView {
+    pub(super) center: Option<(f64, f64)>,
+    /// Continuous, not a tile level: the tile level is where the pictures
+    /// come from, and rounding the view to it would make most scroll notches
+    /// do nothing.
+    pub(super) zoom: f64,
+}
+
+impl Default for MapView {
+    fn default() -> Self {
+        Self { center: None, zoom: DEFAULT_MAP_ZOOM }
+    }
+}
 
 /// The spectrum and the waterfall: what is being drawn, and how.
 pub(super) struct ScopeState {

@@ -973,3 +973,63 @@ impl App {
     }
 
 }
+
+/// A radio reached over the network, as the dialog that creates one asks for
+/// it.
+///
+/// The protocol is a choice rather than an assumption: rtl_tcp and airspy's
+/// own network server are the same shape of thing, and the dialog is where
+/// they will be offered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKind {
+    IqStream,
+}
+
+impl RemoteKind {
+    pub const ALL: &'static [RemoteKind] = &[RemoteKind::IqStream];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::IqStream => "iqstream",
+        }
+    }
+
+    fn help(self) -> &'static str {
+        match self {
+            Self::IqStream => {
+                "One tuner shared with many readers, so a dongle already feeding a decoder \
+                 elsewhere can still be listened to here. The frequency and the span belong \
+                 to whoever owns that tuner and cannot be changed from this end."
+            }
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::IqStream => "host, or host:port (1234)",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteEdit {
+    kind: RemoteKind,
+    host: String,
+    /// What to call it in the radio list. Optional, and worth having: an
+    /// address says which machine and nothing about which aerial.
+    label: String,
+    /// Why the last attempt was refused, kept beside the field it belongs to
+    /// rather than in the status line under the dial.
+    err: Option<String>,
+}
+
+impl Default for RemoteEdit {
+    fn default() -> Self {
+        Self {
+            kind: RemoteKind::IqStream,
+            host: String::new(),
+            label: String::new(),
+            err: None,
+        }
+    }
+}

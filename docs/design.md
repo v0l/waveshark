@@ -567,7 +567,41 @@ was really there. Measured at 2.4 MS/s it runs at 25 to 30 times real time from
 /2 to /32. Spans narrower than 48 kHz are not offered: that is the rate the
 narrowband audio chain runs at.
 
+## How the interface is put together
+
+Three layers, in `crates/app/src/ui/`.
+
+`widgets.rs` holds the controls: the level meter, the fader whose track is its
+own meter, the squelch, the cell of a painted table. Each is an `egui::Widget`
+over the one value it edits and knows nothing about the receiver, so any pane
+can use one, twice on a row if it wants.
+
+Each view is then a struct that borrows its own state out of `state.rs` and
+nothing else: `Scope`, `Strip`, `Log`, `Map`, `Chain`, `CallList`. A pane
+cannot reach the radio. What it wants done it either pushes into the command
+queue, for the things the receiver does, or returns as its own `Action`, for
+the things the application does, and `App` carries those out. This is the rule
+that matters: a view can only see its own state, so a new view cannot quietly
+come to depend on another one's fields. Before it, the interface was one struct
+with ninety fields and an `impl App` block per file, and every pane could reach
+every other pane's business.
+
+`App` owns the state, hands each pane its part, and drains the command queue
+once a frame. The top bar and the settings modals stay on `App` rather than
+becoming panes, because neither is a view of anything: both set the receiver
+itself, so what they would borrow is most of the application.
+
+The view state is also what gets saved. `ScopeState::prefs` is the session's
+`ViewPrefs`, rather than a dozen fields copied across by hand.
+
 ## Interface rules
+
+Every level in the receiver is a fader whose track is its own meter, and the
+meter shows the amber and red regions it is heading for. A fader says what was
+asked for and only a meter says what is arriving, and a receiver that is silent
+looks exactly like one that is turned down without it. The scale is a square
+root: speech spends its time well below full scale, and on a linear bar that is
+a stub near the left end where no movement can be read.
 
 The top bar carries only what you change while tuning. Everything else lives
 behind a cog in the corner of the pane it affects, because spectrum and
