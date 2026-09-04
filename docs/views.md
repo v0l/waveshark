@@ -47,11 +47,25 @@ claims what it can render.
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
   width rather than clipped to a column. The recipient is read from
-  `addressee`, `to`, `dst`, `destination`, `talkgroup` or `address`, so a
-  pager's capcode and a TETRA talkgroup land in the same place. Identical
-  words from the same sender inside two minutes are one message with a count,
-  because a pager sends every page twice and TETRA retransmits until it is
-  acknowledged. `crates/app/src/messages.rs`.
+  `addressee`, `to`, `dst`, `destination`, `talkgroup`, `channel` or
+  `address`, so a pager's capcode, a TETRA talkgroup and a mesh channel land
+  in the same place; the sender from `from`, `src`, `source` or `radio_id`.
+  Identical words from the same sender inside two minutes are one message with
+  a count, because a pager sends every page twice and TETRA retransmits until
+  it is acknowledged. `crates/app/src/messages.rs`.
+
+  The reading itself is `DecodeRecord::to_message`, so anything holding a
+  record can ask it for a message rather than repeating the field names:
+  the packet log as it appends, a feed, or a view added later. It borrows and
+  does not consume, because the record carries on to the log and the message
+  is a second reading of it. Keeping it on the record rather than on each
+  decoder is what stops a protocol needing a private path to this view.
+
+  The trap this replaces is worth knowing, because it is silent. A decoder
+  that names its sender field something outside the list above still shows its
+  messages, with nobody's name on them: MeshCore called it `sender` and its
+  traffic arrived under a blank header. Nothing errors, and the view looks
+  like it works.
 Both are views by this definition. Neither knows anything about a protocol.
 
 ## Planned views

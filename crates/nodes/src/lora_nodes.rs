@@ -27,6 +27,7 @@
 
 use common::{Result, C32};
 use decode::lora::{self, Received};
+use decode::lorawan;
 use decode::meshtastic;
 use dsp::lora::{Demod, OVERSAMPLE};
 use dsp::FirDecim;
@@ -208,10 +209,10 @@ impl Simple for LoraNode {
         self.bandwidth_hz = bw;
         self.center_hz = i.spec.center.as_f64();
         self.demods = match self.sf {
-            0 => dsp::lora::SPREADING_FACTORS
-                .map(|sf| Demod::new(dsp::lora::Config { sf, ..Default::default() }))
+            0 => dsp::lora::SCANNED_SPREADING_FACTORS
+                .map(|sf| Demod::new(dsp::lora::Config::for_sf(sf)))
                 .collect(),
-            sf => vec![Demod::new(dsp::lora::Config { sf, ..Default::default() })],
+            sf => vec![Demod::new(dsp::lora::Config::for_sf(sf))],
         };
         self.scanned = vec![0; self.demods.len()];
         self.held.clear();
@@ -474,6 +475,90 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
     }
 
+    // MeshCore keeps its routing in the clear, so the shape of the packet
+    // reads whether or not its payload does; an advert is the whole node.
+    let core = r.meshcore();
+    if let Some(p) = &core {
+        fields.push(("type".into(), Value::Text(p.payload_type.name().into())));
+        fields.push(("route".into(), Value::Text(p.route.name().into())));
+        fields.push(("hops".into(), Value::Int(p.hops() as i64)));
+        // MeshCore has no sync word of its own, so say plainly whether
+        // anything past the header agreed this is one.
+        fields.push(("verified".into(), Value::Bool(p.corroborated())));
+        if p.payload_type.is_encrypted() {
+            fields.push(("encrypted".into(), Value::Bool(true)));
+        }
+        if let Some(a) = p.advert() {
+            fields.push(("node".into(), Value::Text(a.node_type.name().into())));
+            fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
+            if let Some(n) = &a.name {
+                fields.push(("name".into(), Value::Text(n.clone())));
+            }
+            if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+                fields.push(("latitude".into(), Value::Float(lat)));
+                fields.push(("longitude".into(), Value::Float(lon)));
+            }
+        }
+        if let Some(m) = p.public_message() {
+            fields.push(("channel".into(), Value::Text("Public (default key)".into())));
+            // The text travels as `sender: message`, and the name in front of
+            // it is part of the plaintext rather than a protocol field. A
+            // group message carries no signature, so anyone holding the
+            // channel key can write any name there; `text` is what was sent,
+            // and `from` is only what it claims to be.
+            //
+            // Named `from` and not `sender` because that is what the message
+            // view reads, and a field named anything else is a message with
+            // nobody's name on it. See `DecodeRecord::to_message`.
+            let (sender, body) = m.sender_and_body();
+            if let Some(s) = sender {
+                fields.push(("from".into(), Value::Text(s.to_string())));
+            }
+            fields.push(("text".into(), Value::Text(body.to_string())));
+        }
+    }
+
+    // LoRaWAN: the keys are per device and not published, so this is the
+    // metadata around a payload that stays shut. A join request is the
+    // exception and names the device outright.
+    let wan = r.lorawan();
+    if let Some(f) = &wan {
+        fields.push(("type".into(), Value::Text(f.mtype.name().into())));
+        match &f.body {
+            lorawan::Body::Join(j) => {
+                fields.push(("dev_eui".into(), Value::Text(lorawan::format_eui(j.dev_eui))));
+                fields.push(("join_eui".into(), Value::Text(lorawan::format_eui(j.join_eui))));
+                fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
+            }
+            lorawan::Body::Data(d) => {
+                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
+                fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
+                if let Some(p) = d.f_port {
+                    fields.push(("port".into(), Value::Int(i64::from(p))));
+                }
+                fields.push(("payload_len".into(), Value::Int(d.payload_len as i64)));
+                if d.adr {
+                    fields.push(("adr".into(), Value::Bool(true)));
+                }
+                if d.ack {
+                    fields.push(("ack".into(), Value::Bool(true)));
+                }
+                if d.f_pending {
+                    fields.push(("pending".into(), Value::Bool(true)));
+                }
+                if d.f_opts_len > 0 {
+                    fields.push(("mac_bytes".into(), Value::Int(i64::from(d.f_opts_len))));
+                }
+                // The payload is enciphered under a session key that is not
+                // public, so say so rather than leaving it to be inferred.
+                if d.payload_len > 0 {
+                    fields.push(("encrypted".into(), Value::Bool(true)));
+                }
+            }
+            lorawan::Body::JoinAccept | lorawan::Body::Opaque => {}
+        }
+    }
+
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
         Some(m) => {
@@ -510,16 +595,84 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 m.hop_start,
             )
         }
-        None => format!(
-            "{shape}, {} byte payload, sync 0x{:02x}",
-            r.payload.len(),
-            r.sync_word
-        ),
+        None => match &core {
+            Some(p) => {
+                let mut s = format!("{shape}, {} {}", p.payload_type.name(), p.route.name());
+                if p.hops() > 0 {
+                    s.push_str(&format!(", {} hops", p.hops()));
+                }
+                if let Some(a) = p.advert() {
+                    match &a.name {
+                        Some(n) => s.push_str(&format!(", \"{n}\" ({})", a.node_type.name())),
+                        None => s.push_str(&format!(", {}", a.node_type.name())),
+                    }
+                    if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+                        s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
+                    }
+                } else if let Some(m) = p.public_message() {
+                    let (sender, body) = m.sender_and_body();
+                    match sender {
+                        Some(who) => s.push_str(&format!(", {who}: \"{body}\"")),
+                        None => s.push_str(&format!(", \"{body}\"")),
+                    }
+                } else {
+                    // Nothing but the header said this was MeshCore, and a
+                    // packet from another network on the same sync word can
+                    // say that much. Do not let it read as a certainty.
+                    s.push_str(", header only");
+                }
+                s
+            }
+            None => match &wan {
+                Some(f) => {
+                    let mut s = format!("{shape}, {}", f.mtype.name());
+                    match &f.body {
+                        lorawan::Body::Join(j) => s.push_str(&format!(
+                            ", device {} joining {}",
+                            lorawan::format_eui(j.dev_eui),
+                            lorawan::format_eui(j.join_eui)
+                        )),
+                        lorawan::Body::Data(d) => {
+                            s.push_str(&format!(
+                                ", {:08x} frame {}",
+                                d.dev_addr, d.f_cnt
+                            ));
+                            match d.f_port {
+                                Some(0) => s.push_str(", mac commands"),
+                                Some(p) => s.push_str(&format!(", port {p}")),
+                                None => {}
+                            }
+                            if d.payload_len > 0 {
+                                s.push_str(&format!(", {} bytes sealed", d.payload_len));
+                            }
+                        }
+                        lorawan::Body::JoinAccept => s.push_str(", sealed"),
+                        lorawan::Body::Opaque => {}
+                    }
+                    s
+                }
+                None => format!(
+                    "{shape}, {} byte payload, sync 0x{:02x}",
+                    r.payload.len(),
+                    r.sync_word
+                ),
+            },
+        },
+    };
+
+    let protocol = if mesh.is_some() {
+        "Meshtastic"
+    } else if core.is_some() {
+        "MeshCore"
+    } else if wan.is_some() {
+        "LoRaWAN"
+    } else {
+        "LoRa"
     };
 
     Some(
         Decoded::bytes(
-            if mesh.is_some() { "Meshtastic" } else { "LoRa" },
+            protocol,
             center,
             0.0,
             r.payload.clone(),

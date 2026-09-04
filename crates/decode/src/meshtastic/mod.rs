@@ -26,8 +26,10 @@
 //! exists. Random bytes clear that bar rarely, and a wrong key gives random
 //! bytes; [`Decoded::of`] is where that judgement is made.
 
-mod aes;
+
 mod protobuf;
+
+use crate::crypto;
 
 use protobuf::Fields;
 
@@ -60,7 +62,7 @@ fn counter(source: u32, packet_id: u32) -> [u8; 16] {
 /// Undo the channel cipher over a packet's encrypted part.
 pub fn decrypt(ciphertext: &[u8], source: u32, packet_id: u32, key: &[u8; 16]) -> Vec<u8> {
     let mut out = ciphertext.to_vec();
-    aes::ctr_xor(key, &counter(source, packet_id), &mut out);
+    crypto::ctr_xor(key, &counter(source, packet_id), &mut out);
     out
 }
 

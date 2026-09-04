@@ -35,9 +35,39 @@ use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
-/// Spreading factors LoRa defines. SF6 exists but only with an implicit
-/// header and is not read here.
-pub const SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 7..=12;
+/// Spreading factors LoRa defines, and that this can be pointed at.
+///
+/// SF5 and SF6 only carry an implicit header, so a receiver has to be told
+/// the length, coding rate and CRC that a header would otherwise have said.
+/// They are what ExpressLRS and other latency-sensitive links use.
+pub const SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 5..=12;
+
+/// The spreading factors searched when nothing says which one to expect.
+///
+/// Not all of them: see [`peak_min_for`]. The margin between a real symbol
+/// and noise closes as the factor falls, so scanning for SF5 blind would open
+/// on noise, and a source that says nothing about its spreading factor is far
+/// more likely to be one of these. Pin the factor to read a lower one.
+pub const SCANNED_SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 7..=12;
+
+/// The peak-to-mean floor that suits a spreading factor.
+///
+/// A dechirped symbol stands over the noise in proportion to the chips in it,
+/// so a threshold that suits SF7's 128 chips starves SF5's 32: a synthesised
+/// SF5 packet here found its preamble and its sync word and then yielded no
+/// data symbols at all, because every one of them fell under the floor. It
+/// reads correctly at 4.0.
+///
+/// The catch, and the reason the low factors are not scanned for by default,
+/// is that noise gives three or four whatever the spreading factor. At SF7
+/// and above the gap is wide; at SF5 there is almost none left.
+pub fn peak_min_for(sf: u8) -> f32 {
+    if sf <= 5 {
+        4.0
+    } else {
+        10.0
+    }
+}
 
 /// Downchirps between the sync word and the first data symbol. The quarter
 /// is not a rounding: the standard puts the payload a quarter of a symbol
@@ -69,6 +99,15 @@ pub struct Config {
     /// Symbols to read after the header before giving up on a packet whose
     /// end never falls below `peak_min`.
     pub max_symbols: usize,
+}
+
+impl Config {
+    /// The configuration for one spreading factor, with the detection floor
+    /// that suits it. Prefer this to setting `sf` on [`Config::default`],
+    /// which keeps SF7's floor whatever the factor.
+    pub fn for_sf(sf: u8) -> Self {
+        Config { sf, peak_min: peak_min_for(sf), ..Default::default() }
+    }
 }
 
 impl Default for Config {
@@ -564,6 +603,37 @@ mod tests {
         assert_eq!(p.preamble_syms, 8, "preamble length");
         assert_eq!(p.sync_word, 0x12, "sync word");
         assert_eq!(&p.symbols[..values.len()], &values[..], "symbols");
+    }
+
+    /// The low spreading factors read back, given the detection floor that
+    /// suits them. SF5 does not without it, which is what [`peak_min_for`]
+    /// exists for.
+    #[test]
+    fn the_low_spreading_factors_give_back_their_symbols() {
+        for sf in [5u8, 6] {
+            let n = 1u16 << sf;
+            let values: Vec<u16> = (0..16).map(|i| (i * 7 + 3) % n).collect();
+            let iq = synth(sf, 8, 0x12, &values);
+
+            let mut d = Demod::new(Config::for_sf(sf));
+            let p = d.detect(&iq, 0).unwrap_or_else(|| panic!("SF{sf}: no packet"));
+            assert_eq!(p.sync_word, 0x12, "SF{sf} sync word");
+            assert_eq!(&p.symbols[..values.len()], &values[..], "SF{sf} symbols");
+        }
+    }
+
+    /// SF7's floor is too high for SF5, and silently costs every data symbol
+    /// rather than the whole packet, which is why it went unnoticed.
+    #[test]
+    fn sf5_yields_nothing_at_sf7s_detection_floor() {
+        let values: Vec<u16> = (0..16).map(|i| (i * 7 + 3) % 32).collect();
+        let iq = synth(5, 8, 0x12, &values);
+        let mut d = Demod::new(Config { sf: 5, ..Default::default() });
+        let found = d.detect(&iq, 0);
+        assert!(
+            found.is_none_or(|p| p.symbols.is_empty()),
+            "SF5 should starve at SF7's floor"
+        );
     }
 
     #[test]

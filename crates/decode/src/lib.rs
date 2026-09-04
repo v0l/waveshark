@@ -14,6 +14,7 @@
 //! every known protocol against every detected burst affordable.
 
 pub mod adsb;
+pub(crate) mod crypto;
 pub mod ais;
 pub mod aprs;
 pub mod ax25;
@@ -27,6 +28,8 @@ pub mod gpu;
 #[cfg(feature = "tea")]
 pub mod keystream;
 pub mod lora;
+pub mod lorawan;
+pub mod meshcore;
 pub mod meshtastic;
 #[cfg(feature = "tea")]
 pub mod recover;

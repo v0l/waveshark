@@ -81,6 +81,14 @@ csv = "1.3"
 nusb = "0.2"
 bindgen = "0.72"
 pkg-config = "0.3"
+# Mesh protocol ciphers: Meshtastic encrypts in AES-128-CTR and MeshCore in
+# AES-128-ECB with a truncated HMAC-SHA256 tag. Audited implementations rather
+# than hand-written ones, even though this only ever decrypts public broadcast
+# traffic under published keys.
+aes = "0.9"
+ctr = "0.10"
+sha2 = "0.11"
+hmac = "0.13"
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
