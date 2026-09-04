@@ -22,7 +22,14 @@ fn main() {
     for (i, b) in iq.chunks(block).enumerate() {
         let t = std::time::Instant::now();
         g.feed_iq(b).unwrap();
-        packets += g.output().len();
+        for p in g.output().as_packets().unwrap_or(&[]) {
+            packets += 1;
+            if let common::PacketBody::Frame(b) = &p.body {
+                if let Some(d) = nodes::lora_nodes::lora_decoded(&b[..], common::Hz(p.center_hz)) {
+                    eprintln!("LORA at {:.2}s: {:?}", i as f64 * block as f64 / rate, d);
+                }
+            }
+        }
         let dt = t.elapsed().as_secs_f64();
         let real = block as f64 / rate;
         if dt > real { slow_blocks += 1; }
