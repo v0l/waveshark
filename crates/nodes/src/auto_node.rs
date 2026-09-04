@@ -107,6 +107,9 @@ struct Member {
     /// When a transmission still going was last reported, in seconds of
     /// stream, so it is reported every [`REPORT_S`] rather than every piece.
     last_report_s: Option<f64>,
+    /// Width of the channel this front end was placed for, in hertz, or
+    /// zero for one that measures the burst rather than reading a channel.
+    channel_hz: f64,
 }
 
 impl Member {
@@ -128,6 +131,7 @@ impl Member {
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
             last_report_s: None,
+            channel_hz: 0.0,
         })
     }
 
@@ -320,6 +324,33 @@ fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
         .collect()
 }
 
+/// A channel a front end has read something on, kept for as long as the
+/// node runs.
+///
+/// Detection finds what is transmitting; it does not know what will. A
+/// channel that has produced a decoded frame is one that will produce
+/// another, on the same frequency, in the same width, read by the same
+/// front end, and from then on it does not have to be found again: it is
+/// cut out continuously and that front end alone reads it. The cases this
+/// pays for are the ones detection gets wrong on a channel it has already
+/// proved: a burst too strong for the converter, which lights the whole
+/// span and measures as two megahertz wide, and a weak one that flickers
+/// around the open threshold and comes out as three slivers. Where a
+/// transmitter moves, the front end that reads it is the one to follow it;
+/// the channel here is where it was heard.
+///
+/// Not saved. A channel is remembered for a session, and a session that
+/// starts fresh finds its channels the same way it did the first time.
+struct Sticky {
+    id: SourceId,
+    name: &'static str,
+    center_hz: f64,
+    width_hz: f64,
+}
+
+/// Source ids counted down from the top, where the detector's never reach.
+const STICKY_ID_BASE: u64 = u64::MAX - 1_000_000;
+
 /// One open source and the decoders reading it.
 struct Slot {
     id: SourceId,
@@ -365,6 +396,10 @@ pub struct AutoNode {
     narrowband: Vec<(&'static str, &'static [f64])>,
     /// Sources decoders were built for, over the node's life.
     built: u64,
+    sticky: Vec<Sticky>,
+    /// Channels to cut out from the next block on: newly heard ones, and
+    /// after a rebuild every one the span still covers.
+    pending_sticky: Vec<SourceId>,
     /// What each channel has announced about itself, so a source that
     /// closes and opens again, or decoders rebuilt with the graph, do not
     /// log the same cell's identity a second time.
@@ -395,8 +430,16 @@ impl AutoNode {
             blocks: Vec::new(),
             hits: Vec::new(),
             built: 0,
+            sticky: Vec::new(),
+            pending_sticky: Vec::new(),
             announced: HashMap::new(),
         }
+    }
+
+    /// Channels front ends have read something on this session, as
+    /// (front end, centre, width) in hertz.
+    pub fn remembered(&self) -> Vec<(&'static str, f64, f64)> {
+        self.sticky.iter().map(|s| (s.name, s.center_hz, s.width_hz)).collect()
     }
 
     /// Limit detection to a band inside the input, or `None` for all of it.
@@ -568,6 +611,7 @@ impl AutoNode {
         self.extractor = Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
         self.detector = Some(d);
         self.slots.clear();
+        self.pending_sticky = self.sticky.iter().map(|s| s.id).collect();
         self.narrowband = self.query_narrowband();
 
         // The span-wide decoders, where the span reaches what they are for.
@@ -627,6 +671,11 @@ impl AutoNode {
     fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
+        if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
+            let mut m = Member::build(st.name, spec, Self::place(st.name, st.center_hz, st.width_hz), &self.reg)?;
+            m.channel_hz = st.width_hz;
+            return Ok(Slot { id: b.id, center_hz: b.center_hz, members: vec![m], heard: true });
+        }
         // The front end is told how strong the detector found the source,
         // so a stream that begins inside a transmission is not read as
         // noise from its first sample to its last.
@@ -644,8 +693,8 @@ impl AutoNode {
                 b.rate > w && b.bandwidth_hz <= w * CHANNEL_WIDTH_TOLERANCE
             });
             if fits {
-                let spec_node = NodeSpec::new(*name).f("channel_hz", hz);
-                if let Ok(m) = Member::build(name, spec, spec_node, &self.reg) {
+                if let Ok(mut m) = Member::build(name, spec, Self::place(name, hz, widths[0]), &self.reg) {
+                    m.channel_hz = widths[0];
                     members.push(m);
                 }
             }
@@ -654,12 +703,16 @@ impl AutoNode {
         // carriers live in licensed downlink allocations, and its hunt
         // correlates continuously, not worth paying on every 433 MHz burst.
         if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
-            if let Ok(m) = Member::build("tetra", spec, NodeSpec::new("tetra").f("channel_hz", hz), &self.reg) {
+            let w = crate::tetra_nodes::CHANNEL_WIDTH_HZ;
+            if let Ok(mut m) = Member::build("tetra", spec, Self::place("tetra", hz, w), &self.reg) {
+                m.channel_hz = w;
                 members.push(m);
             }
         }
         if METER_HZ.contains(&b.bandwidth_hz) {
-            if let Ok(m) = Member::build("wmbus", spec, NodeSpec::new("wmbus"), &self.reg) {
+            let w = crate::wmbus_nodes::CHANNEL_WIDTH_HZ;
+            if let Ok(mut m) = Member::build("wmbus", spec, Self::place("wmbus", hz, w), &self.reg) {
+                m.channel_hz = w;
                 members.push(m);
             }
         }
@@ -674,9 +727,8 @@ impl AutoNode {
         // channel measured at 240 kHz came through as a 360 kHz stream, which
         // read as the 500 kHz channel and dechirped nothing.
         if let Some(bw) = crate::lora_nodes::bandwidth_for(b.signal_hz) {
-            if let Ok(m) =
-                Member::build("lora", spec, NodeSpec::new("lora").f("bandwidth_hz", bw), &self.reg)
-            {
+            if let Ok(mut m) = Member::build("lora", spec, Self::place("lora", hz, bw), &self.reg) {
+                m.channel_hz = bw;
                 members.push(m);
             }
         }
@@ -685,6 +737,39 @@ impl AutoNode {
         }
         Ok(Slot { id: b.id, center_hz: b.center_hz, members, heard: false })
     }
+
+    /// The settings a front end is built with for a channel: where it is
+    /// and, for the one that needs telling, how wide.
+    fn place(name: &'static str, hz: f64, width_hz: f64) -> NodeSpec {
+        match name {
+            "lora" => NodeSpec::new(name).f("bandwidth_hz", width_hz),
+            "wmbus" => NodeSpec::new(name),
+            _ => NodeSpec::new(name).f("channel_hz", hz),
+        }
+    }
+
+    /// Remember a channel a front end has just read, unless it is one
+    /// already kept, and have it cut out from the next block on.
+    fn remember(&mut self, name: &'static str, center_hz: f64, width_hz: f64) -> Option<Event> {
+        if width_hz <= 0.0 {
+            return None;
+        }
+        let same = |s: &Sticky| s.name == name && (s.center_hz - center_hz).abs() <= s.width_hz / 2.0;
+        if self.sticky.iter().any(same) {
+            return None;
+        }
+        let id = SourceId(STICKY_ID_BASE + self.sticky.len() as u64);
+        self.sticky.push(Sticky { id, name, center_hz, width_hz });
+        self.pending_sticky.push(id);
+        Some(Event::Warning {
+            stage: self.label.clone(),
+            message: format!(
+                "{name} read {:.4} MHz; keeping that channel open for the session",
+                center_hz / 1e6
+            ),
+        })
+    }
+
 
 }
 
@@ -809,10 +894,19 @@ impl Node for AutoNode {
             .live()
             .filter(|s| !spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&(c0 + s.center_hz))))
             .count();
+        let sticky = &self.sticky;
+        let covered = |hz: f64, w: f64| {
+            sticky.iter().any(|s| {
+                (s.center_hz - hz).abs() <= s.width_hz / 2.0 && w <= s.width_hz * CHANNEL_WIDTH_TOLERANCE
+            })
+        };
         self.events.extend(raw.iter().filter(|ev| {
             let SourceEvent::Opened(s) = ev else { return true };
             let hz = c0 + s.center_hz;
             if exclude.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz)) {
+                return false;
+            }
+            if covered(hz, s.bandwidth_hz()) {
                 return false;
             }
             // The tuner's centre while something else transmits: the
@@ -829,10 +923,35 @@ impl Node for AutoNode {
                 }
             }
         }
+        // Channels kept from earlier: opened once, at their own width, never
+        // closed. The extractor takes them from the current position, so a
+        // channel kept before a rebuild starts again where the new span
+        // begins.
+        let half = self.input_bw / 2.0;
+        for id in std::mem::take(&mut self.pending_sticky) {
+            let Some(st) = self.sticky.iter().find(|s| s.id == id) else { continue };
+            let off = st.center_hz - c0;
+            if off.abs() + st.width_hz / 2.0 > half {
+                continue;
+            }
+            self.events.push(SourceEvent::Opened(dsp::Source {
+                id,
+                lo_hz: off - st.width_hz / 2.0,
+                hi_hz: off + st.width_hz / 2.0,
+                center_hz: off,
+                start_sample: d.position(),
+                end_sample: None,
+                peak_snr_db: f32::NAN,
+                frames: 0,
+            }));
+        }
         self.blocks.clear();
         e.process(iq, &self.events, &mut self.blocks);
         for ev in &self.events {
             if let SourceEvent::Opened(s) = ev {
+                if s.id.0 >= STICKY_ID_BASE {
+                    continue;
+                }
                 events.push(Event::Detection {
                     center: Hz((self.center.as_f64() + s.center_hz).max(0.0) as u64),
                     bandwidth: s.bandwidth_hz(),
@@ -860,7 +979,7 @@ impl Node for AutoNode {
         let slots = &mut self.slots;
         let (wide_results, results): (
             Vec<(Vec<Event>, Vec<Packet>)>,
-            Vec<(usize, Vec<Event>, Vec<Packet>, bool)>,
+            Vec<(usize, Vec<Event>, Vec<Packet>, bool, Vec<(&'static str, f64)>)>,
         ) = rayon::join(
             || {
                 wide.par_iter_mut()
@@ -881,7 +1000,7 @@ impl Node for AutoNode {
                         // reads it, none writes it.
                         let quiet = (b.state == SourceState::Closed)
                             .then(|| vec![C32::new(0.0, 0.0); (FLUSH_S * b.rate) as usize]);
-                        let per: Vec<(Vec<Event>, Vec<Packet>, bool)> = slot
+                        let per: Vec<(Vec<Event>, Vec<Packet>, Option<(&'static str, f64)>)> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
@@ -891,15 +1010,19 @@ impl Node for AutoNode {
                                     ev.extend(m.run(q, at_us, &mut pk));
                                 }
                                 let read = m.router.is_none() && !pk.is_empty();
-                                (ev, pk, read)
+                                (ev, pk, read.then_some((m.name, m.channel_hz)))
                             })
                             .collect();
                         let mut ev = Vec::new();
                         let mut pk = Vec::new();
+                        let mut heard = Vec::new();
                         for (e2, p2, read) in per {
                             ev.extend(e2);
                             pk.extend(p2);
-                            slot.heard |= read;
+                            if let Some(r) = read {
+                                slot.heard = true;
+                                heard.push(r);
+                            }
                         }
                         // A measurement of a source a front end reads is
                         // not news.
@@ -918,7 +1041,7 @@ impl Node for AutoNode {
                             pk.clear();
                             ev.retain(|e| !matches!(e, Event::Decoded(_)));
                         }
-                        Some((k, ev, pk, done))
+                        Some((k, ev, pk, done, heard))
                     })
                     .collect()
             },
@@ -930,8 +1053,13 @@ impl Node for AutoNode {
         let mut results = results;
         results.sort_by_key(|(k, ..)| *k);
         let mut closed = Vec::new();
-        for (k, ev, pk, done) in results {
+        for (k, ev, pk, done, heard) in results {
             let center = Hz(self.slots[k].center_hz);
+            for (name, width) in heard {
+                if let Some(e) = self.remember(name, center.as_f64(), width) {
+                    c.emit(e);
+                }
+            }
             for e in ev {
                 if matches!(e, Event::Decoded(_)) {
                     self.hits.push((center, e.clone()));

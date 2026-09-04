@@ -388,3 +388,41 @@ fn auto_finds_lora_in_a_real_capture() {
 
 
 
+
+/// A channel a front end has read is kept for the session. The Meshtastic
+/// capture decodes once through detection; afterwards the node must report
+/// the LoRa channel as remembered, so the next packet on it is read without
+/// having to be found, however the converter measures it that time.
+#[test]
+fn a_channel_that_decoded_is_remembered() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/offair/lora_sf11_meshtastic_c_869.0M_2400k.cu8");
+    if !p.exists() {
+        eprintln!("skipping: {p:?} absent, run testdata/fetch.sh");
+        return;
+    }
+    let buf = FileSource::open(&p).unwrap().read_all().unwrap();
+    let rate = 2_400_000.0;
+    let center = Hz(869_000_000);
+    let mut g = build_chain(StreamSpec::iq(rate, center), &[NodeSpec::new("auto")], &registry()).unwrap();
+    let mut decoded = 0;
+    for block in buf.samples.chunks(16_384) {
+        g.feed_iq(block).unwrap();
+        if let pipeline::Payload::Packets(p) = g.output() {
+            decoded += p
+                .iter()
+                .filter(|p| matches!(&p.body, PacketBody::Frame(b) if nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)).is_some()))
+                .count();
+        }
+    }
+    assert!(decoded >= 1, "nothing decoded");
+    let auto = g
+        .order()
+        .find_map(|(id, _)| g.node(id)?.as_any()?.downcast_ref::<nodes::AutoNode>())
+        .expect("the auto node");
+    let kept = auto.remembered();
+    let lora = kept.iter().find(|(name, _, _)| *name == "lora");
+    let Some((_, hz, width)) = lora else { panic!("no LoRa channel remembered: {kept:?}") };
+    assert!((hz - 869_525_000.0).abs() < 50_000.0, "remembered at {hz}");
+    assert_eq!(*width, 250_000.0);
+}
