@@ -512,13 +512,20 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
             ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
         ]);
-        if let Some(name) = m.well_known_channel() {
-            fields.push(("channel".into(), Value::Text(name.into())));
-        }
     }
 
-    // What the packet says, where the public default channel key opens it.
-    let body = r.meshtastic_message();
+    // What the packet says, where the default key or one of the operator's
+    // channel keys opens it, and which channel that was.
+    let opened = r.meshtastic_message_on();
+    let channel_name: Option<String> = match (&mesh, &opened) {
+        (Some(_), Some((_, Some(name)))) => Some(name.clone()),
+        (Some(m), _) => m.well_known_channel().map(str::to_string),
+        _ => None,
+    };
+    if let Some(name) = &channel_name {
+        fields.push(("channel".into(), Value::Text(name.clone())));
+    }
+    let body = opened.map(|(d, _)| d);
     if let Some(d) = &body {
         fields.push(("port".into(), Value::Text(d.port().into())));
         if d.data.reply_id != 0 {
@@ -597,8 +604,8 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("longitude".into(), Value::Float(lon)));
             }
         }
-        if let Some(m) = p.public_message() {
-            fields.push(("channel".into(), Value::Text("Public (default key)".into())));
+        if let Some((m, on)) = p.any_message() {
+            fields.push(("channel".into(), Value::Text(on.unwrap_or_else(|| "Public (default key)".into()))));
             // The text travels as `sender: message`, and the name in front of
             // it is part of the plaintext rather than a protocol field. A
             // group message carries no signature, so anyone holding the
@@ -660,7 +667,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
         Some(m) => {
-            let chan = match m.well_known_channel() {
+            let chan = match &channel_name {
                 Some(name) => format!(" on {name}"),
                 None => format!(" on channel #{:02x}", m.channel_hash),
             };
@@ -707,7 +714,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                     if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
                         s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
                     }
-                } else if let Some(m) = p.public_message() {
+                } else if let Some((m, _)) = p.any_message() {
                     let (sender, body) = m.sender_and_body();
                     match sender {
                         Some(who) => s.push_str(&format!(", {who}: \"{body}\"")),

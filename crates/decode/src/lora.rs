@@ -474,14 +474,34 @@ impl Received {
     /// readable. What decides is whether the plaintext parses, which
     /// [`meshtastic::Decoded::of`] insists on.
     pub fn meshtastic_message(&self) -> Option<crate::meshtastic::Decoded> {
+        self.meshtastic_message_on().map(|(d, _)| d)
+    }
+
+    /// The same, saying which channel opened it: `None` for the default
+    /// key, else the name of the operator's channel that did.
+    ///
+    /// The default key first, then the channels held, those whose hash
+    /// matches the packet's before those that do not: the hash is one byte
+    /// and collides, and a channel renamed but left on its key still reads.
+    pub fn meshtastic_message_on(&self) -> Option<(crate::meshtastic::Decoded, Option<String>)> {
+        use crate::meshtastic::{Channel, Decoded, DEFAULT_KEY};
         let m = self.meshtastic()?;
         let ciphertext = self.payload.get(Meshtastic::HEADER..)?;
-        crate::meshtastic::Decoded::of(
-            ciphertext,
-            m.source,
-            m.packet_id,
-            &crate::meshtastic::DEFAULT_KEY,
-        )
+        if let Some(d) = Decoded::of(ciphertext, m.source, m.packet_id, &DEFAULT_KEY) {
+            return Some((d, None));
+        }
+        let mut held: Vec<Channel> = crate::channel_keys::for_system(crate::channel_keys::System::Meshtastic)
+            .into_iter()
+            .map(|k| Channel { name: k.name, psk: k.key })
+            .collect();
+        held.sort_by_key(|c| c.hash() != Some(m.channel_hash));
+        for c in held {
+            let Some(key) = c.key() else { continue };
+            if let Some(d) = Decoded::under(ciphertext, m.source, m.packet_id, key) {
+                return Some((d, Some(c.name)));
+            }
+        }
+        None
     }
 }
 

@@ -389,19 +389,28 @@ pub(super) struct MessagesState {
 /// without it); the view itself is always present as an encryption monitor.
 pub(super) struct KeysState {
     /// Keys stored on disk, loaded at startup and written when one changes.
-    #[cfg(feature = "tea")]
+    /// The TETRA entries are read only with the `tea` feature; the channel
+    /// keys of the mesh protocols are in force in every build.
     pub store: crate::keystore::KeyStore,
     /// The hex the operator is typing, per cell tag, before it is applied.
     #[cfg_attr(not(feature = "tea"), allow(dead_code))]
     pub typing: std::collections::HashMap<String, String>,
+    /// The channel key being entered: protocol, name, key.
+    pub new_system: decode::channel_keys::System,
+    pub new_name: String,
+    pub new_key: String,
 }
 
 impl Default for KeysState {
     fn default() -> Self {
+        let store = crate::keystore::KeyStore::load();
+        store.publish();
         Self {
-            #[cfg(feature = "tea")]
-            store: crate::keystore::KeyStore::load(),
+            store,
             typing: std::collections::HashMap::new(),
+            new_system: decode::channel_keys::System::Meshtastic,
+            new_name: String::new(),
+            new_key: String::new(),
         }
     }
 }
@@ -412,6 +421,8 @@ pub(super) struct AudioState {
     /// The channel whose chain the signal chain view shows.
     pub listening: Option<usize>,
     pub volume: f32,
+    /// Whether the bus passes anything at all: the master mute.
+    pub muted: bool,
     pub next_id: u32,
     /// Shared per-digit readout for the strip. Only one channel can be under
     /// the pointer, so one is enough.
@@ -430,6 +441,7 @@ impl Default for AudioState {
             channels: Vec::new(),
             listening: None,
             volume: 0.5,
+            muted: false,
             next_id: 1,
             dial: Dial::new(),
             call_volume: 0.8,

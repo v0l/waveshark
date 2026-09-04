@@ -1,17 +1,33 @@
-//! Persisted TETRA keys, by the cell identity they belong to.
+//! Persisted keys: TETRA cell keys by the cell they belong to, and the
+//! channel keys of the mesh protocols by the channel they open.
 //!
 //! A key is valid for a network, not a moment: it survives restarts, so it
-//! lives in a file beside the scanners and the session. Each entry names the
-//! cell it decrypts (mcc, mnc, colour) and carries the key, how it was
+//! lives in a file beside the scanners and the session. A TETRA entry names
+//! the cell it decrypts (mcc, mnc, colour) and carries the key, how it was
 //! obtained, and the cipher it is for. A key entered by an operator and one
 //! the receiver recovered from the air are the same to the decryptor; they
-//! differ only in what the manager shows about their provenance.
+//! differ only in what the manager shows about their provenance. A channel
+//! entry names the protocol and the channel and carries the pre-shared key
+//! as the operator's app showed it.
 //!
-//! The file is `key = value` blocks under a `[mcc/mnc/colour]` heading, the
-//! same shape as the scanners file, and anything unparsable is skipped rather
+//! The file is `key = value` blocks under a `[mcc/mnc/colour]` heading for
+//! a cell and a `[meshtastic:name]` style heading for a channel, the same
+//! shape as the scanners file, and anything unparsable is skipped rather
 //! than fatal, so a file written by a later version still loads.
 
+use decode::channel_keys::{ChannelKey, System};
+#[cfg(feature = "tea")]
 use decode::tea::Key;
+
+/// Stands in for the cipher key type where the `tea` feature is off: a
+/// cell's entry is then kept as the text it was written as, so a file
+/// written by a build with the cipher still round-trips through one without.
+#[cfg(not(feature = "tea"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Key {
+    Tea1(u32),
+    Tea2([u8; 10]),
+}
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -49,6 +65,7 @@ pub struct CellId {
     pub colour: u8,
 }
 
+#[cfg_attr(not(feature = "tea"), allow(dead_code))]
 impl CellId {
     fn tag(&self) -> String {
         format!("{}/{}/{}", self.mcc, self.mnc, self.colour)
@@ -78,12 +95,14 @@ pub struct Entry {
     pub origin: Origin,
 }
 
-/// The keys known, by cell.
+/// The keys known, by cell, and the channel keys held.
 #[derive(Default, Clone, Debug)]
 pub struct KeyStore {
     keys: BTreeMap<CellId, Entry>,
+    channels: Vec<ChannelKey>,
 }
 
+#[cfg_attr(not(feature = "tea"), allow(dead_code))]
 impl KeyStore {
     /// `$XDG_CONFIG_HOME/waveshark/keys`, beside the scanners and session.
     pub fn path() -> Option<PathBuf> {
@@ -139,10 +158,33 @@ impl KeyStore {
         self.keys.remove(&cell)
     }
 
+    /// The channel keys held.
+    pub fn channels(&self) -> &[ChannelKey] {
+        &self.channels
+    }
+
+    /// Store a channel key, replacing one for the same channel.
+    pub fn insert_channel(&mut self, key: ChannelKey) {
+        self.channels.retain(|c| !(c.system == key.system && c.name == key.name));
+        self.channels.push(key);
+    }
+
+    pub fn remove_channel(&mut self, system: System, name: &str) {
+        self.channels.retain(|c| !(c.system == system && c.name == name));
+    }
+
+    /// Hand the channel keys to the decoders, which read them wherever a
+    /// packet's bytes are labelled.
+    pub fn publish(&self) {
+        decode::channel_keys::set(self.channels.clone());
+    }
+
     /// Blocks of `key = value` under a `[mcc/mnc/colour]` heading.
     pub fn parse(text: &str) -> Self {
         let mut keys = BTreeMap::new();
+        let mut channels: Vec<ChannelKey> = Vec::new();
         let mut cur: Option<CellId> = None;
+        let mut chan: Option<(System, String)> = None;
         let mut key: Option<Key> = None;
         let mut origin = Origin::Manual;
         let mut flush = |cell: &mut Option<CellId>, key: &mut Option<Key>, origin: Origin| {
@@ -157,7 +199,15 @@ impl KeyStore {
             }
             if let Some(head) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 flush(&mut cur, &mut key, origin);
-                cur = CellId::parse(head);
+                chan = None;
+                match head.split_once(':') {
+                    Some((sys, name)) => {
+                        if let Some(system) = System::parse(sys) {
+                            chan = Some((system, name.trim().to_string()));
+                        }
+                    }
+                    None => cur = CellId::parse(head),
+                }
                 origin = Origin::Manual;
                 continue;
             }
@@ -167,11 +217,18 @@ impl KeyStore {
                 "tea1" => key = u32::from_str_radix(v, 16).ok().map(Key::Tea1),
                 "tea2" => key = parse_eck(v).map(Key::Tea2),
                 "origin" => origin = Origin::parse(v).unwrap_or(Origin::Manual),
+                "psk" => {
+                    if let (Some((system, name)), Some(bytes)) =
+                        (&chan, decode::channel_keys::parse_key(v))
+                    {
+                        channels.push(ChannelKey { system: *system, name: name.clone(), key: bytes });
+                    }
+                }
                 _ => {}
             }
         }
         flush(&mut cur, &mut key, origin);
-        KeyStore { keys }
+        KeyStore { keys, channels }
     }
 
     /// Render to the on-disk form.
@@ -187,6 +244,13 @@ impl KeyStore {
                 }
             }
             s.push_str(&format!("origin = {}\n", e.origin.as_str()));
+        }
+        if !self.channels.is_empty() {
+            s.push_str("\n# Channel keys, by protocol and channel name.\n");
+        }
+        for c in &self.channels {
+            s.push_str(&format!("\n[{}:{}]\n", c.system.as_str(), c.name));
+            s.push_str(&format!("psk = {}\n", decode::channel_keys::hex(&c.key)));
         }
         s
     }
@@ -207,6 +271,7 @@ fn parse_eck(s: &str) -> Option<[u8; 10]> {
 
 /// Parse a typed key: 8 hex digits for a TEA1 register, 20 for a TEA2 ECK.
 /// What the manual-entry field accepts.
+#[cfg_attr(not(feature = "tea"), allow(dead_code))]
 pub fn parse_typed_key(s: &str) -> Option<Key> {
     let s = s.trim();
     match s.len() {
@@ -219,6 +284,24 @@ pub fn parse_typed_key(s: &str) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trips_channel_keys() {
+        let mut ks = KeyStore::default();
+        ks.insert_channel(ChannelKey {
+            system: System::Meshtastic,
+            name: "waveshark".into(),
+            key: decode::channel_keys::parse_key("D7CA0CE2D3C78953").unwrap(),
+        });
+        ks.insert_channel(ChannelKey { system: System::MeshCore, name: "hikers".into(), key: vec![1; 16] });
+        let back = KeyStore::parse(&ks.render());
+        assert_eq!(back.channels(), ks.channels());
+        // The same channel again replaces rather than duplicates.
+        ks.insert_channel(ChannelKey { system: System::Meshtastic, name: "waveshark".into(), key: vec![9] });
+        assert_eq!(ks.channels().len(), 2);
+        ks.remove_channel(System::Meshtastic, "waveshark");
+        assert_eq!(ks.channels().len(), 1);
+    }
 
     #[test]
     fn round_trips_manual_and_recovered() {

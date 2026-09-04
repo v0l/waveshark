@@ -66,6 +66,67 @@ pub fn decrypt(ciphertext: &[u8], source: u32, packet_id: u32, key: &[u8; 16]) -
     out
 }
 
+/// A channel as an operator configures one: a name and a pre-shared key
+/// of whatever length the app produced.
+///
+/// The firmware takes the key as given (`Channels::getKey`): one byte is
+/// an index into the default key, anything shorter than sixteen bytes is
+/// zero-padded to sixteen, sixteen is AES-128 and thirty-two AES-256. The
+/// one byte a packet carries to say which channel it is on is the xor of
+/// the name's bytes and the key's (`generateHash`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Channel {
+    pub name: String,
+    pub psk: Vec<u8>,
+}
+
+/// The cipher key a channel's PSK selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Aes128([u8; 16]),
+    Aes256([u8; 32]),
+}
+
+impl Channel {
+    pub fn key(&self) -> Option<Key> {
+        match self.psk.len() {
+            0 => None,
+            1 => key_for_index(self.psk[0]).map(Key::Aes128),
+            n if n <= 16 => {
+                let mut k = [0u8; 16];
+                k[..n].copy_from_slice(&self.psk);
+                Some(Key::Aes128(k))
+            }
+            n if n <= 32 => {
+                let mut k = [0u8; 32];
+                k[..n].copy_from_slice(&self.psk);
+                Some(Key::Aes256(k))
+            }
+            _ => None,
+        }
+    }
+
+    /// The byte a packet on this channel carries.
+    pub fn hash(&self) -> Option<u8> {
+        let xor = |b: &[u8]| b.iter().fold(0u8, |h, x| h ^ x);
+        let key_bytes: Vec<u8> = match self.key()? {
+            Key::Aes128(k) => k.to_vec(),
+            Key::Aes256(k) => k.to_vec(),
+        };
+        Some(xor(self.name.as_bytes()) ^ xor(&key_bytes))
+    }
+}
+
+/// Undo the channel cipher under either width of key.
+pub fn decrypt_with(ciphertext: &[u8], source: u32, packet_id: u32, key: Key) -> Vec<u8> {
+    let mut out = ciphertext.to_vec();
+    match key {
+        Key::Aes128(k) => crypto::ctr_xor(&k, &counter(source, packet_id), &mut out),
+        Key::Aes256(k) => crypto::ctr_xor_256(&k, &counter(source, packet_id), &mut out),
+    }
+    out
+}
+
 /// The application a payload belongs to. Only the ports whose payloads are
 /// read below are named individually; the rest are reported by number, which
 /// is more honest than a name for bytes nothing here can interpret.
@@ -318,7 +379,12 @@ impl Decoded {
     /// every byte and named a known port, which is the answer for a channel
     /// this key does not open.
     pub fn of(ciphertext: &[u8], source: u32, packet_id: u32, key: &[u8; 16]) -> Option<Self> {
-        let plain = decrypt(ciphertext, source, packet_id, key);
+        Self::under(ciphertext, source, packet_id, Key::Aes128(*key))
+    }
+
+    /// The same under a key of either width.
+    pub fn under(ciphertext: &[u8], source: u32, packet_id: u32, key: Key) -> Option<Self> {
+        let plain = decrypt_with(ciphertext, source, packet_id, key);
         let data = Data::parse(&plain)?;
         // An unnamed port is either a firmware newer than this or, far more
         // often, a wrong key whose bytes happened to parse.
@@ -361,6 +427,21 @@ mod tests {
 
     /// PSK index 1 is the default key untouched, and the next index moves the
     /// last byte on by one.
+    #[test]
+    fn a_channel_hashes_as_the_firmware_does() {
+        // LongFast on the default key is 0x08 on the air.
+        let c = Channel { name: "LongFast".into(), psk: vec![1] };
+        assert_eq!(c.hash(), Some(0x08));
+        // A short key is padded with zeros, which the xor does not see.
+        let c = Channel { name: "waveshark".into(), psk: vec![0xd7, 0xca, 0x0c, 0xe2, 0xd3, 0xc7, 0x89, 0x53] };
+        let mut k = [0u8; 16];
+        k[..8].copy_from_slice(&c.psk);
+        assert_eq!(c.key(), Some(Key::Aes128(k)));
+        let name_x = "waveshark".bytes().fold(0u8, |h, x| h ^ x);
+        let key_x = c.psk.iter().fold(0u8, |h, x| h ^ x);
+        assert_eq!(c.hash(), Some(name_x ^ key_x));
+    }
+
     #[test]
     fn a_psk_index_selects_the_key_it_names() {
         assert_eq!(key_for_index(1), Some(DEFAULT_KEY));

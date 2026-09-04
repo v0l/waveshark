@@ -20,12 +20,20 @@ use hmac::Mac;
 /// the leading twelve bytes as the nonce. `Ctr32BE` is that arrangement.
 type Aes128Ctr32 = ctr::Ctr32BE<aes::Aes128>;
 
+type Aes256Ctr32 = ctr::Ctr32BE<aes::Aes256>;
+
 /// XOR `data` with the AES-128-CTR keystream for `key` and `counter`.
 ///
 /// The cipher is its own inverse in this mode, so this both encrypts and
 /// decrypts.
 pub fn ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &mut [u8]) {
     let mut cipher = Aes128Ctr32::new(key.into(), counter.into());
+    cipher.apply_keystream(data);
+}
+
+/// The same with a 32 byte key, which Meshtastic calls AES256.
+pub fn ctr_xor_256(key: &[u8; 32], counter: &[u8; 16], data: &mut [u8]) {
+    let mut cipher = Aes256Ctr32::new(key.into(), counter.into());
     cipher.apply_keystream(data);
 }
 

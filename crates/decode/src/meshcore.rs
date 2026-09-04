@@ -315,6 +315,23 @@ impl<'a> Packet<'a> {
         self.group_message(&Channel::public())
     }
 
+    /// The group message this carries on any channel held: the public one,
+    /// then the operator's, and the name of the one that opened it (`None`
+    /// for public). The hash byte on the wire picks which keys are worth
+    /// trying; the tag decides.
+    pub fn any_message(&self) -> Option<(GroupMessage, Option<String>)> {
+        if let Some(m) = self.public_message() {
+            return Some((m, None));
+        }
+        for k in crate::channel_keys::for_system(crate::channel_keys::System::MeshCore) {
+            let c = Channel::from_psk(&k.key);
+            if let Some(m) = self.group_message(&c) {
+                return Some((m, Some(k.name)));
+            }
+        }
+        None
+    }
+
     /// Whether something beyond the header agrees this is MeshCore.
     ///
     /// The header and the length rules are weak on their own: this protocol
