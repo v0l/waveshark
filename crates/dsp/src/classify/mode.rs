@@ -41,6 +41,17 @@ pub struct Mode {
     pub note: &'static str,
 }
 
+impl Mode {
+    /// The name, with the note in brackets where there is one.
+    pub fn label(&self) -> String {
+        if self.note.is_empty() {
+            self.name.to_string()
+        } else {
+            format!("{} ({})", self.name, self.note)
+        }
+    }
+}
+
 const fn r(lo: f64, hi: f64) -> Range {
     Some((lo, hi))
 }
@@ -72,7 +83,7 @@ pub static MODES: &[Mode] = &[
         symbol_period_s: None,
         duration_s: None,
         centre_hz: r(863e6, 870e6),
-        note: "Meshtastic LongFast on the EU868 plan uses exactly this",
+        note: "",
     },
     Mode {
         name: "LoRa BW125",

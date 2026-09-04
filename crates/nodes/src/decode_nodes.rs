@@ -739,7 +739,7 @@ impl BurstRouteNode {
 pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
     let f = &b.class.features;
     let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz)
-        .map(|m| format!("{} ({})", m.name, m.note));
+        .map(|m| m.label());
     common::Measure {
         modulation: b.class.modulation.label(),
         confidence: b.class.confidence,
@@ -861,7 +861,7 @@ impl Simple for BurstRouteNode {
                     d = d.with_bandwidth(f.bandwidth_hz as f64);
                 }
                 d = match mode {
-                    Some(m) => d.with_detail(format!("{} ({})", m.name, m.note)),
+                    Some(m) => d.with_detail(m.label()),
                     None => d.with_detail(format!(
                         "no front end reads {}",
                         b.class.modulation.label()
