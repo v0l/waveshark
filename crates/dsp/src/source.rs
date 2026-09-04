@@ -1242,20 +1242,33 @@ impl SourceDetector {
         // floor's memory is believed. What it costs is a transmitter at that
         // margin keying up inside the strong one's first seconds.
         //
-        // Only an open source counts, and not one standing on the tuner's
-        // own centre: a direct-conversion receiver's DC offset follows the
-        // envelope of whatever is in the span, opens and closes with it, and
-        // is refused downstream, so as the strongest thing in the band it
-        // would have hidden every transmitter that made it move.
+        // Not one standing on the tuner's own centre: a direct-conversion
+        // receiver's DC offset follows the envelope of whatever is in the
+        // span, opens and closes with it, and is refused downstream, so as
+        // the strongest thing in the band it would have hidden every
+        // transmitter that made it move. Candidates count as well as open
+        // sources, since a burst's image is a frame or two behind it.
         let memory = (self.floor.sub_len * self.floor.sub_count) as u64;
         let skip = self.cap_skip;
+        let off_centre = |lo: usize, hi: usize| !skip.is_some_and(|(a, b)| lo <= b && hi >= a);
         let dominant = self
             .tracks
             .iter()
-            .filter(|t| t.open && self.frame - t.born <= memory)
-            .filter(|t| !skip.is_some_and(|(lo, hi)| t.occ_lo <= hi && t.occ_hi >= lo))
+            .filter(|t| self.frame - t.born <= memory)
+            .filter(|t| off_centre(t.occ_lo, t.occ_hi))
             .map(|t| t.src.peak_snr_db)
             .fold(f32::NEG_INFINITY, f32::max);
+        // And the strongest run being born this frame, since the image of a
+        // burst is born in the same frame as the burst: a MeshCore advert at
+        // 59 dB and its mirror at 28 dB opened together, and the mirror was
+        // read as a chirp sweeping the wrong way for the whole packet.
+        let dominant = self
+            .segs
+            .iter()
+            .enumerate()
+            .filter(|(si, s)| assigned[*si].is_none() && off_centre(s.occ_lo, s.occ_hi))
+            .map(|(_, s)| s.peak_db)
+            .fold(dominant, f32::max);
         let born = self.tracks.len();
         for (si, s) in self.segs.iter().enumerate() {
             if assigned[si].is_some() || s.peak_db < self.cfg.open_db {
