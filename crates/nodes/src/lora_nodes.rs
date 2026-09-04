@@ -485,6 +485,19 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("longitude".into(), Value::Float(lon)));
             }
         }
+        if let Some(m) = p.public_message() {
+            fields.push(("channel".into(), Value::Text("Public (default key)".into())));
+            // The text travels as `sender: message`, and the name in front of
+            // it is part of the plaintext rather than a protocol field. A
+            // group message carries no signature, so anyone holding the
+            // channel key can write any name there; `text` is what was sent,
+            // and `sender` is only what it claims.
+            let (sender, body) = m.sender_and_body();
+            if let Some(s) = sender {
+                fields.push(("sender".into(), Value::Text(s.to_string())));
+            }
+            fields.push(("text".into(), Value::Text(body.to_string())));
+        }
     }
 
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
@@ -536,6 +549,12 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                     }
                     if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
                         s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
+                    }
+                } else if let Some(m) = p.public_message() {
+                    let (sender, body) = m.sender_and_body();
+                    match sender {
+                        Some(who) => s.push_str(&format!(", {who}: \"{body}\"")),
+                        None => s.push_str(&format!(", \"{body}\"")),
                     }
                 } else {
                     // Nothing but the header said this was MeshCore, and a

@@ -86,3 +86,34 @@ fn a_meshtastic_packet_is_not_claimed_as_meshcore() {
     let d = lora_decoded(&bytes, Hz(869_495_000)).expect("a row");
     assert_eq!(d.protocol, "Meshtastic");
 }
+
+/// A message on the public channel, read back through the row path.
+///
+/// The packet is not built by this program: the ciphertext and the tag were
+/// produced by `openssl enc -aes-128-ecb` and `openssl dgst -sha256 -mac
+/// HMAC` over the published key, so reading it confirms the cipher, the key,
+/// the 32-byte HMAC keying and the payload layout against an implementation
+/// that shares no code with this one.
+#[test]
+fn a_public_channel_message_from_openssl_becomes_a_readable_row() {
+    let mut payload = vec![(0x05 << 2) | 0x01, 0x00]; // group text, flood, no path
+    payload.push(0x11); // channel hash of the public key
+    payload.extend_from_slice(&[0x8b, 0xea]); // first two bytes of the HMAC
+    payload.extend_from_slice(
+        &unhex("55c92ceb1ba78c899bd6407235ae24848868926b274a5c56cb2e467278d2fd31"),
+    );
+
+    let d = row(payload);
+    assert_eq!(d.protocol, "MeshCore");
+    assert_eq!(field(&d, "type").as_deref(), Some("group text"));
+    assert_eq!(field(&d, "channel").as_deref(), Some("Public (default key)"));
+    assert_eq!(field(&d, "sender").as_deref(), Some("kieran"));
+    assert_eq!(field(&d, "text").as_deref(), Some("on my way"));
+    assert_eq!(field(&d, "verified").as_deref(), Some("true"));
+    let detail = d.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("kieran: \"on my way\""), "{detail}");
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}

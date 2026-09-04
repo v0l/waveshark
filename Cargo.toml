@@ -87,6 +87,8 @@ pkg-config = "0.3"
 # traffic under published keys.
 aes = "0.9"
 ctr = "0.10"
+sha2 = "0.11"
+hmac = "0.13"
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 poll-promise = { version = "0.3", features = ["tokio"] }

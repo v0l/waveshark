@@ -42,9 +42,29 @@
 //! Until that is here, an advert is believed on shape alone, and
 //! [`Advert::signature`] is carried but unchecked.
 
+use crate::crypto;
+
 /// The LoRa sync word MeshCore uses. Shared with every other private-network
 /// LoRa device, so it is a precondition and not evidence.
 pub const SYNC: u8 = 0x12;
+
+/// The pre-shared key of the public channel every node ships with, from the
+/// firmware's own `PUBLIC_GROUP_PSK` (`izOH6cXN6mrJ5e26oRXNcg==` in
+/// `examples/companion_radio/MyMesh.cpp`). Published, so the channel is
+/// readable by anyone; the traffic on it is the bulk of what a MeshCore mesh
+/// carries.
+pub const PUBLIC_PSK: [u8; 16] = [
+    0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a, 0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72,
+];
+
+/// Bytes of the group payload before the ciphertext: the channel hash that
+/// says which key to try, and the truncated authentication tag.
+const GROUP_HEADER: usize = 1 + MAC_LEN;
+
+/// How much of the HMAC travels with the packet. Two bytes is weak against a
+/// forger, who need only try 65536 times, but it is what decides whether a
+/// decrypt was real, and against accident that is decisive.
+const MAC_LEN: usize = 2;
 
 /// Bytes of an advert before its application data: key, timestamp, signature.
 const ADVERT_FIXED: usize = 32 + 4 + 64;
@@ -278,16 +298,33 @@ impl<'a> Packet<'a> {
         (self.payload_type == PayloadType::Advert).then(|| Advert::parse(self.payload)).flatten()
     }
 
+    /// The group message this carries, if `channel` is the one it was sent on.
+    ///
+    /// `None` when this is not a group message, when the channel hash names a
+    /// different key, or when the authentication tag disagrees.
+    pub fn group_message(&self, channel: &Channel) -> Option<GroupMessage> {
+        if self.payload_type != PayloadType::GrpTxt {
+            return None;
+        }
+        GroupMessage::parse(&channel.open(self.payload)?)
+    }
+
+    /// The group message this carries on the public channel, which is the one
+    /// every node ships with and whose key is published.
+    pub fn public_message(&self) -> Option<GroupMessage> {
+        self.group_message(&Channel::public())
+    }
+
     /// Whether something beyond the header agrees this is MeshCore.
     ///
     /// The header and the length rules are weak on their own: this protocol
     /// has no sync word of its own and an encrypted payload is bytes with no
     /// structure to check, so a stray packet from another 0x12 network can
-    /// look like a plausible one of these. An advert that parses in full is
-    /// the corroboration, and where there is none a reader should treat the
-    /// reading as a likely rather than a fact.
+    /// look like a plausible one of these. Corroboration is an advert that
+    /// parses in full, or a group message whose tag verifies; where there is
+    /// none a reader should treat the reading as a likely rather than a fact.
     pub fn corroborated(&self) -> bool {
-        self.advert().is_some()
+        self.advert().is_some() || self.public_message().is_some()
     }
 }
 
@@ -323,6 +360,116 @@ impl NodeType {
             NodeType::Sensor => "sensor",
             NodeType::Other(_) => "node",
         }
+    }
+}
+
+/// A channel, which in MeshCore is a pre-shared key and a name.
+///
+/// The wire carries only one byte of the key's hash, so several channels can
+/// present the same byte and a receiver tries each of them; what settles it is
+/// the authentication tag, not the hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Channel {
+    /// The key material as the firmware holds it: the pre-shared key followed
+    /// by zeroes out to 32 bytes. The width matters and is not padding for
+    /// its own sake, because the cipher takes the first 16 bytes as its key
+    /// while the tag is keyed on all 32 (`CIPHER_KEY_SIZE` against
+    /// `PUB_KEY_SIZE` in `Utils.cpp`).
+    secret: [u8; 32],
+    /// The byte a packet carries to say which channel it is on.
+    pub hash: u8,
+}
+
+impl Channel {
+    /// The channel a pre-shared key defines.
+    ///
+    /// The hash is the first byte of the SHA-256 of the key as supplied, so it
+    /// is taken over the 16 bytes of a short key rather than over the padded
+    /// buffer the cipher later uses.
+    pub fn from_psk(psk: &[u8]) -> Self {
+        let mut secret = [0u8; 32];
+        let n = psk.len().min(32);
+        secret[..n].copy_from_slice(&psk[..n]);
+        Channel { secret, hash: crypto::sha256(&psk[..n])[0] }
+    }
+
+    /// The public channel, which every node is configured with out of the box.
+    pub fn public() -> Self {
+        Self::from_psk(&PUBLIC_PSK)
+    }
+
+    /// Undo the cipher over a group payload, given that its tag agrees.
+    ///
+    /// `payload` is the whole of a group message payload: the channel hash,
+    /// the tag, then the ciphertext. `None` means the tag did not match, which
+    /// is the answer for a channel this key does not open.
+    fn open(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        if payload.len() < GROUP_HEADER || payload[0] != self.hash {
+            return None;
+        }
+        let (tag, ciphertext) = (&payload[1..GROUP_HEADER], &payload[GROUP_HEADER..]);
+        // A whole number of blocks, or the sender did not produce this.
+        if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+            return None;
+        }
+        // The tag is over the ciphertext, so it is checked before anything is
+        // decrypted rather than after.
+        if crypto::hmac_sha256(&self.secret, ciphertext)[..MAC_LEN] != *tag {
+            return None;
+        }
+        let mut plain = ciphertext.to_vec();
+        let key: &[u8; 16] = self.secret[..16].try_into().ok()?;
+        crypto::ecb_decrypt(key, &mut plain);
+        Some(plain)
+    }
+}
+
+/// A message sent to everyone on a channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMessage {
+    /// When the sender says it sent this.
+    pub timestamp: u32,
+    /// The text as it travels, which is `sender: message`.
+    pub text: String,
+}
+
+impl GroupMessage {
+    /// The sender's name and the message, where the text splits the way the
+    /// firmware composes it.
+    ///
+    /// **The name is not authenticated.** A group message carries no signature
+    /// and the name is simply the front of the plaintext, so anyone holding
+    /// the channel key, which for the public channel is everyone, can put any
+    /// name there.
+    pub fn sender_and_body(&self) -> (Option<&str>, &str) {
+        match self.text.split_once(": ") {
+            Some((sender, body)) if !sender.is_empty() => (Some(sender), body),
+            _ => (None, self.text.as_str()),
+        }
+    }
+
+    /// Read a decrypted group text payload.
+    ///
+    /// The plaintext is a timestamp, a flags byte and the text, zero-padded by
+    /// the sender out to a whole cipher block, so the text ends at the first
+    /// NUL rather than at the end of the buffer.
+    fn parse(plain: &[u8]) -> Option<Self> {
+        if plain.len() < 5 {
+            return None;
+        }
+        let timestamp = u32::from_le_bytes(plain[..4].try_into().ok()?);
+        if !(TIME_LOW..TIME_HIGH).contains(&timestamp) {
+            return None;
+        }
+        // The firmware refuses anything with bits above the low two set, so
+        // this is both what it does and a useful check on the decrypt.
+        if plain[4] >> 2 != 0 {
+            return None;
+        }
+        let body = &plain[5..];
+        let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+        let text = std::str::from_utf8(&body[..end]).ok()?;
+        Some(GroupMessage { timestamp, text: text.to_owned() })
     }
 }
 
@@ -592,6 +739,105 @@ mod tests {
         let mut v = vec![(0x07 << 2) | 0x01, 0x00];
         v.extend(std::iter::repeat_n(0xaa, 10));
         assert!(Packet::parse(&v).is_none());
+    }
+
+    /// Build a group text packet the way a node sends one: encrypt the
+    /// plaintext in ECB, tag the ciphertext, and put the channel hash in
+    /// front (`Mesh::createGroupDatagram` with `Utils::encryptThenMAC`).
+    fn group_packet(channel: &Channel, timestamp: u32, flags: u8, text: &str) -> Vec<u8> {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&timestamp.to_le_bytes());
+        plain.push(flags);
+        plain.extend_from_slice(text.as_bytes());
+        plain.push(0); // the NUL the firmware sends with the string
+        plain.resize(plain.len().div_ceil(16) * 16, 0); // zero pad to a block
+
+        let key: [u8; 16] = channel.secret[..16].try_into().unwrap();
+        crate::crypto::ecb_encrypt(&key, &mut plain);
+        let tag = crate::crypto::hmac_sha256(&channel.secret, &plain);
+
+        let mut v = vec![(0x05 << 2) | 0x01, 0x00]; // group text, flood, no path
+        v.push(channel.hash);
+        v.extend_from_slice(&tag[..MAC_LEN]);
+        v.extend_from_slice(&plain);
+        v
+    }
+
+    /// The public channel's hash byte, checked against a SHA-256 taken by
+    /// something that is not this program. `sha256sum` over the sixteen key
+    /// bytes gives `1155f187...`, so the byte on the wire is 0x11.
+    #[test]
+    fn the_public_channel_hashes_to_the_byte_the_wire_carries() {
+        assert_eq!(Channel::public().hash, 0x11);
+        // The hash is over the key as supplied, not over the padded buffer
+        // the cipher uses, and those differ.
+        assert_ne!(crate::crypto::sha256(&Channel::public().secret)[0], 0x11);
+    }
+
+    #[test]
+    fn a_message_on_the_public_channel_reads_back() {
+        let ch = Channel::public();
+        let bytes = group_packet(&ch, 1_760_000_000, 0, "kieran: on my way");
+        let p = Packet::parse(&bytes).expect("a packet");
+        assert_eq!(p.payload_type, PayloadType::GrpTxt);
+        let m = p.public_message().expect("the published key opens it");
+        assert_eq!(m.text, "kieran: on my way");
+        assert_eq!(m.timestamp, 1_760_000_000);
+        assert_eq!(m.sender_and_body(), (Some("kieran"), "on my way"));
+        // A decrypt that verifies is corroboration that this is MeshCore.
+        assert!(p.corroborated());
+    }
+
+    /// The tag is what decides. A different channel key with a colliding hash
+    /// byte is refused rather than decrypted into noise.
+    #[test]
+    fn another_channel_key_is_refused_even_when_the_hash_byte_agrees() {
+        let public = Channel::public();
+        // Find a private key whose hash byte collides with the public one.
+        let mut psk = [0u8; 16];
+        let mut other = Channel::from_psk(&psk);
+        for i in 0..=u16::MAX {
+            psk[0..2].copy_from_slice(&i.to_le_bytes());
+            other = Channel::from_psk(&psk);
+            if other.hash == public.hash {
+                break;
+            }
+        }
+        assert_eq!(other.hash, public.hash, "no colliding key found to test with");
+
+        let bytes = group_packet(&other, 1_760_000_000, 0, "private: hello");
+        let p = Packet::parse(&bytes).expect("a packet");
+        assert!(p.public_message().is_none(), "the tag must refuse a wrong key");
+        assert!(!p.corroborated());
+        // And the channel that did send it still reads it.
+        assert_eq!(p.group_message(&other).unwrap().text, "private: hello");
+    }
+
+    #[test]
+    fn a_tampered_ciphertext_is_refused() {
+        let ch = Channel::public();
+        let mut bytes = group_packet(&ch, 1_760_000_000, 0, "kieran: hello");
+        *bytes.last_mut().unwrap() ^= 0x01;
+        assert!(Packet::parse(&bytes).unwrap().public_message().is_none());
+    }
+
+    /// A message with no sender prefix is still a message; the name is simply
+    /// not there to report.
+    #[test]
+    fn a_message_without_a_sender_prefix_still_reads() {
+        let ch = Channel::public();
+        let bytes = group_packet(&ch, 1_760_000_000, 0, "anonymous shout");
+        let m = Packet::parse(&bytes).unwrap().public_message().unwrap();
+        assert_eq!(m.sender_and_body(), (None, "anonymous shout"));
+    }
+
+    /// The firmware refuses a text type with bits above the low two, and so
+    /// does this: it is a cheap check that the plaintext is really plaintext.
+    #[test]
+    fn an_unsupported_text_type_is_refused() {
+        let ch = Channel::public();
+        let bytes = group_packet(&ch, 1_760_000_000, 0x04, "kieran: hello");
+        assert!(Packet::parse(&bytes).unwrap().public_message().is_none());
     }
 
     #[test]
