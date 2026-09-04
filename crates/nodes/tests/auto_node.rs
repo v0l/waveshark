@@ -358,3 +358,33 @@ fn auto_finds_dmr_in_a_real_capture() {
 }
 
 
+
+/// A real LoRa capture through the auto node: no frequency told, only a span.
+/// Proves the auto path detects the chirp source, places the lora front end,
+/// and that a decoded frame reaches the log as LoRa, not just a chirp
+/// description. Skips when the fixture is absent.
+#[test]
+#[ignore]
+fn auto_finds_lora_in_a_real_capture() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/offair/lora_sf11_meshtastic_a_869.525M_2000k.cs16");
+    if !p.exists() { eprintln!("skipping: {p:?} absent"); return; }
+    let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+    let iq: Vec<C32> = buf.samples.clone();
+    let rate = 2_000_000.0;
+    let center = Hz(869_525_000);
+    let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
+    let lora: Vec<_> = pk.iter().filter_map(|p| match &p.body {
+        PacketBody::Frame(b) => nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)),
+        _ => None,
+    }).collect();
+    let chirps = pk.iter().filter(|p| p.modulation == Some("chirp")).count();
+    eprintln!("auto: {} LoRa decoded, {} chirp rows, {} packets total", lora.len(), chirps, pk.len());
+    assert!(!lora.is_empty(), "auto placed no LoRa that decoded; {} packets, {chirps} chirps", pk.len());
+}
+
+
+
+
+
+

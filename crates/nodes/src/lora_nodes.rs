@@ -66,6 +66,18 @@ pub struct LoraNode {
     /// every window of a source that already said what it is.
     locked_sf: Option<u8>,
     decim: Option<FirDecim>,
+    /// Input samples the decimator produces per output sample wanted, so the
+    /// stream reaching the demodulator is exactly [`OVERSAMPLE`] per chip. The
+    /// decimator can only divide by a whole number, and a common SDR rate
+    /// (2.048 MS/s) does not divide to 500 kS/s, so what it leaves (512 kS/s)
+    /// is resampled the last 2.4% here. A whole-number-only chain drifts the
+    /// symbol boundary across an SF11 packet and the header checksum fails,
+    /// which read as "no LoRa here" on air even though the preamble locked.
+    resample_step: f64,
+    /// Fractional read position into `pending`, and the tail carried between
+    /// blocks.
+    resample_pos: f64,
+    pending: Vec<C32>,
     demods: Vec<Demod>,
     /// Samples at [`OVERSAMPLE`] per chip, waiting to be read.
     held: Vec<C32>,
@@ -88,6 +100,9 @@ impl LoraNode {
             sf: 0,
             locked_sf: None,
             decim: None,
+            resample_step: 1.0,
+            resample_pos: 0.0,
+            pending: Vec::new(),
             demods: Vec::new(),
             held: Vec::new(),
             hold: 0,
@@ -142,22 +157,40 @@ impl Simple for LoraNode {
             })?
         };
 
-        // Two samples a chip, and by a whole number: a fractional resampler
-        // in front of a dechirp buys nothing, because the demodulator
-        // measures its own timing anyway and a rate a few percent off is a
-        // sample rate offset it already tracks.
+        // Two samples a chip, exactly. The decimator divides by a whole
+        // number and lands near the target; the last few percent is a
+        // fractional resample here. It is not optional: the demodulator's
+        // symbol length is a whole number of samples at OVERSAMPLE per chip,
+        // and a rate 2.4% off (512 kS/s from a 2.048 MS/s SDR against the
+        // 500 kS/s a 250 kHz channel wants) drifts the symbol boundary far
+        // enough across an SF11 packet that the header checksum fails.
         let want = bw * OVERSAMPLE as f64;
-        let factor = (rate / want).round().max(1.0) as usize;
-        let got = rate / factor as f64;
-        if got < want * 0.9 {
+        // The stream has to carry two samples a chip before any resample: a
+        // resample can retime samples that exist, not invent ones a rate
+        // below the target never had.
+        if rate < want {
             return Err(common::Error::other(format!(
                 "lora needs {want:.0} S/s for a {bw:.0} Hz channel and this \
-                 stream decimates to {got:.0}"
+                 stream is only {rate:.0}"
             )));
         }
+        let factor = (rate / want).round().max(1.0) as usize;
+        let got = rate / factor as f64;
+        if got < want {
+            // The decimator must not land below the wanted rate, or the
+            // resample would have to invent samples: pick the factor that
+            // leaves it at or above `want`.
+            let factor = factor.saturating_sub(1).max(1);
+            self.resample_step = (rate / factor as f64) / want;
+            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
+        } else {
+            self.resample_step = got / want;
+            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
+        }
+        self.resample_pos = 0.0;
+        self.pending.clear();
         self.bandwidth_hz = bw;
         self.center_hz = i.spec.center.as_f64();
-        self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
         self.demods = match self.sf {
             0 => dsp::lora::SPREADING_FACTORS
                 .map(|sf| Demod::new(dsp::lora::Config { sf, ..Default::default() }))
@@ -165,7 +198,7 @@ impl Simple for LoraNode {
             sf => vec![Demod::new(dsp::lora::Config { sf, ..Default::default() })],
         };
         self.held.clear();
-        self.hold = (got * HOLD_SECONDS) as usize;
+        self.hold = (want * HOLD_SECONDS) as usize;
 
         // Packets rather than frames, for the same reason M17 sends
         // packets: what the front end knows about a transmission is more
@@ -179,7 +212,24 @@ impl Simple for LoraNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let (Some(iq), Some(decim)) = (i.as_iq(), self.decim.as_mut()) else { return Ok(()) };
-        decim.process(iq, &mut self.held);
+        // Decimate to near the target, then resample the last few percent to
+        // exactly OVERSAMPLE per chip. `pending` holds the decimator output
+        // with the fractional read position carried between blocks.
+        decim.process(iq, &mut self.pending);
+        let step = self.resample_step;
+        while (self.resample_pos as usize) + 1 < self.pending.len() {
+            let idx = self.resample_pos as usize;
+            let frac = (self.resample_pos - idx as f64) as f32;
+            self.held.push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
+            self.resample_pos += step;
+        }
+        // Drop consumed pending samples, keeping the one the position still
+        // sits inside so the next block continues the phase.
+        let consumed = self.resample_pos as usize;
+        if consumed > 0 && consumed <= self.pending.len() {
+            self.pending.drain(..consumed);
+            self.resample_pos -= consumed as f64;
+        }
 
         loop {
             // The one that has worked before is asked first, both because it
@@ -267,6 +317,8 @@ impl Simple for LoraNode {
 
     fn reset(&mut self) {
         self.held.clear();
+        self.pending.clear();
+        self.resample_pos = 0.0;
         self.locked_sf = None;
         if let Some(d) = &mut self.decim {
             d.reset();
