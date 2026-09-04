@@ -82,7 +82,7 @@ pub struct Http {
 /// Identifies the client to servers with a usage policy, the same way the
 /// tile fetcher does.
 const AGENT: &str = concat!(
-    "waveshark/",
+    "WaveShark/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/v0l/waveshark)"
 );
@@ -499,5 +499,15 @@ mod tests {
         std::fs::write(&src_path, b"goodbye").unwrap();
         assert!(cache.refresh(&src, When::Now).unwrap().is_some());
         assert_eq!(cache.read(&src).unwrap(), b"goodbye");
+    }
+
+    /// radioid.net and pistar both serve large files under a usage policy,
+    /// and a client that identifies itself as nothing is the one they block
+    /// first.
+    #[test]
+    fn the_agent_names_the_product_and_where_it_came_from() {
+        assert!(AGENT.starts_with("WaveShark/"), "{AGENT}");
+        assert!(AGENT.contains(env!("CARGO_PKG_VERSION")), "{AGENT}");
+        assert!(AGENT.contains("github.com/v0l/waveshark"), "{AGENT}");
     }
 }

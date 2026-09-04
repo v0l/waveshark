@@ -19,7 +19,7 @@ pub const TILE_PX: f64 = 256.0;
 /// OSM's tile usage policy asks for an identifying agent with contact
 /// information, and blocks clients that send a default or absent one.
 const AGENT: &str = concat!(
-    "waveshark/",
+    "WaveShark/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/v0l/waveshark)"
 );
