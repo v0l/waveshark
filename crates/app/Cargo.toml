@@ -46,6 +46,9 @@ limesdr = ["dep:limesdr"]
 # stock build has no Keys view and links no cipher or GPU stack. Enable with
 # `--features tea` (which turns on `nodes/tea` and `decode/tea`).
 tea = ["nodes/tea", "decode/tea"]
+# DMR speech decode through the AMBE vocoder (patent-encumbered, off by
+# default). Turns on `nodes/ambe`.
+ambe = ["nodes/ambe"]
 
 [[example]]
 name = "lime"

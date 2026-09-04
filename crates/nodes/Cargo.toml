@@ -9,6 +9,10 @@ common.workspace = true
 dsp.workspace = true
 pipeline.workspace = true
 decode.workspace = true
+# AMBE/IMBE vocoder for the DMR node. Off by default: the algorithm is
+# patent-encumbered (see crates/mbe). Without it the DMR node still reads
+# signalling and shows who is talking, but decodes no speech.
+mbe = { workspace = true, optional = true }
 poll-promise = { workspace = true, optional = true }
 rayon.workspace = true
 # M17 voice is Codec 2 3200, whose frame is exactly the 8 bytes M17 puts in
@@ -20,6 +24,9 @@ codec2 = "0.3.1"
 # Off by default; enables `decode/tea`. Without it the node still reads
 # signalling and decodes clear speech, but carries no cipher or key search.
 tea = ["decode/tea", "dep:poll-promise"]
+# DMR speech decode through the AMBE vocoder. Off by default (patent). Without
+# it the DMR node reads signalling only.
+ambe = ["dep:mbe"]
 
 [dev-dependencies]
 sources.workspace = true

@@ -63,6 +63,7 @@ iqnet = { path = "crates/iqnet" }
 sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
 datasets = { path = "crates/datasets" }
+mbe = { path = "crates/mbe" }
 
 anyhow = "1.0"
 thiserror = "2.0"

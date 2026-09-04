@@ -610,6 +610,12 @@ impl AutoNode {
                 if let Ok(m) = Member::build("m17", spec, NodeSpec::new("m17").f("channel_hz", hz), &self.reg) {
                     members.push(m);
                 }
+                // DMR shares M17's grid and its "you must be told the
+                // frequency" character; its sync words decide whether the
+                // bits are DMR. Placed on the same 12.5 kHz channels.
+                if let Ok(m) = Member::build("dmr", spec, NodeSpec::new("dmr").f("channel_hz", hz), &self.reg) {
+                    members.push(m);
+                }
             }
             // TETRA only where a downlink band puts it: unlike M17 the
             // carriers live in licensed allocations, and the node's hunt

@@ -13,6 +13,7 @@ pub mod bank;
 pub mod capture_nodes;
 pub mod decode_nodes;
 pub mod dsp_nodes;
+pub mod dmr_nodes;
 pub mod m17_nodes;
 pub mod tetra_nodes;
 pub mod modes_nodes;
@@ -34,6 +35,7 @@ pub use decode_nodes::{
 };
 pub use ais_nodes::AisNode;
 pub use aprs_nodes::AprsNode;
+pub use dmr_nodes::DmrNode;
 pub use m17_nodes::M17Node;
 pub use tetra_nodes::TetraNode;
 pub use pocsag_nodes::PocsagNode;
@@ -149,6 +151,17 @@ pub fn registry() -> Registry {
         },
         |s: &Settings| {
             Ok(Box::new(TetraNode::new(s.f64_or("channel_hz", 390_000_000.0))) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "dmr",
+            summary: "One DMR channel: narrowband FM, 4-FSK at 4800 baud, two-slot TDMA voice",
+            category: "decode",
+        },
+        |s: &Settings| {
+            Ok(Box::new(DmrNode::new(s.f64_or("channel_hz", dmr_nodes::DEFAULT_HZ))) as Box<dyn Node>)
         },
     );
 
