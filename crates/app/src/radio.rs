@@ -1872,6 +1872,9 @@ fn run(
                 *status.error.lock() = Some(format!("chain: {e}"));
                 return Ok(());
             }
+            if let Some(w) = rx.take_warnings().pop() {
+                *status.error.lock() = Some(w);
+            }
         }
 
         if rx.spectrum_ready() {

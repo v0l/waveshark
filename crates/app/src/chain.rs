@@ -241,6 +241,10 @@ pub struct Receiver {
     /// Rate at the spectrum's own input, which is the span's unless the
     /// operator has put something in front of it.
     spectrum_rate: f64,
+    /// What a node said went wrong this block. A node reports once and
+    /// stops, so a warning left in the graph's event list is a warning
+    /// nobody sees: the capture that would not start said why, to nobody.
+    warnings: Vec<String>,
     /// Spectrum stages the operator added, by patch id. Each is a display of
     /// its own: a patch can watch a decimated band and the whole span at the
     /// same time, which is most of the reason to draw one.
@@ -388,6 +392,7 @@ impl Receiver {
             center: plan.center,
             rate: plan.rate,
             spectrum_rate: plan.eff_rate(),
+            warnings: Vec::new(),
             patch_spectra: Vec::new(),
             refused: None,
         };
@@ -847,9 +852,18 @@ impl Receiver {
         let buf = self.graph.input_buf();
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
-        self.graph.run()?;
+        for e in self.graph.run()? {
+            if let pipeline::event::Event::Warning { stage, message } = e {
+                self.warnings.push(format!("{stage}: {message}"));
+            }
+        }
         self.read_back();
         Ok(())
+    }
+
+    /// The warnings nodes raised since the last call.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     /// Copy out the state a display wants on every frame.

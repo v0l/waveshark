@@ -51,6 +51,11 @@ pub struct Session {
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
+    /// What the packet log folder and the raw capture folder may take, in
+    /// megabytes, or `None` for no limit. Absent from an older file means
+    /// the default, and a limit set once should not need setting again.
+    pub log_cap_mb: Option<u64>,
+    pub capture_cap_mb: Option<u64>,
     /// How the spectrum and the waterfall are drawn.
     ///
     /// Kept here with the rest of it because they are settings in the same
@@ -127,6 +132,8 @@ impl Default for Session {
             dc_block: true,
             decode_on: true,
             volume: 0.5,
+            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
+            capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             view: ViewPrefs::default(),
             feeds: Vec::new(),
             streams: Vec::new(),
@@ -230,6 +237,8 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
+            log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
+            capture_cap_mb: cap(kv.get("capture_cap_mb").copied(), d.capture_cap_mb),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
                     as f32,
@@ -278,6 +287,8 @@ impl Session {
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("volume = {}\n", self.volume));
+        s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
+        s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
         let v = &self.view;
         s.push_str(&format!("rows_per_sec = {}\n", v.rows_per_sec));
         s.push_str(&format!("wf_rows = {}\n", v.wf_rows));
@@ -314,6 +325,19 @@ impl Session {
         }
         s
     }
+}
+
+/// A folder limit as written: megabytes, or `none`.
+fn cap(v: Option<&str>, default: Option<u64>) -> Option<u64> {
+    match v {
+        None => default,
+        Some("none") => None,
+        Some(s) => s.parse().ok().or(default),
+    }
+}
+
+fn render_cap(c: Option<u64>) -> String {
+    c.map(|mb| mb.to_string()).unwrap_or_else(|| "none".into())
 }
 
 /// `beast host:port`, as written by `render`. An unknown kind is dropped

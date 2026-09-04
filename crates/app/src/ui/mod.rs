@@ -408,6 +408,8 @@ impl App {
             location: s.location,
             country: s.country.clone(),
             feeds: s.feeds.clone(),
+            log_cap_mb: s.log_cap_mb,
+            capture_cap_mb: s.capture_cap_mb,
             scanners: crate::scanners::Scanners::load(),
             saved: s.clone(),
             ..Default::default()
@@ -474,6 +476,8 @@ impl App {
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.audio.volume,
+            log_cap_mb: self.log_cap_mb,
+            capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
             map_layers: self.map.map.layers.saved(),
         }
