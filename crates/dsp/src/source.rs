@@ -217,7 +217,7 @@ impl Default for SourceConfig {
             min_frames: 2,
             hang_us: 20_000,
             guard_bins: 2,
-            pair_hz: 200_000.0,
+            pair_hz: 150_000.0,
             lead_us: 5_000,
             tail_us: 30_000,
             oversample: 2.5,
