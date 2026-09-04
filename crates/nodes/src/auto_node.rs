@@ -259,9 +259,24 @@ impl Member {
         }
         for t in &self.packets {
             let Some(pk) = self.graph.buf(*t).and_then(|p| p.as_packets()) else { continue };
-            // Taken as they are: a front end that builds its own packet has
-            // said everything about it, including what it sounded like.
-            out.extend(pk.iter().cloned());
+            // Taken as they are, except for a level the front end left
+            // unmeasured: a dechirp reports its processing gain, not a
+            // channel level, so the LoRa node leaves both NaN and the
+            // source's own measurement fills them here. A front end that did
+            // measure keeps what it said.
+            for p in pk {
+                let mut p = p.clone();
+                if p.rssi_dbfs.is_nan() {
+                    p.rssi_dbfs = 10.0 * self.peak_pow.max(1e-20).log10();
+                }
+                if p.snr_db.is_nan() {
+                    p.snr_db = self.source_snr_db;
+                }
+                out.push(p);
+            }
+            if !pk.is_empty() {
+                self.peak_pow = 0.0;
+            }
         }
         for t in &self.frames {
             let spec = self.graph.spec_of(*t);

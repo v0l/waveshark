@@ -396,6 +396,29 @@ impl Meshtastic {
     pub fn is_broadcast(&self) -> bool {
         self.destination == u32::MAX
     }
+
+    /// The name of a well-known channel this hash could be, when it matches
+    /// one of the modem presets carried with the default key.
+    ///
+    /// The hash is one byte, `xorHash(name) ^ xorHash(psk)`, so a match is a
+    /// strong hint, not a certainty: a private channel whose name and key
+    /// happen to xor to the same byte reads the same on air. What a match
+    /// does mean is that the payload behind this header is very likely
+    /// readable, because the default key is public. The default primary
+    /// channel almost every node ships with is LongFast on that key, 0x08.
+    pub fn well_known_channel(&self) -> Option<&'static str> {
+        Some(match self.channel_hash {
+            0x08 => "LongFast (default key)",
+            0x0f => "LongSlow (default key)",
+            0x37 => "VeryLongSlow (default key)",
+            0x6e => "LongModerate (default key)",
+            0x18 => "MediumSlow (default key)",
+            0x1f => "MediumFast (default key)",
+            0x77 => "ShortSlow (default key)",
+            0x70 => "ShortFast (default key)",
+            _ => return None,
+        })
+    }
 }
 
 /// How many data symbols a packet of this shape occupies, which is what says
@@ -447,5 +470,18 @@ mod tests {
     #[test]
     fn too_few_symbols_for_a_header_is_short() {
         assert_eq!(decode(&[0; 7], 11, false).unwrap_err(), Error::Short);
+    }
+
+    #[test]
+    fn the_default_channel_is_recognised_by_its_hash() {
+        // xorHash("LongFast") ^ xorHash(default key) = 0x08, the hash almost
+        // every node ships transmitting on. Build a minimal broadcast header
+        // carrying it and check it is named.
+        let mut payload = [0u8; 16];
+        payload[13] = 0x08;
+        let m = Meshtastic::parse(&payload).unwrap();
+        assert_eq!(m.well_known_channel(), Some("LongFast (default key)"));
+        payload[13] = 0x5b;
+        assert_eq!(Meshtastic::parse(&payload).unwrap().well_known_channel(), None);
     }
 }

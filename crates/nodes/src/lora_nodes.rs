@@ -382,17 +382,26 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
             ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
         ]);
+        if let Some(name) = m.well_known_channel() {
+            fields.push(("channel".into(), Value::Text(name.into())));
+        }
     }
 
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
-        Some(m) => format!(
-            "{shape}, {:08x} to {}, {} of {} hops left",
-            m.source,
-            if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
-            m.hop_limit,
-            m.hop_start,
-        ),
+        Some(m) => {
+            let chan = match m.well_known_channel() {
+                Some(name) => format!(" on {name}"),
+                None => format!(" on channel #{:02x}", m.channel_hash),
+            };
+            format!(
+                "{shape}, {:08x} to {}, {} of {} hops left{chan}",
+                m.source,
+                if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
+                m.hop_limit,
+                m.hop_start,
+            )
+        }
         None => format!(
             "{shape}, {} byte payload, sync 0x{:02x}",
             r.payload.len(),
