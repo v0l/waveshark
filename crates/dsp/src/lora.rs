@@ -136,6 +136,10 @@ pub struct Demod {
     fft_fine: Arc<dyn Fft<f32>>,
     buf: Vec<C32>,
     mag: Vec<f32>,
+    /// Where the last `detect` that found nothing left off: the first
+    /// window it did not clear, so the next call over the same samples can
+    /// start there instead of at the front.
+    resume: usize,
 }
 
 impl Demod {
@@ -162,8 +166,16 @@ impl Demod {
             fft_fine: planner.plan_fft_forward(step * 4),
             buf: Vec::new(),
             mag: Vec::new(),
+            resume: 0,
             cfg,
         }
+    }
+
+    /// Position a repeat of the last `detect` over the same buffer, grown
+    /// at the end, may start from without missing anything. Meaningful only
+    /// after a call that returned `None`.
+    pub fn resume(&self) -> usize {
+        self.resume
     }
 
     /// Samples in one symbol at the rate this demodulator expects.
@@ -246,6 +258,11 @@ impl Demod {
         while at + sym <= iq.len() && self.peak(iq, at, true, false).peak_mean < self.cfg.peak_min {
             at += sym / 4;
         }
+        // Everything before the rise is quiet, so a later scan over more of
+        // the same stream begins here; where the rise ran into the end of
+        // the buffer it is re-read once more samples arrive.
+        let rise = at;
+        self.resume = rise;
         if at + 2 * sym > iq.len() {
             return None;
         }
@@ -281,7 +298,13 @@ impl Demod {
         // sweep the other way ends the preamble and the sync word.
         let mut down_sym = 1usize;
         loop {
-            if down_sym > 64 || start + (down_sym + 1) * sym > iq.len() {
+            if start + (down_sym + 1) * sym > iq.len() {
+                return None;
+            }
+            if down_sym > 64 {
+                // Upchirps with no end in sight is a tone, not a preamble;
+                // move on past what was read rather than reading it again.
+                self.resume = (start + down_sym * sym).max(rise + sym / 4);
                 return None;
             }
             if self
@@ -294,6 +317,7 @@ impl Demod {
             down_sym += 1;
         }
         if down_sym < self.cfg.preamble_min + 2 {
+            self.resume = (start + down_sym * sym).max(rise + sym / 4);
             return None;
         }
         let preamble_syms = down_sym - 2;

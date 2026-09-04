@@ -79,6 +79,13 @@ pub struct LoraNode {
     resample_pos: f64,
     pending: Vec<C32>,
     demods: Vec<Demod>,
+    /// How far into `held` each demodulator has already found nothing.
+    ///
+    /// Without it every block scanned the whole of `held` again for every
+    /// spreading factor, so a source open for a second cost a second of
+    /// dechirping per block, six times over, and a strong signal's image
+    /// held open for that long took the whole receiver under real time.
+    scanned: Vec<usize>,
     /// Samples at [`OVERSAMPLE`] per chip, waiting to be read.
     held: Vec<C32>,
     /// Most samples held before the oldest are dropped.
@@ -104,6 +111,7 @@ impl LoraNode {
             resample_pos: 0.0,
             pending: Vec::new(),
             demods: Vec::new(),
+            scanned: Vec::new(),
             held: Vec::new(),
             hold: 0,
             decoded: 0,
@@ -197,6 +205,7 @@ impl Simple for LoraNode {
                 .collect(),
             sf => vec![Demod::new(dsp::lora::Config { sf, ..Default::default() })],
         };
+        self.scanned = vec![0; self.demods.len()];
         self.held.clear();
         self.hold = (want * HOLD_SECONDS) as usize;
 
@@ -245,7 +254,10 @@ impl Simple for LoraNode {
 
             let mut found = None;
             for k in order {
-                let Some(p) = self.demods[k].detect(&self.held, 0) else { continue };
+                let Some(p) = self.demods[k].detect(&self.held, self.scanned[k]) else {
+                    self.scanned[k] = self.demods[k].resume();
+                    continue;
+                };
                 if !p.complete {
                     // The window ends inside a transmission. Keeping the
                     // samples and asking again is the whole point of holding
@@ -263,6 +275,9 @@ impl Simple for LoraNode {
                 if self.held.len() > self.hold {
                     let drop = self.held.len() - self.hold;
                     self.held.drain(..drop);
+                    for s in &mut self.scanned {
+                        *s = s.saturating_sub(drop);
+                    }
                 }
                 return Ok(());
             };
@@ -309,6 +324,7 @@ impl Simple for LoraNode {
             }
             let end = packet.end.min(self.held.len());
             self.held.drain(..end);
+            self.scanned.fill(0);
             if self.held.len() < self.demods[0].symbol_len() * 4 {
                 return Ok(());
             }
@@ -317,6 +333,7 @@ impl Simple for LoraNode {
 
     fn reset(&mut self) {
         self.held.clear();
+        self.scanned.fill(0);
         self.pending.clear();
         self.resample_pos = 0.0;
         self.locked_sf = None;
