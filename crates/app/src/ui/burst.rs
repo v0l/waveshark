@@ -193,8 +193,12 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let rows = 256usize;
     // A window that is a fixed fraction of the burst, so a fast and a slow
     // extraction of the same signal read alike rather than one crisp and one
-    // smeared. About three hundred resolvable time cells across the burst.
-    let win = (iq.samples.len() / 300).clamp(8, rows);
+    // smeared: about three hundred resolvable time cells across the burst.
+    // Capped well under the transform, so a tone is always drawn a few rows
+    // thick. A half-second LoRa packet reached the transform's full length
+    // and drew each chirp as a one-row hairline, where a 17 ms sensor burst
+    // drew as the soft trace this view is meant to be.
+    let win = (iq.samples.len() / 300).clamp(8, rows / 8);
     let img = dsp::spectrum::spectrogram(&iq.samples, cols, rows, win);
     let n = img.len() / cols;
     // The floor is the median cell; the top is the peak. A fixed range would

@@ -136,28 +136,42 @@ pub fn spectrogram(samples: &[C32], cols: usize, rows: usize, win_len: usize) ->
     let mut scratch = vec![C32::default(); fft.get_inplace_scratch_len()];
     let half = n / 2;
     let mut peak = 1e-20f32;
-    // One column per pixel, its window centred on the column's place in the
-    // burst so the first and last columns are the burst's ends, not silence
-    // beyond them.
+    // One column per pixel, its windows centred on the column's place in
+    // the burst so the first and last columns are the burst's ends, not
+    // silence beyond them. A column of a long burst spans more samples than
+    // one window holds, so it averages the windows across its span rather
+    // than reading one and skipping the rest: a chirp then draws as the
+    // same soft continuous trace a short burst does, instead of a hairline
+    // through one sample in ten.
+    let stride = samples.len() as f64 / cols as f64;
+    let hops = ((stride / (w as f64 / 2.0)).ceil() as usize).clamp(1, 16);
     for c in 0..cols {
         let centre = (c as f64 + 0.5) / cols as f64 * samples.len() as f64;
-        let start = centre as isize - (w / 2) as isize;
-        for i in 0..n {
-            buf[i] = if i < w {
-                let j = start + i as isize;
-                let s = if j >= 0 { samples.get(j as usize).copied() } else { None };
-                s.unwrap_or(C32::new(0.0, 0.0)) * hann[i]
-            } else {
-                C32::new(0.0, 0.0)
-            };
-        }
-        fft.process_with_scratch(&mut buf, &mut scratch);
+        let col = &mut out[c..];
         for r in 0..n {
-            // Shift so the lowest frequency is at row zero.
-            let bin = (r + half) % n;
-            let power = buf[bin].norm_sqr();
-            peak = peak.max(power);
-            out[r * cols + c] = power;
+            col[r * cols] = 0.0;
+        }
+        for h in 0..hops {
+            let at = centre + ((h as f64 + 0.5) / hops as f64 - 0.5) * stride;
+            let start = at as isize - (w / 2) as isize;
+            for i in 0..n {
+                buf[i] = if i < w {
+                    let j = start + i as isize;
+                    let s = if j >= 0 { samples.get(j as usize).copied() } else { None };
+                    s.unwrap_or(C32::new(0.0, 0.0)) * hann[i]
+                } else {
+                    C32::new(0.0, 0.0)
+                };
+            }
+            fft.process_with_scratch(&mut buf, &mut scratch);
+            for r in 0..n {
+                // Shift so the lowest frequency is at row zero.
+                let bin = (r + half) % n;
+                out[r * cols + c] += buf[bin].norm_sqr() / hops as f32;
+            }
+        }
+        for r in 0..n {
+            peak = peak.max(out[r * cols + c]);
         }
     }
     let scale = 1.0 / peak;
