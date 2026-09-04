@@ -134,6 +134,10 @@ impl Log<'_> {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, body_h), Sense::hover());
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
         child.set_clip_rect(rect);
+        // The legend face's capitals stand taller than the row egui lays
+        // them in, and the first line of the body sat against the clip and
+        // lost the top of its letters to it.
+        child.add_space(3.0);
         if packet_detail(&mut child, rec) {
             if let Some(a) = rec.audio.clone() {
                 self.cmds.push(Cmd::Play(a));
