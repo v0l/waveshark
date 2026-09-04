@@ -23,6 +23,9 @@ use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
+mod dmr_ambe;
+use dmr_ambe::Vocoder;
+
 /// Tag byte identifying a packet body this node wrote, so the log labeler can
 /// tell a DMR voice-over row from any other `Frame` and refuse everything
 /// else. "DV" for DMR voice.
@@ -99,7 +102,6 @@ const SLOT_STRIDE: usize = 288;
 const SUPERFRAME_BURSTS: usize = 6;
 
 /// Longest transmission kept as audio, in seconds.
-#[cfg(feature = "ambe")]
 const MAX_VOICE_SECONDS: f64 = 120.0;
 
 /// The DMR sync words as level-index strings (0=-3,1=-1,2=+1,3=+3), derived
@@ -413,8 +415,9 @@ pub struct DmrNode {
     /// Input sample rate, for the silence timeout.
     in_rate: f64,
     accepted: u64,
-    #[cfg(feature = "ambe")]
-    synth: mbe::ambe::AmbeSynthesizer,
+    /// The AMBE speech path. A zero-size stub without the `ambe` feature, so
+    /// the node reads signalling only there and decodes no speech.
+    vocoder: Vocoder,
 }
 
 impl Default for DmrNode {
@@ -447,8 +450,7 @@ impl DmrNode {
             silent_samples: 0,
             in_rate: AUDIO_HZ,
             accepted: 0,
-            #[cfg(feature = "ambe")]
-            synth: mbe::ambe::AmbeSynthesizer::new(),
+            vocoder: Vocoder::new(),
         }
     }
 
@@ -464,30 +466,18 @@ impl DmrNode {
         &self.voice_now
     }
 
-    /// Decode one voice burst's three AMBE frames to speech, muting frames the
-    /// Golay check says are too damaged (which is what a burst that is not
-    /// really voice, or badly received, looks like).
-    #[cfg(feature = "ambe")]
+    /// Decode one voice burst's three AMBE frames to speech and keep it, both
+    /// live and (up to [`MAX_VOICE_SECONDS`]) for the packet log. Without the
+    /// `ambe` feature the vocoder yields no samples, so this keeps nothing.
     fn decode_voice(&mut self, frames: &[[u8; 9]; 3]) {
         let cap = (MAX_VOICE_SECONDS * VOICE_HZ) as usize;
-        for f in frames {
-            let e = mbe::ambe::AmbeFrame::new(f).errors();
-            let audio = if e[0] + e[1] <= 4 {
-                self.synth.decode(f)
-            } else {
-                [0.0f32; 160]
-            };
-            for s in audio {
-                self.voice_now.push(s);
-                if self.voice.len() < cap {
-                    self.voice.push(s);
-                }
+        for s in self.vocoder.decode_burst(frames) {
+            self.voice_now.push(s);
+            if self.voice.len() < cap {
+                self.voice.push(s);
             }
         }
     }
-
-    #[cfg(not(feature = "ambe"))]
-    fn decode_voice(&mut self, _frames: &[[u8; 9]; 3]) {}
 
     fn take_voice(&mut self) -> Option<std::sync::Arc<common::Speech>> {
         if self.voice.is_empty() {
@@ -748,9 +738,6 @@ impl Node for DmrNode {
         self.voice_bursts = 0;
         self.idle_bursts = 0;
         self.silent_samples = 0;
-        #[cfg(feature = "ambe")]
-        {
-            self.synth = mbe::ambe::AmbeSynthesizer::new();
-        }
+        self.vocoder.reset();
     }
 }
