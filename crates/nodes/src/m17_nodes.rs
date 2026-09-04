@@ -42,13 +42,6 @@ pub const VOICE_HZ: f64 = 8_000.0;
 /// bits of payload, which at 3200 bit/s is two 20 ms codec frames.
 const C2_FRAME_BYTES: usize = 8;
 
-/// Longest transmission kept as audio, in seconds.
-///
-/// A held microphone is minutes long and nobody replays it from a packet list.
-/// At 8 kHz mono this cap is about 4 MB, and the cut is at the end rather than
-/// the start: what is worth hearing is how the call began.
-const MAX_VOICE_SECONDS: f64 = 120.0;
-
 pub struct M17Node {
     channel_hz: f64,
     mixer: Mixer,
@@ -66,7 +59,6 @@ pub struct M17Node {
     /// codec carries state between frames: decoding each block with a fresh
     /// one would restart the synthesiser twenty-five times a second.
     codec: Codec2,
-    voice: Vec<f32>,
     /// Speech decoded in this block, for anything listening live.
     voice_now: Vec<f32>,
     /// Whether the payload being decoded is voice at all. A data stream is
@@ -103,7 +95,6 @@ impl M17Node {
             audio: Vec::new(),
             frames: Vec::new(),
             codec: Codec2::new(Codec2Mode::MODE_3200),
-            voice: Vec::new(),
             voice_now: Vec::new(),
             voice_stream: false,
             talking: None,
@@ -135,32 +126,20 @@ impl M17Node {
         self.talking.as_ref().map(|(f, t)| (f.as_str(), t.as_str()))
     }
 
-    /// Decode both Codec 2 frames in one stream payload.
-    fn decode_voice(&mut self, payload: &[u8; 16]) {
+    /// Decode both Codec 2 frames in one stream payload: 40 ms of speech,
+    /// for the live bus and for the frame's own packet.
+    fn decode_voice(&mut self, payload: &[u8; 16]) -> Option<std::sync::Arc<common::Speech>> {
         if !self.voice_stream {
-            return;
-        }
-        let cap = (MAX_VOICE_SECONDS * VOICE_HZ) as usize;
-        let mut pcm = [0i16; 160];
-        for half in payload.chunks_exact(C2_FRAME_BYTES) {
-            self.codec.decode(&mut pcm, half);
-            for s in pcm {
-                let v = s as f32 / 32768.0;
-                self.voice_now.push(v);
-                if self.voice.len() < cap {
-                    self.voice.push(v);
-                }
-            }
-        }
-    }
-
-    /// The speech of the transmission that just ended, if it had any.
-    fn take_voice(&mut self) -> Option<std::sync::Arc<common::Speech>> {
-        if self.voice.is_empty() {
             return None;
         }
-        let pcm = std::mem::take(&mut self.voice);
-        Some(std::sync::Arc::new(common::Speech { pcm, rate: VOICE_HZ }))
+        let mut pcm = [0i16; 160];
+        let mut out = Vec::with_capacity(320);
+        for half in payload.chunks_exact(C2_FRAME_BYTES) {
+            self.codec.decode(&mut pcm, half);
+            out.extend(pcm.iter().map(|s| *s as f32 / 32768.0));
+        }
+        self.voice_now.extend_from_slice(&out);
+        Some(std::sync::Arc::new(common::Speech { pcm: out, rate: VOICE_HZ }))
     }
 }
 
@@ -256,35 +235,37 @@ impl Node for M17Node {
         self.audio = audio;
 
         self.voice_now.clear();
-        let mut events = Vec::new();
+        // Each event with the speech of the frame it came from, where it is
+        // a stream frame of a voice transmission.
+        let mut events: Vec<(Event, Option<std::sync::Arc<common::Speech>>)> = Vec::new();
         for f in &frames {
+            let mut heard = None;
             // The vocoder runs here rather than in the assembler: what a
             // stream frame carries is 40 ms of speech, and holding it until
             // the transmission ends would mean nobody could listen to it.
             if let Body::Stream { payload, .. } = &f.body {
                 let p = *payload;
-                self.decode_voice(&p);
+                heard = self.decode_voice(&p);
             }
             for e in self.assembler.push(f) {
                 if let Event::LinkSetup { lsf, .. } = &e {
-                    // A new transmission: what the vocoder holds belongs to
-                    // the last one, and whether to run it at all is decided
-                    // by what the link setup says this stream is.
-                    self.voice.clear();
+                    // A new transmission: whether to run the vocoder at all
+                    // is decided by what the link setup says this stream is.
                     self.voice_stream = lsf.is_stream()
                         && matches!(lsf.data_type(), DataType::Voice | DataType::VoiceData);
                     self.talking = self
                         .voice_stream
                         .then(|| (lsf.source().to_string(), lsf.destination().to_string()));
                 }
-                events.push(e);
+                let audio = matches!(e, Event::StreamFrame { .. }).then(|| heard.take()).flatten();
+                events.push((e, audio));
             }
         }
         self.frames = frames;
         // A transmission that stopped mid-stream ends when nothing more is
         // heard, so the assembler has to be told the time even when no frame
         // arrived.
-        events.extend(self.assembler.poll(self.samples));
+        events.extend(self.assembler.poll(self.samples).into_iter().map(|e| (e, None)));
 
         // The channel is reported whether or not anybody is on it, so a
         // listener can see the front end is there before it has heard
@@ -308,13 +289,8 @@ impl Node for M17Node {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
         let out = outputs[OUT_PACKETS].packets_mut();
-        for e in &events {
+        for (e, audio) in &events {
             self.accepted += 1;
-            // The speech goes with the row that ends the transmission, which
-            // is the one a log shows with a duration on it.
-            let audio = matches!(e, Event::Stream { .. })
-                .then(|| self.take_voice())
-                .flatten();
             if matches!(e, Event::Stream { .. }) {
                 // The transmission ended, so there is nobody to subscribe to
                 // until the next link setup.
@@ -332,7 +308,7 @@ impl Node for M17Node {
                 modulation: Some("4FSK"),
                 body: common::PacketBody::Frame(e.to_bytes()),
                 iq: None,
-                audio,
+                audio: audio.clone(),
                 measure: None,
             });
         }
@@ -341,7 +317,6 @@ impl Node for M17Node {
 
     fn reset(&mut self) {
         self.talking = None;
-        self.voice.clear();
         self.voice_now.clear();
         self.voice_stream = false;
         self.codec = Codec2::new(Codec2Mode::MODE_3200);
@@ -426,6 +401,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // counting airtime can add these up without waiting for the
             // transmission to end.
             fields.push(("seconds".into(), Value::Float(0.04)));
+            fields.push(("live".into(), Value::Bool(true)));
             fields.push(("payload".into(), Value::Text(hex(payload))));
             match lsf.map(|l| l.data_type()) {
                 Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
@@ -433,10 +409,9 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             }
         }
         Event::Stream { frames, complete, .. } => {
+            // The end of the run of frames, each of which carried its own
+            // 40 ms; anything adding airtime up has done so already.
             fields.push(("frames".into(), Value::Int(i64::from(*frames))));
-            // 40 ms a frame, which is the only duration in the protocol that
-            // needs no clock to measure.
-            fields.push(("seconds".into(), Value::Float(f64::from(*frames) * 0.04)));
             if !complete {
                 fields.push(("truncated".into(), Value::Bool(true)));
             }
@@ -590,7 +565,13 @@ mod tests {
 
         assert_eq!(rows[1].protocol, "M17-Voice");
         assert_eq!(get(&rows[1], "frames"), Some(common::Value::Int(25)));
-        assert_eq!(get(&rows[1], "seconds"), Some(common::Value::Float(1.0)));
+        // The airtime is on the frames, 40 ms each, live while the stream
+        // runs; the end row does not say it again.
+        let frames: Vec<&Decoded> = all.iter().filter(|d| d.fields.iter().any(|(k, _)| k == "frame")).collect();
+        let seconds: f64 = frames.iter().filter_map(|d| get(d, "seconds")?.as_f64()).sum();
+        assert!((seconds - 1.0).abs() < 1e-6, "{seconds}");
+        assert!(frames.iter().all(|d| get(d, "live") == Some(common::Value::Bool(true))));
+        assert_eq!(get(&rows[1], "seconds"), None);
     }
 
     /// A frame produced by an independent implementation, decoded by ours.
@@ -673,7 +654,7 @@ mod tests {
         let ins = [spec(rate, center)];
         let tags = Vec::new();
         let quiet = vec![common::C32::new(0.0, 0.0); (rate * 0.5) as usize];
-        let mut speech: Option<std::sync::Arc<common::Speech>> = None;
+        let mut speech: Vec<f32> = Vec::new();
         let mut live = 0usize;
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             for chunk in block.chunks(65_536) {
@@ -688,23 +669,23 @@ mod tests {
                     live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
                 }
                 if let Payload::Packets(ps) = packets {
+                    // Each frame's packet carries its own 40 ms; the over is
+                    // the run of them put together.
                     for p in ps {
-                        if p.audio.is_some() {
-                            speech = p.audio;
+                        if let Some(a) = &p.audio {
+                            speech.extend_from_slice(&a.pcm);
                         }
                     }
                 }
             }
         }
-        let speech = speech.expect("the stream row carried no speech");
-        assert_eq!(speech.rate, VOICE_HZ);
         // 25 frames of 40 ms, allowing for the last one closing the stream.
+        let seconds = speech.len() as f64 / VOICE_HZ;
         assert!(
-            (speech.seconds() - 1.0).abs() < 0.1,
-            "{} seconds of speech from a one second transmission",
-            speech.seconds()
+            (seconds - 1.0).abs() < 0.1,
+            "{seconds} seconds of speech from a one second transmission"
         );
-        assert_eq!(live, speech.pcm.len(), "what was published live is what was kept");
+        assert_eq!(live, speech.len(), "what was published live is what was kept");
     }
 
     /// A text message sent in packet mode, which is the other thing an M17
