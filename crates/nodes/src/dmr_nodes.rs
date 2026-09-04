@@ -131,6 +131,11 @@ pub const DEFAULT_HZ: f64 = 433_450_000.0;
 /// 12.5 kHz channel grid.
 pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
 
+/// Silence after the last voice burst that ends an over with no terminator.
+/// Longer than a superframe (360 ms) and the framer's eight missed bursts
+/// (480 ms), or a fade mid-over becomes two rows.
+const OVER_SILENCE_S: f64 = 1.5;
+
 /// One-sided filter cutoff. A compliant DMR signal is ~9.5 kHz wide (±4.75),
 /// but handsets over-deviate badly (a DM-1701 measured ±6.3 kHz outer
 /// levels, ~14 kHz occupied), so pass well past nominal or the outer symbols
@@ -909,6 +914,12 @@ impl Node for DmrNode {
         &[CHANNEL_WIDTH_HZ]
     }
 
+    /// An over with no terminator ends on 1.5 s of silence, so a source's
+    /// worth of decoding is lost if the decoder is dropped before that.
+    fn flush_s(&self) -> f64 {
+        OVER_SILENCE_S + 0.1
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -1041,7 +1052,7 @@ impl Node for DmrNode {
                 self.silent_samples = 0;
             } else {
                 self.silent_samples += iq.len() as u64;
-                if self.silent_samples as f64 >= self.in_rate * 1.5 {
+                if self.silent_samples as f64 >= self.in_rate * OVER_SILENCE_S {
                     ended = true;
                 }
             }

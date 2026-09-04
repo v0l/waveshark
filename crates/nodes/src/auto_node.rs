@@ -59,13 +59,14 @@ const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 /// with what the extraction adds around it.
 const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
 
-/// Silence fed to a source's decoders after its last block, in seconds.
-///
-/// A pager transmission has no closing flag: it ends when the batch that
-/// should follow is not there, and the demodulator only says so once it has
-/// heard enough silence to be sure. Dropping the decoder the moment the
-/// source closes would drop the page with it.
-const FLUSH_S: f64 = 0.25;
+/// Silence fed to a source's decoders after its last block is what each
+/// asks for through [`Node::flush_s`]. A pager transmission has no closing
+/// flag: it ends when the batch that should follow is not there, and the
+/// demodulator only says so once it has heard enough silence to be sure. A
+/// DMR over that lost its terminator ends on a second and a half of it.
+/// Dropping the decoder the moment the source closes drops the page, or the
+/// over, with it: a handheld's every over was decoded to the end and never
+/// reported, while the same front end placed by hand reported all of them.
 
 /// How often a transmission that never ends is reported, in seconds.
 ///
@@ -110,6 +111,9 @@ struct Member {
     /// Width of the channel this front end was placed for, in hertz, or
     /// zero for one that measures the burst rather than reading a channel.
     channel_hz: f64,
+    /// Silence to feed after the source closes, in seconds: the most any
+    /// node in the graph asked for.
+    flush_s: f64,
 }
 
 impl Member {
@@ -120,6 +124,10 @@ impl Member {
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
+        let flush_s = graph
+            .order()
+            .filter_map(|(id, _)| graph.node(id).map(|n| n.flush_s()))
+            .fold(0.25, f64::max);
         Ok(Self {
             name,
             graph,
@@ -132,6 +140,7 @@ impl Member {
             peak_pow: 0.0,
             last_report_s: None,
             channel_hz: 0.0,
+            flush_s,
         })
     }
 
@@ -996,18 +1005,16 @@ impl Node for AutoNode {
                     .enumerate()
                     .filter_map(|(k, slot)| {
                         let b = blocks.iter().find(|b| b.id == slot.id)?;
-                        // One buffer of silence for the slot; every member
-                        // reads it, none writes it.
-                        let quiet = (b.state == SourceState::Closed)
-                            .then(|| vec![C32::new(0.0, 0.0); (FLUSH_S * b.rate) as usize]);
+                        let closed = b.state == SourceState::Closed;
                         let per: Vec<(Vec<Event>, Vec<Packet>, Option<(&'static str, f64)>)> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
                                 let mut pk = Vec::new();
                                 let mut ev = m.run(&b.samples, at_us, &mut pk);
-                                if let Some(q) = &quiet {
-                                    ev.extend(m.run(q, at_us, &mut pk));
+                                if closed {
+                                    let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * b.rate) as usize];
+                                    ev.extend(m.run(&quiet, at_us, &mut pk));
                                 }
                                 let read = m.router.is_none() && !pk.is_empty();
                                 (ev, pk, read.then_some((m.name, m.channel_hz)))

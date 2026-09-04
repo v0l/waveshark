@@ -172,6 +172,14 @@ pub trait Node: Send + 'static {
         &[]
     }
 
+    /// Seconds of silence this node needs after a transmission to finish
+    /// with it: what a decoder that ends an over on a timeout has to hear
+    /// before it says the over ended. A quarter second unless a node says
+    /// otherwise; a source's decoders are dropped once they have had it.
+    fn flush_s(&self) -> f64 {
+        0.25
+    }
+
     /// Validate inputs and declare one spec per output port.
     ///
     /// Also where rate-dependent state is built: a filter designs its taps
@@ -229,6 +237,10 @@ pub trait Simple: Send {
     fn channels(&self) -> &'static [f64] {
         &[]
     }
+    /// See [`Node::flush_s`].
+    fn flush_s(&self) -> f64 {
+        0.25
+    }
     fn latency(&self) -> u64 {
         0
     }
@@ -262,6 +274,9 @@ impl<T: Simple + 'static> Node for T {
     }
     fn channels(&self) -> &'static [f64] {
         Simple::channels(self)
+    }
+    fn flush_s(&self) -> f64 {
+        Simple::flush_s(self)
     }
     fn process(
         &mut self,
