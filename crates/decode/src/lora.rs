@@ -264,6 +264,140 @@ pub fn checksum(payload: &[u8]) -> [u8; 2] {
     }
 }
 
+/// The sync word Meshtastic uses, which is the whole of what identifies it
+/// on the air. LoRaWAN uses 0x34 and a private network 0x12.
+pub const MESHTASTIC_SYNC: u8 = 0x2b;
+
+/// What a decoded frame looks like on the packet bus.
+///
+/// A LoRa payload says nothing about itself: it is bytes, it can be anywhere
+/// from 433 to 915 MHz, and the parameters that make it readable are not in
+/// it. So the front end writes them in front, the way a pager transmission
+/// carries its codewords and an M17 transmission its link setup, and
+/// everything downstream reads one thing rather than being told out of band.
+/// The tag is text because the first thing anyone does with an unfamiliar
+/// frame is look at it in hex.
+pub const TAG: [u8; 4] = *b"LoRa";
+
+/// Bytes before the payload: the tag, the spreading factor, the bandwidth in
+/// kilohertz, the coding rate, the sync word and the two check flags.
+const ENVELOPE: usize = 4 + 1 + 2 + 1 + 1 + 1;
+
+impl Frame {
+    /// The frame as it travels: parameters, then the payload as sent.
+    pub fn to_bytes(&self, sf: u8, bandwidth_hz: f64, sync_word: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ENVELOPE + self.payload.len());
+        out.extend_from_slice(&TAG);
+        out.push(sf);
+        out.extend_from_slice(&((bandwidth_hz / 1e3).round() as u16).to_le_bytes());
+        out.push(self.header.coding_rate);
+        out.push(sync_word);
+        out.push(match self.crc_ok {
+            Some(true) => 2,
+            Some(false) => 1,
+            None => 0,
+        });
+        out.extend_from_slice(&self.payload);
+        out
+    }
+}
+
+/// What a frame off the bus was: its parameters and its payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Received {
+    pub sf: u8,
+    pub bandwidth_hz: f64,
+    pub coding_rate: u8,
+    pub sync_word: u8,
+    pub crc_ok: Option<bool>,
+    pub payload: Vec<u8>,
+}
+
+impl Received {
+    /// Read one back, refusing anything that is not one.
+    ///
+    /// The tag alone is four bytes any burst could start with once in four
+    /// billion, so the fields are checked as well: a spreading factor and a
+    /// bandwidth LoRa does not have, or a coding rate outside 4/5 to 4/8, is
+    /// not a LoRa frame however it starts.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < ENVELOPE || bytes[..4] != TAG {
+            return None;
+        }
+        let sf = bytes[4];
+        let khz = u16::from_le_bytes([bytes[5], bytes[6]]);
+        let coding_rate = bytes[7];
+        if !(7..=12).contains(&sf) || !(1..=4).contains(&coding_rate) || khz == 0 {
+            return None;
+        }
+        Some(Self {
+            sf,
+            bandwidth_hz: f64::from(khz) * 1e3,
+            coding_rate,
+            sync_word: bytes[8],
+            crc_ok: match bytes[9] {
+                2 => Some(true),
+                1 => Some(false),
+                _ => None,
+            },
+            payload: bytes[ENVELOPE..].to_vec(),
+        })
+    }
+
+    pub fn meshtastic(&self) -> Option<Meshtastic> {
+        (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
+    }
+}
+
+/// The sixteen byte header in front of every Meshtastic payload.
+///
+/// Everything past it is AES encrypted with the channel's key, so this is as
+/// far as a receiver without that key reads. It is worth reading anyway: who
+/// transmitted, who it was for, and how far it has already travelled is most
+/// of what a mesh is interesting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Meshtastic {
+    pub destination: u32,
+    pub source: u32,
+    pub packet_id: u32,
+    /// Hops left before the packet is dropped.
+    pub hop_limit: u8,
+    /// Hops it was sent with, so limit against start is how far it came.
+    pub hop_start: u8,
+    pub want_ack: bool,
+    pub via_mqtt: bool,
+    /// One byte of the channel name's hash, not the channel itself.
+    pub channel_hash: u8,
+}
+
+impl Meshtastic {
+    pub fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 16 {
+            return None;
+        }
+        let word = |i: usize| {
+            let mut b = [0u8; 4];
+            b.copy_from_slice(&payload[i..i + 4]);
+            u32::from_le_bytes(b)
+        };
+        let flags = payload[12];
+        Some(Self {
+            destination: word(0),
+            source: word(4),
+            packet_id: word(8),
+            hop_limit: flags & 0x07,
+            want_ack: flags & 0x08 != 0,
+            via_mqtt: flags & 0x10 != 0,
+            hop_start: (flags >> 5) & 0x07,
+            channel_hash: payload[13],
+        })
+    }
+
+    pub fn is_broadcast(&self) -> bool {
+        self.destination == u32::MAX
+    }
+}
+
 /// How many data symbols a packet of this shape occupies, which is what says
 /// whether a header's length agrees with the transmission it came from.
 pub fn symbol_count(length: usize, sf: u8, coding_rate: u8, has_crc: bool, ldro: bool) -> usize {

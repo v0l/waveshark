@@ -2334,6 +2334,66 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    fn lora_fixture(which: char) -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../testdata/offair/lora_sf11_meshtastic_{which}_869.525M_2000k.cs16"
+        ));
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// A Meshtastic transmission the receiver has to find, measure, decide
+    /// is a chirp, and read, with nothing told to it.
+    ///
+    /// This is the capture energy detection could not see: LoRa spreads its
+    /// power under the noise and the excursion inside the channel stayed
+    /// below 10 dB, so two capture sessions were written off as empty before
+    /// the source detector was rewritten. Every stage between the samples
+    /// and the row is being tested here: the detector opening a source that
+    /// wide, the auto node placing a LoRa front end on it because the width
+    /// is one of its channels, the demodulator finding the spreading factor
+    /// without being told, and the frame behind it passing both the header
+    /// checksum and the transmitter's own CRC.
+    #[test]
+    fn a_meshtastic_transmission_is_found_and_read() {
+        for which in ['a', 'b'] {
+            let Some(buf) = lora_fixture(which) else {
+                eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+                return;
+            };
+            let mut rx = replay_receiver(&buf, None).unwrap();
+            let out = replay_blocks(&mut rx, &buf);
+            let rows: Vec<String> = out
+                .iter()
+                .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.model, r.detail))
+                .collect();
+            let r = out
+                .iter()
+                .find(|r| r.model == "Meshtastic")
+                .unwrap_or_else(|| panic!("capture {which}: nothing read it: {rows:?}"));
+            // The transmitter's CRC, not a plausibility argument.
+            assert_eq!(r.crc, Some(true), "capture {which}: {r:?}");
+            assert!(
+                r.detail.contains("SF11 BW250k 4/5"),
+                "capture {which}: read as {}",
+                r.detail
+            );
+            // Both captures are from a node addressing the whole mesh.
+            assert!(
+                r.detail.contains("to everyone"),
+                "capture {which}: read as {}",
+                r.detail
+            );
+            let hz = r.freq;
+            assert!(
+                (hz - 869_525_000.0).abs() < 250_000.0,
+                "capture {which}: read at {hz} Hz"
+            );
+        }
+    }
+
     /// Two TETRA base station downlinks, on for every one of the capture's
     /// ten seconds, that the receiver never reports.
     #[test]

@@ -110,6 +110,14 @@ pub struct Packet {
     /// Mean peak to mean over the data symbols, which is the closest thing
     /// to an SNR the dechirp produces.
     pub peak_mean: f32,
+    /// Whether the packet ended inside the block rather than the block
+    /// ending inside the packet. Something feeding a stream has to keep the
+    /// samples and ask again when this is false, or it decodes half a
+    /// transmission and reports the rest as a CRC failure.
+    pub complete: bool,
+    /// Samples from the start of the block to the end of the last symbol
+    /// read, which is what a caller draining a buffer should drop.
+    pub end: usize,
 }
 
 pub struct Demod {
@@ -161,6 +169,10 @@ impl Demod {
     /// Samples in one symbol at the rate this demodulator expects.
     pub fn symbol_len(&self) -> usize {
         self.step
+    }
+
+    pub fn spreading_factor(&self) -> u8 {
+        self.cfg.sf
     }
 
     /// Dechirp one symbol-length window and find the tone. `up_ref` selects
@@ -317,7 +329,9 @@ impl Demod {
         let lo = sync(self, preamble_syms + 1);
         let sync_word = (((hi / SYNC_STEP) << 4) | (lo / SYNC_STEP)) as u8;
 
-        let (data, mean) = self.symbols(iq, start, down_sym, reference);
+        let (data, mean, complete) = self.symbols(iq, start, down_sym, reference);
+        let end =
+            start + ((down_sym as f64 + DOWNCHIRPS) * sym as f64) as usize + data.len() * sym;
         Some(Packet {
             sf: self.cfg.sf,
             start,
@@ -327,6 +341,8 @@ impl Demod {
             sto,
             symbols: data,
             peak_mean: mean,
+            complete,
+            end,
         })
     }
 
@@ -363,7 +379,7 @@ impl Demod {
         start: usize,
         down_sym: usize,
         reference: f32,
-    ) -> (Vec<u16>, f32) {
+    ) -> (Vec<u16>, f32, bool) {
         let sym = self.step;
         // Where the frame says the payload is. Both off-air captures read a
         // chip later than this, consistently and in the same direction from
@@ -373,9 +389,14 @@ impl Demod {
 
         let mut bins: Vec<f32> = Vec::new();
         let mut sum = 0.0f32;
-        while first + (bins.len() + 1) * sym <= iq.len() && bins.len() < self.cfg.max_symbols {
+        let mut ended = false;
+        while bins.len() < self.cfg.max_symbols {
+            if first + (bins.len() + 1) * sym > iq.len() {
+                break;
+            }
             let p = self.peak(iq, first + bins.len() * sym, true, false);
             if p.peak_mean < self.cfg.peak_min {
+                ended = true;
                 break;
             }
             sum += p.peak_mean;
@@ -386,7 +407,7 @@ impl Demod {
         } else {
             sum / bins.len() as f32
         };
-        (self.round(&bins), mean)
+        (self.round(&bins), mean, ended || bins.len() >= self.cfg.max_symbols)
     }
 
     /// Turn measured bins into symbol values, taking out the slow slide that

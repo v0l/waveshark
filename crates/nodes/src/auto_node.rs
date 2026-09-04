@@ -626,6 +626,19 @@ impl AutoNode {
                 members.push(m);
             }
         }
+        // LoRa, where the source is one of its channels and the stream holds
+        // two samples a chip. Which channel is the source's own width: a
+        // chirp fills the channel it is sent in, so a signal that only part
+        // fills one is something else standing there. The spreading factor
+        // is not decided here, because the node can tell by trying and
+        // nothing at this level could tell at all.
+        if let Some(bw) = crate::lora_nodes::bandwidth_for(b.bandwidth_hz as f64) {
+            if let Ok(m) =
+                Member::build("lora", spec, NodeSpec::new("lora").f("bandwidth_hz", bw), &self.reg)
+            {
+                members.push(m);
+            }
+        }
         for m in &mut members {
             m.source_snr_db = b.snr_db;
         }

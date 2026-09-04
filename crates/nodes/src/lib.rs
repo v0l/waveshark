@@ -24,6 +24,7 @@ mod filter_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
+pub mod lora_nodes;
 pub mod wmbus_nodes;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
@@ -41,6 +42,7 @@ pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
+pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
@@ -184,6 +186,23 @@ pub fn registry() -> Registry {
             let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
             if hi > lo {
                 n.set_band(Some((lo, hi)));
+            }
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "lora",
+            summary: "LoRa chirp spread spectrum: dechirp, then the frame \
+                      behind it, at any spreading factor over 125 to 500 kHz",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let mut n = LoraNode::new(s.f64_or("bandwidth_hz", 0.0));
+            let sf = s.f64_or("sf", 0.0) as u8;
+            if dsp::lora::SPREADING_FACTORS.contains(&sf) {
+                let _ = n.set_param("sf", pipeline::param::ParamValue::Float(sf as f64));
             }
             Ok(Box::new(n) as Box<dyn Node>)
         },
