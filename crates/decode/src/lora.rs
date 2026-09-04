@@ -348,6 +348,17 @@ impl Received {
         (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
     }
 
+    /// The MeshCore packet this is, if it is one.
+    ///
+    /// Its sync word is the generic private-network 0x12 rather than one of
+    /// its own, so passing that is a precondition and the structure of the
+    /// header is what actually decides. See `crate::meshcore`.
+    pub fn meshcore(&self) -> Option<crate::meshcore::Packet<'_>> {
+        (self.sync_word == crate::meshcore::SYNC)
+            .then(|| crate::meshcore::Packet::parse(&self.payload))
+            .flatten()
+    }
+
     /// What the packet says, where the public default channel key opens it.
     ///
     /// The key is tried on every Meshtastic packet rather than only where the

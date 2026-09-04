@@ -461,6 +461,32 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
     }
 
+    // MeshCore keeps its routing in the clear, so the shape of the packet
+    // reads whether or not its payload does; an advert is the whole node.
+    let core = r.meshcore();
+    if let Some(p) = &core {
+        fields.push(("type".into(), Value::Text(p.payload_type.name().into())));
+        fields.push(("route".into(), Value::Text(p.route.name().into())));
+        fields.push(("hops".into(), Value::Int(p.hops() as i64)));
+        // MeshCore has no sync word of its own, so say plainly whether
+        // anything past the header agreed this is one.
+        fields.push(("verified".into(), Value::Bool(p.corroborated())));
+        if p.payload_type.is_encrypted() {
+            fields.push(("encrypted".into(), Value::Bool(true)));
+        }
+        if let Some(a) = p.advert() {
+            fields.push(("node".into(), Value::Text(a.node_type.name().into())));
+            fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
+            if let Some(n) = &a.name {
+                fields.push(("name".into(), Value::Text(n.clone())));
+            }
+            if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+                fields.push(("latitude".into(), Value::Float(lat)));
+                fields.push(("longitude".into(), Value::Float(lon)));
+            }
+        }
+    }
+
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
         Some(m) => {
@@ -497,16 +523,47 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 m.hop_start,
             )
         }
-        None => format!(
-            "{shape}, {} byte payload, sync 0x{:02x}",
-            r.payload.len(),
-            r.sync_word
-        ),
+        None => match &core {
+            Some(p) => {
+                let mut s = format!("{shape}, {} {}", p.payload_type.name(), p.route.name());
+                if p.hops() > 0 {
+                    s.push_str(&format!(", {} hops", p.hops()));
+                }
+                if let Some(a) = p.advert() {
+                    match &a.name {
+                        Some(n) => s.push_str(&format!(", \"{n}\" ({})", a.node_type.name())),
+                        None => s.push_str(&format!(", {}", a.node_type.name())),
+                    }
+                    if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+                        s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
+                    }
+                } else {
+                    // Nothing but the header said this was MeshCore, and a
+                    // packet from another network on the same sync word can
+                    // say that much. Do not let it read as a certainty.
+                    s.push_str(", header only");
+                }
+                s
+            }
+            None => format!(
+                "{shape}, {} byte payload, sync 0x{:02x}",
+                r.payload.len(),
+                r.sync_word
+            ),
+        },
+    };
+
+    let protocol = if mesh.is_some() {
+        "Meshtastic"
+    } else if core.is_some() {
+        "MeshCore"
+    } else {
+        "LoRa"
     };
 
     Some(
         Decoded::bytes(
-            if mesh.is_some() { "Meshtastic" } else { "LoRa" },
+            protocol,
             center,
             0.0,
             r.payload.clone(),
