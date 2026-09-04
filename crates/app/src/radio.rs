@@ -2415,9 +2415,14 @@ pub(crate) mod tests {
     }
 
     fn lora_fixture(which: char) -> Option<common::IqBuf> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../../testdata/offair/lora_sf11_meshtastic_{which}_869.525M_2000k.cs16"
-        ));
+        let name = match which {
+            // Tuned 525 kHz under the channel at 2.4 MS/s, so the packet is
+            // off centre and no rate divides to two samples a chip.
+            'c' => "lora_sf11_meshtastic_c_869.0M_2400k.cu8",
+            _ => "lora_sf11_meshtastic_a_869.525M_2000k.cs16",
+        };
+        let name = if which == 'b' { "lora_sf11_meshtastic_b_869.525M_2000k.cs16" } else { name };
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../testdata/offair/{name}"));
         if !p.exists() {
             return None;
         }
@@ -2438,7 +2443,7 @@ pub(crate) mod tests {
     /// checksum and the transmitter's own CRC.
     #[test]
     fn a_meshtastic_transmission_is_found_and_read() {
-        for which in ['a', 'b'] {
+        for which in ['a', 'b', 'c'] {
             let Some(buf) = lora_fixture(which) else {
                 eprintln!("skipping: fixture absent, run testdata/fetch.sh");
                 return;
@@ -2471,6 +2476,11 @@ pub(crate) mod tests {
                 (hz - 869_525_000.0).abs() < 250_000.0,
                 "capture {which}: read at {hz} Hz"
             );
+            if which == 'c' {
+                // What the node said, against the public default key.
+                assert!(r.detail.contains("050d3664 to everyone"), "capture c: {}", r.detail);
+                assert!(r.detail.contains("\"Hi\""), "capture c: {}", r.detail);
+            }
         }
     }
 

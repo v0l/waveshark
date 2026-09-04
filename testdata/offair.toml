@@ -140,6 +140,43 @@ halves of one transmission.
 """
 
 [[capture]]
+name = "lora_sf11_meshtastic_c_869.0M_2400k.cu8"
+sha256 = "a7e8b687689e5aaf6cb5ece0d69431c793ac6a6cfe6d8ac4df1c0f0cc11236cf"
+url = "https://nostr.download/a7e8b687689e5aaf6cb5ece0d69431c793ac6a6cfe6d8ac4df1c0f0cc11236cf.xz"
+compression = "xz"
+center_hz = 869_000_000
+rate_sps = 2_400_000
+format = "cu8"
+family = "chirp"
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+The same node sending the text "Hi" to the mesh, tuned 525 kHz below the
+channel this time and sampled at 2.4 MS/s, so the packet sits at +521 kHz
+and none of the rates divide to 500 kS/s without a resample. Cut from a
+12 s raw capture, from 1.27 s before the packet to 0.87 s after it, with a
+wM-Bus burst near 868.1 MHz for company.
+
+Kept because the first two fixtures passed by luck. The detector measures
+this packet at 240 to 280 kHz, where it measured those at 204 kHz, and the
+extraction is cut half again wider than the measurement: 360 kHz reads as
+the 500 kHz LoRa channel, 306 kHz as the 250 kHz one. Every packet from
+this node on air was being dechirped at the wrong bandwidth while the test
+corpus was green. Placement now goes by the measured width. The same
+packet read with dsp::lora::Demod directly at SF11/BW250 gives sync 0x2b,
+16 preamble symbols, 33 data symbols, header 24 bytes at 4/5 with the
+transmitter's CRC passing.
+"""
+
+[capture.expect]
+sf = 11
+bandwidth_hz = 250_000
+sync_word = 0x2b
+payload_len = 24
+coding_rate = "4/5"
+source = "050d3664"
+text = "Hi"
+
+[[capture]]
 name = "ofdm_lte_762M_12000k.cs16"
 sha256 = "f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510"
 url = "https://nostr.download/f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510.xz"
