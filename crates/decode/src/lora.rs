@@ -348,6 +348,18 @@ impl Received {
         (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
     }
 
+    /// The LoRaWAN frame this is, if it is one.
+    ///
+    /// Sync word 0x34 is reserved for public LoRaWAN networks, so unlike
+    /// MeshCore's this does identify the protocol; the structure is checked
+    /// as well, since a corrupt frame would otherwise pass on the sync word
+    /// alone. See `crate::lorawan`.
+    pub fn lorawan(&self) -> Option<crate::lorawan::Frame> {
+        (self.sync_word == crate::lorawan::SYNC)
+            .then(|| crate::lorawan::Frame::parse(&self.payload))
+            .flatten()
+    }
+
     /// The MeshCore packet this is, if it is one.
     ///
     /// Its sync word is the generic private-network 0x12 rather than one of

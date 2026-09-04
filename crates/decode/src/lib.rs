@@ -28,6 +28,7 @@ pub mod gpu;
 #[cfg(feature = "tea")]
 pub mod keystream;
 pub mod lora;
+pub mod lorawan;
 pub mod meshcore;
 pub mod meshtastic;
 #[cfg(feature = "tea")]

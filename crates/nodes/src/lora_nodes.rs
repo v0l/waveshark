@@ -27,6 +27,7 @@
 
 use common::{Result, C32};
 use decode::lora::{self, Received};
+use decode::lorawan;
 use decode::meshtastic;
 use dsp::lora::{Demod, OVERSAMPLE};
 use dsp::FirDecim;
@@ -500,6 +501,47 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
     }
 
+    // LoRaWAN: the keys are per device and not published, so this is the
+    // metadata around a payload that stays shut. A join request is the
+    // exception and names the device outright.
+    let wan = r.lorawan();
+    if let Some(f) = &wan {
+        fields.push(("type".into(), Value::Text(f.mtype.name().into())));
+        match &f.body {
+            lorawan::Body::Join(j) => {
+                fields.push(("dev_eui".into(), Value::Text(lorawan::format_eui(j.dev_eui))));
+                fields.push(("join_eui".into(), Value::Text(lorawan::format_eui(j.join_eui))));
+                fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
+            }
+            lorawan::Body::Data(d) => {
+                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
+                fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
+                if let Some(p) = d.f_port {
+                    fields.push(("port".into(), Value::Int(i64::from(p))));
+                }
+                fields.push(("payload_len".into(), Value::Int(d.payload_len as i64)));
+                if d.adr {
+                    fields.push(("adr".into(), Value::Bool(true)));
+                }
+                if d.ack {
+                    fields.push(("ack".into(), Value::Bool(true)));
+                }
+                if d.f_pending {
+                    fields.push(("pending".into(), Value::Bool(true)));
+                }
+                if d.f_opts_len > 0 {
+                    fields.push(("mac_bytes".into(), Value::Int(i64::from(d.f_opts_len))));
+                }
+                // The payload is enciphered under a session key that is not
+                // public, so say so rather than leaving it to be inferred.
+                if d.payload_len > 0 {
+                    fields.push(("encrypted".into(), Value::Bool(true)));
+                }
+            }
+            lorawan::Body::JoinAccept | lorawan::Body::Opaque => {}
+        }
+    }
+
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
         Some(m) => {
@@ -564,11 +606,40 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 }
                 s
             }
-            None => format!(
-                "{shape}, {} byte payload, sync 0x{:02x}",
-                r.payload.len(),
-                r.sync_word
-            ),
+            None => match &wan {
+                Some(f) => {
+                    let mut s = format!("{shape}, {}", f.mtype.name());
+                    match &f.body {
+                        lorawan::Body::Join(j) => s.push_str(&format!(
+                            ", device {} joining {}",
+                            lorawan::format_eui(j.dev_eui),
+                            lorawan::format_eui(j.join_eui)
+                        )),
+                        lorawan::Body::Data(d) => {
+                            s.push_str(&format!(
+                                ", {:08x} frame {}",
+                                d.dev_addr, d.f_cnt
+                            ));
+                            match d.f_port {
+                                Some(0) => s.push_str(", mac commands"),
+                                Some(p) => s.push_str(&format!(", port {p}")),
+                                None => {}
+                            }
+                            if d.payload_len > 0 {
+                                s.push_str(&format!(", {} bytes sealed", d.payload_len));
+                            }
+                        }
+                        lorawan::Body::JoinAccept => s.push_str(", sealed"),
+                        lorawan::Body::Opaque => {}
+                    }
+                    s
+                }
+                None => format!(
+                    "{shape}, {} byte payload, sync 0x{:02x}",
+                    r.payload.len(),
+                    r.sync_word
+                ),
+            },
         },
     };
 
@@ -576,6 +647,8 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         "Meshtastic"
     } else if core.is_some() {
         "MeshCore"
+    } else if wan.is_some() {
+        "LoRaWAN"
     } else {
         "LoRa"
     };
