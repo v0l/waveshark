@@ -314,6 +314,10 @@ pub enum Cmd {
     /// enciphered traffic decodes. From the key manager.
     #[cfg(feature = "tea")]
     TetraKey { colour: u8, key: decode::tea::Key },
+    /// Install a TA61 identity secret for a cell colour, so its encrypted
+    /// identities show as real subscribers. From the key manager.
+    #[cfg(feature = "tea")]
+    TetraIdSecret { colour: u8, c: [u8; 8] },
     Stop,
 }
 
@@ -1580,6 +1584,8 @@ fn run(
                 }
                 #[cfg(feature = "tea")]
                 Cmd::TetraKey { colour, key } => rx.set_tetra_key(colour, key),
+                #[cfg(feature = "tea")]
+                Cmd::TetraIdSecret { colour, c } => rx.set_tetra_id_secret(colour, c),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
                     // Voice is written beside the log rather than into it: a

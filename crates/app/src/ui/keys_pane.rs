@@ -151,6 +151,27 @@ impl Keys<'_> {
             }
         }
 
+        // Identity secret entry: a 16-hex-digit TA61 `c` that de-anonymises
+        // the encrypted identities on this cell, independent of the voice
+        // key and working on TEA2/3. Session-only; not persisted yet.
+        if s.aie != 0 {
+            let key = format!("{}#id", cell.tag_key());
+            let buf = self.st.typing.entry(key.clone()).or_default();
+            ui.add(
+                egui::TextEdit::singleline(buf)
+                    .hint_text("identity secret: 16 hex")
+                    .desired_width(180.0)
+                    .font(egui::FontId::monospace(12.0)),
+            );
+            let secret = parse_id_secret(buf);
+            if ui.add_enabled(secret.is_some(), egui::Button::new("id")).clicked() {
+                if let Some(c) = secret {
+                    self.cmds.push(Cmd::TetraIdSecret { colour: cell.colour, c });
+                    self.st.typing.remove(&key);
+                }
+            }
+        }
+
         if stored.is_some() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("forget").clicked() {
@@ -160,6 +181,20 @@ impl Keys<'_> {
             });
         }
     }
+}
+
+/// Parse a 16-hex-digit TA61 identity secret into its 8 bytes.
+#[cfg(feature = "tea")]
+fn parse_id_secret(s: &str) -> Option<[u8; 8]> {
+    let s = s.trim();
+    if s.len() != 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 8];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// A short line for where the key search is, and the colour to draw it. None

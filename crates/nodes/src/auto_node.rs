@@ -491,6 +491,18 @@ impl AutoNode {
     /// scanner as well as one placed by hand.
     #[cfg(feature = "tea")]
     pub fn set_inner_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
+        self.each_inner_tetra(|t| t.add_key(colour, key));
+    }
+
+    /// Install a TA61 identity secret on every inner TETRA front end.
+    #[cfg(feature = "tea")]
+    pub fn set_inner_tetra_id_secret(&mut self, colour: u8, c: [u8; 8]) {
+        self.each_inner_tetra(|t| t.add_id_secret(colour, c));
+    }
+
+    /// Run `f` over every TETRA front end the scanner placed inside.
+    #[cfg(feature = "tea")]
+    fn each_inner_tetra(&mut self, mut f: impl FnMut(&mut crate::tetra_nodes::TetraNode)) {
         for slot in &mut self.slots {
             for m in &mut slot.members {
                 let ids: Vec<_> =
@@ -501,7 +513,7 @@ impl AutoNode {
                             .as_any_mut()
                             .and_then(|a| a.downcast_mut::<crate::tetra_nodes::TetraNode>())
                         {
-                            t.add_key(colour, key);
+                            f(t);
                         }
                     }
                 }

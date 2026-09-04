@@ -1177,6 +1177,28 @@ impl Receiver {
         }
     }
 
+    /// Install a TA61 identity secret for a cell colour on every TETRA front
+    /// end, so its encrypted identities show as real subscribers.
+    #[cfg(feature = "tea")]
+    pub fn set_tetra_id_secret(&mut self, colour: u8, c: [u8; 8]) {
+        let ids: Vec<_> =
+            self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
+        for id in ids {
+            if let Some(n) = self.graph.node_mut(id) {
+                if let Some(t) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TetraNode>()) {
+                    t.add_id_secret(colour, c);
+                }
+            }
+        }
+        for &id in &self.sources.clone() {
+            if let Some(n) = self.graph.node_mut(id) {
+                if let Some(a) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
+                    a.set_inner_tetra_id_secret(colour, c);
+                }
+            }
+        }
+    }
+
     /// The span-wide decoders the auto nodes are running, by stage name.
     fn auto_wide(&self, name: &str) -> bool {
         self.sources
