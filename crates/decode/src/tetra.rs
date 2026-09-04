@@ -65,6 +65,14 @@ pub struct SysinfoPdu {
     pub num_of_csch: u8,
     pub ms_txpwr_max_cell: u8,
     pub rxlev_access_min: u8,
+    /// Whether the 16-bit field after the header is a CCK identity (class 3,
+    /// `true`) rather than the hyperframe number (`false`). The flag itself
+    /// tells clear class 3 from class 2 apart, which is otherwise unreadable.
+    pub cck_valid: bool,
+    /// The hyperframe number, when the cell broadcasts it (`!cck_valid`). The
+    /// slow digit of the cipher IV; without it the IV is only known modulo a
+    /// multiframe, which is ~61 s. `None` when the field is a CCK id instead.
+    pub hyperframe: Option<u16>,
     /// Location area, the roaming boundary inside the network.
     pub la: u16,
     pub subscriber_class: u16,
@@ -86,6 +94,11 @@ impl SysinfoPdu {
             num_of_csch: bits(b, 26, 2) as u8,
             ms_txpwr_max_cell: bits(b, 28, 3) as u8,
             rxlev_access_min: bits(b, 31, 4) as u8,
+            // access_parameter (4) and radio_dl_timeout (4) sit at 35..43,
+            // then a flag at 43 says whether the 16 bits at 44 are a CCK id
+            // or the hyperframe number.
+            cck_valid: bits(b, 43, 1) == 1,
+            hyperframe: (bits(b, 43, 1) == 0).then(|| bits(b, 44, 16) as u16),
             // The MLE trailer sits at a fixed distance from the end, past
             // the optional field the header selects.
             la: bits(b, 124 - 42, 14) as u16,
@@ -843,6 +856,8 @@ impl Event {
                 v.push(s.num_of_csch);
                 v.push(s.ms_txpwr_max_cell);
                 v.push(s.rxlev_access_min);
+                v.push(u8::from(s.cck_valid));
+                v.extend_from_slice(&s.hyperframe.unwrap_or(0).to_be_bytes());
                 v.extend_from_slice(&s.la.to_be_bytes());
                 v.extend_from_slice(&s.subscriber_class.to_be_bytes());
                 v.extend_from_slice(&s.bs_service_details.to_be_bytes());
@@ -947,7 +962,7 @@ impl Event {
                     .collect();
                 Some(Event::Network(NetworkPdu { neighbours }))
             }
-            (2, 15) => Some(Event::Sysinfo(SysinfoPdu {
+            (2, 18) => Some(Event::Sysinfo(SysinfoPdu {
                 main_carrier: u16::from_be_bytes([r[0], r[1]]),
                 freq_band: r[2],
                 freq_offset: r[3],
@@ -956,9 +971,11 @@ impl Event {
                 num_of_csch: r[6],
                 ms_txpwr_max_cell: r[7],
                 rxlev_access_min: r[8],
-                la: u16::from_be_bytes([r[9], r[10]]),
-                subscriber_class: u16::from_be_bytes([r[11], r[12]]),
-                bs_service_details: u16::from_be_bytes([r[13], r[14]]),
+                cck_valid: r[9] == 1,
+                hyperframe: (r[9] == 0).then(|| u16::from_be_bytes([r[10], r[11]])),
+                la: u16::from_be_bytes([r[12], r[13]]),
+                subscriber_class: u16::from_be_bytes([r[14], r[15]]),
+                bs_service_details: u16::from_be_bytes([r[16], r[17]]),
             })),
             _ => None,
         }
@@ -1251,6 +1268,8 @@ mod tests {
             num_of_csch: 0,
             ms_txpwr_max_cell: 4,
             rxlev_access_min: 9,
+            cck_valid: false,
+            hyperframe: Some(1234),
             la: 100,
             subscriber_class: 0xffff,
             bs_service_details: 0x870,

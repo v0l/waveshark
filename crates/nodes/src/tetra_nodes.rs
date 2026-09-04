@@ -219,14 +219,13 @@ pub struct TetraNode {
     /// reads either frame once one plaintext is known. What a key manager
     /// shows as recoverable-by-crib, for any cipher.
     reuse_pairs: Vec<decode::keystream::Reuse>,
-    /// A session hyperframe counter. The absolute hyperframe is broadcast in
-    /// SYSINFO but not parsed here; without it, IVs would repeat every ~61 s
-    /// as the multiframe wraps and every wrap would look like key re-use. So
-    /// the IV carries a count of multiframe wraps since lock instead, which
-    /// is monotonic within a session and never falsely collides. It is not
-    /// the cell's real hyperframe, so it cannot match one across sessions:
-    /// cross-session re-use detection needs the SYSINFO field, not this.
-    hyperframe: u16,
+    /// The cell's real hyperframe, the slow digit of the cipher IV, seeded
+    /// from SYSINFO and advanced on each multiframe wrap so the IV stays
+    /// right between broadcasts. `None` until SYSINFO has carried it (a
+    /// class-3 cell sends a CCK id there instead, so it may stay `None`).
+    /// Keystream re-use is only judged when this is known: a guessed
+    /// hyperframe manufactures collisions that are not real.
+    hyperframe: Option<u16>,
     last_multiframe: Option<u8>,
     /// The slot counter as of the last burst, for reaping traffic whose
     /// marker stopped appearing.
@@ -272,7 +271,7 @@ impl TetraNode {
             reuse: decode::keystream::ReuseWatch::new(),
             keystreams: HashMap::new(),
             reuse_pairs: Vec::new(),
-            hyperframe: 0,
+            hyperframe: None,
             last_multiframe: None,
             slot_now: 0,
             accepted: 0,
@@ -542,23 +541,28 @@ impl TetraNode {
         }
         let Some(time) = self.rx.time_at(slot) else { return };
 
-        // Advance the session hyperframe on a multiframe wrap, so the IV a
-        // re-use is keyed by does not roll over every ~61 s.
+        // Advance the real hyperframe on a multiframe wrap, so the IV stays
+        // right between the SYSINFO broadcasts that seed it. Only when it is
+        // known: a guessed hyperframe manufactures re-use that is not real.
         if let Some(prev) = self.last_multiframe {
             if time.multiframe < prev {
-                self.hyperframe = self.hyperframe.wrapping_add(1);
+                if let Some(hn) = self.hyperframe.as_mut() {
+                    *hn = hn.wrapping_add(1);
+                }
             }
         }
         self.last_multiframe = Some(time.multiframe);
 
         // Watch for the same IV coming round with different traffic: that is
-        // keystream re-use, and reads any cipher given a crib. Tagged by the
-        // addressed party so a re-decode of one frame is not mistaken for it.
+        // keystream re-use, and reads any cipher given a crib. Only judged
+        // when the real hyperframe is known, since it is most of the IV.
+        // Tagged by the addressed party so a re-decode is not mistaken for it.
+        let Some(hyperframe) = self.hyperframe else { return };
         let full_ts = Timestamp {
             tn: time.tn,
             frame: time.frame,
             multiframe: time.multiframe,
-            hyperframe: self.hyperframe,
+            hyperframe,
             uplink: false,
         };
         let tag = {
@@ -599,11 +603,14 @@ impl TetraNode {
             return;
         }
 
+        // The same real hyperframe the re-use watch used: the TEA1 search
+        // builds the IV from this, so a wrong one makes every search exhaust
+        // even on a genuine TEA1 network.
         let ts = Timestamp {
             tn: time.tn,
             frame: time.frame,
             multiframe: time.multiframe,
-            hyperframe: 0,
+            hyperframe,
             uplink: false,
         };
         let group = self.collisions.entry(sig).or_default();
@@ -807,6 +814,12 @@ impl Node for TetraNode {
                 }
                 Event::Sysinfo(si) => {
                     self.cell_band = Some((si.freq_band, si.freq_offset));
+                    // Seed the IV's slow digit from the cell itself. A class-3
+                    // cell sends a CCK id here instead, so it may never come,
+                    // and re-use detection stays off until it does.
+                    if let Some(hn) = si.hyperframe {
+                        self.hyperframe = Some(hn);
+                    }
                     events.push((Event::Sysinfo(si), block.slot));
                 }
                 Event::Call(mut c) => {
@@ -913,7 +926,7 @@ impl Node for TetraNode {
         self.reuse = decode::keystream::ReuseWatch::new();
         self.keystreams.clear();
         self.reuse_pairs.clear();
-        self.hyperframe = 0;
+        self.hyperframe = None;
         self.last_multiframe = None;
     }
 }
@@ -1232,10 +1245,13 @@ mod tests {
         let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
         node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
         node.last_aie = 3;
+        // Re-use is only judged once the hyperframe is known, as SYSINFO
+        // would set it; seed it directly here.
+        node.hyperframe = Some(110);
 
-        // Two calls at the same slot (hence same IV here, hyperframe 0),
+        // Two calls at the same slot (hence same IV, hyperframe 110),
         // addressed to different parties, both TEA2 under one keystream.
-        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 0, uplink: false };
+        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 110, uplink: false };
         let ks = keystream(&Key::Tea2([9u8; 10]), &ts, 10);
         let m1 = b"ABCDEFGHIJ";
         let m2 = b"0123456789";

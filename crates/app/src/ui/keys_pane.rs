@@ -36,7 +36,9 @@ impl Keys<'_> {
             ui.add_space(12.0);
             ui.label(legend("encryption keys"));
             let enc = live.iter().filter(|s| s.aie != 0).count();
-            ui.label(value(format!("{} channels, {enc} enciphered", live.len())).size(11.0));
+            let n = live.len();
+            let chan = if n == 1 { "channel" } else { "channels" };
+            ui.label(value(format!("{n} {chan}, {enc} enciphered")).size(11.0));
         });
         ui.add_space(6.0);
 
