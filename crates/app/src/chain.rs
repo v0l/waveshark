@@ -2386,6 +2386,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "aprs" => "APRS".into(),
         "pocsag" => "Pager".into(),
         "m17" => "M17".into(),
+        "dmr" => "DMR".into(),
         "bank" => bank_label(settings.f64_or("channel_hz", 0.0)),
         "source_detect" => "Sources".into(),
         "source_decode" => "Source decoders".into(),

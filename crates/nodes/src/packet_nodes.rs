@@ -131,6 +131,13 @@ impl PacketDecodeNode {
             self.hits.push(d.with_audio(p.audio.clone()));
             return;
         }
+        // DMR is the other shape-identified voice mode: like M17 it runs
+        // wherever it is put, so it is recognised by its own tagged body
+        // rather than by band. Its voice travels with the packet too.
+        if let Some(d) = crate::dmr_nodes::dmr_decoded(bytes, center) {
+            self.hits.push(d.with_audio(p.audio.clone()));
+            return;
+        }
         // A TETRA broadcast identifies itself twice over: it arrives from a
         // downlink band, and its bytes are a tagged PDU that had to pass the
         // standard's own CRC to exist at all.

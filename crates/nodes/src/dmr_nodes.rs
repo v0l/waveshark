@@ -19,8 +19,47 @@
 
 use common::Result;
 use dsp::{FirDecim, FmDemod, Mixer};
+use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+
+/// Tag byte identifying a packet body this node wrote, so the log labeler can
+/// tell a DMR voice-over row from any other `Frame` and refuse everything
+/// else. "DV" for DMR voice.
+const DMR_TAG: [u8; 2] = *b"DV";
+
+/// Serialise a finished voice over: the tag and the burst count, which is the
+/// only fact we have without the embedded Link Control decode. Each burst is
+/// one 60 ms slot of speech.
+fn encode_voice_over(bursts: u32) -> Vec<u8> {
+    let mut v = DMR_TAG.to_vec();
+    v.extend_from_slice(&bursts.to_be_bytes());
+    v
+}
+
+/// Recognise and describe a DMR voice-over row for the packet log. Returns
+/// `None` for anything this node did not write, so it is safe to try on every
+/// frame the way `m17_decoded` is.
+pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    if bytes.len() != 6 || bytes[..2] != DMR_TAG {
+        return None;
+    }
+    let bursts = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+    // One burst is one 60 ms slot on this logical channel.
+    let seconds = f64::from(bursts) * 0.06;
+    let fields = vec![
+        ("seconds".to_string(), Value::Float(seconds)),
+        ("bursts".to_string(), Value::Int(i64::from(bursts))),
+    ];
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    Some(
+        Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation("4FSK"),
+    )
+}
 
 /// A common DMR simplex frequency in Region 1, and only the default before the
 /// scanner table says where to listen.
@@ -360,6 +399,9 @@ pub struct DmrNode {
     voice: Vec<f32>,
     /// Whether a voice transmission is in progress.
     talking: bool,
+    /// Voice bursts in the transmission in progress, for its duration: each
+    /// burst is one 60 ms slot of speech.
+    voice_bursts: u32,
     /// Bursts since the last voice sync, to notice a transmission ending.
     idle_bursts: u32,
     accepted: u64,
@@ -392,6 +434,7 @@ impl DmrNode {
             voice_now: Vec::new(),
             voice: Vec::new(),
             talking: false,
+            voice_bursts: 0,
             idle_bursts: 0,
             accepted: 0,
             #[cfg(feature = "ambe")]
@@ -461,6 +504,18 @@ mod tests {
         let mut n = DmrNode::default();
         assert!(n.negotiate(&[spec(2_048_000.0, DEFAULT_HZ)]).is_ok());
         assert!(n.negotiate(&[spec(2_048_000.0, 460_000_000.0)]).is_err());
+    }
+
+    #[test]
+    fn labels_only_its_own_voice_over() {
+        let body = encode_voice_over(50);
+        let d = dmr_decoded(&body, common::Hz(433_450_000)).expect("a DMR row");
+        assert_eq!(d.protocol, "DMR-Voice");
+        // 50 bursts x 60 ms = 3.0 s.
+        assert!(d.detail.as_deref().unwrap_or_default().contains("seconds=3"), "{:?}", d.detail);
+        // Not anyone else's frame.
+        assert!(dmr_decoded(b"random", common::Hz(0)).is_none());
+        assert!(dmr_decoded(b"DV", common::Hz(0)).is_none());
     }
 
     /// End to end on a real off-air capture: run the node's own path (mix,
@@ -588,12 +643,14 @@ impl Node for DmrNode {
                 DmrEvent::VoiceStart => {
                     if !self.talking {
                         self.voice.clear();
+                        self.voice_bursts = 0;
                     }
                     self.talking = true;
                     self.idle_bursts = 0;
                 }
                 DmrEvent::Voice(frames) => {
                     self.decode_voice(&frames);
+                    self.voice_bursts += 1;
                     self.idle_bursts = 0;
                 }
                 DmrEvent::Data => {
@@ -625,7 +682,9 @@ impl Node for DmrNode {
                 .map(|d| d.as_micros() as u64)
                 .unwrap_or(0);
             let audio = self.take_voice();
+            let bursts = self.voice_bursts;
             self.talking = false;
+            self.voice_bursts = 0;
             self.idle_bursts = 0;
             self.accepted += 1;
             outputs[OUT_PACKETS].packets_mut().push(common::Packet {
@@ -635,7 +694,7 @@ impl Node for DmrNode {
                 rssi_dbfs: f32::NAN,
                 snr_db: f32::NAN,
                 modulation: Some("4FSK"),
-                body: common::PacketBody::Frame(b"DMR voice".to_vec()),
+                body: common::PacketBody::Frame(encode_voice_over(bursts)),
                 iq: None,
                 audio,
                 measure: None,
@@ -653,6 +712,7 @@ impl Node for DmrNode {
         self.voice.clear();
         self.voice_now.clear();
         self.talking = false;
+        self.voice_bursts = 0;
         self.idle_bursts = 0;
         #[cfg(feature = "ambe")]
         {
