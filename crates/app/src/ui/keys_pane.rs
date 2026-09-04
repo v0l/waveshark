@@ -75,76 +75,95 @@ impl Keys<'_> {
     /// its privacy key, held for the decoder that will read it.
     fn channel_keys(&mut self, ui: &mut egui::Ui) {
         use decode::channel_keys::{ChannelKey, System};
-        theme::Line::new().legend("channel keys").size(11.0).show(ui);
         let held: Vec<ChannelKey> = self.st.store.channels().to_vec();
-        if held.is_empty() {
-            theme::Line::new()
-                .value("none held: the default and public channels are always read")
-                .tint(theme::LEGEND)
-                .size(11.0)
-                .show(ui);
-        }
         let mut forget: Option<(System, String)> = None;
-        for c in &held {
-            ui.horizontal(|ui| {
+        // Amber rail: these are the operator's own settings, like a key
+        // typed for a cell.
+        widgets::card(
+            ui,
+            (!held.is_empty()).then_some(theme::READOUT),
+            |ui| {
                 theme::Line::new()
-                    .legend(c.system.as_str())
-                    .value(&c.name)
-                    .value(decode::channel_keys::hex(&c.key))
-                    .tint(theme::LEGEND)
-                    .size(11.0)
+                    .legend("channel keys")
+                    .value(format!("{} held", held.len()))
                     .show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("forget").clicked() {
-                        forget = Some((c.system, c.name.clone()));
+                    theme::Line::new()
+                        .value("default and public channels are always read")
+                        .tint(theme::LEGEND)
+                        .size(11.0)
+                        .show(ui);
+                });
+            },
+            |ui| {
+                for c in &held {
+                    ui.horizontal(|ui| {
+                        theme::Line::new()
+                            .legend(c.system.as_str())
+                            .value(&c.name)
+                            .size(11.0)
+                            .show(ui);
+                        theme::Line::new()
+                            .value(decode::channel_keys::hex(&c.key))
+                            .tint(theme::LEGEND)
+                            .size(11.0)
+                            .show(ui);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("forget").clicked() {
+                                forget = Some((c.system, c.name.clone()));
+                            }
+                        });
+                    });
+                }
+                if !held.is_empty() {
+                    ui.add_space(4.0);
+                }
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("new_channel_system")
+                        .selected_text(self.st.new_system.as_str())
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            for s in [System::Meshtastic, System::MeshCore, System::Dmr] {
+                                ui.selectable_value(&mut self.st.new_system, s, s.as_str());
+                            }
+                        });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.st.new_name)
+                            .hint_text(match self.st.new_system {
+                                System::Dmr => "talkgroup",
+                                _ => "channel name",
+                            })
+                            .desired_width(120.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.st.new_key)
+                            .hint_text("key: hex or base64")
+                            .desired_width(240.0)
+                            .font(egui::FontId::monospace(12.0)),
+                    );
+                    let key = decode::channel_keys::parse_key(&self.st.new_key);
+                    let ok = key.is_some() && !self.st.new_name.trim().is_empty();
+                    if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
+                        if let Some(key) = key {
+                            self.st.store.insert_channel(ChannelKey {
+                                system: self.st.new_system,
+                                name: self.st.new_name.trim().to_string(),
+                                key,
+                            });
+                            let _ = self.st.store.save();
+                            self.st.store.publish();
+                            self.st.new_name.clear();
+                            self.st.new_key.clear();
+                        }
                     }
                 });
-            });
-        }
+            },
+        );
         if let Some((system, name)) = forget {
             self.st.store.remove_channel(system, &name);
             let _ = self.st.store.save();
             self.st.store.publish();
         }
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("new_channel_system")
-                .selected_text(self.st.new_system.as_str())
-                .width(100.0)
-                .show_ui(ui, |ui| {
-                    for s in [System::Meshtastic, System::MeshCore, System::Dmr] {
-                        ui.selectable_value(&mut self.st.new_system, s, s.as_str());
-                    }
-                });
-            ui.add(
-                egui::TextEdit::singleline(&mut self.st.new_name)
-                    .hint_text(match self.st.new_system {
-                        System::Dmr => "talkgroup",
-                        _ => "channel name",
-                    })
-                    .desired_width(120.0),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut self.st.new_key)
-                    .hint_text("key: hex or base64")
-                    .desired_width(240.0)
-                    .font(egui::FontId::monospace(12.0)),
-            );
-            let key = decode::channel_keys::parse_key(&self.st.new_key);
-            let ok = key.is_some() && !self.st.new_name.trim().is_empty();
-            if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
-                if let Some(key) = key {
-                    self.st.store.insert_channel(ChannelKey {
-                        system: self.st.new_system,
-                        name: self.st.new_name.trim().to_string(),
-                        key,
-                    });
-                    let _ = self.st.store.save();
-                    self.st.store.publish();
-                    self.st.new_name.clear();
-                    self.st.new_key.clear();
-                }
-            }
-        });
     }
 
     /// One channel: what it is in the header, what is known about its keying
