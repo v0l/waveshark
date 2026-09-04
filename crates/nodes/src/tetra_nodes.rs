@@ -25,8 +25,8 @@ mod tetra_crypto;
 use tetra_crypto::Crypto;
 use dsp::tetra::speech;
 use dsp::tetra::{
-    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, NDB_BB1, NDB_BLK1, NDB_BLK2,
-    OCCUPIED_HZ,
+    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, BAUD, NDB_BB1, NDB_BLK1,
+    NDB_BLK2, OCCUPIED_HZ, SLOT_BITS, SLOT_SYMBOLS,
 };
 use dsp::{FirDecim, Mixer};
 use pipeline::event::Decoded;
@@ -134,6 +134,38 @@ struct Traffic {
     reported: bool,
 }
 
+/// Tag of a packet body this node writes for one traffic burst, distinct
+/// from the tags [`Event::to_bytes`] uses for signalling.
+///
+/// A call used to be one row saying traffic had started and one saying it
+/// had stopped, and the speech between them went to the bus and nowhere
+/// else. A packet per burst carries the 510 bits as sliced, the timeslot
+/// and marker the node read them under, its samples and its speech, so a
+/// logged call is decodable again by something written later.
+const TRAFFIC_BURST_TAG: u8 = 7;
+/// Body: tag, timeslot, marker, flags, frame, slot counter, the SSI the
+/// marker was given to or zero, 510 bits packed.
+const TRAFFIC_BURST_LEN: usize = 1 + 1 + 1 + 1 + 1 + 8 + 4 + SLOT_BITS.div_ceil(8);
+const TB_BITS_AT: usize = 17;
+const TB_FLAG_CRC_OK: u8 = 0x01;
+const TB_FLAG_ENCRYPTED: u8 = 0x02;
+/// Ring of channel samples behind the demodulator, in slots. A burst is
+/// reported once its whole slot is in the demodulator's buffer, which
+/// holds a slot of history, so a few slots is plenty.
+const RING_SLOTS: usize = 8;
+
+/// One traffic burst's speech, for its packet.
+struct VoiceBurst {
+    burst_index: usize,
+    tn: u8,
+    marker: u8,
+    /// Who the marker's traffic was granted to, when a call PDU said.
+    to: Option<u32>,
+    frame: u8,
+    crc_ok: bool,
+    pcm: Vec<f32>,
+}
+
 pub struct TetraNode {
     channel_hz: f64,
     mixer: Mixer,
@@ -142,6 +174,12 @@ pub struct TetraNode {
     rx: TetraRx,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
+    /// Channel samples at the demodulator's rate, kept behind it so a
+    /// burst's packet can carry the samples it was sliced from;
+    /// `ring_base` is the absolute index of `ring[0]`.
+    ring: Vec<common::C32>,
+    ring_base: u64,
+    demod_rate: f64,
     bursts: Vec<Burst>,
     blocks: Vec<Block>,
     /// The last identity and broadcast reported, so a repeat is not a row.
@@ -201,6 +239,9 @@ impl TetraNode {
             rx: TetraRx::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
+            ring: Vec::new(),
+            ring_base: 0,
+            demod_rate: DEMOD_HZ,
             bursts: Vec::new(),
             blocks: Vec::new(),
             last_sync: None,
@@ -391,7 +432,24 @@ impl TetraNode {
     /// has marked as traffic; its 432 channel bits are the same two half
     /// blocks the SCH/F occupies. Enciphered slots are decrypted first when a
     /// key for the cell's colour is known.
-    fn decode_voice(&mut self, bursts: &[Burst]) -> Vec<common::Voice> {
+    /// The channel samples a burst was sliced from. The root-raised-cosine
+    /// filter ahead of the slicer delays it by a few samples, which is
+    /// inside the burst's own guard.
+    fn burst_iq(&self, b: &Burst) -> Option<std::sync::Arc<common::IqBurst>> {
+        let len = (SLOT_SYMBOLS as f64 * self.demod_rate / BAUD) as usize;
+        let start = b.start_sample;
+        if start < self.ring_base || start + len as u64 > self.ring_base + self.ring.len() as u64 {
+            return None;
+        }
+        let s = (start - self.ring_base) as usize;
+        Some(std::sync::Arc::new(common::IqBurst {
+            rate: self.demod_rate,
+            center_hz: self.channel_hz as u64,
+            samples: self.ring[s..s + len].to_vec(),
+        }))
+    }
+
+    fn decode_voice(&mut self, bursts: &[Burst], per_burst: &mut Vec<VoiceBurst>) -> Vec<common::Voice> {
         let Some(cell) = self.rx.cell else { return Vec::new() };
         // An enciphered call with no key is silence, not noise: the STEC
         // frames are ciphertext, and feeding those to the vocoder would
@@ -404,15 +462,15 @@ impl TetraNode {
         let mut pcm: HashMap<u8, Vec<f32>> = HashMap::new();
         let mut seen_tn: Vec<u8> = Vec::new();
 
-        for b in bursts {
+        for (burst_index, b) in bursts.iter().enumerate() {
             if b.kind != BurstKind::Normal1 {
                 continue;
             }
             let Some(time) = self.rx.time_at(b.slot) else { continue };
             let tn = time.tn;
-            if !self.traffic.contains_key(&tn) {
+            let Some(marker) = self.traffic.get(&tn).map(|t| t.marker) else {
                 continue;
-            }
+            };
             let mut chan = [0u8; speech::CHAN_BITS];
             chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
             chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
@@ -425,10 +483,21 @@ impl TetraNode {
 
             let dec = self.voice_calls.entry(tn).or_insert_with(CallDecoder::new);
             let buf = pcm.entry(tn).or_default();
+            let mut mine = Vec::new();
             for frame in &frames {
                 let samples = dec.frame(frame, !crc_ok);
-                buf.extend(samples.iter().map(|&s| s as f32 / 32768.0));
+                mine.extend(samples.iter().map(|&s| s as f32 / 32768.0));
             }
+            buf.extend_from_slice(&mine);
+            per_burst.push(VoiceBurst {
+                burst_index,
+                tn,
+                marker,
+                to: self.markers.get(&marker).copied(),
+                frame: time.frame,
+                crc_ok,
+                pcm: mine,
+            });
             if !seen_tn.contains(&tn) {
                 seen_tn.push(tn);
             }
@@ -492,6 +561,9 @@ impl Node for TetraNode {
         }
         let factor = (rate / DEMOD_HZ).round().max(1.0) as usize;
         let demod_rate = rate / factor as f64;
+        self.demod_rate = demod_rate;
+        self.ring.clear();
+        self.ring_base = 0;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, OCCUPIED_HZ / 2.0, 60.0);
         self.demod = TetraDemod::new(demod_rate, TetraConfig::default());
@@ -518,6 +590,13 @@ impl Node for TetraNode {
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
         self.decim.process(&self.mixed, &mut self.narrow);
+        self.ring.extend_from_slice(&self.narrow);
+        let keep = (RING_SLOTS as f64 * SLOT_SYMBOLS as f64 * self.demod_rate / BAUD) as usize;
+        if self.ring.len() > keep * 2 {
+            let drop = self.ring.len() - keep;
+            self.ring.drain(..drop);
+            self.ring_base += drop as u64;
+        }
 
         self.bursts.clear();
         let narrow = std::mem::take(&mut self.narrow);
@@ -650,9 +729,28 @@ impl Node for TetraNode {
                 measure: None,
             });
         }
-        // Speech the traffic slots carried this block, one Voice per call.
+        // Speech the traffic slots carried this block, one Voice per call
+        // for the bus and one packet per burst for the log.
         let bursts = std::mem::take(&mut self.bursts);
-        let voices = self.decode_voice(&bursts);
+        let mut per_burst = Vec::new();
+        let voices = self.decode_voice(&bursts, &mut per_burst);
+        for vb in per_burst {
+            let b = &bursts[vb.burst_index];
+            self.accepted += 1;
+            out.push(common::Packet {
+                at_us,
+                center_hz: self.channel_hz as u64,
+                bandwidth_hz: CHANNEL_WIDTH_HZ as u32,
+                rssi_dbfs: f32::NAN,
+                snr_db: f32::NAN,
+                modulation: Some("pi/4-DQPSK"),
+                body: common::PacketBody::Frame(encode_traffic_burst(&vb, b, self.last_aie != 0)),
+                iq: self.burst_iq(b),
+                audio: (!vb.pcm.is_empty())
+                    .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ })),
+                measure: None,
+            });
+        }
         self.bursts = bursts;
         let vout = outputs[OUT_VOICE].voice_mut();
         vout.extend(voices);
@@ -665,6 +763,8 @@ impl Node for TetraNode {
         self.mixer.reset();
         self.decim.reset();
         self.demod.reset();
+        self.ring.clear();
+        self.ring_base = 0;
         self.rx = TetraRx::new();
         self.last_sync = None;
         self.last_sysinfo = None;
@@ -679,9 +779,91 @@ impl Node for TetraNode {
     }
 }
 
+fn encode_traffic_burst(vb: &VoiceBurst, b: &Burst, encrypted: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(TRAFFIC_BURST_LEN);
+    v.push(TRAFFIC_BURST_TAG);
+    v.push(vb.tn);
+    v.push(vb.marker);
+    let mut flags = 0;
+    if vb.crc_ok {
+        flags |= TB_FLAG_CRC_OK;
+    }
+    if encrypted {
+        flags |= TB_FLAG_ENCRYPTED;
+    }
+    v.push(flags);
+    v.push(vb.frame);
+    v.extend_from_slice(&b.slot.to_be_bytes());
+    v.extend_from_slice(&vb.to.unwrap_or(0).to_be_bytes());
+    v.extend(b.bits.chunks(8).map(|c| c.iter().fold(0u8, |acc, &bit| (acc << 1) | (bit & 1))));
+    v
+}
+
+/// The 510 bits of a logged traffic burst, for anything reading it again.
+pub fn traffic_burst_bits(bytes: &[u8]) -> Option<[u8; SLOT_BITS]> {
+    if bytes.len() != TRAFFIC_BURST_LEN || bytes[0] != TRAFFIC_BURST_TAG {
+        return None;
+    }
+    let mut bits = [0u8; SLOT_BITS];
+    for (i, bit) in bits.iter_mut().enumerate() {
+        *bit = (bytes[TB_BITS_AT + i / 8] >> (7 - i % 8)) & 1;
+    }
+    Some(bits)
+}
+
+/// The row a traffic burst becomes.
+fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    if bytes.len() != TRAFFIC_BURST_LEN || bytes[0] != TRAFFIC_BURST_TAG {
+        return None;
+    }
+    let (tn, marker, flags, frame) = (bytes[1], bytes[2], bytes[3], bytes[4]);
+    let slot = u64::from_be_bytes(bytes[5..13].try_into().ok()?);
+    let to = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
+    let crc_ok = flags & TB_FLAG_CRC_OK != 0;
+    let mut fields: Vec<(String, Value)> = vec![
+        ("voice".into(), Value::Bool(true)),
+        ("live".into(), Value::Bool(true)),
+        ("to".into(), Value::Text(if to != 0 { to.to_string() } else { format!("marker {marker}") })),
+        ("timeslot".into(), Value::Int(tn.into())),
+        ("marker".into(), Value::Int(marker.into())),
+        ("frame".into(), Value::Int(frame.into())),
+        ("slot".into(), Value::Int(slot as i64)),
+        ("crc".into(), Value::Bool(crc_ok)),
+    ];
+    // No airtime here: the traffic end row carries the whole call's, and a
+    // list that added both would count it twice.
+    if flags & TB_FLAG_ENCRYPTED != 0 {
+        fields.push(("encrypted".into(), Value::Bool(true)));
+    }
+    Some(Decoded {
+        protocol: "TETRA-Voice",
+        media_type: "application/octet-stream",
+        center,
+        at: 0.0,
+        payload: bytes.to_vec(),
+        text: None,
+        crc_ok: Some(crc_ok),
+        modulation: Some("pi/4-DQPSK"),
+        bandwidth_hz: Some(CHANNEL_WIDTH_HZ),
+        detail: Some(format!(
+            "traffic burst TS{tn} marker {marker}{}",
+            if flags & TB_FLAG_ENCRYPTED != 0 { ", enciphered" } else { "" }
+        )),
+        fields,
+        rssi_dbfs: None,
+        snr_db: None,
+        iq: None,
+        audio: None,
+    })
+}
+
 /// The row a TETRA broadcast becomes.
 pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
+    if let Some(d) = traffic_burst_decoded(bytes, center) {
+        return Some(d);
+    }
     let event = Event::parse(bytes)?;
     let mut fields: Vec<(String, Value)> = Vec::new();
     let protocol = match &event {
@@ -970,8 +1152,16 @@ mod tests {
             let [out, _voice] = outs;
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(b) = p.body {
-                        rows.push(tetra_decoded(&b, Hz(hz as u64)).unwrap());
+                    if let common::PacketBody::Frame(b) = &p.body {
+                        let d = tetra_decoded(b, Hz(hz as u64)).unwrap();
+                        if d.protocol == "TETRA-Voice" {
+                            // Every burst carries the samples it was sliced
+                            // from, a slot's worth at the demodulator's rate.
+                            let q = p.iq.as_ref().expect("a traffic burst without its samples");
+                            assert_eq!(q.samples.len(), (255.0 * q.rate / 18_000.0) as usize);
+                            assert!(traffic_burst_bits(b).is_some());
+                        }
+                        rows.push(d);
                     }
                 }
             }
@@ -979,6 +1169,12 @@ mod tests {
         let get = |d: &Decoded, k: &str| {
             d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
         };
+        // One packet per traffic burst on the slot, between the markers:
+        // thirty frames carried the marker, and the first is what opens it.
+        let bursts: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
+        // Fewer than thirty: the demodulator locks a few frames in.
+        assert!((20..=30).contains(&bursts.len()), "{} traffic bursts", bursts.len());
+        assert!(bursts.iter().all(|b| get(b, "timeslot").as_deref() == Some("2") && get(b, "marker").as_deref() == Some("23")));
         let traffic: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
         let names: Vec<String> = traffic.iter().filter_map(|r| get(r, "pdu")).collect();
         assert_eq!(names, ["TRAFFIC", "TRAFFIC END"], "{rows:?}");
