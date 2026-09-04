@@ -148,6 +148,8 @@ center_hz = 869_000_000
 rate_sps = 2_400_000
 format = "cu8"
 family = "chirp"
+# Only the packet is scored as a chirp; the wM-Bus burst beside it is 15 ms.
+burst_us = [300000, 700000]
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
 The same node sending the text "Hi" to the mesh, tuned 525 kHz below the
