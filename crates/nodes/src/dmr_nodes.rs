@@ -112,11 +112,7 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             fields.push(("emergency".to_string(), Value::Bool(true)));
         }
     }
-    let detail = fields
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     Some(
         Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
             .with_detail(detail)
@@ -233,15 +229,7 @@ struct SymbolSync {
 impl SymbolSync {
     fn new(rate: f64) -> Self {
         let sps = rate / BAUD;
-        Self {
-            sps,
-            period: sps,
-            pos: sps,
-            prev: 0.0,
-            buf: Vec::new(),
-            power: 1e-6,
-            loop_gain: 0.003,
-        }
+        Self { sps, period: sps, pos: sps, prev: 0.0, buf: Vec::new(), power: 1e-6, loop_gain: 0.003 }
     }
 
     fn reset(&mut self) {
@@ -510,11 +498,7 @@ impl Framer {
                 }
                 _ => None,
             };
-            return Some(Burst::Data {
-                colour: Some(cc),
-                data_type: Some(dt),
-                lc,
-            });
+            return Some(Burst::Data { colour: Some(cc), data_type: Some(dt), lc });
         }
         if hunting {
             return None;
@@ -647,10 +631,8 @@ impl Framer {
             }
         }
         // Drain marks behind whatever is still to be read.
-        let keep = self
-            .next
-            .map_or(self.scan, |n| n.saturating_sub(REANCHOR))
-            .min(self.scan.max(self.base));
+        let keep =
+            self.next.map_or(self.scan, |n| n.saturating_sub(REANCHOR)).min(self.scan.max(self.base));
         if keep > self.base {
             let drop = (keep - self.base).min(self.marks.len());
             self.marks.drain(..drop);
@@ -662,12 +644,7 @@ impl Framer {
     /// embedded link control as the fragments arrive.
     fn emit(&mut self, burst: Burst, out: &mut Vec<DmrEvent>) {
         match burst {
-            Burst::Voice {
-                frames,
-                start,
-                lcss,
-                embedded,
-            } => {
+            Burst::Voice { frames, start, lcss, embedded } => {
                 if start {
                     self.since_sync = 0;
                     self.embedded.reset();
@@ -679,11 +656,7 @@ impl Framer {
                 }
                 out.push(DmrEvent::Voice { frames, start });
             }
-            Burst::Data {
-                colour,
-                data_type,
-                lc,
-            } => {
+            Burst::Data { colour, data_type, lc } => {
                 self.since_sync = usize::MAX;
                 if let Some(cc) = colour {
                     self.colour = Some(cc);
@@ -699,17 +672,8 @@ impl Framer {
 
 /// What one burst turned out to be, before the framer folds it into events.
 enum Burst {
-    Voice {
-        frames: [[u8; 9]; 3],
-        start: bool,
-        lcss: u8,
-        embedded: Vec<u8>,
-    },
-    Data {
-        colour: Option<u8>,
-        data_type: Option<u8>,
-        lc: Option<LinkControl>,
-    },
+    Voice { frames: [[u8; 9]; 3], start: bool, lcss: u8, embedded: Vec<u8> },
+    Data { colour: Option<u8>, data_type: Option<u8>, lc: Option<LinkControl> },
 }
 
 pub struct DmrNode {
@@ -810,11 +774,7 @@ impl DmrNode {
         let cap = (MAX_VOICE_SECONDS * VOICE_HZ) as usize;
         for f in frames {
             let e = mbe::ambe::AmbeFrame::new(f).errors();
-            let audio = if e[0] + e[1] <= 4 {
-                self.synth.decode(f)
-            } else {
-                [0.0f32; 160]
-            };
+            let audio = if e[0] + e[1] <= 4 { self.synth.decode(f) } else { [0.0f32; 160] };
             for s in audio {
                 self.voice_now.push(s);
                 if self.voice.len() < cap {
@@ -832,10 +792,7 @@ impl DmrNode {
             return None;
         }
         let pcm = std::mem::take(&mut self.voice);
-        Some(std::sync::Arc::new(common::Speech {
-            pcm,
-            rate: VOICE_HZ,
-        }))
+        Some(std::sync::Arc::new(common::Speech { pcm, rate: VOICE_HZ }))
     }
 }
 
@@ -847,10 +804,7 @@ mod tests {
     use pipeline::port::StreamSpec;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     #[test]
@@ -866,34 +820,16 @@ mod tests {
         let d = dmr_decoded(&body, common::Hz(433_450_000)).expect("a DMR row");
         assert_eq!(d.protocol, "DMR-Voice");
         // 50 bursts x 60 ms = 3.0 s.
-        assert!(
-            d.detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("seconds=3"),
-            "{:?}",
-            d.detail
-        );
+        assert!(d.detail.as_deref().unwrap_or_default().contains("seconds=3"), "{:?}", d.detail);
         // Without a link control there is nobody to put in the call list.
         assert!(!d.fields.iter().any(|(k, _)| k == "to"));
 
         // With one, the row names the talkgroup and the radio, and says it
         // is voice, which is what the call table needs to keep it.
-        let lc = LinkControl {
-            flco: dmr::FLCO_GROUP,
-            fid: 0,
-            options: 0,
-            dst: 91,
-            src: 2_345_678,
-        };
-        let d =
-            dmr_decoded(&encode_voice_over(6, Some(lc)), common::Hz(433_450_000)).expect("a row");
+        let lc = LinkControl { flco: dmr::FLCO_GROUP, fid: 0, options: 0, dst: 91, src: 2_345_678 };
+        let d = dmr_decoded(&encode_voice_over(6, Some(lc)), common::Hz(433_450_000)).expect("a row");
         let get = |k: &str| {
-            d.fields
-                .iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.to_string())
-                .unwrap_or_default()
+            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
         };
         assert_eq!(get("to"), "91");
         assert_eq!(get("from"), "2345678");
@@ -931,85 +867,42 @@ mod tests {
         (live, packets)
     }
 
-    /// A real off-air transmission has to come out as one row naming who was
-    /// talking, not as several anonymous ones. Skips cleanly without the file.
+    /// The corpus capture against what the transmission says about itself:
+    /// one over, talkgroup 9, radio 1234567, three and a half seconds of it.
+    /// `testdata/fixtures.toml` says what the capture is evidence of and how
+    /// those values were established. Skips cleanly without the file.
     #[test]
-    #[ignore]
-    fn reads_link_control_from_a_real_capture() {
-        let path = format!("{}/dmr_dev/dmr_good1.cu8", std::env::var("HOME").unwrap());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("no capture at {path}; skipping");
+    fn reads_one_over_and_its_link_control_off_air() {
+        const NAME: &str = "dmr_tg9_433.45M_2048k.cu8";
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {NAME} absent, run testdata/fetch.sh");
             return;
         }
-        let (_, packets) = replay(&path, 2_048_000.0, 434_000_000.0, 434_000_000.0 + 448_200.0);
-        for p in &packets {
-            let common::PacketBody::Frame(b) = &p.body else {
-                continue;
-            };
-            let d = dmr_decoded(b, common::Hz(p.center_hz)).expect("a DMR row");
-            eprintln!("{}", d.detail.unwrap_or_default());
-        }
+        let (live, packets) = replay(path, 2_048_000.0, 433_450_000.0, 433_900_000.0);
+        // One keying of the microphone is one row, not one per stretch the
+        // framer kept hold of.
         assert_eq!(packets.len(), 1, "one transmission should be one row");
-        let common::PacketBody::Frame(b) = &packets[0].body else {
-            panic!("a frame")
+        let common::PacketBody::Frame(b) = &packets[0].body else { panic!("a frame") };
+        let d = dmr_decoded(b, common::Hz(packets[0].center_hz)).expect("a DMR row");
+        let get = |k: &str| {
+            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
         };
-        let d = dmr_decoded(b, common::Hz(0)).expect("a DMR row");
-        assert!(
-            d.fields.iter().any(|(k, _)| k == "to"),
-            "no link control was read"
-        );
-    }
+        assert_eq!(get("to"), "9");
+        assert_eq!(get("from"), "1234567");
+        assert_eq!(get("call_type"), "group");
+        // Without this the row stays in the packet log and never reaches the
+        // call list, which is half of what the capture is here to catch.
+        assert_eq!(get("voice"), "true");
+        let seconds: f64 = get("seconds").parse().unwrap_or_default();
+        assert!(seconds > 3.0, "the over ran {seconds:.2} s, expected the whole 3.6");
 
-    /// End to end on a real off-air capture: run the node's own path (mix,
-    /// discriminate, Gardner timing, sync, AMBE) and require it to produce
-    /// speech. Only asserts audio with the `ambe` feature, since the vocoder
-    /// is what turns the frames into samples. Skips cleanly without the file.
-    #[cfg(feature = "ambe")]
-    #[test]
-    #[ignore]
-    fn decodes_a_real_dmr_capture() {
-        let path = format!("{}/dmr_dev/dmr_good1.cu8", std::env::var("HOME").unwrap());
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("no capture at {path}; skipping");
-            return;
+        // The vocoder is what turns the AMBE frames into samples, so speech
+        // is only asserted where it is built in. Ten superframes of it.
+        if cfg!(feature = "ambe") {
+            let secs = live as f64 / VOICE_HZ;
+            assert!(secs > 3.0, "decoded {secs:.2} s of speech, expected the whole over");
         }
-        let raw = std::fs::read(&path).unwrap();
-        let rate = 2_048_000.0;
-        // The capture is at 433.45 center but the signal sits ~449 kHz up in
-        // the file recorded at 434.0; tune the node's channel to where it is.
-        let center = 434_000_000.0;
-        let hz = 434_000_000.0 + 448_200.0;
-        let iq: Vec<common::C32> = raw
-            .chunks_exact(2)
-            .map(|c| common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
-            .collect();
-
-        let mut node = DmrNode::new(hz);
-        node.negotiate(&[spec(rate, center)]).unwrap();
-        let ins = [spec(rate, center)];
-        let tags = Vec::new();
-        let mut live = 0usize;
-        for chunk in iq.chunks(65_536) {
-            let input = Payload::Iq(chunk.to_vec());
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
-            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&[&input], &mut out, &mut ctx).unwrap();
-            if let [_, Payload::Voice(vs)] = &out {
-                live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
-            }
-        }
-        eprintln!(
-            "decoded {live} voice samples ({:.2}s)",
-            live as f32 / VOICE_HZ as f32
-        );
-        // This capture holds two voice superframes (the operator spoke
-        // briefly): 2 x 6 bursts x 3 frames x 160 samples = 5760. Require a
-        // healthy fraction so a regression that loses framing is caught.
-        assert!(
-            live >= 4000,
-            "expected the voice superframes to decode, got {live} samples"
-        );
     }
 }
 
@@ -1045,9 +938,7 @@ impl Node for DmrNode {
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other(
-                "dmr needs its channel inside the span",
-            ));
+            return Err(common::Error::other("dmr needs its channel inside the span"));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         let audio_rate = rate / factor as f64;
