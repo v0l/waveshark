@@ -302,24 +302,43 @@ impl Simple for LoraNode {
                     self.locked_sf = Some(packet.sf);
                     self.decoded += 1;
                     let bw = self.bandwidth();
+                    // The packet's own samples, at two a chip, and the level
+                    // they stood at against the channel just before the
+                    // preamble. A dechirp's peak over its transform is a
+                    // processing gain, not a channel SNR, so the level is
+                    // measured on the samples themselves.
+                    let end = packet.end.min(self.held.len());
+                    let samples = self.held[packet.start..end].to_vec();
+                    let power = |s: &[C32]| {
+                        s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len().max(1) as f32
+                    };
+                    let sig = power(&samples);
+                    let sym = self.demods[0].symbol_len();
+                    let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
+                    let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
+                        let noise = power(before).max(1e-20);
+                        (10.0 * sig.log10(), 10.0 * ((sig - noise).max(noise * 0.01) / noise).log10())
+                    } else {
+                        (10.0 * sig.max(1e-20).log10(), f32::NAN)
+                    };
+                    let rate = bw * OVERSAMPLE as f64;
                     o.packets_mut().push(common::Packet {
                         at_us: now_us(),
                         center_hz: self.center_hz as u64,
                         bandwidth_hz: bw as u32,
-                        // A dechirp measures how far its peak stood over the
-                        // rest of the transform, which is a processing gain
-                        // rather than a channel SNR. The source this came
-                        // from was measured, and that is the level the row
-                        // gets; inventing one here would be worse.
-                        rssi_dbfs: f32::NAN,
-                        snr_db: f32::NAN,
+                        rssi_dbfs,
+                        snr_db,
                         modulation: Some("CSS"),
                         body: common::PacketBody::Frame(frame.to_bytes(
                             packet.sf,
                             bw,
                             packet.sync_word,
                         )),
-                        iq: None,
+                        iq: Some(std::sync::Arc::new(common::IqBurst {
+                            rate,
+                            center_hz: self.center_hz as u64,
+                            samples,
+                        })),
                         audio: None,
                         measure: None,
                     });

@@ -31,15 +31,27 @@ fn main() {
             packets += 1;
             if let common::PacketBody::Frame(b) = &p.body {
                 if let Some(d) = nodes::lora_nodes::lora_decoded(&b[..], common::Hz(p.center_hz)) {
-                    eprintln!("LORA at {:.2}s: {:?}", i as f64 * block as f64 / rate, d);
+                    eprintln!(
+                        "LORA at {:.2}s: rssi {:.1} snr {:.1} iq {} @ {}: {:?}",
+                        i as f64 * block as f64 / rate,
+                        p.rssi_dbfs,
+                        p.snr_db,
+                        p.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
+                        p.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
+                        d
+                    );
                 } else if std::env::var_os("FRAMES").is_some() {
                     eprintln!(
-                        "FRAME at {:.2}s: {:.4} MHz {} B mod {:?} audio {}",
+                        "FRAME at {:.2}s: {:.4} MHz {} B mod {:?} audio {} iq {} @ {:.0} rssi {:.1} snr {:.1}",
                         i as f64 * block as f64 / rate,
                         p.center_hz as f64 / 1e6,
                         b.len(),
                         p.modulation,
-                        p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0)
+                        p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0),
+                        p.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
+                        p.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
+                        p.rssi_dbfs,
+                        p.snr_db
                     );
                 }
             }

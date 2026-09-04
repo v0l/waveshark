@@ -114,7 +114,21 @@ struct Member {
     /// Silence to feed after the source closes, in seconds: the most any
     /// node in the graph asked for.
     flush_s: f64,
+    /// The source's samples since the last packet left, up to
+    /// [`RING_MAX_S`], so a packet from a front end that did not cut its
+    /// own samples out still leaves with the stream it was read from. A
+    /// packet in the log without its samples cannot be decoded again by
+    /// anything written later, and a row that says only what one decoder
+    /// made of a burst is an event, not a packet.
+    ring: Vec<C32>,
+    /// Quietest block power seen, rising slowly, so a source whose level the
+    /// detector did not measure (a channel kept open for the session) still
+    /// reports a signal to noise ratio on its packets.
+    noise_pow: f32,
 }
+
+/// Longest run of samples kept behind a packet, in seconds.
+const RING_MAX_S: f64 = 2.0;
 
 impl Member {
     fn build(name: &'static str, spec: StreamSpec, settings: NodeSpec, reg: &Registry) -> Result<Self> {
@@ -141,15 +155,53 @@ impl Member {
             last_report_s: None,
             channel_hz: 0.0,
             flush_s,
+            ring: Vec::new(),
+            noise_pow: f32::NAN,
         })
     }
 
     /// Run one block through and collect what came out as packets.
     fn run(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
+        let rate = self.graph.input_spec().rate;
         if !iq.is_empty() {
             let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
             self.peak_pow = self.peak_pow.max(pow);
+            // The floor follows the quietest block and climbs a hundredth
+            // a block, so a burst does not become the floor and a real
+            // rise in the noise is learned within a second or so.
+            self.noise_pow = if self.noise_pow.is_nan() { pow } else { pow.min(self.noise_pow * 1.01) };
+            self.ring.extend_from_slice(iq);
+            let cap = (RING_MAX_S * rate) as usize;
+            if self.ring.len() > cap {
+                let drop = self.ring.len() - cap;
+                self.ring.drain(..drop);
+            }
         }
+        let first = out.len();
+        let events = self.run_graph(iq, at_us, out);
+        // What the front end did not cut out for itself is given the stream
+        // since the last packet, and the level it stood at.
+        let mut attached = false;
+        for p in &mut out[first..] {
+            if p.iq.is_none() && !self.ring.is_empty() {
+                p.iq = Some(std::sync::Arc::new(common::IqBurst {
+                    rate,
+                    center_hz: self.graph.input_spec().center.0,
+                    samples: self.ring.clone(),
+                }));
+                attached = true;
+            }
+            if p.snr_db.is_nan() && self.noise_pow > 0.0 {
+                p.snr_db = 10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10();
+            }
+        }
+        if attached {
+            self.ring.clear();
+        }
+        events
+    }
+
+    fn run_graph(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
         let buf = self.graph.input_buf();
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
@@ -941,6 +993,17 @@ impl Node for AutoNode {
             let Some(st) = self.sticky.iter().find(|s| s.id == id) else { continue };
             let off = st.center_hz - c0;
             if off.abs() + st.width_hz / 2.0 > half {
+                continue;
+            }
+            // Not while the source that earned it is still open: two
+            // decoders on one channel are every burst twice in the log, and
+            // the new one would start mid-transmission without the header
+            // the old one read. It takes over once that source closes.
+            let busy = self.slots.iter().any(|sl| {
+                sl.id.0 < STICKY_ID_BASE && (sl.center_hz as f64 - st.center_hz).abs() <= st.width_hz / 2.0
+            });
+            if busy {
+                self.pending_sticky.push(id);
                 continue;
             }
             self.events.push(SourceEvent::Opened(dsp::Source {
