@@ -21,7 +21,7 @@ that turns radio into symbols, and there are only a few of those.
 | discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
 | discriminator plus sync correlation, `m17` | M17 frames | yes | no |
 | coherent PSK/GMSK with timing recovery | soft symbols | no | no |
-| chirp correlator (dechirp then FFT) | LoRa symbols | no | no |
+| chirp correlator (dechirp then FFT), `lora` | LoRa symbols | yes | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
 
@@ -214,9 +214,9 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | demod | mod | Dechirp with a conjugate chirp then FFT. Self-contained, well documented, highest value item on the demod list |
-| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | demod | mod | Payloads are AES encrypted; the metadata is still worth logging |
-| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | demod | mod | LoRa plus a known framing |
+| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` places it on any source the width of a LoRa channel and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against two off-air Meshtastic transmissions at SF11 over 250 kHz, from different nodes 128 seconds apart, both giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
+| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | framing | mod | The PHY is read; what is missing is the MAC layout on top of it. Payloads are AES encrypted, the metadata is still worth logging |
+| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | done | mod | The 0x2B sync word names it and the sixteen byte packet header is read: who transmitted, who for, the packet id, and how many hops it has left of how many it started with. The payload behind that is AES encrypted with the channel key, so it is reported as bytes |
 | Sigfox uplink | 868.13 MHz | DBPSK 100 bps (600 US) | 100 Hz | demod | mod | Ultra narrowband, coherent detection, very narrow channel |
 | Sigfox downlink | 869.525 MHz | GFSK 600 bps | 31 kHz | framing | mod | |
 
@@ -367,8 +367,9 @@ Cheapest first, by value per unit of work:
    block CRC work carries over to Z-Wave and Homematic.
 7. **The transmit path, ending in Morse.** Device, encoder, modulator,
    scheduler, proven end to end on the simplest possible protocol.
-8. **LoRa.** The first new demodulator, self-contained, and it brings
-   Meshtastic and LoRaWAN metadata with it.
+8. **LoRaWAN.** The MAC layer on top of the LoRa PHY that is now read:
+   join requests, device addresses and frame counters, all of which are in
+   the clear even though the payload is not.
 9. **ADS-B.** Needs its own wideband chain rather than a bank channel, so it
    is a structural change: a scanner tier at 2 MS/s.
 

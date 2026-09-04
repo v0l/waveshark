@@ -20,6 +20,7 @@ pub mod fir;
 pub mod fourlevel;
 pub mod fsk;
 pub mod hdlc;
+pub mod lora;
 pub mod m17;
 pub mod mixer;
 pub mod modes;

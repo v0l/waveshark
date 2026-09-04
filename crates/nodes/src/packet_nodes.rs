@@ -131,11 +131,20 @@ impl PacketDecodeNode {
             self.hits.push(d.with_audio(p.audio.clone()));
             return;
         }
-        // DMR is the other shape-identified voice mode: like M17 it runs
-        // wherever it is put, so it is recognised by its own tagged body
-        // rather than by band. Its voice travels with the packet too.
+        // DMR is another shape-identified mode: like M17 it runs wherever it
+        // is put, so it is recognised by its own tagged body rather than by
+        // band. Its voice travels with the packet too.
         if let Some(d) = crate::dmr_nodes::dmr_decoded(bytes, center) {
             self.hits.push(d.with_audio(p.audio.clone()));
+            return;
+        }
+        // LoRa is the other one its frequency cannot identify: the same
+        // chirp is legal at 433, 868 and 915 MHz and none of those bands is
+        // only LoRa. The front end tags what it read with the parameters it
+        // read it at, so the claim here is a tag plus a spreading factor, a
+        // bandwidth and a coding rate that all have to be ones LoRa defines.
+        if let Some(d) = crate::lora_nodes::lora_decoded(bytes, center) {
+            self.hits.push(d);
             return;
         }
         // A TETRA broadcast identifies itself twice over: it arrives from a

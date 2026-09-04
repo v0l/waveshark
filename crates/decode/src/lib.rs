@@ -26,6 +26,7 @@ pub mod m17;
 pub mod gpu;
 #[cfg(feature = "tea")]
 pub mod keystream;
+pub mod lora;
 #[cfg(feature = "tea")]
 pub mod recover;
 #[cfg(feature = "tea")]
