@@ -677,7 +677,23 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         edits: Default::default(),
         record,
         capture_dir: crate::chain::default_capture_dir(),
+        capture_format: common::SampleFormat::Cu8,
         log: false,
+    }
+}
+
+/// The file format a device's samples are captured in.
+///
+/// Its own depth where that is a file format, and sixteen bit signed where
+/// the driver hands over floats: the converters behind those are twelve to
+/// fourteen bits, so sixteen loses nothing and floats would double the file
+/// to carry zeros.
+fn capture_format_for(native: common::SampleFormat) -> common::SampleFormat {
+    use common::SampleFormat::*;
+    match native {
+        Cu8 => Cu8,
+        Cs8 => Cs8,
+        Cs16 | Cf32 => Cs16,
     }
 }
 
@@ -1347,6 +1363,7 @@ impl Audio {
             edits: Default::default(),
             record: false,
             capture_dir: crate::chain::default_capture_dir(),
+            capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
         };
@@ -1449,6 +1466,7 @@ fn run(
         edits: Default::default(),
         record: false,
         capture_dir: crate::chain::default_capture_dir(),
+        capture_format: capture_format_for(dev.info().native_format),
         // Switched on as soon as the interface says where to write; the
         // default is on, and the command arrives with the first frame.
         log: false,
@@ -2128,6 +2146,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         edits: Default::default(),
         record: false,
         capture_dir: crate::chain::default_capture_dir(),
+        capture_format: common::SampleFormat::Cu8,
         log: false,
         feeds: Vec::new(),
     }

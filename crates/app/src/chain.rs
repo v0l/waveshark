@@ -281,6 +281,10 @@ pub struct Plan {
     /// Where a raw span capture is written when one is switched on. The
     /// stage is always in the graph, so this is always needed.
     pub capture_dir: PathBuf,
+    /// The sample format a capture is written in: the device's own depth.
+    /// A twelve bit converter written as bytes throws away its bottom
+    /// four bits, and on a quiet band those were the whole signal.
+    pub capture_format: common::SampleFormat,
     /// Log every burst the front ends detect.
     pub log: bool,
     /// Other receivers feeding the same packet bus.
@@ -1831,6 +1835,10 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             pipeline::ParamValue::Text(plan.capture_dir.display().to_string()),
         );
         s.insert("enabled".into(), pipeline::ParamValue::Bool(false));
+        s.insert(
+            "format".into(),
+            pipeline::ParamValue::Text(plan.capture_format.extension().into()),
+        );
         p.add_derived(derived::CAPTURE, "iq_capture", s);
         p.connect(head, (derived::CAPTURE, 0));
     }
