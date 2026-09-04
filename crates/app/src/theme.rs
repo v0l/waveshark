@@ -198,6 +198,8 @@ const SPAN_GAP: f32 = 8.0;
 #[derive(Default)]
 pub struct Line {
     job: LayoutJob,
+    /// Space before the next span, when it is not the usual one.
+    gap: Option<f32>,
 }
 
 impl Line {
@@ -216,7 +218,7 @@ impl Line {
     fn add(mut self, text: impl Into<String>, format: TextFormat) -> Self {
         let lead = match self.job.sections.is_empty() {
             true => 0.0,
-            false => SPAN_GAP,
+            false => self.gap.take().unwrap_or(SPAN_GAP),
         };
         self.job.append(&text.into(), lead, format);
         self
@@ -259,6 +261,24 @@ impl Line {
     /// Words off the air, which are neither a caption nor a number.
     pub fn words(self, text: impl Into<String>) -> Self {
         self.add(text, Self::face(READOUT_FONT, VALUE_SIZE, VALUE))
+    }
+
+    /// Space before the next span, for a group that belongs together or one
+    /// that wants separating from what came before it.
+    pub fn gap(mut self, px: f32) -> Self {
+        self.gap = Some(px);
+        self
+    }
+
+    /// Start the next span `x` points from the left of the line.
+    ///
+    /// A column of readings lines its values up while each row stays one
+    /// galley, which a fixed-width label beside a separate value cannot do:
+    /// that is two galleys again, and egui centres them against each other.
+    pub fn column(mut self, ui: &egui::Ui, x: f32) -> Self {
+        let so_far = ui.ctx().fonts_mut(|f| f.layout_job(self.job.clone()).size().x);
+        self.gap = Some((x - so_far).max(SPAN_GAP));
+        self
     }
 
     /// Recolour the span just added.

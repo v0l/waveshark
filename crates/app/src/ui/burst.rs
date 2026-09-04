@@ -34,6 +34,24 @@ pub(super) fn mono(text: &str, col: Color32) -> egui::RichText {
         .color(col)
 }
 
+/// A decoded field as it is worth reading.
+///
+/// A float arrives at whatever precision the decoder computed in, and a
+/// confidence shown as 0.7089155912399292 is a dozen digits of arithmetic
+/// noise across a row somebody is scanning. The packet log holds the value as
+/// it was decoded either way, so nothing is lost by rounding the one on
+/// screen.
+fn field_value(v: &common::Value) -> String {
+    let common::Value::Float(f) = v else { return v.to_string() };
+    // Small enough that six places would show zero, which would be a lie
+    // rather than a rounding.
+    if *f != 0.0 && f.abs() < 1e-5 {
+        return format!("{f:.3e}");
+    }
+    let s = format!("{f:.6}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// Green for a verified packet, amber for one with no check to verify, red for
 /// a failed one, grey for a burst nothing claimed. The same colours are used
 /// on the waterfall.
@@ -82,10 +100,17 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
         let (peak, rms) = crate::audiobus::levels_db(a);
         ui.horizontal(|ui| {
             play = ui.button("PLAY").clicked();
-            ui.label(legend(&format!(
-                "{:.1} s of speech   peak {peak:.0} dBFS   rms {rms:.0} dBFS",
-                a.seconds()
-            )));
+            theme::Line::new()
+                .legend("speech")
+                .value(format!("{:.1} s", a.seconds()))
+                .size(11.0)
+                .legend("peak")
+                .value(format!("{peak:.0} dBFS"))
+                .size(11.0)
+                .legend("rms")
+                .value(format!("{rms:.0} dBFS"))
+                .size(11.0)
+                .show(ui);
         });
         ui.add_space(4.0);
     }
@@ -93,11 +118,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             for (k, v) in &rec.fields {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(legend(k));
-                    ui.label(mono(&v.to_string(), theme::VALUE));
-                });
+                theme::Line::new().legend(k).value(field_value(v)).size(11.0).show(ui);
             }
         });
         ui.add_space(4.0);
@@ -316,4 +337,25 @@ pub(super) fn thousands(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::Value;
+
+    /// The inspector is read at a glance, and a confidence of
+    /// 0.7089155912399292 is a dozen digits of arithmetic noise. A position
+    /// still has to keep the places that put it on the right street, and a
+    /// small value must not round to a flat zero.
+    #[test]
+    fn a_float_field_is_shown_at_a_readable_precision() {
+        assert_eq!(field_value(&Value::Float(0.7089155912399292)), "0.708916");
+        assert_eq!(field_value(&Value::Float(-213_364_400.0)), "-213364400");
+        assert_eq!(field_value(&Value::Float(53.640_123_4)), "53.640123");
+        assert_eq!(field_value(&Value::Float(0.0)), "0");
+        assert_eq!(field_value(&Value::Float(1.5e-7)), "1.500e-7");
+        assert_eq!(field_value(&Value::Int(42_000)), "42000");
+        assert_eq!(field_value(&Value::Text("KE0ABC".into())), "KE0ABC");
+    }
 }

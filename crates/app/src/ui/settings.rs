@@ -95,19 +95,21 @@ impl App {
             table.active(center, rate).into_iter().map(|s| s.name.clone()).collect();
 
         ui.horizontal(|ui| {
-            ui.label(legend("tuned to"));
-            ui.label(value(format!("{:.4} MHz", center / 1e6)).size(12.0));
-            ui.add_space(8.0);
-            ui.label(legend("span"));
-            ui.label(value(format!("{:.0} kHz", rate / 1e3)).size(12.0));
-            ui.add_space(8.0);
-            ui.label(legend("running"));
-            match active.is_empty() {
-                false => ui.label(
-                    egui::RichText::new(active.join(", ")).color(theme::TRACE).size(13.0),
-                ),
-                true => ui.label(egui::RichText::new("nothing").color(theme::FAULT).size(13.0)),
+            let mut line = theme::Line::new()
+                .legend("tuned to")
+                .value(format!("{:.4} MHz", center / 1e6))
+                .size(12.0)
+                .gap(16.0)
+                .legend("span")
+                .value(format!("{:.0} kHz", rate / 1e3))
+                .size(12.0)
+                .gap(16.0)
+                .legend("running");
+            line = match active.is_empty() {
+                false => line.heard(active.join(", ")),
+                true => line.value("nothing").tint(theme::FAULT),
             };
+            line.show(ui);
         });
         if active.is_empty() {
             hint(ui, "No block covers this frequency and span, so nothing is decoded here. Add one, or widen a range.");
@@ -377,9 +379,7 @@ impl App {
         );
         ui.add_space(10.0);
 
-        row(ui, "on disk", |ui| {
-            ui.label(value(format!("{} in {logged} packets", human_bytes(bytes))).size(11.0));
-        });
+        reading(ui, "on disk", format!("{} in {logged} packets", human_bytes(bytes)));
         if full {
             ui.add(
                 egui::Label::new(
@@ -416,14 +416,13 @@ impl App {
                         None => theme::ETCH,
                     },
                 );
-                ui.label(value(f.address()).size(11.0));
-                ui.label(legend(f.kind.name));
+                theme::Line::new().value(f.address()).size(11.0).legend(f.kind.name).show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("REMOVE").clicked() {
                         remove = Some(i);
                     }
                     if let Some(s) = live {
-                        ui.label(legend(&format!("{} frames", s.frames)));
+                        theme::Line::new().legend(&format!("{} frames", s.frames)).show(ui);
                     }
                 });
             });
@@ -591,8 +590,11 @@ impl App {
                 .corner_radius(2);
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(value(r.which.label()).size(13.0));
-                    ui.label(egui::RichText::new(r.which.publisher()).small().color(theme::LEGEND));
+                    theme::Line::new()
+                        .value(r.which.label())
+                        .size(13.0)
+                        .note(r.which.publisher())
+                        .show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Disabled rather than hidden while it works: a
                         // button that vanishes under the pointer is a button
@@ -607,26 +609,29 @@ impl App {
                         }
                     });
                 });
-                ui.horizontal(|ui| {
-                    ui.label(legend("held"));
-                    ui.label(match r.rows {
-                        Some(n) => value(format!("{n} rows")).size(12.0),
+                theme::Line::new()
+                    .legend("held")
+                    .value(match r.rows {
+                        Some(n) => format!("{n} rows"),
                         // Cached but not parsed is the ordinary state for the
                         // registries, which are read the first time something
                         // asks them a question.
-                        None if r.bytes > 0 => value("on disc").size(12.0),
-                        None => value("not downloaded").size(12.0),
-                    });
-                    ui.add_space(10.0);
-                    ui.label(legend("size"));
-                    ui.label(value(crate::data::fmt_bytes(r.bytes)).size(12.0));
-                    ui.add_space(10.0);
-                    ui.label(legend("checked"));
-                    ui.label(match r.checked_ago {
-                        Some(s) => value(crate::data::fmt_ago(s)).size(12.0),
-                        None => value("never").size(12.0),
-                    });
-                });
+                        None if r.bytes > 0 => "on disc".into(),
+                        None => "not downloaded".into(),
+                    })
+                    .size(12.0)
+                    .gap(18.0)
+                    .legend("size")
+                    .value(crate::data::fmt_bytes(r.bytes))
+                    .size(12.0)
+                    .gap(18.0)
+                    .legend("checked")
+                    .value(match r.checked_ago {
+                        Some(s) => crate::data::fmt_ago(s),
+                        None => "never".into(),
+                    })
+                    .size(12.0)
+                    .show(ui);
                 if let Some(e) = &r.error {
                     ui.label(egui::RichText::new(e).small().color(theme::FAULT));
                 }
@@ -985,9 +990,7 @@ impl App {
         );
         ui.add_space(8.0);
 
-        row(ui, "written", |ui| {
-            ui.label(value(human_bytes(cap_bytes)).size(11.0));
-        });
+        reading(ui, "written", human_bytes(cap_bytes));
         if let Some(f) = &cap_file {
             row(ui, "file", |ui| {
                 ui.add(egui::Label::new(value(f).size(11.0)).wrap());

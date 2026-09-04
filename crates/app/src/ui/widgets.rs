@@ -325,13 +325,33 @@ pub fn modal_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(10.0);
 }
 
+/// Width of the legend column in a settings modal, and where what it labels
+/// begins.
+pub const LABEL_W: f32 = 90.0;
+const LABEL_GAP: f32 = 8.0;
+
 /// A labelled settings row: legend on the left, control on the right, so the
 /// modal reads as a column of settings rather than a wall of widgets.
 pub fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized([90.0, 18.0], egui::Label::new(legend(label)));
+        ui.add_sized([LABEL_W, 18.0], egui::Label::new(legend(label)));
         add(ui);
     });
+}
+
+/// A settings row that reads a value back rather than setting one.
+///
+/// Not [`row`] with a label in it: two labels in a row are two galleys, and
+/// egui centres them against each other, so a legend beside its value sits a
+/// little low. One line puts them on the same baseline and still lands the
+/// value in the column.
+pub fn reading(ui: &mut egui::Ui, label: &str, text: impl Into<String>) {
+    theme::Line::new()
+        .legend(label)
+        .column(ui, LABEL_W + LABEL_GAP)
+        .value(text)
+        .size(11.0)
+        .show(ui);
 }
 
 /// Resolution bandwidth, which is what the bin count actually buys you.

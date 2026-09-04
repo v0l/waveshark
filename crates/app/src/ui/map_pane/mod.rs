@@ -143,8 +143,8 @@ impl Map<'_> {
         use crate::tracks::Kind;
         let count = |k: Kind| active.iter().filter(|t| t.kind() == k).count();
         ui.horizontal(|ui| {
-            ui.label(legend("tracks"));
-            ui.label(value(active.len().to_string()).size(12.0));
+            let mut line =
+                theme::Line::new().legend("tracks").value(active.len().to_string()).size(12.0);
             // Broken down by kind, because "14 tracks" on a coast says nothing
             // about whether the aircraft or the shipping is being heard.
             for (k, name) in
@@ -157,17 +157,15 @@ impl Map<'_> {
             {
                 let n = count(k);
                 if n > 0 {
-                    ui.add_space(8.0);
-                    ui.label(legend(name));
-                    ui.label(value(n.to_string()).size(12.0));
+                    line = line.gap(16.0).legend(name).value(n.to_string()).size(12.0);
                 }
             }
             if active.is_empty() {
-                ui.add_space(10.0);
-                ui.label(legend(
-                    "tune to 1090 for aircraft, 162 for shipping, 144.8 for APRS",
-                ));
+                line = line
+                    .gap(16.0)
+                    .legend("tune to 1090 for aircraft, 162 for shipping, 144.8 for APRS");
             }
+            line.show(ui);
         });
         ui.add_space(6.0);
 
