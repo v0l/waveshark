@@ -21,6 +21,7 @@ pub mod ax25;
 pub mod analyze;
 pub mod bds;
 pub mod bits;
+pub mod dmr;
 pub mod framing;
 pub mod m17;
 #[cfg(feature = "tea")]

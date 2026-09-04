@@ -315,10 +315,10 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
 /// Proves the auto path detects the carrier, places the dmr front end on it,
 /// decodes a voice over and labels it, so it reaches the call list as DMR.
 ///
-/// Ignored and HOME-local because the capture is not in the committed corpus,
-/// and it needs a *clean* capture: the auto node places a front end only when
-/// the detected source measures within [`CHANNEL_WIDTH_TOLERANCE`] of the
-/// channel width, and a splattered capture with a strong nearby spur measures
+/// Ignored because it needs a *clean* capture: the auto node places a front
+/// end only when the detected source measures within
+/// [`CHANNEL_WIDTH_TOLERANCE`] of the channel width, and the corpus capture,
+/// which has a strong nearby spur from an overloaded front end, measures
 /// far wider than 12.5 kHz and is rightly refused. A capture from an SDR with
 /// a clean front end (no close-in spur, radio not overloading it) opens a
 /// ~14 kHz source and places DMR. See the direct-path test in dmr_nodes for
@@ -327,14 +327,14 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
 #[test]
 #[ignore]
 fn auto_finds_dmr_in_a_real_capture() {
-    let path = format!("{}/dmr_dev/dmr_good1.cu8", std::env::var("HOME").unwrap());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("skipping: {path} absent");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: dmr_tg9_433.45M_2048k.cu8 absent, run testdata/fetch.sh");
         return;
     }
-    let raw = std::fs::read(&path).unwrap();
+    let raw = std::fs::read(path).unwrap();
     let rate = 2_048_000.0;
-    let center = Hz(434_000_000);
+    let center = Hz(433_450_000);
     let iq: Vec<C32> = raw
         .chunks_exact(2)
         .map(|c| C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))

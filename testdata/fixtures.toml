@@ -196,3 +196,52 @@ carrier_hz = [391_181_000, 391_704_500]
 tolerance_hz = 12_500
 snr_min_db = 20
 always_on = true
+
+[[capture]]
+name = "dmr_tg9_433.45M_2048k.cu8"
+sha256 = "800f4371a08cc940b40c10fc10f1373c7eff226f90246facc3eeac750ddc96f3"
+url = "https://nostr.download/800f4371a08cc940b40c10fc10f1373c7eff226f90246facc3eeac750ddc96f3.xz"
+compression = "xz"
+center_hz = 433_450_000
+rate_sps = 2_048_000
+format = "cu8"
+description = """
+One DMR transmission on 433.900 MHz, 450 kHz up in a span tuned to 433.45,
+recorded off air from a hotspot on an RTL-SDR. Three voice LC headers, ten
+voice superframes and a terminator: 3.6 seconds of speech to talkgroup 9 from
+radio ID 1234567.
+
+The transmission's own signalling is what says so, and it says it four ways
+that have to agree: the link control arrives in the header under
+BPTC(196,96), again in the terminator, and again in each superframe as four
+embedded fragments under BPTC(128,72) with a five-bit checksum over the nine
+bytes. Six of the ten superframes decode their embedded copy independently
+and all of them read the same talkgroup and radio ID as the headers.
+
+What the capture is evidence of is the matched filter. DMR shapes its 4-FSK
+with a root raised cosine at 0.2, and a receiver that reads the discriminator
+without matching it still finds every sync word, because the sync words use
+only the outer two of the four levels. The inner levels never separate: on
+this capture every BPTC in the file failed with nine bad rows out of nine, so
+the receiver knew a transmission was there and could say nothing about it,
+and the call list stayed empty while the packet log filled with anonymous
+rows. With the filter the same bursts decode clean.
+
+It is also evidence about framing. Only burst A of a superframe carries a
+sync, so a framer that hunts for one per superframe loses 360 ms whenever one
+is marginal, and the silence timeout then closes the over: this transmission
+arrived as three separate rows in the packet log before the burst clock
+replaced the hunt.
+
+Beware the polarity. MS_voice and MS_data are exact complements of each
+other, so the sync alone cannot say which is which, and reading this capture
+the wrong way up turns a voice call into signalling that never decodes.
+"""
+
+[capture.expect]
+channel_hz = 433_900_000
+talkgroup = 9
+radio_id = 1_234_567
+call_type = "group"
+overs = 1
+seconds_min = 3.0
