@@ -877,6 +877,12 @@ impl App {
             }
             self.scope.db = f.db;
             self.scope.extra = f.extra;
+            self.scope.adc = f.adc;
+            self.scope.adc_bad_frames = if f.adc.starved() || f.adc.clipping() {
+                self.scope.adc_bad_frames.saturating_add(1)
+            } else {
+                0
+            };
         }
     }
 

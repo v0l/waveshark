@@ -19,9 +19,78 @@ use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
+/// How the converter is being driven, measured on the samples of the last
+/// spectrum frame.
+///
+/// Two failures look like a quiet band from the display and are nothing of
+/// the kind. Too little gain leaves the noise under half a step of the
+/// converter and the samples take only the two or three values around zero:
+/// there is no floor to detect against, and the first real signal drops the
+/// quantisation noise everywhere else by ten decibels, so the detector
+/// opens on the whole band. Too much gain puts the samples on the rails and
+/// every level and shape is a lie. Both are the operator's to fix and both
+/// are invisible until something says so.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdcHealth {
+    /// Distinct values the in-phase samples took, capped at [`Self::LEVELS_ENOUGH`].
+    pub levels: u16,
+    /// Share of samples at either rail, 0 to 1.
+    pub clipped: f32,
+    /// Peak sample magnitude, in dBFS.
+    pub peak_db: f32,
+}
+
+impl AdcHealth {
+    /// Distinct levels past which the converter is counted as driven. An
+    /// eight bit converter with its noise at a step and a half shows a
+    /// dozen; a starved one shows two or three.
+    pub const LEVELS_ENOUGH: u16 = 8;
+    /// Samples within this of full scale are on the rail. Eight bit sources
+    /// land at 127/127.5 rather than exactly one.
+    const RAIL: f32 = 0.98;
+    /// Share of samples on the rail that counts as clipping. A burst of
+    /// packet clips its own peaks and nobody wants a warning for that; a
+    /// tenth of the frame is a gain that is too high.
+    const CLIP_FRAC: f32 = 0.05;
+
+    pub fn measure(iq: &[C32]) -> Self {
+        if iq.is_empty() {
+            return Self::default();
+        }
+        let mut peak = 0.0f32;
+        let mut rails = 0usize;
+        for s in iq {
+            let m = s.re.abs().max(s.im.abs());
+            peak = peak.max(m);
+            if m >= Self::RAIL {
+                rails += 1;
+            }
+        }
+        // Distinct values are counted on a bounded sample: a frame is a few
+        // thousand samples and the answer wanted is "two" or "plenty".
+        let mut re: Vec<f32> = iq.iter().take(1024).map(|s| s.re).collect();
+        re.sort_by(f32::total_cmp);
+        re.dedup();
+        Self {
+            levels: re.len().min(Self::LEVELS_ENOUGH as usize) as u16,
+            clipped: rails as f32 / iq.len() as f32,
+            peak_db: 20.0 * peak.max(1e-6).log10(),
+        }
+    }
+
+    pub fn starved(&self) -> bool {
+        self.levels > 0 && self.levels < Self::LEVELS_ENOUGH
+    }
+
+    pub fn clipping(&self) -> bool {
+        self.clipped >= Self::CLIP_FRAC
+    }
+}
+
 /// The FFT behind the spectrum and the waterfall.
 pub struct SpectrumNode {
     spec: Spectrum,
+    adc: AdcHealth,
     rate: f64,
     center: common::Hz,
     /// Whether the last block completed a frame, so the host knows when there
@@ -48,6 +117,7 @@ impl SpectrumNode {
             spec: Spectrum::new(size),
             rate: 0.0,
             center: common::Hz(0),
+            adc: AdcHealth::default(),
             fresh: false,
             refresh_hz: 30.0,
             debt: 0.0,
@@ -80,6 +150,11 @@ impl SpectrumNode {
 
     pub fn rate(&self) -> f64 {
         self.rate
+    }
+
+    /// How the converter was driven in the last frame.
+    pub fn adc(&self) -> AdcHealth {
+        self.adc
     }
 
     pub fn center(&self) -> common::Hz {
@@ -122,6 +197,7 @@ impl Simple for SpectrumNode {
             self.collecting = true;
         }
         if self.spec.process(iq) {
+            self.adc = AdcHealth::measure(iq);
             self.fresh = true;
             self.collecting = false;
             self.debt = self.rate / self.refresh_hz.max(1.0) as f64;
@@ -657,5 +733,42 @@ mod tests {
             Simple::process(&mut r, &Payload::Iq(tone(100)), &mut out, &mut ctx).unwrap();
         }
         assert_eq!(r.ring().0, 300);
+    }
+}
+
+#[cfg(test)]
+mod adc_tests {
+    use super::AdcHealth;
+    use common::C32;
+
+    /// The capture that showed the need: an RTL at 27 dB on 868 MHz whose
+    /// every sample was 127 or 128, so the whole band was one bit of
+    /// quantisation noise and the first packet to arrive dropped it by
+    /// eleven decibels everywhere else.
+    #[test]
+    fn two_values_is_starved_and_a_driven_converter_is_not() {
+        let starved: Vec<C32> = (0..4096)
+            .map(|i| {
+                let v = |k: u32| if (i * 7 + k) % 3 == 0 { -0.5 / 127.5 } else { 0.5 / 127.5 };
+                C32::new(v(0), v(1))
+            })
+            .collect();
+        let h = AdcHealth::measure(&starved);
+        assert_eq!(h.levels, 2);
+        assert!(h.starved() && !h.clipping());
+
+        let mut seed = 12345u32;
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            ((seed >> 16) as i32 % 21 - 10) as f32 / 127.5
+        };
+        let driven: Vec<C32> = (0..4096).map(|_| C32::new(noise(), noise())).collect();
+        let h = AdcHealth::measure(&driven);
+        assert!(!h.starved() && !h.clipping(), "{h:?}");
+
+        let railed: Vec<C32> = (0..4096)
+            .map(|i| if i % 4 == 0 { C32::new(1.0, -1.0) } else { C32::new(0.1, 0.2) })
+            .collect();
+        assert!(AdcHealth::measure(&railed).clipping());
     }
 }

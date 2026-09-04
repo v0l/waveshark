@@ -131,6 +131,7 @@ impl Scope<'_> {
         // margin note rather than as a signal.
         self.scan_marks(&p, &plot);
         self.source_marks(&p, &plot);
+        self.adc_warning(&p, &plot);
         self.ribbon(&p, &ribbon);
 
         p.rect_filled(fall, 0.0, theme::CHASSIS);
@@ -545,6 +546,39 @@ impl Scope<'_> {
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,
         );
+    }
+
+    /// One line over the plot when the converter is starved or clipping.
+    ///
+    /// Waits a second of frames so a burst that clips its own peak does not
+    /// flash it, and says what to do rather than what was measured: nobody
+    /// reading "3 levels" knows that means turn the gain up.
+    fn adc_warning(&self, p: &egui::Painter, plot: &Rect) {
+        const HOLD_FRAMES: u32 = 30;
+        if self.st.adc_bad_frames < HOLD_FRAMES {
+            return;
+        }
+        let text = if self.st.adc.clipping() {
+            format!(
+                "ADC CLIPPING  {:.0}% of samples on the rail: lower the gain",
+                self.st.adc.clipped * 100.0
+            )
+        } else {
+            format!(
+                "ADC STARVED  samples take {} values: raise the gain",
+                self.st.adc.levels
+            )
+        };
+        let font = FontId::new(11.0, FontFamily::Name(theme::READOUT_FONT.into()));
+        let at = Pos2::new(plot.center().x, plot.top() + 8.0);
+        let galley = p.layout_no_wrap(text, font, theme::FAULT);
+        let r = Rect::from_center_size(
+            Pos2::new(at.x, at.y + galley.size().y / 2.0),
+            galley.size() + egui::vec2(16.0, 6.0),
+        );
+        p.rect_filled(r, 2.0, theme::WELL.gamma_multiply(0.9));
+        p.rect_stroke(r, 2.0, Stroke::new(1.0, theme::FAULT), egui::StrokeKind::Outside);
+        p.galley(r.min + egui::vec2(8.0, 3.0), galley, theme::FAULT);
     }
 
     fn trace(&self, p: &egui::Painter, plot: &Rect) {

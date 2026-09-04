@@ -79,6 +79,11 @@ pub(super) struct ScopeState {
     /// Spectrum stages the operator added, from the last frame. Each covers
     /// whatever was wired into it rather than the span.
     pub extra: Vec<crate::radio::Spectrum>,
+    /// How the converter was driven, from the last frame, and how many
+    /// frames in a row it has been starved or clipping: the warning waits
+    /// for a run so a single strong burst does not flash it.
+    pub adc: nodes::AdcHealth,
+    pub adc_bad_frames: u32,
 }
 
 impl Default for ScopeState {
@@ -106,6 +111,8 @@ impl Default for ScopeState {
             drag_ch: None,
             scrub: Wheel::default(),
             extra: Vec::new(),
+            adc: nodes::AdcHealth::default(),
+            adc_bad_frames: 0,
         }
     }
 }

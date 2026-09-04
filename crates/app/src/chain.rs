@@ -981,6 +981,10 @@ impl Receiver {
         self.spectrum_mut().map(|s| s.power_db()).unwrap_or(&[])
     }
 
+    pub fn adc(&mut self) -> nodes::AdcHealth {
+        self.spectrum_mut().map(|s| s.adc()).unwrap_or_default()
+    }
+
     pub fn modes_on(&self) -> bool {
         self.modes.is_some() || self.auto_wide("mode_s")
     }

@@ -314,6 +314,7 @@ fn peak_of(pcm: &[f32]) -> f32 {
     pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
 }
 
+
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -327,8 +328,8 @@ pub enum Cmd {
     Rate(Sps),
     /// The complete set of channels to demodulate and mix.
     Channels(Vec<ChannelSpec>),
-    /// Master volume, which the whole mix leaves the bus at.
-    Volume(f32),
+    /// Master volume, and whether the mix leaves the bus at all.
+    Volume { volume: f32, muted: bool },
     Fft(usize),
     /// Spectrum frames per second delivered to the UI.
     Refresh(f32),
@@ -453,6 +454,7 @@ pub struct ChannelState {
 /// One spectrum update.
 pub struct Frame {
     pub db: Vec<f32>,
+    pub adc: nodes::AdcHealth,
     pub center: f64,
     pub rate: f64,
     /// Spectrum stages the operator added, each covering whatever was wired
@@ -1554,10 +1556,11 @@ fn run(
                         rebuild = true;
                     }
                 }
-                Cmd::Volume(v) => {
-                    plan.audio.master = v;
+                Cmd::Volume { volume, muted } => {
+                    plan.audio.master = volume;
+                    plan.audio.muted = muted;
                     if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_master(v, plan.audio.muted);
+                        b.bus_mut().set_master(volume, muted);
                     }
                 }
                 Cmd::Fft(n) => {
@@ -1885,6 +1888,7 @@ fn run(
                 .collect();
             let f = Frame {
                 db: rx.power_db().to_vec(),
+                adc: rx.adc(),
                 center: plan.center.as_f64(),
                 rate: if seen > 0.0 { seen } else { plan.eff_rate() },
                 extra,
@@ -2021,9 +2025,20 @@ fn run(
             *status.call_heard.lock() = b.last_heard().map(str::to_string);
         }
         if let Some(s) = sink.as_mut() {
+            // The master governs the device, not the mix: anything a stage
+            // downstream of the bus adds is under it too, and a mute takes
+            // the fifth of a second already queued at the sound card with it.
+            s.set_output(plan.audio.master, plan.audio.muted);
             let (out, rate) = rx.audio_out();
-            if !out.is_empty() {
-                Status::set_level(&status.out_level, peak_of(out));
+            if plan.audio.muted {
+                Status::set_level(&status.out_level, 0.0);
+                if !out.is_empty() {
+                    // Still written, so the drift loop stays converged and
+                    // unmuting does not open with a burst of resampling.
+                    s.write_adaptive_stereo(out, rate);
+                }
+            } else if !out.is_empty() {
+                Status::set_level(&status.out_level, peak_of(out) * plan.audio.master);
                 s.write_adaptive_stereo(out, rate);
                 status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
             } else {
