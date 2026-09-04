@@ -209,8 +209,15 @@ fn recovery_label(r: Recovery) -> Option<(String, Color32)> {
             Some((format!("searching ({})", if gpu { "GPU" } else { "CPU" }), theme::READOUT))
         }
         Recovery::Exhausted { dropped } => {
-            Some((format!("no TEA1 key ({dropped} tried)"), theme::LEGEND))
+            Some((format!("not TEA1 ({dropped} tried)"), theme::LEGEND))
         }
-        Recovery::NotTea1 => Some(("not TEA1 (TEA2/3): key must be entered".into(), theme::READOUT)),
+        // The air never names the cipher, so a ruled-out TEA1 only says the
+        // cipher is one of the others. TEA1 is the sole reduced-key cipher
+        // this can break: TEA2/3/5/6 are full-length, and TEA4/7 are reduced
+        // but different algorithms, not implemented and (TEA7) 56-bit. So a
+        // key must be entered by hand here whatever it turns out to be.
+        Recovery::NotTea1 => {
+            Some(("not TEA1 (unbreakable here): enter a key".into(), theme::READOUT))
+        }
     }
 }

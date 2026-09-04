@@ -278,6 +278,28 @@ impl NetworkPdu {
     }
 }
 
+/// The MM (mobility management) PDU types the downlink carries (16.9),
+/// under MLE protocol discriminator 1. Only the type is read; the point of
+/// note is the MAC header's address, which on these is the clear SSI: a
+/// registration or authentication precedes the enciphered traffic, so it is
+/// where a real identity is seen before it becomes an encrypted one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmPdu {
+    /// The MM PDU type (16.9.1), e.g. 1 = D-AUTHENTICATION, 5 = D-LOCATION
+    /// UPDATE ACCEPT.
+    pub pdu: u8,
+    /// The addressed subscriber, in clear from the MAC header.
+    pub address: Address,
+    pub time: Option<TdmaTime>,
+}
+
+/// MM PDU type 1: the authentication exchange, the surest marker that a
+/// subscriber's identity is on air in clear right before it is enciphered.
+pub const D_AUTHENTICATION: u8 = 1;
+/// MM PDU type 5: location update accepted, an ITSI attach or roaming, also
+/// carrying a clear identity.
+pub const D_LOCATION_UPDATE_ACCEPT: u8 = 5;
+
 /// The CMCE PDU types the downlink carries (14.8.28).
 pub const D_ALERT: u8 = 0;
 pub const D_CALL_PROCEEDING: u8 = 1;
@@ -422,7 +444,7 @@ impl CallPdu {
     pub fn parse(b: &[u8], time: Option<TdmaTime>) -> Option<Self> {
         match Mac::parse(b, time)? {
             Mac::Call(c) => Some(c),
-            Mac::Network(_) => None,
+            Mac::Network(_) | Mac::Mm(_) => None,
         }
     }
 }
@@ -432,6 +454,7 @@ impl CallPdu {
 pub enum Mac {
     Call(CallPdu),
     Network(NetworkPdu),
+    Mm(MmPdu),
 }
 
 impl Mac {
@@ -537,9 +560,14 @@ impl Mac {
             _ => return Some(Mac::Call(pdu)),
         };
         // MLE (18.5.21): the protocol the SDU belongs to. The MLE's own
-        // PDUs (18.4.1) carry the network broadcast.
+        // PDUs (18.4.1) carry the network broadcast; MM (1) carries the
+        // registration and authentication whose address is a clear identity.
         match take(b, &mut at, 3)? {
             2 => {}
+            1 => {
+                let mm = take(b, &mut at, 4)? as u8;
+                return Some(Mac::Mm(MmPdu { pdu: mm, address: pdu.address, time }));
+            }
             5 => {
                 return match take(b, &mut at, 3)? {
                     2 => NetworkPdu::parse(b, &mut at).map(Mac::Network),
@@ -758,6 +786,9 @@ pub enum Event {
     /// these into traffic events.
     Aach(AachPdu),
     Network(NetworkPdu),
+    /// A mobility-management PDU: a registration or authentication, whose
+    /// address is a clear subscriber identity.
+    Mm(MmPdu),
 }
 
 impl Event {
@@ -770,6 +801,7 @@ impl Event {
         let mac = |b: &Block| match Mac::parse(&b.bits, b.time)? {
             Mac::Call(c) => Some(Event::Call(c)),
             Mac::Network(n) => Some(Event::Network(n)),
+            Mac::Mm(m) => Some(Event::Mm(m)),
         };
         match block.lchan {
             Lchan::Bsch => SyncPdu::parse(&block.bits).map(Event::Sync),
@@ -846,6 +878,22 @@ impl Event {
                 v
             }
             Event::Aach(_) => Vec::new(),
+            Event::Mm(m) => {
+                let (kind, id): (u8, u32) = match m.address {
+                    Address::Ssi(s) => (1, s),
+                    Address::EventLabel(e) => (2, u32::from(e)),
+                    Address::Ussi(s) => (3, s),
+                    Address::Smi(s) => (4, s),
+                    Address::UsageMarker(mk) => (5, u32::from(mk)),
+                };
+                let mut v = vec![5u8, m.pdu, kind];
+                v.extend_from_slice(&id.to_be_bytes());
+                match m.time {
+                    Some(t) => v.extend_from_slice(&[t.tn, t.frame, t.multiframe]),
+                    None => v.extend_from_slice(&[0, 0, 0]),
+                }
+                v
+            }
             Event::Sysinfo(s) => {
                 let mut v = vec![2u8];
                 v.extend_from_slice(&s.main_carrier.to_be_bytes());
@@ -879,6 +927,12 @@ impl Event {
                 Some(Event::Sync(s).to_bytes())
             }
             Event::Sysinfo(_) | Event::Network(_) => Some(bytes.to_vec()),
+            // An MM PDU is keyed by type and address with the clock removed,
+            // so one registration is one row, not one a frame while it holds.
+            Event::Mm(mut m) => {
+                m.time = None;
+                Some(Event::Mm(m).to_bytes())
+            }
             Event::Call(_) | Event::Aach(_) => None,
         }
     }
@@ -899,6 +953,20 @@ impl Event {
                 service_level: r[10],
                 late_entry: r[11] == 1,
             })),
+            (5, 9) => {
+                let id = u32::from_be_bytes([r[2], r[3], r[4], r[5]]);
+                let address = match r[1] {
+                    1 => Address::Ssi(id),
+                    2 => Address::EventLabel(id as u16),
+                    3 => Address::Ussi(id),
+                    4 => Address::Smi(id),
+                    5 => Address::UsageMarker(id as u8),
+                    _ => return None,
+                };
+                let time = (r[6] != 0)
+                    .then(|| TdmaTime { tn: r[6], frame: r[7], multiframe: r[8] });
+                Some(Event::Mm(MmPdu { pdu: r[0], address, time }))
+            }
             (3, n) if n >= 34 => {
                 let id = u32::from_be_bytes([r[3], r[4], r[5], r[6]]);
                 let address = match r[2] {
@@ -1274,7 +1342,12 @@ mod tests {
             subscriber_class: 0xffff,
             bs_service_details: 0x870,
         });
-        for e in [sync, si] {
+        let mm = Event::Mm(MmPdu {
+            pdu: D_AUTHENTICATION,
+            address: Address::Ssi(1_234_567),
+            time: Some(TdmaTime { tn: 2, frame: 5, multiframe: 9 }),
+        });
+        for e in [sync, si, mm] {
             assert_eq!(Event::parse(&e.to_bytes()).as_ref(), Some(&e));
         }
         let call = Event::Call(CallPdu {

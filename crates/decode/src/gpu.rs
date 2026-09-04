@@ -341,6 +341,17 @@ impl Ta61Gpu {
 
     /// Sweep `range` of the 2^40 space for the `c` consistent with every
     /// pair. Dispatches in `chunk`-sized batches; a hit ends the sweep.
+    /// Run [`search`](Self::search) on a background thread, returning a
+    /// promise the node polls each block while the GPU sweeps the 2^40 space.
+    pub fn spawn(
+        self: Arc<Self>,
+        pairs: Vec<crate::ta61::IdPair>,
+        range: core::ops::Range<u64>,
+        chunk: u32,
+    ) -> Promise<Option<[u8; 8]>> {
+        Promise::spawn_thread("ta61-gpu", move || self.search(&pairs, range, chunk))
+    }
+
     pub fn search(
         &self,
         pairs: &[crate::ta61::IdPair],
