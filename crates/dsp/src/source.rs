@@ -1334,6 +1334,7 @@ struct Chan {
     id: SourceId,
     center_hz: u64,
     bandwidth_hz: f64,
+    signal_hz: f64,
     out_rate: f64,
     mixer: Mixer,
     /// Coarse stage, absent when the total decimation is small.
@@ -1472,6 +1473,7 @@ impl SourceExtractor {
             id: s.id,
             center_hz: (self.center_hz + s.center_hz).max(0.0) as u64,
             bandwidth_hz: bw.min(out_rate),
+            signal_hz: s.bandwidth_hz(),
             out_rate,
             mixer: Mixer::new(-s.center_hz, self.rate),
             coarse,
@@ -1569,6 +1571,7 @@ impl SourceExtractor {
                     state,
                     center_hz: c.center_hz,
                     bandwidth_hz: c.bandwidth_hz,
+                    signal_hz: c.signal_hz,
                     rate: c.out_rate,
                     start_sample,
                     snr_db: c.snr_db,

@@ -669,7 +669,11 @@ impl AutoNode {
         // fills one is something else standing there. The spreading factor
         // is not decided here, because the node can tell by trying and
         // nothing at this level could tell at all.
-        if let Some(bw) = crate::lora_nodes::bandwidth_for(b.bandwidth_hz as f64) {
+        // Judged on the width the detector measured, not the extraction's:
+        // the stream is cut half again wider than the signal, and a 250 kHz
+        // channel measured at 240 kHz came through as a 360 kHz stream, which
+        // read as the 500 kHz channel and dechirped nothing.
+        if let Some(bw) = crate::lora_nodes::bandwidth_for(b.signal_hz) {
             if let Ok(m) =
                 Member::build("lora", spec, NodeSpec::new("lora").f("bandwidth_hz", bw), &self.reg)
             {
@@ -1237,6 +1241,7 @@ mod tests {
             // The two-bin minimum the detector can report, which is what a
             // clean 12.5 kHz channel measures at its 20 dB extent.
             bandwidth_hz: 4_000.0,
+            signal_hz: 4_000.0,
             rate: n.cfg.min_rate_hz,
             start_sample: 0,
             snr_db: 20.0,

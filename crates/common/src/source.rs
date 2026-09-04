@@ -54,6 +54,10 @@ pub struct SourceBlock {
     /// margin, since the edges measured on a weak burst are the loud middle
     /// of it and not its extent.
     pub bandwidth_hz: f64,
+    /// Width the detector measured for the signal itself, in hertz, before
+    /// that margin. What a front end that asks whether the signal fills a
+    /// channel should look at.
+    pub signal_hz: f64,
     /// Sample rate of `samples`.
     pub rate: f64,
     /// Index in the *wideband* stream of the instant `samples` begins, for
