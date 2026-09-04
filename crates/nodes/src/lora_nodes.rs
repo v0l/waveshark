@@ -27,6 +27,7 @@
 
 use common::{Result, C32};
 use decode::lora::{self, Received};
+use decode::meshtastic;
 use dsp::lora::{Demod, OVERSAMPLE};
 use dsp::FirDecim;
 use pipeline::event::{Decoded, Event};
@@ -404,6 +405,62 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
     }
 
+    // What the packet says, where the public default channel key opens it.
+    let body = r.meshtastic_message();
+    if let Some(d) = &body {
+        fields.push(("port".into(), Value::Text(d.port().into())));
+        if d.data.reply_id != 0 {
+            fields.push(("reply_to".into(), Value::Text(format!("{:08x}", d.data.reply_id))));
+        }
+        match &d.message {
+            meshtastic::Message::Text(t) => {
+                fields.push(("text".into(), Value::Text(t.clone())));
+            }
+            meshtastic::Message::Position(p) => {
+                if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
+                    fields.push(("latitude".into(), Value::Float(lat)));
+                    fields.push(("longitude".into(), Value::Float(lon)));
+                }
+                if let Some(a) = p.altitude {
+                    fields.push(("altitude_m".into(), Value::Int(i64::from(a))));
+                }
+                if let Some(s) = p.sats_in_view {
+                    fields.push(("satellites".into(), Value::Int(i64::from(s))));
+                }
+                // Worth showing: a low precision is the sender deliberately
+                // blurring where it is, not a poor fix.
+                if let Some(b) = p.precision_bits {
+                    fields.push(("precision_bits".into(), Value::Int(i64::from(b))));
+                }
+            }
+            meshtastic::Message::NodeInfo(u) => {
+                fields.push(("name".into(), Value::Text(u.long_name.clone())));
+                fields.push(("short_name".into(), Value::Text(u.short_name.clone())));
+                if u.is_licensed {
+                    fields.push(("licensed".into(), Value::Bool(true)));
+                }
+            }
+            meshtastic::Message::Telemetry(t) => {
+                if let Some(b) = t.battery_level {
+                    fields.push(("battery".into(), Value::Int(i64::from(b))));
+                }
+                if let Some(v) = t.voltage {
+                    fields.push(("voltage".into(), Value::Float(f64::from(v))));
+                }
+                if let Some(c) = t.channel_utilization {
+                    fields.push(("channel_util".into(), Value::Float(f64::from(c))));
+                }
+                if let Some(c) = t.temperature {
+                    fields.push(("temperature".into(), Value::Float(f64::from(c))));
+                }
+                if let Some(u) = t.uptime_seconds {
+                    fields.push(("uptime_s".into(), Value::Int(i64::from(u))));
+                }
+            }
+            meshtastic::Message::Opaque => {}
+        }
+    }
+
     let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
     let detail = match &mesh {
         Some(m) => {
@@ -411,8 +468,29 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 Some(name) => format!(" on {name}"),
                 None => format!(" on channel #{:02x}", m.channel_hash),
             };
+            // What it says comes first past the routing, since that is what
+            // a reader is looking for; the radio shape stays in front because
+            // it is what tells two networks apart.
+            let says = match body.as_ref().map(|d| (&d.message, d.port())) {
+                Some((meshtastic::Message::Text(t), _)) => format!(", \"{t}\""),
+                Some((meshtastic::Message::Position(p), _)) => {
+                    match (p.latitude, p.longitude) {
+                        (Some(lat), Some(lon)) => format!(", at {lat:.5}, {lon:.5}"),
+                        _ => ", position".to_string(),
+                    }
+                }
+                Some((meshtastic::Message::NodeInfo(u), _)) => {
+                    format!(", is {} ({})", u.long_name, u.short_name)
+                }
+                Some((meshtastic::Message::Telemetry(t), _)) => match t.battery_level {
+                    Some(b) => format!(", telemetry, battery {b}%"),
+                    None => ", telemetry".to_string(),
+                },
+                Some((meshtastic::Message::Opaque, port)) => format!(", {port}"),
+                None => String::new(),
+            };
             format!(
-                "{shape}, {:08x} to {}, {} of {} hops left{chan}",
+                "{shape}, {:08x} to {}, {} of {} hops left{chan}{says}",
                 m.source,
                 if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
                 m.hop_limit,

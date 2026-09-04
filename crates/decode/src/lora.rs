@@ -347,6 +347,25 @@ impl Received {
     pub fn meshtastic(&self) -> Option<Meshtastic> {
         (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
     }
+
+    /// What the packet says, where the public default channel key opens it.
+    ///
+    /// The key is tried on every Meshtastic packet rather than only where the
+    /// channel hash names a default preset: the hash is one byte and a
+    /// private channel can collide with a preset, while a channel renamed but
+    /// left on the default key does not match any preset and is still
+    /// readable. What decides is whether the plaintext parses, which
+    /// [`meshtastic::Decoded::of`] insists on.
+    pub fn meshtastic_message(&self) -> Option<crate::meshtastic::Decoded> {
+        let m = self.meshtastic()?;
+        let ciphertext = self.payload.get(Meshtastic::HEADER..)?;
+        crate::meshtastic::Decoded::of(
+            ciphertext,
+            m.source,
+            m.packet_id,
+            &crate::meshtastic::DEFAULT_KEY,
+        )
+    }
 }
 
 /// The sixteen byte header in front of every Meshtastic payload.
@@ -371,8 +390,11 @@ pub struct Meshtastic {
 }
 
 impl Meshtastic {
+    /// Bytes of cleartext header in front of the encrypted payload.
+    pub const HEADER: usize = 16;
+
     pub fn parse(payload: &[u8]) -> Option<Self> {
-        if payload.len() < 16 {
+        if payload.len() < Self::HEADER {
             return None;
         }
         let word = |i: usize| {
