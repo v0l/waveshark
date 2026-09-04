@@ -29,10 +29,23 @@
 //! file   := "WSPKT\0" u16 version
 //! record := u32 body_len, u8 kind, u8 flags, u16 pulses_or_bytes,
 //!           u64 at_us, u64 center_hz, u32 bandwidth_hz,
-//!           f32 rssi_dbfs, f32 snr_db, body
+//!           f32 rssi_dbfs, f32 snr_db, body, [iq]
 //! body   := kind 1: [u32 mark_us, u32 gap_us] * n
 //!           kind 2: [u8] * n
+//!           kind 3: measure, [u32 mark_us, u32 gap_us] * n
+//! iq     := f64 rate, u64 center_hz, u32 n, [i16 i, i16 q] * n
 //! ```
+//!
+//! The samples come after the body, from version 2. The body's length is
+//! fixed by the count in the header, so a reader of version 1 files takes
+//! the body and stops, and a reader of version 2 files takes what is left as
+//! the burst. Sixteen bits a component because that is more than any
+//! converter here has, and floats would double a file that is already mostly
+//! samples.
+//!
+//! Samples are kept because timings and bytes are what one demodulator made
+//! of a burst, and a different demodulator, or the same one fixed, wants the
+//! burst. A row without them can be read again but not re-read.
 //!
 //! Binary rather than the line-delimited JSON this replaces, because the
 //! content changed: a burst is a few hundred timings, and a hundred bytes of
@@ -65,7 +78,7 @@ pub const DEFAULT_MAX_BYTES: u64 = 2 << 30;
 const EXT: &str = "wspkt";
 
 const MAGIC: &[u8; 6] = b"WSPKT\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 /// Write buffer per open day file. A pulse record is a few hundred bytes and
 /// 1090 MHz can produce thousands of frames a second, so this is sized to
@@ -119,6 +132,14 @@ fn keying_from_code(c: u8) -> Option<&'static str> {
 /// Bytes before the body of a record: kind, keying, count, time, frequency,
 /// bandwidth, level and noise.
 const HEAD_LEN: usize = 1 + 1 + 2 + 8 + 8 + 4 + 4 + 4;
+
+/// Rate, centre and count in front of the samples.
+const IQ_HEAD_LEN: usize = 8 + 8 + 4;
+
+/// Samples a record may carry. A burst is the ring behind a front end, two
+/// seconds at most at the rate it was read at; this is well past that and
+/// well under what a length prefix can say.
+const IQ_MAX_SAMPLES: usize = 1 << 22;
 
 pub struct PacketLog {
     dir: PathBuf,
@@ -361,6 +382,10 @@ impl nodes::PacketSink for PacketLog {
                 rec
             }
         };
+        let rec = match p.iq.as_deref() {
+            Some(q) if !q.samples.is_empty() => put_iq(rec, q),
+            _ => rec,
+        };
         self.append(p.at_us, &rec);
     }
 
@@ -429,6 +454,43 @@ fn take_measure(body: &[u8]) -> Option<(common::Measure, &[u8])> {
     ))
 }
 
+/// The samples after the body, and the length prefix grown to cover them.
+fn put_iq(mut rec: Vec<u8>, q: &common::IqBurst) -> Vec<u8> {
+    let n = q.samples.len().min(IQ_MAX_SAMPLES);
+    rec.reserve(IQ_HEAD_LEN + n * 4);
+    rec.extend_from_slice(&q.rate.to_le_bytes());
+    rec.extend_from_slice(&q.center_hz.to_le_bytes());
+    rec.extend_from_slice(&(n as u32).to_le_bytes());
+    for s in &q.samples[..n] {
+        for v in [s.re, s.im] {
+            rec.extend_from_slice(&((v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+        }
+    }
+    let len = (rec.len() - 4) as u32;
+    rec[..4].copy_from_slice(&len.to_le_bytes());
+    rec
+}
+
+/// The samples at the tail of a record, when it has them.
+fn take_iq(tail: &[u8]) -> Option<std::sync::Arc<common::IqBurst>> {
+    if tail.len() < IQ_HEAD_LEN {
+        return None;
+    }
+    let rate = f64::from_le_bytes(tail[0..8].try_into().ok()?);
+    let center_hz = u64::from_le_bytes(tail[8..16].try_into().ok()?);
+    let n = u32::from_le_bytes(tail[16..20].try_into().ok()?) as usize;
+    let data = tail.get(IQ_HEAD_LEN..IQ_HEAD_LEN + n * 4)?;
+    let samples = data
+        .chunks_exact(4)
+        .map(|c| {
+            let i = i16::from_le_bytes([c[0], c[1]]) as f32 / 32767.0;
+            let q = i16::from_le_bytes([c[2], c[3]]) as f32 / 32767.0;
+            common::C32::new(i, q)
+        })
+        .collect();
+    Some(std::sync::Arc::new(common::IqBurst { rate, center_hz, samples }))
+}
+
 fn put_head(out: &mut Vec<u8>, kind: u8, count: u16, body_len: usize, p: &Packet) {
     out.extend_from_slice(&((HEAD_LEN + body_len) as u32).to_le_bytes());
     out.push(kind);
@@ -475,7 +537,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
         let getf = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
         let body = &r[HEAD_LEN..];
         let mut measure = None;
-        let packet_body = match kind {
+        let (packet_body, tail) = match kind {
             KIND_PULSES | KIND_MEASURED => {
                 let mut body = body;
                 if kind == KIND_MEASURED {
@@ -483,17 +545,21 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
                     measure = Some(m);
                     body = rest;
                 }
-                let mut pulses = Vec::new();
-                for k in 0..count.min(body.len() / 8) {
+                let n = count.min(body.len() / 8);
+                let mut pulses = Vec::with_capacity(n);
+                for k in 0..n {
                     let o = k * 8;
                     pulses.push(Pulse {
                         mark: u32::from_le_bytes(body[o..o + 4].try_into().unwrap()),
                         gap: u32::from_le_bytes(body[o + 4..o + 8].try_into().unwrap()),
                     });
                 }
-                PacketBody::Pulses(pulses)
+                (PacketBody::Pulses(pulses), &body[n * 8..])
             }
-            KIND_BYTES => PacketBody::Frame(body[..count.min(body.len())].to_vec()),
+            KIND_BYTES => {
+                let n = count.min(body.len());
+                (PacketBody::Frame(body[..n].to_vec()), &body[n..])
+            }
             // An unknown kind is skipped by its length rather than guessed
             // at, which is the whole reason the length comes first.
             _ => continue,
@@ -507,7 +573,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             modulation: keying_from_code(r[1]),
             body: packet_body,
             measure,
-            iq: None,
+            iq: take_iq(tail),
             // The log is a record of what was on the air, in timings and
             // bytes. Speech is not written to it: an hour of a busy repeater
             // is gigabytes, and the decision to keep audio belongs to
@@ -639,6 +705,39 @@ mod tests {
         // And it is a package again, ready for a decoder that did not exist
         // when it was written.
         assert_eq!(got[0].package().map(|p| p.pulses.len()), Some(3));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_burst_comes_back_with_its_samples() {
+        let d = dir("iq");
+        let mut log = PacketLog::new(d.clone());
+        let mut p = frame(AT, &[0x4c, 0x6f, 0x52, 0x61]);
+        p.iq = Some(std::sync::Arc::new(common::IqBurst {
+            rate: 62_500.0,
+            center_hz: 869_618_000,
+            samples: (0..1000)
+                .map(|i| common::C32::new((i as f32 * 0.01).sin() * 0.5, (i as f32 * 0.01).cos() * 0.5))
+                .collect(),
+        }));
+        let mut q = burst(433_920_000);
+        q.iq = Some(std::sync::Arc::new(common::IqBurst {
+            rate: 250_000.0,
+            center_hz: 433_920_000,
+            samples: vec![common::C32::new(1.0, -1.0); 10],
+        }));
+        log.write(&p);
+        log.write(&q);
+        log.flush();
+        let got = read(d.join("2026-08-31.wspkt")).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].frame(), p.frame());
+        let (a, b) = (got[0].iq.as_ref().unwrap(), p.iq.as_ref().unwrap());
+        assert_eq!((a.rate, a.center_hz, a.samples.len()), (b.rate, b.center_hz, b.samples.len()));
+        let err = a.samples.iter().zip(&b.samples).map(|(x, y)| (x - y).norm()).fold(0.0f32, f32::max);
+        assert!(err < 1e-4, "samples moved by {err}");
+        assert_eq!(got[1].iq.as_ref().unwrap().samples[0], common::C32::new(1.0, -1.0));
+        assert_eq!(got[1].package().map(|p| p.pulses.len()), Some(3));
         let _ = std::fs::remove_dir_all(&d);
     }
 

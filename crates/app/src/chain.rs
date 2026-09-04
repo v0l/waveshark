@@ -3067,6 +3067,7 @@ mod tests {
             }],
             record: false,
             capture_dir: crate::chain::default_capture_dir(),
+            capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
         }
