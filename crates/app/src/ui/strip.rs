@@ -32,17 +32,17 @@ impl Strip<'_> {
         ui.add_space(4.0);
         if ch.demod != Demod::Wfm {
             ui.horizontal(|ui| {
-                ui.label(legend("agc"));
+                theme::Line::new().legend("agc").show(ui);
                 if ui.selectable_label(ch.agc, if ch.agc { "ON" } else { "OFF" }).clicked() {
                     ch.agc = !ch.agc;
                     changed = true;
                 }
                 if ch.agc {
-                    ui.label(value(format!("{gain_db:+.0} dB")).size(10.0));
+                    theme::Line::new().value(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !open {
-                        ui.label(value("MUTED").size(10.0).color(theme::LEGEND));
+                        theme::Line::new().legend("muted").show(ui);
                     }
                 });
             });
@@ -51,7 +51,7 @@ impl Strip<'_> {
             let (lo, hi, ratio) = ch.demod.squelch_range();
             let mut db = ch.squelch_db.unwrap_or(default);
             ui.horizontal(|ui| {
-                ui.label(legend("sql"));
+                theme::Line::new().legend("sql").show(ui);
                 if ui.add(Squelch::new(&mut db, lo, hi, measured, open)).changed() {
                     ch.squelch_db = Some(db);
                     changed = true;
@@ -64,14 +64,14 @@ impl Strip<'_> {
                 } else {
                     format!("{db:.0}{}", if ratio { "" } else { " dBFS" })
                 };
-                ui.label(value(text).size(10.0));
+                theme::Line::new().value(text).size(11.0).show(ui);
             });
             // The reading the threshold is being set against. Without it the
             // control is a number to guess at, and the right number differs
             // by mode and moves with the RF gain.
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                hint(ui, &format!("now {measured:.0} dB"));
+                theme::Line::new().note(format!("now {measured:.0} dB")).show(ui);
             });
         }
         changed
@@ -89,33 +89,38 @@ impl Strip<'_> {
         ui.add_space(6.0);
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label(legend("rds"));
+            let mut head = theme::Line::new().legend("rds");
             if let Some(pi) = st.pi {
-                ui.label(legend(&format!("PI {pi:04X}")));
+                head = head.legend(&format!("PI {pi:04X}"));
             }
+            head.show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Stereo belongs here too: it is a property of this station,
                 // and it fades with the blend because the audio does.
                 let t = blend.clamp(0.0, 1.0);
                 if t > 0.01 {
                     let c = theme::TRACE.gamma_multiply(0.35 + 0.65 * t);
-                    ui.label(value(if t > 0.99 { "STEREO" } else { "BLEND" }).size(10.0).color(c));
+                    theme::Line::new()
+                        .value(if t > 0.99 { "stereo" } else { "blend" })
+                        .tint(c)
+                        .size(11.0)
+                        .show(ui);
                 }
             });
         });
         if let Some(n) = &st.name {
             // Cyan, not amber: this is what the radio heard, not something the
             // operator set.
-            ui.label(value(n).size(15.0).color(theme::TRACE));
+            theme::Line::new().heard(n).size(15.0).show(ui);
         }
         if let Some(p) = st.pty {
-            ui.label(legend(p));
+            theme::Line::new().legend(p).show(ui);
         }
         if let Some(rt) = &st.radiotext {
             ui.add_space(2.0);
             // Radiotext is up to 64 characters and the strip is narrow, so let
             // it wrap rather than truncating a song title mid-word.
-            ui.label(egui::RichText::new(rt).color(theme::LEGEND).size(11.0));
+            theme::Line::new().note(rt).wrapped(ui);
         }
     }
 
@@ -133,10 +138,12 @@ impl Strip<'_> {
                 ui.add_space(6.0);
 
                 // The master, which every channel's own level runs into.
+                // Call audio has a level of its own and it is set on the
+                // calls page: it is not a channel anybody tuned, and a fader
+                // for it under the master read as a second master.
                 let out_level = self.radio.map(|r| r.status.out_level()).unwrap_or(0.0);
-                let call_level = self.radio.map(|r| r.status.call_level()).unwrap_or(0.0);
                 ui.horizontal(|ui| {
-                    ui.label(legend("master"));
+                    theme::Line::new().legend("master").show(ui);
                     if ui.add(Fader::new(&mut self.st.volume, out_level).width(VU_W)).changed() {
                         self.cmds.push(Cmd::Volume(self.st.volume));
                     }
@@ -158,55 +165,6 @@ impl Strip<'_> {
                     }
                 });
 
-                // Call audio has one level for the lot, beside the master:
-                // it is not a channel anybody tuned, it is whatever the front
-                // ends decode, and mixing it belongs where every other level
-                // in the receiver is set.
-                ui.horizontal(|ui| {
-                    ui.label(legend("calls"));
-                    let mut changed = ui
-                        .add(Fader::new(&mut self.st.call_volume, call_level).width(VU_W))
-                        .changed();
-                    if crate::icons::icon_button(
-                        ui,
-                        if self.st.call_muted {
-                            crate::icons::Icon::Mute
-                        } else {
-                            crate::icons::Icon::Sound
-                        },
-                        "Mute call audio",
-                        true,
-                        self.st.call_muted,
-                    )
-                    .clicked()
-                    {
-                        self.st.call_muted = !self.st.call_muted;
-                        changed = true;
-                    }
-                    if changed {
-                        self.cmds.push(Cmd::CallVolume {
-                            volume: self.st.call_volume,
-                            muted: self.st.call_muted,
-                        });
-                    }
-                });
-                // The gain control, with what it is doing beside it: a call
-                // arrives at whatever level the transmitting radio's
-                // microphone was set to, which is not something a listener
-                // can fix at the far end.
-                ui.horizontal(|ui| {
-                    ui.add_space(4.0);
-                    if ui.checkbox(&mut self.st.call_agc, "AGC").changed() {
-                        self.cmds.push(Cmd::CallAgc(self.st.call_agc));
-                    }
-                    let db = self
-                        .radio
-                        .map(|r| r.status.call_gain_db())
-                        .unwrap_or(0.0);
-                    if self.st.call_agc && db.abs() > 0.1 {
-                        ui.label(value(format!("{db:+.0} dB")).size(11.0));
-                    }
-                });
 
                 ui.add_space(8.0);
 
@@ -269,7 +227,7 @@ impl Strip<'_> {
                                 ch.freq = d.hz;
                                 tune = Some(i);
                             }
-                            ui.label(legend(bands::name_at(ch.freq)));
+                            theme::Line::new().legend(bands::name_at(ch.freq)).show(ui);
                             ui.add_space(4.0);
                             // Two rows: broadcast modes, then the ones an
                             // amateur band needs. Six across is narrower than
@@ -309,7 +267,7 @@ impl Strip<'_> {
                                 let st = states.iter().find(|s| s.id == ch.id).copied();
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    ui.label(legend("vol"));
+                                    theme::Line::new().legend("vol").show(ui);
                                     let level = st.map(|s| s.level).unwrap_or(0.0);
                                     if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
                                         tune = Some(i);
@@ -359,17 +317,17 @@ impl Strip<'_> {
                                     let (r, _) = ui
                                         .allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
                                     ui.painter().rect_filled(r, 1.0, theme::ETCH);
-                                    ui.label(value(s.label.clone()).size(12.0));
+                                    theme::Line::new().value(s.label.clone()).size(12.0).show(ui);
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.label(legend("chain"));
+                                            theme::Line::new().legend("chain").show(ui);
                                         },
                                     );
                                 });
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    ui.label(legend("vol"));
+                                    theme::Line::new().legend("vol").show(ui);
                                     let mut v = s.volume;
                                     if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
                                         self.cmds.push(Cmd::NodeParam(

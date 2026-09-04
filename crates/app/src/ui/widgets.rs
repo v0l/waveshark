@@ -247,6 +247,68 @@ pub fn cell(p: &egui::Painter, row: Rect, x: f32, w: f32, text: &str, col: Color
     );
 }
 
+/// Height of the rail down the left of a card, and the inset of a card's
+/// contents from its edge.
+const RAIL_W: f32 = 3.0;
+
+/// A block of related lines: a captioned header on its own ground, and the
+/// content under it.
+///
+/// The panes that list what the receiver heard were rows of text on a
+/// striped background, which is readable while every row is one line and
+/// stops being readable the moment one of them wraps: nothing says where a
+/// message ends and the next begins except a shade of grey. A card says it
+/// with an edge. The header is recessed into the chassis the way a legend
+/// plate is, the body sits proud of it, and the rail down the left is where
+/// a card carries its state: amber for what the operator set, cyan for what
+/// the radio heard, nothing at all for a card that is only telling you
+/// something.
+pub fn card<R>(
+    ui: &mut Ui,
+    rail: Option<Color32>,
+    header: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let outer = egui::Frame::NONE
+        .fill(theme::PANEL)
+        .stroke(Stroke::new(1.0, theme::ETCH))
+        .corner_radius(2);
+    let framed = outer.show(ui, |ui| {
+        // The header and the body are one surface split by a rule, so no
+        // spacing may creep in between them.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let head = egui::Frame::NONE
+            .fill(theme::WELL)
+            .inner_margin(egui::Margin { left: 10, right: 10, top: 4, bottom: 4 });
+        let h = head.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| header(ui));
+        });
+        let r = h.response.rect;
+        ui.painter().line_segment(
+            [Pos2::new(r.left(), r.bottom()), Pos2::new(r.right(), r.bottom())],
+            Stroke::new(1.0, theme::ETCH),
+        );
+        egui::Frame::NONE
+            .inner_margin(egui::Margin { left: 10, right: 10, top: 6, bottom: 8 })
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.set_width(ui.available_width());
+                body(ui)
+            })
+            .inner
+    });
+    if let Some(c) = rail {
+        let r = framed.response.rect;
+        ui.painter().rect_filled(
+            Rect::from_min_max(r.left_top(), Pos2::new(r.left() + RAIL_W, r.bottom())),
+            0.0,
+            c,
+        );
+    }
+    framed
+}
+
 /// A line of explanation under a control.
 ///
 /// Added through `Label` with wrapping asked for explicitly: inside a modal

@@ -5,7 +5,7 @@
 //! whole of the call bus's configuration. Anything more elaborate would be a
 //! rules editor for a decision an operator makes by pointing at the row.
 
-use super::state::CallsState;
+use super::state::{AudioState, CallsState};
 use super::*;
 use crate::audiobus::Rule;
 use crate::calls::Call;
@@ -27,32 +27,55 @@ const COLS: [(&str, f32); 10] = [
     ("last", 56.0),
 ];
 
+/// What the list wants done that it cannot do itself.
+pub(super) enum Action {
+    /// Tune the dial to the channel a call is on.
+    Tune(f64),
+    /// Throw the list away.
+    Clear,
+}
+
 /// The call list, over what it lists and what it has subscribed to.
 pub(super) struct CallList<'a> {
     pub st: &'a mut CallsState,
+    /// The call bus's own level, which is mixed here rather than in the
+    /// channel strip: it is not a channel anybody tuned, and beside the
+    /// master it read as a control over everything the receiver plays.
+    pub audio: &'a mut AudioState,
     pub radio: Option<&'a Radio>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
 
 impl CallList<'_> {
-    /// Draw the list, and say which channel a click asked to tune to.
-    pub(super) fn show(self, ui: &mut egui::Ui) -> Option<f64> {
+    /// Draw the list, and say what a click asked for.
+    pub(super) fn show(mut self, ui: &mut egui::Ui) -> Option<Action> {
         let now = std::time::Instant::now();
         let calls: Vec<Call> = self.st.list.active(now).into_iter().cloned().collect();
         self.st.subscribe_new(&calls, self.cmds);
         let levels = self.radio.map(|r| r.status.call_levels()).unwrap_or_default();
+        let mut act = None;
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            ui.label(legend("calls"));
             let live = calls.iter().filter(|c| c.live(now)).count();
-            ui.label(value(format!("{} heard", calls.len())).size(11.0));
+            let mut head =
+                theme::Line::new().legend("calls").value(format!("{} heard", calls.len())).size(11.0);
             if live > 0 {
-                ui.label(egui::RichText::new(format!("{live} on air")).color(CRC_OK).size(11.0));
+                head = head.value(format!("{live} on air")).tint(CRC_OK).size(11.0);
             }
+            head.show(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(12.0);
+                if ui.add_enabled(!calls.is_empty(), egui::Button::new("Clear calls")).clicked() {
+                    act = Some(Action::Clear);
+                }
+            });
         });
+        ui.add_space(6.0);
+
+        self.mixer(ui);
         ui.add_space(6.0);
 
         if calls.is_empty() {
@@ -65,7 +88,7 @@ impl CallList<'_> {
                      fields the same way.",
                 );
             });
-            return None;
+            return act;
         }
 
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
@@ -168,9 +191,75 @@ impl CallList<'_> {
         }
         // Clicking a row puts the dial on its channel, which is the only
         // other thing anybody wants to do with a call.
-        tune_to
+        act.or(tune_to.map(Action::Tune))
     }
 
+    /// The call bus: one level for every call the front ends decode, its
+    /// mute, and the gain control that rides it.
+    ///
+    /// Here rather than beside the master fader because that is what it
+    /// governs. Sat under the master it looked like a control over the whole
+    /// output, and the gain switch under it looked like a limiter on the
+    /// speaker rather than one on incoming speech.
+    fn mixer(&mut self, ui: &mut egui::Ui) {
+        let level = self.radio.map(|r| r.status.call_level()).unwrap_or(0.0);
+        let gain_db = self.radio.map(|r| r.status.call_gain_db()).unwrap_or(0.0);
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+            widgets::card(
+                ui,
+                Some(theme::READOUT),
+                |ui| {
+                    theme::Line::new()
+                        .legend("call audio")
+                        .note("every call the front ends decode, mixed into the speaker")
+                        .show(ui);
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        theme::Line::new().legend("level").show(ui);
+                        let mut changed = ui
+                            .add(Fader::new(&mut self.audio.call_volume, level).width(VU_W))
+                            .changed();
+                        if crate::icons::icon_button(
+                            ui,
+                            if self.audio.call_muted {
+                                crate::icons::Icon::Mute
+                            } else {
+                                crate::icons::Icon::Sound
+                            },
+                            "Mute call audio",
+                            true,
+                            self.audio.call_muted,
+                        )
+                        .clicked()
+                        {
+                            self.audio.call_muted = !self.audio.call_muted;
+                            changed = true;
+                        }
+                        if changed {
+                            self.cmds.push(Cmd::CallVolume {
+                                volume: self.audio.call_volume,
+                                muted: self.audio.call_muted,
+                            });
+                        }
+                        ui.add_space(12.0);
+                        // A call arrives at whatever level the transmitting
+                        // radio's microphone was set to, which is not
+                        // something a listener can fix at the far end.
+                        if ui
+                            .checkbox(&mut self.audio.call_agc, "Even out the levels")
+                            .changed()
+                        {
+                            self.cmds.push(Cmd::CallAgc(self.audio.call_agc));
+                        }
+                        if self.audio.call_agc && gain_db.abs() > 0.1 {
+                            theme::Line::new().set(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
+                        }
+                    });
+                },
+            );
+        });
+    }
 }
 
 /// Which of the columns after the checkboxes is the meter.

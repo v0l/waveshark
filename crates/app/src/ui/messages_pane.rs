@@ -1,10 +1,12 @@
 //! The message view: what was written, rather than who was talking.
 //!
 //! Text is the one thing on this receiver that is not a number, so it is not
-//! drawn as a table cell clipped to a column. Each message is a block: a
-//! header line saying where it came from and when, and the words underneath
-//! at full width, wrapped. A long page stays readable and a short one takes
-//! one line.
+//! drawn as a table cell clipped to a column. Each message is a card: a
+//! header saying where it came from and when, and the words underneath at
+//! full width, wrapped. A long page stays readable and a short one takes one
+//! line. Striping was doing that job and could not: a message that wraps to
+//! four lines has no edge, and two grey rows next to each other read as one
+//! long message.
 
 use super::state::MessagesState;
 use super::*;
@@ -15,17 +17,29 @@ pub(super) struct Msgs<'a> {
     pub st: &'a mut MessagesState,
 }
 
+/// What the list wants done that it cannot do itself.
+pub(super) enum Action {
+    /// Tune the dial to the channel a message was heard on.
+    Tune(f64),
+    /// Throw the list away.
+    Clear,
+}
+
 impl Msgs<'_> {
-    /// Draw the list, and say which channel a click asked to tune to.
-    pub(super) fn show(self, ui: &mut egui::Ui) -> Option<f64> {
+    /// Draw the list, and say what a click asked for.
+    pub(super) fn show(self, ui: &mut egui::Ui) -> Option<Action> {
         let now = std::time::Instant::now();
         let msgs: Vec<Message> = self.st.list.recent().into_iter().cloned().collect();
+        let mut act = None;
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            ui.label(legend("messages"));
-            ui.label(value(format!("{} received", msgs.len())).size(11.0));
+            theme::Line::new()
+                .legend("messages")
+                .value(format!("{} received", msgs.len()))
+                .size(11.0)
+                .show(ui);
             if !self.st.list.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
@@ -34,9 +48,15 @@ impl Msgs<'_> {
                         .hint_text("filter")
                         .desired_width(160.0),
                 );
-                if !filter.is_empty() && ui.button("clear").clicked() {
+                if !filter.is_empty() && ui.button("Clear filter").clicked() {
                     filter.clear();
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    if ui.button("Clear messages").clicked() {
+                        act = Some(Action::Clear);
+                    }
+                });
             }
         });
         ui.add_space(6.0);
@@ -51,7 +71,7 @@ impl Msgs<'_> {
                      APRS message, a pager page.",
                 );
             });
-            return None;
+            return act;
         }
 
         let needle = self.st.filter.to_lowercase();
@@ -65,63 +85,60 @@ impl Msgs<'_> {
             })
             .collect();
 
-        let mut tune_to = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (n, m) in shown.iter().enumerate() {
-                if n > 0 {
-                    ui.add_space(2.0);
-                }
-                let resp = message_block(ui, m, now, n % 2 == 1);
-                if resp.clicked() {
-                    tune_to = Some(m.channel_hz);
-                }
-            }
+            ui.spacing_mut().item_spacing.y = 6.0;
+            // The cards keep their own margin off the edge of the pane, so
+            // the rule down the left of one is not against the window frame.
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(12, 0))
+                .show(ui, |ui| {
+                    for m in &shown {
+                        if message_card(ui, m, now).clicked() {
+                            act = Some(Action::Tune(m.channel_hz));
+                        }
+                    }
+                });
             ui.add_space(8.0);
         });
-        // The same gesture as the call list: clicking a row puts the dial on
-        // the channel it was heard on.
-        tune_to
+        act
     }
 }
 
-/// One message: header line, then the words.
-fn message_block(
-    ui: &mut egui::Ui,
-    m: &Message,
-    now: std::time::Instant,
-    striped: bool,
-) -> egui::Response {
-    let frame = egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(12, 6))
-        .fill(if striped { Color32::from_rgb(0x24, 0x27, 0x2D) } else { Color32::TRANSPARENT });
-    let inner = frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(legend(&m.system).size(11.0));
-            ui.label(value(format!("{:.4} MHz", m.channel_hz / 1e6)).size(11.0));
+/// One message: a header saying where it came from, then the words.
+fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui::Response {
+    let inner = widgets::card(
+        ui,
+        // Cyan: everything on this card came off the air.
+        Some(theme::TRACE),
+        |ui| {
+            let mut head = theme::Line::new()
+                .legend(&m.system)
+                .value(format!("{:.4} MHz", m.channel_hz / 1e6))
+                .size(11.0);
             let title = m.title();
             if !title.is_empty() {
-                ui.label(egui::RichText::new(title).color(theme::READOUT).size(11.0));
+                head = head.value(title).tint(theme::READOUT).size(11.0);
             }
             // Heard more than once means retransmitted, not sent twice: the
-            // count is here so a row that says 3 is not read as three pages.
+            // count is here so a card that says 3 is not read as three pages.
             if m.heard > 1 {
-                ui.label(legend(&format!("x{}", m.heard)).size(11.0));
+                head = head.legend(&format!("x{}", m.heard));
             }
+            head.show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(legend(&age(m.age(now))).size(11.0));
+                theme::Line::new().legend(&age(m.age(now))).show(ui);
             });
-        });
-        ui.label(
-            egui::RichText::new(&m.text)
-                .color(theme::VALUE)
-                .family(FontFamily::Name(theme::READOUT_FONT.into()))
-                .size(13.0),
-        );
-    });
+        },
+        |ui| {
+            theme::Line::new().words(&m.text).wrapped(ui);
+        },
+    );
+    // The same gesture as the call list: clicking a card puts the dial on
+    // the channel it was heard on.
     ui.interact(inner.response.rect, ui.id().with(m.first).with(&m.text), Sense::click())
 }
 
-/// How long ago, short enough for the corner of a row.
+/// How long ago, short enough for the corner of a header.
 fn age(d: std::time::Duration) -> String {
     let s = d.as_secs();
     match s {

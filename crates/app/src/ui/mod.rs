@@ -1049,24 +1049,29 @@ impl App {
         self.open = Some(Settings::Scanners);
     }
 
-    /// Draw the call list, then tune to the row that was clicked.
+    /// Draw the call list, then do what its buttons asked for.
     fn call_view(&mut self, ui: &mut egui::Ui) {
-        let tune = calls_pane::CallList {
+        let act = calls_pane::CallList {
             st: &mut self.calls,
+            audio: &mut self.audio,
             radio: self.radio.as_ref(),
             cmds: &mut self.cmds,
         }
         .show(ui);
-        if let Some(hz) = tune {
-            self.set_center(hz / 1e6);
+        match act {
+            Some(calls_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
+            Some(calls_pane::Action::Clear) => self.calls.list.clear(),
+            None => {}
         }
     }
 
-    /// Draw the message list, then tune to the row that was clicked.
+    /// Draw the message list, then do what its buttons asked for.
     fn message_view(&mut self, ui: &mut egui::Ui) {
-        let tune = messages_pane::Msgs { st: &mut self.messages }.show(ui);
-        if let Some(hz) = tune {
-            self.set_center(hz / 1e6);
+        let act = messages_pane::Msgs { st: &mut self.messages }.show(ui);
+        match act {
+            Some(messages_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
+            Some(messages_pane::Action::Clear) => self.messages.list.clear(),
+            None => {}
         }
     }
 

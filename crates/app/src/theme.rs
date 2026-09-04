@@ -5,6 +5,7 @@
 //! you set; cyan is everything the radio hears. Keeping that split consistent
 //! means a glance tells you whether a number came from you or from the air.
 
+use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, CornerRadius, FontFamily, FontId, RichText, Stroke, TextStyle};
 
 /// Deepest surface, the case itself.
@@ -177,6 +178,117 @@ pub fn value(text: impl Into<String>) -> RichText {
         .color(VALUE)
 }
 
+/// Sizes the panel is set in. Two, so a line is either a caption or a
+/// reading and there is no third size to invent.
+pub const LEGEND_SIZE: f32 = 11.5;
+pub const VALUE_SIZE: f32 = 13.0;
+
+/// Space between two spans of one line, matching the style's item spacing so
+/// a line reads the same whether it was built here or laid out as widgets.
+const SPAN_GAP: f32 = 8.0;
+
+/// A line of text in more than one voice, set as a single galley.
+///
+/// A legend and its value are different faces at different sizes, and putting
+/// them in a `ui.horizontal` gives each its own galley, which egui then
+/// centres against the others: the two sit on different baselines and the row
+/// looks a millimetre out everywhere it appears. One `LayoutJob` lays every
+/// span out against the row's own metrics, which puts them on one baseline to
+/// within a pixel, and wraps them together.
+#[derive(Default)]
+pub struct Line {
+    job: LayoutJob,
+}
+
+impl Line {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn face(name: &'static str, size: f32, colour: Color32) -> TextFormat {
+        TextFormat {
+            font_id: FontId::new(size, FontFamily::Name(name.into())),
+            color: colour,
+            ..Default::default()
+        }
+    }
+
+    fn add(mut self, text: impl Into<String>, format: TextFormat) -> Self {
+        let lead = match self.job.sections.is_empty() {
+            true => 0.0,
+            false => SPAN_GAP,
+        };
+        self.job.append(&text.into(), lead, format);
+        self
+    }
+
+    /// A silkscreened caption: condensed, uppercase, widely tracked.
+    pub fn legend(self, text: &str) -> Self {
+        let mut f = Self::face(LEGEND_FONT, LEGEND_SIZE, LEGEND);
+        f.extra_letter_spacing = 1.6;
+        self.add(text.to_uppercase(), f)
+    }
+
+    /// A reading, in tabular figures.
+    pub fn value(self, text: impl Into<String>) -> Self {
+        self.add(text, Self::face(READOUT_FONT, VALUE_SIZE, VALUE))
+    }
+
+    /// A reading of something the operator set.
+    pub fn set(self, text: impl Into<String>) -> Self {
+        self.add(text, Self::face(READOUT_FONT, VALUE_SIZE, READOUT))
+    }
+
+    /// A reading of something the radio heard.
+    pub fn heard(self, text: impl Into<String>) -> Self {
+        self.add(text, Self::face(READOUT_FONT, VALUE_SIZE, TRACE))
+    }
+
+    /// Prose: a sentence somebody reads rather than a field they scan.
+    pub fn note(self, text: impl Into<String>) -> Self {
+        self.add(
+            text,
+            TextFormat {
+                font_id: FontId::proportional(12.0),
+                color: LEGEND,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Words off the air, which are neither a caption nor a number.
+    pub fn words(self, text: impl Into<String>) -> Self {
+        self.add(text, Self::face(READOUT_FONT, VALUE_SIZE, VALUE))
+    }
+
+    /// Recolour the span just added.
+    pub fn tint(mut self, colour: Color32) -> Self {
+        if let Some(s) = self.job.sections.last_mut() {
+            s.format.color = colour;
+        }
+        self
+    }
+
+    /// Resize the span just added.
+    pub fn size(mut self, px: f32) -> Self {
+        if let Some(s) = self.job.sections.last_mut() {
+            s.format.font_id.size = px;
+        }
+        self
+    }
+
+    pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
+        ui.add(egui::Label::new(self.job))
+    }
+
+    /// The same line, allowed to wrap into the width available. For prose and
+    /// for anything off the air, whose length nobody here chose.
+    pub fn wrapped(mut self, ui: &mut egui::Ui) -> egui::Response {
+        self.job.wrap.max_width = ui.available_width();
+        ui.add(egui::Label::new(self.job))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -250,9 +362,31 @@ mod tests {
         assert!(luma(READOUT_DIM) < luma(READOUT) * 0.6);
     }
 
+    /// The reason `Line` exists. Two labels in a `ui.horizontal` are two
+    /// galleys, and egui centres them against each other, so a legend beside
+    /// a value sits a pixel low and every row on the panel is out by a
+    /// different amount. One layout job puts them on one baseline.
+    #[test]
+    fn spans_of_different_sizes_share_a_baseline() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        // No fonts exist until a frame has been run.
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let job = Line::new().legend("squelch").value("-42 dBFS").size(11.0).job;
+        let galley = ctx.fonts_mut(|f| f.layout_job(job));
+        assert_eq!(galley.rows.len(), 1, "a short line wrapped");
+        let baselines: Vec<f32> = galley.rows[0].glyphs.iter().map(|g| g.pos.y).collect();
+        let (lo, hi) = (
+            baselines.iter().cloned().fold(f32::MAX, f32::min),
+            baselines.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        assert!(hi - lo <= 1.0, "baselines differ by {:.2} px", hi - lo);
+    }
+
     #[test]
     fn fault_is_distinct_from_the_amber_readout() {
         let d = (FAULT.g() as i32 - READOUT.g() as i32).abs();
         assert!(d > 40, "fault and readout differ by only {d} in green");
     }
 }
+

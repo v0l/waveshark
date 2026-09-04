@@ -86,6 +86,10 @@ impl Messages {
         self.seen.is_empty()
     }
 
+    pub fn clear(&mut self) {
+        self.seen.clear();
+    }
+
     /// Fold one decode in, if it carried text at all.
     ///
     /// Returns whether it did. An empty string is not a message: a link setup
