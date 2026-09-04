@@ -103,6 +103,9 @@ pub enum TrackId {
     /// than a number because that is what the protocol issues: this is the
     /// variant the enum existed to make room for.
     Call(String),
+    /// A Meshtastic node number, written as the mesh writes it: `!` and
+    /// eight hex digits.
+    Mesh(u32),
 }
 
 impl TrackId {
@@ -112,6 +115,7 @@ impl TrackId {
             TrackId::Icao(v) => format!("{v:06x}"),
             TrackId::Mmsi(v) => v.to_string(),
             TrackId::Call(c) => c.clone(),
+            TrackId::Mesh(v) => format!("!{v:08x}"),
         }
     }
 }
@@ -155,6 +159,19 @@ pub enum Detail {
         /// Fixed rather than moving, decided by the symbol.
         fixed: bool,
     },
+    /// A Meshtastic node, from its position, node info and telemetry
+    /// packets on the public default channel. Anything is a node: a
+    /// handheld in a pocket, a solar router on a hill, so it is drawn as
+    /// something that may move.
+    Mesh {
+        long_name: Option<String>,
+        short_name: Option<String>,
+        altitude_m: Option<i32>,
+        battery_pct: Option<u32>,
+        /// Bits of the coordinates the node chose to send; fewer is a
+        /// deliberately blurred position.
+        precision_bits: Option<u32>,
+    },
 }
 
 impl Detail {
@@ -177,6 +194,7 @@ impl Detail {
             Detail::Aprs { symbol_code, symbol_table, fixed, .. } => {
                 aprs_kind(*symbol_table, *symbol_code, *fixed)
             }
+            Detail::Mesh { .. } => Kind::Vehicle,
         }
     }
 }
@@ -512,6 +530,74 @@ impl Tracks {
         }
     }
 
+    /// Fold in one Meshtastic packet that was read against the default key.
+    ///
+    /// A position moves the node; node info names it; telemetry says how
+    /// its battery is. A text message is evidence it is there and nothing
+    /// more, and a packet whose payload did not open is not evidence of a
+    /// position at all.
+    pub fn update_mesh(
+        &mut self,
+        source: u32,
+        message: &decode::meshtastic::Message,
+        at: std::time::Instant,
+    ) {
+        use decode::meshtastic::Message;
+        let id = TrackId::Mesh(source);
+        let i = self.entry(
+            id,
+            Detail::Mesh {
+                long_name: None,
+                short_name: None,
+                altitude_m: None,
+                battery_pct: None,
+                precision_bits: None,
+            },
+            at,
+        );
+        let e = &mut self.seen[i];
+        e.track.messages += 1;
+        e.track.last = at;
+        let Detail::Mesh { long_name, short_name, altitude_m, battery_pct, precision_bits } =
+            &mut e.track.detail
+        else {
+            return;
+        };
+        match message {
+            Message::Position(p) => {
+                if let Some(a) = p.altitude {
+                    *altitude_m = Some(a);
+                }
+                if p.precision_bits.is_some() {
+                    *precision_bits = p.precision_bits;
+                }
+                if let Some(v) = p.ground_speed {
+                    // Metres a second on the air; the table reads knots.
+                    e.track.speed_kt = Some(f64::from(v) * 1.943_844);
+                }
+                if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
+                    // Absolute, and behind the packet's own CRC.
+                    e.track.set_position((lat, lon), at, true);
+                }
+            }
+            Message::NodeInfo(u) => {
+                if !u.long_name.is_empty() {
+                    *long_name = Some(u.long_name.clone());
+                    e.track.label = Some(u.long_name.clone());
+                }
+                if !u.short_name.is_empty() {
+                    *short_name = Some(u.short_name.clone());
+                }
+            }
+            Message::Telemetry(t) => {
+                if let Some(b) = t.battery_level {
+                    *battery_pct = Some(b);
+                }
+            }
+            Message::Text(_) | Message::Opaque => {}
+        }
+    }
+
     /// Fold in one Mode S frame.
     pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
         let Some(icao) = frame.icao else { return };
@@ -718,6 +804,12 @@ impl pipeline::node::Simple for TracksNode {
             } else if dsp::afsk::is_packet_band(packet.center_hz as f64) {
                 if let Ok(f) = ax25::parse(bytes) {
                     self.tracks.update_aprs(&f, at);
+                }
+            } else if let Some(r) = decode::lora::Received::parse(bytes) {
+                // A LoRa frame is a LoRa frame on any band; what identifies
+                // a Meshtastic node is the envelope in front of its payload.
+                if let (Some(m), Some(d)) = (r.meshtastic(), r.meshtastic_message()) {
+                    self.tracks.update_mesh(m.source, &d.message, at);
                 }
             } else if let Ok(f) = adsb::parse(bytes) {
                 self.tracks.update_adsb(&f, at);
@@ -1132,5 +1224,44 @@ mod tests {
         let mut f = Tracks::new();
         f.update_adsb(&frame("5D4007FB3E0376"), now);
         assert!(f.active(now).is_empty());
+    }
+
+    #[test]
+    fn a_meshtastic_node_is_placed_and_named() {
+        use decode::meshtastic::{Message, Position, User};
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        t.update_mesh(
+            0x050d_3664,
+            &Message::Position(Position {
+                latitude: Some(53.64),
+                longitude: Some(-6.65),
+                altitude: Some(80),
+                time: None,
+                sats_in_view: Some(7),
+                precision_bits: Some(32),
+                ground_speed: None,
+            }),
+            now,
+        );
+        t.update_mesh(
+            0x050d_3664,
+            &Message::NodeInfo(User {
+                id: "!050d3664".into(),
+                long_name: "Kitchen".into(),
+                short_name: "KTCH".into(),
+                hw_model: 0,
+                role: 0,
+                is_licensed: false,
+                has_public_key: false,
+            }),
+            now,
+        );
+        let n = t.active(now).into_iter().find(|x| x.id == TrackId::Mesh(0x050d_3664)).expect("a node");
+        assert_eq!(n.id.text(), "!050d3664");
+        assert_eq!(n.label.as_deref(), Some("Kitchen"));
+        let (lat, lon) = n.position.expect("placed");
+        assert!((lat - 53.64).abs() < 1e-6 && (lon + 6.65).abs() < 1e-6);
+        assert_eq!(n.kind(), Kind::Vehicle);
     }
 }

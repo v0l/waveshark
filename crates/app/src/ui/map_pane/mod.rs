@@ -272,6 +272,19 @@ impl Map<'_> {
                             .unwrap_or_else(|| dash.clone()),
                         theme::LEGEND,
                     ),
+                    crate::tracks::Detail::Mesh { short_name, altitude_m, battery_pct, .. } => {
+                        let mut parts = Vec::new();
+                        if let Some(s) = short_name {
+                            parts.push(s.clone());
+                        }
+                        if let Some(b) = battery_pct {
+                            parts.push(if *b > 100 { "on power".into() } else { format!("{b}%") });
+                        }
+                        if let Some(a) = altitude_m {
+                            parts.push(format!("{a} m"));
+                        }
+                        (if parts.is_empty() { dash.clone() } else { parts.join(", ") }, theme::LEGEND)
+                    }
                 };
                 let kind = match a.kind() {
                     Kind::Aircraft => "air",
