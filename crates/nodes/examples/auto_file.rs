@@ -21,7 +21,12 @@ fn main() {
     let mut slow_blocks = 0usize;
     for (i, b) in iq.chunks(block).enumerate() {
         let t = std::time::Instant::now();
-        g.feed_iq(b).unwrap();
+        let evs = g.feed_iq(b).unwrap();
+        if std::env::var_os("EVENTS").is_some() {
+            for e in evs {
+                eprintln!("EV at {:.3}s: {e:?}", i as f64 * block as f64 / rate);
+            }
+        }
         for p in g.output().as_packets().unwrap_or(&[]) {
             packets += 1;
             if let common::PacketBody::Frame(b) = &p.body {
