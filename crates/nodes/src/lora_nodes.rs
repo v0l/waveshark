@@ -87,6 +87,12 @@ pub struct LoraNode {
     /// dechirping per block, six times over, and a strong signal's image
     /// held open for that long took the whole receiver under real time.
     scanned: Vec<usize>,
+    /// Samples `held` must reach before a packet found still in progress
+    /// is read again. Every block otherwise re-read the whole of it, from
+    /// its preamble to the buffer's end, and a 640 ms packet cost the last
+    /// of its blocks tens of milliseconds each. Eight symbols later is soon
+    /// enough to notice that it ended.
+    retry_at: usize,
     /// Samples at [`OVERSAMPLE`] per chip, waiting to be read.
     held: Vec<C32>,
     /// Most samples held before the oldest are dropped.
@@ -113,6 +119,7 @@ impl LoraNode {
             pending: Vec::new(),
             demods: Vec::new(),
             scanned: Vec::new(),
+            retry_at: 0,
             held: Vec::new(),
             hold: 0,
             decoded: 0,
@@ -241,6 +248,10 @@ impl Simple for LoraNode {
             self.resample_pos -= consumed as f64;
         }
 
+        if self.held.len() < self.retry_at {
+            return Ok(());
+        }
+        self.retry_at = 0;
         loop {
             // The one that has worked before is asked first, both because it
             // is usually right and because a wrong spreading factor can find
@@ -264,6 +275,7 @@ impl Simple for LoraNode {
                     // samples and asking again is the whole point of holding
                     // them; decoding now would report a truncated packet as
                     // a CRC failure, which is a worse answer than silence.
+                    self.retry_at = self.held.len() + 8 * self.demods[k].symbol_len();
                     return Ok(());
                 }
                 found = Some(p);
@@ -335,6 +347,7 @@ impl Simple for LoraNode {
     fn reset(&mut self) {
         self.held.clear();
         self.scanned.fill(0);
+        self.retry_at = 0;
         self.pending.clear();
         self.resample_pos = 0.0;
         self.locked_sf = None;
