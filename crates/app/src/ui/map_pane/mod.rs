@@ -173,20 +173,25 @@ impl Map<'_> {
         // and the one column that differs is named for what it holds. An
         // altitude column full of dashes beside every vessel is worse than a
         // column that says "altitude / status".
-        const COLS: [(&str, f32); 10] = [
+        const COLS: [(&str, f32); 11] = [
             ("name", 100.0),
             ("id", 80.0),
             ("kind", 62.0),
-            ("alt / status", 96.0),
+            ("status", 110.0),
             ("speed", 70.0),
             ("course", 60.0),
             ("position", 170.0),
-            // Both come from Mode S replies to a radar rather than from any
-            // broadcast, so they fill in for aircraft under interrogation and
-            // stay blank for everything else, vessels included. Blank rather
-            // than a dash: nothing is missing from a ship that has no squawk.
+            // Beside the position, since it is the third coordinate of it.
+            ("alt", 64.0),
+            // The squawk comes from Mode S replies to a radar rather than
+            // from any broadcast, so it fills in for aircraft under
+            // interrogation and stays blank for everything else, vessels
+            // included. Blank rather than a dash: nothing is missing from a
+            // ship that has no squawk. The weather is whatever the thing
+            // measured where it is: an aircraft's wind and air temperature
+            // out of its registers, a mesh node's sensor readings.
             ("squawk", 64.0),
-            ("wind / temp", 130.0),
+            ("weather", 150.0),
             ("msgs", 56.0),
         ];
         // Wide enough that the last column is not clipped when the channel
@@ -237,13 +242,38 @@ impl Map<'_> {
                             (None, None) => String::new(),
                         },
                     ),
+                    crate::tracks::Detail::Mesh { temperature_c, humidity_pct, pressure_hpa, .. } => {
+                        let mut parts = Vec::new();
+                        if let Some(t) = temperature_c {
+                            parts.push(format!("{t:.1} C"));
+                        }
+                        if let Some(h) = humidity_pct {
+                            parts.push(format!("{h:.0}%"));
+                        }
+                        if let Some(p) = pressure_hpa {
+                            parts.push(format!("{p:.0} hPa"));
+                        }
+                        (String::new(), parts.join("  "))
+                    }
                     _ => (String::new(), String::new()),
                 };
+                let alt = match &a.detail {
+                    crate::tracks::Detail::Aircraft { altitude_ft, .. }
+                    | crate::tracks::Detail::Aprs { altitude_ft, .. } => {
+                        altitude_ft.map(|v| format!("{v} ft"))
+                    }
+                    crate::tracks::Detail::Mesh { altitude_m, .. } => altitude_m.map(|v| format!("{v} m")),
+                    _ => None,
+                }
+                .unwrap_or_else(|| dash.clone());
                 let (state, state_col) = match &a.detail {
-                    crate::tracks::Detail::Aircraft {
-                        altitude_ft, vertical_rate_fpm, ..
-                    } => (
-                        altitude_ft.map(|v| format!("{v} ft")).unwrap_or_else(|| dash.clone()),
+                    crate::tracks::Detail::Aircraft { vertical_rate_fpm, .. } => (
+                        match vertical_rate_fpm {
+                            Some(v) if *v > 128 => format!("climbing {v} fpm"),
+                            Some(v) if *v < -128 => format!("descending {} fpm", -v),
+                            Some(_) => "level".to_string(),
+                            None => dash.clone(),
+                        },
                         // Climb and descent are worth telling apart at a
                         // glance; level flight is not worth colouring at all.
                         match vertical_rate_fpm {
@@ -265,23 +295,16 @@ impl Map<'_> {
                     ),
                     // An APRS station says what it is in a comment more often
                     // than in any field, so that is what the column shows.
-                    crate::tracks::Detail::Aprs { comment, altitude_ft, .. } => (
-                        comment
-                            .clone()
-                            .or_else(|| altitude_ft.map(|v| format!("{v} ft")))
-                            .unwrap_or_else(|| dash.clone()),
-                        theme::LEGEND,
-                    ),
-                    crate::tracks::Detail::Mesh { short_name, altitude_m, battery_pct, .. } => {
+                    crate::tracks::Detail::Aprs { comment, .. } => {
+                        (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
+                    }
+                    crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
                         let mut parts = Vec::new();
                         if let Some(s) = short_name {
                             parts.push(s.clone());
                         }
                         if let Some(b) = battery_pct {
                             parts.push(if *b > 100 { "on power".into() } else { format!("{b}%") });
-                        }
-                        if let Some(a) = altitude_m {
-                            parts.push(format!("{a} m"));
                         }
                         (if parts.is_empty() { dash.clone() } else { parts.join(", ") }, theme::LEGEND)
                     }
@@ -311,6 +334,7 @@ impl Map<'_> {
                             .unwrap_or_else(|| dash.clone()),
                         theme::TRACE,
                     ),
+                    (alt, theme::VALUE),
                     (squawk, theme::VALUE),
                     (weather, theme::TRACE),
                     (a.messages.to_string(), theme::LEGEND),

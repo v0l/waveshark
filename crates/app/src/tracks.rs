@@ -171,6 +171,10 @@ pub enum Detail {
         /// Bits of the coordinates the node chose to send; fewer is a
         /// deliberately blurred position.
         precision_bits: Option<u32>,
+        /// Environment telemetry, where the node has a sensor for it.
+        temperature_c: Option<f32>,
+        humidity_pct: Option<f32>,
+        pressure_hpa: Option<f32>,
     },
 }
 
@@ -552,14 +556,25 @@ impl Tracks {
                 altitude_m: None,
                 battery_pct: None,
                 precision_bits: None,
+                temperature_c: None,
+                humidity_pct: None,
+                pressure_hpa: None,
             },
             at,
         );
         let e = &mut self.seen[i];
         e.track.messages += 1;
         e.track.last = at;
-        let Detail::Mesh { long_name, short_name, altitude_m, battery_pct, precision_bits } =
-            &mut e.track.detail
+        let Detail::Mesh {
+            long_name,
+            short_name,
+            altitude_m,
+            battery_pct,
+            precision_bits,
+            temperature_c,
+            humidity_pct,
+            pressure_hpa,
+        } = &mut e.track.detail
         else {
             return;
         };
@@ -592,6 +607,15 @@ impl Tracks {
             Message::Telemetry(t) => {
                 if let Some(b) = t.battery_level {
                     *battery_pct = Some(b);
+                }
+                if t.temperature.is_some() {
+                    *temperature_c = t.temperature;
+                }
+                if t.relative_humidity.is_some() {
+                    *humidity_pct = t.relative_humidity;
+                }
+                if t.barometric_pressure.is_some() {
+                    *pressure_hpa = t.barometric_pressure;
                 }
             }
             Message::Text(_) | Message::Opaque => {}
