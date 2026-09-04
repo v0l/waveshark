@@ -173,9 +173,10 @@ impl Map<'_> {
         // and the one column that differs is named for what it holds. An
         // altitude column full of dashes beside every vessel is worse than a
         // column that says "altitude / status".
-        const COLS: [(&str, f32); 11] = [
+        const COLS: [(&str, f32); 12] = [
             ("name", 100.0),
             ("id", 80.0),
+            ("system", 76.0),
             ("kind", 62.0),
             ("status", 110.0),
             ("speed", 70.0),
@@ -308,6 +309,7 @@ impl Map<'_> {
                         }
                         (if parts.is_empty() { dash.clone() } else { parts.join(", ") }, theme::LEGEND)
                     }
+                    crate::tracks::Detail::MeshCore { role, .. } => (role.to_string(), theme::LEGEND),
                 };
                 let kind = match a.kind() {
                     Kind::Aircraft => "air",
@@ -318,6 +320,7 @@ impl Map<'_> {
                 let text = [
                     (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
                     (a.id.text(), theme::VALUE),
+                    (a.id.system().to_string(), theme::LEGEND),
                     (kind.to_string(), theme::LEGEND),
                     (state, state_col),
                     (

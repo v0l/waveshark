@@ -389,6 +389,8 @@ mod tests {
             dc_block: false,
             decode_on: false,
             volume: 0.25,
+            log_cap_mb: None,
+            capture_cap_mb: Some(16_384),
             view: ViewPrefs {
                 rows_per_sec: 40.0,
                 wf_rows: 1024,

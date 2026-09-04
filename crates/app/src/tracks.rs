@@ -106,6 +106,9 @@ pub enum TrackId {
     /// A Meshtastic node number, written as the mesh writes it: `!` and
     /// eight hex digits.
     Mesh(u32),
+    /// A MeshCore node's Ed25519 public key, which is its identity; other
+    /// packets address it by the first byte.
+    MeshCore([u8; 32]),
 }
 
 impl TrackId {
@@ -116,6 +119,21 @@ impl TrackId {
             TrackId::Mmsi(v) => v.to_string(),
             TrackId::Call(c) => c.clone(),
             TrackId::Mesh(v) => format!("!{v:08x}"),
+            // The hash other nodes use, then enough of the key to tell two
+            // nodes with the same hash apart.
+            TrackId::MeshCore(k) => format!("{:02x}:{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]),
+        }
+    }
+
+    /// Which system the track was heard on. A map with aircraft, ships and
+    /// two kinds of mesh on it needs to say which is which somewhere.
+    pub fn system(&self) -> &'static str {
+        match self {
+            TrackId::Icao(_) => "ADS-B",
+            TrackId::Mmsi(_) => "AIS",
+            TrackId::Call(_) => "APRS",
+            TrackId::Mesh(_) => "Meshtastic",
+            TrackId::MeshCore(_) => "MeshCore",
         }
     }
 }
@@ -176,6 +194,13 @@ pub enum Detail {
         humidity_pct: Option<f32>,
         pressure_hpa: Option<f32>,
     },
+    /// A MeshCore node, from its advert, which is in the clear on every
+    /// network. What it is decides how it is drawn: a repeater, a room
+    /// server or a sensor is installed somewhere, a chat node is carried.
+    MeshCore {
+        role: &'static str,
+        fixed: bool,
+    },
 }
 
 impl Detail {
@@ -199,6 +224,7 @@ impl Detail {
                 aprs_kind(*symbol_table, *symbol_code, *fixed)
             }
             Detail::Mesh { .. } => Kind::Vehicle,
+            Detail::MeshCore { fixed, .. } => if *fixed { Kind::Station } else { Kind::Vehicle },
         }
     }
 }
@@ -622,6 +648,24 @@ impl Tracks {
         }
     }
 
+    /// Fold in a MeshCore advert.
+    pub fn update_meshcore(&mut self, a: &decode::meshcore::Advert, at: std::time::Instant) {
+        use decode::meshcore::NodeType;
+        let fixed = matches!(a.node_type, NodeType::Repeater | NodeType::RoomServer | NodeType::Sensor);
+        let id = TrackId::MeshCore(a.public_key);
+        let i = self.entry(id, Detail::MeshCore { role: a.node_type.name(), fixed }, at);
+        let e = &mut self.seen[i];
+        e.track.messages += 1;
+        e.track.last = at;
+        e.track.detail = Detail::MeshCore { role: a.node_type.name(), fixed };
+        if let Some(n) = &a.name {
+            e.track.label = Some(n.clone());
+        }
+        if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+            e.track.set_position((lat, lon), at, true);
+        }
+    }
+
     /// Fold in one Mode S frame.
     pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
         let Some(icao) = frame.icao else { return };
@@ -831,9 +875,12 @@ impl pipeline::node::Simple for TracksNode {
                 }
             } else if let Some(r) = decode::lora::Received::parse(bytes) {
                 // A LoRa frame is a LoRa frame on any band; what identifies
-                // a Meshtastic node is the envelope in front of its payload.
-                if let (Some(m), Some(d)) = (r.meshtastic(), r.meshtastic_message()) {
+                // a Meshtastic node is the envelope in front of its payload,
+                // and a MeshCore node its advert, which is in the clear.
+                if let (Some(m), Some((d, _))) = (r.meshtastic(), r.meshtastic_message_on()) {
                     self.tracks.update_mesh(m.source, &d.message, at);
+                } else if let Some(a) = r.meshcore().filter(|p| p.corroborated()).and_then(|p| p.advert()) {
+                    self.tracks.update_meshcore(&a, at);
                 }
             } else if let Ok(f) = adsb::parse(bytes) {
                 self.tracks.update_adsb(&f, at);
@@ -1240,6 +1287,35 @@ mod tests {
         let named = list.iter().find(|a| a.label.as_deref() == Some("EXS2MF"));
         assert!(named.is_some(), "the callsign register named the aircraft");
         assert_eq!(named.unwrap().altitude_ft(), Some(38_000));
+    }
+
+    /// A repeater's advert puts it on the map as something fixed, named,
+    /// and labelled as MeshCore beside the aircraft and ships.
+    #[test]
+    fn a_meshcore_advert_places_a_node() {
+        let now = std::time::Instant::now();
+        let mut key = [0u8; 32];
+        key[0] = 0x22;
+        key[1..4].copy_from_slice(&[0x7a, 0xa8, 0x8f]);
+        let a = decode::meshcore::Advert {
+            public_key: key,
+            timestamp: 1_700_000_000,
+            signature: [0; 64],
+            node_type: decode::meshcore::NodeType::Repeater,
+            latitude: Some(53.608448),
+            longitude: Some(-6.684672),
+            name: Some("Balbriggan Repeater".into()),
+        };
+        let mut t = Tracks::new();
+        t.update_meshcore(&a, now);
+        let list = t.active(now);
+        let n = list.iter().find(|x| x.id == TrackId::MeshCore(key)).expect("a node");
+        assert_eq!(n.id.text(), "22:7aa88f");
+        assert_eq!(n.id.system(), "MeshCore");
+        assert_eq!(n.label.as_deref(), Some("Balbriggan Repeater"));
+        assert_eq!(n.kind(), Kind::Station);
+        let (lat, lon) = n.position.expect("placed");
+        assert!((lat - 53.608448).abs() < 1e-6 && (lon + 6.684672).abs() < 1e-6);
     }
 
     #[test]
