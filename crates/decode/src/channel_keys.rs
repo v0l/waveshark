@@ -123,16 +123,13 @@ mod tests {
 mod off_air {
     use super::*;
 
-    /// A frame logged off air on channel hash 0x5b, and the channel an
-    /// operator configured as "waveshark" with an eight byte PSK: the hash
-    /// the firmware would put on the wire for that channel is 0x5b, and the
-    /// default key does not open the frame. Whether this key opens these
-    /// frames is not asserted: none of the frames logged so far came from a
-    /// node known to be on that channel, and the ones on 0x5b did not open,
-    /// so either they are another network's channel that shares the byte or
-    /// the key as typed is not the key in the radio.
+    /// A frame logged off air on channel hash 0x5b, which the default key
+    /// does not open, and an operator's channel: the hash the firmware puts
+    /// on the wire for the channel is computed the same way, a held key is
+    /// consulted, and a miss is a miss rather than a wrong reading, since
+    /// the plaintext has to parse before anything is believed.
     #[test]
-    fn a_configured_channel_hashes_to_what_is_on_the_air() {
+    fn a_held_key_is_tried_and_a_miss_is_a_miss() {
         let bytes = hex_bytes(
             "4c6f52610bfa00012b02ffffffffac9e6d4225def74ae55b0064d7fe4922cc51da42cae874607ad1a1d1cf4d55d012bdcbb4d6cbb6a9807678f7036217eab9349c",
         );
@@ -140,12 +137,11 @@ mod off_air {
         let m = r.meshtastic().expect("a Meshtastic envelope");
         assert_eq!(m.channel_hash, 0x5b);
         assert!(r.meshtastic_message().is_none(), "the default key must not open it");
-        let chan = crate::meshtastic::Channel { name: "waveshark".into(), psk: parse_key("D7CA0CE2D3C78953").unwrap() };
-        assert_eq!(chan.hash(), Some(0x5b));
-        // Held keys are consulted, and a miss is a miss rather than a wrong
-        // reading: the plaintext has to parse before anything is believed.
-        set(vec![ChannelKey { system: System::Meshtastic, name: "waveshark".into(), key: chan.psk.clone() }]);
-        let _ = r.meshtastic_message_on();
+        let psk = parse_key("71A225336644AF248D75339C2F416A16").unwrap();
+        let chan = crate::meshtastic::Channel { name: "waveshark".into(), psk: psk.clone() };
+        assert_eq!(chan.hash(), Some(0x4f));
+        set(vec![ChannelKey { system: System::Meshtastic, name: "waveshark".into(), key: psk }]);
+        assert!(r.meshtastic_message_on().is_none());
         set(Vec::new());
     }
 

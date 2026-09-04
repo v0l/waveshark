@@ -24,7 +24,8 @@ fn main() {
                 opened += 1;
                 eprintln!("  {:08x} -> {:?}", m.source, d.message);
             } else {
-                eprintln!("  {:08x} id {:08x} hash {:02x}: {} bytes, did not open", m.source, m.packet_id, m.channel_hash, ct.len());
+                let plain = decode::meshtastic::decrypt_with(ct, m.source, m.packet_id, chan.key().unwrap());
+                eprintln!("  {:08x} id {:08x} hash {:02x}: {} bytes, did not open: {}", m.source, m.packet_id, m.channel_hash, ct.len(), decode::channel_keys::hex(&plain));
             }
         }
     }
