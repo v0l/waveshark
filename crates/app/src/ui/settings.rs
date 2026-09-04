@@ -355,21 +355,14 @@ impl App {
             }
         });
 
-        row(ui, "size limit", |ui| {
+        row(ui, "folder limit", |ui| {
             let mut cap = self.log_cap_mb;
             egui::ComboBox::from_id_salt("log_cap")
-                .selected_text(match cap {
-                    Some(mb) => format!("{mb} MB per day"),
-                    None => "no limit".into(),
-                })
+                .selected_text(size_label(cap))
                 .width(160.0)
                 .show_ui(ui, |ui| {
-                    for opt in [Some(128u64), Some(512), Some(2048), Some(8192), None] {
-                        let label = match opt {
-                            Some(mb) => format!("{mb} MB per day"),
-                            None => "no limit".into(),
-                        };
-                        ui.selectable_value(&mut cap, opt, label);
+                    for opt in [Some(512u64), Some(2048), Some(8192), Some(32_768), None] {
+                        ui.selectable_value(&mut cap, opt, size_label(opt));
                     }
                 });
             if cap != self.log_cap_mb {
@@ -377,69 +370,22 @@ impl App {
                 self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
             }
         });
-        hint(ui, "A runaway guard, not a budget.");
+        hint(
+            ui,
+            "What the whole folder may take. The oldest days are deleted to keep it \
+             under, so the log rolls rather than stopping.",
+        );
         ui.add_space(10.0);
 
-        row(ui, "today", |ui| {
+        row(ui, "on disk", |ui| {
             ui.label(value(format!("{} in {logged} packets", human_bytes(bytes))).size(11.0));
         });
         if full {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(
-                        "The log has stopped: the day's file reached the limit. \
+                        "The log has stopped: today's file is over the limit on its own. \
                          Raise it here to start again.",
-                    )
-                    .small()
-                    .color(theme::FAULT),
-                )
-                .wrap(),
-            );
-        }
-
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(6.0);
-        ui.label(legend("raw capture"));
-        hint(
-            ui,
-            "The whole span to one file, as it arrives. This is the recording to \
-             make when the receiver shows a transmission and reads nothing from \
-             it: replaying the file puts the same samples through the same \
-             graph, so a decoder can be changed and tried again.",
-        );
-        ui.add_space(8.0);
-
-        let (cap_on, cap_bytes, cap_full, cap_file) = match &self.radio {
-            Some(r) => {
-                use std::sync::atomic::Ordering;
-                (
-                    r.status.capture_on.load(Ordering::Relaxed),
-                    r.status.capture_bytes.load(Ordering::Relaxed),
-                    r.status.capture_full.load(Ordering::Relaxed),
-                    r.status.capture_file.lock().clone(),
-                )
-            }
-            None => (false, 0, false, None),
-        };
-        let mut on = cap_on;
-        if ui.checkbox(&mut on, "Capture the raw span").changed() {
-            self.set_capture(on);
-        }
-        row(ui, "written", |ui| {
-            ui.label(value(human_bytes(cap_bytes)).size(11.0));
-        });
-        if let Some(f) = &cap_file {
-            row(ui, "file", |ui| {
-                ui.add(egui::Label::new(value(f).size(11.0)).wrap());
-            });
-        }
-        if cap_full {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(
-                        "The capture stopped at its size limit. Switch it off and \
-                         on again for a new file.",
                     )
                     .small()
                     .color(theme::FAULT),
@@ -862,7 +808,6 @@ impl App {
         if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
         {
             ui.label(legend("this device has no adjustable stages"));
-            return;
         }
 
         for (stage, mode) in &controls.stages {
@@ -975,8 +920,102 @@ impl App {
             .small()
             .color(theme::LEGEND),
         );
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        self.raw_capture(ui);
     }
 
+    /// Writing the span to disk exactly as it arrives.
+    ///
+    /// Here rather than with the packet log, where it used to be. Both write
+    /// to disk and that is all they have in common: the log holds what the
+    /// demodulators made of a burst, and this holds the samples themselves,
+    /// for the transmission nothing made anything of. Two capture switches on
+    /// one panel meant picking the wrong one and finding out an hour later.
+    fn raw_capture(&mut self, ui: &mut egui::Ui) {
+        ui.label(legend("raw capture"));
+        hint(
+            ui,
+            "The whole span to one file, as it arrives. This is the recording to \
+             make when the receiver shows a transmission and reads nothing from \
+             it: replaying the file puts the same samples through the same \
+             graph, so a decoder can be changed and tried again.",
+        );
+        ui.add_space(8.0);
+
+        let (cap_on, cap_bytes, cap_full, cap_file) = match &self.radio {
+            Some(r) => {
+                use std::sync::atomic::Ordering;
+                (
+                    r.status.capture_on.load(Ordering::Relaxed),
+                    r.status.capture_bytes.load(Ordering::Relaxed),
+                    r.status.capture_full.load(Ordering::Relaxed),
+                    r.status.capture_file.lock().clone(),
+                )
+            }
+            None => (false, 0, false, None),
+        };
+        let mut on = cap_on;
+        if ui.checkbox(&mut on, "Capture the raw span").changed() {
+            self.set_capture(on);
+        }
+        ui.add_space(6.0);
+
+        row(ui, "folder limit", |ui| {
+            let mut cap = self.capture_cap_mb;
+            egui::ComboBox::from_id_salt("capture_cap")
+                .selected_text(size_label(cap))
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for opt in [Some(1024u64), Some(4096), Some(16_384), Some(65_536), None] {
+                        ui.selectable_value(&mut cap, opt, size_label(opt));
+                    }
+                });
+            if cap != self.capture_cap_mb {
+                self.capture_cap_mb = cap;
+                self.send(Cmd::CaptureCap(cap.map(|mb| mb << 20).unwrap_or(0)));
+            }
+        });
+        hint(
+            ui,
+            "What the whole folder may take. Nothing here is deleted: a capture is \
+             evidence of a signal that may not come again, so writing stops instead.",
+        );
+        ui.add_space(8.0);
+
+        row(ui, "written", |ui| {
+            ui.label(value(human_bytes(cap_bytes)).size(11.0));
+        });
+        if let Some(f) = &cap_file {
+            row(ui, "file", |ui| {
+                ui.add(egui::Label::new(value(f).size(11.0)).wrap());
+            });
+        }
+        if cap_full {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "The capture stopped: the folder is at its limit. Raise it, or \
+                         move the captures somewhere else.",
+                    )
+                    .small()
+                    .color(theme::FAULT),
+                )
+                .wrap(),
+            );
+        }
+    }
+}
+
+/// A folder limit as it is offered and shown, in whichever unit reads.
+fn size_label(mb: Option<u64>) -> String {
+    match mb {
+        Some(mb) if mb >= 1024 => format!("{} GB", mb / 1024),
+        Some(mb) => format!("{mb} MB"),
+        None => "no limit".into(),
+    }
 }
 
 /// A radio reached over the network, as the dialog that creates one asks for

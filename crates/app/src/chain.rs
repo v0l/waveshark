@@ -226,7 +226,7 @@ pub struct Receiver {
     /// than an open file so that a rebuild has something to reopen when the
     /// bus itself had to be built again.
     log_dir: Option<PathBuf>,
-    /// Size at which a day's file stops growing, or `None` for no limit.
+    /// Size the packet log's folder may reach, or `None` for no limit.
     log_cap: Option<u64>,
     bus: Option<NodeId>,
     decode: Option<NodeId>,
@@ -1234,6 +1234,15 @@ impl Receiver {
         self.capture().is_some_and(|n| n.is_enabled() && !n.is_full())
     }
 
+    /// How large the capture folder may get. Raising it lets a capture that
+    /// stopped be started again, which is what pressing the button after
+    /// reading why it stopped is asking for.
+    pub fn set_capture_cap(&mut self, bytes: u64) {
+        let Some(id) = self.capture else { return };
+        let mb = bytes as f64 / (1u64 << 20) as f64;
+        let _ = self.set_node_param(id.0, "budget_mb", pipeline::ParamValue::Float(mb));
+    }
+
     pub fn recorder_mut(&mut self) -> Option<&mut Recorder> {
         let id = self.record?;
         self.graph
@@ -1465,8 +1474,8 @@ impl Receiver {
             .collect()
     }
 
-    /// Size at which a day's file stops growing. Changing it takes effect on
-    /// the file being written, so raising it restarts a log that stopped.
+    /// Size the log's folder may reach. Changing it takes effect on the file
+    /// being written, so raising it restarts a log that stopped.
     pub fn set_log_cap(&mut self, cap: Option<u64>) {
         self.log_cap = cap;
         let sink = self.new_sink();

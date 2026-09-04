@@ -51,10 +51,18 @@ use std::path::PathBuf;
 
 use common::{Packet, PacketBody, Pulse};
 
-/// Stop appending when a day's file reaches this. A busy band writes a few
-/// megabytes an hour and 1090 MHz writes rather more; this is a runaway
-/// guard, not a budget, and it can be raised or lifted in the settings.
-pub const DEFAULT_MAX_BYTES: u64 = 512 << 20;
+/// How much of the disk the whole log folder may take.
+///
+/// A limit per day answered the wrong question. Nobody wants to know what one
+/// file may reach; they want to know what the receiver may take, and a cap of
+/// half a gigabyte a day is a cap of fifteen gigabytes a month with nothing
+/// standing in its way. This is the number a disk has, so this is the number
+/// the setting asks for, and the oldest days go to keep the folder under it.
+pub const DEFAULT_MAX_BYTES: u64 = 2 << 30;
+
+/// What a day's file is called after its date, and so which files in the
+/// folder the log owns and may delete.
+const EXT: &str = "wspkt";
 
 const MAGIC: &[u8; 6] = b"WSPKT\0";
 const VERSION: u16 = 1;
@@ -116,12 +124,15 @@ pub struct PacketLog {
     dir: PathBuf,
     /// The day currently open, as `YYYY-MM-DD`, and its writer.
     open: Option<(String, std::io::BufWriter<std::fs::File>)>,
-    /// Bytes in the day's file, against the runaway guard.
+    /// Bytes in the day's file.
     bytes: u64,
+    /// Bytes in every other day's file, so the folder's total is this plus
+    /// the open one and no directory has to be walked per record.
+    older: u64,
     full: bool,
     /// Packets appended since the receiver started.
     written: u64,
-    /// Size at which a day's file stops growing, or `None` for no limit.
+    /// Size the whole folder may reach, or `None` for no limit.
     cap: Option<u64>,
     /// Records written into the buffer since the last flush.
     dirty: bool,
@@ -142,6 +153,7 @@ impl PacketLog {
             dir,
             open: None,
             bytes: 0,
+            older: 0,
             full: false,
             written: 0,
             cap: Some(DEFAULT_MAX_BYTES),
@@ -150,16 +162,71 @@ impl PacketLog {
         }
     }
 
-    /// Change the runaway guard. `None` lifts it, which is what a receiver
+    /// Change the folder's limit. `None` lifts it, which is what a receiver
     /// left running on 1090 MHz for a week wants.
     pub fn with_cap(mut self, cap: Option<u64>) -> Self {
         self.cap = cap;
         // Raising the cap on a log that stopped should start it again, or the
         // setting would only take effect on the next restart.
-        if self.cap.is_none_or(|c| self.bytes < c) {
+        if self.cap.is_none_or(|c| self.total() < c) {
             self.full = false;
         }
         self
+    }
+
+    /// What the folder holds: the day being written and every day kept.
+    pub fn total(&self) -> u64 {
+        self.older + self.bytes
+    }
+
+    /// Add up the days already on the disk, other than the one named.
+    fn measure(&self, except: &str) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
+        entries
+            .flatten()
+            .filter(|e| {
+                let p = e.path();
+                p.extension().is_some_and(|x| x == EXT)
+                    && p.file_stem().is_some_and(|s| s != except)
+            })
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum()
+    }
+
+    /// Delete whole days, oldest first, until the folder is back under its
+    /// limit. The day being written is never a candidate: it is the one with
+    /// the packets somebody is watching arrive.
+    ///
+    /// Returns whether there is now room. When there is not, the only file
+    /// left is today's and it is over the limit on its own, so appending
+    /// stops rather than the log eating itself.
+    fn make_room(&mut self, today: &str) -> bool {
+        let Some(cap) = self.cap else { return true };
+        if self.total() < cap {
+            return true;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return false };
+        // The name is the date, so alphabetical order is chronological.
+        let mut days: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == EXT)
+                    && p.file_stem().is_some_and(|s| s != today)
+            })
+            .collect();
+        days.sort();
+        for path in days {
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                self.older = self.older.saturating_sub(size);
+            }
+            if self.total() < cap {
+                return true;
+            }
+        }
+        false
     }
 
     /// Open or roll the day's file, returning false once logging has stopped.
@@ -180,7 +247,7 @@ impl PacketLog {
                 self.full = true;
                 return None;
             }
-            let path = self.dir.join(format!("{day}.wspkt"));
+            let path = self.dir.join(format!("{day}.{EXT}"));
             let fresh = !path.exists();
             let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
                 self.full = true;
@@ -188,6 +255,14 @@ impl PacketLog {
             };
             let mut w = std::io::BufWriter::with_capacity(BUF_BYTES, f);
             self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
+            self.older = self.measure(&day);
+            // A receiver started against a folder already over its limit
+            // makes room before it writes, rather than on the record that
+            // happens to cross the line.
+            if !self.make_room(&day) {
+                self.full = true;
+                return None;
+            }
             if fresh || self.bytes == 0 {
                 if w.write_all(MAGIC).is_err() || w.write_all(&VERSION.to_le_bytes()).is_err() {
                     self.full = true;
@@ -209,8 +284,9 @@ impl PacketLog {
         self.dirty = true;
         self.bytes += rec.len() as u64;
         self.written += 1;
-        if self.cap.is_some_and(|c| self.bytes >= c) {
-            self.full = true;
+        if self.cap.is_some_and(|c| self.total() >= c) {
+            let today = self.open.as_ref().map(|(d, _)| d.clone()).unwrap_or_default();
+            self.full = !self.make_room(&today);
         }
         self.flush_due();
     }
@@ -252,7 +328,7 @@ impl Drop for PacketLog {
 
 impl nodes::PacketSink for PacketLog {
     fn bytes(&self) -> u64 {
-        self.bytes
+        self.total()
     }
 
     fn full(&self) -> bool {
@@ -654,6 +730,30 @@ mod tests {
         assert_eq!(log.written(), 1000);
         log.flush();
         assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The limit is on the folder, so it is the folder that has to come back
+    /// under it. Deleting the oldest day is what a rolling log does; stopping
+    /// dead with a week of disk still free is what the per-day limit did.
+    #[test]
+    fn the_oldest_days_go_to_keep_the_folder_under_its_limit() {
+        let d = dir("prune");
+        std::fs::create_dir_all(&d).unwrap();
+        for day in ["2026-08-28", "2026-08-29", "2026-08-30"] {
+            std::fs::write(d.join(format!("{day}.{EXT}")), vec![0u8; 40_000]).unwrap();
+        }
+        // Room for the three kept days and a little of today's.
+        let mut log = PacketLog::new(d.clone()).with_cap(Some(100_000));
+        for _ in 0..100 {
+            log.write(&burst(868_300_000));
+        }
+        log.flush();
+        assert!(!d.join("2026-08-28.wspkt").exists(), "the oldest day was kept");
+        assert!(d.join("2026-08-30.wspkt").exists(), "a recent day was thrown away");
+        assert!(d.join("2026-08-31.wspkt").exists(), "today was not written");
+        assert!(!log.full(), "logging stopped although there was room to make");
+        assert!(log.total() < 100_000, "the folder is {} bytes", log.total());
         let _ = std::fs::remove_dir_all(&d);
     }
 

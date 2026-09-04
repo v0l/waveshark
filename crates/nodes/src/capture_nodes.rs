@@ -25,13 +25,18 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Bytes written before a capture stops on its own.
+/// How much of the disk the capture folder may take.
 ///
-/// A gigabyte is three and a half minutes of a 2.4 MS/s span as bytes, which
-/// is long enough for any transmission somebody is standing there waiting
-/// for, and small enough that forgetting to stop costs a gigabyte rather
-/// than a filesystem.
-pub const DEFAULT_BUDGET: u64 = 1 << 30;
+/// The limit used to be on one file, which answered the wrong question: what
+/// fills a disk is not one capture but the twenty left behind from last
+/// week. Four gigabytes is a quarter of an hour of a 2.4 MS/s span as bytes,
+/// spread over as many captures as somebody made, and a capture that would
+/// take the folder past it does not start.
+///
+/// Nothing here deletes a capture. A recording is evidence of a signal that
+/// may not come again, and a receiver that quietly threw last night's away to
+/// make room for tonight's would be worse than one that stops.
+pub const DEFAULT_BUDGET: u64 = 4 << 30;
 
 /// A file being written, and what is known about it.
 struct Sink {
@@ -46,7 +51,14 @@ pub struct IqCaptureNode {
     dir: PathBuf,
     name: String,
     format: SampleFormat,
+    /// What the whole folder may reach.
     budget: u64,
+    /// What the captures already in it come to, measured when a file is
+    /// opened rather than per block.
+    older: u64,
+    /// The size of the file being written, kept beside the sink so a capture
+    /// that stopped at the limit can still say how large it got.
+    last: u64,
     enabled: bool,
     rate: f64,
     center: Hz,
@@ -68,6 +80,8 @@ impl IqCaptureNode {
             name: "capture".into(),
             format: SampleFormat::Cu8,
             budget: DEFAULT_BUDGET,
+            older: 0,
+            last: 0,
             enabled: true,
             rate: 0.0,
             center: Hz(0),
@@ -91,7 +105,7 @@ impl IqCaptureNode {
         self
     }
 
-    /// How much may be written before the capture stops, in bytes.
+    /// How large the capture folder may get before writing stops, in bytes.
     pub fn with_budget(mut self, bytes: u64) -> Self {
         self.budget = bytes;
         self
@@ -108,7 +122,25 @@ impl IqCaptureNode {
     }
 
     pub fn bytes(&self) -> u64 {
-        self.sink.as_ref().map(|s| s.bytes).unwrap_or(0)
+        self.last
+    }
+
+    /// What the folder holds: this capture and every one kept beside it.
+    pub fn folder_bytes(&self) -> u64 {
+        self.older + self.last
+    }
+
+    /// Add up the captures already on the disk. Every file is counted, not
+    /// only the ones this node named: what the setting promises is a limit on
+    /// the folder, and a `.cs16` from last month takes the same disk.
+    fn measure(&self) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
+        entries
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum()
     }
 
     /// Seconds of signal written, which is what somebody watching wants to
@@ -181,7 +213,17 @@ impl IqCaptureNode {
             self.format.extension(),
         );
         let path = self.dir.join(name);
+        self.older = self.measure();
+        if self.budget > 0 && self.older >= self.budget {
+            self.full = true;
+            return Err(Error::other(format!(
+                "{} already holds {:.1} GB, which is the limit",
+                self.dir.display(),
+                self.older as f64 / (1u64 << 30) as f64
+            )));
+        }
         let file = std::fs::File::create(&path)?;
+        self.last = 0;
         self.sink = Some(Sink {
             path,
             // A megabyte at a time: at 2.4 MS/s the graph delivers a block
@@ -201,7 +243,8 @@ impl IqCaptureNode {
         s.file.write_all(&self.buf)?;
         s.bytes += self.buf.len() as u64;
         s.samples += iq.len() as u64;
-        if self.budget > 0 && s.bytes >= self.budget {
+        self.last = s.bytes;
+        if self.budget > 0 && self.older + s.bytes >= self.budget {
             self.full = true;
             self.close();
         }
@@ -263,7 +306,7 @@ impl Simple for IqCaptureNode {
             Param::bool("enabled", self.enabled).label("Write the span to disk"),
             Param::float("budget_mb", self.budget as f64 / (1 << 20) as f64, 16.0..=65_536.0)
                 .unit("MB")
-                .label("Stop after")
+                .label("Stop when the folder reaches")
                 .log(),
         ]
     }
@@ -412,6 +455,29 @@ mod tests {
             .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
             .sum();
         assert_eq!(written, 4_000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The limit is on the folder, so what is already in it counts. A limit
+    /// per file let a night of pressing the button fill a disk one gigabyte
+    /// at a time, with every file inside its budget.
+    #[test]
+    fn captures_already_on_the_disk_count_against_the_budget() {
+        let d = dir("folder-budget");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("last-week_433.9200M_250k.cu8"), vec![0u8; 3_000]).unwrap();
+        let ins = [spec(250_000.0, Hz(433_920_000))];
+        let mut n = IqCaptureNode::new(&d).with_budget(4_000);
+        Node::negotiate(&mut n, &ins).unwrap();
+        for _ in 0..4 {
+            feed(&mut n, &tone(1_000), &ins);
+        }
+        assert!(n.is_full(), "the folder went past its limit");
+        assert!(n.folder_bytes() >= 4_000, "{} bytes", n.folder_bytes());
+        assert!(
+            d.join("last-week_433.9200M_250k.cu8").exists(),
+            "a capture was deleted to make room, which loses evidence"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

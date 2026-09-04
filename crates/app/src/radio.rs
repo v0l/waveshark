@@ -325,6 +325,8 @@ pub enum Cmd {
     Record(Option<(std::path::PathBuf, Option<u64>)>),
     /// Start or stop writing the raw span to a file.
     CaptureIq(bool),
+    /// Size the capture folder may reach before writing stops, in bytes.
+    CaptureCap(u64),
     /// Where the receiver is, in degrees, which lets the flight tracker
     /// resolve a position from a single frame instead of waiting for a pair.
     Location(f64, f64),
@@ -1612,6 +1614,7 @@ fn run(
                 }
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
+                Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
                 Cmd::Feeds(feeds) => {
                     if feeds != plan.feeds {
                         plan.feeds = feeds;

@@ -134,6 +134,9 @@ pub struct App {
     log_dir_edit: String,
     log_dir: Option<std::path::PathBuf>,
     log_cap_mb: Option<u64>,
+    /// How large the raw capture folder may get, in megabytes, or `None` for
+    /// no limit.
+    capture_cap_mb: Option<u64>,
     feed_kind: &'static nodes::FeedKind,
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
@@ -359,6 +362,7 @@ impl Default for App {
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
+            capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
@@ -673,6 +677,10 @@ impl App {
         if let Some(r) = self.record_dir.clone() {
             self.send(Cmd::Record(Some(r)));
         }
+        // A new radio thread has a new graph, whose log and capture are at
+        // their defaults until they are told otherwise.
+        self.send(Cmd::PacketLogCap(self.log_cap_mb.map(|mb| mb << 20)));
+        self.send(Cmd::CaptureCap(self.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)));
         if self.capture {
             self.send(Cmd::CaptureIq(true));
         }
