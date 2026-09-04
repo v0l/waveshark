@@ -171,16 +171,57 @@ fn restart(
     rate: Sps,
     center: Hz,
     gain: GainMode,
-) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>)> {
+    ppm: f64,
+) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>, f64)> {
     // The device needs a moment to release its USB claim; reopening
     // immediately gets "already in use".
     std::thread::sleep(std::time::Duration::from_millis(150));
     let mut dev = crate::devices::open(entry)?;
     dev.set_rate(rate)?;
-    dev.set_center(center)?;
+    // Reopening resets the correction, and a span change that silently threw
+    // it away would put every frequency back where it was wrong.
+    let soft = apply_ppm(dev.as_mut(), ppm);
+    dev.set_center(tuned(center, soft))?;
     let _ = dev.set_gain("tuner", gain);
     let stream = dev.start_rx()?;
-    Ok((dev, stream))
+    Ok((dev, stream, soft))
+}
+
+/// Put the correction on the device, and say how much of it the receiver has
+/// to apply itself.
+///
+/// Only the RTL-SDR corrects its own reference. Every other driver takes the
+/// call, does nothing, and goes on reporting zero, which is what made the
+/// setting look broken: the box snapped back to 0 the moment it was let go
+/// and nothing moved. Where the device will not do it, the offset is applied
+/// to every frequency asked for instead, which is the same correction one
+/// step further out.
+fn apply_ppm(dev: &mut dyn common::Device, ppm: f64) -> f64 {
+    let _ = dev.set_ppm(ppm);
+    match (dev.ppm() - ppm).abs() < 0.001 {
+        true => 0.0,
+        false => ppm,
+    }
+}
+
+/// What to ask the hardware for so the receiver ends up on `want`.
+///
+/// A reference running fast by `ppm` puts the local oscillator that much
+/// above where it was asked for, so the request goes that much below.
+fn tuned(want: Hz, ppm: f64) -> Hz {
+    match ppm == 0.0 {
+        true => want,
+        false => Hz((want.as_f64() / (1.0 + ppm * 1e-6)).round().max(0.0) as u64),
+    }
+}
+
+/// The inverse: where the receiver actually is, given what the hardware was
+/// asked for. What the dial and the spectrum are labelled with.
+fn untuned(hw: Hz, ppm: f64) -> Hz {
+    match ppm == 0.0 {
+        true => hw,
+        false => Hz((hw.as_f64() * (1.0 + ppm * 1e-6)).round().max(0.0) as u64),
+    }
 }
 
 /// Shortest gap between retunes.
@@ -293,8 +334,8 @@ pub enum Cmd {
     /// log is a node in the graph: what it writes is what the demodulators
     /// produced, which never reaches the interface at all.
     PacketLog(Option<std::path::PathBuf>),
-    /// Size at which a day's packet log stops growing, or `None` to let it
-    /// grow until the disk says otherwise.
+    /// Size the packet log's folder may reach, or `None` to let it grow until
+    /// the disk says otherwise. The oldest days go to keep it under.
     PacketLogCap(Option<u64>),
     /// Packet feeds from other receivers, as the complete set: the graph is
     /// rebuilt from a plan, so a change is the new list rather than an
@@ -876,7 +917,11 @@ pub struct RadioControls {
 }
 
 impl RadioControls {
-    fn read(dev: &dyn common::Device) -> Self {
+    /// `ppm` is the correction in force, which is not always the device's
+    /// own: one that cannot correct itself is corrected by the radio thread,
+    /// and reading the setting back off the driver would report zero and
+    /// throw away what was just typed.
+    fn read(dev: &dyn common::Device, ppm: f64) -> Self {
         let now = dev.gains();
         let stages = dev
             .info()
@@ -891,7 +936,7 @@ impl RadioControls {
                 (st.clone(), mode)
             })
             .collect();
-        Self { stages, toggles: dev.toggles(), choices: dev.choices(), ppm: dev.ppm() }
+        Self { stages, toggles: dev.toggles(), choices: dev.choices(), ppm }
     }
 }
 
@@ -1327,7 +1372,7 @@ fn run(
 
     let mut stream = dev.start_rx()?;
     status.running.store(true, Ordering::Relaxed);
-    status.set_radio(RadioControls::read(dev.as_ref()));
+    status.set_radio(RadioControls::read(dev.as_ref(), 0.0));
 
     // What the receiver should be doing. Everything that acts on a sample is
     // in the graph this describes, so a command changes the plan and the
@@ -1370,6 +1415,10 @@ fn run(
     // The last edits that built, to fall back on when an edit does not.
     let mut last_edits: Option<crate::patch::Edits> = None;
     let mut rebuild = false;
+    // The correction asked for, and however much of it this thread has to
+    // apply because the device would not.
+    let mut ppm = 0.0f64;
+    let mut soft_ppm = 0.0f64;
     let mut want_center: Option<Hz> = None;
     let mut last_chain = std::time::Instant::now();
     // What the bus is subscribed to, kept outside the graph because the bus
@@ -1401,10 +1450,11 @@ fn run(
                     if dev.rate_needs_restart() {
                         stream.stop();
                         drop(stream);
-                        match restart(&entry, r, plan.center, gain) {
-                            Ok((d, s)) => {
+                        match restart(&entry, r, plan.center, gain, ppm) {
+                            Ok((d, s, soft)) => {
                                 dev = d;
                                 stream = s;
+                                soft_ppm = soft;
                             }
                             Err(e) => {
                                 *status.error.lock() = Some(format!("cannot change span: {e}"));
@@ -1479,14 +1529,14 @@ fn run(
                     // The driver snaps to what the hardware supports, so the
                     // control has to be told what it actually got rather than
                     // what it asked for.
-                    status.set_radio(RadioControls::read(dev.as_ref()));
+                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     rx.remeasure_dc();
                 }
                 Cmd::Toggle(name, on) => {
                     if let Err(e) = dev.set_toggle(&name, on) {
                         *status.error.lock() = Some(format!("{name}: {e}"));
                     }
-                    status.set_radio(RadioControls::read(dev.as_ref()));
+                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     // Any of these changes the offset, and a stale estimate
                     // shows up as a spur that was not there a moment ago.
                     rx.remeasure_dc();
@@ -1515,14 +1565,19 @@ fn run(
                     } else if let Err(e) = dev.set_choice(&name, &value) {
                         *status.error.lock() = Some(format!("{name}: {e}"));
                     }
-                    status.set_radio(RadioControls::read(dev.as_ref()));
+                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     rx.remeasure_dc();
                 }
-                Cmd::Ppm(ppm) => {
-                    if let Err(e) = dev.set_ppm(ppm) {
-                        *status.error.lock() = Some(format!("ppm: {e}"));
-                    }
-                    status.set_radio(RadioControls::read(dev.as_ref()));
+                Cmd::Ppm(v) => {
+                    ppm = v;
+                    soft_ppm = apply_ppm(dev.as_mut(), v);
+                    // Nothing moves until the tuner is asked for a frequency
+                    // again, so ask now: a correction that only took effect
+                    // on the next drag of the dial is a correction nobody
+                    // can see themselves setting.
+                    want_center = Some(plan.center);
+                    last_tune = std::time::Instant::now() - gap;
+                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     rebuild = true;
                 }
                 Cmd::Record(dir) => {
@@ -1650,8 +1705,11 @@ fn run(
         if let Some(f) = want_center {
             if last_tune.elapsed() >= gap {
                 let _t = tracing::info_span!("set_center").entered();
-                dev.set_center(f)?;
-                plan.center = dev.center();
+                dev.set_center(tuned(f, soft_ppm))?;
+                // The plan is labelled with where the receiver is, not with
+                // what the tuner was asked for: the dial, the spectrum and
+                // every channel offset are read against it.
+                plan.center = untuned(dev.center(), soft_ppm);
                 rebuild = true;
                 want_center = None;
                 last_tune = std::time::Instant::now();
@@ -1999,6 +2057,21 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
 pub(crate) mod tests {
     use super::*;
     use crate::chain::{FSK_CHANNEL_HZ, OOK_CHANNEL_HZ};
+
+    /// The correction has to move the request the opposite way to the error,
+    /// and it has to come back to the frequency the operator asked for, or
+    /// the dial reads one thing and the receiver hears another.
+    #[test]
+    fn a_correction_offsets_the_request_and_reads_back_where_it_started() {
+        let want = Hz(145_000_000);
+        let hw = tuned(want, 20.0);
+        assert!(hw.get() < want.get(), "a fast reference is asked for a lower frequency");
+        let moved = want.get() - hw.get();
+        assert!((2_800..3_000).contains(&moved), "20 ppm of 145 MHz moved {moved} Hz");
+        assert_eq!(untuned(hw, 20.0), want);
+        assert_eq!(untuned(tuned(want, -7.5), -7.5), want);
+        assert_eq!(tuned(want, 0.0), want);
+    }
 
     #[test]
     fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
