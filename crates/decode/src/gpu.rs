@@ -243,6 +243,209 @@ impl GpuSearch {
     }
 }
 
+// ---- TA61 identity-secret (c) recovery ----
+
+const MAX_PAIRS: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Ta61Params {
+    base_lo: u32,
+    base_hi: u32,
+    count: u32,
+    n_pairs: u32,
+    ssi: [u32; MAX_PAIRS],
+    esi: [u32; MAX_PAIRS],
+}
+
+/// A GPU search for the TA61 intermediate secret `c` from (SSI, ESI) pairs.
+pub struct Ta61Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    sbox: wgpu::Buffer,
+    inv_sbox: wgpu::Buffer,
+}
+
+impl Ta61Gpu {
+    /// Bring up an adapter and pipeline, or `None` if there is no usable GPU.
+    pub fn new() -> Option<Self> {
+        block_on(Self::new_async())
+    }
+
+    async fn new_async() -> Option<Self> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("ta61-search"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ta61"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("ta61_search.wgsl").into()),
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ta61-bgl"),
+            entries: &[
+                storage_ro(0),
+                storage_ro(1),
+                storage_ro(2),
+                storage_rw(3),
+                storage_rw(4),
+                storage_rw(5),
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ta61-pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ta61-pipe"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let sbox: Vec<u32> = crate::ta61::SBOX.iter().map(|&b| b as u32).collect();
+        let inv: Vec<u32> = crate::ta61::INV_SBOX.iter().map(|&b| b as u32).collect();
+        let mk = |data: &[u32], label| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        };
+        Some(Ta61Gpu {
+            sbox: mk(&sbox, "ta61-sbox"),
+            inv_sbox: mk(&inv, "ta61-inv"),
+            device,
+            queue,
+            pipeline,
+            bgl,
+        })
+    }
+
+    /// Sweep `range` of the 2^40 space for the `c` consistent with every
+    /// pair. Dispatches in `chunk`-sized batches; a hit ends the sweep.
+    pub fn search(
+        &self,
+        pairs: &[crate::ta61::IdPair],
+        range: core::ops::Range<u64>,
+        chunk: u32,
+    ) -> Option<[u8; 8]> {
+        assert!(pairs.len() >= 2 && pairs.len() <= MAX_PAIRS);
+        let mut ssi = [0u32; MAX_PAIRS];
+        let mut esi = [0u32; MAX_PAIRS];
+        for (i, p) in pairs.iter().enumerate() {
+            ssi[i] = p.ssi;
+            esi[i] = p.esi;
+        }
+        let found = self.rw_buf("found");
+        let c_lo = self.rw_buf("c_lo");
+        let c_hi = self.rw_buf("c_hi");
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ta61-readback"),
+            size: 12,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut at = range.start;
+        while at < range.end {
+            let count = ((range.end - at).min(chunk as u64)) as u32;
+            let params = Ta61Params {
+                base_lo: at as u32,
+                base_hi: (at >> 32) as u32,
+                count,
+                n_pairs: pairs.len() as u32,
+                ssi,
+                esi,
+            };
+            let pbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ta61-params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            self.queue.write_buffer(&found, 0, &0u32.to_le_bytes());
+            let binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ta61-bind"),
+                layout: &self.bgl,
+                entries: &[
+                    bind(0, pbuf.as_entire_binding()),
+                    bind(1, self.sbox.as_entire_binding()),
+                    bind(2, self.inv_sbox.as_entire_binding()),
+                    bind(3, found.as_entire_binding()),
+                    bind(4, c_lo.as_entire_binding()),
+                    bind(5, c_hi.as_entire_binding()),
+                ],
+            });
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &binding, &[]);
+                pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
+            }
+            enc.copy_buffer_to_buffer(&found, 0, &readback, 0, 4);
+            enc.copy_buffer_to_buffer(&c_lo, 0, &readback, 4, 4);
+            enc.copy_buffer_to_buffer(&c_hi, 0, &readback, 8, 4);
+            self.queue.submit([enc.finish()]);
+            let out = read_n::<3>(&self.device, &readback);
+            if out[0] != 0 {
+                let mut c = [0u8; 8];
+                c[..4].copy_from_slice(&out[1].to_le_bytes());
+                c[4..].copy_from_slice(&out[2].to_le_bytes());
+                return Some(c);
+            }
+            at += count as u64;
+        }
+        None
+    }
+
+    fn rw_buf(&self, label: &str) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    }
+}
+
+fn read_n<const N: usize>(device: &wgpu::Device, buf: &wgpu::Buffer) -> [u32; N] {
+    let slice = buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    let _ = rx.recv();
+    let data = slice.get_mapped_range();
+    let mut out = [0u32; N];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+    drop(data);
+    buf.unmap();
+    out
+}
+
 fn read_two(device: &wgpu::Device, buf: &wgpu::Buffer) -> [u32; 2] {
     let slice = buf.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -330,5 +533,23 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn gpu_recovers_the_ta61_secret() {
+        use crate::ta61::{encrypt_id, IdPair};
+        let Some(gpu) = Ta61Gpu::new() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        // c whose guessed bytes pack small, so a narrow window reaches it.
+        let c = [0x03u8, 0x11, 0x02, 0x00, 0x77, 0x01, 0x00, 0x88];
+        let ssis = [0x12_3456u32, 0x00_4321, 0xab_cdef];
+        let pairs: Vec<IdPair> =
+            ssis.iter().map(|&ssi| IdPair { ssi, esi: encrypt_id(&c, ssi) }).collect();
+        // Guess = c0 | c2<<8 | c3<<16 | c5<<24 | c6<<32 = 0x01_0000_0203.
+        let g = 0x0100_0203u64;
+        let got = gpu.search(&pairs, g - 8..g + 8, 1 << 16);
+        assert_eq!(got, Some(c), "GPU meet-in-the-middle recovers c");
     }
 }

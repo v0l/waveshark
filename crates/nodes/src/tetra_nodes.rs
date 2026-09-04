@@ -163,6 +163,11 @@ impl RecoveryJob {
 struct Crypto {
     /// Keys to try on enciphered traffic, by cell colour code.
     keys: HashMap<u8, Key>,
+    /// The TA61 identity secret per cell colour, once recovered or entered:
+    /// the 64-bit `c` that turns an encrypted identity on air into the real
+    /// subscriber (CVE-2022-24403). Independent of the voice key, and works
+    /// on TEA2/3 where no voice key can be found.
+    id_secrets: HashMap<u8, [u8; 8]>,
     /// Enciphered SDUs grouped by message: the equal-plaintext sets a TEA1
     /// key search runs on (TETRA:BURST section 5.2).
     collisions: HashMap<u64, Vec<Collision>>,
@@ -191,6 +196,7 @@ impl Crypto {
     fn new() -> Self {
         Crypto {
             keys: HashMap::new(),
+            id_secrets: HashMap::new(),
             collisions: HashMap::new(),
             gpu: GpuSearch::new().map(Arc::new),
             recovery: None,
@@ -318,6 +324,32 @@ impl TetraNode {
     #[cfg(feature = "tea")]
     pub fn add_key(&mut self, colour: u8, key: Key) {
         self.crypto.keys.insert(colour, key);
+    }
+
+    /// Give the node a TA61 identity secret for a colour code, so encrypted
+    /// identities on that cell are shown as the real subscribers.
+    #[cfg(feature = "tea")]
+    pub fn add_id_secret(&mut self, colour: u8, c: [u8; 8]) {
+        self.crypto.id_secrets.insert(colour, c);
+    }
+
+    /// Turn an encrypted identity in a call PDU into the real subscriber,
+    /// where the cell's TA61 secret is known. Only an SSI-family address on
+    /// an enciphered PDU is an ESI; a usage marker or event label is not.
+    #[cfg(feature = "tea")]
+    fn deanonymize(&self, c: &mut CallPdu) {
+        if c.aie == 0 {
+            return;
+        }
+        let Some(cell) = self.rx.cell else { return };
+        let Some(secret) = self.crypto.id_secrets.get(&cell.colour) else { return };
+        let real = |esi: u32| decode::ta61::decrypt_id(secret, esi & 0xff_ffff);
+        c.address = match c.address {
+            Address::Ssi(e) => Address::Ssi(real(e)),
+            Address::Ussi(e) => Address::Ussi(real(e)),
+            Address::Smi(e) => Address::Smi(real(e)),
+            other => other,
+        };
     }
 
     /// What this front end knows about the cell it hears and its key: the
@@ -898,6 +930,12 @@ impl Node for TetraNode {
                     events.push((Event::Sysinfo(si), block.slot));
                 }
                 Event::Call(mut c) => {
+                    // On an enciphered network the address is an encrypted
+                    // identity (ESI), not the real SSI. If a TA61 secret for
+                    // the cell is known, decrypt it to the subscriber before
+                    // anything downstream reads it (CVE-2022-24403).
+                    #[cfg(feature = "tea")]
+                    self.deanonymize(&mut c);
                     if let (Some(m), Some(ssi)) = (c.marker, c.address.ssi()) {
                         self.markers.insert(m, ssi);
                     }
