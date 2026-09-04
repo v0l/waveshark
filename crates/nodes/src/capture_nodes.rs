@@ -59,6 +59,9 @@ pub struct IqCaptureNode {
     /// The size of the file being written, kept beside the sink so a capture
     /// that stopped at the limit can still say how large it got.
     last: u64,
+    /// When the folder was last added up, so a reader is not charged a
+    /// directory listing per block.
+    measured: Option<std::time::Instant>,
     enabled: bool,
     rate: f64,
     center: Hz,
@@ -82,6 +85,7 @@ impl IqCaptureNode {
             budget: DEFAULT_BUDGET,
             older: 0,
             last: 0,
+            measured: None,
             enabled: true,
             rate: 0.0,
             center: Hz(0),
@@ -128,6 +132,23 @@ impl IqCaptureNode {
     /// What the folder holds: this capture and every one kept beside it.
     pub fn folder_bytes(&self) -> u64 {
         self.older + self.last
+    }
+
+    /// Add the folder up again, at most this often.
+    ///
+    /// Called from whatever publishes the status rather than from `process`:
+    /// a directory listing per block is a syscall every few milliseconds, and
+    /// this number only has to be right for somebody reading it. While a file
+    /// is open the total is already exact, since the folder was measured when
+    /// it was created and the writing is counted.
+    pub fn refresh_folder(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.sink.is_some() || self.measured.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.older = self.measure();
+        self.last = 0;
+        self.measured = Some(std::time::Instant::now());
     }
 
     /// Add up the captures already on the disk. Every file is counted, not
@@ -214,6 +235,7 @@ impl IqCaptureNode {
         );
         let path = self.dir.join(name);
         self.older = self.measure();
+        self.measured = Some(std::time::Instant::now());
         if self.budget > 0 && self.older >= self.budget {
             self.full = true;
             return Err(Error::other(format!(

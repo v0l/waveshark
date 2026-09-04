@@ -1234,6 +1234,20 @@ impl Receiver {
         self.capture().is_some_and(|n| n.is_enabled() && !n.is_full())
     }
 
+    /// Add the capture folder up again, for the status that reports it
+    /// against the limit. Throttled inside the node.
+    pub fn refresh_capture_folder(&mut self) {
+        let Some(id) = self.capture else { return };
+        if let Some(n) = self
+            .graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::IqCaptureNode>())
+        {
+            n.refresh_folder();
+        }
+    }
+
     /// How large the capture folder may get. Raising it lets a capture that
     /// stopped be started again, which is what pressing the button after
     /// reading why it stopped is asking for.

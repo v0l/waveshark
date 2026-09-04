@@ -846,6 +846,8 @@ pub struct Status {
     /// switched it on, which is the usual state.
     pub capture_on: AtomicBool,
     pub capture_bytes: AtomicU64,
+    /// What the whole capture folder holds, which is what the limit is on.
+    pub capture_folder: AtomicU64,
     pub capture_full: AtomicBool,
     pub capture_file: parking_lot::Mutex<Option<String>>,
     /// Size of the day's log file, and whether it has stopped growing.
@@ -999,6 +1001,7 @@ impl Default for Status {
             track_list: parking_lot::Mutex::new(Vec::new()),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
+            capture_folder: AtomicU64::new(0),
             capture_full: AtomicBool::new(false),
             capture_file: parking_lot::Mutex::new(None),
             log_bytes: AtomicU64::new(0),
@@ -1850,9 +1853,13 @@ fn run(
         status.pocsag_on.store(rx.pocsag_on(), Ordering::Relaxed);
         status.m17_on.store(rx.m17_on(), Ordering::Relaxed);
         {
+            rx.refresh_capture_folder();
             let cap = rx.capture();
             status.capture_on.store(rx.capturing(), Ordering::Relaxed);
             status.capture_bytes.store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
+            status
+                .capture_folder
+                .store(cap.map(|c| c.folder_bytes()).unwrap_or(0), Ordering::Relaxed);
             status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
             *status.capture_file.lock() =
                 cap.and_then(|c| c.path()).map(|p| p.display().to_string());

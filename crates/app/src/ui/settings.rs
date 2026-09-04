@@ -379,7 +379,8 @@ impl App {
         );
         ui.add_space(10.0);
 
-        reading(ui, "on disk", format!("{} in {logged} packets", human_bytes(bytes)));
+        reading(ui, "folder holds", human_bytes(bytes));
+        reading(ui, "this session", format!("{logged} packets"));
         if full {
             ui.add(
                 egui::Label::new(
@@ -950,17 +951,18 @@ impl App {
         );
         ui.add_space(8.0);
 
-        let (cap_on, cap_bytes, cap_full, cap_file) = match &self.radio {
+        let (cap_on, cap_bytes, cap_folder, cap_full, cap_file) = match &self.radio {
             Some(r) => {
                 use std::sync::atomic::Ordering;
                 (
                     r.status.capture_on.load(Ordering::Relaxed),
                     r.status.capture_bytes.load(Ordering::Relaxed),
+                    r.status.capture_folder.load(Ordering::Relaxed),
                     r.status.capture_full.load(Ordering::Relaxed),
                     r.status.capture_file.lock().clone(),
                 )
             }
-            None => (false, 0, false, None),
+            None => (false, 0, 0, false, None),
         };
         let mut on = cap_on;
         if ui.checkbox(&mut on, "Capture the raw span").changed() {
@@ -990,7 +992,13 @@ impl App {
         );
         ui.add_space(8.0);
 
-        reading(ui, "written", human_bytes(cap_bytes));
+        // The folder first: it is the number the limit above is about, and
+        // showing only the file being written made a folder of two gigabytes
+        // read as seventy megabytes.
+        reading(ui, "folder holds", human_bytes(cap_folder));
+        if cap_bytes > 0 {
+            reading(ui, "this file", human_bytes(cap_bytes));
+        }
         if let Some(f) = &cap_file {
             row(ui, "file", |ui| {
                 ui.add(egui::Label::new(value(f).size(11.0)).wrap());
