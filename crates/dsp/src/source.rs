@@ -112,7 +112,11 @@ pub struct SourceConfig {
     ///
     /// Also what holds a source open across the gaps inside it. Fine Offset
     /// stations repeat their frame three times with 8 ms between repeats,
-    /// and those three belong to one source and one package.
+    /// and those three belong to one source and one package. A DMR radio
+    /// on one slot of two keys 30 ms bursts with 30 ms between them, and a
+    /// hang shorter than that gap closed the source at every burst: each
+    /// slot opened as a transmission of its own, with a fresh decoder that
+    /// had a burst to read and no superframe to read it in.
     pub hang_us: u32,
     /// Bins of gap to bridge inside one source. A keyed signal has nulls in
     /// its spectrum, and a null is not the edge of the signal.
@@ -226,7 +230,7 @@ impl Default for SourceConfig {
             floor_cap_db: 8.0,
             floor_chunk_bins: 0,
             min_frames: 2,
-            hang_us: 20_000,
+            hang_us: 40_000,
             guard_bins: 2,
             pair_hz: 150_000.0,
             lead_us: 5_000,
