@@ -6,6 +6,7 @@ mod wheel;
 mod chain;
 mod bands;
 mod audiobus;
+mod callrec;
 mod calls;
 mod devices;
 mod i18n;

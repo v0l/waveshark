@@ -314,28 +314,6 @@ fn peak_of(pcm: &[f32]) -> f32 {
     pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
 }
 
-/// What a transmission's audio file is called: when it was heard, who was
-/// talking and to whom, so a directory of them reads as a log.
-fn call_file_name(r: &DecodeRecord) -> String {
-    let field = |k: &str| {
-        r.fields
-            .iter()
-            .find(|(n, _)| n == k)
-            .map(|(_, v)| v.to_string())
-            .unwrap_or_else(|| "unknown".into())
-    };
-    let clean = |s: String| {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-            .collect::<String>()
-    };
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}_{}_{}_{}.wav", r.model, clean(field("from")), clean(field("to")))
-}
-
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -1502,6 +1480,7 @@ fn run(
     // is a node and a rebuild can hand back a new one.
     let mut calls = BusSettings::default();
     let mut call_dir: Option<std::path::PathBuf> = None;
+    let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
 
@@ -1978,17 +1957,20 @@ fn run(
 
         records.clear();
         records.extend(rx.decodes(at));
-        // Speech goes to its own file as soon as the transmission closes.
+        // Speech goes to a file per over, assembled from the bursts that
+        // carried it and written when the over ends or goes quiet.
         if let Some(dir) = &call_dir {
-            for r in records.iter().filter(|r| r.audio.is_some()) {
-                let Some(a) = &r.audio else { continue };
-                let name = call_file_name(r);
-                let path = dir.join(name);
-                match crate::audiobus::write_wav(&path, a) {
+            let mut done: Vec<crate::callrec::Finished> = Vec::new();
+            for r in &records {
+                done.extend(call_rec.feed(r, at, dir));
+            }
+            done.extend(call_rec.tick(at, dir));
+            for f in done {
+                match crate::audiobus::write_wav(&f.path, &f.speech) {
                     Ok(()) => status.calls_written.fetch_add(1, Ordering::Relaxed),
                     Err(e) => {
                         *status.error.lock() =
-                            Some(format!("cannot write {}: {e}", path.display()));
+                            Some(format!("cannot write {}: {e}", f.path.display()));
                         0
                     }
                 };
