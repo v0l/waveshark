@@ -14,6 +14,8 @@ pub mod channelizer;
 pub mod classify;
 pub mod dc;
 pub mod demod;
+#[cfg(test)]
+mod dmr_probe;
 pub mod detect;
 pub mod filter;
 pub mod fir;

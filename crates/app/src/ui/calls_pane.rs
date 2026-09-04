@@ -247,7 +247,8 @@ impl CallList<'_> {
                         // radio's microphone was set to, which is not
                         // something a listener can fix at the far end.
                         if ui
-                            .checkbox(&mut self.audio.call_agc, "Even out the levels")
+                            .checkbox(&mut self.audio.call_agc, "AGC")
+                            .on_hover_text("Even out the level between one call and the next")
                             .changed()
                         {
                             self.cmds.push(Cmd::CallAgc(self.audio.call_agc));
