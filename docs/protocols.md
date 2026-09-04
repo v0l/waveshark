@@ -21,7 +21,7 @@ that turns radio into symbols, and there are only a few of those.
 | discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
 | discriminator plus sync correlation, `m17` | M17 frames | yes | no |
 | coherent PSK/GMSK with timing recovery | soft symbols | no | no |
-| chirp correlator (dechirp then FFT) | LoRa symbols | no | no |
+| chirp correlator (dechirp then FFT), `lora` | LoRa symbols | yes | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
 
@@ -214,9 +214,9 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | demod | mod | Dechirp with a conjugate chirp then FFT. Self-contained, well documented, highest value item on the demod list |
-| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | demod | mod | Payloads are AES encrypted; the metadata is still worth logging |
-| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | demod | mod | LoRa plus a known framing |
+| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | synthetic | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. Checked against two off-air Meshtastic transmissions at SF11 over 250 kHz, both giving a valid header checksum and the transmitter's own CRC. No node yet, so nothing routes to it |
+| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | framing | mod | The PHY is read; what is missing is the MAC layout on top of it. Payloads are AES encrypted, the metadata is still worth logging |
+| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | framing | mod | The PHY is read, including the 0x2B sync word. The sixteen byte packet header is straightforward and the payload behind it is AES encrypted |
 | Sigfox uplink | 868.13 MHz | DBPSK 100 bps (600 US) | 100 Hz | demod | mod | Ultra narrowband, coherent detection, very narrow channel |
 | Sigfox downlink | 869.525 MHz | GFSK 600 bps | 31 kHz | framing | mod | |
 
