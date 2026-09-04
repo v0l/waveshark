@@ -280,6 +280,13 @@ pub struct ClassifyConfig {
     pub channel_hz: f32,
     /// Shortest burst worth classifying, in samples.
     pub min_samples: usize,
+    /// Most samples measured of one burst. A longer burst is measured over
+    /// this much of its middle, since what the keying is does not change
+    /// along a transmission and the features are all averages; what
+    /// changes is the cost, which on a long strong burst at a wide
+    /// extraction rate was 80 to 150 ms in the radio thread. The burst's
+    /// length is still reported whole.
+    pub max_samples: usize,
     /// FFT size for the spectral features. 1024 is about 30 Hz of resolution
     /// at 31.25 kHz and 500 Hz at 500 kHz, which is finer than any decision
     /// here needs.
@@ -303,6 +310,7 @@ impl Default for ClassifyConfig {
         Self {
             channel_hz: 0.0,
             min_samples: 256,
+            max_samples: 1 << 16,
             fft_size: 1024,
             min_score: 0.45,
             min_margin: 0.05,
@@ -414,11 +422,17 @@ impl Classifier {
         // amplitude changes *during* the transmission, and that question can
         // only be asked once the transmission's edges are known.
         let (a, b) = self.extent(iq);
-        let (trimmed, samples) = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
+        let (mut trimmed, samples) = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
             (iq[a..b].to_vec(), iq.len())
         } else {
             (iq.to_vec(), iq.len())
         };
+        if trimmed.len() > self.cfg.max_samples.max(self.cfg.min_samples) {
+            let n = self.cfg.max_samples.max(self.cfg.min_samples);
+            let from = (trimmed.len() - n) / 2;
+            trimmed.drain(..from);
+            trimmed.truncate(n);
+        }
 
         // Bring a signal that is a small part of its span down to its own
         // bandwidth first. In the channel bank this never fires, because the
