@@ -132,18 +132,27 @@ impl Keys<'_> {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.st.new_name)
                             .hint_text(match self.st.new_system {
-                                System::Dmr => "talkgroup",
+                                System::Dmr => "talkgroup, or * for all",
                                 _ => "channel name",
                             })
                             .desired_width(120.0),
                     );
                     ui.add(
                         egui::TextEdit::singleline(&mut self.st.new_key)
-                            .hint_text("key: hex or base64")
+                            .hint_text(match self.st.new_system {
+                                System::Dmr => "basic privacy key number, 1 to 255",
+                                _ => "key: hex or base64",
+                            })
                             .desired_width(240.0)
                             .font(egui::FontId::monospace(12.0)),
                     );
-                    let key = decode::channel_keys::parse_key(&self.st.new_key);
+                    // A DMR basic privacy key is a number the codeplug
+                    // shows in decimal, so that is how it is typed.
+                    let typed = self.st.new_key.trim();
+                    let key = match self.st.new_system {
+                        System::Dmr => typed.parse::<u8>().ok().filter(|n| *n > 0).map(|n| vec![n]),
+                        _ => decode::channel_keys::parse_key(typed),
+                    };
                     let ok = key.is_some() && !self.st.new_name.trim().is_empty();
                     if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
                         if let Some(key) = key {

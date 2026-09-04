@@ -24,12 +24,15 @@ impl Vocoder {
     /// Decode one voice burst's three AMBE frames to speech, muting frames the
     /// Golay check says are too damaged (which is what a burst that is not
     /// really voice, or badly received, looks like).
-    pub(crate) fn decode_burst(&mut self, frames: &[[u8; 9]; 3]) -> Vec<f32> {
+    pub(crate) fn decode_burst(&mut self, frames: &[[u8; 9]; 3], keystream: Option<&[bool; 49]>) -> Vec<f32> {
         let mut out = Vec::with_capacity(3 * 160);
         for f in frames {
             let e = mbe::ambe::AmbeFrame::new(f).errors();
             if e[0] + e[1] <= 4 {
-                out.extend_from_slice(&self.synth.decode(f));
+                out.extend_from_slice(&match keystream {
+                    Some(ks) => self.synth.decode_keyed(f, ks),
+                    None => self.synth.decode(f),
+                });
             } else {
                 out.extend_from_slice(&[0.0f32; 160]);
             }
@@ -47,7 +50,7 @@ impl Vocoder {
         Vocoder
     }
     pub(crate) fn reset(&mut self) {}
-    pub(crate) fn decode_burst(&mut self, _frames: &[[u8; 9]; 3]) -> Vec<f32> {
+    pub(crate) fn decode_burst(&mut self, _frames: &[[u8; 9]; 3], _keystream: Option<&[bool; 49]>) -> Vec<f32> {
         Vec::new()
     }
 }

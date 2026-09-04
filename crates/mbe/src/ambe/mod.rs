@@ -562,16 +562,36 @@ impl AmbeFrame {
     /// deliver the frame through their own outer FEC (for example YSF V/D
     /// mode 2, which majority-votes and de-whitens before this point).
     pub fn from_bit_frame(frame: &BitFrame) -> Self {
+        Self::from_bit_frame_keyed(frame, None)
+    }
+
+    /// As [`Self::from_bit_frame`], with a keystream XORed over the 49 data
+    /// bits after the error correction and before the parameters are read:
+    /// C0's twelve, C1's twelve, C2's eleven, C3's fourteen, in that order.
+    /// That is where DMR's privacy XORs sit, under the FEC rather than over
+    /// it, so a keyed frame corrects like a clear one and reads like noise.
+    pub fn from_bit_frame_keyed(frame: &BitFrame, keystream: Option<&[bool; 49]>) -> Self {
         let mut c0 = extract_vector(frame, &VECTOR_C0);
         let mut c1 = extract_vector(frame, &VECTOR_C1);
-        let c2 = extract_vector(frame, &VECTOR_C2);
-        let c3 = extract_vector(frame, &VECTOR_C3);
+        let mut c2 = extract_vector(frame, &VECTOR_C2);
+        let mut c3 = extract_vector(frame, &VECTOR_C3);
 
         // Error check C0, then descramble and error check C1.
         let mut errors = [0u32; 2];
         errors[0] = golay24_check_and_correct(&mut c0, 0);
         c1.xor(0, 23, modulation_vector(c0.get_int(&VECTOR_U0)));
         errors[1] = golay23_check_and_correct(&mut c1, 0);
+
+        if let Some(ks) = keystream {
+            let mut k = ks.iter();
+            for (v, n) in [(&mut c0, 12), (&mut c1, 12), (&mut c2, 11), (&mut c3, 14)] {
+                for i in 0..n {
+                    if *k.next().unwrap_or(&false) {
+                        v.flip(i);
+                    }
+                }
+            }
+        }
 
         let b0 = (c0.get_int(&VECTOR_U0_B0_HIGH) << 3) + c3.get_int(&VECTOR_U3_B0_LOW);
         let error_count = errors[0] + errors[1];
@@ -736,6 +756,12 @@ impl AmbeSynthesizer {
     /// `AMBEAudioCodec.getAudio(byte[])`.
     pub fn decode(&mut self, frame_data: &[u8]) -> [f32; SAMPLES_PER_FRAME] {
         self.decode_frame(&AmbeFrame::new(frame_data))
+    }
+
+    /// As [`Self::decode`], with a privacy keystream undone first.
+    pub fn decode_keyed(&mut self, frame_data: &[u8], keystream: &[bool; 49]) -> [f32; SAMPLES_PER_FRAME] {
+        let frame = BitFrame::from_bytes(frame_data, false);
+        self.decode_frame(&AmbeFrame::from_bit_frame_keyed(&frame, Some(keystream)))
     }
 
     /// Decodes a 72-bit AMBE frame supplied as bits (index 0 first), for
@@ -981,6 +1007,34 @@ mod tests {
             let audio = synthesizer.decode(&bytes);
             assert_valid_audio(&audio);
         }
+    }
+
+    /// A privacy keystream is undone under the FEC: a frame built with its
+    /// data bits XORed by the pattern corrects cleanly and, read keyed,
+    /// gives the parameters the clear frame has. Read clear it does not.
+    #[test]
+    fn a_keyed_frame_reads_as_its_clear_self() {
+        let u0 = 0x531;
+        let u1 = (0x40 << 4) | 0b0010;
+        let mut ks = [false; 49];
+        // C0 bit 0 and C1 bit 5, C2 bit 3, C3 bit 13.
+        ks[0] = true;
+        ks[12 + 5] = true;
+        ks[24 + 3] = true;
+        ks[35 + 13] = true;
+        let u0k = u0 ^ (1 << 11);
+        let u1k = u1 ^ (1 << (11 - 5));
+        let c2k = 1 << (10 - 3);
+        let c3k = 1 << (13 - 13);
+        let c0 = golay24_codeword(u0k);
+        let c1 = golay23_codeword(u1k) ^ modulation_vector(u0k);
+        let bytes = build_frame(c0, c1, c2k, c3k);
+
+        let clear = AmbeFrame::new(&build_frame(golay24_codeword(u0), golay23_codeword(u1) ^ modulation_vector(u0), 0, 0));
+        let keyed = AmbeFrame::from_bit_frame_keyed(&BitFrame::from_bytes(&bytes, false), Some(&ks));
+        assert_eq!(keyed.errors(), [0, 0]);
+        assert_eq!(keyed.b, clear.b);
+        assert_ne!(AmbeFrame::new(&bytes).b, clear.b);
     }
 
     #[test]

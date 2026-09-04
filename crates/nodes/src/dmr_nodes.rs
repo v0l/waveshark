@@ -95,6 +95,27 @@ fn lc_flags(lc: Option<&LinkControl>) -> u8 {
     flags
 }
 
+/// Motorola's feature set, whose privacy bit means Basic Privacy when no
+/// key id was signalled.
+const FID_MOTOROLA: u8 = 0x10;
+
+/// The keystream to undo on a transmission's speech, from the DMR keys
+/// held: one named for its talkgroup, else one named `*` for every group.
+/// A one byte key is a Basic Privacy key number. Longer keys are the
+/// enhanced and AES ciphers, which this does not undo.
+fn privacy_keystream(lc: &LinkControl) -> Option<[bool; 49]> {
+    if !lc.encrypted() || lc.fid != FID_MOTOROLA {
+        return None;
+    }
+    let held = decode::channel_keys::for_system(decode::channel_keys::System::Dmr);
+    let group = lc.dst.to_string();
+    held.iter()
+        .find(|k| k.name == group)
+        .or_else(|| held.iter().find(|k| k.name == "*"))
+        .filter(|k| k.key.len() == 1)
+        .and_then(|k| decode::dmr_bp::keystream(k.key[0]))
+}
+
 /// Serialise one burst with the framer's context for it.
 fn encode_burst(pos: u8, colour: Option<u8>, lc: Option<&LinkControl>, bits: &[u8]) -> Vec<u8> {
     let mut v = DMR_TAG.to_vec();
@@ -871,7 +892,8 @@ impl DmrNode {
     /// bus and for the burst's own packet. Without the `ambe` feature the
     /// vocoder yields no samples, so this returns `None`.
     fn decode_voice(&mut self, frames: &[[u8; 9]; 3]) -> Option<std::sync::Arc<common::Speech>> {
-        let pcm = self.vocoder.decode_burst(frames);
+        let keystream = self.lc.as_ref().and_then(privacy_keystream);
+        let pcm = self.vocoder.decode_burst(frames, keystream.as_ref());
         if pcm.is_empty() {
             return None;
         }
