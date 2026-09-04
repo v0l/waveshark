@@ -406,6 +406,11 @@ pub(super) struct KeysState {
     pub new_system: decode::channel_keys::System,
     pub new_name: String,
     pub new_key: String,
+    /// A Meshtastic node to read channels from, and the read in flight.
+    pub node_host: String,
+    pub node_fetch: Option<poll_promise::Promise<Result<Vec<crate::meshnode::Channel>, String>>>,
+    /// What the last read said: how many came in, or what went wrong.
+    pub node_result: Option<Result<String, String>>,
 }
 
 impl Default for KeysState {
@@ -418,6 +423,9 @@ impl Default for KeysState {
             new_system: decode::channel_keys::System::Meshtastic,
             new_name: String::new(),
             new_key: String::new(),
+            node_host: String::new(),
+            node_fetch: None,
+            node_result: None,
         }
     }
 }

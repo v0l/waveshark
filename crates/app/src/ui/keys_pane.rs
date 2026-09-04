@@ -23,6 +23,7 @@ pub(super) struct Keys<'a> {
     pub radio: Option<&'a Radio>,
     #[cfg_attr(not(feature = "tea"), allow(dead_code))]
     pub cmds: &'a mut Vec<Cmd>,
+    pub rt: tokio::runtime::Handle,
 }
 
 impl Keys<'_> {
@@ -75,6 +76,7 @@ impl Keys<'_> {
     /// its privacy key, held for the decoder that will read it.
     fn channel_keys(&mut self, ui: &mut egui::Ui) {
         use decode::channel_keys::{ChannelKey, System};
+        self.poll_node();
         let held: Vec<ChannelKey> = self.st.store.channels().to_vec();
         let mut forget: Option<(System, String)> = None;
         // Amber rail: these are the operator's own settings, like a key
@@ -157,6 +159,37 @@ impl Keys<'_> {
                         }
                     }
                 });
+                // Or straight out of a node on the network, which is the
+                // copy of the key that cannot be mistyped.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.st.node_host)
+                            .hint_text("meshtastic node address, e.g. 10.0.0.5")
+                            .desired_width(240.0),
+                    );
+                    let busy = self.st.node_fetch.is_some();
+                    let ok = !busy && !self.st.node_host.trim().is_empty();
+                    if ui.add_enabled(ok, egui::Button::new("Import channels")).clicked() {
+                        let host = self.st.node_host.trim().to_string();
+                        let _enter = self.rt.enter();
+                        self.st.node_result = None;
+                        self.st.node_fetch = Some(poll_promise::Promise::spawn_async(
+                            crate::meshnode::channels(host),
+                        ));
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                    match &self.st.node_result {
+                        Some(Ok(s)) => {
+                            theme::Line::new().value(s).tint(theme::OK).size(11.0).show(ui);
+                        }
+                        Some(Err(e)) => {
+                            theme::Line::new().value(e).tint(theme::FAULT).size(11.0).show(ui);
+                        }
+                        None => {}
+                    }
+                });
             },
         );
         if let Some((system, name)) = forget {
@@ -164,6 +197,43 @@ impl Keys<'_> {
             let _ = self.st.store.save();
             self.st.store.publish();
         }
+    }
+
+    /// Take in what a node sent, once it has.
+    fn poll_node(&mut self) {
+        use decode::channel_keys::{ChannelKey, System};
+        let Some(p) = self.st.node_fetch.take() else { return };
+        let done = match p.try_take() {
+            Ok(r) => r,
+            Err(p) => {
+                self.st.node_fetch = Some(p);
+                return;
+            }
+        };
+        self.st.node_result = Some(done.map(|chans| {
+            let mut n = 0;
+            for c in chans.iter().filter(|c| c.has_own_key()) {
+                // A primary channel with a key of its own and no name is
+                // hashed under the modem preset's name by the firmware,
+                // and that name is what has to be held here.
+                let name = if c.name.is_empty() { "LongFast".to_string() } else { c.name.clone() };
+                self.st.store.insert_channel(ChannelKey {
+                    system: System::Meshtastic,
+                    name,
+                    key: c.psk.clone(),
+                });
+                n += 1;
+            }
+            if n > 0 {
+                let _ = self.st.store.save();
+                self.st.store.publish();
+            }
+            match n {
+                0 => format!("{} channels, none with a key of its own", chans.len()),
+                1 => "1 channel imported".to_string(),
+                n => format!("{n} channels imported"),
+            }
+        }));
     }
 
     /// One channel: what it is in the header, what is known about its keying

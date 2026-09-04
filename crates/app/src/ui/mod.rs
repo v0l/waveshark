@@ -1099,8 +1099,13 @@ impl App {
 
     /// Draw the key manager.
     fn keys_view(&mut self, ui: &mut egui::Ui) {
-        keys_pane::Keys { st: &mut self.keys, radio: self.radio.as_ref(), cmds: &mut self.cmds }
-            .show(ui);
+        keys_pane::Keys {
+            st: &mut self.keys,
+            radio: self.radio.as_ref(),
+            cmds: &mut self.cmds,
+            rt: self.rt.handle().clone(),
+        }
+        .show(ui);
     }
 
     /// Draw the scope, then do what it asked for.

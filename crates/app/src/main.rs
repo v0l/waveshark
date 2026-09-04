@@ -12,6 +12,7 @@ mod devices;
 mod i18n;
 mod icons;
 mod keystore;
+mod meshnode;
 mod locale;
 mod dial;
 mod tracks;
