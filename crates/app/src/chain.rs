@@ -1158,6 +1158,7 @@ impl Receiver {
 
     /// Install a key for a cell colour on every TETRA front end, so traffic
     /// on that cell decodes. From the key manager, for a manual key.
+    #[cfg(feature = "tea")]
     pub fn set_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
         let ids: Vec<_> = self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
         for id in ids {

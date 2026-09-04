@@ -18,17 +18,21 @@
 //! The round-trip test is self-consistent under those choices; it does not
 //! prove them against an independent implementation.
 
+#[cfg(feature = "tea")]
 use crate::tea::{keystream, Key, Timestamp};
 use crate::vocoder::Decoder;
 use dsp::tetra::speech::FRAME_BITS;
+#[cfg(feature = "tea")]
 use dsp::tetra::TdmaTime;
 
 /// PCM samples one STEC speech frame decodes to: 30 ms at 8 kHz.
 pub const FRAME_SAMPLES: usize = 240;
 
 /// Bytes a 137-bit STEC frame packs into, MSB-first.
+#[cfg(feature = "tea")]
 const FRAME_BYTES: usize = FRAME_BITS.div_ceil(8); // 18
 
+#[cfg(feature = "tea")]
 fn pack(bits: &[u8; FRAME_BITS]) -> [u8; FRAME_BYTES] {
     let mut out = [0u8; FRAME_BYTES];
     for (i, &b) in bits.iter().enumerate() {
@@ -37,6 +41,7 @@ fn pack(bits: &[u8; FRAME_BITS]) -> [u8; FRAME_BYTES] {
     out
 }
 
+#[cfg(feature = "tea")]
 fn unpack(bytes: &[u8; FRAME_BYTES]) -> [u8; FRAME_BITS] {
     let mut out = [0u8; FRAME_BITS];
     for (i, o) in out.iter_mut().enumerate() {
@@ -49,11 +54,13 @@ fn unpack(bytes: &[u8; FRAME_BYTES]) -> [u8; FRAME_BITS] {
 ///
 /// `TdmaTime` counts tn/frame/multiframe; the hyperframe the IV also folds in
 /// is not in a SYNC PDU and has to be supplied (0 until tracked).
+#[cfg(feature = "tea")]
 pub fn timestamp(time: TdmaTime, hyperframe: u16, uplink: bool) -> Timestamp {
     Timestamp { tn: time.tn, frame: time.frame, multiframe: time.multiframe, hyperframe, uplink }
 }
 
 /// Decrypt one STEC frame in place against the keystream for its slot.
+#[cfg(feature = "tea")]
 pub fn decrypt_frame(frame: &mut [u8; FRAME_BITS], key: &Key, ts: &Timestamp) {
     let mut bytes = pack(frame);
     let ks = keystream(key, ts, FRAME_BYTES);
@@ -64,38 +71,35 @@ pub fn decrypt_frame(frame: &mut [u8; FRAME_BITS], key: &Key, ts: &Timestamp) {
 }
 
 /// Encrypt one STEC frame; the cipher is its own inverse, this names intent.
+#[cfg(feature = "tea")]
 pub fn encrypt_frame(frame: &mut [u8; FRAME_BITS], key: &Key, ts: &Timestamp) {
     decrypt_frame(frame, key, ts);
 }
 
-/// One call's voice path: decrypt if keyed, then run the ACELP decoder,
-/// keeping its inter-frame state. A traffic slot yields two speech frames;
-/// feed them in order (A then B), each with its own timestamp.
+/// One call's voice path: the ACELP decoder, keeping its inter-frame state.
+/// A traffic slot yields two speech frames; feed them in order (A then B).
+/// Frames must already be plaintext: on an enciphered call the caller
+/// decrypts each with [`decrypt_frame`] first (behind the `tea` feature).
 pub struct CallDecoder {
     vocoder: Decoder,
-    key: Option<Key>,
+}
+
+impl Default for CallDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CallDecoder {
-    /// A decoder for a clear call, or an enciphered one when a key is given.
-    pub fn new(key: Option<Key>) -> Self {
-        CallDecoder { vocoder: Decoder::new(), key }
+    pub fn new() -> Self {
+        CallDecoder { vocoder: Decoder::new() }
     }
 
-    /// One STEC frame (as `speech::decode` recovered it) to 240 PCM samples.
-    /// `bad` marks a frame whose channel CRC failed, so the vocoder conceals
-    /// rather than trusts it. Decryption happens first when the call is keyed.
-    pub fn frame(
-        &mut self,
-        stec: &[u8; FRAME_BITS],
-        ts: &Timestamp,
-        bad: bool,
-    ) -> [i16; FRAME_SAMPLES] {
-        let mut frame = *stec;
-        if let Some(key) = &self.key {
-            decrypt_frame(&mut frame, key, ts);
-        }
-        let parm = Decoder::frame_to_parm(&frame);
+    /// One plaintext STEC frame (as `speech::decode` recovered it, decrypted
+    /// if it was enciphered) to 240 PCM samples. `bad` marks a frame whose
+    /// channel CRC failed, so the vocoder conceals rather than trusts it.
+    pub fn frame(&mut self, stec: &[u8; FRAME_BITS], bad: bool) -> [i16; FRAME_SAMPLES] {
+        let parm = Decoder::frame_to_parm(stec);
         let mut pcm = [0i16; FRAME_SAMPLES];
         self.vocoder.decode(&parm, bad, &mut pcm);
         pcm
@@ -104,13 +108,14 @@ impl CallDecoder {
 
 /// The timestamps for the two speech frames of the block at `time`: frame A
 /// on the slot itself, frame B on the next slot.
+#[cfg(feature = "tea")]
 pub fn frame_timestamps(time: TdmaTime, hyperframe: u16, uplink: bool) -> [Timestamp; 2] {
     let mut next = time;
     next.advance(1);
     [timestamp(time, hyperframe, uplink), timestamp(next, hyperframe, uplink)]
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tea"))]
 mod tests {
     use super::*;
     use dsp::tetra::{coding, speech};
@@ -179,18 +184,19 @@ mod tests {
         let chan = speech::encode(scramb, &stec_a, &stec_b);
         let (clear_frames, ok) = speech::decode(scramb, &chan);
         assert!(ok);
-        let mut clear = CallDecoder::new(None);
-        let ca = clear.frame(&clear_frames[0], &ts[0], false);
+        let mut clear = CallDecoder::new();
+        let ca = clear.frame(&clear_frames[0], false);
 
         // Keyed path: encrypt the same STEC, channel, decrypt, vocode.
         let (mut ea, mut eb) = (stec_a, stec_b);
         encrypt_frame(&mut ea, &key, &ts[0]);
         encrypt_frame(&mut eb, &key, &ts[1]);
         let chan2 = speech::encode(scramb, &ea, &eb);
-        let (enc_frames, ok2) = speech::decode(scramb, &chan2);
+        let (mut enc_frames, ok2) = speech::decode(scramb, &chan2);
         assert!(ok2);
-        let mut keyed = CallDecoder::new(Some(key));
-        let ka = keyed.frame(&enc_frames[0], &ts[0], false);
+        decrypt_frame(&mut enc_frames[0], &key, &ts[0]);
+        let mut keyed = CallDecoder::new();
+        let ka = keyed.frame(&enc_frames[0], false);
 
         assert_eq!(ca, ka, "keyed path recovers the same audio as the clear one");
         assert!(ca.iter().any(|&s| s != 0), "the audio is not silence");

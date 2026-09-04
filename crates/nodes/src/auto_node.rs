@@ -489,6 +489,7 @@ impl AutoNode {
     /// Install a key on every inner TETRA front end for a cell colour, so a
     /// manual key entered in the manager reaches a cell heard through the
     /// scanner as well as one placed by hand.
+    #[cfg(feature = "tea")]
     pub fn set_inner_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
         for slot in &mut self.slots {
             for m in &mut slot.members {

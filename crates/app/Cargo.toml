@@ -42,6 +42,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # driver absent: the device simply never appears in the list.
 default = ["limesdr"]
 limesdr = ["dep:limesdr"]
+# TETRA decryption, key recovery and the key manager UI. Off by default; a
+# stock build has no Keys view and links no cipher or GPU stack. Enable with
+# `--features tea` (which turns on `nodes/tea` and `decode/tea`).
+tea = ["nodes/tea", "decode/tea"]
 
 [[example]]
 name = "lime"

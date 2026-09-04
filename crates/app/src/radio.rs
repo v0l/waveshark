@@ -312,6 +312,7 @@ pub enum Cmd {
     Edits(crate::patch::Edits),
     /// Install a TETRA key for a cell colour on every front end, so its
     /// enciphered traffic decodes. From the key manager.
+    #[cfg(feature = "tea")]
     TetraKey { colour: u8, key: decode::tea::Key },
     Stop,
 }
@@ -1577,6 +1578,7 @@ fn run(
                         rebuild = true;
                     }
                 }
+                #[cfg(feature = "tea")]
                 Cmd::TetraKey { colour, key } => rx.set_tetra_key(colour, key),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();

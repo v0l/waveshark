@@ -65,6 +65,7 @@ pub struct App {
     map: map_pane::MapState,
     calls: state::CallsState,
     messages: state::MessagesState,
+    #[allow(dead_code)]
     keys: state::KeysState,
     audio: state::AudioState,
     /// Where the interface's waiting work runs: tile fetches now, anything

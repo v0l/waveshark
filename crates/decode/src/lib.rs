@@ -21,9 +21,15 @@ pub mod analyze;
 pub mod bds;
 pub mod bits;
 pub mod m17;
+#[cfg(feature = "tea")]
 pub mod gpu;
+#[cfg(feature = "tea")]
 pub mod keystream;
+#[cfg(feature = "tea")]
 pub mod recover;
+#[cfg(feature = "tea")]
+pub mod ta61;
+#[cfg(feature = "tea")]
 pub mod tea;
 pub mod vocoder;
 pub mod voice;

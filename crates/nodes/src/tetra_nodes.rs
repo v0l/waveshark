@@ -18,11 +18,18 @@
 
 use common::Result;
 use decode::tetra::{Address, CallPdu, Event, RESOURCE, TRAFFIC, TRAFFIC_END};
+#[cfg(feature = "tea")]
 use decode::gpu::GpuSearch;
+#[cfg(feature = "tea")]
 use decode::recover::{Progress, Search};
+#[cfg(feature = "tea")]
 use decode::tea::{Collision, Key, Timestamp};
-use decode::voice::{frame_timestamps, CallDecoder};
+use decode::voice::CallDecoder;
+#[cfg(feature = "tea")]
+use decode::voice::{decrypt_frame, frame_timestamps};
+#[cfg(feature = "tea")]
 use poll_promise::Promise;
+#[cfg(feature = "tea")]
 use std::sync::Arc;
 use std::collections::HashMap;
 use dsp::tetra::speech;
@@ -72,18 +79,22 @@ const TRAFFIC_CONFIRM: u32 = 2;
 
 /// How many retransmissions of one message must be seen before a search is
 /// worth starting: three leaves no candidate over the whole register space.
+#[cfg(feature = "tea")]
 const COLLISION_QUORUM: usize = 3;
 
 /// Whole-space searches that must exhaust on one cell before TEA1 is ruled
 /// out. Each is a genuine equal-plaintext set that a TEA1 key would have
 /// satisfied, so a handful failing is strong evidence the cipher is not TEA1.
+#[cfg(feature = "tea")]
 const TEA1_RULED_OUT: usize = 4;
 
 /// Where the TEA1 key search is for a cell, so the manager can show it
-/// happening rather than only its result.
+/// happening rather than only its result. Always present, so the key manager
+/// compiles without the `tea` feature; without it the phase is always
+/// [`Recovery::Idle`], since nothing searches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recovery {
-    /// Nothing gathered yet, or the cell is clear.
+    /// Nothing gathered yet, the cell is clear, or the build has no search.
     Idle,
     /// Gathering retransmissions of one message: `have` of the quorum a
     /// search needs, across `messages` distinct messages being watched.
@@ -101,7 +112,9 @@ pub enum Recovery {
 }
 
 /// What a TETRA front end reports about the cell it hears and its key, for a
-/// key manager to show and act on.
+/// key manager to show and act on. Carries no cipher type, so the manager is
+/// a useful encryption monitor even in a build without the `tea` feature:
+/// which channels are enciphered and in what mode, with the key fields inert.
 #[derive(Clone, Copy, Debug)]
 pub struct KeyStatus {
     pub mcc: u16,
@@ -111,8 +124,8 @@ pub struct KeyStatus {
     /// The air-interface encryption mode the cell's signalling carries; 0 is
     /// clear.
     pub aie: u8,
-    /// The key in force for this cell, if one is known.
-    pub key: Option<Key>,
+    /// Whether a key is in force for this cell. Always false without `tea`.
+    pub has_key: bool,
     /// Timestamps caught re-using one keystream, waiting for a crib.
     pub reuse_pairs: usize,
     /// Where the key search is: gathering, running, or spent.
@@ -120,11 +133,13 @@ pub struct KeyStatus {
 }
 
 /// A TEA1 register search in flight, on the GPU or the CPU.
+#[cfg(feature = "tea")]
 enum RecoveryJob {
     Gpu(Promise<Option<u32>>),
     Cpu(Search),
 }
 
+#[cfg(feature = "tea")]
 impl RecoveryJob {
     /// The recovered register, if the search has finished with one.
     fn poll(&mut self) -> Progress {
@@ -136,6 +151,71 @@ impl RecoveryJob {
             },
             RecoveryJob::Cpu(s) => s.poll(),
         }
+    }
+}
+
+/// The TEA1/TEA2 state a TETRA node holds: everything that reads or recovers
+/// an air-interface key. One struct so the whole subsystem is one `#[cfg]` on
+/// the node, and so a stock build without the `tea` feature carries none of
+/// it. The methods that drive it are on `TetraNode`, since they also read the
+/// lower MAC's clock and cell.
+#[cfg(feature = "tea")]
+struct Crypto {
+    /// Keys to try on enciphered traffic, by cell colour code.
+    keys: HashMap<u8, Key>,
+    /// Enciphered SDUs grouped by message: the equal-plaintext sets a TEA1
+    /// key search runs on (TETRA:BURST section 5.2).
+    collisions: HashMap<u64, Vec<Collision>>,
+    /// The GPU searcher, built once; `None` with no adapter, CPU then.
+    gpu: Option<Arc<GpuSearch>>,
+    /// A key recovery in flight: colour code, message signature, the search.
+    recovery: Option<(u8, u64, RecoveryJob)>,
+    /// Message signatures whose whole-space search exhausted.
+    dead_sigs: std::collections::HashSet<u64>,
+    /// Exhausted searches on this cell; past [`TEA1_RULED_OUT`], not TEA1.
+    exhausted: usize,
+    /// Ciphertexts per IV, watching for keystream re-use (section 5.1).
+    reuse: decode::keystream::ReuseWatch,
+    /// Keystream recovered for an IV by a crib, by IV.
+    keystreams: HashMap<u32, Vec<u8>>,
+    /// Timestamps caught re-using one keystream: `m1 ^ m2` crib-drag surface.
+    reuse_pairs: Vec<decode::keystream::Reuse>,
+    /// The cell's real hyperframe, the slow digit of the cipher IV, from
+    /// SYSINFO and advanced on each multiframe wrap. `None` until seen.
+    hyperframe: Option<u16>,
+    last_multiframe: Option<u8>,
+}
+
+#[cfg(feature = "tea")]
+impl Crypto {
+    fn new() -> Self {
+        Crypto {
+            keys: HashMap::new(),
+            collisions: HashMap::new(),
+            gpu: GpuSearch::new().map(Arc::new),
+            recovery: None,
+            dead_sigs: std::collections::HashSet::new(),
+            exhausted: 0,
+            reuse: decode::keystream::ReuseWatch::new(),
+            keystreams: HashMap::new(),
+            reuse_pairs: Vec::new(),
+            hyperframe: None,
+            last_multiframe: None,
+        }
+    }
+
+    /// Forget everything but the keys, which survive a resync: a key is valid
+    /// for the network, not the moment.
+    fn reset(&mut self) {
+        self.collisions.clear();
+        self.recovery = None;
+        self.dead_sigs.clear();
+        self.exhausted = 0;
+        self.reuse = decode::keystream::ReuseWatch::new();
+        self.keystreams.clear();
+        self.reuse_pairs.clear();
+        self.hyperframe = None;
+        self.last_multiframe = None;
     }
 }
 
@@ -186,47 +266,12 @@ pub struct TetraNode {
     /// A speech decoder per timeslot carrying traffic, holding the vocoder's
     /// inter-frame state for that call and, when known, its key.
     voice_calls: HashMap<u8, CallDecoder>,
-    /// Keys to try on enciphered traffic, by cell colour code. Empty until a
-    /// key manager fills it or recovery finds one; without a key, enciphered
-    /// traffic decodes to noise and clear traffic decodes to speech.
-    keys: HashMap<u8, Key>,
-    /// Enciphered SDUs grouped by what says two of them are retransmissions
-    /// of the same message (address, PDU, mode, length): the equal-plaintext
-    /// sets a TEA1 key search runs on (TETRA:BURST section 5.2).
-    collisions: HashMap<u64, Vec<Collision>>,
-    /// The GPU searcher, built once; `None` where there is no adapter, and
-    /// the CPU search is used instead.
-    gpu: Option<Arc<GpuSearch>>,
-    /// A key recovery in flight: the colour code and message signature it is
-    /// for, and the search itself. One at a time, since the GPU is one device.
-    recovery: Option<(u8, u64, RecoveryJob)>,
-    /// Message signatures whose whole-space search exhausted: never gathered
-    /// or searched again.
-    dead_sigs: std::collections::HashSet<u64>,
-    /// Whole-space searches that exhausted on this cell's colour. Past
-    /// [`TEA1_RULED_OUT`] of them, TEA1 is not the cipher: it would have been
-    /// found by now on real retransmissions, so the cell is TEA2/3.
-    exhausted: usize,
-    /// Ciphertexts seen per IV, watching for a timestamp that comes round
-    /// again with different traffic: the keystream re-use that reads a frame
-    /// of any cipher without its key (TETRA:BURST section 5.1).
-    reuse: decode::keystream::ReuseWatch,
-    /// Keystream recovered for an IV, by IV. A crib on one frame at a re-used
-    /// timestamp reads every frame there; empty until a crib is available.
-    keystreams: HashMap<u32, Vec<u8>>,
-    /// Timestamps caught carrying two different frames under one IV: the
-    /// keystream cancelled, so `xor` is `m1 ^ m2`, a crib-drag surface that
-    /// reads either frame once one plaintext is known. What a key manager
-    /// shows as recoverable-by-crib, for any cipher.
-    reuse_pairs: Vec<decode::keystream::Reuse>,
-    /// The cell's real hyperframe, the slow digit of the cipher IV, seeded
-    /// from SYSINFO and advanced on each multiframe wrap so the IV stays
-    /// right between broadcasts. `None` until SYSINFO has carried it (a
-    /// class-3 cell sends a CCK id there instead, so it may stay `None`).
-    /// Keystream re-use is only judged when this is known: a guessed
-    /// hyperframe manufactures collisions that are not real.
-    hyperframe: Option<u16>,
-    last_multiframe: Option<u8>,
+    /// The TEA1/TEA2 subsystem: keys, collision material, the key search and
+    /// its backends, and the keystream-reuse watch. Behind the `tea` feature
+    /// as one member, so a stock build carries no cipher, key store or
+    /// search and links no GPU stack.
+    #[cfg(feature = "tea")]
+    crypto: Crypto,
     /// The slot counter as of the last burst, for reaping traffic whose
     /// marker stopped appearing.
     slot_now: u64,
@@ -262,62 +307,70 @@ impl TetraNode {
             marker_speech: HashMap::new(),
             traffic: HashMap::new(),
             voice_calls: HashMap::new(),
-            keys: HashMap::new(),
-            collisions: HashMap::new(),
-            gpu: GpuSearch::new().map(Arc::new),
-            recovery: None,
-            dead_sigs: std::collections::HashSet::new(),
-            exhausted: 0,
-            reuse: decode::keystream::ReuseWatch::new(),
-            keystreams: HashMap::new(),
-            reuse_pairs: Vec::new(),
-            hyperframe: None,
-            last_multiframe: None,
+            #[cfg(feature = "tea")]
+            crypto: Crypto::new(),
             slot_now: 0,
             accepted: 0,
         }
     }
 
     /// Give the node a key to try on this colour code's enciphered traffic.
+    #[cfg(feature = "tea")]
     pub fn add_key(&mut self, colour: u8, key: Key) {
-        self.keys.insert(colour, key);
+        self.crypto.keys.insert(colour, key);
     }
 
     /// What this front end knows about the cell it hears and its key: the
     /// row a key manager shows. `None` until a SYNC PDU has decoded a cell.
+    /// Always present; without the `tea` feature it reports encryption mode
+    /// only, with no key and no search phase.
     pub fn key_status(&self) -> Option<KeyStatus> {
         let cell = self.rx.cell?;
+        #[cfg(feature = "tea")]
+        let (has_key, reuse_pairs) =
+            (self.crypto.keys.contains_key(&cell.colour), self.crypto.reuse_pairs.len());
+        #[cfg(not(feature = "tea"))]
+        let (has_key, reuse_pairs) = (false, 0);
         Some(KeyStatus {
             mcc: cell.mcc,
             mnc: cell.mnc,
             colour: cell.colour,
             channel_hz: self.channel_hz,
             aie: self.last_aie,
-            key: self.keys.get(&cell.colour).copied(),
-            reuse_pairs: self.reuse_pairs.len(),
+            has_key,
+            reuse_pairs,
             recovery: self.recovery_phase(),
         })
     }
 
-    /// Where the key search is, for the manager to show.
+    /// Where the key search is, for the manager to show. Always [`Idle`]
+    /// without the `tea` feature, since nothing searches.
+    ///
+    /// [`Idle`]: Recovery::Idle
     fn recovery_phase(&self) -> Recovery {
-        if self.exhausted >= TEA1_RULED_OUT {
-            return Recovery::NotTea1;
+        #[cfg(not(feature = "tea"))]
+        return Recovery::Idle;
+        #[cfg(feature = "tea")]
+        {
+            let c = &self.crypto;
+            if c.exhausted >= TEA1_RULED_OUT {
+                return Recovery::NotTea1;
+            }
+            if let Some((_, _, job)) = &c.recovery {
+                return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_)) };
+            }
+            if !c.dead_sigs.is_empty() && c.collisions.is_empty() {
+                return Recovery::Exhausted { dropped: c.dead_sigs.len() };
+            }
+            if let Some(most) = c.collisions.values().map(Vec::len).max() {
+                return Recovery::Gathering {
+                    have: most,
+                    need: COLLISION_QUORUM,
+                    messages: c.collisions.len(),
+                };
+            }
+            Recovery::Idle
         }
-        if let Some((_, _, job)) = &self.recovery {
-            return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_)) };
-        }
-        if !self.dead_sigs.is_empty() && self.collisions.is_empty() {
-            return Recovery::Exhausted { dropped: self.dead_sigs.len() };
-        }
-        if let Some(most) = self.collisions.values().map(Vec::len).max() {
-            return Recovery::Gathering {
-                have: most,
-                need: COLLISION_QUORUM,
-                messages: self.collisions.len(),
-            };
-        }
-        Recovery::Idle
     }
 
     pub fn channel_hz(&self) -> f64 {
@@ -451,7 +504,12 @@ impl TetraNode {
     /// key for the cell's colour is known.
     fn decode_voice(&mut self, bursts: &[Burst]) -> Vec<common::Voice> {
         let Some(cell) = self.rx.cell else { return Vec::new() };
-        let key = self.keys.get(&cell.colour).copied();
+        // The key for this cell, if the crypto subsystem is built and holds
+        // one. Without the `tea` feature there is no key and no decryption.
+        #[cfg(feature = "tea")]
+        let key = self.crypto.keys.get(&cell.colour).copied();
+        #[cfg(not(feature = "tea"))]
+        let key: Option<()> = None;
         // An enciphered call with no key is silence, not noise: the STEC
         // frames are ciphertext, and feeding those to the vocoder would
         // synthesise random speech parameters. Only decode when the traffic
@@ -474,16 +532,25 @@ impl TetraNode {
             let mut chan = [0u8; speech::CHAN_BITS];
             chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
             chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
-            let (frames, crc_ok) = speech::decode(cell.scramb, &chan);
+            // `mut` only when the `tea` decrypt below is compiled in.
+            #[cfg_attr(not(feature = "tea"), allow(unused_mut))]
+            let (mut frames, crc_ok) = speech::decode(cell.scramb, &chan);
 
-            let dec = self
-                .voice_calls
-                .entry(tn)
-                .or_insert_with(|| CallDecoder::new(key));
-            let ts = frame_timestamps(time, 0, false);
+            // Decrypt each STEC frame in place before the vocoder sees it,
+            // when the call is keyed. Without the feature this is compiled
+            // out and only clear traffic reaches here.
+            #[cfg(feature = "tea")]
+            if let Some(key) = key {
+                let ts = frame_timestamps(time, self.crypto.hyperframe.unwrap_or(0), false);
+                for (frame, ts) in frames.iter_mut().zip(&ts) {
+                    decrypt_frame(frame, &key, ts);
+                }
+            }
+
+            let dec = self.voice_calls.entry(tn).or_insert_with(CallDecoder::new);
             let buf = pcm.entry(tn).or_default();
-            for (frame, ts) in frames.iter().zip(&ts) {
-                let samples = dec.frame(frame, ts, !crc_ok);
+            for frame in &frames {
+                let samples = dec.frame(frame, !crc_ok);
                 buf.extend(samples.iter().map(|&s| s as f32 / 32768.0));
             }
             if !seen_tn.contains(&tn) {
@@ -522,6 +589,7 @@ impl TetraNode {
     /// address, the PDU type, the encryption mode and the ciphertext length
     /// are the signature here. Frames are kept per signature until a quorum
     /// of distinct timestamps is reached, then handed to a search.
+    #[cfg(feature = "tea")]
     fn collect_collision(&mut self, c: &CallPdu, slot: u64) {
         // The MAC header's encryption mode does not name the cipher, so any
         // enciphered call is tried: the register search either finds a TEA1
@@ -531,12 +599,12 @@ impl TetraNode {
             return;
         }
         // TEA1 already ruled out on this cell: gathering more is wasted work.
-        if self.exhausted >= TEA1_RULED_OUT {
+        if self.crypto.exhausted >= TEA1_RULED_OUT {
             return;
         }
         let Some(cell) = self.rx.cell else { return };
         // A key is already known: nothing to recover.
-        if self.keys.contains_key(&cell.colour) {
+        if self.crypto.keys.contains_key(&cell.colour) {
             return;
         }
         let Some(time) = self.rx.time_at(slot) else { return };
@@ -544,20 +612,20 @@ impl TetraNode {
         // Advance the real hyperframe on a multiframe wrap, so the IV stays
         // right between the SYSINFO broadcasts that seed it. Only when it is
         // known: a guessed hyperframe manufactures re-use that is not real.
-        if let Some(prev) = self.last_multiframe {
+        if let Some(prev) = self.crypto.last_multiframe {
             if time.multiframe < prev {
-                if let Some(hn) = self.hyperframe.as_mut() {
+                if let Some(hn) = self.crypto.hyperframe.as_mut() {
                     *hn = hn.wrapping_add(1);
                 }
             }
         }
-        self.last_multiframe = Some(time.multiframe);
+        self.crypto.last_multiframe = Some(time.multiframe);
 
         // Watch for the same IV coming round with different traffic: that is
         // keystream re-use, and reads any cipher given a crib. Only judged
         // when the real hyperframe is known, since it is most of the IV.
         // Tagged by the addressed party so a re-decode is not mistaken for it.
-        let Some(hyperframe) = self.hyperframe else { return };
+        let Some(hyperframe) = self.crypto.hyperframe else { return };
         let full_ts = Timestamp {
             tn: time.tn,
             frame: time.frame,
@@ -571,13 +639,13 @@ impl TetraNode {
             c.address.hash(&mut h);
             h.finish()
         };
-        if let Some(re) = self.reuse.observe(&full_ts, c.cipher.clone(), tag) {
+        if let Some(re) = self.crypto.reuse.observe(&full_ts, c.cipher.clone(), tag) {
             // A re-used IV: the keystream cancels across the pair. Without a
             // crib nothing is decrypted, so the pair is kept for one to be
             // applied later rather than claimed as plaintext now. Bounded so
             // a long run does not grow it without limit.
-            if self.reuse_pairs.len() < 256 {
-                self.reuse_pairs.push(re);
+            if self.crypto.reuse_pairs.len() < 256 {
+                self.crypto.reuse_pairs.push(re);
             }
         }
 
@@ -599,7 +667,7 @@ impl TetraNode {
         // A signature that already exhausted a whole-space search will not
         // yield: its frames did not share plaintext, or the hyperframe was
         // wrong. Do not gather it again.
-        if self.dead_sigs.contains(&sig) {
+        if self.crypto.dead_sigs.contains(&sig) {
             return;
         }
 
@@ -613,7 +681,7 @@ impl TetraNode {
             hyperframe,
             uplink: false,
         };
-        let group = self.collisions.entry(sig).or_default();
+        let group = self.crypto.collisions.entry(sig).or_default();
         // A retransmission is at a new time; the same slot twice is one frame.
         if group.iter().any(|f| f.ts == ts) {
             return;
@@ -626,7 +694,7 @@ impl TetraNode {
         // Start a search when a message has enough retransmissions and the
         // one search slot (the GPU, or the CPU pool) is free. Collection of
         // every other message keeps going regardless.
-        if group.len() >= COLLISION_QUORUM && self.recovery.is_none() {
+        if group.len() >= COLLISION_QUORUM && self.crypto.recovery.is_none() {
             let frames = group.clone();
             self.start_recovery(cell.colour, sig, frames);
         }
@@ -634,15 +702,16 @@ impl TetraNode {
 
     /// Start a register search over the whole space, on the GPU if there is
     /// one, else across CPU threads.
+    #[cfg(feature = "tea")]
     fn start_recovery(&mut self, colour: u8, sig: u64, frames: Vec<Collision>) {
-        let job = match &self.gpu {
+        let job = match &self.crypto.gpu {
             Some(gpu) => RecoveryJob::Gpu(gpu.clone().spawn(frames, 0..1u64 << 32, 1 << 20)),
             None => {
                 let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                 RecoveryJob::Cpu(Search::start(frames, threads))
             }
         };
-        self.recovery = Some((colour, sig, job));
+        self.crypto.recovery = Some((colour, sig, job));
     }
 
     /// Poll a running search; on success install the key so the next traffic
@@ -652,33 +721,34 @@ impl TetraNode {
     /// other message keeps its accumulated frames: recovery is a long game of
     /// waiting for one message to be retransmitted enough times, and a wrong
     /// guess on one caller must not throw away progress on another.
+    #[cfg(feature = "tea")]
     fn poll_recovery(&mut self) -> Option<u8> {
-        let (colour, sig, job) = self.recovery.as_mut()?;
+        let (colour, sig, job) = self.crypto.recovery.as_mut()?;
         let (colour, sig) = (*colour, *sig);
         match job.poll() {
             Progress::Running => None,
             Progress::Found(reg) => {
-                self.keys.insert(colour, Key::Tea1(reg));
-                self.recovery = None;
-                self.collisions.clear();
+                self.crypto.keys.insert(colour, Key::Tea1(reg));
+                self.crypto.recovery = None;
+                self.crypto.collisions.clear();
                 Some(colour)
             }
             Progress::Exhausted => {
-                self.recovery = None;
-                self.dead_sigs.insert(sig);
-                self.collisions.remove(&sig);
-                self.exhausted += 1;
+                self.crypto.recovery = None;
+                self.crypto.dead_sigs.insert(sig);
+                self.crypto.collisions.remove(&sig);
+                self.crypto.exhausted += 1;
                 // Once TEA1 is ruled out, stop spending the GPU on a cipher
                 // this cannot crack: drop what was gathered and do not start
                 // another search. A hand-entered key is the only way in then.
-                if self.exhausted >= TEA1_RULED_OUT {
-                    self.collisions.clear();
+                if self.crypto.exhausted >= TEA1_RULED_OUT {
+                    self.crypto.collisions.clear();
                     return None;
                 }
                 // Hand the search slot to the next message already at quorum.
                 if let Some(cell) = self.rx.cell {
                     if let Some((&next, frames)) =
-                        self.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
+                        self.crypto.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
                     {
                         let frames = frames.clone();
                         self.start_recovery(cell.colour, next, frames);
@@ -691,15 +761,17 @@ impl TetraNode {
 
     /// The key recovered for a colour code, if any: what a key manager reads
     /// to show and persist it.
+    #[cfg(feature = "tea")]
     pub fn recovered_key(&self, colour: u8) -> Option<Key> {
-        self.keys.get(&colour).copied()
+        self.crypto.keys.get(&colour).copied()
     }
 
     /// Timestamps caught re-using one keystream across two frames. Each is a
     /// crib-drag surface (`m1 ^ m2`) that reads either frame once a plaintext
     /// is known, for any cipher; what a key manager offers for a crib.
+    #[cfg(feature = "tea")]
     pub fn reuse_pairs(&self) -> &[decode::keystream::Reuse] {
-        &self.reuse_pairs
+        &self.crypto.reuse_pairs
     }
 
     /// Apply a known plaintext to a re-used IV: recover its keystream and keep
@@ -708,15 +780,17 @@ impl TetraNode {
     /// into readable traffic, for TEA2 as much as TEA1.
     ///
     /// [`reuse_pairs`]: Self::reuse_pairs
+    #[cfg(feature = "tea")]
     pub fn apply_crib(&mut self, iv: u32, ciphertext: &[u8], known_plaintext: &[u8]) -> Vec<u8> {
         let ks = decode::keystream::keystream_from_known(ciphertext, known_plaintext);
-        self.keystreams.insert(iv, ks.clone());
+        self.crypto.keystreams.insert(iv, ks.clone());
         ks
     }
 
     /// The keystream recovered for an IV by a crib, if any.
+    #[cfg(feature = "tea")]
     pub fn keystream_for(&self, iv: u32) -> Option<&[u8]> {
-        self.keystreams.get(&iv).map(|k| k.as_slice())
+        self.crypto.keystreams.get(&iv).map(|k| k.as_slice())
     }
 }
 
@@ -817,8 +891,9 @@ impl Node for TetraNode {
                     // Seed the IV's slow digit from the cell itself. A class-3
                     // cell sends a CCK id here instead, so it may never come,
                     // and re-use detection stays off until it does.
+                    #[cfg(feature = "tea")]
                     if let Some(hn) = si.hyperframe {
-                        self.hyperframe = Some(hn);
+                        self.crypto.hyperframe = Some(hn);
                     }
                     events.push((Event::Sysinfo(si), block.slot));
                 }
@@ -836,6 +911,7 @@ impl Node for TetraNode {
                         a.band.get_or_insert(band);
                     }
                     // Enciphered SDUs are the material a key search runs on.
+                    #[cfg(feature = "tea")]
                     self.collect_collision(&c, block.slot);
                     events.push((Event::Call(c), block.slot));
                 }
@@ -856,6 +932,7 @@ impl Node for TetraNode {
 
         // Advance any key recovery in flight; a found key decodes the next
         // traffic without an operator entering anything.
+        #[cfg(feature = "tea")]
         self.poll_recovery();
 
         for (event, slot) in events {
@@ -919,15 +996,8 @@ impl Node for TetraNode {
         self.marker_speech.clear();
         self.traffic.clear();
         self.voice_calls.clear();
-        self.collisions.clear();
-        self.recovery = None;
-        self.dead_sigs.clear();
-        self.exhausted = 0;
-        self.reuse = decode::keystream::ReuseWatch::new();
-        self.keystreams.clear();
-        self.reuse_pairs.clear();
-        self.hyperframe = None;
-        self.last_multiframe = None;
+        #[cfg(feature = "tea")]
+        self.crypto.reset();
     }
 }
 
@@ -1235,6 +1305,7 @@ mod tests {
     /// The cipher-agnostic passive path: one IV seen twice with different
     /// traffic is keystream re-use, and a crib on one frame reads the other,
     /// whatever the cipher. Built with TEA2, which no key search touches.
+    #[cfg(feature = "tea")]
     #[test]
     fn a_reused_timestamp_is_caught_and_a_crib_reads_it() {
         use decode::keystream::{keystream_from_known, xor};
@@ -1247,7 +1318,7 @@ mod tests {
         node.last_aie = 3;
         // Re-use is only judged once the hyperframe is known, as SYSINFO
         // would set it; seed it directly here.
-        node.hyperframe = Some(110);
+        node.crypto.hyperframe = Some(110);
 
         // Two calls at the same slot (hence same IV, hyperframe 110),
         // addressed to different parties, both TEA2 under one keystream.
@@ -1303,6 +1374,7 @@ mod tests {
     /// the cipher is not TEA1, so the manager stops looking as if it might
     /// still crack. Driven through the exhausted count directly; a real
     /// 2^32 sweep is far too slow for a test.
+    #[cfg(feature = "tea")]
     #[test]
     fn repeated_exhaustion_rules_out_tea1() {
         use dsp::tetra::{Cell, TdmaTime};
@@ -1311,12 +1383,12 @@ mod tests {
         node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
         node.last_aie = 3;
 
-        node.exhausted = TEA1_RULED_OUT - 1;
+        node.crypto.exhausted = TEA1_RULED_OUT - 1;
         assert!(
             !matches!(node.key_status().unwrap().recovery, Recovery::NotTea1),
             "one more search still worth trying"
         );
-        node.exhausted = TEA1_RULED_OUT;
+        node.crypto.exhausted = TEA1_RULED_OUT;
         assert!(
             matches!(node.key_status().unwrap().recovery, Recovery::NotTea1),
             "TEA1 ruled out after enough exhaustion"

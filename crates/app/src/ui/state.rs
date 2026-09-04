@@ -383,17 +383,25 @@ pub(super) struct MessagesState {
     pub filter: String,
 }
 
-/// The key manager: the keys known, and what the operator is typing.
+/// The key manager: the keys known, and what the operator is typing. The
+/// store exists only with the `tea` feature (there is no key material to keep
+/// without it); the view itself is always present as an encryption monitor.
 pub(super) struct KeysState {
     /// Keys stored on disk, loaded at startup and written when one changes.
+    #[cfg(feature = "tea")]
     pub store: crate::keystore::KeyStore,
     /// The hex the operator is typing, per cell tag, before it is applied.
+    #[cfg_attr(not(feature = "tea"), allow(dead_code))]
     pub typing: std::collections::HashMap<String, String>,
 }
 
 impl Default for KeysState {
     fn default() -> Self {
-        Self { store: crate::keystore::KeyStore::load(), typing: std::collections::HashMap::new() }
+        Self {
+            #[cfg(feature = "tea")]
+            store: crate::keystore::KeyStore::load(),
+            typing: std::collections::HashMap::new(),
+        }
     }
 }
 

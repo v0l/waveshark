@@ -9,11 +9,17 @@ common.workspace = true
 dsp.workspace = true
 pipeline.workspace = true
 decode.workspace = true
-poll-promise.workspace = true
+poll-promise = { workspace = true, optional = true }
 rayon.workspace = true
 # M17 voice is Codec 2 3200, whose frame is exactly the 8 bytes M17 puts in
 # half a stream frame. Pure Rust, so it costs the build nothing.
 codec2 = "0.3.1"
+
+[features]
+# TETRA air-interface decryption and TEA1 key recovery in the TETRA node.
+# Off by default; enables `decode/tea`. Without it the node still reads
+# signalling and decodes clear speech, but carries no cipher or key search.
+tea = ["decode/tea", "dep:poll-promise"]
 
 [dev-dependencies]
 sources.workspace = true
