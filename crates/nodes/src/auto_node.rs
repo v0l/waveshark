@@ -1062,10 +1062,20 @@ impl Node for AutoNode {
         let mut closed = Vec::new();
         for (k, ev, pk, done, heard) in results {
             let center = Hz(self.slots[k].center_hz);
-            for (name, width) in heard {
-                if let Some(e) = self.remember(name, center.as_f64(), width) {
+            for (name, width) in &heard {
+                if let Some(e) = self.remember(name, center.as_f64(), *width) {
                     c.emit(e);
                 }
+            }
+            // Latch. Every front end whose channel the source could be was
+            // built for it and asked; the one that read a frame has
+            // answered what the source is, and from here it alone reads
+            // it. The others were each a decoder's worth of work per block
+            // and, for a pager or a packet channel, a second row saying
+            // the same burst was nothing.
+            if !heard.is_empty() && self.slots[k].members.len() > 1 {
+                let keep: Vec<&str> = heard.iter().map(|(n, _)| *n).collect();
+                self.slots[k].members.retain(|m| keep.contains(&m.name));
             }
             for e in ev {
                 if matches!(e, Event::Decoded(_)) {
