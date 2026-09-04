@@ -1116,12 +1116,32 @@ impl SourceDetector {
                 }
             }
         }
+        // A strong signal brings a forest with it: its image at the
+        // tuner's rejection, intermodulation and reciprocal mixing across
+        // the span, all narrow, all tens of dB under it, all born as it
+        // keys and gone as it stops. Minimum statistics learn them as floor
+        // only if they stay for the floor's whole memory, so a transmitter
+        // that keys for a moment every few seconds reopened its forest every
+        // time: thirty sources in a frame, each with a full set of decoders.
+        // Nothing that opens this far under a source still younger than the
+        // floor's memory is believed. What it costs is a transmitter at that
+        // margin keying up inside the strong one's first seconds.
+        let memory = (self.floor.sub_len * self.floor.sub_count) as u64;
+        let dominant = self
+            .tracks
+            .iter()
+            .filter(|t| self.frame - t.born <= memory)
+            .map(|t| t.src.peak_snr_db)
+            .fold(f32::NEG_INFINITY, f32::max);
         let born = self.tracks.len();
         for (si, s) in self.segs.iter().enumerate() {
             if assigned[si].is_some() || s.peak_db < self.cfg.open_db {
                 continue;
             }
             if s.occ_hi + 1 - s.occ_lo < self.cfg.min_bins {
+                continue;
+            }
+            if s.peak_db < dominant - SPUR_DB {
                 continue;
             }
             let id = SourceId(self.next_id);
@@ -1275,6 +1295,12 @@ impl SourceDetector {
 /// Four milliseconds at the default resolution: a chirp at the highest
 /// spreading factor moves several bins in that, and nothing keyed does.
 const GROWTH_FRAMES: usize = 16;
+
+/// How far under a young strong source a new candidate is taken to be one
+/// of its spurs rather than a transmitter. An RTL-SDR's image sits about
+/// 32 dB down and its intermodulation products 28 to 34 dB under a 44 dB
+/// burst; a second transmitter within this margin still opens.
+const SPUR_DB: f32 = 25.0;
 
 /// Frames after a start or a silence before the floor is measured. At the
 /// default resolution that is eight milliseconds: longer than any filter's
