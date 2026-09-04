@@ -92,21 +92,12 @@ impl Messages {
 
     /// Fold one decode in, if it carried text at all.
     ///
-    /// Returns whether it did. An empty string is not a message: a link setup
-    /// frame with an empty metadata field is a voice transmission, not
-    /// somebody writing nothing.
+    /// Returns whether it did.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let Some(body) = text(rec, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())
-        else {
-            return false;
-        };
-        let from = text(rec, &["from", "src", "source", "radio_id"]).filter(|s| !s.is_empty());
-        let to = text(rec, &["addressee", "to", "dst", "destination", "talkgroup", "address"])
-            .filter(|s| !s.is_empty());
-        let system = rec.model.split('-').next().unwrap_or(&rec.model).to_string();
+        let Some(msg) = rec.to_message(at) else { return false };
 
         if let Some(m) = self.seen.iter_mut().find(|m| {
-            m.system == system && m.text == body && m.from == from && m.to == to
+            m.system == msg.system && m.text == msg.text && m.from == msg.from && m.to == msg.to
                 && at.saturating_duration_since(m.last) < REPEAT
         }) {
             m.last = at;
@@ -114,21 +105,48 @@ impl Messages {
             return true;
         }
 
-        self.seen.push(Message {
-            system,
-            channel_hz: rec.freq,
-            from,
-            to,
-            text: body,
-            first: at,
-            last: at,
-            heard: 1,
-        });
+        self.seen.push(msg);
         if self.seen.len() > MAX_MESSAGES {
             let drop = self.seen.len() - MAX_MESSAGES;
             self.seen.drain(..drop);
         }
         true
+    }
+}
+
+impl DecodeRecord {
+    /// The message this decode carries, if it carries one.
+    ///
+    /// This is the one place the convention lives, so anything holding a
+    /// record can ask it for a message: the packet log as it appends, a feed,
+    /// or a view added later. It reads fields rather than switching on the
+    /// protocol, which is what keeps `docs/views.md` true, and a decoder joins
+    /// the message view by naming its fields the way everything else does.
+    ///
+    /// Borrowing rather than consuming, hence `to_` and not `into_`: the
+    /// record carries on to the packet log, and the message is a second
+    /// reading of it rather than a replacement.
+    ///
+    /// An empty string is not a message: a link setup frame with an empty
+    /// metadata field is a voice transmission, not somebody writing nothing.
+    pub fn to_message(&self, at: Instant) -> Option<Message> {
+        let body =
+            text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
+        Some(Message {
+            system: self.model.split('-').next().unwrap_or(&self.model).to_string(),
+            channel_hz: self.freq,
+            from: text(self, &["from", "src", "source", "radio_id"])
+                .filter(|s| !s.is_empty()),
+            to: text(
+                self,
+                &["addressee", "to", "dst", "destination", "talkgroup", "channel", "address"],
+            )
+            .filter(|s| !s.is_empty()),
+            text: body,
+            first: at,
+            last: at,
+            heard: 1,
+        })
     }
 }
 
@@ -158,6 +176,66 @@ mod tests {
 
     fn t(secs: u64) -> Instant {
         Instant::now() + Duration::from_secs(secs)
+    }
+
+    /// The mesh protocols reach this view, sender and all.
+    ///
+    /// The field names here are the ones `nodes::lora_nodes::lora_decoded`
+    /// actually emits. MeshCore named its sender `sender` once, which is not
+    /// a name this reads, and the messages arrived with nobody on them.
+    #[test]
+    fn the_mesh_protocols_arrive_with_their_sender_and_recipient() {
+        let mut m = Messages::default();
+
+        // Meshtastic: a text message on the default channel.
+        let meshtastic = rec(
+            "Meshtastic",
+            869.495e6,
+            &[
+                ("source", Value::Text("1de7f958".into())),
+                ("destination", Value::Text("broadcast".into())),
+                ("channel", Value::Text("LongFast (default key)".into())),
+                ("port", Value::Text("text".into())),
+                ("text", Value::Text("on my way".into())),
+            ],
+        );
+        assert!(m.update(&meshtastic, t(0)));
+
+        // MeshCore: a message on the public channel.
+        let meshcore = rec(
+            "MeshCore",
+            869.525e6,
+            &[
+                ("type", Value::Text("group text".into())),
+                ("channel", Value::Text("Public (default key)".into())),
+                ("from", Value::Text("kieran".into())),
+                ("text", Value::Text("on my way".into())),
+            ],
+        );
+        assert!(m.update(&meshcore, t(0)));
+
+        let got = m.recent();
+        assert_eq!(got.len(), 2, "two systems, two messages");
+
+        let mt = got.iter().find(|x| x.system == "Meshtastic").expect("meshtastic");
+        assert_eq!(mt.from.as_deref(), Some("1de7f958"));
+        assert_eq!(mt.to.as_deref(), Some("broadcast"));
+        assert_eq!(mt.text, "on my way");
+
+        let mc = got.iter().find(|x| x.system == "MeshCore").expect("meshcore");
+        assert_eq!(mc.from.as_deref(), Some("kieran"), "the sender must survive");
+        assert_eq!(mc.to.as_deref(), Some("Public (default key)"));
+        assert!(!mc.title().is_empty(), "a message with no title is the bug");
+    }
+
+    /// The same words on two systems are two messages, not one repeat.
+    #[test]
+    fn one_systems_words_do_not_swallow_anothers() {
+        let mut m = Messages::default();
+        let f = [("from", Value::Text("kieran".into())), ("text", Value::Text("hi".into()))];
+        assert!(m.update(&rec("MeshCore", 869.5e6, &f), t(0)));
+        assert!(m.update(&rec("Meshtastic", 869.5e6, &f), t(1)));
+        assert_eq!(m.recent().len(), 2);
     }
 
     #[test]

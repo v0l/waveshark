@@ -492,10 +492,14 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // it is part of the plaintext rather than a protocol field. A
             // group message carries no signature, so anyone holding the
             // channel key can write any name there; `text` is what was sent,
-            // and `sender` is only what it claims.
+            // and `from` is only what it claims to be.
+            //
+            // Named `from` and not `sender` because that is what the message
+            // view reads, and a field named anything else is a message with
+            // nobody's name on it. See `DecodeRecord::to_message`.
             let (sender, body) = m.sender_and_body();
             if let Some(s) = sender {
-                fields.push(("sender".into(), Value::Text(s.to_string())));
+                fields.push(("from".into(), Value::Text(s.to_string())));
             }
             fields.push(("text".into(), Value::Text(body.to_string())));
         }
