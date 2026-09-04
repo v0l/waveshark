@@ -8,7 +8,7 @@
 //! These are the parts of the interface that survive a frame. Anything a pane
 //! works out again each frame stays a local.
 
-use crate::radio::{Cmd, DecodeRecord, Demod};
+use crate::radio::{ChanMode, Cmd, DecodeRecord};
 use crate::dial::Dial;
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
@@ -27,7 +27,8 @@ pub struct Channel {
     /// chain when a different channel is removed.
     pub(super) id: u64,
     pub(super) freq: f64,
-    pub(super) demod: Demod,
+    /// What it does with that frequency: play it, or decode it.
+    pub(super) mode: ChanMode,
     pub(super) label: String,
     /// Whether this channel is being demodulated into the mix.
     pub(super) on: bool,

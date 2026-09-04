@@ -44,7 +44,7 @@ mod widgets;
 use crate::bands;
 use crate::dial::Dial;
 use crate::radio::{
-    ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
+    ChanMode, ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
 };
 use crate::theme::{self, legend, value};
 use burst::*;
@@ -635,7 +635,7 @@ impl App {
         self.audio.channels.push(Channel {
             id: self.audio.next_id as u64,
             freq,
-            demod,
+            mode: ChanMode::Audio(demod),
             label: format!("{mhz:.1}"),
             on: true,
             volume: 0.8,
@@ -1031,22 +1031,28 @@ impl App {
                     self.send(Cmd::Decode(on));
                 }
                 packets::Action::Open(w) => self.open = Some(w),
-                packets::Action::Pin { freq, model } => self.pin_scanner(freq, &model),
+                packets::Action::Pin { freq, model } => self.pin_channel(freq, &model),
             }
         }
     }
 
-    /// Open the scanner table with a block prefilled from a packet, the (+) on
-    /// a log row. The edit buffer is seeded from whatever is there now, so a
-    /// pin adds to unsaved edits rather than discarding them, and the new row
-    /// is left unsaved: the operator sees what will run before it does.
-    fn pin_scanner(&mut self, freq: f64, model: &str) {
-        let mut rows = self.scanner_edit.take().unwrap_or_else(|| {
-            self.scanners.list.iter().map(ScannerRow::from_scanner).collect()
-        });
-        rows.push(ScannerRow::for_packet(freq, model, self.rate));
-        self.scanner_edit = Some(rows);
-        self.open = Some(Settings::Scanners);
+    /// Put a decode channel on the strip from a packet, the (+) on a log row:
+    /// the frequency it arrived on, and the front end that reads it.
+    ///
+    /// This used to prefill a scanner block, which was a heavier answer than
+    /// the question. A block sweeps the span it covers whether or not anything
+    /// else in it is wanted, so keeping one frequency meant keeping the search
+    /// that found it. A channel is the front end alone, at a fixed centre and
+    /// width, and it runs with the scanner switched off.
+    fn pin_channel(&mut self, freq: f64, model: &str) {
+        let Some(kind) = front_for(model) else {
+            // Nothing here reads it on its own, so the search that found it is
+            // the only thing that can: leave the scanner table to say so.
+            self.open = Some(Settings::Scanners);
+            return;
+        };
+        let label = format!("{} {:.4}", crate::chain::front_label(kind), freq / 1e6);
+        self.push_channel(freq, ChanMode::Decode(kind.to_string()), Some(label));
     }
 
     /// Draw the call list, then do what its buttons asked for.
@@ -1129,13 +1135,18 @@ impl App {
     }
 
     fn add_channel(&mut self, freq: f64) {
+        self.push_channel(freq, ChanMode::Audio(bands::demod_at(freq)), None);
+    }
+
+    /// A channel on the strip, tuned to `freq` and doing `mode` with it.
+    fn push_channel(&mut self, freq: f64, mode: ChanMode, label: Option<String>) {
         let id = self.audio.next_id;
         self.audio.next_id += 1;
         self.audio.channels.push(Channel {
             id: id as u64,
             freq,
-            demod: bands::demod_at(freq),
-            label: format!("CH{id}"),
+            mode,
+            label: label.unwrap_or_else(|| format!("CH{id}")),
             on: true,
             volume: 0.8,
             muted: false,
@@ -1166,7 +1177,7 @@ impl App {
                 id: c.id,
                 label: c.label.clone(),
                 offset_hz: c.freq - center,
-                demod: c.demod,
+                mode: c.mode.clone(),
                 volume: c.volume,
                 muted: c.muted,
                 squelch_db: c.squelch_db,
@@ -1215,6 +1226,18 @@ fn apply_locale(s: &mut crate::session::Session) {
     if let Some(p) = crate::bands::Plan::from_id(&s.band_plan) {
         crate::bands::set_plan(p);
     }
+}
+
+/// The front end that reads a protocol, matched by the name the log gives it.
+///
+/// Against the registry's own channel front ends rather than a table of
+/// protocol names, so a decoder added to the registry is pinnable the day it
+/// arrives. AX.25 is the exception: it is the frame format APRS carries
+/// rather than a front end of its own.
+fn front_for(model: &str) -> Option<&'static str> {
+    let system = model.split('-').next().unwrap_or(model).to_ascii_lowercase();
+    let system = if system == "ax25" { "aprs" } else { system.as_str() };
+    crate::chain::channel_fronts().iter().map(|(k, _)| *k).find(|k| *k == system)
 }
 
 fn fmt_hz(hz: f64) -> String {
@@ -1437,7 +1460,7 @@ mod tests {
         app.audio.channels.push(Channel {
             id,
             freq,
-            demod: Demod::Nfm,
+            mode: ChanMode::Audio(Demod::Nfm),
             label: format!("CH{id}"),
             on,
             volume,
@@ -1634,7 +1657,7 @@ mod tests {
             a.audio.channels.push(Channel {
                 id: 1,
                 freq: *f,
-                demod: Demod::Wfm,
+                mode: ChanMode::Audio(Demod::Wfm),
                 label: "t".into(),
                 on: true,
                 volume: 0.8,
@@ -1790,8 +1813,8 @@ mod tests {
         let mut a = app();
         a.add_channel(95.8e6);
         a.add_channel(124.0e6);
-        assert_eq!(a.audio.channels[0].demod, Demod::Wfm);
-        assert_eq!(a.audio.channels[1].demod, Demod::Am);
+        assert_eq!(a.audio.channels[0].mode, ChanMode::Audio(Demod::Wfm));
+        assert_eq!(a.audio.channels[1].mode, ChanMode::Audio(Demod::Am));
     }
 
     #[test]

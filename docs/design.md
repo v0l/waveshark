@@ -659,6 +659,19 @@ WFM channel takes about 17% of the radio thread and two take 31%, so the thread
 runs out somewhere around six broadcast channels and rather more narrowband
 ones.
 
+A strip channel does not have to be played. Pick a front end instead of a
+demodulator and the channel is that decoder alone, at the frequency the dial
+is set to and the channel width the decoder asks for: a mixer, a decimator and
+the front end, on the packet bus with everything else and on the audio bus if
+it has speech to give. The list of front ends offered is asked of the registry
+rather than kept in the interface, and a decoder that declares a channel width
+through `Node::channels` is one that can be put on a channel. The (+) on a
+packet log row adds one at the frequency that packet arrived on. This is what
+reading a single frequency costs now: before it, the only way to decode one
+channel was a scanner block, which searched the whole span it covered whether
+or not anything else in that span was wanted, so keeping one pager channel
+meant paying for the sweep that found it.
+
 Band plans differ by ITU region and by regulator inside one, so a table that is
 right in Dublin is wrong in Denver: 915 MHz is the licence-free band an
 American sees key fobs and weather sensors in, and the GSM uplink a European

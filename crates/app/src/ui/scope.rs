@@ -628,7 +628,7 @@ impl Scope<'_> {
             // Show what the demodulator actually takes in, not just where it
             // is centred: an NFM channel and a WFM channel at the same spot
             // are wildly different slices of spectrum.
-            let half = ch.demod.bandwidth() / 2.0;
+            let half = ch.mode.bandwidth() / 2.0;
             let (bx0, bx1) = (self.x_of(full, ch.freq - half), self.x_of(full, ch.freq + half));
             if bx1 - bx0 >= 1.0 {
                 let band = Rect::from_min_max(

@@ -34,7 +34,7 @@ use nodes::{
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
-use crate::radio::{ChannelSpec, DecodeRecord, Demod};
+use crate::radio::{ChanMode, ChannelSpec, DecodeRecord, Demod};
 use crate::record::Recorder;
 use std::path::PathBuf;
 
@@ -136,7 +136,7 @@ enum Role {
 /// coefficients or a mixer's shift.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct ChanKey {
-    demod: Demod,
+    mode: u64,
     offset_bits: u64,
     rate_bits: u64,
 }
@@ -144,7 +144,7 @@ struct ChanKey {
 impl ChanKey {
     fn new(spec: &ChannelSpec, rate: f64) -> Self {
         Self {
-            demod: spec.demod,
+            mode: spec.mode.key(),
             offset_bits: spec.offset_hz.to_bits(),
             rate_bits: rate.to_bits(),
         }
@@ -623,11 +623,11 @@ impl Receiver {
                 ));
                 continue;
             }
-            if plan.eff_rate() < spec.demod.if_rate() {
+            if plan.eff_rate() < spec.mode.min_rate() {
                 refused = Some(format!(
                     "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
-                    spec.demod.label(),
-                    spec.demod.if_rate() / 1e3,
+                    spec.mode.label(),
+                    spec.mode.min_rate() / 1e3,
                     plan.eff_rate() / 1e3,
                 ));
                 continue;
@@ -635,16 +635,19 @@ impl Receiver {
             let of = |what: &str| -> Option<NodeId> {
                 patch_ids.get(&chan_stage_id(what, spec, plan.eff_rate())).copied()
             };
-            let Some(tail) = of("chan_blend") else { continue };
+            // A played channel ends in the blend; a decoded one ends in its
+            // front end, which is heard only if it has speech to give.
+            let last = if spec.mode.is_decode() { "chan_front" } else { "chan_blend" };
+            let Some(tail) = of(last) else { continue };
             // The bus input its tail is wired into, which is where its level
             // and its meter are.
-            let tail_id = chan_stage_id("chan_blend", spec, plan.eff_rate());
+            let tail_id = chan_stage_id(last, spec, plan.eff_rate());
             let port = patch
                 .links()
                 .iter()
                 .find(|l| {
                     l.to.0 == derived::AUDIO
-                        && l.from == crate::patch::Source::Stage(tail_id, 0)
+                        && matches!(l.from, crate::patch::Source::Stage(f, _) if f == tail_id)
                 })
                 .map(|l| l.to.1);
             let stereo = patch
@@ -653,11 +656,23 @@ impl Receiver {
             chans.push(Chan {
                 spec: spec.clone(),
                 // A channel came through intact when every stage of it did.
-                kept: ["chan_mix", "chan_ifdec", "chan_demod", "chan_blend"]
+                kept: ["chan_mix", "chan_ifdec", last]
                     .iter()
                     .all(|w| reused.contains(&chan_stage_id(w, spec, plan.eff_rate()))),
                 key: ChanKey::new(spec, plan.eff_rate()),
-                tail: tail.o(),
+                // A decode channel is read at its voice port when it has
+                // one, which is the output the strip listens to; its packets
+                // leave on port 0 and go to the bus like any front end's.
+                tail: match &spec.mode {
+                    ChanMode::Decode(kind) => tail.out(
+                        VOICE_TAILS
+                            .iter()
+                            .find(|(k, _)| k == kind)
+                            .map(|(_, port)| *port)
+                            .unwrap_or(0),
+                    ),
+                    ChanMode::Audio(_) => tail.o(),
+                },
                 port,
                 agc: of("chan_agc"),
                 squelch: of("chan_squelch"),
@@ -1599,6 +1614,47 @@ pub fn bank_label(width_hz: f64) -> String {
 /// Bandwidth a Mode S transmission occupies, for the log's channel column.
 const MODES_BAND_HZ: f64 = 2_000_000.0;
 
+/// The front ends a strip channel can run, with the channel each expects.
+///
+/// Asked of the registry, not listed here. A decode stage that declares a
+/// channel width through `Node::channels` is one that reads a fixed channel,
+/// which is exactly what a strip channel points at; one that declares none is
+/// placed by band or sweeps, and belongs in the scanner table instead. Built
+/// once, because building every decode stage to ask it a question is not work
+/// to repeat per frame.
+pub fn channel_fronts() -> &'static [(&'static str, f64)] {
+    static FRONTS: std::sync::OnceLock<Vec<(&'static str, f64)>> = std::sync::OnceLock::new();
+    FRONTS.get_or_init(|| {
+        let reg = nodes::registry();
+        let mut out: Vec<(&'static str, f64)> = reg
+            .by_category("decode")
+            .filter_map(|d| {
+                let node = reg.build(d.name, &Default::default()).ok()?;
+                // The narrowest channel it declares: a mode keyed at several
+                // spacings still fits in its widest, and the marker on the
+                // spectrum should not claim more of the band than it reads.
+                let w = node.channels().iter().cloned().fold(f64::INFINITY, f64::min);
+                w.is_finite().then_some((d.name, w))
+            })
+            .collect();
+        out.sort_by_key(|(name, _)| *name);
+        out
+    })
+}
+
+/// The channel one of those front ends expects, or None if it is not one.
+pub fn front_width(kind: &str) -> Option<f64> {
+    channel_fronts().iter().find(|(k, _)| *k == kind).map(|(_, w)| *w)
+}
+
+/// What a front end is called on a strip button.
+///
+/// The registry name in capitals: every one of these is an acronym, and a
+/// second table mapping "m17" to "M17" would be a table to keep in step.
+pub fn front_label(kind: &str) -> String {
+    kind.to_uppercase()
+}
+
 /// The band a front end needs, and the slowest rate it can be handed.
 ///
 /// Every front end used to cut its own channel out of the full span with a
@@ -1924,6 +1980,12 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         p.add_derived(derived::at("feed", key, 0), "feed", s);
     }
 
+    // The strip's channels are drawn before the bus rather than after it,
+    // because a channel that decodes is a front end like any other and has to
+    // be on the bus with the rest. Drawn afterwards, its packets went
+    // nowhere: nothing was wired to it and the log stayed empty.
+    sync_audio(&mut p, plan);
+
     // Everything that produces packets meets at the bus, and everything that
     // consumes them hangs off the far side. One input per source: the bus is
     // the only stage whose shape follows the rest of the graph rather than
@@ -1931,7 +1993,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     let sources: Vec<u64> = p
         .stages()
         .iter()
-        .filter(|s| BUS_TAILS.contains(&s.kind.as_str()) || s.kind == "feed")
+        .filter(|s| puts_packets_on_bus(&s.kind))
         .map(|s| s.id)
         .collect();
     if !sources.is_empty() {
@@ -1965,16 +2027,25 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         }
     }
 
-    // The listening channels and the bus they end at, which the operator's
-    // patch gets in exactly the same way.
-    sync_audio(&mut p, plan);
     p
 }
 
-/// The stages of one listening channel, in the order they are built.
-const CHAN_STAGES: [&str; 8] = [
+/// Whether a stage of this kind puts packets on the bus.
+///
+/// The table, plus every front end that declares a channel of its own: those
+/// are what a strip channel can be set to, and a decoder nobody wired to the
+/// bus decodes into silence.
+fn puts_packets_on_bus(kind: &str) -> bool {
+    BUS_TAILS.contains(&kind) || kind == "feed" || front_width(kind).is_some()
+}
+
+/// The stages of one strip channel, in the order they are built. A decode
+/// channel uses the first two and then its front end; an audio one uses the
+/// rest.
+const CHAN_STAGES: [&str; 9] = [
     "chan_mix",
     "chan_ifdec",
+    "chan_front",
     "chan_demod",
     "chan_squelch",
     "chan_audiodec",
@@ -2006,14 +2077,29 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // the radio never sampled down to baseband, and the chain would produce
     // noise that sounds like a dead station rather than silence.
     let mut want: Vec<u64> = Vec::new();
-    let mut tails: Vec<(u64, &ChannelSpec)> = Vec::new();
+    let mut tails: Vec<(Source, &ChannelSpec)> = Vec::new();
+    let mut fronts: Vec<u64> = Vec::new();
     for spec in &plan.channels {
-        if spec.offset_hz.abs() > rate / 2.0 || rate < spec.demod.if_rate() {
+        if spec.offset_hz.abs() > rate / 2.0 || rate < spec.mode.min_rate() {
             continue;
         }
-        let tail = channel_stages(p, head, spec, rate);
+        let tail = channel_stages(p, head, spec, plan.center.as_f64(), rate);
         want.extend(CHAN_STAGES.iter().map(|w| chan_stage_id(w, spec, rate)));
-        tails.push((tail, spec));
+        // Where the strip listens to it. A played channel ends in audio; a
+        // decoded one is heard only if its front end has speech to give, and
+        // a pager does not.
+        let port = match &spec.mode {
+            ChanMode::Audio(_) => Some(0),
+            ChanMode::Decode(kind) => {
+                VOICE_TAILS.iter().find(|(k, _)| k == kind).map(|(_, port)| *port)
+            }
+        };
+        if let Some(port) = port {
+            tails.push((Source::Stage(tail, port), spec));
+        }
+        if spec.mode.is_decode() {
+            fronts.push(tail);
+        }
     }
     // A stage left over from a channel that changed mode or went away.
     let stale: Vec<u64> = p
@@ -2024,6 +2110,27 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         .collect();
     for id in stale {
         p.remove(id);
+    }
+
+    // A decode channel is a front end, so its packets belong on the packet
+    // bus with everything else's. The derived pass draws the channels before
+    // the bus and wires them there; this is for the pass over an edited
+    // patch, where the bus was drawn before the channel existed.
+    if p.stage(derived::BUS).is_some() {
+        for id in fronts {
+            let from = Source::Stage(id, 0);
+            if p.links().iter().any(|l| l.to.0 == derived::BUS && l.from == from) {
+                continue;
+            }
+            let k = (0..).find(|k| p.feeding((derived::BUS, *k)).is_none()).unwrap_or(0);
+            p.connect(from, (derived::BUS, k));
+        }
+        let inputs = p.links().iter().filter(|l| l.to.0 == derived::BUS).map(|l| l.to.1 + 1).max();
+        if let (Some(n), Some(st)) = (inputs, p.stage(derived::BUS)) {
+            let mut s = st.settings.clone();
+            s.insert("inputs".into(), V::Int(n as i64));
+            p.add_derived(derived::BUS, "packet_bus", s);
+        }
     }
 
     // The bus, carrying the levels that are nobody's channel. Whatever it
@@ -2041,13 +2148,18 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
 
     // What feeds it: every chain's tail and every voice port, on the input
     // it already has or else the first free one.
-    let mut owned: Vec<(Source, Option<&ChannelSpec>, String)> = tails
-        .iter()
-        .map(|(tail, spec)| (Source::Stage(*tail, 0), Some(*spec), spec.label.clone()))
-        .collect();
+    let mut owned: Vec<(Source, Option<&ChannelSpec>, String)> =
+        tails.iter().map(|(tail, spec)| (*tail, Some(*spec), spec.label.clone())).collect();
     for st in p.stages() {
         if let Some((_, port)) = VOICE_TAILS.iter().find(|(kind, _)| *kind == st.kind) {
-            owned.push((Source::Stage(st.id, *port), None, stage_label(&st.kind, &st.settings)));
+            let from = Source::Stage(st.id, *port);
+            // A front end the strip owns is already here, with the fader and
+            // the name the operator gave it. Adding it again as a loose voice
+            // port would put the same speech into the mix twice.
+            if owned.iter().any(|(o, ..)| *o == from) {
+                continue;
+            }
+            owned.push((from, None, stage_label(&st.kind, &st.settings)));
         }
     }
     for (from, ..) in &owned {
@@ -2143,13 +2255,92 @@ fn channel_stages(
     p: &mut crate::patch::Patch,
     head: crate::patch::Source,
     spec: &ChannelSpec,
+    center: f64,
+    rate: f64,
+) -> u64 {
+    match &spec.mode {
+        ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, rate),
+        ChanMode::Decode(kind) => decode_channel_stages(p, head, spec, kind, center, rate),
+    }
+}
+
+/// One channel that is decoded rather than played: the band cut out around
+/// the frequency it is tuned to, and the front end reading it.
+///
+/// The same three boxes the scanner table draws for a pinned front end, drawn
+/// for a channel somebody put on the strip instead. That is the whole point
+/// of it: one channel at a fixed centre and width can be read with the
+/// scanner switched off, where before the only way to decode a frequency was
+/// a block that swept the span it was in.
+fn decode_channel_stages(
+    p: &mut crate::patch::Patch,
+    head: crate::patch::Source,
+    spec: &ChannelSpec,
+    kind: &str,
+    center: f64,
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
     use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
 
-    let mode = spec.demod;
+    let hz = spec.offset_hz;
+    let width = spec.mode.bandwidth();
+    let at = |p: &mut crate::patch::Patch, what: &str, kind: &str, mut s: Settings| -> u64 {
+        s.insert("channel".into(), V::Int(spec.id as i64));
+        p.add_derived(chan_stage_id(what, spec, rate), kind, s)
+    };
+
+    let mut mix = Settings::new();
+    mix.insert("shift_hz".into(), V::Float(-hz));
+    let m = at(p, "chan_mix", "mixer", mix);
+    p.connect(head, (m, 0));
+
+    // The front end mixes and filters its own channel out of what it is
+    // handed, so this only has to bring the rate down far enough that it is
+    // not doing that at the radio's. Decimating to the channel itself would
+    // leave the node no transition band and no room for the tuning error the
+    // dial has, so the target is well above it.
+    let target = (width * DECODE_RATE_RATIO).max(DECODE_MIN_RATE_HZ);
+    let dec = ((rate / target).floor() as usize).max(1);
+    let mut ifd = Settings::new();
+    ifd.insert("factor".into(), V::Int(dec as i64));
+    ifd.insert("passband_hz".into(), V::Float((rate / dec as f64) * 0.45));
+    ifd.insert("input_rate_hz".into(), V::Float(rate));
+    ifd.insert("label".into(), V::Text(format!("/{dec} to {}", hz_label(rate / dec as f64))));
+    let i = at(p, "chan_ifdec", "decimate", ifd);
+    p.connect(Source::Stage(m, 0), (i, 0));
+
+    // The mixer moved the channel to the middle of the stream and said so, so
+    // the front end is told the frequency it is really on: it reads its own
+    // channel out of the stream's centre, and every packet it puts on the bus
+    // is labelled with where it came from.
+    let mut s = Settings::new();
+    s.insert("channel_hz".into(), V::Float(center + hz));
+    s.insert("label".into(), V::Text(spec.label.clone()));
+    let f = at(p, "chan_front", kind, s);
+    p.connect(Source::Stage(i, 0), (f, 0));
+    f
+}
+
+/// How much wider than its channel a decode channel's front end is fed, and
+/// the floor under that. A 12.5 kHz channel lands on the 192 kHz the scanner
+/// table's own pinned front ends have always been given.
+const DECODE_RATE_RATIO: f64 = 12.0;
+const DECODE_MIN_RATE_HZ: f64 = 192_000.0;
+
+/// One channel that is played: eight stages from the span to the bus.
+fn audio_channel_stages(
+    p: &mut crate::patch::Patch,
+    head: crate::patch::Source,
+    spec: &ChannelSpec,
+    mode: Demod,
+    rate: f64,
+) -> u64 {
+    use crate::patch::Source;
+    use pipeline::registry::Settings;
+    use pipeline::ParamValue as V;
+
     let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
     let if_rate = rate / if_dec as f64;
     let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
@@ -2273,7 +2464,7 @@ fn channel_stages(
 fn chan_stage_id(what: &str, spec: &ChannelSpec, rate: f64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (spec.demod as u8).hash(&mut h);
+    spec.mode.key().hash(&mut h);
     rate.to_bits().hash(&mut h);
     derived::at(what, spec.id, h.finish() ^ fnv(what))
 }
@@ -3041,7 +3232,7 @@ mod tests {
             id,
             label: format!("CH{id}"),
             offset_hz: offset,
-            demod,
+            mode: ChanMode::Audio(demod),
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -3103,6 +3294,41 @@ mod tests {
         assert_eq!(rx.channels().len(), 2);
         assert!(rx.channels()[0].kept, "the channel that did not change was rebuilt");
         assert!(!rx.channels()[1].kept, "a new channel cannot have kept anything");
+    }
+
+    #[test]
+    fn a_decode_channel_is_a_front_end_on_the_strip() {
+        // A channel that decodes is on both buses: its packets go to the log
+        // with every other front end's, and its speech to the mixer under the
+        // fader the strip gives it. Drawn after the packet bus, its packets
+        // went nowhere at all.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts.clear();
+        let mut spec = chan(1, 100_000.0, Demod::Nfm);
+        spec.mode = ChanMode::Decode("m17".into());
+        p.channels = vec![spec];
+        let patch = derived_patch(&p);
+
+        use pipeline::registry::SettingsExt;
+        let front = patch.stages().iter().find(|s| s.kind == "m17").expect("the front end");
+        assert_eq!(
+            front.settings.f64_or("channel_hz", 0.0),
+            433_100_000.0,
+            "the front end reads the frequency the channel is tuned to",
+        );
+        let to = |bus: u64, port: usize| {
+            patch.links().iter().any(|l| {
+                l.to.0 == bus && matches!(l.from, crate::patch::Source::Stage(f, o) if f == front.id && o == port)
+            })
+        };
+        assert!(to(derived::BUS, 0), "its packets never reach the log");
+        assert!(to(derived::AUDIO, 1), "its speech never reaches the mixer");
+
+        // And the receiver builds it: a channel refused at negotiation is a
+        // patch that describes something that cannot run.
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(rx.channels().len(), 1);
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
     #[test]
@@ -3223,7 +3449,7 @@ mod tests {
         // the stages it had are not left behind.
         p.edits = rx.edits();
         p.channels[0].offset_hz = -300_000.0;
-        p.channels[0].demod = Demod::Nfm;
+        p.channels[0].mode = ChanMode::Audio(Demod::Nfm);
         rx.rebuild(&p).unwrap();
         assert_eq!(rx.channels().len(), 1);
         let chan_stages = rx

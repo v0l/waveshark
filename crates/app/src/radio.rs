@@ -10,6 +10,77 @@ use std::sync::{
     Arc,
 };
 
+/// What a strip channel does with the band it is tuned to.
+///
+/// A channel used to be a demodulator and nothing else, so the only way to
+/// read one digital channel was a scanner block over the span, which then
+/// swept every other channel in it as well. A decode channel is the front end
+/// on its own: one extraction at the frequency the channel is tuned to, the
+/// decoder behind it, and nothing else running.
+///
+/// The decode arm names a registry stage rather than listing protocols here,
+/// so a front end that declares a channel width can be put on a strip channel
+/// without this enum learning about it.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ChanMode {
+    Audio(Demod),
+    Decode(String),
+}
+
+impl ChanMode {
+    pub fn label(&self) -> String {
+        match self {
+            ChanMode::Audio(d) => d.label().to_string(),
+            ChanMode::Decode(kind) => crate::chain::front_label(kind),
+        }
+    }
+
+    /// The demodulator this channel plays, if it plays one.
+    pub fn demod(&self) -> Option<Demod> {
+        match self {
+            ChanMode::Audio(d) => Some(*d),
+            ChanMode::Decode(_) => None,
+        }
+    }
+
+    pub fn is_decode(&self) -> bool {
+        matches!(self, ChanMode::Decode(_))
+    }
+
+    /// Occupied bandwidth, two-sided: what the channel covers on the
+    /// spectrum, and what a filter in front of it has to pass.
+    pub fn bandwidth(&self) -> f64 {
+        match self {
+            ChanMode::Audio(d) => d.bandwidth(),
+            ChanMode::Decode(kind) => crate::chain::front_width(kind).unwrap_or(12_500.0),
+        }
+    }
+
+    /// The least span this channel can be built in.
+    pub fn min_rate(&self) -> f64 {
+        match self {
+            ChanMode::Audio(d) => d.if_rate(),
+            // The front end mixes and decimates its own channel out of
+            // whatever it is handed, so what it needs is a stream that holds
+            // the channel at all.
+            ChanMode::Decode(_) => self.bandwidth() * 2.0,
+        }
+    }
+
+    /// A number a stage id can be keyed on, so a channel that changed mode is
+    /// not the same channel and does not reuse filters designed for the old
+    /// one.
+    pub(crate) fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match self {
+            ChanMode::Audio(d) => (0u8, *d as u8).hash(&mut h),
+            ChanMode::Decode(kind) => (1u8, kind).hash(&mut h),
+        }
+        h.finish()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Demod {
     Wfm,
@@ -379,7 +450,8 @@ pub struct ChannelSpec {
     pub label: String,
     /// From the receiver's centre frequency.
     pub offset_hz: f64,
-    pub demod: Demod,
+    /// What it does with that frequency: play it, or decode it.
+    pub mode: ChanMode,
     pub volume: f32,
     pub muted: bool,
     /// None leaves the mode's own default.
@@ -1276,7 +1348,7 @@ impl Audio {
             id: 1,
             label: String::new(),
             offset_hz: offset,
-            demod: mode,
+            mode: ChanMode::Audio(mode),
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -1975,11 +2047,12 @@ fn run(
             } else {
                 Status::set_level(&status.out_level, 0.0);
             }
-            for w in rx.channels().iter().filter(|c| c.spec.demod == Demod::Wfm) {
+            let wfm = |c: &&crate::chain::Chan| c.spec.mode == ChanMode::Audio(Demod::Wfm);
+            for w in rx.channels().iter().filter(wfm) {
                 let (g, e, sy) = w.rds_stats;
                 status.set_station(w.spec.id, &w.station, g, e, sy);
             }
-            if let Some(w) = rx.channels().iter().find(|c| c.spec.demod == Demod::Wfm) {
+            if let Some(w) = rx.channels().iter().find(wfm) {
                 status.set_blend(w.blend);
             }
         }
@@ -2094,7 +2167,7 @@ pub(crate) mod tests {
             id: 1,
             label: String::new(),
             offset_hz: -400_000.0,
-            demod: Demod::Wfm,
+            mode: ChanMode::Audio(Demod::Wfm),
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -2606,6 +2679,44 @@ pub(crate) mod tests {
         // was recorded for.
         let voice = m17.iter().filter(|r| r.model == "M17-Voice").count();
         assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
+    }
+
+    #[test]
+    fn a_decode_channel_reads_its_frequency_with_the_scanner_switched_off() {
+        // The point of a decode channel: one front end at a fixed centre and
+        // width, and nothing else running. Before this the only way to read
+        // one frequency was a scanner block, which searched the span it
+        // covered whether or not anything else in it was wanted.
+        let Some(buf) = m17_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "M17".into(),
+            offset_hz: 433_475_000.0 - buf.center.as_f64(),
+            mode: ChanMode::Decode("m17".into()),
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
+        let out = replay_blocks(&mut rx, &buf);
+
+        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
+        assert!(
+            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            "no callsign: {:?}",
+            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+        );
+        // The frequency the channel was set to, not one anything searched
+        // for: a decode channel is told where to listen.
+        let hz = m17[0].freq;
+        assert!((hz - 433_475_000.0).abs() < 1.0, "read at {hz} Hz");
     }
 
     #[test]
@@ -3207,7 +3318,7 @@ mod zoom_tests {
             id: 1,
             label: String::new(),
             offset_hz: 0.0,
-            demod: Demod::Nfm,
+            mode: ChanMode::Audio(Demod::Nfm),
             volume: 1.0,
             muted: false,
             squelch_db: Some(-200.0),

@@ -29,8 +29,11 @@ impl Strip<'_> {
     fn channel_audio(ui: &mut egui::Ui, ch: &mut Channel, st: ChannelState) -> bool {
         let (gain_db, open, measured) = (st.agc_gain_db, st.squelch_open, st.squelch_db);
         let mut changed = false;
+        // A decode channel has neither: its front end sets its own levels and
+        // decides for itself whether a burst is a transmission.
+        let Some(demod) = ch.mode.demod() else { return false };
         ui.add_space(4.0);
-        if ch.demod != Demod::Wfm {
+        if demod != Demod::Wfm {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("agc").show(ui);
                 if ui.selectable_label(ch.agc, if ch.agc { "ON" } else { "OFF" }).clicked() {
@@ -47,8 +50,8 @@ impl Strip<'_> {
                 });
             });
         }
-        if let Some(default) = ch.demod.default_squelch_db() {
-            let (lo, hi, ratio) = ch.demod.squelch_range();
+        if let Some(default) = demod.default_squelch_db() {
+            let (lo, hi, ratio) = demod.squelch_range();
             let mut db = ch.squelch_db.unwrap_or(default);
             ui.horizontal(|ui| {
                 theme::Line::new().legend("sql").show(ui);
@@ -234,8 +237,9 @@ impl Strip<'_> {
                             // the panel gets on a laptop.
                             ui.horizontal(|ui| {
                                 for m in [Demod::Wfm, Demod::Nfm, Demod::Am] {
-                                    if ui.selectable_label(ch.demod == m, m.label()).clicked() {
-                                        ch.demod = m;
+                                    let on = ch.mode == ChanMode::Audio(m);
+                                    if ui.selectable_label(on, m.label()).clicked() {
+                                        ch.mode = ChanMode::Audio(m);
                                         tune = Some(i);
                                     }
                                 }
@@ -255,10 +259,31 @@ impl Strip<'_> {
                             });
                             ui.horizontal(|ui| {
                                 for m in [Demod::Usb, Demod::Lsb, Demod::Cw] {
-                                    if ui.selectable_label(ch.demod == m, m.label()).clicked() {
-                                        ch.demod = m;
+                                    let on = ch.mode == ChanMode::Audio(m);
+                                    if ui.selectable_label(on, m.label()).clicked() {
+                                        ch.mode = ChanMode::Audio(m);
                                         tune = Some(i);
                                     }
+                                }
+                            });
+                            // The front ends that read one channel, asked of
+                            // the registry rather than listed here. Picking
+                            // one runs that decoder on this frequency alone,
+                            // which is what makes a single channel readable
+                            // with the scanner switched off.
+                            ui.horizontal_wrapped(|ui| {
+                                for (kind, width) in crate::chain::channel_fronts() {
+                                    let on = ch.mode == ChanMode::Decode(kind.to_string());
+                                    let r = ui.selectable_label(on, crate::chain::front_label(kind));
+                                    if r.clicked() {
+                                        ch.mode = ChanMode::Decode(kind.to_string());
+                                        tune = Some(i);
+                                    }
+                                    r.on_hover_text(format!(
+                                        "decode this frequency as {} in a {:.1} kHz channel",
+                                        crate::chain::front_label(kind),
+                                        width / 1e3,
+                                    ));
                                 }
                             });
                             if ch.on {
@@ -277,7 +302,7 @@ impl Strip<'_> {
                                         tune = Some(i);
                                     }
                                 });
-                                if ch.demod == Demod::Wfm {
+                                if ch.mode == ChanMode::Audio(Demod::Wfm) {
                                     // Each channel's own RDS, not the first
                                     // channel's: two WFM channels are usually
                                     // two different stations.

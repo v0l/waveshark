@@ -9,9 +9,9 @@ pub(super) enum Action {
     Decode(bool),
     /// Open one of the settings panels the header carries a button for.
     Open(Settings),
-    /// Open the scanner table with a new block prefilled from this row's
-    /// frequency and protocol: the (+) that turns a packet seen once into a
-    /// channel kept.
+    /// Put a channel on the strip at this row's frequency, running the front
+    /// end that reads its protocol: the (+) that turns a packet seen once into
+    /// a channel kept, decoded whether or not the scanner is running.
     Pin { freq: f64, model: String },
 }
 
@@ -370,7 +370,7 @@ impl Log<'_> {
             widgets::cell(&p, rect, x, info_w, &rec.detail, theme::VALUE);
 
             // The (+): a hit target of its own at the right edge, so clicking
-            // it prefills a scanner block rather than selecting the row. Only
+            // it adds a channel rather than selecting the row. Only
             // for a decode that names a protocol; an unknown burst has no
             // front end to pin. Interacted after the row so its click wins
             // over the row's inside its rect.
@@ -396,7 +396,7 @@ impl Log<'_> {
                     pin = Some((rec.freq, rec.model.clone()));
                 }
                 if presp.hovered() {
-                    presp.on_hover_text("add a scanner channel here");
+                    presp.on_hover_text("decode this frequency on the channel strip");
                 }
             }
         }
