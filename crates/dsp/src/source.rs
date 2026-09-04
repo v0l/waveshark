@@ -201,6 +201,17 @@ pub struct SourceConfig {
     /// Wideband samples kept behind the newest, in seconds, so a reopened
     /// source can start again from where it began.
     pub history_s: f64,
+    /// Widest a source may be, in hertz. Nothing wider opens, and an open
+    /// source stops growing rather than pass it.
+    ///
+    /// A receiver driven into saturation lights its whole span: the floor
+    /// comes up, intermodulation lines stand every few hundred kilohertz,
+    /// and the detector reads one thing as wide as the input. Cut out at
+    /// the full rate and handed to every front end that will take it, that
+    /// cost more than the rest of the band together and decoded nothing,
+    /// since nothing this receiver reads is wider than a 500 kHz LoRa
+    /// channel. Set it above the widest signal a front end reads.
+    pub max_width_hz: f64,
 }
 
 impl Default for SourceConfig {
@@ -230,6 +241,7 @@ impl Default for SourceConfig {
             min_bins: 2,
             regrow: 1.5,
             history_s: 0.3,
+            max_width_hz: 600_000.0,
         }
     }
 }
@@ -1232,12 +1244,18 @@ impl SourceDetector {
         let hang = self.hang_frames;
         let regrow = self.cfg.regrow;
         let integrate = self.cfg.integrate_frames.max(1);
+        let max_width = self.cfg.max_width_hz;
         let events = &mut self.events;
         let next_id = &mut self.next_id;
         self.tracks.retain_mut(|t| {
             let lo_hz = (t.occ_lo as f64 - (n / 2) as f64) * bin_hz;
             let hi_hz = (t.occ_hi as f64 + 1.0 - (n / 2) as f64) * bin_hz;
-            if t.matched {
+            // A run that would take an open source past the widest thing
+            // read here is not that source: the span lit end to end by a
+            // saturated converter, standing over a sensor's channel. The
+            // source misses the frame instead, and closes if that goes on.
+            let flood = t.open && hi_hz.max(t.src.hi_hz) - lo_hz.min(t.src.lo_hz) > max_width;
+            if t.matched && !flood {
                 if t.open {
                     t.src.lo_hz = t.src.lo_hz.min(lo_hz);
                     t.src.hi_hz = t.src.hi_hz.max(hi_hz);
@@ -1270,8 +1288,13 @@ impl SourceDetector {
                 } else {
                     t.src.lo_hz = lo_hz;
                     t.src.hi_hz = hi_hz;
+                    // Too wide to be anything read here, but kept as a
+                    // candidate rather than dropped: it takes the runs
+                    // inside it that would otherwise each be born as a
+                    // source of their own, and opens if it narrows.
+                    let fits = hi_hz - lo_hz <= max_width;
                     let moved = t.peak_hi - t.peak_lo >= steady_db;
-                    if t.hits >= min_frames && (moved || t.born >= fixture_until) {
+                    if fits && t.hits >= min_frames && (moved || t.born >= fixture_until) {
                         t.open = true;
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = (c + 0.5 - (n / 2) as f64) * bin_hz;
