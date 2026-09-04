@@ -450,10 +450,41 @@ pub fn unmatched_event(
         Some(a) => format!("{a}; {b}"),
         None => b,
     };
+    let mut framing_fields: Vec<(String, common::Value)> = Vec::new();
     let ev = match decode::analyze(pkg) {
-        Some(a) => Decoded::bytes("unknown", center, at, a.bits.as_bytes().to_vec())
-            .with_text(format!("unknown: {}", a.summary()))
-            .with_detail(join(measured, a.summary())),
+        // The bytes are the frame-aligned ones where the burst carried a
+        // preamble to align to. Handing over the slicer's own phase instead is
+        // what makes one device look like a different one on every reception.
+        Some(a) => {
+            if let Some(f) = &a.framing {
+                framing_fields.push((
+                    "preamble_bits".into(),
+                    common::Value::Int(f.preamble_bits as i64),
+                ));
+                framing_fields.push(("sync".into(), common::Value::Text(f.sync_hex())));
+                framing_fields.push((
+                    "frame_bytes".into(),
+                    common::Value::Int(f.content_bytes() as i64),
+                ));
+                if !f.repeats.is_empty() {
+                    framing_fields.push((
+                        "copies".into(),
+                        common::Value::Int(f.repeats.len() as i64 + 1),
+                    ));
+                }
+            }
+            if let Some(f) = &a.framed {
+                framing_fields
+                    .push(("frame_len".into(), common::Value::Int(f.payload.len() as i64)));
+                framing_fields.push((
+                    "whitening".into(),
+                    common::Value::Text(if f.whitened { "PN9".into() } else { "none".into() }),
+                ));
+            }
+            Decoded::bytes("unknown", center, at, a.frame_bytes().to_vec())
+                .with_text(format!("unknown: {}", a.summary()))
+                .with_detail(join(measured, a.summary()))
+        }
         // Too short or too irregular to read. Still worth a line: it says
         // something was there, which is the difference between a quiet band
         // and a misconfigured chain.
@@ -474,9 +505,9 @@ pub fn unmatched_event(
             )),
     };
     let mut ev = ev.with_modulation(modulation).with_level(pkg.rssi_dbfs, pkg.snr_db);
+    let mut fields: Vec<(String, common::Value)> = Vec::new();
     if let Some(m) = measure {
-        let mut fields: Vec<(String, common::Value)> =
-            vec![("confidence".into(), common::Value::Float(m.confidence as f64))];
+        fields.push(("confidence".into(), common::Value::Float(m.confidence as f64)));
         if m.baud > 0.0 {
             fields.push(("baud".into(), common::Value::Float(m.baud as f64)));
         }
@@ -492,10 +523,13 @@ pub fn unmatched_event(
         if let Some(mode) = &m.mode {
             fields.push(("mode".into(), common::Value::Text(mode.clone())));
         }
-        ev = ev.with_fields(fields);
         if m.bandwidth_hz > 0.0 {
             ev = ev.with_bandwidth(m.bandwidth_hz as f64);
         }
+    }
+    fields.append(&mut framing_fields);
+    if !fields.is_empty() {
+        ev = ev.with_fields(fields);
     }
     ev
 }

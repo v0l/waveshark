@@ -20,6 +20,7 @@ pub mod ax25;
 pub mod analyze;
 pub mod bds;
 pub mod bits;
+pub mod framing;
 pub mod m17;
 #[cfg(feature = "tea")]
 pub mod gpu;
@@ -38,9 +39,11 @@ pub mod protocol;
 pub mod protocols;
 pub mod slicer;
 pub mod tetra;
+pub mod whiten;
 pub mod wmbus;
 
 pub use analyze::{analyze, Analysis};
 pub use bits::BitBuffer;
+pub use framing::Framing;
 pub use protocol::{DecodeError, Protocol, Protocols, Report, Value};
 pub use slicer::{slice, Coding, SliceError, Timing};

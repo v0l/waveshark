@@ -24,7 +24,9 @@
 //!   every width is an integer number of symbols. NRZ.
 
 use crate::bits::BitBuffer;
+use crate::framing::{frame_from_preamble, Framing, MIN_PREAMBLE_BITS};
 use crate::slicer::{slice, Coding, Timing};
+use crate::whiten::{read_framed, Framed};
 use common::pulse::Package;
 
 /// What a burst looks like, and the bits that fall out under that reading.
@@ -39,6 +41,31 @@ pub struct Analysis {
     /// On-air time, excluding the gap that ended the burst.
     pub duration_us: u64,
     pub bits: BitBuffer,
+    /// Where the alternating preamble ended, and the bits after it aligned to
+    /// the transmitter's own byte boundaries rather than to whatever edge the
+    /// detector triggered on. `None` when the burst has no preamble to align
+    /// to. See [`crate::framing`].
+    pub framing: Option<Framing>,
+    /// The frame read out of the aligned bits, where they turn out to carry
+    /// TI-style length-and-CRC framing, whitened or not. See
+    /// [`crate::whiten`].
+    pub framed: Option<Framed>,
+}
+
+impl Analysis {
+    /// The bytes worth showing an operator: aligned to the frame where there
+    /// was a preamble to align to, and the raw slicer output where there was
+    /// not.
+    ///
+    /// Showing the raw output unconditionally is what makes two receptions of
+    /// one device look like two different devices, since the slicer's phase is
+    /// whatever the trigger edge happened to be.
+    pub fn frame_bytes(&self) -> &[u8] {
+        match &self.framing {
+            Some(f) => f.frame.as_bytes(),
+            None => self.bits.as_bytes(),
+        }
+    }
 }
 
 impl Analysis {
@@ -55,12 +82,34 @@ impl Analysis {
         } else {
             format!("{} us", self.short_us)
         };
-        format!(
+        let mut s = format!(
             "{coding} {timing}, {} pulses, {} bits, {:.1} ms",
             self.pulses,
             self.bits.len(),
             self.duration_us as f64 / 1000.0
-        )
+        );
+        // The preamble length and the bytes right after it are what identify a
+        // device across receptions, long before anything decodes it, so they
+        // belong on the one line a scanning operator reads.
+        if let Some(f) = &self.framing {
+            s.push_str(&format!(
+                ", {} bit preamble, {} byte frame, sync {}",
+                f.preamble_bits,
+                f.content_bytes(),
+                f.sync_hex()
+            ));
+            if !f.repeats.is_empty() {
+                s.push_str(&format!(", {} copies", f.repeats.len() + 1));
+            }
+        }
+        if let Some(f) = &self.framed {
+            s.push_str(&format!(
+                ", {} byte {}frame, CRC ok",
+                f.payload.len(),
+                if f.whitened { "PN9-whitened " } else { "" }
+            ));
+        }
+        s
     }
 }
 
@@ -116,11 +165,22 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
             // Two widths on both sides is Manchester when the pair is one
             // symbol and two, and a four-state line code otherwise. Only the
             // first is worth guessing at.
+            //
+            // A run of three symbols settles it on its own, whatever the
+            // clusters say: Manchester puts a transition in the middle of
+            // every bit, so nothing on the wire can stay at one level for
+            // longer than two half-symbols, and a single 3T run proves the
+            // coding is not Manchester. The clusters cannot see this, because
+            // a burst opening with forty bits of alternating preamble buries
+            // the handful of long runs in the payload under the count floor.
+            // That is why the same 19.2 kbit/s frame was reported as
+            // Manchester on one reception and NRZ on the next.
             let ratio = marks[1] as f32 / marks[0].max(1) as f32;
-            if (1.6..2.6).contains(&ratio) {
+            let symbol = marks[0].min(gaps[0]);
+            if (1.6..2.6).contains(&ratio) && longest_run(pkg) <= symbol * 5 / 2 {
                 (Coding::Manchester, marks[0], marks[1])
             } else {
-                (Coding::Nrz, marks[0].min(gaps[0]), marks[0].min(gaps[0]))
+                (Coding::Nrz, symbol, symbol)
             }
         }
         // One width each way carries nothing in the widths themselves, so the
@@ -154,6 +214,13 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
     if bits.is_empty() {
         return None;
     }
+    // The slicer's polarity is a coin toss for FSK, since which tone it called
+    // the mark depends on the tuner's sideband as much as on the transmitter.
+    // The preamble looks the same either way, so alignment is unaffected, but
+    // the framing check has to be offered both readings or half the devices on
+    // the band never read.
+    let framing = frame_from_preamble(&bits, MIN_PREAMBLE_BITS);
+    let framed = framing.as_ref().and_then(read_frame_of);
     Some(Analysis {
         coding,
         short_us,
@@ -161,7 +228,40 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
         pulses: pkg.pulses.len(),
         duration_us: pkg.duration_us(),
         bits,
+        framing,
+        framed,
     })
+}
+
+/// Read a length-and-CRC frame out of aligned bits, if there is one there.
+///
+/// Both slicer polarities and every bit offset the preamble cut might have
+/// swallowed are offered, and the CRC decides. Nothing else can: the cut has
+/// no way to see where an alternating preamble stopped and an alternating sync
+/// word began, and the mark tone is whichever way round the tuner's sideband
+/// left it.
+fn read_frame_of(f: &Framing) -> Option<Framed> {
+    let n = f.rolled_back.len();
+    (0..=crate::framing::ROLLBACK).find_map(|skip| {
+        if skip >= n {
+            return None;
+        }
+        let at = f.rolled_back.slice(skip, n - skip);
+        read_framed(at.as_bytes()).or_else(|| read_framed(at.inverted().as_bytes()))
+    })
+}
+
+/// The longest mark or gap in the burst, excluding the gap that ended it:
+/// that one is the silence afterwards and says nothing about the coding.
+fn longest_run(pkg: &Package) -> u32 {
+    let n = pkg.pulses.len().saturating_sub(1);
+    pkg.pulses
+        .iter()
+        .take(n)
+        .flat_map(|p| [p.mark, p.gap])
+        .chain(pkg.pulses.last().map(|p| p.mark))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Widths that occur often enough to be symbols, shortest first.
@@ -289,6 +389,104 @@ mod tests {
         assert!((48..=56).contains(&a.short_us), "symbol read as {} us", a.short_us);
     }
 
+    /// An NRZ burst as the FSK detector hands one over: runs of like symbols
+    /// merged into marks and gaps. `stretch` adds a symbol to the first mark,
+    /// which is what a gate opening a fraction of a symbol early does, and is
+    /// the reason two receptions of one device come out at different bit
+    /// offsets.
+    fn nrz_package(bytes: &[u8], sym_us: u32, stretch: bool) -> Package {
+        let mut bits: Vec<bool> = Vec::new();
+        for &b in bytes {
+            for i in (0..8).rev() {
+                bits.push(b >> i & 1 != 0);
+            }
+        }
+        // A burst begins on a mark: leading zeros are silence the detector
+        // never saw.
+        let first = bits.iter().position(|b| *b).unwrap_or(0);
+        let mut runs: Vec<(bool, u32)> = Vec::new();
+        for &b in &bits[first..] {
+            match runs.last_mut() {
+                Some(last) if last.0 == b => last.1 += 1,
+                _ => runs.push((b, 1)),
+            }
+        }
+        if stretch {
+            runs[0].1 += 1;
+        }
+        let mut pulses: Vec<(u32, u32)> = Vec::new();
+        let mut i = 0;
+        while i < runs.len() {
+            let mark = if runs[i].0 { let w = runs[i].1; i += 1; w } else { 0 };
+            let gap = if i < runs.len() && !runs[i].0 { let w = runs[i].1; i += 1; w } else { 0 };
+            pulses.push((mark * sym_us, gap * sym_us));
+        }
+        // The silence that ended the burst. Without it the slicer has no reset
+        // gap to cap zero runs against and truncates every run of zeros in the
+        // payload.
+        if let Some(last) = pulses.last_mut() {
+            last.1 = sym_us * 20;
+        }
+        pkg(&pulses)
+    }
+
+    /// Preamble, sync, then a PN9-whitened length-and-CRC frame: what a
+    /// CC1101-class transmitter puts on the air with its default settings.
+    fn whitened_transmission(payload: &[u8]) -> Vec<u8> {
+        transmission(&[0x2d, 0xd4], payload)
+    }
+
+    fn transmission(sync: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![payload.len() as u8];
+        frame.extend_from_slice(payload);
+        frame.extend_from_slice(&crate::whiten::crc16_ti(&frame).to_be_bytes());
+        let mut air = vec![0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
+        air.extend_from_slice(sync);
+        air.extend_from_slice(&crate::whiten::pn9(&frame));
+        air
+    }
+
+    #[test]
+    fn two_receptions_of_one_transmitter_come_out_as_the_same_bytes() {
+        // The observation this alignment exists for. The slicer's phase is
+        // whatever the gate's trigger edge happened to be, so the raw bits
+        // differ between receptions and the two hex dumps share no byte, which
+        // makes one device look like two.
+        let air = whitened_transmission(&[0xa5, 0x4d, 0xca, 0x18, 0x25, 0x30, 0xbb, 0x1d, 0x6d]);
+        let a = analyze(&nrz_package(&air, 52, false)).expect("a");
+        let b = analyze(&nrz_package(&air, 52, true)).expect("b");
+        assert_ne!(a.bits.as_bytes(), b.bits.as_bytes(), "the two phases were identical, so this test says nothing");
+        assert_eq!(a.frame_bytes(), b.frame_bytes(), "alignment did not survive a phase shift");
+    }
+
+    #[test]
+    fn the_frame_is_aligned_to_the_sync_word_and_read_through_its_whitening() {
+        let payload = [0xa5u8, 0x4d, 0xca, 0x18, 0x25, 0x30, 0xbb, 0x1d, 0x6d];
+        let air = whitened_transmission(&payload);
+        let a = analyze(&nrz_package(&air, 52, false)).expect("analysis");
+        let f = a.framing.as_ref().expect("a preamble");
+        assert!(f.preamble_bits >= 32, "preamble read as {} bits", f.preamble_bits);
+        assert!(f.sync_hex().starts_with("2dd4"), "sync came out as {}", f.sync_hex());
+        let framed = a.framed.as_ref().expect("a frame");
+        assert!(framed.whitened);
+        assert_eq!(framed.payload, payload);
+        assert!(a.summary().contains("PN9-whitened"), "{}", a.summary());
+    }
+
+    #[test]
+    fn a_sync_word_that_carries_on_alternating_still_reads() {
+        // 0xb4 opens 1011, and the preamble ends on a 0, so the alternating
+        // run swallows the first three bits of the sync word and the cut lands
+        // that far into it. Only the CRC can say where the frame really
+        // started, so the check has to be offered the earlier offsets.
+        let payload = [0xa5u8, 0x4d, 0xca, 0x18, 0x25, 0x30, 0xbb, 0x1d, 0x6d];
+        let air = transmission(&[0xb4, 0xd2], &payload);
+        let a = analyze(&nrz_package(&air, 52, false)).expect("analysis");
+        let framed = a.framed.as_ref().expect("a frame the CRC found");
+        assert_eq!(framed.payload, payload);
+        assert!(framed.whitened);
+    }
+
     #[test]
     fn too_short_a_burst_is_not_guessed_at() {
         assert!(analyze(&pkg(&[(500, 500), (1500, 500)])).is_none());
@@ -303,3 +501,4 @@ mod tests {
         assert!(s.contains("bits"), "{s}");
     }
 }
+
