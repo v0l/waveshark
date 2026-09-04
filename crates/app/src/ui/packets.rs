@@ -165,49 +165,29 @@ impl Log<'_> {
             // frame total below is a real total and is worth printing.
             if let Some(r) = self.radio {
                 use std::sync::atomic::Ordering;
-                let narrow = r.status.scan_channels.load(Ordering::Relaxed);
-                let wide = r.status.scan_channels_wide.load(Ordering::Relaxed);
                 let total = r.status.decoded.load(Ordering::Relaxed);
                 let aircraft = r.status.aircraft.load(Ordering::Relaxed);
                 ui.add_space(10.0);
-                // Several front ends can run on one span now, so this names
-                // all of them rather than the first that happens to be on.
-                let mut running: Vec<String> = Vec::new();
-                if r.status.modes_on.load(Ordering::Relaxed) {
-                    running.push("mode s".into());
-                }
-                if r.status.ais_on.load(Ordering::Relaxed) {
-                    running.push("ais".into());
-                }
-                if r.status.aprs_on.load(Ordering::Relaxed) {
-                    running.push("aprs".into());
-                }
-                if r.status.pocsag_on.load(Ordering::Relaxed) {
-                    running.push("pocsag".into());
-                }
-                if r.status.m17_on.load(Ordering::Relaxed) {
-                    running.push("m17".into());
-                }
-                if narrow > 0 || wide > 0 {
-                    running.push(format!("{narrow} ook + {wide} fsk channels"));
-                }
-                if r.status.sources_on.load(Ordering::Relaxed) {
-                    let live = r.status.sources.lock().iter().filter(|e| e.live).count();
-                    running.push(if live == 0 {
-                        "auto".into()
-                    } else {
-                        format!("auto, {live} sources")
-                    });
-                }
+                // The scanner blocks the span covers, by the names the
+                // operator gave them. Not the front ends inside: auto
+                // builds and drops candidates by the second, and a status
+                // that named each of them flickered with every source.
+                let running: Vec<&str> = if self.decode_on {
+                    self.scanners.active(self.center, self.rate).iter().map(|s| s.name.as_str()).collect()
+                } else {
+                    Vec::new()
+                };
                 let tracking = r.status.modes_on.load(Ordering::Relaxed)
                     || r.status.ais_on.load(Ordering::Relaxed)
                     || r.status.aprs_on.load(Ordering::Relaxed);
-                ui.label(legend(&if running.is_empty() {
+                ui.label(legend(&if !self.decode_on {
                     "decoding off".to_string()
+                } else if running.is_empty() {
+                    format!("no scanner covers this span, {total} frames")
                 } else if tracking {
-                    format!("{}, {aircraft} tracks, {total} frames", running.join(" + "))
+                    format!("{}, {aircraft} tracks, {total} frames", running.join(", "))
                 } else {
-                    format!("{}, {total} frames", running.join(" + "))
+                    format!("{}, {total} frames", running.join(", "))
                 }));
             }
             let logged = self
