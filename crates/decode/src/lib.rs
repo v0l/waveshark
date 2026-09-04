@@ -14,6 +14,7 @@
 //! every known protocol against every detected burst affordable.
 
 pub mod adsb;
+pub(crate) mod crypto;
 pub mod ais;
 pub mod aprs;
 pub mod ax25;
