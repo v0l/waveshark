@@ -787,7 +787,7 @@ impl AutoNode {
         // the stream is cut half again wider than the signal, and a 250 kHz
         // channel measured at 240 kHz came through as a 360 kHz stream, which
         // read as the 500 kHz channel and dechirped nothing.
-        if let Some(bw) = crate::lora_nodes::bandwidth_for(b.signal_hz) {
+        for bw in crate::lora_nodes::bandwidths_for(b.signal_hz) {
             if let Ok(mut m) = Member::build("lora", spec, Self::place("lora", hz, bw), &self.reg) {
                 m.channel_hz = bw;
                 members.push(m);
@@ -1137,8 +1137,19 @@ impl Node for AutoNode {
             // and, for a pager or a packet channel, a second row saying
             // the same burst was nothing.
             if !heard.is_empty() && self.slots[k].members.len() > 1 {
-                let keep: Vec<&str> = heard.iter().map(|(n, _)| *n).collect();
-                self.slots[k].members.retain(|m| keep.contains(&m.name));
+                // Two LoRa channels an octave apart share a sweep rate two
+                // spreading factors apart, so a 250 kHz packet also reads,
+                // as something, through a 125 kHz demodulator seeing half of
+                // it. The narrower one cannot read a chirp of the wider, so
+                // when both read the wider one is the channel.
+                let widest = heard
+                    .iter()
+                    .filter(|(n, _)| *n == "lora")
+                    .map(|(_, w)| *w)
+                    .fold(0.0, f64::max);
+                self.slots[k].members.retain(|m| {
+                    heard.iter().any(|(n, w)| *n == m.name && (*n != "lora" || *w >= widest))
+                });
             }
             for e in ev {
                 if matches!(e, Event::Decoded(_)) {

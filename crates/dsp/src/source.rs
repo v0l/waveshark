@@ -1037,6 +1037,7 @@ impl SourceDetector {
             let mut raw_sum = 0.0f32;
             let mut peak_bin = lo;
             let mut peak_w = -1.0f64;
+            let mut peak_raw_w = 0.0f64;
             for i in lo..=hi {
                 peak_r = peak_r.max(self.ratio[i]);
                 raw_sum += self.raw_ratio[i];
@@ -1045,6 +1046,8 @@ impl SourceDetector {
                     peak_w = w;
                     peak_bin = i;
                 }
+                let raw_w = (self.floor_lin[i] * (self.raw_ratio[i] - 1.0)).max(0.0) as f64;
+                peak_raw_w = peak_raw_w.max(raw_w);
             }
             let raw_mean = raw_sum / (hi - lo + 1) as f32;
             if raw_mean < close_r {
@@ -1060,7 +1063,24 @@ impl SourceDetector {
             // two-tone signal and loses the other. The tones are within a
             // few dB of each other, a keyed carrier's splash and sidelobes
             // are tens of dB down, and that difference is the extent.
-            let floor_w = peak_w * 10f64.powf(-(extent_db as f64) / 10.0);
+            //
+            // Measured under the peak this frame reads raw as well as under
+            // the smoothed one. A chirp's tone moves on every frame, so the
+            // smoothed peak is the decaying trace of where it was, tens of
+            // dB under where it is; and a receiver's front end driven hard
+            // lifts its whole floor by a dozen dB while the signal lasts.
+            // Against the decayed peak the lifted floor was within the
+            // margin, and a 62 kHz MeshCore channel measured 566 kHz.
+            //
+            // Only in a run that has swallowed the band, and only where the
+            // two disagree by more than a burst's onset does: a keyed
+            // signal's raw spectrum is a few spikes and leads its smoothed
+            // envelope by several dB every frame, and cutting on it took a
+            // DMR channel down to 6 kHz and a sensor's 30 kHz down to 10.
+            let flooded = (hi - lo + 1) * 2 > self.bin_hi + 1 - self.bin_lo;
+            let over = flooded && peak_raw_w > peak_w * 10f64.powf(RAW_EXTENT_LEAD_DB / 10.0);
+            let reference = if over { peak_raw_w } else { peak_w };
+            let floor_w = reference * 10f64.powf(-(extent_db as f64) / 10.0);
             let (mut a, mut b) = (peak_bin, peak_bin);
             for i in lo..=hi {
                 if self.excess(i) >= floor_w {
@@ -1418,6 +1438,11 @@ const GROWTH_FRAMES: usize = 16;
 /// 32 dB down and its intermodulation products 28 to 34 dB under a 44 dB
 /// burst; a second transmitter within this margin still opens.
 const SPUR_DB: f32 = 25.0;
+
+/// How far this frame's raw peak has to stand over the smoothed one before
+/// the extent is measured under it instead. Three costs a corpus capture;
+/// seven loses a MeshCore packet.
+const RAW_EXTENT_LEAD_DB: f64 = 5.0;
 
 /// Sample magnitude, on either axis, taken to be the converter's rail. Every
 /// driver here delivers full scale as one.

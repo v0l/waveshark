@@ -39,16 +39,28 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 /// The bandwidths LoRa is used at in practice. The standard defines nine,
 /// down to 7.8 kHz, but a receiver that offers all of them has to guess
 /// between neighbours a few kilohertz apart on a measurement worth rather
-/// less than that.
-pub const BANDWIDTHS_HZ: [f64; 3] = [125_000.0, 250_000.0, 500_000.0];
+/// less than that. 62.5 kHz is MeshCore's European preset (869.618 MHz,
+/// SF8), which arrived at 61 dB and was refused as no channel at all.
+pub const BANDWIDTHS_HZ: [f64; 4] = [62_500.0, 125_000.0, 250_000.0, 500_000.0];
 
 /// Widest channel, which is what decides whether a source is one at all.
 pub const CHANNEL_WIDTH_HZ: f64 = 500_000.0;
 
 /// A source narrower than this fraction of a bandwidth is not that channel.
 /// LoRa fills its channel by construction, so a signal well inside one is
-/// something else sitting in the same place.
-const FILL: f64 = 0.55;
+/// something else sitting in the same place. Seven tenths, so the neighbours
+/// an octave apart do not overlap: the widest a 62.5 kHz channel may
+/// measure (1.4 of it) is the narrowest a 125 kHz one may.
+const FILL: f64 = 0.7;
+
+/// Sync words of the networks whose frames are believed without a payload
+/// CRC: LoRaWAN public, private (MeshCore among them) and Meshtastic.
+const KNOWN_SYNC: [u8; 3] = [0x34, 0x12, lora::MESHTASTIC_SYNC];
+
+/// Power arriving over power in the channel past which a packet read is
+/// taken to be the alias of a wider channel's. A packet that fills its
+/// channel reads near one; one that fills twice the width reads two.
+const OUTSIDE_RATIO: f32 = 1.5;
 
 /// Seconds of samples held while waiting for a packet to finish.
 ///
@@ -100,6 +112,15 @@ pub struct LoraNode {
     hold: usize,
     decoded: u64,
     center_hz: f64,
+    /// Power of the stream arriving and of the channel cut out of it, each
+    /// smoothed over the last few blocks. Their ratio says whether what is
+    /// transmitting fits the channel: a chirp twice the channel's width
+    /// dechirps, at two spreading factors up, as a packet in the narrower
+    /// one, with half its energy left outside. That packet is an alias of
+    /// the wider channel's and is refused here by the energy that is not in
+    /// the channel; the wider channel's own demodulator reads the real one.
+    in_pow: f32,
+    chan_pow: f32,
 }
 
 impl Default for LoraNode {
@@ -125,6 +146,8 @@ impl LoraNode {
             hold: 0,
             decoded: 0,
             center_hz: 0.0,
+            in_pow: 0.0,
+            chan_pow: 0.0,
         }
     }
 
@@ -150,6 +173,23 @@ pub fn bandwidth_for(width_hz: f64) -> Option<f64> {
         .iter()
         .copied()
         .find(|bw| width_hz >= bw * FILL && width_hz <= bw * 1.4)
+}
+
+/// Every standard bandwidth a measured width could be, nearest first.
+///
+/// A width is a measurement of a strong signal's skirts as much as of its
+/// channel: a 62.5 kHz MeshCore packet at 59 dB measured 110 kHz and read
+/// as the 125 kHz channel, and dechirped nothing. Where the measurement
+/// sits between two channels both are offered, and whichever reads the
+/// packet is the one kept.
+pub fn bandwidths_for(width_hz: f64) -> Vec<f64> {
+    let mut out: Vec<f64> = BANDWIDTHS_HZ
+        .iter()
+        .copied()
+        .filter(|bw| width_hz >= bw * FILL && width_hz <= bw * 2.0)
+        .collect();
+    out.sort_by(|a, b| (a - width_hz).abs().total_cmp(&(b - width_hz).abs()));
+    out
 }
 
 impl Simple for LoraNode {
@@ -233,7 +273,14 @@ impl Simple for LoraNode {
         // Decimate to near the target, then resample the last few percent to
         // exactly OVERSAMPLE per chip. `pending` holds the decimator output
         // with the fractional read position carried between blocks.
+        let before = self.pending.len();
         decim.process(iq, &mut self.pending);
+        if !iq.is_empty() && self.pending.len() > before {
+            let mean = |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
+            let (a, b) = (mean(iq), mean(&self.pending[before..]));
+            self.in_pow += (a - self.in_pow) * 0.2;
+            self.chan_pow += (b - self.chan_pow) * 0.2;
+        }
         let step = self.resample_step;
         while (self.resample_pos as usize) + 1 < self.pending.len() {
             let idx = self.resample_pos as usize;
@@ -296,8 +343,40 @@ impl Simple for LoraNode {
                 return Ok(());
             };
 
+            // More than twice the channel's power arriving than is in the
+            // channel: what was read is the middle of something wider.
+            if self.in_pow > self.chan_pow * OUTSIDE_RATIO {
+                let end = packet.end.min(self.held.len());
+                self.held.drain(..end);
+                self.scanned.fill(0);
+                if self.held.len() < self.demods[0].symbol_len() * 4 {
+                    return Ok(());
+                }
+                continue;
+            }
             let ldro = dsp::lora::ldro_default(packet.sf, self.bandwidth());
             match lora::decode(&packet.symbols, packet.sf, ldro) {
+                // A frame whose payload CRC did not check, or that has none
+                // to check, stands on its eight-bit header checksum alone,
+                // which noise passes one time in 256. The networks that send
+                // without a CRC are known by their sync word; a two byte
+                // frame under an unknown one, read off the intermodulation
+                // product of a strong burst, is not a frame.
+                Ok(frame)
+                    if frame.crc_ok != Some(true)
+                        && !(!frame.header.has_crc && KNOWN_SYNC.contains(&packet.sync_word)) =>
+                {
+                    c.emit(Event::Warning {
+                        stage: "lora".into(),
+                        message: format!(
+                            "SF{} over {:.0} kHz: {} bytes without a CRC that checks, sync {:#04x}, refused",
+                            packet.sf,
+                            self.bandwidth() / 1e3,
+                            frame.payload.len(),
+                            packet.sync_word
+                        ),
+                    });
+                }
                 Ok(frame) => {
                     self.locked_sf = Some(packet.sf);
                     self.decoded += 1;
@@ -731,6 +810,11 @@ mod tests {
         // A narrow carrier sitting in a LoRa channel is not a LoRa channel.
         assert_eq!(bandwidth_for(25_000.0), None);
         assert_eq!(bandwidth_for(800_000.0), None);
+        // A strong signal measures wide: both neighbours are offered,
+        // nearest first, and the one that reads it is kept.
+        assert_eq!(bandwidths_for(110_000.0), vec![125_000.0, 62_500.0]);
+        assert_eq!(bandwidths_for(40_000.0), Vec::<f64>::new());
+        assert_eq!(bandwidths_for(60_000.0), vec![62_500.0]);
     }
 
     #[test]
