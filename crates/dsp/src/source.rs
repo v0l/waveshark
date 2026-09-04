@@ -493,6 +493,12 @@ struct Track {
     centroid_sum: f64,
     centroid_n: u32,
     matched: bool,
+    /// Whether the run that matched this frame is far under the source's
+    /// own peak. It keeps the source present but does not widen it: the
+    /// gap between a handheld's slots, where the smoothed tail of a 75 dB
+    /// burst bridged to the tuner's centre spur as a run under 30 dB, would
+    /// otherwise have made a 12 kHz source 120 kHz wide.
+    faint: bool,
 }
 
 /// Watches a wideband stream as a spectrogram and reports sources.
@@ -507,6 +513,25 @@ pub struct SourceDetector {
     /// frame was silent, filled across the pool before the frame pass.
     spectra: Vec<f32>,
     silent: Vec<bool>,
+    /// Whether each frame of the block had samples at the converter's rails.
+    saturated: Vec<bool>,
+    /// Whether the frame being tracked did.
+    ///
+    /// A converter driven past full scale makes its own spectrum: the floor
+    /// comes up ten decibels or more, and products of the signal stand
+    /// across the span within twenty decibels of it, so the run is the
+    /// whole band and its extent hundreds of kilohertz. A handheld keyed
+    /// beside a HackRF put a quarter of the samples on the rails and read
+    /// as a 400 kHz source, which no channel front end would take, while a
+    /// channel placed by hand on the same frequency decoded it through:
+    /// the signal itself is still there, and still the strongest thing by
+    /// twenty decibels. So in such a frame the strongest run is the only
+    /// one believed, and its extent is the bins within a few decibels of
+    /// its peak, which is the signal's own lobe and not the receiver's
+    /// products of it. A second transmitter on the air at the same moment
+    /// is lost for as long as the saturation lasts, which is the receiver's
+    /// state and not the detector's to fix.
+    frame_saturated: bool,
     /// Samples carried between calls, so a frame can span input blocks.
     pending: Vec<C32>,
     /// Wideband index of `pending[0]`.
@@ -598,6 +623,8 @@ impl SourceDetector {
             win: window::blackman_harris(n),
             spectra: Vec::new(),
             silent: Vec::new(),
+            saturated: Vec::new(),
+            frame_saturated: false,
             pending: Vec::new(),
             consumed: 0,
             alpha,
@@ -735,6 +762,7 @@ impl SourceDetector {
         // are then a cheap pass in frame order.
         self.spectra.resize(count * n, 0.0);
         self.silent.resize(count, false);
+        self.saturated.resize(count, false);
         let pending = &self.pending;
         let win = &self.win;
         let fft = &self.fft;
@@ -742,11 +770,22 @@ impl SourceDetector {
         self.spectra
             .par_chunks_mut(n)
             .zip(self.silent.par_iter_mut())
+            .zip(self.saturated.par_iter_mut())
             .enumerate()
             .for_each_init(
                 || (vec![C32::default(); n], vec![C32::default(); fft.get_inplace_scratch_len()]),
-                |(buf, scratch), (f, (spec, silent))| {
+                |(buf, scratch), (f, ((spec, silent), saturated))| {
                     let frame = &pending[f * hop..f * hop + n];
+                    // At the rail, not past it: a converter stops at full
+                    // scale, and a value beyond it is a synthesised stream
+                    // that was never clipped at all.
+                    let at_rail = |v: f32| (RAIL..=RAIL_TOP).contains(&v.abs());
+                    let rails = frame.iter().filter(|c| at_rail(c.re) || at_rail(c.im)).count();
+                    // One sample in ten on the rail. A pair of tones at
+                    // half scale each touches it one time in fifty and is
+                    // not clipping; a handheld beside a HackRF put one in
+                    // five there.
+                    *saturated = rails * 10 > n;
                     // Silence is measured after the mean is removed, because
                     // a tuner settling does not always deliver zeros:
                     // rtl_433's captures open with a quarter second of byte
@@ -769,11 +808,20 @@ impl SourceDetector {
 
         let spectra = std::mem::take(&mut self.spectra);
         let silent = std::mem::take(&mut self.silent);
+        let saturated = std::mem::take(&mut self.saturated);
         for f in 0..count {
+            // The frames either side too: the converter clips a symbol
+            // or two after the signal's edge lit the band, and it is that
+            // edge frame's splash, read with the ordinary margin, that
+            // opened a 12 kHz signal 70 kHz wide.
+            let lo = f.saturating_sub(SATURATION_SMEAR);
+            let hi = (f + SATURATION_SMEAR).min(count - 1);
+            self.frame_saturated = saturated[lo..=hi].iter().any(|s| *s);
             self.frame_from(&spectra[f * n..(f + 1) * n], silent[f]);
         }
         self.spectra = spectra;
         self.silent = silent;
+        self.saturated = saturated;
 
         let pos = count * hop;
         self.pending.drain(..pos);
@@ -965,6 +1013,25 @@ impl SourceDetector {
             runs.push(r);
         }
 
+        // Saturated: the strongest run is the signal, the rest are what the
+        // converter made of it. Judged on smoothed power over the floor.
+        // Saturated: the strongest run is the signal, and with it only what
+        // could be the other tone of the same transmitter, within a few dB
+        // and a pair's distance; a LaCrosse sensor keying 120 kHz apart
+        // saturates the same way and is still two tones. The rest is what
+        // the converter made of it.
+        if self.frame_saturated && !runs.is_empty() {
+            let peak = |r: &(usize, usize)| (r.0..=r.1).map(|i| self.ratio[i]).fold(0.0f32, f32::max);
+            let best = runs.iter().copied().max_by(|a, b| peak(a).total_cmp(&peak(b))).unwrap();
+            let top = peak(&best);
+            let pair_bins = (self.cfg.pair_hz / self.bin_hz()).round() as usize;
+            runs.retain(|r| {
+                let gap = if r.0 > best.1 { r.0 - best.1 } else { best.0.saturating_sub(r.1) };
+                peak(r) * 10f32.powf(SATURATED_PAIR_DB / 10.0) >= top && gap <= pair_bins
+            });
+        }
+        let extent_db = if self.frame_saturated { SATURATED_EXTENT_DB } else { self.cfg.extent_db };
+
         for (lo, hi) in runs {
             let mut peak_r = 0.0f32;
             let mut raw_sum = 0.0f32;
@@ -993,7 +1060,7 @@ impl SourceDetector {
             // two-tone signal and loses the other. The tones are within a
             // few dB of each other, a keyed carrier's splash and sidelobes
             // are tens of dB down, and that difference is the extent.
-            let floor_w = peak_w * 10f64.powf(-(self.cfg.extent_db as f64) / 10.0);
+            let floor_w = peak_w * 10f64.powf(-(extent_db as f64) / 10.0);
             let (mut a, mut b) = (peak_bin, peak_bin);
             for i in lo..=hi {
                 if self.excess(i) >= floor_w {
@@ -1001,6 +1068,13 @@ impl SourceDetector {
                     b = b.max(i);
                 }
             }
+            // The run of a saturated frame is the whole band; matched on
+            // that, the source would take every later run in the span.
+            let (lo, hi) = if self.frame_saturated {
+                (a.saturating_sub(guard).max(lo), (b + guard).min(hi))
+            } else {
+                (lo, hi)
+            };
             let mut wsum = 0.0f64;
             let mut w_all = 0.0f64;
             for i in a..=b {
@@ -1073,7 +1147,11 @@ impl SourceDetector {
             .tracks
             .iter()
             .map(|t| {
-                let bins = t.lo_bin..=t.hi_bin.min(n - 1);
+                // Where its power was, not the run it was part of: the
+                // splash of a burst ending bridged the run to a spur 40 kHz
+                // away, and the spur's power kept the source present after
+                // the burst was gone.
+                let bins = t.occ_lo..=t.occ_hi.min(n - 1);
                 let count = bins.clone().count().max(1) as f32;
                 let mean = bins.map(|i| self.raw_ratio[i]).sum::<f32>() / count;
                 mean >= close_r
@@ -1118,6 +1196,7 @@ impl SourceDetector {
                     t.occ_lo = s.occ_lo;
                     t.occ_hi = s.occ_hi;
                     t.matched = true;
+                    t.faint = s.peak_db < t.src.peak_snr_db - self.cfg.extent_db;
                     t.hits += 1;
                     t.misses = 0;
                     t.last_frame = self.frame;
@@ -1198,6 +1277,7 @@ impl SourceDetector {
                 centroid_sum: s.centroid,
                 centroid_n: 1,
                 matched: true,
+                faint: false,
             });
         }
 
@@ -1261,8 +1341,10 @@ impl SourceDetector {
             let flood = t.open && hi_hz.max(t.src.hi_hz) - lo_hz.min(t.src.lo_hz) > max_width;
             if t.matched && !flood {
                 if t.open {
-                    t.src.lo_hz = t.src.lo_hz.min(lo_hz);
-                    t.src.hi_hz = t.src.hi_hz.max(hi_hz);
+                    if !t.faint {
+                        t.src.lo_hz = t.src.lo_hz.min(lo_hz);
+                        t.src.hi_hz = t.src.hi_hz.max(hi_hz);
+                    }
                     let width = t.src.bandwidth_hz();
                     let centre = (t.occ_lo + t.occ_hi) as f64 / 2.0;
                     // Recorded only once the smoother has settled after
@@ -1336,6 +1418,26 @@ const GROWTH_FRAMES: usize = 16;
 /// 32 dB down and its intermodulation products 28 to 34 dB under a 44 dB
 /// burst; a second transmitter within this margin still opens.
 const SPUR_DB: f32 = 25.0;
+
+/// Sample magnitude, on either axis, taken to be the converter's rail. Every
+/// driver here delivers full scale as one.
+const RAIL: f32 = 0.98;
+/// Just past full scale; nothing a converter delivered is above it.
+const RAIL_TOP: f32 = 1.02;
+
+/// Frames either side of a saturated one treated the same way.
+const SATURATION_SMEAR: usize = 2;
+
+/// How close to the strongest run another run must be, in a saturated
+/// frame, to be kept as the other tone of the same transmitter. The two
+/// tones of a LaCrosse sensor read within a decibel of each other; a keying
+/// product born in the same frame 50 kHz away read 12 dB down and, paired
+/// with the signal, put the source's centre between them.
+const SATURATED_PAIR_DB: f32 = 6.0;
+
+/// Extent margin used in a saturated frame: the signal's own lobe, under the
+/// products the converter adds around it.
+const SATURATED_EXTENT_DB: f32 = 12.0;
 
 /// Frames after a start or a silence before the floor is measured. At the
 /// default resolution that is eight milliseconds: longer than any filter's
