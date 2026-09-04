@@ -1126,11 +1126,19 @@ impl SourceDetector {
         // Nothing that opens this far under a source still younger than the
         // floor's memory is believed. What it costs is a transmitter at that
         // margin keying up inside the strong one's first seconds.
+        //
+        // Only an open source counts, and not one standing on the tuner's
+        // own centre: a direct-conversion receiver's DC offset follows the
+        // envelope of whatever is in the span, opens and closes with it, and
+        // is refused downstream, so as the strongest thing in the band it
+        // would have hidden every transmitter that made it move.
         let memory = (self.floor.sub_len * self.floor.sub_count) as u64;
+        let skip = self.cap_skip;
         let dominant = self
             .tracks
             .iter()
-            .filter(|t| self.frame - t.born <= memory)
+            .filter(|t| t.open && self.frame - t.born <= memory)
+            .filter(|t| !skip.is_some_and(|(lo, hi)| t.occ_lo <= hi && t.occ_hi >= lo))
             .map(|t| t.src.peak_snr_db)
             .fold(f32::NEG_INFINITY, f32::max);
         let born = self.tracks.len();
