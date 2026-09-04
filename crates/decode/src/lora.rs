@@ -99,6 +99,100 @@ pub enum Error {
 /// checksum with the payload CRC behind it says which one it was. That is
 /// cheaper and steadier than chasing the last fraction of a chip in the
 /// timing, and the offset it settled on is reported rather than hidden.
+/// What a header would have said, for a link that does not send one.
+///
+/// SF5 and SF6 have no explicit header at all, and plenty of private links at
+/// higher factors turn it off to save eight symbols. Both ends are then
+/// configured alike out of band, and a receiver has to be told the same three
+/// things the header would have carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Implicit {
+    /// Payload bytes, not counting the CRC.
+    pub length: usize,
+    /// 1 to 4, meaning 4/5 to 4/8.
+    pub coding_rate: u8,
+    pub has_crc: bool,
+}
+
+/// Decode a packet whose parameters were agreed rather than transmitted.
+///
+/// The eight header symbols are simply not there: the payload starts at the
+/// first symbol, coded at the packet's own rate and full spreading factor
+/// rather than at the header block's reduced one.
+///
+/// The bin offset search that [`decode`] leans on is much weaker here. With
+/// an explicit header the checksum says which of the three offsets was right;
+/// without one there is only the payload CRC, and nothing at all to check
+/// when `has_crc` is false. A packet with no CRC is therefore whatever the
+/// nominal offset produced, right or not.
+pub fn decode_implicit(symbols: &[u16], sf: u8, ldro: bool, p: Implicit) -> Result<Frame, Error> {
+    let mut first = None;
+    for offset in [0i16, -1, 1] {
+        match decode_implicit_at(symbols, sf, ldro, offset, p) {
+            Ok(frame) if frame.crc_ok != Some(false) => return Ok(frame),
+            Ok(frame) => first.get_or_insert(Ok(frame)),
+            Err(e) => first.get_or_insert(Err(e)),
+        };
+    }
+    first.unwrap_or(Err(Error::Short))
+}
+
+fn decode_implicit_at(
+    symbols: &[u16],
+    sf: u8,
+    ldro: bool,
+    offset: i16,
+    p: Implicit,
+) -> Result<Frame, Error> {
+    if !(1..=4).contains(&p.coding_rate) {
+        return Err(Error::BadCodingRate);
+    }
+    let n = 1u32 << sf;
+    let symbols: Vec<u16> = symbols
+        .iter()
+        .map(|&v| (v as i32 + offset as i32).rem_euclid(n as i32) as u16)
+        .collect();
+    let ppm = if ldro { sf as usize - 2 } else { sf as usize };
+    let rdd = p.coding_rate as usize + 4;
+
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i + rdd <= symbols.len() {
+        let block: Vec<u16> = symbols[i..i + rdd]
+            .iter()
+            .map(|&v| {
+                let w = if ldro { v / 4 } else { v % n as u16 };
+                w ^ (w >> 1)
+            })
+            .collect();
+        out.extend(hamming(&deinterleave(&block, ppm), rdd));
+        i += rdd;
+    }
+
+    let bytes: Vec<u8> = out.chunks_exact(2).map(|c| c[0] | (c[1] << 4)).collect();
+    if bytes.len() < p.length {
+        return Err(Error::Short);
+    }
+    let payload: Vec<u8> = bytes[..p.length]
+        .iter()
+        .enumerate()
+        .map(|(j, b)| b ^ WHITENING[j % WHITENING.len()])
+        .collect();
+    let crc_ok = if !p.has_crc || bytes.len() < p.length + 2 {
+        None
+    } else {
+        let want = [bytes[p.length], bytes[p.length + 1]];
+        Some(checksum(&payload) == want)
+    };
+
+    Ok(Frame {
+        header: Header { length: p.length, coding_rate: p.coding_rate, has_crc: p.has_crc },
+        payload,
+        crc_ok,
+        bin_offset: offset,
+    })
+}
+
 pub fn decode(symbols: &[u16], sf: u8, ldro: bool) -> Result<Frame, Error> {
     let mut first = None;
     for offset in [0i16, -1, 1] {
@@ -500,6 +594,105 @@ mod tests {
         // both of which were 58 symbols on the air.
         assert_eq!(symbol_count(55, 11, 1, true, false), 58);
         assert_eq!(symbol_count(51, 11, 1, true, false), 58);
+    }
+
+    /// Build the symbols an implicit-mode transmitter would send for a
+    /// payload: whiten, split to nibbles, add the parity the coding rate
+    /// asks for, interleave, and gray code. The inverse of the decode path,
+    /// written here so the two can be checked against each other.
+    fn encode_implicit(payload: &[u8], sf: u8, cr: u8) -> Vec<u16> {
+        let rdd = cr as usize + 4;
+        let ppm = sf as usize;
+
+        let mut whitened: Vec<u8> = payload
+            .iter()
+            .enumerate()
+            .map(|(j, b)| b ^ WHITENING[j % WHITENING.len()])
+            .collect();
+        whitened.extend_from_slice(&checksum(payload));
+
+        // Low nibble first, the order the decoder reassembles bytes in.
+        let mut nibbles: Vec<u8> = Vec::new();
+        for b in &whitened {
+            nibbles.push(b & 0x0f);
+            nibbles.push(b >> 4);
+        }
+        while nibbles.len() % ppm != 0 {
+            nibbles.push(0);
+        }
+
+        // The parity bits the decoder checks at 4/7 and 4/8, in the same
+        // positions its syndromes read them from.
+        let codeword = |d: u8| -> u8 {
+            let bit = |p: u8| (d >> p) & 1;
+            let (d0, d1, d2, d3) = (bit(0), bit(1), bit(2), bit(3));
+            let mut c = d & 0x0f;
+            if rdd >= 5 {
+                c |= (d0 ^ d1 ^ d2 ^ d3) << 4;
+            }
+            if rdd >= 6 {
+                c |= (d1 ^ d2 ^ d3) << 5;
+            }
+            if rdd >= 7 {
+                c |= (d0 ^ d1 ^ d3) << 6;
+            }
+            c
+        };
+
+        let mut out = Vec::new();
+        for block in nibbles.chunks(ppm) {
+            let mut cw: Vec<u8> = block.iter().map(|&d| codeword(d)).collect();
+            cw.reverse();
+            // Undo the diagonal the deinterleaver walks.
+            for i in 0..rdd {
+                let mut s: u16 = 0;
+                for (k, w) in cw.iter().enumerate() {
+                    let b = (k + i) % ppm;
+                    let bit = (w >> i) & 1;
+                    s |= u16::from(bit) << (ppm - 1 - b);
+                }
+                // Gray decode: the demodulator's value is what the decoder
+                // gray codes back.
+                let mut v = s;
+                let mut shift = 1;
+                while shift < 16 {
+                    v ^= s >> shift;
+                    shift += 1;
+                }
+                out.push(v & ((1u16 << sf) - 1));
+            }
+        }
+        out
+    }
+
+    /// A packet with no header round trips through the implicit path, at the
+    /// spreading factors that have no other option.
+    ///
+    /// This is a round trip and knows it: encoder and decoder share this
+    /// file's idea of the format, so it proves the wiring rather than the
+    /// format. What would settle the format is a capture off the air, and
+    /// there is none here for SF5 or SF6.
+    #[test]
+    fn an_implicit_packet_round_trips_without_a_header() {
+        for sf in [5u8, 6, 7] {
+            for cr in 1..=4u8 {
+                let payload: Vec<u8> = (0..12u8).map(|i| i.wrapping_mul(37).wrapping_add(5)).collect();
+                let symbols = encode_implicit(&payload, sf, cr);
+                let p = Implicit { length: payload.len(), coding_rate: cr, has_crc: true };
+                let f = decode_implicit(&symbols, sf, false, p)
+                    .unwrap_or_else(|e| panic!("SF{sf} 4/{}: {e:?}", cr + 4));
+                assert_eq!(f.payload, payload, "SF{sf} 4/{}", cr + 4);
+                assert_eq!(f.crc_ok, Some(true), "SF{sf} 4/{} crc", cr + 4);
+            }
+        }
+    }
+
+    /// A coding rate outside the four the standard defines is refused rather
+    /// than used as a block width.
+    #[test]
+    fn an_implicit_decode_refuses_an_impossible_coding_rate() {
+        let p = Implicit { length: 4, coding_rate: 7, has_crc: false };
+        assert!(matches!(decode_implicit(&[0; 32], 7, false, p), Err(Error::BadCodingRate)));
     }
 
     #[test]

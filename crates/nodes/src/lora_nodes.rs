@@ -202,10 +202,10 @@ impl Simple for LoraNode {
         self.bandwidth_hz = bw;
         self.center_hz = i.spec.center.as_f64();
         self.demods = match self.sf {
-            0 => dsp::lora::SPREADING_FACTORS
-                .map(|sf| Demod::new(dsp::lora::Config { sf, ..Default::default() }))
+            0 => dsp::lora::SCANNED_SPREADING_FACTORS
+                .map(|sf| Demod::new(dsp::lora::Config::for_sf(sf)))
                 .collect(),
-            sf => vec![Demod::new(dsp::lora::Config { sf, ..Default::default() })],
+            sf => vec![Demod::new(dsp::lora::Config::for_sf(sf))],
         };
         self.scanned = vec![0; self.demods.len()];
         self.held.clear();
