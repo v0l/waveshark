@@ -171,6 +171,7 @@ impl Protocols {
         p.add(Box::new(SchraderTpms));
         p.add(Box::new(ToyotaTpms));
         p.add(Box::new(HoneywellSecurity));
+        p.add(Box::new(Jeweller));
         p
     }
 
