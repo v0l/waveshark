@@ -290,13 +290,17 @@ const VU_W: f32 = 130.0;
 /// How far the auto scale keeps its ceiling above the loudest bin, and the
 /// least range it will show whatever the band is doing.
 ///
-/// A quiet band with nothing in it used to be scaled to a twenty decibel
-/// window, which turns the noise floor's own wobble into a trace filling half
-/// the plot and leaves a signal arriving on top of it nowhere to go. Thirty
-/// five keeps the floor down where it belongs and leaves room above it for
-/// something to appear in.
-const PEAK_HEADROOM_DB: f32 = 8.0;
-const MIN_SPAN_DB: f32 = 35.0;
+/// The floor sits just under the noise and stays there. A quiet band with
+/// nothing in it used to be scaled to a twenty decibel window, which turns
+/// the noise floor's own wobble into a trace filling half the plot and
+/// leaves a signal arriving on top of it nowhere to go, so the ceiling is
+/// held at least this far up. It was eighty, with the ceiling never under
+/// -20 dB, and that pushed the floor down to -100 dB under an -85 dB noise
+/// floor: noise then sat a fifth of the way up the colour ramp and a 20 dB
+/// signal barely a third, and the waterfall had no contrast left. Fifty
+/// keeps the grass at a tenth of the ramp and gives a signal the rest.
+const PEAK_HEADROOM_DB: f32 = 12.0;
+const MIN_SPAN_DB: f32 = 50.0;
 
 /// Share of the scope pane the spectrum gets by default.
 const DEFAULT_PLOT_FRAC: f32 = 0.34;
@@ -702,7 +706,7 @@ impl App {
         self.send(Cmd::Refresh(self.scope.refresh));
         self.send(Cmd::Smoothing(self.scope.smoothing));
         // Same for the bus: a new thread has one at its defaults.
-        self.send(Cmd::Volume(self.audio.volume));
+        self.send(Cmd::Volume { volume: self.audio.volume, muted: self.audio.muted });
         self.send(Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted });
         self.send(Cmd::CallAgc(self.audio.call_agc));
         // And what was changed about the graph goes back on top of it
@@ -816,6 +820,7 @@ impl App {
             self.audio.levels_rev = rev;
             if rev > 0 {
                 self.audio.volume = audio.master;
+                self.audio.muted = audio.muted;
                 self.audio.call_volume = audio.calls;
                 self.audio.call_muted = audio.calls_muted;
                 self.audio.call_agc = audio.agc;
@@ -971,9 +976,10 @@ impl App {
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
-        let (lo, hi) = (pct(0.10) - 6.0, pct(0.999) + PEAK_HEADROOM_DB);
+        let lo = pct(0.10) - 6.0;
+        let hi = (pct(0.999) + PEAK_HEADROOM_DB).max(lo + MIN_SPAN_DB);
         self.scope.floor += (lo - self.scope.floor) * 0.05;
-        self.scope.ceil += (hi.max(lo + MIN_SPAN_DB) - self.scope.ceil) * 0.05;
+        self.scope.ceil += (hi - self.scope.ceil) * 0.05;
     }
 
     /// Draw the channel strip, then hand the radio what it changed.
@@ -1828,7 +1834,26 @@ mod tests {
             a.rescale(&db);
         }
         assert!(a.scope.floor < -95.0, "floor tracked the carrier: {}", a.scope.floor);
-        assert!(a.scope.floor > -110.0, "floor ran away: {}", a.scope.floor);
+        assert!(a.scope.floor > -105.0, "floor ran away: {}", a.scope.floor);
+    }
+
+    #[test]
+    fn auto_scale_keeps_the_floor_just_under_the_noise() {
+        let mut a = app();
+        a.scope.floor = -120.0;
+        a.scope.ceil = -20.0;
+        // An -85 dB floor with a 20 dB signal standing in it: the noise has
+        // to sit near the bottom of the ramp or the signal has no contrast.
+        let mut db = vec![-85.0f32; 1024];
+        for x in db[300..306].iter_mut() {
+            *x = -65.0;
+        }
+        for _ in 0..400 {
+            a.rescale(&db);
+        }
+        assert!((a.scope.floor + 91.0).abs() < 1.0, "floor {}", a.scope.floor);
+        let span = a.scope.ceil - a.scope.floor;
+        assert!((span - MIN_SPAN_DB).abs() < 1.0, "span {span}");
     }
 
     #[test]
