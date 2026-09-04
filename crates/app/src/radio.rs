@@ -2466,6 +2466,38 @@ pub(crate) mod tests {
         }
     }
 
+    /// A MeshCore advert on the European preset, which is the one LoRa
+    /// channel the receiver did not have: 62.5 kHz at SF8, from a node in
+    /// the same building, strong enough that the detector measures it at
+    /// up to twice its width and the front end lifts the whole span while
+    /// it lasts. Found, placed, read, and the node's name and position
+    /// come out of the signed advert.
+    #[test]
+    fn a_meshcore_advert_is_found_and_read() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/meshcore_advert_868.9M_2048k.cu8");
+        if !p.exists() {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        }
+        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let rows: Vec<String> =
+            out.iter().map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.model, r.detail)).collect();
+        let r = out
+            .iter()
+            .find(|r| r.model == "MeshCore")
+            .unwrap_or_else(|| panic!("nothing read it: {rows:?}"));
+        assert_eq!(r.crc, Some(true), "{r:?}");
+        assert!(r.detail.contains("SF8 BW63k 4/8"), "read as {}", r.detail);
+        assert!(r.detail.contains("\"Kieran\""), "read as {}", r.detail);
+        assert!((r.freq - 869_618_000.0).abs() < 62_500.0, "read at {} Hz", r.freq);
+        // The packet carries what it was: its samples and its level.
+        assert!(r.iq.as_ref().is_some_and(|q| !q.samples.is_empty()), "no samples on the row");
+        assert!(r.snr_db.is_finite() && r.rssi_dbfs.is_finite(), "no level on the row");
+    }
+
     /// Two TETRA base station downlinks, on for every one of the capture's
     /// ten seconds, that the receiver never reports.
     #[test]

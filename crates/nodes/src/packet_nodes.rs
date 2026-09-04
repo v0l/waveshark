@@ -105,6 +105,11 @@ impl PacketDecodeNode {
         // pager page with a blank SNR column looks weaker than a sensor
         // reading beside it, which is backwards. RSSI stays absent, since
         // what the detector has is a ratio and not an absolute level.
+        //
+        // The samples the frame was read from and the width it was heard
+        // through travel the same way: they are the packet's, and every row
+        // made of the packet carries them. A row without them is a
+        // conclusion with its evidence left behind.
         let start = self.hits.len();
         self.decode_frame_inner(p, bytes);
         for d in &mut self.hits[start..] {
@@ -113,6 +118,15 @@ impl PacketDecodeNode {
             }
             if d.rssi_dbfs.is_none() && p.rssi_dbfs.is_finite() {
                 d.rssi_dbfs = Some(p.rssi_dbfs);
+            }
+            if d.iq.is_none() {
+                d.iq = p.iq.clone();
+            }
+            if d.audio.is_none() {
+                d.audio = p.audio.clone();
+            }
+            if d.bandwidth_hz.is_none() && p.bandwidth_hz > 0 {
+                d.bandwidth_hz = Some(f64::from(p.bandwidth_hz));
             }
         }
     }

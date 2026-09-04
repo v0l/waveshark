@@ -179,6 +179,45 @@ source = "050d3664"
 text = "Hi"
 
 [[capture]]
+name = "meshcore_advert_868.9M_2048k.cu8"
+sha256 = "b177e3f47c0ddab6895ebe7e4f3027dd90ff04a23fb1a3a91692e84204bf9e2e"
+url = "https://nostr.download/b177e3f47c0ddab6895ebe7e4f3027dd90ff04a23fb1a3a91692e84204bf9e2e.xz"
+compression = "xz"
+center_hz = 868_900_000
+rate_sps = 2_048_000
+format = "cu8"
+family = "chirp"
+# Only the packet is scored as a chirp; the bursts around it are sensors.
+burst_us = [900000, 1400000]
+receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
+description = """
+A MeshCore node advert on the European preset: 869.618 MHz, LoRa at
+spreading factor 8 over 62.5 kHz, coding rate 4/8, sync word 0x12, one
+1.19 s packet of 117 bytes from a node in the same building named "Kieran",
+carrying its position. The parameters are the preset's, and the advert's
+signature verifies.
+
+Kept because the receiver had no 62.5 kHz channel at all, and because the
+packet arrived at 59 dB: the detector measured it at 68 to 110 kHz, which
+read as the 125 kHz channel and dechirped nothing, so both channels a wide
+measurement could be are now offered. The front end also lifts the whole
+span by a dozen dB while this packet lasts, without clipping, and the
+extent measured against the smoothed peak took in the lifted floor and
+grew to 566 kHz; the extent is now measured under the raw peak when the
+band has flooded. Cut from 2.6 s before the packet, because with 0.6 s the
+floor was not learned and the same packet measured 338 kHz wide.
+"""
+
+[capture.expect]
+sf = 8
+bandwidth_hz = 62_500
+sync_word = 0x12
+payload_len = 117
+coding_rate = "4/8"
+node_name = "Kieran"
+type = "advert"
+
+[[capture]]
 name = "ofdm_lte_762M_12000k.cs16"
 sha256 = "f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510"
 url = "https://nostr.download/f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510.xz"
