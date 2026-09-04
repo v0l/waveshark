@@ -79,6 +79,10 @@ impl Simple for PocsagNode {
         "pocsag"
     }
 
+    fn channels(&self) -> &'static [f64] {
+        &[CHANNEL_WIDTH_HZ]
+    }
+
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("pocsag reads complex baseband"));

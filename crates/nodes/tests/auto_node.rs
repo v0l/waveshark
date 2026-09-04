@@ -310,3 +310,51 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
         .map(|(_, v)| v.to_string());
     assert_eq!(from.as_deref(), Some("M0ABC"));
 }
+
+/// A real DMR capture through the auto node: no frequency told, only a span.
+/// Proves the auto path detects the carrier, places the dmr front end on it,
+/// decodes a voice over and labels it, so it reaches the call list as DMR.
+///
+/// Ignored and HOME-local because the capture is not in the committed corpus,
+/// and it needs a *clean* capture: the auto node places a front end only when
+/// the detected source measures within [`CHANNEL_WIDTH_TOLERANCE`] of the
+/// channel width, and a splattered capture with a strong nearby spur measures
+/// far wider than 12.5 kHz and is rightly refused. A capture from an SDR with
+/// a clean front end (no close-in spur, radio not overloading it) opens a
+/// ~14 kHz source and places DMR. See the direct-path test in dmr_nodes for
+/// the decode proven without the detector in the way.
+#[cfg(feature = "ambe")]
+#[test]
+#[ignore]
+fn auto_finds_dmr_in_a_real_capture() {
+    let path = format!("{}/dmr_dev/dmr_good1.cu8", std::env::var("HOME").unwrap());
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("skipping: {path} absent");
+        return;
+    }
+    let raw = std::fs::read(&path).unwrap();
+    let rate = 2_048_000.0;
+    let center = Hz(434_000_000);
+    let iq: Vec<C32> = raw
+        .chunks_exact(2)
+        .map(|c| C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
+        .collect();
+
+    let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
+    let dmr: Vec<_> = pk
+        .iter()
+        .filter_map(|p| match &p.body {
+            PacketBody::Frame(b) => nodes::dmr_nodes::dmr_decoded(b, Hz(p.center_hz)),
+            _ => None,
+        })
+        .collect();
+    assert!(!dmr.is_empty(), "auto placed no DMR that decoded; {} packets", pk.len());
+    let d = &dmr[0];
+    assert_eq!(d.protocol, "DMR-Voice");
+    // The over carried audio, so a call-list row would be playable.
+    let carried = pk.iter().any(|p| p.audio.is_some());
+    assert!(carried, "the DMR over reached the packet with no audio");
+    eprintln!("auto decoded {} DMR row(s), audio present={carried}", dmr.len());
+}
+
+

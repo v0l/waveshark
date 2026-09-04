@@ -82,6 +82,10 @@ impl Simple for AprsNode {
         "aprs"
     }
 
+    fn channels(&self) -> &'static [f64] {
+        &[CHANNEL_WIDTH_HZ]
+    }
+
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("aprs reads complex baseband"));

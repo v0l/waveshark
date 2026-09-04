@@ -179,6 +179,10 @@ impl Node for M17Node {
         "m17"
     }
 
+    fn channels(&self) -> &'static [f64] {
+        &[CHANNEL_WIDTH_HZ]
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }

@@ -404,6 +404,14 @@ pub struct DmrNode {
     voice_bursts: u32,
     /// Bursts since the last voice sync, to notice a transmission ending.
     idle_bursts: u32,
+    /// Input samples since the last voice burst. A transmission that simply
+    /// stops (the carrier drops, no terminator heard) ends when no voice has
+    /// arrived for a while, the way M17 closes on a silent clock. Counted in
+    /// samples, not blocks, so it does not depend on how the caller chunks
+    /// the stream (a live radio and the auto node's flush differ).
+    silent_samples: u64,
+    /// Input sample rate, for the silence timeout.
+    in_rate: f64,
     accepted: u64,
     #[cfg(feature = "ambe")]
     synth: mbe::ambe::AmbeSynthesizer,
@@ -436,6 +444,8 @@ impl DmrNode {
             talking: false,
             voice_bursts: 0,
             idle_bursts: 0,
+            silent_samples: 0,
+            in_rate: AUDIO_HZ,
             accepted: 0,
             #[cfg(feature = "ambe")]
             synth: mbe::ambe::AmbeSynthesizer::new(),
@@ -570,6 +580,10 @@ impl Node for DmrNode {
         "dmr"
     }
 
+    fn channels(&self) -> &'static [f64] {
+        &[CHANNEL_WIDTH_HZ]
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -602,6 +616,7 @@ impl Node for DmrNode {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.sync = SymbolSync::new(audio_rate);
         self.framer = Framer::new();
+        self.in_rate = rate;
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
@@ -638,6 +653,7 @@ impl Node for DmrNode {
 
         self.voice_now.clear();
         let mut ended = false;
+        let had_voice = events.iter().any(|e| matches!(e, DmrEvent::Voice(_)));
         for e in events {
             match e {
                 DmrEvent::VoiceStart => {
@@ -666,6 +682,22 @@ impl Node for DmrNode {
             }
         }
 
+        // End on silence too: a carrier that drops after the last voice burst
+        // leaves no terminator to count, so an over that saw voice is closed
+        // once enough input time passes with none. A voice superframe is
+        // 360 ms; 0.5 s of no voice is a real gap, not a slot edge or a lost
+        // burst mid-over.
+        if self.talking {
+            if had_voice {
+                self.silent_samples = 0;
+            } else {
+                self.silent_samples += iq.len() as u64;
+                if self.silent_samples as f64 >= self.in_rate * 0.5 {
+                    ended = true;
+                }
+            }
+        }
+
         let (from, to) = (None, None);
         outputs[OUT_VOICE].voice_mut().push(common::Voice {
             system: "DMR",
@@ -686,6 +718,7 @@ impl Node for DmrNode {
             self.talking = false;
             self.voice_bursts = 0;
             self.idle_bursts = 0;
+            self.silent_samples = 0;
             self.accepted += 1;
             outputs[OUT_PACKETS].packets_mut().push(common::Packet {
                 at_us,
@@ -714,6 +747,7 @@ impl Node for DmrNode {
         self.talking = false;
         self.voice_bursts = 0;
         self.idle_bursts = 0;
+        self.silent_samples = 0;
         #[cfg(feature = "ambe")]
         {
             self.synth = mbe::ambe::AmbeSynthesizer::new();

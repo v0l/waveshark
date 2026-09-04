@@ -47,7 +47,13 @@ use crate::{build_chain, NodeSpec};
 /// its decoders before they saw a sample. The decoders each decide for
 /// themselves whether the bits are theirs, so the cost of trying is CPU and
 /// the cost of not trying is silence.
-const NARROW_MAX_HZ: f64 = 40_000.0;
+/// How much wider than its declared channel a source may measure and still
+/// have that channel's front end placed on it. A clean channel measures a
+/// little over its width (an M17 12.5 kHz channel lands around 25 kHz once
+/// extracted); splatter and a nearby spur can measure it far wider, and past
+/// this a 12.5 kHz decoder does not belong on the signal. Three times keeps
+/// the old ~40 kHz ceiling for a 12.5 kHz channel while scaling with width.
+const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 
 /// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
 /// with what the extraction adds around it.
@@ -337,6 +343,11 @@ pub struct AutoNode {
     events: Vec<SourceEvent>,
     blocks: Vec<SourceBlock>,
     hits: Vec<(Hz, Event)>,
+    /// Narrowband front ends and the channel widths they declared, asked of
+    /// the registry once rather than kept as a table here: the auto node no
+    /// longer decides who fits where, it asks each front what it wants. Only
+    /// stages that returned a non-empty `Node::channels` are here.
+    narrowband: Vec<(&'static str, &'static [f64])>,
     /// Sources decoders were built for, over the node's life.
     built: u64,
     /// What each channel has announced about itself, so a source that
@@ -360,6 +371,7 @@ impl AutoNode {
             detector: None,
             extractor: None,
             reg: crate::registry(),
+            narrowband: Vec::new(),
             slots: Vec::new(),
             wide: Vec::new(),
             exclude: Vec::new(),
@@ -541,6 +553,7 @@ impl AutoNode {
         self.extractor = Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
         self.detector = Some(d);
         self.slots.clear();
+        self.narrowband = self.query_narrowband();
 
         // The span-wide decoders, where the span reaches what they are for.
         let mut spec = StreamSpec::iq(self.rate, self.center);
@@ -577,6 +590,25 @@ impl AutoNode {
     /// A frame decoder that will not build is left out rather than fatal:
     /// the source still has the front end, and one decoder's refusal is not
     /// a reason to stop the receiver.
+    /// Ask the registry which decode stages are narrowband channels and what
+    /// widths they want. Each is built once with nominal settings and asked
+    /// through [`Node::channels`]; the ones that answer with a width are the
+    /// candidates [`open`](Self::open) may place. This replaces a hand-kept
+    /// table of who fits where with a question put to each front end.
+    fn query_narrowband(&self) -> Vec<(&'static str, &'static [f64])> {
+        let mut out = Vec::new();
+        for desc in self.reg.by_category("decode") {
+            let Ok(node) = self.reg.build(desc.name, &NodeSpec::new(desc.name).settings) else {
+                continue;
+            };
+            let ch = node.channels();
+            if !ch.is_empty() {
+                out.push((desc.name, ch));
+            }
+        }
+        out
+    }
+
     fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
@@ -585,46 +617,30 @@ impl AutoNode {
         // noise from its first sample to its last.
         let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
         let mut members = vec![Member::build("burst_route", spec, route, &self.reg)?];
-        if b.bandwidth_hz <= NARROW_MAX_HZ {
-            let hz = b.center_hz as f64;
-            // The channel is centred on the source, so it fits when the
-            // stream is wider than the channel. Asking for twice the width
-            // rules out every source extracted at the 25 kHz floor, which is
-            // where a clean 12.5 kHz transmission lands.
-            let fits = |width: f64| b.rate > width;
-            if fits(crate::pocsag_nodes::CHANNEL_WIDTH_HZ) {
-                if let Ok(m) = Member::build("pocsag", spec, NodeSpec::new("pocsag").f("channel_hz", hz), &self.reg) {
+        let hz = b.center_hz as f64;
+        // Place every narrowband front whose declared channel fits inside the
+        // detected source: the stream must carry the channel (rate over its
+        // width), and the source's own width must be within reach of the
+        // channel (up to CHANNEL_WIDTH_TOLERANCE times it), so a fat or
+        // splattered measurement does not put a 12.5 kHz decoder on a
+        // 200 kHz signal, but a channel measured a little wide still places.
+        for (name, widths) in &self.narrowband {
+            let fits = widths.iter().any(|&w| {
+                b.rate > w && b.bandwidth_hz <= w * CHANNEL_WIDTH_TOLERANCE
+            });
+            if fits {
+                let spec_node = NodeSpec::new(*name).f("channel_hz", hz);
+                if let Ok(m) = Member::build(name, spec, spec_node, &self.reg) {
                     members.push(m);
                 }
             }
-            if fits(crate::aprs_nodes::CHANNEL_WIDTH_HZ) {
-                if let Ok(m) = Member::build("aprs", spec, NodeSpec::new("aprs").f("channel_hz", hz), &self.reg) {
-                    members.push(m);
-                }
-            }
-            // M17 belongs here for the same reason the other two do: it is a
-            // 12.5 kHz channel wherever an amateur puts it, its sync words
-            // and CRC decide whether the bits are its own, and a receiver
-            // that has to be told the frequency is not detecting.
-            if fits(crate::m17_nodes::CHANNEL_WIDTH_HZ) {
-                if let Ok(m) = Member::build("m17", spec, NodeSpec::new("m17").f("channel_hz", hz), &self.reg) {
-                    members.push(m);
-                }
-                // DMR shares M17's grid and its "you must be told the
-                // frequency" character; its sync words decide whether the
-                // bits are DMR. Placed on the same 12.5 kHz channels.
-                if let Ok(m) = Member::build("dmr", spec, NodeSpec::new("dmr").f("channel_hz", hz), &self.reg) {
-                    members.push(m);
-                }
-            }
-            // TETRA only where a downlink band puts it: unlike M17 the
-            // carriers live in licensed allocations, and the node's hunt
-            // correlates continuously, which is not worth paying on every
-            // meter burst at 433 MHz.
-            if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
-                if let Ok(m) = Member::build("tetra", spec, NodeSpec::new("tetra").f("channel_hz", hz), &self.reg) {
-                    members.push(m);
-                }
+        }
+        // TETRA is placed by band, not width: unlike the amateur channels its
+        // carriers live in licensed downlink allocations, and its hunt
+        // correlates continuously, not worth paying on every 433 MHz burst.
+        if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
+            if let Ok(m) = Member::build("tetra", spec, NodeSpec::new("tetra").f("channel_hz", hz), &self.reg) {
+                members.push(m);
             }
         }
         if METER_HZ.contains(&b.bandwidth_hz) {
