@@ -83,7 +83,7 @@ frame decoders where the width warrants them. At 2.4 MS/s on an empty band
 that measures about 9x real time on a 48 core machine against the 6.1x the
 four bank tiers took, in `radio::tests::the_scanner_keeps_up_with_the_stream`.
 Scored on rtl_433's corpus by `crates/nodes/tests/source_corpus.rs`, the node
-recovers 50 of the 57 reference decodes against the tiers' 48, and loses
+recovers 53 of the 57 reference decodes against the tiers' 48, and loses
 ground on no capture. The tiers remain a front end a scanner block can ask
 for as `banks`, for that comparison.
 
@@ -97,7 +97,9 @@ The third is hardware.
 
 Out of scope whatever the ambition: a Flipper's 125 kHz RFID, its 13.56 MHz
 NFC, its infrared and its iButton are near-field or optical, not radio an SDR
-can reach.
+can reach. That rules out most of the shelf labels a Flipper can talk to:
+TagTinker and PriceIR drive Pricer and SES tags over the infrared blaster, and
+Momentum's sub-GHz protocol list has no shelf label in it at all.
 
 ## Status codes
 
@@ -196,6 +198,27 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Radiosondes (RS41, DFM, M10) | 400-406 MHz | GFSK 4800 bps | 125 kHz | framing | mod | Reed-Solomon, and a GPS position worth having |
 | nRF24 ShockBurst | 2.4 GHz | GFSK 1-2 Mbps | 2 MHz | demod | mod | HackRF only. Flipper does this with a separate module |
 
+## Displays: shelf labels, price signs and passenger information
+
+Unrelated systems that happen to share a purpose. Retailers' own tags are the
+point here, so the link layer and the payload are listed separately: the
+framing is published silicon and reads today, while what a stock tag says
+inside it is the vendor's and mostly is not.
+
+| Protocol | Where | Modulation | Width | RX | TX | Notes |
+|---|---|---|---|---|---|---|
+| Shelf labels, sub-GHz link layer | 863.999-869.034, 903-923 MHz | GFSK 38.38 kbps (20.6 kHz deviation) or 249.94 kbps (165 kHz deviation) | 125 or 650 kHz | synthetic | table | Chroma and the Solum tags behind them run a CC1110 or CC1310, so the link layer is TI's packet engine: preamble, sync, length byte, CRC-16, PN9 whitening, all of which `decode::whiten` already had. `decode::protocols::esl` reads that and reports the frame whoever built it, because the framing is a data sheet and a shop's own tags obey it. The sync word is not matched against a constant, since the stock configuration and the replacement firmware use different ones and a tag on a shelf can be running either: the frame is taken from the end of the preamble and the CRC-16 decides. The 250 kbps variant is the widest thing here an RTL-SDR can still reach, at 9.6 samples per symbol on 2.4 MS/s |
+| Stock Solum payload | as above | as above | as above | bytes only | no | What a retailer's own tags actually say inside that frame. Nobody has published it: Dmitry Grinberg's teardown found self-contained firmware with no 802.15.4 stack and a layout of its own. Frames report as `oepl=false` with their length and bytes, which is the starting point for reversing it, not a decode |
+| OpenEPaperLink payload | as above | as above | as above | synthetic | table | The replacement firmware's own protocol, parsed when PAN id 0x4447 and a packet type from `oepl-proto.h` say so: tag MAC, battery voltage, temperature, firmware and channel on a check-in, and the size of the image waiting plus the next check-in time on the access point's reply. Checked against frames built from that header only. Useful for a bench tag, not for a shop |
+| Hanshow Stellar heartbeat | 2.401-2.480 GHz, 500 kHz channels | GFSK, 500 kbps up, 100 kbps down | 2 MHz | synthetic | mod | A stock shop protocol, and the best documented one. `decode::protocols::hanshow` reads the heartbeat a tag sends about every three minutes: sync `52 56 78 53`, a control byte, then the ESL id, the wakeup, group and data channels, the netmask, battery level, encryption flag, panel temperature and display id. Layout and field names from `dustybee/HanshowESL`, recovered off air at 2.401 GHz. The CRC's polynomial and span were not pinned down there, so nothing is checked and the corroboration is the sync, the control byte and the exact length it implies. The stream is inverted against this slicer's convention and is searched for both ways round. HackRF only |
+| Solum ZBS243, Newton M2/M3 | 2.4 GHz, channels 11, 15, 20, 25, 26, 27 | O-QPSK DSSS 250 kbps | 2 MHz | demod | mod | An 802.15.4 PHY carrying a proprietary payload. Needs the despreader. HackRF only |
+| SES-imagotag Vusion | 2.4 GHz, 11 channels | proprietary, CC2510 | 2 MHz | demod | mod | Another TI packet engine, so the framing above applies once there is a 2.4 GHz chain to run it on. The chip has hardware AES-128 and the brochures claim encryption, so expect the payload to be ciphertext |
+| Gicisky, PICKSMART, ATC shelf labels | 2.4 GHz | BLE advertising, GFSK 1 Mbps | 2 MHz | demod | mod | Waits on the same BLE front end as everything else on 2.4 GHz |
+| Pricer, SES-imagotag infrared, SES 38 kHz LF loop | optical, or a radiating cable | infrared, or LF induction | | out of scope | out of scope | Not radio an SDR can reach. This is what the Flipper apps talk to |
+| Petrol forecourt price signs | 433.92 MHz typically | OOK or 2-FSK, one way, address plus BCD digits | 31 kHz | table | table | A controller at the till repeats the price to each sign continuously. The shape fits the existing pulse front end and costs a timing table, but no layout is published for any of them, so it is capture-driven work: a recording during a price change, or one of the receivers on a bench |
+| Axentia iBus bus stop displays | FM broadcast band | DARC, 76 kHz subcarrier, LMSK 16 kbps | 200 kHz | demod | mod | Not sub-GHz at all. The displays are fed over a data channel on an ordinary FM station, above the RDS subcarrier this project already demodulates in `dsp::rds`, so the front end is a second subcarrier on a chain that exists rather than a new one. Decoded off air by windytan in Helsinki and Apollo-NG in Munich. The DARC layers are ETSI EN 300 751; the iBus payload above them is not published |
+| STP403 passenger information | 164 and 468.4875 MHz | FFSK, 8 kHz channel | 25 kHz | framing | mod | The French pattern instead: an NFM channel and a bit slicer. Layout unpublished |
+
 ## Utility metering and home automation
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
@@ -214,7 +237,7 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` places it on any source the width of a LoRa channel and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against two off-air Meshtastic transmissions at SF11 over 250 kHz, from different nodes 128 seconds apart, both giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
+| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` is placed on a source once the burst front end has named a burst of it a chirp, fed the source's samples so far from that front end's ring, and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against two off-air Meshtastic transmissions at SF11 over 250 kHz, from different nodes 128 seconds apart, both giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
 | LoRaWAN | as LoRa | as LoRa | 125-500 kHz | framing | mod | The PHY is read; what is missing is the MAC layout on top of it. Payloads are AES encrypted, the metadata is still worth logging |
 | Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | done | mod | The 0x2B sync word names it and the sixteen byte packet header is read: who transmitted, who for, the packet id, and how many hops it has left of how many it started with. The payload behind that is AES encrypted with the channel key, so it is reported as bytes |
 | Sigfox uplink | 868.13 MHz | DBPSK 100 bps (600 US) | 100 Hz | demod | mod | Ultra narrowband, coherent detection, very narrow channel |

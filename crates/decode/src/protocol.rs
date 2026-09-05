@@ -30,7 +30,12 @@ pub struct Report {
 
 impl Report {
     pub fn new(model: &'static str) -> Self {
-        Self { model, fields: BTreeMap::new(), crc_valid: None, raw: Vec::new() }
+        Self {
+            model,
+            fields: BTreeMap::new(),
+            crc_valid: None,
+            raw: Vec::new(),
+        }
     }
 
     pub fn set(mut self, k: &str, v: Value) -> Self {
@@ -172,6 +177,10 @@ impl Protocols {
         p.add(Box::new(ToyotaTpms));
         p.add(Box::new(HoneywellSecurity));
         p.add(Box::new(Ism868Link));
+        p.add(Box::new(Esl::sub_ghz_38k()));
+        p.add(Box::new(Esl::sub_ghz_250k()));
+        p.add(Box::new(Hanshow::uplink_500k()));
+        p.add(Box::new(Hanshow::uplink_100k()));
         p
     }
 
@@ -199,13 +208,19 @@ impl Protocols {
     /// operator should see, not something to be silently resolved by
     /// registration order.
     pub fn decode_all(&self, pkg: &Package) -> Vec<Report> {
-        self.list.iter().filter_map(|p| p.decode_package(pkg).ok()).collect()
+        self.list
+            .iter()
+            .filter_map(|p| p.decode_package(pkg).ok())
+            .collect()
     }
 
     /// Try every protocol, reporting failures too. For diagnosing an unknown
     /// signal: knowing that six protocols matched the timing but failed CRC is
     /// far more useful than an empty result.
     pub fn diagnose(&self, pkg: &Package) -> Vec<(&'static str, Result<Report, DecodeError>)> {
-        self.list.iter().map(|p| (p.name(), p.decode_package(pkg))).collect()
+        self.list
+            .iter()
+            .map(|p| (p.name(), p.decode_package(pkg)))
+            .collect()
     }
 }
