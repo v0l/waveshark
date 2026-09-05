@@ -343,6 +343,15 @@ cannot check because a port there is complex samples and nothing else. Bursts
 carry `tx_start`, `tx_end` and `tx_at` tags, named after `tx_sob`, `tx_eob`
 and `tx_time` for the same reasons.
 
+NFM runs end to end from the graph: `tone` into `fm_mod` into `radio_tx`,
+which holds the device's `TxStream` and paces the whole chain by blocking
+when the radio has enough queued. `crates/nodes/tests/nfm_tx_path.rs` runs
+that graph into a file sink and demodulates what the "radio" received with
+`dsp::FmDemod`; `crates/app/examples/nfm_tx.rs` is the same graph with a
+HackRF in place of the file. What is not there yet is any audio source
+besides a tone, and any resampler on the transmit side, so the tone is
+generated at the radio's rate rather than at an audio rate.
+
 Still missing:
 
 1. **The rest of the encoders.** `decode::slicer::slice` turns a pulse train

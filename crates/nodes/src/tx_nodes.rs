@@ -219,3 +219,188 @@ impl Node for MorseTxNode {
     }
 }
 
+
+/// A tone, added to whatever is already on the stream.
+///
+/// The simplest thing to modulate and the standard way to check a
+/// transmitter: a steady tone on an NFM carrier is what a service monitor
+/// measures deviation from, and what tells you the audio chain is alive
+/// before speech is involved. Added rather than substituted, so it can also
+/// be laid over real audio as a test tone.
+pub struct ToneNode {
+    hz: f64,
+    level: f32,
+    rate: f64,
+    phase: f64,
+}
+
+impl Default for ToneNode {
+    fn default() -> Self {
+        Self { hz: 1_000.0, level: 0.5, rate: 0.0, phase: 0.0 }
+    }
+}
+
+impl ToneNode {
+    pub fn new(hz: f64, level: f32) -> Self {
+        Self { hz, level: level.clamp(0.0, 1.0), ..Self::default() }
+    }
+}
+
+impl Simple for ToneNode {
+    fn name(&self) -> &str {
+        "tone"
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Real {
+            return Err(common::Error::other("tone runs on a real audio stream"));
+        }
+        self.rate = input.spec.rate;
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(audio) = input.as_real() else { return Ok(()) };
+        let step = std::f64::consts::TAU * self.hz / self.rate.max(1.0);
+        let out = output.real_mut();
+        out.reserve(audio.len());
+        for &a in audio {
+            out.push(a + self.level * self.phase.sin() as f32);
+            self.phase += step;
+            if self.phase > std::f64::consts::TAU {
+                self.phase -= std::f64::consts::TAU;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float("hz", self.hz, 20.0..=20_000.0).label("Tone").unit("Hz"),
+            Param::float("level", self.level as f64, 0.0..=1.0).label("Level"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        let v = value.as_f64().unwrap_or(0.0);
+        match name {
+            "hz" => self.hz = v.max(0.0),
+            "level" => self.level = v.clamp(0.0, 1.0) as f32,
+            _ => return Err(common::Error::other(format!("tone: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
+/// The end of a transmit chain: IQ in, samples out of the antenna.
+///
+/// The mirror of the radio at the head of the receive graph, and the node
+/// that makes a transmission visible as something the graph does rather than
+/// something done to it. It is also what paces the whole chain: the device's
+/// write blocks once the radio has enough queued, so a graph ending here runs
+/// at the sample rate without anything timing it.
+///
+/// Refuses a receive stream. A demodulator's output wired into a transmitter
+/// is the mistake this exists to make impossible.
+pub struct TxSinkNode {
+    stream: Option<Box<dyn common::TxStream>>,
+    rate: common::Sps,
+    center: common::Hz,
+    written: u64,
+    /// Blocks the device could not take, because the radio went away.
+    failed: u64,
+}
+
+impl TxSinkNode {
+    pub fn new(stream: Box<dyn common::TxStream>) -> Self {
+        Self {
+            stream: Some(stream),
+            rate: common::Sps(0),
+            center: common::Hz(0),
+            written: 0,
+            failed: 0,
+        }
+    }
+
+    /// Complex samples handed to the radio since the node was built.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Transfers the radio sent as silence because nothing was queued in
+    /// time. Non-zero means the transmission has holes in it.
+    pub fn underruns(&self) -> u64 {
+        self.stream.as_ref().map(|s| s.underruns()).unwrap_or(0)
+    }
+
+    pub fn failed_blocks(&self) -> u64 {
+        self.failed
+    }
+
+    /// Let everything written reach the radio, then stop transmitting.
+    pub fn finish(&mut self, timeout: std::time::Duration) {
+        if let Some(s) = &mut self.stream {
+            s.drain(timeout);
+            s.stop();
+        }
+        self.stream = None;
+    }
+}
+
+impl Simple for TxSinkNode {
+    fn name(&self) -> &str {
+        "radio_tx"
+    }
+
+    fn is_sink(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("radio_tx needs IQ"));
+        }
+        if !input.spec.is_tx() {
+            return Err(common::Error::other(
+                "radio_tx was given a receive stream; a modulator has to be in front of it",
+            ));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("radio_tx needs a sample rate"));
+        }
+        self.rate = common::Sps(input.spec.rate.round() as u64);
+        self.center = input.spec.center;
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        _output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(iq) = input.as_iq() else { return Ok(()) };
+        if iq.is_empty() {
+            return Ok(());
+        }
+        let Some(s) = &mut self.stream else { return Ok(()) };
+        let buf = common::IqBuf::new(iq.to_vec(), self.center, self.rate, self.written);
+        match s.write(&buf) {
+            Ok(()) => self.written += iq.len() as u64,
+            // The radio going away must not take the graph down with it: a
+            // receiver that keeps running is more useful than one that exits
+            // because a transmission could not finish.
+            Err(_) => self.failed += 1,
+        }
+        Ok(())
+    }
+}
