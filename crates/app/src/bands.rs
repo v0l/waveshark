@@ -23,6 +23,16 @@ pub struct Band {
     pub raster: Option<Raster>,
 }
 
+impl Band {
+    /// Whether this is a licence-free allocation, which is what the scanner
+    /// table ships an `auto` block for. The colour is the tag: a band drawn
+    /// as ISM and one scanned as ISM are the same set, and keeping a second
+    /// list of names is how the two drift apart.
+    pub fn is_ism(&self) -> bool {
+        self.color == ISM
+    }
+}
+
 /// An evenly spaced channel plan.
 #[derive(Clone, Copy, Debug)]
 pub struct Raster {
@@ -125,6 +135,7 @@ pub const EUROPE: &[Band] = &[
     Band { lo: 26.965e6, hi: 27.405e6, name: "CB", demod: Demod::Am, color: UTILITY, raster: Some(Raster::from(26.965e6, 10_000.0)) },
     Band { lo: 28.0e6, hi: 29.7e6, name: "10 m", demod: Demod::Nfm, color: AMATEUR, raster: None },
     Band { lo: 50.0e6, hi: 52.0e6, name: "6 m", demod: Demod::Nfm, color: AMATEUR, raster: None },
+    Band { lo: 40.66e6, hi: 40.7e6, name: "ISM 40", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 76.0e6, hi: 87.5e6, name: "Band II low", demod: Demod::Wfm, color: BROADCAST, raster: Some(Raster::step(100_000.0)) },
     Band { lo: 87.5e6, hi: 108.0e6, name: "FM broadcast", demod: Demod::Wfm, color: BROADCAST, raster: Some(Raster::step(100_000.0)) },
     Band { lo: 108.0e6, hi: 117.975e6, name: "VOR / ILS", demod: Demod::Am, color: AERO, raster: Some(Raster::step(50_000.0)) },
@@ -133,6 +144,7 @@ pub const EUROPE: &[Band] = &[
     Band { lo: 144.0e6, hi: 146.0e6, name: "2 m", demod: Demod::Nfm, color: AMATEUR, raster: Some(Raster::step(12_500.0)) },
     Band { lo: 146.0e6, hi: 156.0e6, name: "Land mobile", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(12_500.0)) },
     Band { lo: 156.0e6, hi: 162.05e6, name: "Marine VHF", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(25_000.0)) },
+    Band { lo: 169.4e6, hi: 169.475e6, name: "ISM 169", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 174.0e6, hi: 230.0e6, name: "DAB / Band III", demod: Demod::Nfm, color: BROADCAST, raster: None },
     Band { lo: 240.0e6, hi: 270.0e6, name: "Milair UHF", demod: Demod::Am, color: AERO, raster: Some(Raster::step(25_000.0)) },
     Band { lo: 380.0e6, hi: 400.0e6, name: "TETRA", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(25_000.0)) },
@@ -164,6 +176,7 @@ pub const EUROPE: &[Band] = &[
     Band { lo: 2400.0e6, hi: 2483.5e6, name: "ISM 2.4", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 2500.0e6, hi: 2570.0e6, name: "LTE 2600 up", demod: Demod::Nfm, color: CELLULAR, raster: None },
     Band { lo: 2620.0e6, hi: 2690.0e6, name: "LTE 2600 down", demod: Demod::Nfm, color: CELLULAR, raster: None },
+    Band { lo: 5725.0e6, hi: 5875.0e6, name: "ISM 5.8", demod: Demod::Nfm, color: ISM, raster: None },
 ];
 
 /// United States allocations as the FCC divides them.
@@ -186,6 +199,10 @@ pub const AMERICAS: &[Band] = &[
     Band { lo: 156.0e6, hi: 162.025e6, name: "Marine VHF", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(25_000.0)) },
     Band { lo: 162.4e6, hi: 162.55e6, name: "NOAA weather", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::from(162.4e6, 25_000.0)) },
     Band { lo: 174.0e6, hi: 216.0e6, name: "VHF TV / wireless mics", demod: Demod::Nfm, color: BROADCAST, raster: None },
+    // Part 15 devices: key fobs, tyre pressure sensors, garage doors. Narrow
+    // enough to sit inside the military UHF allocation below without hiding
+    // it, which is what it does in practice too.
+    Band { lo: 314.9e6, hi: 315.1e6, name: "ISM 315", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 219.0e6, hi: 225.0e6, name: "1.25 m", demod: Demod::Nfm, color: AMATEUR, raster: None },
     Band { lo: 225.0e6, hi: 400.0e6, name: "Milair UHF", demod: Demod::Am, color: AERO, raster: Some(Raster::step(25_000.0)) },
     Band { lo: 420.0e6, hi: 450.0e6, name: "70 cm", demod: Demod::Nfm, color: AMATEUR, raster: Some(Raster::step(12_500.0)) },
@@ -212,6 +229,7 @@ pub const AMERICAS: &[Band] = &[
     Band { lo: 2110.0e6, hi: 2155.0e6, name: "AWS down", demod: Demod::Nfm, color: CELLULAR, raster: None },
     Band { lo: 2400.0e6, hi: 2483.5e6, name: "ISM 2.4", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 2496.0e6, hi: 2690.0e6, name: "BRS / EBS", demod: Demod::Nfm, color: CELLULAR, raster: None },
+    Band { lo: 5725.0e6, hi: 5875.0e6, name: "ISM 5.8", demod: Demod::Nfm, color: ISM, raster: None },
 ];
 
 /// ITU Region 3, with the Japanese allocations where they differ. Those are
@@ -230,6 +248,7 @@ pub const ASIA_PACIFIC: &[Band] = &[
     Band { lo: 146.0e6, hi: 156.0e6, name: "Land mobile", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(12_500.0)) },
     Band { lo: 156.0e6, hi: 162.05e6, name: "Marine VHF", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(25_000.0)) },
     Band { lo: 170.0e6, hi: 222.0e6, name: "ISDB-T / Band III", demod: Demod::Nfm, color: BROADCAST, raster: None },
+    Band { lo: 314.9e6, hi: 315.1e6, name: "ISM 315", demod: Demod::Nfm, color: ISM, raster: None },
     Band { lo: 335.4e6, hi: 470.0e6, name: "Land mobile UHF", demod: Demod::Nfm, color: UTILITY, raster: Some(Raster::step(12_500.0)) },
     Band { lo: 430.0e6, hi: 440.0e6, name: "70 cm", demod: Demod::Nfm, color: AMATEUR, raster: Some(Raster::step(12_500.0)) },
     Band { lo: 426.0e6, hi: 426.1e6, name: "Specified low power", demod: Demod::Nfm, color: ISM, raster: None },
@@ -250,6 +269,7 @@ pub const ASIA_PACIFIC: &[Band] = &[
     Band { lo: 1920.0e6, hi: 1980.0e6, name: "UMTS 2100 up", demod: Demod::Nfm, color: CELLULAR, raster: None },
     Band { lo: 2110.0e6, hi: 2170.0e6, name: "UMTS 2100 down", demod: Demod::Nfm, color: CELLULAR, raster: None },
     Band { lo: 2400.0e6, hi: 2483.5e6, name: "ISM 2.4", demod: Demod::Nfm, color: ISM, raster: None },
+    Band { lo: 5725.0e6, hi: 5875.0e6, name: "ISM 5.8", demod: Demod::Nfm, color: ISM, raster: None },
 ];
 
 /// The narrowest band containing `hz` in a given plan, so ISM 433 wins over
