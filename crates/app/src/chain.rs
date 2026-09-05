@@ -4134,13 +4134,30 @@ pub fn transmit_graph(
         TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
     };
+    // The audio limit, which is what keeps a transmission inside its channel.
+    //
+    // Deviation is only half of Carson: the other half is the highest
+    // modulating frequency, so speech running to 15 kHz through a 2.5 kHz
+    // deviation puts 35 kHz on the air where the band plan allows 12.5. It
+    // matters most with the microphone, since a sound card hands over the
+    // full audio band and desktop audio is usually music.
+    let audio_hz = match mode {
+        TxMode::Nfm | TxMode::Fm => 3_000.0,
+        TxMode::Am => 4_000.0,
+        // Broadcast: 15 kHz is the standard, and above it lies the pilot.
+        TxMode::Wfm => 15_000.0,
+        TxMode::Carrier => 300.0,
+    };
+    let limit = nodes::FirFilterNode::new(
+        dsp::filter::Response::Lowpass,
+        audio_hz,
+        audio_hz * 0.4,
+        127,
+    );
+
     pipeline::chain(
         input,
-        vec![
-            head,
-            modulator,
-            Box::new(nodes::TxSinkNode::new(stream)),
-        ],
+        vec![head, Box::new(limit), modulator, Box::new(nodes::TxSinkNode::new(stream))],
     )
 }
 
@@ -4360,6 +4377,63 @@ mod tx_tests {
     }
 
     #[test]
+    fn a_transmission_fits_the_channel_its_mode_is_for() {
+        // The band plan says PMR446 is 12.5 kHz, and a transmission has to
+        // sit inside that: 99% of the power inside the channel the mode
+        // claims. Music through a microphone is the case that broke it,
+        // because a sound card hands over the whole audio band.
+        let rate = 2_000_000.0;
+        let noisy: Vec<f32> = (0..48_000)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                0.5 * (std::f32::consts::TAU * 800.0 * t).sin()
+                    + 0.5 * (std::f32::consts::TAU * 11_000.0 * t).sin()
+            })
+            .collect();
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(noisy, 48_000.0, true));
+        let tx = TxSpec { source: TxSource::Mic, mic_agc: false, ..Default::default() };
+        let (mut dev, buf) = sink(rate);
+        let mut g = transmit_graph(
+            &tx,
+            TxMode::Nfm,
+            rate,
+            Hz(446_050_000),
+            dev.start_tx().unwrap(),
+            Some(src),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            let b = g.input_buf();
+            b.clear();
+            b.real_mut().resize(40_000, 0.0);
+            g.run().unwrap();
+        }
+        let id = g.order().last().map(|(i, _)| i).unwrap();
+        if let Some(n) = g.node_mut(id) {
+            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+                s.finish(std::time::Duration::from_millis(50));
+            }
+        }
+        let mut iq = Vec::new();
+        common::SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
+
+        const N: usize = 8192;
+        let mut spec = dsp::spectrum::Spectrum::new(N);
+        spec.smoothing = 1.0;
+        spec.process(&iq[40_000..]);
+        let db = spec.power_db();
+        let power: Vec<f64> = db.iter().map(|d| 10f64.powf(*d as f64 / 10.0)).collect();
+        let total: f64 = power.iter().sum();
+        // The 12.5 kHz channel, in bins either side of centre.
+        let half = ((6_250.0 / rate) * N as f64).ceil() as usize;
+        let mid = N / 2;
+        let inside: f64 = power[mid - half..=mid + half].iter().sum();
+        let frac = inside / total;
+        assert!(frac > 0.99, "only {:.1}% of the power is in the channel", frac * 100.0);
+    }
+
+    #[test]
     fn each_mode_deviates_by_what_that_mode_means() {
         // The width of an FM transmission is its deviation, and the deviation
         // is the difference between the modes: 2.5 kHz fits a 12.5 kHz
@@ -4396,7 +4470,7 @@ mod tx_tests {
     }
 
     #[test]
-    fn the_transmit_chain_is_three_stages_ending_in_the_radio() {
+    fn the_transmit_chain_limits_the_audio_before_it_modulates() {
         let (mut dev, _b) = sink(48_000.0);
         let g = transmit_graph(
             &TxSpec::default(),
@@ -4409,7 +4483,11 @@ mod tx_tests {
         .unwrap();
         let topo = g.topology();
         let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
-        assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
+        // The filter is not decoration: Carson counts the highest modulating
+        // frequency as well as the deviation, so unlimited audio into a
+        // 2.5 kHz deviation is a transmission three times wider than the
+        // channel it is meant to sit in.
+        assert_eq!(names, ["tone", "fir_filter", "fm_mod", "radio_tx"]);
         assert!(g.output_spec().is_tx());
     }
 }
