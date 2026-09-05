@@ -259,6 +259,43 @@ fn restart(
 }
 
 
+/// Open or close the microphone to match what the channels ask for.
+///
+/// Open while any channel is set to transmit from it, rather than only while
+/// one is keyed: an operator setting a level needs to see the meter move
+/// before they key up, and a microphone that only wakes on transmit means
+/// finding out afterwards that the gain was wrong. The cost is that the
+/// device is held while a channel is set to MIC, which the strip says
+/// plainly.
+fn sync_mic(
+    plan: &Plan,
+    device: &str,
+    mic: &mut Option<audio::AudioCapture>,
+    status: &Status,
+) {
+    let wanted = plan
+        .channels
+        .iter()
+        .any(|c| c.tx.is_some_and(|t| t.source == TxSource::Mic));
+    match (wanted, mic.is_some()) {
+        (true, false) => {
+            let opened = match device.is_empty() {
+                true => audio::AudioCapture::open(48_000),
+                false => audio::AudioCapture::open_named(device, 48_000),
+            };
+            match opened {
+                Ok(c) => *mic = Some(c),
+                Err(e) => *status.error.lock() = Some(format!("no microphone: {e}")),
+            }
+        }
+        (false, true) => {
+            *mic = None;
+            status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
 /// Start an over on one channel, and give back the graph that runs it.
 ///
 /// The radio is not taken away from the receiver to do this. A half duplex
@@ -272,9 +309,8 @@ fn key_up(
     tx: &TxSpec,
     center: Hz,
     gain_db: f32,
-    mic_device: &str,
-    mic: &mut Option<audio::AudioCapture>,
-) -> common::Result<(pipeline::Graph, Option<audio::AudioCapture>)> {
+    mic: &Option<audio::AudioCapture>,
+) -> common::Result<pipeline::Graph> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
@@ -319,27 +355,20 @@ fn key_up(
         dev.set_tx_gain(&name, GainMode::Manual(db))?;
     }
 
-    // The microphone is opened here and closed when the over ends, so it is
-    // live for exactly as long as the carrier is.
-    let open = match tx.source {
-        TxSource::Mic => match mic.take() {
-            Some(c) => Some(c),
-            None => {
-                let opened = match mic_device.is_empty() {
-                    true => audio::AudioCapture::open(48_000),
-                    false => audio::AudioCapture::open_named(mic_device, 48_000),
-                };
-                Some(opened
-                    .map_err(|e| common::Error::other(format!("no microphone: {e}")))?)
-            }
-        },
+    // The microphone is already open, because the channel asked for it when
+    // it was set to MIC rather than when it was keyed: the meter has to move
+    // before an operator can set a level against it.
+    let src = match tx.source {
+        TxSource::Mic => Some(
+            mic.as_ref()
+                .ok_or_else(|| common::Error::other("no microphone is open"))?
+                .source(),
+        ),
         TxSource::Tone => None,
     };
-    let src = open.as_ref().map(|c| c.source());
 
     let rate = dev.rate().as_f64();
-    let g = crate::chain::transmit_graph(tx, mode, rate, on_air, dev.start_tx()?, src)?;
-    Ok((g, open))
+    crate::chain::transmit_graph(tx, mode, rate, on_air, dev.start_tx()?, src)
 }
 
 /// End the over, letting what is queued reach the antenna first, and say how
@@ -1825,7 +1854,13 @@ fn run(
                 // frequencies already superseded.
                 Cmd::Center(f) => want_center = Some(f),
                 Cmd::Audio { out, input } => {
+                    let changed = input != audio_in;
                     audio_in = input;
+                    if changed {
+                        // Reopened on the new device, if a channel wants one.
+                        mic = None;
+                        sync_mic(&plan, &audio_in, &mut mic, status);
+                    }
                     if out != audio_out {
                         audio_out = out;
                         // Dropping the old player first: a host that only
@@ -1865,10 +1900,7 @@ fn run(
                         status.keyed.store(0, Ordering::Relaxed);
                         status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     }
-                    // Closed with the carrier. A microphone left open between
-                    // overs is a radio listening to the room.
-                    mic = None;
-                    status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
+
                 }
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
@@ -1891,12 +1923,10 @@ fn run(
                                 &tx,
                                 plan.center,
                                 tx_gain_db,
-                                &audio_in,
-                                &mut mic,
+                                &mic,
                             ) {
-                                Ok((g, open)) => {
+                                Ok(g) => {
                                     tx_graph = Some(g);
-                                    mic = open;
                                     status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
@@ -1954,6 +1984,7 @@ fn run(
                 }
                 Cmd::Channels(specs) => {
                     plan.channels = specs;
+                    sync_mic(&plan, &audio_in, &mut mic, status);
                     // A squelch or gain change is a number on a node that is
                     // already there. Rebuilding for it threw away the
                     // spectrum's averaging and every channel's state, once per
@@ -2260,20 +2291,24 @@ fn run(
         // The transmitter, when one is keyed, runs on the same clock as the
         // receiver: one block of receive time is one block of transmit time,
         // and the sink's backpressure paces both.
+        // What the microphone is hearing, whether or not anything is keyed.
+        // While an over is running the node has already taken those samples
+        // out of the ring, so the reading comes from the node instead.
+        if let Some(c) = mic.as_ref() {
+            let from_node = tx_graph.as_ref().and_then(|g| {
+                g.order()
+                    .find(|(_, name)| *name == "mic")
+                    .and_then(|(id, _)| g.node(id))
+                    .and_then(|n| n.as_any())
+                    .and_then(|a| a.downcast_ref::<nodes::MicNode>())
+                    .map(|m| (m.peak(), m.agc_gain_db()))
+            });
+            let (peak, gain_db) = from_node.unwrap_or_else(|| (c.peak(), 0.0));
+            status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
+            status.mic_gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
+        }
+
         if let Some(g) = tx_graph.as_mut() {
-            // What the microphone is hearing, for the meter on the strip.
-            // Read off the node rather than from the capture, so it is the
-            // level that actually reached the modulator.
-            let mic_node = g
-                .order()
-                .find(|(_, name)| *name == "mic")
-                .and_then(|(id, _)| g.node(id))
-                .and_then(|n| n.as_any())
-                .and_then(|a| a.downcast_ref::<nodes::MicNode>());
-            if let Some(m) = mic_node {
-                status.mic_level.store(m.peak().to_bits(), Ordering::Relaxed);
-                status.mic_gain_db.store(m.agc_gain_db().to_bits(), Ordering::Relaxed);
-            }
             if let Err(e) = pump_tx(g, buf.samples.len()) {
                 *status.error.lock() = Some(format!("transmit: {e}"));
                 if let Some(g) = tx_graph.take() {

@@ -221,7 +221,7 @@ impl Strip<'_> {
                         theme::Line::new().value(format!("{:+.0} dB", mic.1)).size(11.0).show(ui);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        theme::Line::new().note("open while keyed").show(ui);
+                        theme::Line::new().note("mic open").show(ui);
                     });
                 });
             }

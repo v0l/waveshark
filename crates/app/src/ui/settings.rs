@@ -546,7 +546,7 @@ impl App {
             self.audio_in = input;
             self.send_audio();
         }
-        hint(ui, "what a keyed channel transmits. Opened while keyed and closed on release");
+        hint(ui, "what a keyed channel transmits. Held open while a channel is set to MIC, so the meter moves before you key");
         ui.add_space(10.0);
 
         ui.label(legend(t("settings.band_plan")));
