@@ -105,6 +105,8 @@ struct Entry {
     cost_us: f32,
     /// Total time spent in the node, for finding where a slow graph goes.
     total_us: u64,
+    /// Recent calls, for the 95th percentile the chain view shows.
+    ring: crate::cost::Ring,
 }
 
 impl Entry {
@@ -130,6 +132,7 @@ impl Entry {
         let us = t.elapsed().as_micros() as u64;
         self.cost_us += 0.2 * (us as f32 - self.cost_us);
         self.total_us += us;
+        self.ring.push(us.min(u32::MAX as u64) as u32, block_seconds);
     }
 }
 
@@ -273,6 +276,11 @@ pub struct TopoNode {
     /// one snapshot and a value read from another shows a number the node is
     /// not using.
     pub params: Vec<crate::param::Param>,
+    /// What the node has been costing to run.
+    pub cost: crate::cost::Cost,
+    /// Where the time inside the node goes, for a node that does more than
+    /// one thing per call and can say which. Empty for most.
+    pub phases: Vec<(String, crate::cost::Cost)>,
 }
 
 /// The built graph's shape, in execution order.
@@ -486,6 +494,7 @@ impl Graph {
                 error: None,
                 cost_us: 0.0,
                 total_us: 0,
+                ring: Default::default(),
             });
         }
 
@@ -660,6 +669,8 @@ impl Graph {
                 inner_count: e.node.subgraph_count(),
                 sink: e.node.is_sink(),
                 params: e.node.params(),
+                cost: e.ring.cost(),
+                phases: e.node.phases(),
             });
         }
         Topology {
