@@ -50,7 +50,15 @@ impl Simple for MixerNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        self.mixer.process(i.as_iq().unwrap(), o.iq_mut());
+        let input = i.as_iq().unwrap();
+        // A shift of nothing is the head of every unzoomed chain, and a
+        // rotating phasor multiplied through 16 MS/s of it cost a tenth of
+        // real time to change no sample.
+        if self.shift_hz == 0.0 {
+            o.iq_mut().extend_from_slice(input);
+        } else {
+            self.mixer.process(input, o.iq_mut());
+        }
         Ok(())
     }
 
@@ -121,11 +129,22 @@ impl Simple for DecimateNode {
     fn latency(&self) -> u64 {
         // A symmetric FIR delays by half its length, measured at the output
         // rate. Reporting this is what lets a fan-in node align its branches.
+        if self.factor == 1 {
+            return 0;
+        }
         self.dec.latency() as u64
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        self.dec.process(i.as_iq().unwrap(), o.iq_mut());
+        let input = i.as_iq().unwrap();
+        // By one is the head of every unzoomed chain. Designed as a filter
+        // it is a hundred-odd taps at the full rate that keep every sample
+        // as it was: 45% of real time at 16 MS/s, measured, for nothing.
+        if self.factor == 1 {
+            o.iq_mut().extend_from_slice(input);
+        } else {
+            self.dec.process(input, o.iq_mut());
+        }
         Ok(())
     }
 
