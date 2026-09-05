@@ -234,6 +234,13 @@ pub struct Receiver {
     /// opened it. Like the recorder's ring, it is handed in once and then
     /// survives rebuilds by coming back out of the pool.
     pending_tx: Option<TxSinks>,
+    /// The microphone, for every rebuild that wants one.
+    ///
+    /// Kept rather than handed in per key, because the microphone stage is
+    /// in the graph whether or not anything is keyed and a rebuild that has
+    /// no microphone to give it skips the stage: the chain after it was then
+    /// built unfed, and keying transmitted a carrier with nothing on it.
+    mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
     /// Where the packet log is written, if it is. Held as a directory rather
     /// than an open file so that a rebuild has something to reopen when the
     /// bus itself had to be built again.
@@ -431,6 +438,7 @@ impl Receiver {
             chans: Vec::new(),
             pending_record: None,
             pending_tx: None,
+            mic: None,
             log_dir: sinks.packet_log,
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             bus: None,
@@ -452,6 +460,11 @@ impl Receiver {
     /// Hand over an open transmitter, for the next rebuild to place.
     pub fn set_transmitter(&mut self, tx: Option<TxSinks>) {
         self.pending_tx = tx;
+    }
+
+    /// The microphone every rebuild from now on builds the mic stage from.
+    pub fn set_microphone(&mut self, mic: Option<std::sync::Arc<dyn audio::AudioSource>>) {
+        self.mic = mic;
     }
 
     /// Key: give the transmit stage a radio, without rebuilding the graph.
@@ -583,7 +596,16 @@ impl Receiver {
         self.sources.clear();
         self.center = plan.center;
         self.rate = plan.rate;
-        let tx = self.pending_tx.take();
+        let mut tx = self.pending_tx.take();
+        // The microphone the receiver holds stands in wherever a key-up did
+        // not bring one, which is every rebuild but that one.
+        if let Some(mic) = &self.mic {
+            match tx.as_mut() {
+                Some(t) if t.mic.is_none() => t.mic = Some(mic.clone()),
+                Some(_) => {}
+                None => tx = Some(TxSinks { stream: None, mic: Some(mic.clone()) }),
+            }
+        }
         self.assemble(plan, pool, ring, tx)?;
         // The stages are keyed by mode and rate, so a channel moved to
         // another frequency comes back holding the nodes it had. The dial
@@ -4731,5 +4753,88 @@ mod tx_tests {
         let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
         assert!(g.output_spec().is_tx());
+    }
+}
+
+#[cfg(test)]
+mod tx_in_graph_tests {
+    use super::*;
+    use crate::radio::{ChanMode, ChannelSpec, Demod, TxMode, TxSource, TxSpec};
+    use common::{Device, Sps};
+
+    fn plan_with_tx(source: TxSource) -> Plan {
+        let mut p = tests::plan(2_000_000.0, Hz(446_000_000));
+        p.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 49_000.0,
+            mode: ChanMode::Audio(Demod::Nfm),
+            volume: 0.8,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            tx: Some(TxSpec { source, ..Default::default() }),
+        }];
+        p.tx = Some(TxPlan {
+            spec: TxSpec { source, ..Default::default() },
+            mode: TxMode::Nfm,
+            on_air: Hz(446_049_000),
+        });
+        p
+    }
+
+    #[test]
+    fn the_transmit_chain_is_built_and_idle_before_anything_is_keyed() {
+        // The reason it is in the graph when the key is up: so it can be
+        // looked at, and so keying is one node being handed a radio rather
+        // than a rebuild. A tone needs no device, so this must build with
+        // nothing handed in at all.
+        let plan = plan_with_tx(TxSource::Tone);
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_radio.is_some(), "no transmitter stage in the graph");
+        assert!(!rx.keyed());
+        let topo = rx.topology();
+        let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
+        for want in ["tx_clock", "tone", "fm_mod", "radio_tx"] {
+            assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
+        }
+    }
+
+    #[test]
+    fn keying_hands_the_idle_transmitter_a_radio_without_a_rebuild() {
+        let plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let (mut dev, captured) =
+            sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
+        assert!(rx.key(dev.start_tx().unwrap()), "the transmitter stage was not found");
+        assert!(rx.keyed());
+
+        let block = vec![C32::new(0.0, 0.0); 40_000];
+        for _ in 0..3 {
+            rx.process(&block).unwrap();
+        }
+        rx.unkey();
+        assert!(!rx.keyed());
+        assert_eq!(captured.lock().len(), 3 * 40_000 * 2, "not every block reached the radio");
+        // And the monitor holds nothing after unkey, so the mirror stops
+        // drawing a transmission that has ended.
+        assert!(rx.tx_monitor().is_empty());
+    }
+
+    #[test]
+    fn a_microphone_chain_builds_once_the_microphone_arrives() {
+        // With no microphone the mic stage waits, and the chain after it is
+        // unfed: a transmitter with nothing to transmit. Handing the
+        // microphone in at the rebuild is what completes it.
+        let plan = plan_with_tx(TxSource::Mic);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_mic.is_none(), "a mic stage was built with no microphone");
+
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
+        rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src) }));
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_mic.is_some(), "the microphone stage did not appear");
+        assert!(rx.tx_radio.is_some(), "the transmitter stage is missing with a microphone");
     }
 }
