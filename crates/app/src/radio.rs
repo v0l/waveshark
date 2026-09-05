@@ -1952,6 +1952,9 @@ fn run(
                         // waterfall comes back tuned to wherever the channel
                         // transmits, which looks like reception never
                         // resumed at all.
+                        if let Some(s) = sink.as_mut() {
+                            s.set_output(plan.audio.master, plan.audio.muted);
+                        }
                         let want = tuned(plan.center, soft_ppm);
                         if dev.center() != want {
                             if let Err(e) = dev.set_center(want) {
@@ -1996,6 +1999,15 @@ fn run(
                                     tracing::info!("keyed channel {}", ch.id);
                                     tx_graph = Some(g);
                                     status.keyed.store(ch.id, Ordering::Relaxed);
+                                    // Silent while transmitting. The receiver
+                                    // is being shown the transmission so the
+                                    // operator can see it, and a receiver
+                                    // that plays it as well is a radio
+                                    // talking over itself, into a headset,
+                                    // at whatever the modulator produced.
+                                    if let Some(s) = sink.as_mut() {
+                                        s.set_output(plan.audio.master, true);
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!("cannot transmit: {e}");
