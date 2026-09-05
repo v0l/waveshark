@@ -784,11 +784,11 @@ impl Receiver {
                 ));
                 continue;
             }
-            if plan.eff_rate() < spec.mode.min_rate() {
+            if plan.eff_rate() < spec.min_rate() {
                 refused = Some(format!(
                     "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
                     spec.mode.label(),
-                    spec.mode.min_rate() / 1e3,
+                    spec.min_rate() / 1e3,
                     plan.eff_rate() / 1e3,
                 ));
                 continue;
@@ -825,13 +825,8 @@ impl Receiver {
                 // one, which is the output the strip listens to; its packets
                 // leave on port 0 and go to the bus like any front end's.
                 tail: match &spec.mode {
-                    ChanMode::Decode(kind) => tail.out(
-                        VOICE_TAILS
-                            .iter()
-                            .find(|(k, _)| k == kind)
-                            .map(|(_, port)| *port)
-                            .unwrap_or(0),
-                    ),
+                    ChanMode::Decode(kind) => tail.out(voice_port(kind).unwrap_or(0)),
+                    ChanMode::Auto => tail.out(voice_port("auto").unwrap_or(0)),
                     ChanMode::Audio(_) => tail.o(),
                 },
                 port,
@@ -1924,6 +1919,11 @@ const BUS_TAILS: [&str; 11] = [
 /// wire to draw.
 const VOICE_TAILS: [(&str, usize); 4] = [("m17", 1), ("tetra", 1), ("dmr", 1), ("auto", 1)];
 
+/// The port a front end's speech leaves on, if it has any.
+fn voice_port(kind: &str) -> Option<usize> {
+    VOICE_TAILS.iter().find(|(k, _)| *k == kind).map(|(_, port)| *port)
+}
+
 /// Stages that report something a position can be resolved from, so the
 /// tracker is worth attaching to the bus.
 const TRACK_SOURCES: [&str; 4] = ["mode_s", "ais", "aprs", "auto"];
@@ -2388,7 +2388,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     let mut tails: Vec<(Source, &ChannelSpec)> = Vec::new();
     let mut fronts: Vec<u64> = Vec::new();
     for spec in &plan.channels {
-        if spec.offset_hz.abs() > rate / 2.0 || rate < spec.mode.min_rate() {
+        if spec.offset_hz.abs() > rate / 2.0 || rate < spec.min_rate() {
             continue;
         }
         let tail = channel_stages(p, head, spec, plan.center.as_f64(), rate);
@@ -2398,9 +2398,8 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         // a pager does not.
         let port = match &spec.mode {
             ChanMode::Audio(_) => Some(0),
-            ChanMode::Decode(kind) => {
-                VOICE_TAILS.iter().find(|(k, _)| k == kind).map(|(_, port)| *port)
-            }
+            ChanMode::Decode(kind) => voice_port(kind),
+            ChanMode::Auto => voice_port("auto"),
         };
         if let Some(port) = port {
             tails.push((Source::Stage(tail, port), spec));
@@ -2569,7 +2568,76 @@ fn channel_stages(
     match &spec.mode {
         ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, rate),
         ChanMode::Decode(kind) => decode_channel_stages(p, head, spec, kind, center, rate),
+        ChanMode::Auto => auto_channel_stages(p, head, spec, center, rate),
     }
+}
+
+/// One channel watched by the auto front end: the band cut out around the
+/// frequency the channel is tuned to, at the width the channel is set to,
+/// and the auto node reading whatever is inside it.
+///
+/// The scanner table's own auto blocks are bands somebody wrote down in
+/// advance. This is the same node over a band pointed at on the spectrum,
+/// which is what an operator wants when the interesting thing is 40 kHz wide
+/// and nowhere near an allocation anybody named.
+fn auto_channel_stages(
+    p: &mut crate::patch::Patch,
+    head: crate::patch::Source,
+    spec: &ChannelSpec,
+    center: f64,
+    rate: f64,
+) -> u64 {
+    use crate::patch::Source;
+    use pipeline::registry::Settings;
+    use pipeline::ParamValue as V;
+
+    let hz = spec.offset_hz;
+    let width = spec.bandwidth();
+    let at = |p: &mut crate::patch::Patch, what: &str, kind: &str, mut s: Settings| -> u64 {
+        s.insert("channel".into(), V::Int(spec.id as i64));
+        p.add_derived(chan_stage_id(what, spec, rate), kind, s)
+    };
+
+    let mut mix = Settings::new();
+    mix.insert("shift_hz".into(), V::Float(-hz));
+    let m = at(p, "chan_mix", "mixer", mix);
+    p.connect(head, (m, 0));
+
+    // Decimated to the band and a little either side, because the detector's
+    // resolution is what it can measure a source's width with: handed the
+    // whole span it would spend its bins on spectrum this channel is not
+    // about.
+    let target = width * crate::radio::IF_HEADROOM;
+    let dec = ((rate / target).floor() as usize).max(1);
+    let band_rate = rate / dec as f64;
+    let mut ifd = Settings::new();
+    ifd.insert("factor".into(), V::Int(dec as i64));
+    ifd.insert("passband_hz".into(), V::Float((width / 2.0).min(band_rate * 0.45)));
+    ifd.insert("input_rate_hz".into(), V::Float(rate));
+    ifd.insert("label".into(), V::Text(format!("/{dec} to {}", hz_label(band_rate))));
+    let i = at(p, "chan_ifdec", "decimate", ifd);
+    p.connect(Source::Stage(m, 0), (i, 0));
+
+    // The band in absolute frequencies, as the scanner table's auto blocks
+    // are given it, so a source is reported where it is on the dial and not
+    // where it is in this stream.
+    let (lo, hi) = (center + hz - width / 2.0, center + hz + width / 2.0);
+    let mut s = Settings::new();
+    s.insert("band_lo_hz".into(), V::Float(lo));
+    s.insert("band_hi_hz".into(), V::Float(hi));
+    // The tuner's own centre, where the DC offset moving under a strong
+    // signal reads as a burst. Only when this channel actually covers it.
+    if lo < center && center < hi {
+        s.insert("spur_hz".into(), V::Float(center));
+    }
+    if let Some(r) = crate::bands::raster_at((lo + hi) / 2.0) {
+        s.insert("raster_hz".into(), V::Float(r.step));
+        s.insert("raster_origin_hz".into(), V::Float(r.origin));
+    }
+    s.insert("label".into(), V::Text(spec.label.clone()));
+    let f = at(p, "chan_front", "auto", s);
+    p.connect(Source::Stage(i, 0), (f, 0));
+    f
 }
 
 /// One channel that is decoded rather than played: the band cut out around
@@ -2593,7 +2661,7 @@ fn decode_channel_stages(
     use pipeline::ParamValue as V;
 
     let hz = spec.offset_hz;
-    let width = spec.mode.bandwidth();
+    let width = spec.bandwidth();
     let at = |p: &mut crate::patch::Patch, what: &str, kind: &str, mut s: Settings| -> u64 {
         s.insert("channel".into(), V::Int(spec.id as i64));
         p.add_derived(chan_stage_id(what, spec, rate), kind, s)
@@ -2649,7 +2717,13 @@ fn audio_channel_stages(
     use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
 
-    let if_dec = ((rate / mode.if_rate()).round() as usize).max(1);
+    // The channel's own width decides the IF rate when it is wider than the
+    // mode's: a 25 kHz repeater set by hand on an NFM channel has to survive
+    // the decimation before any filter can be built around it.
+    let width = spec.bandwidth();
+    let if_dec = ((rate / mode.if_rate().max(width * crate::radio::IF_HEADROOM)).round()
+        as usize)
+        .max(1);
     let if_rate = rate / if_dec as f64;
     let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
     // Every stage says which channel it belongs to, so the ones a channel
@@ -2670,7 +2744,7 @@ fn audio_channel_stages(
     // stopband has to land where the first alias folds down.
     let mut ifd = Settings::new();
     ifd.insert("factor".into(), V::Int(if_dec as i64));
-    ifd.insert("passband_hz".into(), V::Float(mode.bandwidth() / 2.0));
+    ifd.insert("passband_hz".into(), V::Float(width / 2.0));
     ifd.insert("input_rate_hz".into(), V::Float(rate));
     ifd.insert("label".into(), V::Text("IF decimator".into()));
     let i = at(p, "chan_ifdec", "decimate", ifd);
@@ -2689,9 +2763,21 @@ fn audio_channel_stages(
         d.insert("sideband".into(), V::Text(if lsb { "lsb" } else { "usb" }.into()));
         if mode == Demod::Cw {
             d.insert("pitch_hz".into(), V::Float(mode.cw_pitch()));
-            d.insert("width_hz".into(), V::Float(CW_FILTER_HZ));
+            // On CW the width control is the filter itself, which is the
+            // whole reason to reach for it: 500 Hz on a quiet band, 150 in a
+            // pile-up.
+            d.insert(
+                "width_hz".into(),
+                V::Float(spec.bandwidth_hz.unwrap_or(CW_FILTER_HZ)),
+            );
             d.insert("label".into(), V::Text("CW filter".into()));
         } else {
+            // Half the channel is one sideband, which is what the demodulator
+            // passes: the control narrows the audio with the channel rather
+            // than leaving a filter open wider than the IF in front of it.
+            if let Some(bw) = spec.bandwidth_hz {
+                d.insert("high_hz".into(), V::Float((bw / 2.0).max(400.0)));
+            }
             d.insert("label".into(), V::Text("Sideband filter".into()));
         }
         "ssb_demod"
@@ -2734,7 +2820,9 @@ fn audio_channel_stages(
 
     let mut ad = Settings::new();
     ad.insert("factor".into(), V::Int(au_dec as i64));
-    ad.insert("passband_hz".into(), V::Float(mode.audio_bw()));
+    // Never wider than the channel itself: a filter passing 4 kHz of audio
+    // out of a 5 kHz channel is passing the skirt as well as the signal.
+    ad.insert("passband_hz".into(), V::Float(mode.audio_bw().min(width / 2.0)));
     ad.insert("input_rate_hz".into(), V::Float(if_rate));
     ad.insert("label".into(), V::Text("Audio decimator".into()));
     let aud = at(p, "chan_audiodec", "real_decimate", ad);
@@ -2785,6 +2873,10 @@ fn chan_stage_id(what: &str, spec: &ChannelSpec, rate: f64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     spec.mode.key().hash(&mut h);
+    // The width is in the key for the same reason the mode is: every filter
+    // in the chain is designed around it, and a channel that changed width
+    // has to be built again rather than keep coefficients for the old one.
+    spec.bandwidth().to_bits().hash(&mut h);
     rate.to_bits().hash(&mut h);
     derived::at(what, spec.id, h.finish() ^ fnv(what))
 }
@@ -3590,6 +3682,7 @@ mod tests {
             label: format!("CH{id}"),
             offset_hz: offset,
             mode: ChanMode::Audio(demod),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -3686,6 +3779,73 @@ mod tests {
         // patch that describes something that cannot run.
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert_eq!(rx.channels().len(), 1);
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    #[test]
+    fn an_auto_channel_watches_the_band_it_was_given() {
+        // The scanner table's front end, put where somebody pointed: the
+        // band is the channel's own centre and width, not a block's.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts.clear();
+        let mut spec = chan(1, 100_000.0, Demod::Nfm);
+        spec.mode = ChanMode::Auto;
+        spec.bandwidth_hz = Some(40_000.0);
+        p.channels = vec![spec];
+        let patch = derived_patch(&p);
+
+        use pipeline::registry::SettingsExt;
+        let front = patch
+            .stages()
+            .iter()
+            .find(|s| s.kind == "auto" && s.settings.get("channel").is_some())
+            .expect("the auto front end");
+        assert_eq!(front.settings.f64_or("band_lo_hz", 0.0), 433_080_000.0);
+        assert_eq!(front.settings.f64_or("band_hi_hz", 0.0), 433_120_000.0);
+        // The tuner's centre is 100 kHz away, so there is no spur inside this
+        // band to tell the node about.
+        assert!(front.settings.get("spur_hz").is_none());
+
+        let to = |bus: u64, port: usize| {
+            patch.links().iter().any(|l| {
+                l.to.0 == bus && matches!(l.from, crate::patch::Source::Stage(f, o) if f == front.id && o == port)
+            })
+        };
+        assert!(to(derived::BUS, 0), "its packets never reach the log");
+        assert!(to(derived::AUDIO, 1), "its speech never reaches the mixer");
+
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(rx.channels().len(), 1);
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    #[test]
+    fn a_channel_set_by_hand_is_built_at_that_width() {
+        // The width is what every filter in the chain is designed around, so
+        // setting it has to reach the IF filter and the marker alike, and a
+        // channel that changed width cannot keep the old coefficients.
+        use pipeline::registry::SettingsExt;
+        let mut p = plan(2_400_000.0, Hz::mhz(145));
+        let mut spec = chan(1, 0.0, Demod::Nfm);
+        spec.bandwidth_hz = Some(25_000.0);
+        p.channels = vec![spec.clone()];
+        let patch = derived_patch(&p);
+        let ifd = patch
+            .stages()
+            .iter()
+            .find(|s| s.settings.get("label").and_then(|v| v.as_str()) == Some("IF decimator"))
+            .expect("the IF decimator");
+        assert_eq!(ifd.settings.f64_or("passband_hz", 0.0), 12_500.0);
+
+        let mut narrow = spec.clone();
+        narrow.bandwidth_hz = Some(12_500.0);
+        assert_ne!(
+            chan_stage_id("chan_ifdec", &p.channels[0], p.eff_rate()),
+            chan_stage_id("chan_ifdec", &narrow, p.eff_rate()),
+            "a channel that changed width kept a filter designed for the old one",
+        );
+
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
@@ -4823,6 +4983,7 @@ mod tx_in_graph_tests {
             label: "CH1".into(),
             offset_hz: 49_000.0,
             mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
             volume: 0.8,
             muted: false,
             squelch_db: None,

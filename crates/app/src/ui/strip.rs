@@ -88,6 +88,52 @@ impl Strip<'_> {
         changed
     }
 
+    /// The channel's width, for when the mode's own is the wrong one.
+    ///
+    /// Every mode ships a width that suits what it is usually used for, and
+    /// every one of them is wrong somewhere: a 25 kHz repeater clipped by a
+    /// 12.5 kHz filter, a CW note buried in a 500 Hz passband next to a
+    /// stronger one, an auto channel that should watch the 40 kHz somebody
+    /// pointed at rather than a band a scanner block named.
+    fn channel_bandwidth(ui: &mut egui::Ui, ch: &mut Channel) -> bool {
+        let mut changed = false;
+        let mut khz = ch.bandwidth() / 1e3;
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("bw").show(ui);
+            // Proportional, so the same drag is a few hundred hertz on a CW
+            // filter and a few kilohertz on a broadcast channel.
+            let speed = (khz / 200.0).max(0.01);
+            let r = ui.add(
+                egui::DragValue::new(&mut khz)
+                    .speed(speed)
+                    .range(0.1..=20_000.0)
+                    .max_decimals(2)
+                    .suffix(" kHz"),
+            );
+            if r.changed() {
+                ch.bandwidth_hz = Some(khz * 1e3);
+                changed = true;
+            }
+            if ch.bandwidth_hz.is_some() {
+                if ui
+                    .small_button("RESET")
+                    .on_hover_text(format!(
+                        "back to the {:.1} kHz {} asks for",
+                        ch.mode.bandwidth() / 1e3,
+                        ch.mode.label(),
+                    ))
+                    .clicked()
+                {
+                    ch.bandwidth_hz = None;
+                    changed = true;
+                }
+            } else {
+                theme::Line::new().note("mode default").show(ui);
+            }
+        });
+        changed
+    }
+
     /// What the radio is hearing on the channel being listened to.
     ///
     /// This belongs inside the channel rather than beside the list: a station
@@ -486,6 +532,21 @@ impl Strip<'_> {
                                             }
                                         }
                                         ui.separator();
+                                        // The scanner table's own front end,
+                                        // put where the operator points: it
+                                        // finds whatever transmits inside
+                                        // this channel's width and gives
+                                        // each source the decoder that
+                                        // reads it.
+                                        let on = ch.mode == ChanMode::Auto;
+                                        let r = ui.selectable_label(on, "AUTO");
+                                        if r.clicked() && !on {
+                                            ch.mode = ChanMode::Auto;
+                                            tune = Some(i);
+                                        }
+                                        r.on_hover_text(
+                                            "find and decode everything inside this channel's bandwidth",
+                                        );
                                         // The front ends that read one
                                         // channel, asked of the registry
                                         // rather than listed here: picking
@@ -526,6 +587,10 @@ impl Strip<'_> {
                                 );
                             });
                             if ch.on {
+                                ui.add_space(4.0);
+                                if Self::channel_bandwidth(ui, ch) {
+                                    tune = Some(i);
+                                }
                                 // Its own level, which runs into the master,
                                 // read against what it is contributing.
                                 let st = states.iter().find(|s| s.id == ch.id).copied();
