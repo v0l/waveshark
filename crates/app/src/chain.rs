@@ -222,6 +222,10 @@ pub struct Receiver {
     chans: Vec<Chan>,
     /// A recorder waiting for the next rebuild to become a node.
     pending_record: Option<RecordRing>,
+    /// A transmitter waiting for its place in the graph, from the key-up that
+    /// opened it. Like the recorder's ring, it is handed in once and then
+    /// survives rebuilds by coming back out of the pool.
+    pending_tx: Option<TxSinks>,
     /// Where the packet log is written, if it is. Held as a directory rather
     /// than an open file so that a rebuild has something to reopen when the
     /// bus itself had to be built again.
@@ -293,6 +297,23 @@ pub struct Plan {
     pub log: bool,
     /// Other receivers feeding the same packet bus.
     pub feeds: Vec<nodes::FeedSpec>,
+    /// The channel being transmitted on, if any, and what it transmits.
+    ///
+    /// In the plan because the transmitter is part of what the receiver is
+    /// doing, so it belongs in the graph the receiver draws: keying adds
+    /// stages to the chain view, and they can be tapped and parameterised
+    /// like every other stage rather than living in a second graph the
+    /// interface never sees.
+    pub tx: Option<TxPlan>,
+}
+
+/// A keyed channel, as the graph needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TxPlan {
+    pub spec: crate::radio::TxSpec,
+    pub mode: crate::radio::TxMode,
+    /// Where it is transmitting, which is the channel plus its shift.
+    pub on_air: Hz,
 }
 
 /// The levels on the bus that belong to no one channel: the master every
@@ -348,6 +369,18 @@ pub struct Sinks {
     pub recorder: Option<Recorder>,
     /// Where to write the packet log, if it is being written at all.
     pub packet_log: Option<PathBuf>,
+    /// The transmitter, while a channel is keyed.
+    ///
+    /// Handed in rather than built from a description for the same reason the
+    /// recorder is: it owns a radio, and a description cannot carry one.
+    pub tx: Option<TxSinks>,
+}
+
+/// What a keyed transmission needs from outside the graph.
+pub struct TxSinks {
+    pub stream: Option<Box<dyn common::TxStream>>,
+    /// The microphone, when the channel transmits from one.
+    pub mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
 }
 
 impl Plan {
@@ -382,6 +415,7 @@ impl Receiver {
             sources: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
+            pending_tx: None,
             log_dir: sinks.packet_log,
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             bus: None,
@@ -396,8 +430,52 @@ impl Receiver {
             patch_spectra: Vec::new(),
             refused: None,
         };
-        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new))?;
+        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new), sinks.tx)?;
         Ok(rx)
+    }
+
+    /// Hand over an open transmitter, for the next rebuild to place.
+    pub fn set_transmitter(&mut self, tx: Option<TxSinks>) {
+        self.pending_tx = tx;
+    }
+
+    /// What the transmitter has done, for the interface: samples handed over,
+    /// transfers the radio had to fill itself, and what the microphone is
+    /// hearing.
+    pub fn tx_state(&self) -> Option<(u64, u64, f32, f32)> {
+        let sink = self
+            .graph
+            .order()
+            .find(|(_, name)| *name == "radio_tx")
+            .and_then(|(id, _)| self.graph.node(id))
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())?;
+        let mic = self
+            .graph
+            .order()
+            .find(|(_, name)| *name == "mic")
+            .and_then(|(id, _)| self.graph.node(id))
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<nodes::MicNode>());
+        Some((
+            sink.written(),
+            sink.underruns(),
+            mic.map(|m| m.peak()).unwrap_or(0.0),
+            mic.map(|m| m.agc_gain_db()).unwrap_or(0.0),
+        ))
+    }
+
+    /// The last block the transmitter sent, for showing it on the receiver's
+    /// own spectrum while the radio is deaf.
+    pub fn tx_monitor(&self) -> &[C32] {
+        let node = self
+            .graph
+            .order()
+            .find(|(_, name)| *name == "radio_tx")
+            .and_then(|(id, _)| self.graph.node(id))
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
+        node.map(|s| s.monitor()).unwrap_or(&[])
     }
 
     /// Change what the receiver is doing, keeping every node that still means
@@ -466,7 +544,8 @@ impl Receiver {
         self.sources.clear();
         self.center = plan.center;
         self.rate = plan.rate;
-        self.assemble(plan, pool, ring)?;
+        let tx = self.pending_tx.take();
+        self.assemble(plan, pool, ring, tx)?;
         // The stages are keyed by mode and rate, so a channel moved to
         // another frequency comes back holding the nodes it had. The dial
         // moving under every channel is not that: their offsets change and
@@ -523,6 +602,7 @@ impl Receiver {
         plan: &Plan,
         mut pool: HashMap<Role, NodePart>,
         ring: Option<RecordRing>,
+        sinks_tx: Option<TxSinks>,
     ) -> Result<()> {
         let input = StreamSpec::iq(plan.rate, plan.center);
         let mut b = Graph::builder(input);
@@ -542,6 +622,7 @@ impl Receiver {
         let mut patch = base.clone();
         plan.edits.apply(&mut patch);
         sync_audio(&mut patch, plan);
+        let mut tx_sinks = sinks_tx;
         let (patch_packets, patch_ids, reused) = match add_patch(
             &mut b,
             &mut roles,
@@ -549,6 +630,7 @@ impl Receiver {
             pipeline::graph::GRAPH_INPUT,
             &patch,
             &mut ring,
+            &mut tx_sinks,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1754,6 +1836,26 @@ const TRACK_SOURCES: [&str; 4] = ["mode_s", "ais", "aprs", "auto"];
 /// The recorder's ring, which is a stage in the graph but owns an open file
 /// and so cannot be built from a description alone.
 const RING: &str = "ring";
+/// The stage that hands samples to the radio. Named here because, like the
+/// recorder, it is handed a thing the patch cannot describe.
+const TX_RADIO: &str = "radio_tx";
+
+/// What the audio is limited to for a mode, in hertz.
+///
+/// Deviation is only half of Carson and the other half is the highest note
+/// the modulator is given, so this is what keeps a transmission inside its
+/// channel: speech to 15 kHz through a 2.5 kHz deviation is 35 kHz wide
+/// where the band plan allows 12.5.
+pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
+    use crate::radio::TxMode;
+    match mode {
+        // Communications speech, out to where intelligibility lives.
+        TxMode::Nfm | TxMode::Fm | TxMode::Carrier => (200.0, 3_400.0),
+        TxMode::Am => (200.0, 4_000.0),
+        // Broadcast, where 15 kHz is the standard and the pilot is above it.
+        TxMode::Wfm => (30.0, 15_000.0),
+    }
+}
 
 /// Ids the receiver gives the stages it derives for itself.
 ///
@@ -1772,6 +1874,12 @@ pub mod derived {
     pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
     pub const CAPTURE: u64 = Patch::DERIVED_BASE + 8;
     pub const AUDIO: u64 = Patch::DERIVED_BASE + 9;
+    /// The transmit chain: its clock, what is modulated, the modulator, and
+    /// the radio at the end of it.
+    pub const TX_CLOCK: u64 = Patch::DERIVED_BASE + 10;
+    pub const TX_SOURCE: u64 = Patch::DERIVED_BASE + 11;
+    pub const TX_MOD: u64 = Patch::DERIVED_BASE + 12;
+    pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -1834,6 +1942,60 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     if plan.record {
         p.add_derived(derived::RING, RING, Settings::new());
         p.connect(head, (derived::RING, 0));
+    }
+
+    // The transmitter, while a channel is keyed. Four stages: the clock it
+    // takes from the receiver, what is being modulated, the modulator, and
+    // the radio. Derived rather than drawn by hand because it follows the
+    // strip, and in the graph rather than beside it because a transmission
+    // is something the receiver is doing and the chain view is what the
+    // receiver is doing.
+    if let Some(tx) = &plan.tx {
+        use crate::radio::{TxMode, TxSource};
+        p.add_derived(derived::TX_CLOCK, "tx_clock", Settings::new());
+        p.connect(head, (derived::TX_CLOCK, 0));
+
+        let band = tx_audio_band(tx.mode);
+        let (kind, mut settings) = match tx.spec.source {
+            TxSource::Mic => {
+                let mut s = Settings::new();
+                s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
+                s.insert("agc".into(), pipeline::ParamValue::Bool(tx.spec.mic_agc));
+                ("mic", s)
+            }
+            TxSource::Tone => {
+                let mut s = Settings::new();
+                s.insert("hz".into(), pipeline::ParamValue::Float(tx.spec.tone_hz.max(1.0)));
+                // A carrier is a tone at nothing: the modulator sees silence
+                // and leaves the carrier where it is.
+                let level = match tx.mode {
+                    TxMode::Carrier => 0.0,
+                    _ => 0.8,
+                };
+                s.insert("level".into(), pipeline::ParamValue::Float(level));
+                ("tone", s)
+            }
+        };
+        settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
+        settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
+        p.add_derived(derived::TX_SOURCE, kind, settings);
+        p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
+
+        let (mod_kind, deviation) = match tx.mode {
+            TxMode::Nfm | TxMode::Carrier => ("fm_mod", nodes::NBFM_DEVIATION_HZ),
+            TxMode::Fm => ("fm_mod", nodes::FM_DEVIATION_HZ),
+            TxMode::Wfm => ("fm_mod", nodes::WBFM_DEVIATION_HZ),
+            TxMode::Am => ("am_mod", 0.0),
+        };
+        let mut m = Settings::new();
+        if deviation > 0.0 {
+            m.insert("deviation_hz".into(), pipeline::ParamValue::Float(deviation));
+        }
+        p.add_derived(derived::TX_MOD, mod_kind, m);
+        p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
+
+        p.add_derived(derived::TX_RADIO, TX_RADIO, Settings::new());
+        p.connect(Source::Stage(derived::TX_MOD, 0), (derived::TX_RADIO, 0));
     }
 
     // The raw capture is always in the graph and switched off, because the
@@ -2670,6 +2832,7 @@ fn add_patch(
     span: Out,
     patch: &crate::patch::Patch,
     ring: &mut Option<RecordRing>,
+    tx: &mut Option<TxSinks>,
 ) -> Result<Built> {
     use crate::patch::Source;
     use pipeline::registry::SettingsExt;
@@ -2695,6 +2858,30 @@ fn add_patch(
                 Some(r) => Box::new(nodes::RingNode::new(r)) as Box<dyn pipeline::node::Node>,
                 None => continue,
             },
+            // The radio, and the microphone feeding it: both are open
+            // devices, which a description cannot carry. A patch that asks
+            // for them when nothing is keyed gets nothing and the stage
+            // waits, exactly as the recorder's does.
+            None if st.kind == TX_RADIO => match tx.as_mut().and_then(|t| t.stream.take()) {
+                Some(s) => Box::new(nodes::TxSinkNode::new(s)) as Box<dyn pipeline::node::Node>,
+                None => continue,
+            },
+            None if st.kind == "mic" => {
+                let src = tx.as_ref().and_then(|t| t.mic.clone());
+                match src {
+                    Some(src) => {
+                        let level = st.settings.f64_or("level", 1.0) as f32;
+                        let agc = st.settings.bool_or("agc", true);
+                        let band = (
+                            st.settings.f64_or("low_hz", 200.0),
+                            st.settings.f64_or("high_hz", 3_400.0),
+                        );
+                        Box::new(nodes::MicNode::with_band(src, level, agc, band))
+                            as Box<dyn pipeline::node::Node>
+                    }
+                    None => continue,
+                }
+            }
             None => {
                 let mut node = reg.build(&st.kind, &st.settings)?;
                 // A decimator's passband is designed rather than set, so it
@@ -3084,6 +3271,7 @@ mod tests {
             capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
+            tx: None,
         }
     }
 
@@ -4078,7 +4266,12 @@ mod scan_mark_tests {
     }
 }
 
-/// The transmitter, as a graph.
+/// The transmitter as a graph on its own, for tests.
+///
+/// The receiver does not use this: keying adds the same stages to the patch
+/// it derives, so they are in the chain view with everything else. This
+/// builds the same shape without a receiver around it, which is what a test
+/// of the modulators wants.
 ///
 /// The same shape as the receive side and built the same way: what goes on
 /// air is a chain of stages, so it can be drawn, tapped and parameterised

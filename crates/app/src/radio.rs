@@ -290,13 +290,18 @@ fn open_mic(device: &str, mic: &mut Option<audio::AudioCapture>, status: &Status
     }
 }
 
-/// Start an over on one channel, and give back the graph that runs it.
+/// Open the radio for transmit, and say what the graph should key.
 ///
-/// The radio is not taken away from the receiver to do this. A half duplex
-/// driver keeps the receive stream alive and feeds it a noise floor for the
-/// duration, which is what stops an over from throwing away the spectrum's
-/// averaging, every channel's squelch and every decoder's part-built frame; a
-/// full duplex radio goes on hearing the band while it transmits.
+/// No graph is built here. The transmitter is stages in the receiver's own
+/// patch, so keying is a change to the plan and a rebuild: that is what makes
+/// a transmission visible in the chain view, tappable, and parameterised like
+/// everything else the receiver does.
+///
+/// The radio is not taken away from the receiver either. A half duplex driver
+/// keeps the receive stream alive and feeds it a noise floor for the
+/// duration, so an over does not throw away the spectrum's averaging, every
+/// channel's squelch and every decoder's part-built frame; a full duplex
+/// radio goes on hearing the band while it transmits.
 fn key_up(
     dev: &mut dyn common::Device,
     ch: &ChannelSpec,
@@ -304,7 +309,7 @@ fn key_up(
     center: Hz,
     gain_db: f32,
     mic: &Option<audio::AudioCapture>,
-) -> common::Result<pipeline::Graph> {
+) -> common::Result<(crate::chain::TxPlan, crate::chain::TxSinks)> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
@@ -361,25 +366,10 @@ fn key_up(
         TxSource::Tone => None,
     };
 
-    let rate = dev.rate().as_f64();
-    crate::chain::transmit_graph(tx, mode, rate, on_air, dev.start_tx()?, src)
-}
-
-/// End the over, letting what is queued reach the antenna first, and say how
-/// many transfers the radio had to fill with silence.
-fn key_down(mut g: pipeline::Graph) -> u64 {
-    let id = g.order().last().map(|(id, _)| id);
-    let mut idle = 0;
-    if let Some(n) = id.and_then(|id| g.node_mut(id)) {
-        if let Some(sink) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
-            // Dropping the sink would cut the last few milliseconds of the
-            // over off mid-word, and on a half duplex radio it is also what
-            // hands the receiver its radio back.
-            sink.finish(std::time::Duration::from_secs(1));
-            idle = sink.underruns();
-        }
-    }
-    idle
+    Ok((
+        crate::chain::TxPlan { spec: *tx, mode, on_air },
+        crate::chain::TxSinks { stream: Some(dev.start_tx()?), mic: src },
+    ))
 }
 
 /// Put what is going out into what the receiver sees.
@@ -402,21 +392,13 @@ fn key_down(mut g: pipeline::Graph) -> u64 {
 /// Only while the radio is deaf. A full duplex radio hears its own
 /// transmission for real, and mirroring on top of that would draw it twice.
 fn mirror_tx(
-    g: &pipeline::Graph,
+    sent: &[C32],
     into: &mut [C32],
     shift_hz: f64,
     rate: f64,
     mixer: &mut dsp::Mixer,
     scratch: &mut Vec<C32>,
 ) {
-    let sink = g
-        .order()
-        .last()
-        .and_then(|(id, _)| g.node(id))
-        .and_then(|n| n.as_any())
-        .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
-    let Some(sink) = sink else { return };
-    let sent = sink.monitor();
     if sent.is_empty() {
         return;
     }
@@ -426,24 +408,6 @@ fn mirror_tx(
     for (dst, src) in into.iter_mut().zip(scratch.iter()) {
         *dst += *src;
     }
-}
-
-/// Feed the transmitter one block, the same length as the one the receiver
-/// just processed.
-///
-/// Matching the receive block is what keeps the two halves in step without a
-/// clock: both run at the radio's rate, so a block of receive time is a block
-/// of transmit time. The sink blocks when the radio has enough queued, which
-/// is what paces the whole loop.
-fn pump_tx(g: &mut pipeline::Graph, samples: usize) -> common::Result<()> {
-    if samples == 0 {
-        return Ok(());
-    }
-    let buf = g.input_buf();
-    buf.clear();
-    buf.real_mut().resize(samples, 0.0);
-    g.run()?;
-    Ok(())
 }
 
 /// Put the correction on the device, and say how much of it the receiver has
@@ -1004,6 +968,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         audio: crate::chain::AudioPlan::default(),
         fronts,
         feeds: Vec::new(),
+        tx: None,
         edits: Default::default(),
         record,
         capture_dir: crate::chain::default_capture_dir(),
@@ -1753,6 +1718,7 @@ impl Audio {
             capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
+        tx: None,
         };
         let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
         Self { rx, pcm: Vec::new() }
@@ -1863,6 +1829,7 @@ fn run(
         log: false,
         // Feeds arrive from the session or the settings modal, as a command.
         feeds: Vec::new(),
+        tx: None,
     };
     // What to run follows from where the dial is, and that mapping is
     // configuration rather than structure.
@@ -1904,11 +1871,8 @@ fn run(
     let mut keyed_hz = 0.0f64;
     let mut monitor_mix = dsp::Mixer::new(0.0, 1.0);
     let mut monitor_buf: Vec<C32> = Vec::new();
-    // The transmitter, while one is keyed. A graph like any other, run from
-    // the same loop as the receiver: on a full duplex radio both are doing
-    // their work at once, and on a half duplex one the receive half is
-    // reading what the driver puts there instead.
-    let mut tx_graph: Option<pipeline::Graph> = None;
+    let mut monitor_scratch: Vec<C32> = Vec::new();
+
     // The microphone, open for as long as the receiver runs, so the strip's
     // meter is live and anything that wants speech can take a tap.
     let mut mic: Option<audio::AudioCapture> = None;
@@ -1971,9 +1935,13 @@ fn run(
                 // Unkeying while not keyed is what the interface sends when it
                 // loses the button, and it is not an error.
                 Cmd::Key(None) => {
-                    if let Some(g) = tx_graph.take() {
+                    if plan.tx.take().is_some() {
                         tracing::info!("unkeyed");
-                        status.tx_underruns.store(key_down(g), Ordering::Relaxed);
+                        // Rebuilt without the transmit stages, which drops
+                        // the sink: it drains what is queued before the
+                        // carrier goes, and on a half duplex radio that is
+                        // also what hands the receiver its radio back.
+                        rebuild = true;
                         status.keyed.store(0, Ordering::Relaxed);
                         // Back where the receiver was. A half duplex radio
                         // has one synthesiser, so keying moved it to the
@@ -1996,7 +1964,7 @@ fn run(
                 // held, because it cannot know the over has started until the
                 // status comes back, and keying twice would open a second
                 // transmitter on a radio that has one.
-                Cmd::Key(Some(_)) if tx_graph.is_some() => {}
+                Cmd::Key(Some(_)) if plan.tx.is_some() => {}
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
                     match spec.and_then(|c| c.tx.map(|t| (c, t))) {
@@ -2020,10 +1988,15 @@ fn run(
                                 tx_gain_db,
                                 &mic,
                             ) {
-                                Ok(g) => {
-                                    keyed_hz = plan.center.as_f64() + ch.offset_hz + tx.shift_hz;
+                                Ok((tx_plan, sinks)) => {
+                                    keyed_hz = tx_plan.on_air.as_f64();
                                     tracing::info!("keyed channel {}", ch.id);
-                                    tx_graph = Some(g);
+                                    // The transmitter is stages in the
+                                    // receiver's own graph, so keying is a
+                                    // plan change like any other.
+                                    plan.tx = Some(tx_plan);
+                                    rx.set_transmitter(Some(sinks));
+                                    rebuild = true;
                                     status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
@@ -2420,42 +2393,23 @@ fn run(
         let work = std::time::Instant::now();
         let block_secs = buf.samples.len() as f64 / plan.rate.max(1.0);
 
-        // The transmitter, when one is keyed, runs on the same clock as the
-        // receiver: one block of receive time is one block of transmit time,
-        // and the sink's backpressure paces both.
         // What the microphone is hearing, whether or not anything is keyed.
-        // While an over is running the node has already taken those samples
-        // out of the ring, so the reading comes from the node instead.
+        // While an over is running the microphone stage has already taken
+        // those samples out of the ring, so the reading comes from the graph
+        // instead of from the capture.
         if let Some(c) = mic.as_ref() {
-            let from_node = tx_graph.as_ref().and_then(|g| {
-                g.order()
-                    .find(|(_, name)| *name == "mic")
-                    .and_then(|(id, _)| g.node(id))
-                    .and_then(|n| n.as_any())
-                    .and_then(|a| a.downcast_ref::<nodes::MicNode>())
-                    .map(|m| (m.peak(), m.agc_gain_db()))
-            });
-            let (peak, gain_db) = from_node.unwrap_or_else(|| (c.peak(), 0.0));
+            let keyed_now = rx.tx_state();
+            let (peak, gain_db) = match keyed_now {
+                Some((_, _, peak, db)) if plan.tx.is_some() => (peak, db),
+                _ => (c.peak(), 0.0),
+            };
             // Said once a second while keyed, because a transmission that
             // stops is the hardest thing here to see after the fact: the
             // carrier is gone and nothing on screen says why.
-            if tx_graph.is_some() && blocks_since_key % 50 == 0 {
-                if let Some(g) = tx_graph.as_ref() {
-                    let sink = g
-                        .order()
-                        .last()
-                        .and_then(|(id, _)| g.node(id))
-                        .and_then(|n| n.as_any())
-                        .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
-                    if let Some(s) = sink {
-                        tracing::info!(
-                            "on air: {} samples, {} unfilled, {} blocks refused, mic {:.2}",
-                            s.written(),
-                            s.underruns(),
-                            s.failed_blocks(),
-                            peak
-                        );
-                    }
+            if let (Some((sent, idle, _, _)), 0) = (keyed_now, blocks_since_key % 50) {
+                if plan.tx.is_some() {
+                    tracing::info!("on air: {sent} samples, {idle} unfilled, mic {peak:.2}");
+                    status.tx_underruns.store(idle, Ordering::Relaxed);
                 }
             }
             blocks_since_key = blocks_since_key.wrapping_add(1);
@@ -2463,21 +2417,17 @@ fn run(
             status.mic_gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
         }
 
-        if let Some(g) = tx_graph.as_mut() {
-            if let Err(e) = pump_tx(g, buf.samples.len()) {
-                tracing::warn!("transmit stopped: {e}");
-                *status.error.lock() = Some(format!("transmit: {e}"));
-                if let Some(g) = tx_graph.take() {
-                    status.tx_underruns.store(key_down(g), Ordering::Relaxed);
-                }
-                status.keyed.store(0, Ordering::Relaxed);
-            }
-        }
-
         // What is going out, drawn where a receiver would have heard it.
-        if let (Some(g), true) = (tx_graph.as_ref(), stream.silent()) {
+        // Taken from the block the transmit stages sent last time round,
+        // because they run inside the same graph as everything else and this
+        // block has not reached them yet.
+        if plan.tx.is_some() && stream.silent() {
             let shift = keyed_hz - plan.center.as_f64();
-            mirror_tx(g, &mut buf.samples, shift, plan.rate, &mut monitor_mix, &mut monitor_buf);
+            monitor_buf.clear();
+            monitor_buf.extend_from_slice(rx.tx_monitor());
+            let sent = std::mem::take(&mut monitor_buf);
+            mirror_tx(&sent, &mut buf.samples, shift, plan.rate, &mut monitor_mix, &mut monitor_scratch);
+            monitor_buf = sent;
         }
 
         {
@@ -2669,7 +2619,7 @@ fn run(
             //
             // Applied here rather than once at key-up because this line runs
             // every block and would put the operator's setting straight back.
-            let muted = plan.audio.muted || tx_graph.is_some();
+            let muted = plan.audio.muted || plan.tx.is_some();
             // The master governs the device, not the mix: anything a stage
             // downstream of the bus adds is under it too, and a mute takes
             // the fifth of a second already queued at the sound card with it.
@@ -2776,6 +2726,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         capture_format: common::SampleFormat::Cu8,
         log: false,
         feeds: Vec::new(),
+        tx: None,
     }
 }
 
