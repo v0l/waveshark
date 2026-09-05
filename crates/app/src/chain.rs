@@ -4119,9 +4119,23 @@ pub fn transmit_graph(
     // The microphone is a stage in front of the modulator rather than
     // something the radio thread pushes in, so what is being transmitted can
     // be seen and tapped between the two.
+    // What the audio is limited to, which is what keeps a transmission inside
+    // its channel: deviation is only half of Carson and the other half is the
+    // highest note the modulator was given, so speech running to 15 kHz
+    // through a 2.5 kHz deviation puts 35 kHz on the air where the band plan
+    // allows 12.5. The limiting happens in the microphone stage, at the
+    // microphone's own rate, because a filter this sharp is unaffordable at
+    // the radio's.
+    let band = match mode {
+        // Communications speech, out to where intelligibility lives.
+        TxMode::Nfm | TxMode::Fm | TxMode::Carrier => (200.0, 3_400.0),
+        TxMode::Am => (200.0, 4_000.0),
+        // Broadcast, where 15 kHz is the standard and the pilot is above it.
+        TxMode::Wfm => (30.0, 15_000.0),
+    };
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
         (TxSource::Mic, Some(src)) => {
-            Box::new(nodes::MicNode::new(src, tx.mic_gain, tx.mic_agc))
+            Box::new(nodes::MicNode::with_band(src, tx.mic_gain, tx.mic_agc, band))
         }
         (TxSource::Mic, None) => {
             return Err(common::Error::other("no microphone is open to transmit from"))
@@ -4134,30 +4148,9 @@ pub fn transmit_graph(
         TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
     };
-    // The audio limit, which is what keeps a transmission inside its channel.
-    //
-    // Deviation is only half of Carson: the other half is the highest
-    // modulating frequency, so speech running to 15 kHz through a 2.5 kHz
-    // deviation puts 35 kHz on the air where the band plan allows 12.5. It
-    // matters most with the microphone, since a sound card hands over the
-    // full audio band and desktop audio is usually music.
-    let audio_hz = match mode {
-        TxMode::Nfm | TxMode::Fm => 3_000.0,
-        TxMode::Am => 4_000.0,
-        // Broadcast: 15 kHz is the standard, and above it lies the pilot.
-        TxMode::Wfm => 15_000.0,
-        TxMode::Carrier => 300.0,
-    };
-    let limit = nodes::FirFilterNode::new(
-        dsp::filter::Response::Lowpass,
-        audio_hz,
-        audio_hz * 0.4,
-        127,
-    );
-
     pipeline::chain(
         input,
-        vec![head, Box::new(limit), modulator, Box::new(nodes::TxSinkNode::new(stream))],
+        vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))],
     )
 }
 
@@ -4470,7 +4463,7 @@ mod tx_tests {
     }
 
     #[test]
-    fn the_transmit_chain_limits_the_audio_before_it_modulates() {
+    fn the_transmit_chain_is_three_stages_ending_in_the_radio() {
         let (mut dev, _b) = sink(48_000.0);
         let g = transmit_graph(
             &TxSpec::default(),
@@ -4483,11 +4476,7 @@ mod tx_tests {
         .unwrap();
         let topo = g.topology();
         let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
-        // The filter is not decoration: Carson counts the highest modulating
-        // frequency as well as the deviation, so unlimited audio into a
-        // 2.5 kHz deviation is a transmission three times wider than the
-        // channel it is meant to sit in.
-        assert_eq!(names, ["tone", "fir_filter", "fm_mod", "radio_tx"]);
+        assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
         assert!(g.output_spec().is_tx());
     }
 }

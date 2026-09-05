@@ -21,7 +21,7 @@ pub mod feed_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod bank_node;
-mod filter_nodes;
+pub mod filter_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
@@ -55,7 +55,7 @@ pub use mod_nodes::{
 };
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
-pub use filter_nodes::{FirFilterNode, IirFilterNode};
+pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
