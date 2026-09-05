@@ -302,6 +302,25 @@ fn open_mic(device: &str, mic: &mut Option<audio::AudioCapture>, status: &Status
 /// duration, so an over does not throw away the spectrum's averaging, every
 /// channel's squelch and every decoder's part-built frame; a full duplex
 /// radio goes on hearing the band while it transmits.
+fn tx_plan_for(ch: &ChannelSpec, center: Hz) -> Option<crate::chain::TxPlan> {
+    let tx = ch.tx?;
+    let mode = tx_mode_for(&ch.mode)?;
+    let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
+    Some(crate::chain::TxPlan { spec: tx, mode, on_air })
+}
+
+/// The transmit chain to draw, from the channels as they are now.
+///
+/// The first channel that can transmit, because the radio has one transmitter
+/// and the chain view has one transmit chain to draw. Which channel is keyed
+/// is decided when a key goes down; this is only what the graph holds ready.
+fn derive_tx(plan: &Plan, can_transmit: bool) -> Option<crate::chain::TxPlan> {
+    if !can_transmit {
+        return None;
+    }
+    plan.channels.iter().find_map(|c| tx_plan_for(c, plan.center))
+}
+
 fn key_up(
     dev: &mut dyn common::Device,
     ch: &ChannelSpec,
@@ -1934,13 +1953,13 @@ fn run(
                 // Unkeying while not keyed is what the interface sends when it
                 // loses the button, and it is not an error.
                 Cmd::Key(None) => {
-                    if plan.tx.take().is_some() {
+                    if rx.keyed() {
                         tracing::info!("unkeyed");
-                        // Rebuilt without the transmit stages, which drops
-                        // the sink: it drains what is queued before the
-                        // carrier goes, and on a half duplex radio that is
-                        // also what hands the receiver its radio back.
-                        rebuild = true;
+                        // The stages stay; what goes is the radio. Dropping
+                        // it drains the queue before the carrier stops and,
+                        // on a half duplex radio, hands the receiver its
+                        // radio back.
+                        status.tx_underruns.store(rx.unkey(), Ordering::Relaxed);
                         status.keyed.store(0, Ordering::Relaxed);
                         // Back where the receiver was. A half duplex radio
                         // has one synthesiser, so keying moved it to the
@@ -1963,7 +1982,7 @@ fn run(
                 // held, because it cannot know the over has started until the
                 // status comes back, and keying twice would open a second
                 // transmitter on a radio that has one.
-                Cmd::Key(Some(_)) if plan.tx.is_some() => {}
+                Cmd::Key(Some(_)) if rx.keyed() => {}
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
                     match spec.and_then(|c| c.tx.map(|t| (c, t))) {
@@ -1987,15 +2006,40 @@ fn run(
                                 tx_gain_db,
                                 &mic,
                             ) {
-                                Ok((tx_plan, sinks)) => {
+                                Ok((tx_plan, mut sinks)) => {
                                     keyed_hz = tx_plan.on_air.as_f64();
                                     tracing::info!("keyed channel {}", ch.id);
-                                    // The transmitter is stages in the
-                                    // receiver's own graph, so keying is a
-                                    // plan change like any other.
+                                    // The stages are already in the graph, so
+                                    // keying hands the transmit stage a radio
+                                    // rather than building anything: a
+                                    // rebuild here would restart the
+                                    // spectrum's averaging twice an over.
+                                    let same = plan.tx == Some(tx_plan);
                                     plan.tx = Some(tx_plan);
-                                    rx.set_transmitter(Some(sinks));
-                                    rebuild = true;
+                                    let mut stream = sinks.stream.take();
+                                    if same {
+                                        if let Some(s) = stream.take() {
+                                            // Handed to the stage that is
+                                            // already there.
+                                            if !rx.key(s) {
+                                                // There was no stage to hand
+                                                // it to, and the radio went
+                                                // with the attempt: the
+                                                // rebuild below opens
+                                                // nothing, so say so.
+                                                *status.error.lock() =
+                                                    Some("the transmit chain is not built".into());
+                                            }
+                                        }
+                                    } else {
+                                        // The chain in the graph is for
+                                        // another channel: build this one,
+                                        // and the radio goes in as it is
+                                        // built.
+                                        sinks.stream = stream.take();
+                                        rx.set_transmitter(Some(sinks));
+                                        rebuild = true;
+                                    }
                                     status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
@@ -2054,6 +2098,14 @@ fn run(
                 }
                 Cmd::Channels(specs) => {
                     plan.channels = specs;
+                    // The transmit chain follows the strip like every other
+                    // derived stage: change a channel's mode or its shift and
+                    // the chain view shows what would go out, keyed or not.
+                    let want = derive_tx(&plan, status.can_transmit.load(Ordering::Relaxed));
+                    if want != plan.tx && !rx.keyed() {
+                        plan.tx = want;
+                        rebuild = true;
+                    }
                     // A squelch or gain change is a number on a node that is
                     // already there. Rebuilding for it threw away the
                     // spectrum's averaging and every channel's state, once per
@@ -2290,6 +2342,11 @@ fn run(
             // The banks understand nothing on either wideband band, so
             // running them there only spends CPU inventing unknown bursts.
             plan.fronts = fronts_here(&scanners, &plan, scan_on);
+            // The transmit chain follows the dial too: a channel's transmit
+            // frequency is its offset from wherever the receiver is now.
+            if !rx.keyed() {
+                plan.tx = derive_tx(&plan, status.can_transmit.load(Ordering::Relaxed));
+            }
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
             if let Err(e) = rx.rebuild(&plan) {
                 // A patch is drawn wire by wire, so most of the time it is
@@ -2399,14 +2456,14 @@ fn run(
         if let Some(c) = mic.as_ref() {
             let keyed_now = rx.tx_state();
             let peak = match keyed_now {
-                Some((_, _, peak)) if plan.tx.is_some() => peak,
+                Some((_, _, peak)) if rx.keyed() => peak,
                 _ => c.peak(),
             };
             // Said once a second while keyed, because a transmission that
             // stops is the hardest thing here to see after the fact: the
             // carrier is gone and nothing on screen says why.
             if let (Some((sent, idle, _)), 0) = (keyed_now, blocks_since_key % 50) {
-                if plan.tx.is_some() {
+                if rx.keyed() {
                     tracing::info!("on air: {sent} samples, {idle} unfilled, mic {peak:.2}");
                     status.tx_underruns.store(idle, Ordering::Relaxed);
                 }
@@ -2419,7 +2476,7 @@ fn run(
         // Taken from the block the transmit stages sent last time round,
         // because they run inside the same graph as everything else and this
         // block has not reached them yet.
-        if plan.tx.is_some() && stream.silent() {
+        if rx.keyed() && stream.silent() {
             let shift = keyed_hz - plan.center.as_f64();
             monitor_buf.clear();
             monitor_buf.extend_from_slice(rx.tx_monitor());
@@ -2617,7 +2674,7 @@ fn run(
             //
             // Applied here rather than once at key-up because this line runs
             // every block and would put the operator's setting straight back.
-            let muted = plan.audio.muted || plan.tx.is_some();
+            let muted = plan.audio.muted || rx.keyed();
             // The master governs the device, not the mix: anything a stage
             // downstream of the bus adds is under it too, and a mute takes
             // the fifth of a second already queued at the sound card with it.
