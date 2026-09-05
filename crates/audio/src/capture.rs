@@ -43,9 +43,19 @@ pub trait AudioSource: Send + Sync {
     }
 }
 
+/// The samples the microphone has produced lately, and where they sit in the
+/// stream as a whole.
+///
+/// Indexed rather than drained, because more than one thing wants this audio:
+/// the meter on the strip, the transmitter, and anything else that grows a
+/// use for speech. A queue that consumers pop from would have them stealing
+/// samples from each other, which is a microphone that half works whenever
+/// two things are listening.
 struct Ring {
     buf: std::collections::VecDeque<f32>,
     cap: usize,
+    /// Stream position of `buf[0]`.
+    base: u64,
 }
 
 /// An open microphone.
@@ -125,6 +135,7 @@ impl AudioCapture {
                     (rate as f64 * RING_SECONDS) as usize,
                 ),
                 cap: (rate as f64 * RING_SECONDS) as usize,
+                base: 0,
             }),
             rate: rate as f64,
             overruns: AtomicU64::new(0),
@@ -148,7 +159,7 @@ impl AudioCapture {
                         let v = frame.iter().sum::<f32>() / ch as f32;
                         if ring.buf.len() == ring.cap {
                             ring.buf.pop_front();
-                            cb.overruns.fetch_add(1, Ordering::Relaxed);
+                            ring.base += 1;
                         }
                         ring.buf.push_back(v);
                     }
@@ -167,32 +178,61 @@ impl AudioCapture {
         &self.device_name
     }
 
-    /// A handle the graph can hold, since the stream itself is not `Send`.
-    pub fn source(&self) -> Arc<dyn AudioSource> {
-        self.shared.clone()
+    /// A reader of its own, for one thing that wants this audio.
+    ///
+    /// Every tap sees every sample: they do not consume from each other, so a
+    /// transmitter and a meter and anything added later can all be listening
+    /// at once. A tap that falls too far behind is moved up to what the ring
+    /// still holds and counts what it missed, which is the honest failure for
+    /// a live microphone: old speech is not worth catching up on.
+    pub fn tap(&self) -> Arc<dyn AudioSource> {
+        Arc::new(Tap {
+            shared: self.shared.clone(),
+            at: Mutex::new(self.shared.ring.lock().map(|r| r.base + r.buf.len() as u64).unwrap_or(0)),
+            missed: AtomicU64::new(0),
+        })
     }
 
-    /// Peak level since the last call, for a meter beside the key.
+    /// Peak of what the ring holds, for a meter beside the key. Reading it
+    /// consumes nothing, so a meter cannot starve a transmission.
     pub fn peak(&self) -> f32 {
         let Ok(ring) = self.shared.ring.lock() else { return 0.0 };
         ring.buf.iter().fold(0.0f32, |m, v| m.max(v.abs()))
     }
 }
 
-impl AudioSource for Shared {
+/// One reader of the microphone, with its own position in the stream.
+struct Tap {
+    shared: Arc<Shared>,
+    at: Mutex<u64>,
+    missed: AtomicU64,
+}
+
+impl AudioSource for Tap {
     fn rate(&self) -> f64 {
-        self.rate
+        self.shared.rate
     }
 
     fn take(&self, out: &mut Vec<f32>, want: usize) -> usize {
-        let Ok(mut ring) = self.ring.lock() else { return 0 };
-        let n = want.min(ring.buf.len());
-        out.extend(ring.buf.drain(..n));
+        let (Ok(ring), Ok(mut at)) = (self.shared.ring.lock(), self.at.lock()) else {
+            return 0;
+        };
+        if *at < ring.base {
+            // Fell behind the ring: the samples in between are gone, and
+            // waiting for them would put this reader permanently late.
+            self.missed.fetch_add(ring.base - *at, Ordering::Relaxed);
+            self.shared.overruns.fetch_add(ring.base - *at, Ordering::Relaxed);
+            *at = ring.base;
+        }
+        let from = (*at - ring.base) as usize;
+        let n = want.min(ring.buf.len().saturating_sub(from));
+        out.extend(ring.buf.iter().skip(from).take(n).copied());
+        *at += n as u64;
         n
     }
 
     fn overruns(&self) -> u64 {
-        self.overruns.load(Ordering::Relaxed)
+        self.missed.load(Ordering::Relaxed)
     }
 }
 
@@ -294,6 +334,50 @@ mod tests {
                 "Scarlett 2i2 USB",
             ]
         );
+    }
+
+    #[test]
+    fn every_tap_hears_every_sample() {
+        // The reason a tap has its own position: a meter and a transmitter
+        // reading the same microphone must not take samples from each other.
+        let shared = Arc::new(Shared {
+            ring: Mutex::new(Ring {
+                buf: (0..10).map(|i| i as f32).collect(),
+                cap: 10,
+                base: 0,
+            }),
+            rate: 48_000.0,
+            overruns: AtomicU64::new(0),
+        });
+        let a = Tap { shared: shared.clone(), at: Mutex::new(0), missed: AtomicU64::new(0) };
+        let b = Tap { shared, at: Mutex::new(0), missed: AtomicU64::new(0) };
+        let (mut x, mut y) = (Vec::new(), Vec::new());
+        assert_eq!(a.take(&mut x, 10), 10);
+        assert_eq!(b.take(&mut y, 10), 10);
+        assert_eq!(x, y);
+        // And neither gets the same sample twice.
+        assert_eq!(a.take(&mut x, 10), 0);
+    }
+
+    #[test]
+    fn a_tap_that_falls_behind_skips_forward_rather_than_running_late() {
+        // Old speech is not worth catching up on: a reader that insisted on
+        // every sample would transmit further and further behind the operator.
+        let shared = Arc::new(Shared {
+            ring: Mutex::new(Ring {
+                buf: (0..4).map(|i| 100.0 + i as f32).collect(),
+                cap: 4,
+                // The callback has already dropped the first 96 samples.
+                base: 96,
+            }),
+            rate: 48_000.0,
+            overruns: AtomicU64::new(0),
+        });
+        let t = Tap { shared, at: Mutex::new(0), missed: AtomicU64::new(0) };
+        let mut out = Vec::new();
+        assert_eq!(t.take(&mut out, 8), 4);
+        assert_eq!(out, vec![100.0, 101.0, 102.0, 103.0]);
+        assert_eq!(t.overruns(), 96, "the gap has to be reported, not hidden");
     }
 
     #[test]

@@ -259,40 +259,34 @@ fn restart(
 }
 
 
-/// Open or close the microphone to match what the channels ask for.
+/// Open the microphone, once, for whatever wants speech.
 ///
-/// Open while any channel is set to transmit from it, rather than only while
-/// one is keyed: an operator setting a level needs to see the meter move
-/// before they key up, and a microphone that only wakes on transmit means
-/// finding out afterwards that the gain was wrong. The cost is that the
-/// device is held while a channel is set to MIC, which the strip says
-/// plainly.
-fn sync_mic(
-    plan: &Plan,
-    device: &str,
-    mic: &mut Option<audio::AudioCapture>,
-    status: &Status,
-) {
-    let wanted = plan
-        .channels
-        .iter()
-        .any(|c| c.tx.is_some_and(|t| t.source == TxSource::Mic));
-    match (wanted, mic.is_some()) {
-        (true, false) => {
-            let opened = match device.is_empty() {
-                true => audio::AudioCapture::open(48_000),
-                false => audio::AudioCapture::open_named(device, 48_000),
-            };
-            match opened {
-                Ok(c) => *mic = Some(c),
-                Err(e) => *status.error.lock() = Some(format!("no microphone: {e}")),
-            }
+/// One capture for the receiver rather than one per consumer: the meter on
+/// the strip, the transmitter and anything else that grows a use for speech
+/// each take a tap, and every tap hears every sample. Opening it per keyed
+/// channel meant the meter only moved once it was too late to set a level
+/// against, and two consumers would have taken samples from each other.
+///
+/// A device that will not open is reported once and left alone: a receiver
+/// that works is more useful than one that refuses to start because there is
+/// no microphone in the machine.
+fn open_mic(device: &str, mic: &mut Option<audio::AudioCapture>, status: &Status) {
+    if mic.is_some() {
+        return;
+    }
+    let opened = match device.is_empty() {
+        true => audio::AudioCapture::open(48_000),
+        false => audio::AudioCapture::open_named(device, 48_000),
+    };
+    match opened {
+        Ok(c) => {
+            tracing::info!("microphone: {}", c.device_name());
+            *mic = Some(c);
         }
-        (false, true) => {
-            *mic = None;
+        Err(e) => {
+            *status.error.lock() = Some(format!("no microphone: {e}"));
             status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
         }
-        _ => {}
     }
 }
 
@@ -362,7 +356,7 @@ fn key_up(
         TxSource::Mic => Some(
             mic.as_ref()
                 .ok_or_else(|| common::Error::other("no microphone is open"))?
-                .source(),
+                .tap(),
         ),
         TxSource::Tone => None,
     };
@@ -1834,8 +1828,10 @@ fn run(
     // their work at once, and on a half duplex one the receive half is
     // reading what the driver puts there instead.
     let mut tx_graph: Option<pipeline::Graph> = None;
-    // The microphone, open only while a channel that wants it is keyed.
+    // The microphone, open for as long as the receiver runs, so the strip's
+    // meter is live and anything that wants speech can take a tap.
     let mut mic: Option<audio::AudioCapture> = None;
+    open_mic(&audio_in, &mut mic, status);
     status
         .can_transmit
         .store(dev.info().can_transmit(), Ordering::Relaxed);
@@ -1857,9 +1853,8 @@ fn run(
                     let changed = input != audio_in;
                     audio_in = input;
                     if changed {
-                        // Reopened on the new device, if a channel wants one.
                         mic = None;
-                        sync_mic(&plan, &audio_in, &mut mic, status);
+                        open_mic(&audio_in, &mut mic, status);
                     }
                     if out != audio_out {
                         audio_out = out;
@@ -1984,7 +1979,6 @@ fn run(
                 }
                 Cmd::Channels(specs) => {
                     plan.channels = specs;
-                    sync_mic(&plan, &audio_in, &mut mic, status);
                     // A squelch or gain change is a number on a node that is
                     // already there. Rebuilding for it threw away the
                     // spectrum's averaging and every channel's state, once per
