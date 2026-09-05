@@ -1898,6 +1898,7 @@ fn run(
     // meter is live and anything that wants speech can take a tap.
     let mut mic: Option<audio::AudioCapture> = None;
     open_mic(&audio_in, &mut mic, status);
+    rx.set_microphone(mic.as_ref().map(|m| m.tap()));
     status
         .can_transmit
         .store(dev.info().can_transmit(), Ordering::Relaxed);
@@ -1921,6 +1922,8 @@ fn run(
                     if changed {
                         mic = None;
                         open_mic(&audio_in, &mut mic, status);
+                        rx.set_microphone(mic.as_ref().map(|m| m.tap()));
+                        rebuild = true;
                     }
                     if out != audio_out {
                         audio_out = out;

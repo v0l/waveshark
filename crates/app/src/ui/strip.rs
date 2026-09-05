@@ -209,14 +209,6 @@ impl Strip<'_> {
                     }
                     theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
                 });
-                ui.horizontal(|ui| {
-                    ui.add_space(28.0);
-                    // No levelling on transmit, and the strip says so rather
-                    // than leaving an operator hunting for the control: an
-                    // AGC with nothing to level against between words puts
-                    // the room on air at full deviation every pause.
-                    theme::Line::new().note("mic open, set by the meter").show(ui);
-                });
             }
             TxSource::Tone => {
                 ui.horizontal(|ui| {
