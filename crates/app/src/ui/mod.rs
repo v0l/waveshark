@@ -115,6 +115,9 @@ pub struct App {
     capture: bool,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
+    /// When the radio last delivered a spectrum, for noticing that it has
+    /// stopped.
+    last_frame: Option<std::time::Instant>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
     /// Sound devices by name, empty for the system default. The speaker the
@@ -360,6 +363,7 @@ impl Default for App {
             dc_block: true,
             view: View::Spectrum,
             location: None,
+            last_frame: None,
             country: String::new(),
             audio_out: String::new(),
             audio_in: String::new(),
@@ -803,6 +807,22 @@ impl App {
         let mut frames: Vec<Frame> = Vec::new();
         while let Ok(f) = radio.frames.try_recv() {
             frames.push(f);
+        }
+        // A radio that has stopped delivering says so. Without this the
+        // window carries on drawing the last spectrum it was given, which is
+        // indistinguishable from a very quiet band: the receiver looks like
+        // it is working right up until somebody notices the waterfall has not
+        // moved in a minute.
+        if !frames.is_empty() {
+            self.last_frame = Some(std::time::Instant::now());
+        } else if radio.status.running.load(std::sync::atomic::Ordering::Relaxed) {
+            let since = self.last_frame.get_or_insert_with(std::time::Instant::now).elapsed();
+            if since > std::time::Duration::from_secs(3) {
+                self.err = Some(format!(
+                    "the radio has sent nothing for {:.0} s; it may need unplugging",
+                    since.as_secs_f32()
+                ));
+            }
         }
         // A pinned radio cannot be retuned, and a dial left wherever it was
         // dragged would label every frequency on screen wrongly.

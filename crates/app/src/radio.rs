@@ -1672,11 +1672,36 @@ impl Radio {
     }
 }
 
+/// How long a radio is given to stop before it is abandoned.
+///
+/// A USB call that never returns is not a thing this process can cancel, so
+/// the choice is between waiting for it and leaving it. Waiting means the
+/// window is frozen with nothing on screen to say why, which is how a radio
+/// that stopped responding took the whole interface with it; leaving it means
+/// a thread and a USB claim are held until the process exits, and the
+/// operator can carry on, change device, or close the window.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 impl Drop for Radio {
     fn drop(&mut self) {
         self.send(Cmd::Stop);
-        if let Some(h) = self.handle.take() {
+        let Some(h) = self.handle.take() else { return };
+        // Joined on another thread, so this one can give up on it. The
+        // handle is moved in, so abandoning it leaks a thread rather than
+        // leaving a dangling join.
+        let (tx, rx) = bounded::<()>(1);
+        let waiter = std::thread::Builder::new().name("radio-stop".into()).spawn(move || {
             let _ = h.join();
+            let _ = tx.send(());
+        });
+        if waiter.is_err() {
+            return;
+        }
+        if rx.recv_timeout(STOP_GRACE).is_err() {
+            tracing::warn!(
+                "the radio did not stop within {:?}; abandoning its thread and USB claim",
+                STOP_GRACE
+            );
         }
     }
 }
