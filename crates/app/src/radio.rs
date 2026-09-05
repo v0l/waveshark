@@ -278,6 +278,11 @@ fn key_up(
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
+    // The channel's own mode, because a channel is one frequency and one
+    // mode: a radio that listens in NFM and keys up in AM cannot be worked.
+    let mode = tx_mode_for(&ch.mode).ok_or_else(|| {
+        common::Error::other(format!("nothing here transmits {} yet", ch.mode.label()))
+    })?;
     if !dev.info().can_transmit() {
         return Err(common::Error::TxUnsupported);
     }
@@ -333,7 +338,7 @@ fn key_up(
     let src = open.as_ref().map(|c| c.source());
 
     let rate = dev.rate().as_f64();
-    let g = crate::chain::transmit_graph(tx, rate, on_air, dev.start_tx()?, src)?;
+    let g = crate::chain::transmit_graph(tx, mode, rate, on_air, dev.start_tx()?, src)?;
     Ok((g, open))
 }
 
@@ -578,9 +583,14 @@ pub struct ChannelSpec {
 /// What a channel puts on the air when it is keyed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TxSpec {
-    pub mode: TxMode,
     /// What is modulated: the microphone, or a test tone.
     pub source: TxSource,
+    /// Microphone gain, as a multiplier before the modulator.
+    pub mic_gain: f32,
+    /// Whether speech is levelled on the way out, which is what a radio's
+    /// microphone amplifier does and what keeps a quiet talker audible
+    /// without a loud one splattering.
+    pub mic_agc: bool,
     /// Added to the channel's receive frequency when transmitting: the
     /// repeater shift, and zero for simplex.
     pub shift_hz: f64,
@@ -596,7 +606,8 @@ pub struct TxSpec {
 impl Default for TxSpec {
     fn default() -> Self {
         Self {
-            mode: TxMode::Nfm,
+            mic_gain: 1.0,
+            mic_agc: true,
             // A test tone, because the safe default is one that does not open
             // the microphone: keying should not put the room on air until
             // somebody has said it should.
@@ -629,6 +640,10 @@ impl TxSource {
 }
 
 /// How a keyed channel is modulated.
+///
+/// Not a setting: it follows the channel's own mode, because a channel is one
+/// frequency and one mode and a radio that receives NFM and transmits AM on
+/// the same channel is a radio nobody can work. See [`tx_mode_for`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxMode {
     /// 2.5 kHz deviation, the 12.5 kHz channel standard.
@@ -639,6 +654,23 @@ pub enum TxMode {
     Am,
     /// An unmodulated carrier, for measuring what the transmitter is doing.
     Carrier,
+}
+
+/// What a channel transmits, from what it receives.
+///
+/// `None` for a mode with no modulator behind it yet: single sideband needs
+/// one, and a decode channel needs the protocol's encoder. Refusing is the
+/// point, since the alternative is keying up in a mode the other end cannot
+/// read.
+pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
+    match mode {
+        ChanMode::Audio(Demod::Nfm) => Some(TxMode::Nfm),
+        ChanMode::Audio(Demod::Wfm) => Some(TxMode::Fm),
+        ChanMode::Audio(Demod::Am) => Some(TxMode::Am),
+        ChanMode::Audio(Demod::Cw) => Some(TxMode::Carrier),
+        ChanMode::Audio(Demod::Usb | Demod::Lsb) => None,
+        ChanMode::Decode(_) => None,
+    }
 }
 
 impl TxMode {
@@ -1170,6 +1202,10 @@ pub struct Status {
     pub keyed: AtomicU64,
     /// Transfers the radio sent as silence during the last transmission.
     pub tx_underruns: AtomicU64,
+    /// What the microphone is hearing while a channel is keyed, as f32 bits,
+    /// and what the levelling is adding to it.
+    pub mic_level: AtomicU32,
+    pub mic_gain_db: AtomicU32,
     /// The radio's transmit gain, in dB, as the device took it.
     pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
@@ -1331,6 +1367,8 @@ impl Default for Status {
             can_transmit: AtomicBool::new(false),
             keyed: AtomicU64::new(0),
             tx_underruns: AtomicU64::new(0),
+            mic_level: AtomicU32::new(0),
+            mic_gain_db: AtomicU32::new(0),
             tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
             levels: parking_lot::Mutex::new((0, crate::chain::AudioPlan::default(), Vec::new())),
@@ -1830,6 +1868,7 @@ fn run(
                     // Closed with the carrier. A microphone left open between
                     // overs is a radio listening to the room.
                     mic = None;
+                    status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
                 }
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
@@ -2222,6 +2261,19 @@ fn run(
         // receiver: one block of receive time is one block of transmit time,
         // and the sink's backpressure paces both.
         if let Some(g) = tx_graph.as_mut() {
+            // What the microphone is hearing, for the meter on the strip.
+            // Read off the node rather than from the capture, so it is the
+            // level that actually reached the modulator.
+            let mic_node = g
+                .order()
+                .find(|(_, name)| *name == "mic")
+                .and_then(|(id, _)| g.node(id))
+                .and_then(|n| n.as_any())
+                .and_then(|a| a.downcast_ref::<nodes::MicNode>());
+            if let Some(m) = mic_node {
+                status.mic_level.store(m.peak().to_bits(), Ordering::Relaxed);
+                status.mic_gain_db.store(m.agc_gain_db().to_bits(), Ordering::Relaxed);
+            }
             if let Err(e) = pump_tx(g, buf.samples.len()) {
                 *status.error.lock() = Some(format!("transmit: {e}"));
                 if let Some(g) = tx_graph.take() {

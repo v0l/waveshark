@@ -1,7 +1,7 @@
 //! The channel strip: every level that reaches the speaker, and the controls
 //! that belong to one channel rather than to the receiver.
 
-use crate::radio::{TxMode, TxSource};
+use crate::radio::TxSource;
 use super::state::AudioState;
 use super::*;
 use crate::audiobus::AudioBusNode;
@@ -128,34 +128,47 @@ impl Strip<'_> {
         }
     }
 
-    /// The transmit half of a channel, when it has one.
+    /// The transmit half of a channel.
     ///
-    /// Drawn only where the radio can transmit at all, because a key that
-    /// always fails is worse than no key: the operator learns to press it.
-    /// The key itself is held rather than toggled, since a transmitter that
-    /// stays on because a click was missed is exactly the failure that puts a
-    /// carrier on a band for an afternoon.
+    /// Drawn on every channel of a radio that can transmit, and on none of a
+    /// radio that cannot: a key that always fails is worse than no key, since
+    /// the operator learns to press it.
+    ///
+    /// There is no mode here. A channel is one frequency and one mode, and it
+    /// transmits in the mode it receives: a radio that listens in NFM and
+    /// keys up in AM cannot be worked by whoever is on the other end.
     fn channel_tx(
         ui: &mut egui::Ui,
         ch: &mut Channel,
         keyed: Option<u64>,
+        mic: (f32, f32),
         cmds: &mut Vec<Cmd>,
     ) -> bool {
         let mut changed = false;
-        ui.add_space(4.0);
+        let mode = crate::radio::tx_mode_for(&ch.mode);
+        let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);
+
+        ui.add_space(6.0);
         ui.separator();
         ui.horizontal(|ui| {
             theme::Line::new().legend("tx").show(ui);
-            let on = ch.tx.is_some();
-            if ui.selectable_label(on, if on { "ON" } else { "OFF" }).clicked() {
-                ch.tx = match on {
-                    true => None,
-                    false => Some(crate::radio::TxSpec::default()),
-                };
-                changed = true;
+            match mode {
+                Some(m) => {
+                    theme::Line::new().value(m.label()).size(12.0).show(ui);
+                }
+                // Said rather than hidden: a mode with no modulator behind it
+                // is a gap in this receiver, not a property of the channel.
+                None => {
+                    theme::Line::new().note("no transmitter for this mode").show(ui);
+                }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::Line::new()
+                    .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
+                    .size(11.0)
+                    .show(ui);
+            });
         });
-        let Some(tx) = ch.tx.as_mut() else { return changed };
 
         ui.horizontal(|ui| {
             theme::Line::new().legend("src").show(ui);
@@ -165,68 +178,94 @@ impl Strip<'_> {
                     changed = true;
                 }
             }
-            if tx.source == TxSource::Mic {
-                // Said plainly, because the microphone opens on key-up and
-                // an operator should know when the room is on air.
-                theme::Line::new().note("open while keyed").show(ui);
-            }
-        });
-        ui.horizontal(|ui| {
-            for m in [TxMode::Nfm, TxMode::Fm, TxMode::Am, TxMode::Carrier] {
-                if ui.selectable_label(tx.mode == m, m.label()).clicked() {
-                    tx.mode = m;
-                    changed = true;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            theme::Line::new().legend("shift").show(ui);
-            let mut khz = tx.shift_hz / 1e3;
-            if ui
-                .add(egui::DragValue::new(&mut khz).speed(0.1).range(-10_000.0..=10_000.0).suffix(" kHz"))
-                .changed()
-            {
-                tx.shift_hz = khz * 1e3;
-                changed = true;
-            }
-            // Where it will actually transmit, because a shift is only ever
-            // worth anything as the frequency it produces.
-            theme::Line::new()
-                .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
-                .size(11.0)
-                .show(ui);
-        });
-        if tx.mode != TxMode::Carrier && tx.source == TxSource::Tone {
-            ui.horizontal(|ui| {
-                theme::Line::new().legend("tone").show(ui);
-                let mut hz = tx.tone_hz;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::Line::new().legend("shift").show(ui);
+                let mut khz = tx.shift_hz / 1e3;
                 if ui
-                    .add(egui::DragValue::new(&mut hz).speed(10.0).range(100.0..=5_000.0).suffix(" Hz"))
+                    .add(
+                        egui::DragValue::new(&mut khz)
+                            .speed(0.1)
+                            .range(-10_000.0..=10_000.0)
+                            .suffix(" kHz"),
+                    )
                     .changed()
                 {
-                    tx.tone_hz = hz;
+                    tx.shift_hz = khz * 1e3;
                     changed = true;
                 }
-                // Nothing else can be modulated yet, and pretending
-                // otherwise would be the interface lying about the radio.
-                theme::Line::new().note("test tone").show(ui);
             });
-        }
-        ui.horizontal(|ui| {
-            theme::Line::new().legend("trim").show(ui);
-            let mut db = tx.trim_db;
-            if ui
-                .add(egui::DragValue::new(&mut db).speed(0.5).range(0.0..=20.0).suffix(" dB"))
-                .changed()
-            {
-                tx.trim_db = db;
-                changed = true;
-            }
         });
+
+        match tx.source {
+            TxSource::Mic => {
+                // The microphone's own fader and meter, read the way the
+                // channel's audio is: the level beside the control that sets
+                // it, so an operator can see they are being heard.
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("mic").show(ui);
+                    let mut g = tx.mic_gain / 4.0;
+                    if ui.add(Fader::new(&mut g, mic.0).width(VU_W)).changed() {
+                        tx.mic_gain = (g * 4.0).clamp(0.0, 4.0);
+                        changed = true;
+                    }
+                    theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
+                });
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("agc").show(ui);
+                    let on = tx.mic_agc;
+                    if ui.selectable_label(on, if on { "ON" } else { "OFF" }).clicked() {
+                        tx.mic_agc = !on;
+                        changed = true;
+                    }
+                    if on {
+                        theme::Line::new().value(format!("{:+.0} dB", mic.1)).size(11.0).show(ui);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        theme::Line::new().note("open while keyed").show(ui);
+                    });
+                });
+            }
+            TxSource::Tone => {
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("tone").show(ui);
+                    let mut hz = tx.tone_hz;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut hz)
+                                .speed(10.0)
+                                .range(100.0..=5_000.0)
+                                .suffix(" Hz"),
+                        )
+                        .changed()
+                    {
+                        tx.tone_hz = hz;
+                        changed = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        theme::Line::new().legend("trim").show(ui);
+                        let mut db = tx.trim_db;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut db)
+                                    .speed(0.5)
+                                    .range(0.0..=20.0)
+                                    .suffix(" dB"),
+                            )
+                            .changed()
+                        {
+                            tx.trim_db = db;
+                            changed = true;
+                        }
+                    });
+                });
+            }
+        }
 
         ui.add_space(4.0);
         let keyed_here = keyed == Some(ch.id);
-        let key = ui.add(
+        let can_key = mode.is_some();
+        let key = ui.add_enabled(
+            can_key,
             egui::Button::new(
                 egui::RichText::new(if keyed_here { "ON AIR" } else { "KEY" })
                     .size(15.0)
@@ -237,13 +276,10 @@ impl Strip<'_> {
         );
         // Held, not toggled: released, lost focus and the pointer leaving all
         // drop the carrier.
-        if key.is_pointer_button_down_on() && !keyed_here {
+        if can_key && key.is_pointer_button_down_on() && !keyed_here {
             cmds.push(Cmd::Key(Some(ch.id)));
         } else if keyed_here && !key.is_pointer_button_down_on() {
             cmds.push(Cmd::Key(None));
-        }
-        if keyed_here {
-            theme::Line::new().note("receiving stopped while transmitting").show(ui);
         }
         changed
     }
@@ -314,6 +350,21 @@ impl Strip<'_> {
                     .radio
                     .map(|r| r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(false);
+                // What the microphone is hearing, and what the levelling is
+                // adding, for the meter beside the key.
+                let mic = self
+                    .radio
+                    .map(|r| {
+                        (
+                            f32::from_bits(
+                                r.status.mic_level.load(std::sync::atomic::Ordering::Relaxed),
+                            ),
+                            f32::from_bits(
+                                r.status.mic_gain_db.load(std::sync::atomic::Ordering::Relaxed),
+                            ),
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
                 let keyed = self
                     .radio
                     .map(|r| r.status.keyed.load(std::sync::atomic::Ordering::Relaxed))
@@ -456,7 +507,7 @@ impl Strip<'_> {
                                     }
                                 }
                             }
-                            if can_tx && Self::channel_tx(ui, ch, keyed, self.cmds) {
+                            if can_tx && Self::channel_tx(ui, ch, keyed, mic, self.cmds) {
                                 tune = Some(i);
                             }
                         });
