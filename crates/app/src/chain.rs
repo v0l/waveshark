@@ -206,6 +206,14 @@ pub struct Receiver {
     /// is what an edited copy of `patch` is read against to find them.
     base: crate::patch::Patch,
     record: Option<NodeId>,
+    /// The transmitter and what feeds it, by node id.
+    ///
+    /// Held rather than looked up by name, because a graph node carries the
+    /// label the chain view draws ("Transmitter") and not the kind the patch
+    /// asked for: a lookup by kind found nothing, and keying said the chain
+    /// was not built while it was sitting there in the view.
+    tx_radio: Option<NodeId>,
+    tx_mic: Option<NodeId>,
     /// The raw span capture, which is always in the graph and almost always
     /// switched off; see [`Receiver::set_capture`].
     capture: Option<NodeId>,
@@ -409,6 +417,8 @@ impl Receiver {
             patch: crate::patch::Patch::default(),
             base: crate::patch::Patch::default(),
             record: None,
+            tx_radio: None,
+            tx_mic: None,
             capture: None,
             audio: None,
             modes: None,
@@ -473,39 +483,22 @@ impl Receiver {
     }
 
     pub fn keyed(&self) -> bool {
-        self.graph
-            .order()
-            .find(|(_, name)| *name == "radio_tx")
-            .and_then(|(id, _)| self.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())
-            .is_some_and(|s| s.keyed())
+        self.tx_sink().is_some_and(|s| s.keyed())
     }
 
     fn tx_sink_mut(&mut self) -> Option<&mut nodes::TxSinkNode> {
-        let id = self.graph.order().find(|(_, name)| *name == "radio_tx").map(|(id, _)| id)?;
-        self.graph
-            .node_mut(id)?
-            .as_any_mut()?
-            .downcast_mut::<nodes::TxSinkNode>()
+        let id = self.tx_radio?;
+        self.graph.node_mut(id)?.as_any_mut()?.downcast_mut::<nodes::TxSinkNode>()
     }
 
     /// What the transmitter has done, for the interface: samples handed over,
     /// transfers the radio had to fill itself, and what the microphone is
     /// hearing.
     pub fn tx_state(&self) -> Option<(u64, u64, f32)> {
-        let sink = self
-            .graph
-            .order()
-            .find(|(_, name)| *name == "radio_tx")
-            .and_then(|(id, _)| self.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())?;
+        let sink = self.tx_sink()?;
         let mic = self
-            .graph
-            .order()
-            .find(|(_, name)| *name == "mic")
-            .and_then(|(id, _)| self.graph.node(id))
+            .tx_mic
+            .and_then(|id| self.graph.node(id))
             .and_then(|n| n.as_any())
             .and_then(|a| a.downcast_ref::<nodes::MicNode>());
         Some((sink.written(), sink.underruns(), mic.map(|m| m.peak()).unwrap_or(0.0)))
@@ -514,14 +507,14 @@ impl Receiver {
     /// The last block the transmitter sent, for showing it on the receiver's
     /// own spectrum while the radio is deaf.
     pub fn tx_monitor(&self) -> &[C32] {
-        let node = self
-            .graph
-            .order()
-            .find(|(_, name)| *name == "radio_tx")
-            .and_then(|(id, _)| self.graph.node(id))
+        self.tx_sink().map(|s| s.monitor()).unwrap_or(&[])
+    }
+
+    fn tx_sink(&self) -> Option<&nodes::TxSinkNode> {
+        self.tx_radio
+            .and_then(|id| self.graph.node(id))
             .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
-        node.map(|s| s.monitor()).unwrap_or(&[])
+            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())
     }
 
     /// Change what the receiver is doing, keeping every node that still means
@@ -706,6 +699,8 @@ impl Receiver {
         let dc = stage_of("dc_block");
         let spectrum = stage_of("spectrum");
         let record = stage_of(RING);
+        let tx_radio = stage_of(TX_RADIO);
+        let tx_mic = stage_of("mic");
         let capture = stage_of("iq_capture");
         let audio = stage_of("audio_bus");
 
@@ -938,6 +933,8 @@ impl Receiver {
         self.roles = roles;
         self.spectrum = spectrum;
         self.record = record;
+        self.tx_radio = tx_radio;
+        self.tx_mic = tx_mic;
         self.capture = capture;
         self.audio = audio;
         self.bus = bus;
@@ -2792,6 +2789,14 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
             }
         }
         "mixer" => "Mixer".into(),
+        TX_RADIO => "Transmitter".into(),
+        "tx_clock" => "Transmit clock".into(),
+        "mic" => "Microphone".into(),
+        "tone" => "Test tone".into(),
+        "fm_mod" => "FM modulator".into(),
+        "am_mod" => "AM modulator".into(),
+        "ook_mod" => "OOK keyer".into(),
+        "fsk_mod" => "FSK keyer".into(),
         "fir_filter" | "iir_filter" => {
             let what = settings.str_or("response", "lowpass");
             let hz = settings.f64_or("freq_hz", 0.0);
