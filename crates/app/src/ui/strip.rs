@@ -148,23 +148,29 @@ impl Strip<'_> {
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("master").show(ui);
                     if ui.add(Fader::new(&mut self.st.volume, out_level).width(VU_W)).changed() {
-                        self.cmds.push(Cmd::Volume(self.st.volume));
+                        self.cmds
+                            .push(Cmd::Volume { volume: self.st.volume, muted: self.st.muted });
                     }
-                    let all_muted = !self.st.channels.is_empty()
-                        && self.st.channels.iter().all(|c| c.muted || !c.on);
+                    // The master mute is the bus's own, not a sweep over the
+                    // channel mutes: muting every channel left calls, replays
+                    // and any chain drawn by hand still coming out of the
+                    // speaker, which is not what a master mute means.
                     if crate::icons::icon_button(
                         ui,
-                        if all_muted { crate::icons::Icon::Mute } else { crate::icons::Icon::Sound },
-                        "Mute every channel",
+                        if self.st.muted {
+                            crate::icons::Icon::Mute
+                        } else {
+                            crate::icons::Icon::Sound
+                        },
+                        "Mute everything",
                         true,
-                        all_muted,
+                        self.st.muted,
                     )
                     .clicked()
                     {
-                        for c in &mut self.st.channels {
-                            c.muted = !all_muted;
-                        }
-                        self.acts.push(Action::Channels);
+                        self.st.muted = !self.st.muted;
+                        self.cmds
+                            .push(Cmd::Volume { volume: self.st.volume, muted: self.st.muted });
                     }
                 });
 

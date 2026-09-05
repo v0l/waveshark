@@ -481,8 +481,14 @@ impl AudioBus {
     }
 
     /// This block's audio: every strip, every subscribed call and a slice
-    /// of any replay, at the master level, held inside full scale, as
-    /// stereo at the output rate.
+    /// of any replay, held inside full scale, as stereo at the output rate.
+    ///
+    /// The master level and mute are not applied here. They are the node's
+    /// parameters and the strip still sets them here, but what they govern is
+    /// the sound card: applied to the mix instead, a mute took a queue length
+    /// to be heard and left anything wired downstream of the bus playing, and
+    /// a recording made from a tap would carry the listener's volume setting.
+    /// [`crate::radio`] reads them off the node and drives the sink with them.
     ///
     /// `frames` is what the block is worth in time at the output rate, so a
     /// replay runs at real time rather than arriving all at once. Zero means
@@ -511,9 +517,8 @@ impl AudioBus {
             self.mix[i * 2] += v;
             self.mix[i * 2 + 1] += v;
         }
-        let master = if self.muted { 0.0 } else { self.master };
         for v in self.mix.iter_mut() {
-            *v = (*v * master).clamp(-1.0, 1.0);
+            *v = v.clamp(-1.0, 1.0);
         }
         &self.mix
     }

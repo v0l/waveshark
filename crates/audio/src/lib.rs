@@ -10,7 +10,7 @@ pub use resample::Resampler;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Queue depth before the producer drops.
@@ -43,6 +43,11 @@ pub struct AudioStats {
     /// Callbacks that ran out of samples and emitted silence: too slow.
     pub underruns: AtomicU64,
     pub samples_played: AtomicU64,
+    /// Set by the producer, read by the device callback: while it is on the
+    /// device is fed silence and whatever is queued is thrown away.
+    pub muted: AtomicBool,
+    /// Master level the callback applies, as `f32` bits.
+    pub volume: AtomicU32,
 }
 
 /// Producer half. `Send`, unlike the stream.
@@ -63,6 +68,8 @@ pub struct AudioSink {
     trim: f64,
     resampled: Vec<f32>,
     resampled_r: Vec<f32>,
+    muted: bool,
+    volume: f32,
     deint_l: Vec<f32>,
     deint_r: Vec<f32>,
 }
@@ -84,6 +91,35 @@ impl AudioSink {
     /// Samples per channel currently queued.
     pub fn backlog(&self) -> i64 {
         self.stats.backlog.load(Ordering::Relaxed)
+    }
+
+    /// The master level and mute, applied to the device rather than to what
+    /// is queued for it.
+    ///
+    /// Applied upstream of the queue, a change is heard a queue length late,
+    /// which is a fifth of a second of whatever was playing, and it reaches
+    /// only the audio that came through the mix: a stage wired downstream of
+    /// the bus went on playing through a mute. Blocks keep being written
+    /// while it is muted, so the drift loop stays converged and unmuting is
+    /// immediate.
+    pub fn set_output(&mut self, volume: f32, muted: bool) {
+        let volume = volume.clamp(0.0, 1.0);
+        if muted != self.muted {
+            self.muted = muted;
+            self.stats.muted.store(muted, Ordering::Relaxed);
+        }
+        if volume != self.volume {
+            self.volume = volume;
+            self.stats.volume.store(volume.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
     }
 
     /// Queue mono samples, resampling to absorb clock drift.
@@ -311,6 +347,7 @@ impl AudioPlayer {
         let (tx, rx) = bounded::<Vec<f32>>(QUEUE_DEPTH);
         let (recycle_tx, recycle_rx) = bounded::<Vec<f32>>(QUEUE_DEPTH * 2);
         let stats = Arc::new(AudioStats::default());
+        stats.volume.store(1.0f32.to_bits(), Ordering::Relaxed);
 
         let cb_stats = stats.clone();
         let ch = channels;
@@ -326,6 +363,21 @@ impl AudioPlayer {
             .build_output_stream(
                 config.clone(),
                 move |out: &mut [f32], _| {
+                    if cb_stats.muted.load(Ordering::Relaxed) {
+                        out.fill(0.0);
+                        // Drain rather than hold: on unmute the queue would
+                        // otherwise play the seconds that went by while it
+                        // was muted before catching up to now.
+                        pos = current.len();
+                        while let Ok(b) = rx.try_recv() {
+                            let n = (b.len() / ch as usize) as i64;
+                            cb_stats.backlog.fetch_sub(n, Ordering::Relaxed);
+                            let _ = recycle_tx.try_send(b);
+                        }
+                        cb_stats.samples_played.fetch_add(out.len() as u64, Ordering::Relaxed);
+                        return;
+                    }
+                    let volume = f32::from_bits(cb_stats.volume.load(Ordering::Relaxed));
                     let mut written = 0;
                     while written < out.len() {
                         if pos >= current.len() {
@@ -341,6 +393,11 @@ impl AudioPlayer {
                                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
                                     // Silence beats repeating stale audio.
                                     out[written..].fill(0.0);
+                                    if volume != 1.0 {
+                                        for s in out[..written].iter_mut() {
+                                            *s *= volume;
+                                        }
+                                    }
                                     if had_real_data {
                                         cb_stats.underruns.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -352,6 +409,11 @@ impl AudioPlayer {
                         out[written..written + n].copy_from_slice(&current[pos..pos + n]);
                         written += n;
                         pos += n;
+                    }
+                    if volume != 1.0 {
+                        for s in out.iter_mut() {
+                            *s *= volume;
+                        }
                     }
                     cb_stats
                         .samples_played
@@ -385,6 +447,8 @@ impl AudioPlayer {
             deint_r: Vec::new(),
             trim: 0.0,
             resampled: Vec::new(),
+            muted: false,
+            volume: 1.0,
         };
 
         Ok((
