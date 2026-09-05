@@ -690,18 +690,84 @@ range = 390 - 400 MHz
 span  = 250 kHz
 front = auto
 
+# The licence-free allocations, one block each, so a receiver tuned into any
+# of them decodes what is there without being told. They are all shipped
+# enabled because a block only costs anything when the span covers it, and a
+# span covers at most one or two of these at a time. Several are regional and
+# mean something else elsewhere: 902-928 is the American licence-free band and
+# the European GSM uplink, and 315 is key fobs in the Americas and Japan and
+# nothing in Europe. Turn off the ones your regulator gave to somebody else if
+# you would rather not have `auto` measuring carriers you cannot use.
+
+[ISM 27]
+# RC models, telemetry and CB data, under the amateur 10 m band. Needs a radio
+# that tunes below 24 MHz.
+range = 26.957 - 27.283 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 40]
+# The other RC allocation, plus older sensors and garage doors.
+range = 40.66 - 40.7 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 169]
+# European wireless M-Bus, which is where smart meters report at long range.
+range = 169.4 - 169.475 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 315]
+# Key fobs and tyre pressure sensors in the Americas and Japan.
+range = 314 - 316 MHz
+span  = 250 kHz
+front = auto
+
+[SLP 426]
+# Japan's specified low power band: telemetry, alarms and short range voice.
+range = 426 - 426.1 MHz
+span  = 250 kHz
+front = auto
+
 [ISM 433]
 range = 433.05 - 434.79 MHz
 span  = 250 kHz
 front = auto
 
 [ISM 868]
+# The European short range band, 863 up: LoRaWAN, wireless M-Bus, alarms and
+# most of what a weather sensor here transmits on.
 range = 862 - 876 MHz
 span  = 250 kHz
 front = auto
 
-[ISM 315]
-range = 314 - 316 MHz
+[ISM 915]
+# The American licence-free band. In Europe this is the GSM 900 uplink and in
+# Japan the top of it is the 920 band below, so what runs here is a handset
+# rather than a sensor unless the FCC is your regulator.
+range = 902 - 928 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 920]
+# Japan and much of Region 3, inside the American band above.
+range = 920 - 928 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 2.4]
+# Wi-Fi, Bluetooth, video links and RC. Crowded, wide, and mostly signals far
+# wider than the span a receiver samples, so expect measurements rather than
+# decodes.
+range = 2400 - 2483.5 MHz
+span  = 250 kHz
+front = auto
+
+[ISM 5.8]
+# Wi-Fi and FPV video. Above what most receivers tune, so the block simply
+# never matches on those.
+range = 5725 - 5875 MHz
 span  = 250 kHz
 front = auto
 ";
@@ -765,9 +831,51 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 433", "ISM 868", "ISM 315"
+                "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 27", "ISM 40", "ISM 169",
+                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4",
+                "ISM 5.8"
             ]
         );
+    }
+
+    /// Every licence-free allocation the ribbon draws has a block that scans
+    /// it, in every region. The two tables are the same set seen twice: a
+    /// band named on screen and then not scanned is a receiver that knows
+    /// what it is looking at and does nothing about it.
+    #[test]
+    fn every_ism_band_in_every_plan_has_a_scanner() {
+        use crate::bands::Plan;
+        let s = Scanners::default();
+        for p in Plan::ALL {
+            for b in p.bands().iter().filter(|b| b.is_ism()) {
+                let covered = s.list.iter().any(|sc| {
+                    sc.front == Front::Auto && sc.lo <= b.lo + 1.0 && sc.hi >= b.hi - 1.0
+                });
+                assert!(covered, "{} in {} has no auto block", b.name, p.id());
+            }
+        }
+    }
+
+    /// Tuning into a licence-free band runs `auto` over it and nothing else.
+    #[test]
+    fn the_ism_blocks_run_where_they_belong() {
+        let s = Scanners::default();
+        for hz in [
+            40_680_000.0,
+            169_437_500.0,
+            315_000_000.0,
+            426_050_000.0,
+            433_920_000.0,
+            868_300_000.0,
+            915_000_000.0,
+            2_437_000_000.0,
+            5_800_000_000.0,
+        ] {
+            assert_eq!(kinds(&s.fronts(hz, 2_400_000.0)), [Front::Auto], "nothing runs at {hz}");
+        }
+        // 920 sits inside 902-928, and two auto blocks over bands that meet
+        // are one front end rather than the same sources decoded twice.
+        assert_eq!(kinds(&s.fronts(923_000_000.0, 2_400_000.0)), [Front::Auto]);
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
