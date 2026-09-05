@@ -1897,6 +1897,11 @@ fn run(
                     }
 
                 }
+                // Already keyed. The interface repeats this while the key is
+                // held, because it cannot know the over has started until the
+                // status comes back, and keying twice would open a second
+                // transmitter on a radio that has one.
+                Cmd::Key(Some(_)) if tx_graph.is_some() => {}
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
                     match spec.and_then(|c| c.tx.map(|t| (c, t))) {
