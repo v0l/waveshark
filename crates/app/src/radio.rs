@@ -1981,9 +1981,6 @@ fn run(
                         // waterfall comes back tuned to wherever the channel
                         // transmits, which looks like reception never
                         // resumed at all.
-                        if let Some(s) = sink.as_mut() {
-                            s.set_output(plan.audio.master, plan.audio.muted);
-                        }
                         let want = tuned(plan.center, soft_ppm);
                         if dev.center() != want {
                             if let Err(e) = dev.set_center(want) {
@@ -2028,15 +2025,6 @@ fn run(
                                     tracing::info!("keyed channel {}", ch.id);
                                     tx_graph = Some(g);
                                     status.keyed.store(ch.id, Ordering::Relaxed);
-                                    // Silent while transmitting. The receiver
-                                    // is being shown the transmission so the
-                                    // operator can see it, and a receiver
-                                    // that plays it as well is a radio
-                                    // talking over itself, into a headset,
-                                    // at whatever the modulator produced.
-                                    if let Some(s) = sink.as_mut() {
-                                        s.set_output(plan.audio.master, true);
-                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!("cannot transmit: {e}");
@@ -2672,12 +2660,22 @@ fn run(
             *status.call_heard.lock() = b.last_heard().map(str::to_string);
         }
         if let Some(s) = sink.as_mut() {
+            // Silent while transmitting, whatever the strip says. The
+            // receiver is being shown the transmission so the operator can
+            // see it, and playing it as well is a radio talking over itself:
+            // with desktop audio as the microphone it is worse than that,
+            // because what comes out of the speaker goes back in and is
+            // transmitted again.
+            //
+            // Applied here rather than once at key-up because this line runs
+            // every block and would put the operator's setting straight back.
+            let muted = plan.audio.muted || tx_graph.is_some();
             // The master governs the device, not the mix: anything a stage
             // downstream of the bus adds is under it too, and a mute takes
             // the fifth of a second already queued at the sound card with it.
-            s.set_output(plan.audio.master, plan.audio.muted);
+            s.set_output(plan.audio.master, muted);
             let (out, rate) = rx.audio_out();
-            if plan.audio.muted {
+            if muted {
                 Status::set_level(&status.out_level, 0.0);
                 if !out.is_empty() {
                     // Still written, so the drift loop stays converged and
