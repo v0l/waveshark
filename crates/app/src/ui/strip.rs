@@ -110,8 +110,18 @@ impl Strip<'_> {
                     .max_decimals(2)
                     .suffix(" kHz"),
             );
+            // The marker on the spectrum follows every frame of the drag,
+            // the radio hears about it once at the end. A width change
+            // rebuilds the channel, and rebuilding once per frame for as
+            // long as the control was held threw away the spectrum's
+            // averaging with every frame.
             if r.changed() {
                 ch.bandwidth_hz = Some(khz * 1e3);
+            }
+            let settled = r.drag_stopped()
+                || r.lost_focus()
+                || (r.changed() && !r.dragged() && !r.has_focus());
+            if settled && ch.bandwidth_hz.is_some() {
                 changed = true;
             }
             if ch.bandwidth_hz.is_some() {
