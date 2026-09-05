@@ -137,6 +137,10 @@ enum Role {
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct ChanKey {
     mode: u64,
+    /// The width every filter was designed at. A change to it is a rebuild,
+    /// not a parameter: without this here a width set on the strip was
+    /// applied as a level change and reached nothing.
+    width_bits: u64,
     offset_bits: u64,
     rate_bits: u64,
 }
@@ -145,6 +149,7 @@ impl ChanKey {
     fn new(spec: &ChannelSpec, rate: f64) -> Self {
         Self {
             mode: spec.mode.key(),
+            width_bits: spec.bandwidth().to_bits(),
             offset_bits: spec.offset_hz.to_bits(),
             rate_bits: rate.to_bits(),
         }
@@ -3847,6 +3852,16 @@ mod tests {
 
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
+        // And the running receiver treats the change as one. A width applied
+        // as a parameter, like a squelch level, changed nothing.
+        let mut changed = plan(2_400_000.0, Hz::mhz(145));
+        changed.channels = vec![narrow];
+        assert!(!rx.params_only(&changed), "a width change was taken as a parameter tweak");
+        let mut same = plan(2_400_000.0, Hz::mhz(145));
+        let mut sq = spec.clone();
+        sq.squelch_db = Some(-20.0);
+        same.channels = vec![sq];
+        assert!(rx.params_only(&same), "a squelch change should not rebuild");
     }
 
     #[test]
