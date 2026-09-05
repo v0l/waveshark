@@ -1884,6 +1884,9 @@ fn run(
     let mut tx_gain_db = 0.0f32;
     let mut held: Vec<Cmd> = Vec::new();
     let mut blocks_since_key: u64 = 0;
+    // The channel whose key is down but whose transmitter is still being
+    // built, so the strip is not told it is on air before it is.
+    let mut keying_for: Option<u64> = None;
     // Where the transmitter is, and the mixer that puts it back on the
     // spectrum where it belongs.
     let mut keyed_hz = 0.0f64;
@@ -2008,7 +2011,6 @@ fn run(
                             ) {
                                 Ok((tx_plan, mut sinks)) => {
                                     keyed_hz = tx_plan.on_air.as_f64();
-                                    tracing::info!("keyed channel {}", ch.id);
                                     // The stages are already in the graph, so
                                     // keying hands the transmit stage a radio
                                     // rather than building anything: a
@@ -2016,31 +2018,27 @@ fn run(
                                     // spectrum's averaging twice an over.
                                     let same = plan.tx == Some(tx_plan);
                                     plan.tx = Some(tx_plan);
-                                    let mut stream = sinks.stream.take();
+                                    let mut on_air = false;
                                     if same {
-                                        if let Some(s) = stream.take() {
-                                            // Handed to the stage that is
-                                            // already there.
-                                            if !rx.key(s) {
-                                                // There was no stage to hand
-                                                // it to, and the radio went
-                                                // with the attempt: the
-                                                // rebuild below opens
-                                                // nothing, so say so.
-                                                *status.error.lock() =
-                                                    Some("the transmit chain is not built".into());
-                                            }
+                                        if let Some(s) = sinks.stream.take() {
+                                            on_air = rx.key(s);
                                         }
-                                    } else {
-                                        // The chain in the graph is for
-                                        // another channel: build this one,
-                                        // and the radio goes in as it is
-                                        // built.
-                                        sinks.stream = stream.take();
+                                    }
+                                    if !on_air {
+                                        // Either the chain in the graph is
+                                        // for another channel, or there is no
+                                        // transmit stage yet: build it, with
+                                        // the radio going in as it is built.
                                         rx.set_transmitter(Some(sinks));
                                         rebuild = true;
+                                        // Said only once the radio is
+                                        // actually transmitting, so ON AIR
+                                        // means on air.
+                                        keying_for = Some(ch.id);
+                                    } else {
+                                        tracing::info!("keyed channel {}", ch.id);
+                                        status.keyed.store(ch.id, Ordering::Relaxed);
                                     }
-                                    status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
                                     tracing::warn!("cannot transmit: {e}");
@@ -2348,6 +2346,7 @@ fn run(
                 plan.tx = derive_tx(&plan, status.can_transmit.load(Ordering::Relaxed));
             }
             let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
+            let keying_now = keying_for.take();
             if let Err(e) = rx.rebuild(&plan) {
                 // A patch is drawn wire by wire, so most of the time it is
                 // half a graph, and a type mismatch between two stages is an
@@ -2367,6 +2366,19 @@ fn run(
             } else {
                 // Only a shape that built is worth going back to.
                 last_edits = Some(plan.edits.clone());
+            }
+            // A key that was waiting on this rebuild: the radio went in with
+            // the graph, so this is the moment it is actually on air, or the
+            // moment to say it is not.
+            if let Some(id) = keying_now {
+                if rx.keyed() {
+                    tracing::info!("keyed channel {id}");
+                    status.keyed.store(id, Ordering::Relaxed);
+                } else {
+                    *status.error.lock() =
+                        Some("the transmit chain did not build; nothing is on air".into());
+                    status.keyed.store(0, Ordering::Relaxed);
+                }
             }
             *status.error.lock() = rx.refused.clone();
             // A channel that was rebuilt has lost its RDS state, and its old
