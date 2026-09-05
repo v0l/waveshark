@@ -85,6 +85,15 @@ impl Squelch {
     pub fn set_thresholds(&mut self, open_at: f32, close_at: f32) {
         self.open_at = open_at;
         self.close_at = close_at.min(open_at);
+        // The knob is not a signal wobbling. Hysteresis and hang exist so a
+        // station on the edge does not chatter; an operator who drags the
+        // threshold over the level they can see wants it shut now, and a
+        // squelch that stayed open until they had dragged three decibels
+        // further read as latched.
+        if self.primed && self.open && self.level < self.open_at {
+            self.open = false;
+            self.hang = 0;
+        }
     }
 
     /// The smoothed measurement the decision is made on, in dB.
@@ -209,6 +218,22 @@ pub fn level_db(buf: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dragging the threshold above the level shuts the squelch at once,
+    /// hysteresis and hang notwithstanding: those are for signals, not for
+    /// the operator.
+    #[test]
+    fn moving_the_threshold_over_the_level_closes_it_now() {
+        let mut s = Squelch::new(48_000.0, 5.0, 2.0, 5.0);
+        for _ in 0..100 {
+            s.update(10.0, 4800);
+        }
+        assert!(s.is_open());
+        // One decibel over the level, inside the old hysteresis band.
+        s.set_thresholds(11.0, 8.0);
+        assert!(!s.is_open(), "still open with the threshold above the level");
+        assert!(!s.update(10.0, 4800));
+    }
     use std::f64::consts::TAU;
 
     const RATE: f64 = 48_000.0;

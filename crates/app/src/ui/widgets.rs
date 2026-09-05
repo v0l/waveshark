@@ -196,32 +196,58 @@ impl<'a> Squelch<'a> {
 
 impl Widget for Squelch<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        // The same strip as the volume fader: a well that is the meter, and
+        // an amber handle on it that is what the operator set. Drawn
+        // differently it read as a different kind of control, and it is not.
         let (lo, hi) = self.range;
+        let w = 130.0f32.min(ui.available_width()).max(40.0);
         let (rect, mut resp) =
-            ui.allocate_exact_size(Vec2::new(120.0, 12.0), Sense::click_and_drag());
-        let at = |v: f32| rect.left() + ((v - lo) / (hi - lo)).clamp(0.0, 1.0) * rect.width();
+            ui.allocate_exact_size(Vec2::new(w, FADER_H), Sense::click_and_drag());
+        let (x0, x1) = (rect.left() + GRIP, rect.right() - GRIP);
+        let frac = |v: f32| ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let at = |v: f32| x0 + frac(v) * (x1 - x0);
 
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if resp.dragged() || resp.clicked() {
-                let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                *self.threshold = lo + t * (hi - lo);
-                resp.mark_changed();
+        if resp.dragged() || resp.clicked() {
+            if let Some(p) = ui.ctx().pointer_interact_pos() {
+                let t = ((p.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+                let v = lo + t * (hi - lo);
+                if (v - *self.threshold).abs() > 1e-3 {
+                    *self.threshold = v;
+                    resp.mark_changed();
+                }
             }
+        }
+        if !ui.is_rect_visible(rect) {
+            return resp;
         }
 
         let p = ui.painter();
-        p.rect_filled(rect, 2.0, theme::PANEL);
-        // Coloured by the decision rather than by the level, so a glance says
-        // whether audio is getting through without reading the numbers.
-        p.rect_filled(
-            Rect::from_min_max(rect.min, Pos2::new(at(self.measured), rect.max.y)),
-            2.0,
-            if self.open { theme::TRACE } else { theme::LEGEND },
-        );
+        let well = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H));
+        p.rect_filled(well, 1.0, theme::WELL);
+        p.rect_stroke(well, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+        // The bar is what the squelch is measuring now, coloured by what it
+        // decided: a glance says whether audio is getting through.
+        let end = at(self.measured);
+        if end > well.left() + 1.0 {
+            p.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(well.left() + 1.0, well.top() + 1.0),
+                    Pos2::new(end, well.bottom() - 1.0),
+                ),
+                0.0,
+                if self.open { theme::TRACE } else { theme::LEGEND },
+            );
+        }
         let x = at(*self.threshold);
-        p.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(1.5, theme::VALUE),
+        let handle = Rect::from_center_size(
+            Pos2::new(x, rect.center().y),
+            Vec2::new(GRIP * 2.0, rect.height()),
+        );
+        p.rect_filled(handle, 1.0, theme::CHASSIS);
+        p.rect_filled(
+            handle.shrink(1.0),
+            1.0,
+            if resp.hovered() || resp.dragged() { theme::VALUE } else { theme::READOUT },
         );
         resp
     }
