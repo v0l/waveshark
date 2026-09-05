@@ -374,9 +374,15 @@ impl Device for HackRfDevice {
                 Some(handle) => {
                     self.shared.silent.store(true, std::sync::atomic::Ordering::Relaxed);
                     handle.stop();
-                    // Dropping joins the USB thread, which drops the device
-                    // and releases the claim. Both are needed before the same
-                    // unit can be opened again.
+                    // Drained before it is dropped, and this is not optional:
+                    // dropping joins the USB thread while still holding the
+                    // receiving end of the bounded channel that thread sends
+                    // into. A thread mid-send then waits for a read that will
+                    // never come and the join waits for the thread, so the
+                    // whole receiver stops dead the first time anybody keys
+                    // up. The stop flag is only looked at between transfers,
+                    // so the thread has to be let through its current send.
+                    while handle.recv().is_some() {}
                     drop(handle);
                     true
                 }
