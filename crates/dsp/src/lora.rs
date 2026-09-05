@@ -294,8 +294,15 @@ impl Demod {
         let n = self.n;
         let sym = self.step;
         let mut at = from;
+        // A whole symbol per step. The scan is a dechirp and a transform
+        // per step for each of six spreading factors, and at a quarter
+        // symbol it was the dearest thing running on every wide source. A
+        // preamble is eight or more identical upchirps and any window inside
+        // it dechirps to the tone whether or not it is aligned, so a step
+        // of one symbol cannot pass one by; where the first window to clear
+        // the floor falls is refined below.
         while at + sym <= iq.len() && self.peak(iq, at, true, false).peak_mean < self.cfg.peak_min {
-            at += sym / 4;
+            at += sym;
         }
         // Everything before the rise is quiet, so a later scan over more of
         // the same stream begins here; where the rise ran into the end of

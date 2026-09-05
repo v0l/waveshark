@@ -286,6 +286,11 @@ pub struct ClassifyConfig {
     /// changes is the cost, which on a long strong burst at a wide
     /// extraction rate was 80 to 150 ms in the radio thread. The burst's
     /// length is still reported whole.
+    ///
+    /// 16384: at 250 kS/s that is 65 ms, sixty symbols of the slowest
+    /// sensor, and the corpus classifies the same as it did at four times
+    /// that. On a busy 16 MS/s span classification was the largest single
+    /// cost, a burst at a time on every source, and it scales with this.
     pub max_samples: usize,
     /// FFT size for the spectral features. 1024 is about 30 Hz of resolution
     /// at 31.25 kHz and 500 Hz at 500 kHz, which is finer than any decision
@@ -310,7 +315,7 @@ impl Default for ClassifyConfig {
         Self {
             channel_hz: 0.0,
             min_samples: 256,
-            max_samples: 1 << 16,
+            max_samples: 1 << 14,
             fft_size: 1024,
             min_score: 0.45,
             min_margin: 0.05,
@@ -1595,3 +1600,5 @@ mod tests {
         assert!(c.features.channel_fill > 1.0, "fill came out at {}", c.features.channel_fill);
     }
 }
+
+
