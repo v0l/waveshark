@@ -4131,6 +4131,7 @@ pub fn transmit_graph(
     let modulator: Box<dyn pipeline::Node> = match mode {
         TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
         TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
+        TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
     };
     pipeline::chain(
@@ -4356,6 +4357,42 @@ mod tx_tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("microphone"), "unhelpful: {err}");
+    }
+
+    #[test]
+    fn each_mode_deviates_by_what_that_mode_means() {
+        // The width of an FM transmission is its deviation, and the deviation
+        // is the difference between the modes: 2.5 kHz fits a 12.5 kHz
+        // channel, 75 kHz is broadcast. Mapping wideband onto the 5 kHz
+        // modulator made every WFM transmission a narrowband one, which on a
+        // waterfall is a thin line where a 200 kHz block should be.
+        let rate = 2_000_000.0;
+        for (mode, want) in [
+            (TxMode::Nfm, nodes::NBFM_DEVIATION_HZ),
+            (TxMode::Fm, nodes::FM_DEVIATION_HZ),
+            (TxMode::Wfm, nodes::WBFM_DEVIATION_HZ),
+        ] {
+            let iq = transmit(TxSpec { tone_hz: 1_000.0, ..Default::default() }, mode, rate, 1);
+            // Peak deviation, averaged over 200 sample windows: the capture
+            // is eight bit, so a single phase step is dominated by
+            // quantisation and reads several kilohertz whatever was sent.
+            let peak = iq[1_000..]
+                .chunks(200)
+                .map(|c| {
+                    let turns: f64 =
+                        c.windows(2).map(|w| (w[1] * w[0].conj()).arg() as f64).sum();
+                    (turns / (c.len() - 1) as f64 / std::f64::consts::TAU * rate).abs()
+                })
+                .fold(0.0f64, f64::max);
+            // The tone is 0.8 of full scale, so it deviates by 0.8 of what
+            // the mode allows: full deviation is what full scale audio does.
+            let want = want * 0.8;
+            assert!(
+                (peak - want).abs() < want * 0.15,
+                "{} deviated {peak:.0} Hz, expected {want:.0}",
+                mode.label()
+            );
+        }
     }
 
     #[test]
