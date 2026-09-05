@@ -2722,6 +2722,7 @@ dependencies = [
  "poll-promise",
  "rayon",
  "sources",
+ "tracing",
 ]
 
 [[package]]

@@ -921,6 +921,14 @@ fn main() -> eframe::Result<()> {
         use tracing_subscriber::prelude::*;
         prof::enable();
         tracing_subscriber::registry().with(prof::Timing).init();
+    } else if std::env::var_os("RUST_LOG").is_some() {
+        // The window build logs nothing by default, which is right: the
+        // interface is where things are said. With RUST_LOG set it should
+        // still be possible to see what the radio thread is doing, and
+        // without this every tracing call in the receiver went nowhere.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
     }
 
     // Started before the window: on a warm cache the airports are parsed

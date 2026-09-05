@@ -272,7 +272,12 @@ impl Strip<'_> {
                     .color(if keyed_here { theme::PANEL } else { theme::READOUT }),
             )
             .fill(if keyed_here { theme::READOUT } else { theme::PANEL })
-            .min_size(Vec2::new(VU_W, 26.0)),
+            .min_size(Vec2::new(VU_W, 26.0))
+            // Dragging, not clicking. A button that only senses clicks
+            // reports the press and then stops tracking the pointer, so a key
+            // held down came back up on its own after a frame or two: the
+            // carrier lasted as long as it took the queue to drain.
+            .sense(Sense::click_and_drag()),
         );
         // Held, not toggled: released, lost focus and the pointer leaving all
         // drop the carrier.

@@ -398,8 +398,15 @@ impl Simple for TxSinkNode {
             Ok(()) => self.written += iq.len() as u64,
             // The radio going away must not take the graph down with it: a
             // receiver that keeps running is more useful than one that exits
-            // because a transmission could not finish.
-            Err(_) => self.failed += 1,
+            // because a transmission could not finish. Said once, because a
+            // transmitter that has stopped taking samples will refuse every
+            // block from here on and the first refusal is the news.
+            Err(e) => {
+                if self.failed == 0 {
+                    tracing::warn!("the radio stopped taking samples mid-transmission: {e}");
+                }
+                self.failed += 1;
+            }
         }
         Ok(())
     }
