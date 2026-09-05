@@ -72,6 +72,36 @@ pub struct Shared {
     silent: std::sync::atomic::AtomicBool,
     /// Which unit to reopen: the same one, by the index it was opened at.
     index: usize,
+    /// What the receiver should be set to, for whatever reopens the radio:
+    /// the transmit stream when an over ends, and the watchdog when the
+    /// hardware stops producing samples.
+    want: parking_lot::Mutex<Wanted>,
+}
+
+/// The receive settings to restore on a reopen.
+#[derive(Clone, Copy, Debug)]
+struct Wanted {
+    center: Hz,
+    rate: Sps,
+    stages: gain::Stages,
+}
+
+/// Open the unit again and put it back to work receiving.
+fn reopen_rx(index: usize, want: Wanted) -> Result<AsyncReadHandle> {
+    let d = HackRf::open_by_index(index).map_err(map_err)?;
+    d.set_sample_rate(want.rate.0 as u32).map_err(map_err)?;
+    let bw = hackrf_usb::transport::compute_baseband_filter_bw((want.rate.0 as u32) * 3 / 4);
+    d.set_baseband_filter_bandwidth(bw).map_err(map_err)?;
+    d.set_freq(want.center.0).map_err(map_err)?;
+    let handle = d.into_streaming_reader(0, 0).map_err(map_err)?;
+    // Entering receive mode re-initialises the front end, so tuning and gain
+    // are set again through the running stream rather than before it.
+    let c = handle.control_handle();
+    c.tune(want.center.0).map_err(map_err)?;
+    c.set_amp_enable(want.stages.amp).map_err(map_err)?;
+    c.set_lna_gain(want.stages.lna).map_err(map_err)?;
+    c.set_vga_gain(want.stages.vga).map_err(map_err)?;
+    Ok(handle)
 }
 
 impl Shared {
@@ -192,6 +222,11 @@ impl HackRfDevice {
                 tx: parking_lot::Mutex::new(None),
                 silent: std::sync::atomic::AtomicBool::new(false),
                 index,
+                want: parking_lot::Mutex::new(Wanted {
+                    center: Hz(100_000_000),
+                    rate: Sps(8_000_000),
+                    stages: gain::Stages::from_total(32.0),
+                }),
             }),
             index,
         };
@@ -239,6 +274,7 @@ impl HackRfDevice {
     }
 
     fn apply_gain(&self) -> Result<()> {
+        self.shared.want.lock().stages = self.stages;
         let gain::Stages { amp, lna, vga } = self.stages;
         if let Some(c) = self.ctl() {
             c.set_amp_enable(amp).map_err(map_err)?;
@@ -277,6 +313,7 @@ impl Device for HackRfDevice {
             None => self.hw()?.set_freq(f.0).map_err(map_err)?,
         }
         self.center = f;
+        self.shared.want.lock().center = f;
         Ok(())
     }
 
@@ -295,6 +332,7 @@ impl Device for HackRfDevice {
         let bw = hackrf_usb::transport::compute_baseband_filter_bw((r.0 as u32) * 3 / 4);
         d.set_baseband_filter_bandwidth(bw).map_err(map_err)?;
         self.rate = r;
+        self.shared.want.lock().rate = r;
         Ok(())
     }
 
@@ -417,7 +455,6 @@ impl Device for HackRfDevice {
             bytes: Vec::new(),
             shared: self.shared.clone(),
             restore_rx: was_rx,
-            gains: self.stages,
         }))
     }
 
@@ -442,6 +479,8 @@ impl Device for HackRfDevice {
             samples: Vec::new(),
             noise: 0x9E37_79B9_7F4A_7C15,
             silence_at: None,
+            last_real: std::time::Instant::now(),
+            attempts: 0,
         }))
     }
 }
@@ -458,8 +497,6 @@ pub struct HackRfTxStream {
     /// Whether a receive stream was running when this one started, and so
     /// whether one has to be running again when it finishes.
     restore_rx: bool,
-    /// The receive gains to put back, since reopening the radio resets them.
-    gains: gain::Stages,
 }
 
 impl HackRfTxStream {
@@ -482,27 +519,16 @@ impl HackRfTxStream {
         // The writer's thread has to have let go of the device before the
         // same unit can be opened again.
         std::thread::sleep(Duration::from_millis(150));
-        let opened = HackRf::open_by_index(self.shared.index).and_then(|d| {
-            d.set_sample_rate(self.rate.0 as u32)?;
-            d.set_freq(self.center.0)?;
-            d.set_amp_enable(self.gains.amp)?;
-            d.set_lna_gain(self.gains.lna)?;
-            d.set_vga_gain(self.gains.vga)?;
-            d.into_streaming_reader(0, 0)
-        });
-        match opened {
+        let want = *self.shared.want.lock();
+        match reopen_rx(self.shared.index, want) {
             Ok(handle) => {
-                let _ = handle.control_handle().tune(self.center.0);
-                let _ = handle.control_handle().set_amp_enable(self.gains.amp);
-                let _ = handle.control_handle().set_lna_gain(self.gains.lna);
-                let _ = handle.control_handle().set_vga_gain(self.gains.vga);
                 *self.shared.rx.lock() = Some(handle);
                 self.shared.silent.store(false, std::sync::atomic::Ordering::Relaxed);
             }
-            // The radio did not come back. Reads keep producing a noise floor
-            // rather than failing, which is a receiver showing nothing on a
-            // dead band: wrong, but the alternative is the whole graph
-            // collapsing because a transmission ended badly.
+            // The radio did not come back here. Reads keep producing a noise
+            // floor rather than failing, and the watchdog on the read side
+            // will try again: the alternative is the whole graph collapsing
+            // because a transmission ended badly.
             Err(e) => tracing::warn!("HackRF did not return to receive: {e}"),
         }
     }
@@ -577,6 +603,11 @@ pub struct HackRfStream {
     /// When the current run of silence started producing, so it is paced to
     /// the sample rate rather than run as fast as the caller asks.
     silence_at: Option<std::time::Instant>,
+    /// When a real block last arrived, which is what the watchdog measures
+    /// against.
+    last_real: std::time::Instant,
+    /// Restarts tried since the last real block.
+    attempts: u32,
 }
 
 impl HackRfStream {
@@ -629,10 +660,77 @@ fn decode(bytes: &[u8], out: &mut Vec<C32>) {
     }
 }
 
+/// How long a receiver may produce nothing, or nothing but zeros, before the
+/// driver decides the radio has stopped and restarts it.
+///
+/// A HackRF that has just transmitted sometimes comes back streaming zeros:
+/// the USB transfers keep arriving and every sample in them is the same
+/// value, which is a converter that is not running. Nothing above the driver
+/// can tell that from a very quiet band, and it is the driver that knows the
+/// difference between a floor and a flatline.
+const DEAD_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Reopens tried before the board is reset over USB.
+///
+/// A reset makes the radio drop off the bus and come back a second or two
+/// later, which is disruptive enough to be a last resort rather than a first
+/// response.
+const REOPENS_BEFORE_RESET: u32 = 2;
+
+impl HackRfStream {
+    /// Whether a block is a real one or the converter standing still.
+    fn is_flatline(samples: &[C32]) -> bool {
+        match samples.first() {
+            None => true,
+            Some(first) => samples.iter().all(|c| c == first),
+        }
+    }
+
+    /// Put the radio back to work after it has stopped producing.
+    ///
+    /// Reopening is enough for a board that is merely wedged in the wrong
+    /// transceiver mode. A board that will not come back that way is reset
+    /// over USB, which re-enumerates it, and then reopened once it is back.
+    fn revive(&mut self, why: &str) {
+        self.attempts += 1;
+        tracing::warn!("HackRF {why}; restarting the receiver (attempt {})", self.attempts);
+        if let Some(h) = self.shared.rx.lock().take() {
+            h.stop();
+            // Drained before dropping, or the join waits on a send nobody
+            // will read. See the note on this stream's own Drop.
+            while h.recv().is_some() {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        if self.attempts > REOPENS_BEFORE_RESET {
+            if let Ok(d) = HackRf::open_by_index(self.shared.index) {
+                let _ = d.reset();
+                drop(d);
+            }
+            // It has to finish enumerating before it can be opened again.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+
+        let want = *self.shared.want.lock();
+        match reopen_rx(self.shared.index, want) {
+            Ok(h) => {
+                *self.shared.rx.lock() = Some(h);
+                self.last_real = std::time::Instant::now();
+                tracing::info!("HackRF receiving again at {}", want.center);
+            }
+            Err(e) => tracing::warn!("HackRF did not reopen: {e}"),
+        }
+    }
+}
+
 impl RxStream for HackRfStream {
     fn read(&mut self) -> Result<IqBuf> {
         loop {
             if self.shared.is_silent() {
+                // Transmitting: the radio is deaf by design, and the clock
+                // for the watchdog starts again when it comes back.
+                self.last_real = std::time::Instant::now();
+                self.attempts = 0;
                 return Ok(self.silence());
             }
             self.silence_at = None;
@@ -643,13 +741,23 @@ impl RxStream for HackRfStream {
             let got = {
                 let slot = self.shared.rx.lock();
                 match slot.as_ref() {
-                    Some(h) => h.try_recv(),
-                    None => None,
+                    Some(h) => h.recv_state(),
+                    None => hackrf_usb::RecvState::Empty,
                 }
             };
             match got {
-                Some(Ok(chunk)) => {
+                hackrf_usb::RecvState::Data(chunk) => {
                     decode(&chunk, &mut self.samples);
+                    // A transfer of identical samples is a converter that has
+                    // stopped, which is what a HackRF does after some overs.
+                    if Self::is_flatline(&self.samples) {
+                        if self.last_real.elapsed() > DEAD_AFTER {
+                            self.revive("is delivering nothing but flat samples");
+                        }
+                        continue;
+                    }
+                    self.last_real = std::time::Instant::now();
+                    self.attempts = 0;
                     let n = self.samples.len() as u64;
                     let buf = IqBuf::new(
                         std::mem::take(&mut self.samples),
@@ -660,11 +768,26 @@ impl RxStream for HackRfStream {
                     self.seq += n;
                     return Ok(buf);
                 }
-                Some(Err(e)) => return Err(map_err(e)),
-                // Nothing yet, or no reader at all. The second case is the
-                // moment an over is being set up, and is silence rather than
-                // a disconnection.
-                None => std::thread::sleep(std::time::Duration::from_millis(1)),
+                hackrf_usb::RecvState::Failed(e) => return Err(map_err(e)),
+                // The streaming thread has gone. That is the radio being
+                // unplugged or reset by hand, and it is worth one attempt to
+                // get it back before the receiver above is told.
+                hackrf_usb::RecvState::Closed => {
+                    if self.attempts >= REOPENS_BEFORE_RESET + 1 {
+                        return Err(Error::Disconnected);
+                    }
+                    self.revive("stopped streaming");
+                }
+                hackrf_usb::RecvState::Empty => {
+                    if self.last_real.elapsed() > DEAD_AFTER {
+                        if self.attempts >= REOPENS_BEFORE_RESET + 1 {
+                            return Err(Error::Disconnected);
+                        }
+                        self.revive("has sent nothing");
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
         }
     }
@@ -769,6 +892,11 @@ mod tests {
             tx: parking_lot::Mutex::new(None),
             silent: std::sync::atomic::AtomicBool::new(true),
             index: 0,
+            want: parking_lot::Mutex::new(Wanted {
+                center: Hz(433_920_000),
+                rate: Sps(2_000_000),
+                stages: gain::Stages::from_total(32.0),
+            }),
         });
         let mut st = HackRfStream {
             shared,
@@ -779,6 +907,8 @@ mod tests {
             samples: Vec::new(),
             noise: 0x9E37_79B9_7F4A_7C15,
             silence_at: None,
+            last_real: std::time::Instant::now(),
+            attempts: 0,
         };
         assert!(st.is_silent());
         let a = st.silence();
@@ -810,6 +940,11 @@ mod tests {
             tx: parking_lot::Mutex::new(None),
             silent: std::sync::atomic::AtomicBool::new(true),
             index: 0,
+            want: parking_lot::Mutex::new(Wanted {
+                center: Hz(433_920_000),
+                rate: Sps(2_000_000),
+                stages: gain::Stages::from_total(32.0),
+            }),
         });
         let mut st = HackRfStream {
             shared,
@@ -820,6 +955,8 @@ mod tests {
             samples: Vec::new(),
             noise: 1,
             silence_at: None,
+            last_real: std::time::Instant::now(),
+            attempts: 0,
         };
         let t = std::time::Instant::now();
         for _ in 0..5 {
@@ -834,5 +971,26 @@ mod tests {
     fn serials_shorten_to_the_part_that_identifies_the_unit() {
         assert_eq!(short_serial("0000000000000000457863dc3579c1df"), "3579c1df");
         assert_eq!(short_serial("abc"), "abc");
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn a_transfer_of_identical_samples_is_a_stopped_converter() {
+        // What a HackRF hands over after some transmissions: the USB keeps
+        // delivering and every sample in the block is the same value. A very
+        // quiet band is not that, because noise is never one number.
+        let flat = vec![C32::new(0.0, 0.0); 1024];
+        assert!(HackRfStream::is_flatline(&flat));
+        let stuck = vec![C32::new(0.5, -0.25); 1024];
+        assert!(HackRfStream::is_flatline(&stuck), "a held value is a flatline too");
+
+        let mut noise = flat.clone();
+        noise[512] = C32::new(1.0 / 128.0, 0.0);
+        assert!(!HackRfStream::is_flatline(&noise), "one bit of movement is a live converter");
+        assert!(HackRfStream::is_flatline(&[]), "an empty block carries no evidence of life");
     }
 }

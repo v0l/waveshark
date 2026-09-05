@@ -70,6 +70,17 @@ pub struct AsyncReadHandle {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+/// What a non-blocking read of a stream found.
+pub enum RecvState {
+    Data(Vec<u8>),
+    /// Nothing yet; the next transfer has not landed.
+    Empty,
+    /// The transfer failed.
+    Failed(Error),
+    /// The streaming thread has exited: the radio is gone, or was stopped.
+    Closed,
+}
+
 /// Clonable handle for sending control commands to an active streaming session.
 ///
 /// Obtained from [`AsyncReadHandle::control_handle()`].
@@ -92,6 +103,21 @@ impl AsyncReadHandle {
     /// Try to receive the next chunk without blocking.
     pub fn try_recv(&self) -> Option<Result<Vec<u8>>> {
         self.rx.try_recv().ok()
+    }
+
+    /// The same, but saying which kind of nothing it got.
+    ///
+    /// A caller polling for samples has to tell "the next transfer has not
+    /// landed yet" from "the streaming thread has gone", and
+    /// [`Self::try_recv`] returns `None` for both. A receiver that cannot
+    /// tell them apart polls a dead radio forever.
+    pub fn recv_state(&self) -> RecvState {
+        match self.rx.try_recv() {
+            Ok(Ok(chunk)) => RecvState::Data(chunk),
+            Ok(Err(e)) => RecvState::Failed(e),
+            Err(mpsc::TryRecvError::Empty) => RecvState::Empty,
+            Err(mpsc::TryRecvError::Disconnected) => RecvState::Closed,
+        }
     }
 
     /// Get a clonable control handle for sending commands to the streaming thread.
@@ -200,6 +226,9 @@ enum VendorRequest {
     SetTxvgaGain = 21,
     /// Enable/disable bias tee / antenna power (wValue = 0 or 1).
     AntennaEnable = 23,
+    /// Reset the device. It re-enumerates afterwards, so everything holding
+    /// it has to reopen.
+    Reset = 30,
     /// Read board hardware revision (1 byte). Requires USB API >= 0x0106.
     BoardRevRead = 45,
     /// Read supported platform bitfield (4 bytes, big-endian). Requires USB API >= 0x0106.
@@ -791,6 +820,24 @@ impl HackRf {
     }
 
     // ─── Streaming ────────────────────────────────────────────────────────
+
+    /// Reset the board, as `hackrf_reset()` does.
+    ///
+    /// The last resort for a radio that has stopped producing samples: it
+    /// drops off the bus and comes back a second or two later, so every
+    /// handle to it is dead afterwards and the caller has to reopen. The
+    /// device usually does not acknowledge the request before it goes, so a
+    /// transfer error here is the normal case rather than a failure.
+    pub fn reset(&self) -> Result<()> {
+        let r = self.control_out(VendorRequest::Reset, 0, 0, &[]);
+        tracing::info!("HackRF reset requested");
+        match r {
+            Ok(()) => Ok(()),
+            // It went before it could answer, which is what was asked for.
+            Err(Error::ControlTransfer(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 
     /// Set the transceiver mode.
     ///
