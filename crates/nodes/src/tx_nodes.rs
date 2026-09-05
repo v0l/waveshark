@@ -404,3 +404,236 @@ impl Simple for TxSinkNode {
         Ok(())
     }
 }
+
+/// Speech, resampled to whatever rate the radio is running at.
+///
+/// The microphone is not read by the radio thread and handed to the graph: it
+/// is a node, so what goes on air is visible in the chain and can be tapped
+/// between the microphone and the modulator. What it holds is an
+/// [`audio::AudioSource`], which is the microphone in normal use and a known
+/// waveform in a test.
+///
+/// The resampling is Catmull-Rom over the source's samples. A radio's rate is
+/// hundreds of times the microphone's, so this is heavy interpolation rather
+/// than a small ratio change: at 48 kHz in and 2 MS/s out, the images of a
+/// 3 kHz tone land near 45 kHz, which cubic interpolation leaves about 70 dB
+/// down and linear leaves about 48 dB down. A polyphase filter would do
+/// better and costs a multiply-accumulate per output sample, which at 2 MS/s
+/// is the expensive place to spend one.
+pub struct MicNode {
+    src: std::sync::Arc<dyn audio::AudioSource>,
+    level: f32,
+    /// Output rate, from negotiation.
+    rate: f64,
+    /// Position between source samples, in source samples.
+    phase: f64,
+    /// The four samples the interpolator reads, oldest first.
+    window: [f32; 4],
+    /// Source samples not yet consumed.
+    pending: std::collections::VecDeque<f32>,
+    /// Output samples produced with nothing to produce them from, which is
+    /// the microphone not keeping up.
+    starved: u64,
+}
+
+impl MicNode {
+    pub fn new(src: std::sync::Arc<dyn audio::AudioSource>, level: f32) -> Self {
+        Self {
+            src,
+            level: level.clamp(0.0, 4.0),
+            rate: 0.0,
+            phase: 0.0,
+            window: [0.0; 4],
+            pending: std::collections::VecDeque::new(),
+            starved: 0,
+        }
+    }
+
+    /// Output samples that had no speech behind them.
+    pub fn starved(&self) -> u64 {
+        self.starved
+    }
+
+    fn next_source(&mut self) -> bool {
+        match self.pending.pop_front() {
+            Some(v) => {
+                self.window = [self.window[1], self.window[2], self.window[3], v];
+                true
+            }
+            None => {
+                // Silence rather than the last sample held: a held sample is
+                // a DC offset, and on an FM carrier that is a steady
+                // deviation for as long as the microphone is behind.
+                self.window = [self.window[1], self.window[2], self.window[3], 0.0];
+                self.starved += 1;
+                false
+            }
+        }
+    }
+}
+
+/// Catmull-Rom through four points, at `t` in [0, 1] between the middle two.
+fn cubic(p: [f32; 4], t: f32) -> f32 {
+    let (a, b, c, d) = (p[0], p[1], p[2], p[3]);
+    0.5 * ((2.0 * b)
+        + (-a + c) * t
+        + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
+        + (-a + 3.0 * b - 3.0 * c + d) * t * t * t)
+}
+
+impl Simple for MicNode {
+    fn name(&self) -> &str {
+        "mic"
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Real {
+            return Err(common::Error::other("mic runs on a real audio stream"));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("mic needs the rate it should produce at"));
+        }
+        if self.src.rate() <= 0.0 {
+            return Err(common::Error::other("the microphone reports no sample rate"));
+        }
+        self.rate = input.spec.rate;
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(audio) = input.as_real() else { return Ok(()) };
+        let n = audio.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let step = self.src.rate() / self.rate;
+        // What this block needs, plus the interpolator's own lookahead.
+        let want = (n as f64 * step).ceil() as usize + 4;
+        self.pending.reserve(want);
+        let mut got = Vec::with_capacity(want);
+        self.src.take(&mut got, want.saturating_sub(self.pending.len()));
+        self.pending.extend(got);
+
+        let out = output.real_mut();
+        out.reserve(n);
+        for &passthrough in audio {
+            while self.phase >= 1.0 {
+                self.next_source();
+                self.phase -= 1.0;
+            }
+            let v = cubic(self.window, self.phase as f32) * self.level;
+            out.push(passthrough + v.clamp(-1.0, 1.0));
+            self.phase += step;
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.window = [0.0; 4];
+        self.pending.clear();
+        self.starved = 0;
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![Param::float("level", self.level as f64, 0.0..=4.0)
+            .label("Mic gain")
+            .unit("x")]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            "level" => {
+                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, 4.0) as f32;
+                Ok(())
+            }
+            _ => Err(common::Error::other(format!("mic: unknown parameter {name:?}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod mic_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn spec(rate: f64) -> StreamSpec {
+        StreamSpec {
+            kind: PortKind::Real,
+            rate,
+            center: common::Hz(145_500_000),
+            bandwidth: 6_000.0,
+            flow: Flow::Tx,
+            ..Default::default()
+        }
+    }
+
+    fn run(node: &mut MicNode, rate: f64, n: usize) -> Vec<f32> {
+        let s = spec(rate);
+        Simple::negotiate(node, &PortSpec { spec: s, latency: 0 }).unwrap();
+        let input = Payload::Real(vec![0.0; n]);
+        let mut out = Payload::Real(Vec::new());
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let ins = [PortSpec { spec: s, latency: 0 }];
+        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Simple::process(node, &input, &mut out, &mut ctx).unwrap();
+        match out {
+            Payload::Real(v) => v,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn speech_comes_out_at_the_rate_the_radio_wants_and_the_pitch_it_went_in_at() {
+        // 48 kHz in, 480 kHz out: ten times, which is the shape of the real
+        // ratio without the test taking a second to run.
+        let mic_rate = 48_000.0;
+        let out_rate = 480_000.0;
+        let tone: Vec<f32> = (0..48_000)
+            .map(|i| (std::f32::consts::TAU * 1_000.0 * i as f32 / mic_rate as f32).sin())
+            .collect();
+        let src = Arc::new(audio::Canned::new(tone, mic_rate, true));
+        let mut node = MicNode::new(src, 1.0);
+        let out = run(&mut node, out_rate, 48_000);
+
+        assert_eq!(out.len(), 48_000);
+        assert_eq!(node.starved(), 0, "the source had plenty and was read short");
+        // Pitch, by zero crossings past the interpolator's first few samples.
+        let seg = &out[100..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        // The block is a tenth of a second, so one crossing either way is
+        // 10 Hz: this asserts the pitch is unchanged, not that the estimator
+        // is precise.
+        let hz = crossings as f64 * out_rate / seg.len() as f64;
+        assert!((hz - 1_000.0).abs() < 15.0, "1 kHz came out at {hz:.0} Hz");
+        let peak = seg.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 1.0).abs() < 0.05, "level changed on the way through: {peak}");
+    }
+
+    #[test]
+    fn a_microphone_that_falls_behind_transmits_silence_not_a_held_sample() {
+        // A held sample is a DC offset, and on an FM carrier that is a steady
+        // deviation for as long as the microphone is behind: a tone off
+        // frequency rather than a gap.
+        let src = Arc::new(audio::Canned::new(vec![1.0; 100], 48_000.0, false));
+        let mut node = MicNode::new(src, 1.0);
+        let out = run(&mut node, 48_000.0, 4_000);
+        assert!(node.starved() > 0, "the source ran out and nothing noticed");
+        let tail = &out[out.len() - 500..];
+        assert!(tail.iter().all(|v| v.abs() < 1e-6), "the tail is not silent");
+    }
+
+    #[test]
+    fn the_level_control_scales_what_goes_on_air() {
+        let src = Arc::new(audio::Canned::new(vec![0.5; 4_000], 48_000.0, true));
+        let mut node = MicNode::new(src, 2.0);
+        let out = run(&mut node, 48_000.0, 1_000);
+        let peak = out[100..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 1.0).abs() < 0.01, "0.5 at twice gain came out at {peak}");
+    }
+}

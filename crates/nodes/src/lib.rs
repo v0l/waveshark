@@ -48,7 +48,7 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MorseKeyNode, MorseTxNode, ToneNode, TxSinkNode};
+pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxSinkNode};
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
     NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,

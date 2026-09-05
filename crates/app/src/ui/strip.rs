@@ -1,7 +1,7 @@
 //! The channel strip: every level that reaches the speaker, and the controls
 //! that belong to one channel rather than to the receiver.
 
-use crate::radio::TxMode;
+use crate::radio::{TxMode, TxSource};
 use super::state::AudioState;
 use super::*;
 use crate::audiobus::AudioBusNode;
@@ -158,6 +158,20 @@ impl Strip<'_> {
         let Some(tx) = ch.tx.as_mut() else { return changed };
 
         ui.horizontal(|ui| {
+            theme::Line::new().legend("src").show(ui);
+            for src in [TxSource::Mic, TxSource::Tone] {
+                if ui.selectable_label(tx.source == src, src.label()).clicked() {
+                    tx.source = src;
+                    changed = true;
+                }
+            }
+            if tx.source == TxSource::Mic {
+                // Said plainly, because the microphone opens on key-up and
+                // an operator should know when the room is on air.
+                theme::Line::new().note("open while keyed").show(ui);
+            }
+        });
+        ui.horizontal(|ui| {
             for m in [TxMode::Nfm, TxMode::Fm, TxMode::Am, TxMode::Carrier] {
                 if ui.selectable_label(tx.mode == m, m.label()).clicked() {
                     tx.mode = m;
@@ -182,7 +196,7 @@ impl Strip<'_> {
                 .size(11.0)
                 .show(ui);
         });
-        if tx.mode != TxMode::Carrier {
+        if tx.mode != TxMode::Carrier && tx.source == TxSource::Tone {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("tone").show(ui);
                 let mut hz = tx.tone_hz;
