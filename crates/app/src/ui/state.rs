@@ -29,6 +29,8 @@ pub struct Channel {
     pub(super) freq: f64,
     /// What it does with that frequency: play it, or decode it.
     pub(super) mode: ChanMode,
+    /// The channel's width, or None for whatever the mode asks for.
+    pub(super) bandwidth_hz: Option<f64>,
     pub(super) label: String,
     /// Whether this channel is being demodulated into the mix.
     pub(super) on: bool,
@@ -42,6 +44,14 @@ pub struct Channel {
     /// What this channel transmits when it is keyed, or `None` for a channel
     /// that only listens. Every channel starts that way.
     pub(super) tx: Option<crate::radio::TxSpec>,
+}
+
+impl Channel {
+    /// The width this channel is really built at, which is what the marker on
+    /// the spectrum has to be drawn from as well.
+    pub(super) fn bandwidth(&self) -> f64 {
+        self.bandwidth_hz.filter(|b| *b >= 100.0).unwrap_or_else(|| self.mode.bandwidth())
+    }
 }
 
 /// The spectrum and the waterfall: what is being drawn, and how.

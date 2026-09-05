@@ -25,13 +25,28 @@ use std::sync::{
 pub enum ChanMode {
     Audio(Demod),
     Decode(String),
+    /// The auto front end over a band of the operator's choosing, rather than
+    /// over the one a scanner block was written about.
+    ///
+    /// The same node the scanner table places, put where somebody points
+    /// instead: it finds what transmits inside the channel's width, measures
+    /// each source and gives it the decoder that reads it. A band worth
+    /// watching that no block covers is then a channel, not a config file
+    /// edit and a restart.
+    Auto,
 }
+
+/// What an auto channel watches until its width is set by hand. Wide enough
+/// to hold a handful of narrowband transmitters, narrow enough that the
+/// detector's resolution over it is still a few hundred hertz.
+pub const AUTO_CHANNEL_HZ: f64 = 200_000.0;
 
 impl ChanMode {
     pub fn label(&self) -> String {
         match self {
             ChanMode::Audio(d) => d.label().to_string(),
             ChanMode::Decode(kind) => crate::chain::front_label(kind),
+            ChanMode::Auto => "AUTO".into(),
         }
     }
 
@@ -39,33 +54,43 @@ impl ChanMode {
     pub fn demod(&self) -> Option<Demod> {
         match self {
             ChanMode::Audio(d) => Some(*d),
-            ChanMode::Decode(_) => None,
+            ChanMode::Decode(_) | ChanMode::Auto => None,
         }
     }
 
+    /// Whether this channel is a front end rather than something played: its
+    /// packets belong on the bus, and it is heard only if what it found has
+    /// speech in it.
     pub fn is_decode(&self) -> bool {
-        matches!(self, ChanMode::Decode(_))
+        matches!(self, ChanMode::Decode(_) | ChanMode::Auto)
     }
 
     /// Occupied bandwidth, two-sided: what the channel covers on the
     /// spectrum, and what a filter in front of it has to pass.
+    ///
+    /// This is the mode's own width. What a channel actually uses is
+    /// [`ChannelSpec::bandwidth`], which is this unless the operator set one.
     pub fn bandwidth(&self) -> f64 {
         match self {
             ChanMode::Audio(d) => d.bandwidth(),
             ChanMode::Decode(kind) => crate::chain::front_width(kind).unwrap_or(12_500.0),
+            ChanMode::Auto => AUTO_CHANNEL_HZ,
         }
     }
 
-    /// The least span this channel can be built in.
-    pub fn min_rate(&self) -> f64 {
+    /// The least span this channel can be built in, at a given width.
+    pub fn min_rate_for(&self, bandwidth: f64) -> f64 {
         match self {
-            ChanMode::Audio(d) => d.if_rate(),
+            // Room for the channel filter's transition band, and never below
+            // the rate the demodulator was designed at.
+            ChanMode::Audio(d) => d.if_rate().max(bandwidth * IF_HEADROOM),
             // The front end mixes and decimates its own channel out of
             // whatever it is handed, so what it needs is a stream that holds
             // the channel at all.
-            ChanMode::Decode(_) => self.bandwidth() * 2.0,
+            ChanMode::Decode(_) | ChanMode::Auto => bandwidth * 2.0,
         }
     }
+
 
     /// A number a stage id can be keyed on, so a channel that changed mode is
     /// not the same channel and does not reuse filters designed for the old
@@ -76,10 +101,16 @@ impl ChanMode {
         match self {
             ChanMode::Audio(d) => (0u8, *d as u8).hash(&mut h),
             ChanMode::Decode(kind) => (1u8, kind).hash(&mut h),
+            ChanMode::Auto => 2u8.hash(&mut h),
         }
         h.finish()
     }
 }
+
+/// How far above a channel's own width its IF has to run. Decimating to the
+/// width itself leaves the filter no transition band, which is the same
+/// reason [`Demod::if_rate`] sits where it does.
+pub const IF_HEADROOM: f64 = 1.25;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Demod {
@@ -617,6 +648,14 @@ pub struct ChannelSpec {
     pub offset_hz: f64,
     /// What it does with that frequency: play it, or decode it.
     pub mode: ChanMode,
+    /// The channel's width, or `None` for whatever the mode asks for.
+    ///
+    /// Set by hand when the mode's width is the wrong one: a 25 kHz repeater
+    /// clipped by a 12.5 kHz filter, a crowded SSB channel that wants 2.4
+    /// rather than 3 kHz, or an auto channel told to watch a band the
+    /// operator picked off the spectrum rather than one a scanner block was
+    /// written about.
+    pub bandwidth_hz: Option<f64>,
     pub volume: f32,
     pub muted: bool,
     /// None leaves the mode's own default.
@@ -630,6 +669,20 @@ pub struct ChannelSpec {
     /// input, and two entries kept in step by hand is how an operator ends up
     /// transmitting on the wrong half of the pair.
     pub tx: Option<TxSpec>,
+}
+
+impl ChannelSpec {
+    /// The width this channel is really built at.
+    pub fn bandwidth(&self) -> f64 {
+        // A width below a hundred hertz is a mis-set control rather than a
+        // channel, and it would design a filter with thousands of taps.
+        self.bandwidth_hz.filter(|b| *b >= 100.0).unwrap_or_else(|| self.mode.bandwidth())
+    }
+
+    /// The least span this channel can be built in, at its own width.
+    pub fn min_rate(&self) -> f64 {
+        self.mode.min_rate_for(self.bandwidth())
+    }
 }
 
 /// What a channel puts on the air when it is keyed.
@@ -723,6 +776,7 @@ pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
         ChanMode::Audio(Demod::Am) => Some(TxMode::Am),
         ChanMode::Audio(Demod::Cw) => Some(TxMode::Carrier),
         ChanMode::Audio(Demod::Usb | Demod::Lsb) => None,
+        ChanMode::Auto => None,
         ChanMode::Decode(_) => None,
     }
 }
@@ -1767,6 +1821,7 @@ impl Audio {
             label: String::new(),
             offset_hz: offset,
             mode: ChanMode::Audio(mode),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -2893,6 +2948,7 @@ pub(crate) mod tests {
             label: String::new(),
             offset_hz: -400_000.0,
             mode: ChanMode::Audio(Demod::Wfm),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -3466,6 +3522,7 @@ pub(crate) mod tests {
             label: "M17".into(),
             offset_hz: 433_475_000.0 - buf.center.as_f64(),
             mode: ChanMode::Decode("m17".into()),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: false,
             squelch_db: None,
@@ -3486,6 +3543,45 @@ pub(crate) mod tests {
         // for: a decode channel is told where to listen.
         let hz = m17[0].freq;
         assert!((hz - 433_475_000.0).abs() < 1.0, "read at {hz} Hz");
+    }
+
+    #[test]
+    fn an_auto_channel_finds_and_reads_what_is_in_its_own_bandwidth() {
+        // An auto channel is the scanner table's front end pointed by hand:
+        // no block covers this capture's frequency, nothing was told what the
+        // signal is, and the width searched is the one set on the strip.
+        let Some(buf) = m17_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "Watch".into(),
+            offset_hz: 433_475_000.0 - buf.center.as_f64(),
+            mode: ChanMode::Auto,
+            bandwidth_hz: Some(100_000.0),
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            tx: None,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
+        let out = replay_blocks(&mut rx, &buf);
+
+        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
+        assert!(
+            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            "no callsign: {:?}",
+            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+        );
+        // The detector's own answer, in absolute frequency: a source found
+        // inside the channel is reported where it is on the dial.
+        let hz = m17[0].freq;
+        assert!((hz - 433_475_000.0).abs() < 25_000.0, "read at {hz} Hz");
     }
 
     #[test]
@@ -4089,6 +4185,7 @@ mod zoom_tests {
             label: String::new(),
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: false,
             squelch_db: Some(-200.0),

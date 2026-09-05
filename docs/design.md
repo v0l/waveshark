@@ -707,6 +707,24 @@ channel was a scanner block, which searched the whole span it covered whether
 or not anything else in that span was wanted, so keeping one pager channel
 meant paying for the sweep that found it.
 
+Every channel carries its own bandwidth, which the strip sets and the whole
+chain is designed around: the IF filter's passband, the audio filter behind it,
+the sideband a demodulator passes, the CW filter's width, and the marker drawn
+on the spectrum. Left alone it is whatever the mode asks for, which is the
+right answer often enough that the control mostly sits at "mode default"; set
+by hand it is what a 25 kHz repeater on a 12.5 kHz plan needs, or a 300 Hz CW
+filter in a pile-up. A channel that changed width is not the same channel, so
+its stages are keyed on the width too and the filters are designed again
+rather than reused with coefficients for the old one.
+
+`auto` is one of the modes a channel can be in, and it is the same node the
+scanner table places over a band: it finds whatever transmits inside the
+channel's bandwidth, measures each source and gives it the decoder that reads
+it. The difference is who chose the band. A scanner block is a range somebody
+wrote down in advance; an auto channel is a range somebody pointed at on the
+spectrum, which is what is wanted when the interesting thing is 40 kHz wide
+and nowhere near an allocation anybody named.
+
 Band plans differ by ITU region and by regulator inside one, so a table that is
 right in Dublin is wrong in Denver: 915 MHz is the licence-free band an
 American sees key fobs and weather sensors in, and the GSM uplink a European

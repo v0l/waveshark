@@ -51,6 +51,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         label: String::new(),
         offset_hz: 0.0,
         mode: radio::ChanMode::Audio(mode),
+        bandwidth_hz: None,
         volume: 1.0,
         // Measuring, not listening: the numbers are the same either way and
         // this can be run over ssh.
@@ -115,6 +116,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             label: String::new(),
             offset_hz: 0.0,
             mode: radio::ChanMode::Audio(radio::Demod::Wfm),
+            bandwidth_hz: None,
             volume: 1.0,
             muted: true,
             squelch_db: None,
