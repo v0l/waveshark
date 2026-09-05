@@ -859,6 +859,34 @@ impl App {
             ui.add_space(10.0);
         }
 
+        // The transmit gain, which is one number for the radio: a channel's
+        // own trim is added to it when that channel is keyed. Separate from
+        // the stages above because none of those are in circuit while
+        // transmitting, and because this one radiates.
+        if let Some(stage) = controls.tx_stages.iter().find(|s| s.name == "txvga") {
+            ui.separator();
+            ui.add_space(6.0);
+            let mut db = f32::from_bits(
+                radio.status.tx_gain_db.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            ui.horizontal(|ui| {
+                ui.label(legend("Transmit gain"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(value(format!("{db:.0} dB")).size(11.0));
+                });
+            });
+            let (lo, hi) = (*stage.range.start(), *stage.range.end());
+            if ui.add(egui::Slider::new(&mut db, lo..=hi).show_value(false)).changed() {
+                self.send(Cmd::TxGain(stage.quantise(db)));
+            }
+            hint(
+                ui,
+                "what every keyed channel transmits at, before its own trim. \
+                 Start at the bottom and into a dummy load",
+            );
+            ui.add_space(10.0);
+        }
+
         if !controls.choices.is_empty() {
             ui.separator();
             ui.add_space(6.0);

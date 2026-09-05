@@ -1,6 +1,7 @@
 //! The channel strip: every level that reaches the speaker, and the controls
 //! that belong to one channel rather than to the receiver.
 
+use crate::radio::TxMode;
 use super::state::AudioState;
 use super::*;
 use crate::audiobus::AudioBusNode;
@@ -127,6 +128,112 @@ impl Strip<'_> {
         }
     }
 
+    /// The transmit half of a channel, when it has one.
+    ///
+    /// Drawn only where the radio can transmit at all, because a key that
+    /// always fails is worse than no key: the operator learns to press it.
+    /// The key itself is held rather than toggled, since a transmitter that
+    /// stays on because a click was missed is exactly the failure that puts a
+    /// carrier on a band for an afternoon.
+    fn channel_tx(
+        ui: &mut egui::Ui,
+        ch: &mut Channel,
+        keyed: Option<u64>,
+        cmds: &mut Vec<Cmd>,
+    ) -> bool {
+        let mut changed = false;
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("tx").show(ui);
+            let on = ch.tx.is_some();
+            if ui.selectable_label(on, if on { "ON" } else { "OFF" }).clicked() {
+                ch.tx = match on {
+                    true => None,
+                    false => Some(crate::radio::TxSpec::default()),
+                };
+                changed = true;
+            }
+        });
+        let Some(tx) = ch.tx.as_mut() else { return changed };
+
+        ui.horizontal(|ui| {
+            for m in [TxMode::Nfm, TxMode::Fm, TxMode::Am, TxMode::Carrier] {
+                if ui.selectable_label(tx.mode == m, m.label()).clicked() {
+                    tx.mode = m;
+                    changed = true;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("shift").show(ui);
+            let mut khz = tx.shift_hz / 1e3;
+            if ui
+                .add(egui::DragValue::new(&mut khz).speed(0.1).range(-10_000.0..=10_000.0).suffix(" kHz"))
+                .changed()
+            {
+                tx.shift_hz = khz * 1e3;
+                changed = true;
+            }
+            // Where it will actually transmit, because a shift is only ever
+            // worth anything as the frequency it produces.
+            theme::Line::new()
+                .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
+                .size(11.0)
+                .show(ui);
+        });
+        if tx.mode != TxMode::Carrier {
+            ui.horizontal(|ui| {
+                theme::Line::new().legend("tone").show(ui);
+                let mut hz = tx.tone_hz;
+                if ui
+                    .add(egui::DragValue::new(&mut hz).speed(10.0).range(100.0..=5_000.0).suffix(" Hz"))
+                    .changed()
+                {
+                    tx.tone_hz = hz;
+                    changed = true;
+                }
+                // Nothing else can be modulated yet, and pretending
+                // otherwise would be the interface lying about the radio.
+                theme::Line::new().note("test tone").show(ui);
+            });
+        }
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("trim").show(ui);
+            let mut db = tx.trim_db;
+            if ui
+                .add(egui::DragValue::new(&mut db).speed(0.5).range(0.0..=20.0).suffix(" dB"))
+                .changed()
+            {
+                tx.trim_db = db;
+                changed = true;
+            }
+        });
+
+        ui.add_space(4.0);
+        let keyed_here = keyed == Some(ch.id);
+        let key = ui.add(
+            egui::Button::new(
+                egui::RichText::new(if keyed_here { "ON AIR" } else { "KEY" })
+                    .size(15.0)
+                    .color(if keyed_here { theme::PANEL } else { theme::READOUT }),
+            )
+            .fill(if keyed_here { theme::READOUT } else { theme::PANEL })
+            .min_size(Vec2::new(VU_W, 26.0)),
+        );
+        // Held, not toggled: released, lost focus and the pointer leaving all
+        // drop the carrier.
+        if key.is_pointer_button_down_on() && !keyed_here {
+            cmds.push(Cmd::Key(Some(ch.id)));
+        } else if keyed_here && !key.is_pointer_button_down_on() {
+            cmds.push(Cmd::Key(None));
+        }
+        if keyed_here {
+            theme::Line::new().note("receiving stopped while transmitting").show(ui);
+        }
+        changed
+    }
+
     /// Draw the strip, and collect what it wants done.
     pub(super) fn show(mut self, ui: &mut egui::Ui) -> Vec<Action> {
         Panel::right("channels")
@@ -187,6 +294,16 @@ impl Strip<'_> {
 
                 let states: Vec<ChannelState> =
                     self.radio.map(|r| r.status.channel_states()).unwrap_or_default();
+                // What the radio can do, asked of the radio: an RTL-SDR gets
+                // no transmit controls at all rather than controls that fail.
+                let can_tx = self
+                    .radio
+                    .map(|r| r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                let keyed = self
+                    .radio
+                    .map(|r| r.status.keyed.load(std::sync::atomic::Ordering::Relaxed))
+                    .filter(|id| *id != 0);
                 let mut remove = None;
                 let mut tune = None;
                 for (i, ch) in self.st.channels.iter_mut().enumerate() {
@@ -324,6 +441,9 @@ impl Strip<'_> {
                                         tune = Some(i);
                                     }
                                 }
+                            }
+                            if can_tx && Self::channel_tx(ui, ch, keyed, self.cmds) {
+                                tune = Some(i);
                             }
                         });
                     ui.add_space(6.0);

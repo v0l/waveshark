@@ -39,6 +39,9 @@ pub struct Channel {
     /// what an operator who has never touched the control should get.
     pub(super) squelch_db: Option<f32>,
     pub(super) agc: bool,
+    /// What this channel transmits when it is keyed, or `None` for a channel
+    /// that only listens. Every channel starts that way.
+    pub(super) tx: Option<crate::radio::TxSpec>,
 }
 
 /// The spectrum and the waterfall: what is being drawn, and how.
