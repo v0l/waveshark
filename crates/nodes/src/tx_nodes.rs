@@ -463,6 +463,9 @@ pub struct MicNode {
     /// a blanket over the microphone.
     band: (f64, f64),
     filter: Option<crate::RealFir>,
+    /// The rate the filter was designed at, so a parameter change can build a
+    /// new one without waiting for the graph to negotiate again.
+    src_rate: f64,
     /// Output rate, from negotiation.
     rate: f64,
     /// Position between source samples, in source samples.
@@ -504,6 +507,7 @@ impl MicNode {
             // intelligibility lives.
             band: (200.0, 3_400.0),
             filter: None,
+            src_rate: 0.0,
             rate: 0.0,
             phase: 0.0,
             window: [0.0; 4],
@@ -527,6 +531,36 @@ impl MicNode {
     /// What the leveller is adding, in dB, or zero when it is off.
     pub fn agc_gain_db(&self) -> f32 {
         self.agc.as_ref().map(|a| a.gain_db()).unwrap_or(0.0)
+    }
+
+    /// Build the speech filter for the band and rate now set.
+    ///
+    /// Designed at the source's rate, which is what makes a sharp cutoff
+    /// affordable: 255 taps at 48 kHz put the transition inside 200 Hz. The
+    /// same design at the radio's rate cannot make a 3 kHz cutoff at all.
+    fn design(&mut self) {
+        let rate = self.src_rate;
+        if rate <= 0.0 {
+            return;
+        }
+        let (lo, hi) = self.band;
+        let hi = hi.min(rate * 0.45);
+        let lo = lo.clamp(0.0, hi - 100.0);
+        // A band open at both ends is no filter at all, and saying so with a
+        // filter that passes everything costs 255 taps a sample.
+        if lo <= 1.0 && hi >= rate * 0.44 {
+            self.filter = None;
+            return;
+        }
+        let taps = dsp::filter::design(
+            dsp::filter::Response::Bandpass,
+            255,
+            rate,
+            (lo + hi) / 2.0,
+            hi - lo,
+            60.0,
+        );
+        self.filter = Some(crate::RealFir::new(taps));
     }
 
     fn next_source(&mut self) -> bool {
@@ -579,20 +613,8 @@ impl Simple for MicNode {
         if self.agc.is_some() {
             self.agc = Some(dsp::agc::Agc::voice(self.src.rate()));
         }
-        // Designed at the source's rate, which is what makes a sharp cutoff
-        // affordable: 255 taps at 48 kHz put the transition inside 200 Hz.
-        let rate = self.src.rate();
-        let (lo, hi) = self.band;
-        let hi = hi.min(rate * 0.45);
-        let taps = dsp::filter::design(
-            dsp::filter::Response::Bandpass,
-            255,
-            rate,
-            (lo + hi) / 2.0,
-            hi - lo,
-            60.0,
-        );
-        self.filter = Some(crate::RealFir::new(taps));
+        self.src_rate = self.src.rate();
+        self.design();
         Ok(input.spec)
     }
 
@@ -656,6 +678,13 @@ impl Simple for MicNode {
         vec![
             Param::float("level", self.level as f64, 0.0..=4.0).label("Mic gain").unit("x"),
             Param::bool("agc", self.agc.is_some()).label("Mic levelling"),
+            // The band is here rather than fixed because what sounds right
+            // depends on the microphone, the voice and what is listening: a
+            // telephone band is the safe default and not the only answer.
+            Param::float("low_hz", self.band.0, 0.0..=1_000.0).label("Mic low cut").unit("Hz"),
+            Param::float("high_hz", self.band.1, 1_000.0..=20_000.0)
+                .label("Mic high cut")
+                .unit("Hz"),
         ]
     }
 
@@ -672,6 +701,16 @@ impl Simple for MicNode {
             }
             "level" => {
                 self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, 4.0) as f32;
+                Ok(())
+            }
+            "low_hz" => {
+                self.band.0 = value.as_f64().unwrap_or(0.0).max(0.0);
+                self.design();
+                Ok(())
+            }
+            "high_hz" => {
+                self.band.1 = value.as_f64().unwrap_or(3_400.0).max(500.0);
+                self.design();
                 Ok(())
             }
             _ => Err(common::Error::other(format!("mic: unknown parameter {name:?}"))),
@@ -910,5 +949,59 @@ mod mic_band_tests {
         // The same stage, told it has 200 kHz to play with rather than 12.5.
         let band = (30.0, 15_000.0);
         assert!(response_at(10_000.0, band) > 0.85, "broadcast audio must not be telephone audio");
+    }
+}
+
+/// The head of a transmit chain: a block of time, from a block of samples.
+///
+/// A transmitter has nothing upstream of it, but a graph node has an input,
+/// and the thing the transmit side actually needs from the receiver is its
+/// clock: one block of received time is one block of transmitted time, and
+/// that is what keeps the two halves in step without either of them owning a
+/// timer. So this takes the receiver's stream and emits the same number of
+/// silent audio samples for the modulator's chain to fill.
+pub struct TxClockNode {
+    rate: f64,
+}
+
+impl Default for TxClockNode {
+    fn default() -> Self {
+        Self { rate: 0.0 }
+    }
+}
+
+impl Simple for TxClockNode {
+    fn name(&self) -> &str {
+        "tx_clock"
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("tx_clock needs a stream to take its clock from"));
+        }
+        self.rate = input.spec.rate;
+        Ok(StreamSpec {
+            kind: PortKind::Real,
+            rate: self.rate,
+            center: input.spec.center,
+            // What a voice occupies, which is what the modulator checks its
+            // deviation against. The stages between here and it narrow this
+            // no further, so it is stated once.
+            bandwidth: 6_000.0,
+            channels: 1,
+            flow: Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
+        })
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let n = input.len();
+        output.real_mut().resize(n, 0.0);
+        Ok(())
     }
 }

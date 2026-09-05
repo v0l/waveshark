@@ -48,7 +48,7 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxSinkNode};
+pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode};
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
     NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
@@ -72,6 +72,28 @@ use pipeline::{Graph, StreamSpec};
 pub fn registry() -> Registry {
     let mut r = Registry::new();
 
+
+    r.register(
+        StageDesc {
+            name: "tx_clock",
+            summary: "Take the receiver's clock and give a transmit chain a \
+                      block of time to fill",
+            category: "transmit",
+        },
+        |_s: &Settings| Ok(Box::new(TxClockNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "tone",
+            summary: "A test tone, added to whatever is on the stream",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(ToneNode::new(s.f64_or("hz", 1_000.0), s.f64_or("level", 0.8) as f32))
+                as Box<dyn Node>)
+        },
+    );
 
     r.register(
         StageDesc {
