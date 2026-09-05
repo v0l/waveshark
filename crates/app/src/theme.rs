@@ -187,6 +187,12 @@ pub const VALUE_SIZE: f32 = 13.0;
 /// a line reads the same whether it was built here or laid out as widgets.
 const SPAN_GAP: f32 = 8.0;
 
+/// Height every [`Line`] takes, and where its baseline sits in that. Sized
+/// for a value at [`VALUE_SIZE`] with the readout face's ascent; a legend
+/// is shorter and is placed on the same baseline, not centred.
+const LINE_H: f32 = 18.0;
+const LINE_BASELINE: f32 = 13.0;
+
 /// A line of text in more than one voice, set as a single galley.
 ///
 /// A legend and its value are different faces at different sizes, and putting
@@ -297,8 +303,32 @@ impl Line {
         self
     }
 
+    /// Lay the line out and paint it on the panel's baseline.
+    ///
+    /// Every line is given the same row height and its baseline is put at
+    /// the same distance from the top of that row, whatever faces it holds.
+    /// A label centres its galley instead, so a legend on its own and a
+    /// value on its own, each centred, end up on baselines a pixel or two
+    /// apart, and a row that has a control between its caption and its
+    /// reading cannot be one galley. Placing by baseline is what lets those
+    /// two halves line up with each other, and with every other line on the
+    /// strip.
     pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
-        ui.add(egui::Label::new(self.job))
+        let galley = ui.fonts_mut(|f| f.layout_job(self.job));
+        let baseline = galley
+            .rows
+            .first()
+            .map(|r| r.pos.y + r.glyphs.iter().map(|g| g.pos.y).fold(0.0f32, f32::max))
+            .unwrap_or(LINE_BASELINE);
+        let size = galley.size();
+        let lift = (LINE_BASELINE - baseline).max(0.0);
+        let h = LINE_H.max(size.y + lift);
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(size.x, h), egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            ui.painter().galley(egui::pos2(rect.left(), rect.top() + lift), galley, VALUE);
+        }
+        resp
     }
 
     /// The same line, allowed to wrap into the width available. For prose and
