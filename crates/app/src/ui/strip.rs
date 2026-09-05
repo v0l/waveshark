@@ -141,7 +141,7 @@ impl Strip<'_> {
         ui: &mut egui::Ui,
         ch: &mut Channel,
         keyed: Option<u64>,
-        mic: (f32, f32),
+        mic: f32,
         keying: &mut Option<u64>,
         cmds: &mut Vec<Cmd>,
     ) -> bool {
@@ -204,26 +204,23 @@ impl Strip<'_> {
                 // it, so an operator can see they are being heard.
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("mic").show(ui);
-                    let mut g = tx.mic_gain / 4.0;
-                    if ui.add(Fader::new(&mut g, mic.0).width(VU_W)).changed() {
-                        tx.mic_gain = (g * 4.0).clamp(0.0, 4.0);
+                    // Over eight, not four: three is where a line level
+                    // interface sits and there has to be room above it for a
+                    // quiet microphone.
+                    let mut g = tx.mic_gain / 8.0;
+                    if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
+                        tx.mic_gain = (g * 8.0).clamp(0.0, 8.0);
                         changed = true;
                     }
                     theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
                 });
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("agc").show(ui);
-                    let on = tx.mic_agc;
-                    if ui.selectable_label(on, if on { "ON" } else { "OFF" }).clicked() {
-                        tx.mic_agc = !on;
-                        changed = true;
-                    }
-                    if on {
-                        theme::Line::new().value(format!("{:+.0} dB", mic.1)).size(11.0).show(ui);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        theme::Line::new().note("mic open").show(ui);
-                    });
+                    ui.add_space(28.0);
+                    // No levelling on transmit, and the strip says so rather
+                    // than leaving an operator hunting for the control: an
+                    // AGC with nothing to level against between words puts
+                    // the room on air at full deviation every pause.
+                    theme::Line::new().note("mic open, set by the meter").show(ui);
                 });
             }
             TxSource::Tone => {
@@ -364,21 +361,16 @@ impl Strip<'_> {
                     .radio
                     .map(|r| r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(false);
-                // What the microphone is hearing, and what the levelling is
-                // adding, for the meter beside the key.
+                // What the microphone is hearing, for the meter beside the
+                // key.
                 let mic = self
                     .radio
                     .map(|r| {
-                        (
-                            f32::from_bits(
-                                r.status.mic_level.load(std::sync::atomic::Ordering::Relaxed),
-                            ),
-                            f32::from_bits(
-                                r.status.mic_gain_db.load(std::sync::atomic::Ordering::Relaxed),
-                            ),
+                        f32::from_bits(
+                            r.status.mic_level.load(std::sync::atomic::Ordering::Relaxed),
                         )
                     })
-                    .unwrap_or((0.0, 0.0));
+                    .unwrap_or(0.0);
                 let keyed = self
                     .radio
                     .map(|r| r.status.keyed.load(std::sync::atomic::Ordering::Relaxed))

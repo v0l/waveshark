@@ -151,6 +151,23 @@ impl ScopeState {
     }
 }
 
+/// Which direction the chain view is drawing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ChainSide {
+    #[default]
+    Rx,
+    Tx,
+}
+
+impl ChainSide {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rx => "RX",
+            Self::Tx => "TX",
+        }
+    }
+}
+
 /// The signal chain view: what the receiver is running, and what the operator
 /// has drawn.
 #[derive(Default)]
@@ -162,12 +179,14 @@ pub(super) struct ChainState {
     pub latency: f64,
     /// The stage whose settings are showing, by node id.
     pub sel: Option<usize>,
-    /// Show only the transmit stages.
+    /// Which half of the receiver the pane is drawing.
     ///
-    /// The chain a transmission runs is four stages in a graph of forty, and
-    /// on a wide span it is off the edge of the pane behind the banks. This
-    /// is a way to look at what is going out without hunting for it.
-    pub only_tx: bool,
+    /// The two directions are separate chains that meet only at the radio, so
+    /// the view switches between them rather than showing both at once: the
+    /// transmit chain is four stages in a graph that on a wide span holds
+    /// forty, and drawn together the one you are looking at is behind the
+    /// banks.
+    pub side: ChainSide,
     /// Manual mode and where the stages have been dragged to.
     pub edit: crate::chainview::Edit,
     /// The graph as it is running, with the operator's edits in it: what the

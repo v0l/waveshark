@@ -1,7 +1,7 @@
 //! The signal chain view: the graph the receiver is running, and the editing
 //! of it in manual mode.
 
-use super::state::ChainState;
+use super::state::{ChainSide, ChainState};
 use super::*;
 
 /// The chain view, over the graph the receiver is running and the one the
@@ -23,13 +23,10 @@ impl Chain<'_> {
             });
             return;
         };
-        // Only what goes out, when that is what is being looked at. The
-        // transmit chain is four stages in a graph that on a wide span holds
-        // forty, and finding them among the banks is not reading a diagram.
-        let topo = match self.st.only_tx {
-            false => topo,
-            true => transmit_only(&topo),
-        };
+        // One direction at a time. They are separate chains that meet only at
+        // the radio, and drawn together the transmit half is four stages
+        // hidden behind forty.
+        let topo = one_side(&topo, self.st.side);
         // Node ids are positions in the built graph, so a rebuild can leave
         // the selection pointing at a stage that is no longer there.
         if self.st.sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
@@ -161,31 +158,33 @@ impl Chain<'_> {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            // Whether the pane is showing the receiver or the transmitter.
-            // Disabled when nothing is keyed, because an empty pane with a
-            // button that did nothing would read as a fault.
+            // Which direction the pane draws. Transmit is offered only while
+            // something is keyed: an empty pane behind a button that did
+            // nothing would read as a fault rather than as an idle
+            // transmitter.
             let has_tx = self
                 .st
                 .topo
                 .as_ref()
                 .is_some_and(|t| t.nodes.iter().any(|n| n.kind == "radio_tx"));
             if !has_tx {
-                self.st.only_tx = false;
+                self.st.side = ChainSide::Rx;
             }
-            let label = if self.st.only_tx { "TX ONLY" } else { "TX" };
-            if ui
-                .add_enabled(
-                    has_tx,
-                    egui::Button::new(label).fill(if self.st.only_tx {
-                        theme::READOUT
-                    } else {
-                        theme::WELL
-                    }),
-                )
-                .on_hover_text("Show only the chain that is transmitting")
-                .clicked()
-            {
-                self.st.only_tx = !self.st.only_tx;
+            for side in [ChainSide::Rx, ChainSide::Tx] {
+                let on = self.st.side == side;
+                let enabled = side == ChainSide::Rx || has_tx;
+                let w = egui::Button::new(side.label())
+                    .fill(if on { theme::READOUT } else { theme::WELL });
+                let r = ui.add_enabled(enabled, w);
+                let r = match side {
+                    ChainSide::Rx => r.on_hover_text("The chain the receiver is running"),
+                    ChainSide::Tx => r.on_hover_text("The chain that is transmitting"),
+                };
+                if r.clicked() {
+                    self.st.side = side;
+                    // The selection belongs to the other half of the graph.
+                    self.st.sel = None;
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -283,18 +282,27 @@ impl Chain<'_> {
 
 }
 
-/// The transmit half of a chain, on its own.
+/// One direction of a chain, on its own.
 ///
-/// Everything a keyed transmission runs through: the clock it takes from the
-/// receiver, what is being modulated, the modulator, and the radio. Found by
-/// what the stages carry rather than by a list of names kept here, so a
-/// modulator added later appears without this being touched: a transmit
-/// stream is marked as one on the port, which is the whole reason the
-/// direction is on the spec.
-fn transmit_only(topo: &pipeline::graph::Topology) -> pipeline::graph::Topology {
+/// Which half a stage belongs to is read off what it carries rather than off
+/// a list of names kept here, so a modulator or a decoder added later lands
+/// on the right side without this being touched: a transmit stream says so
+/// on its port, which is what the direction on the spec is for.
+///
+/// The stage that takes the receiver's clock carries both, and it belongs to
+/// the transmit side: it is where that chain begins, and on the receive side
+/// it is a stub with nothing after it.
+fn one_side(
+    topo: &pipeline::graph::Topology,
+    side: ChainSide,
+) -> pipeline::graph::Topology {
     let mut out = topo.clone();
     out.nodes.retain(|n| {
-        n.outputs.iter().any(|(_, s)| s.is_tx()) || n.inputs.iter().any(|(_, s)| s.is_tx())
+        let transmits = n.outputs.iter().any(|(_, s)| s.is_tx());
+        match side {
+            ChainSide::Tx => transmits,
+            ChainSide::Rx => !transmits,
+        }
     });
     out
 }
