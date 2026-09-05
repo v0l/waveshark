@@ -315,6 +315,21 @@ pub trait Device: Send {
         Vec::new()
     }
 
+    /// Where the transmitter is tuned.
+    ///
+    /// Its own frequency, not the receiver's. A full duplex radio has a
+    /// synthesiser per direction, which is what makes a repeater pair one
+    /// radio listening on the output while transmitting on the input; a half
+    /// duplex one has to be retuned around an over, and reports whatever
+    /// `center` reports.
+    fn set_tx_center(&mut self, _f: Hz) -> Result<()> {
+        Err(Error::TxUnsupported)
+    }
+
+    fn tx_center(&self) -> Hz {
+        self.center()
+    }
+
     /// Begin transmitting. Half duplex radios stop receiving to do it, so the
     /// caller must have dropped the receive stream first.
     ///

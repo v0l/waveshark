@@ -350,8 +350,12 @@ length of the over, and puts the radio back when the transmit stream is
 dropped. The receive graph runs throughout, so the spectrum's averaging,
 every channel's squelch and every part-built frame survive an over, and the
 waterfall shows the gap instead of stopping. `RxStream::silent` says which it
-is. A LimeSDR is 2x2 and full duplex, so it needs none of that and its
-`TxInfo` will say so; its transmit side is not written yet.
+is. A LimeSDR is 2x2 and full duplex, so it needs none of that: `crates/limesdr`
+transmits on its own chain with its own synthesiser, which `Device::set_tx_center`
+tunes, so a repeater pair is one radio listening on the output while it
+transmits on the input rather than a retune around every over. `TxInfo::channels`
+reports what the board has, asked of the chip: two on a LimeSDR-USB, one on a
+Mini.
 
 NFM runs end to end from the graph: `tone` into `fm_mod` into `radio_tx`,
 which holds the device's `TxStream` and paces the whole chain by blocking
