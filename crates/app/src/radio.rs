@@ -1946,6 +1946,19 @@ fn run(
                         tracing::info!("unkeyed");
                         status.tx_underruns.store(key_down(g), Ordering::Relaxed);
                         status.keyed.store(0, Ordering::Relaxed);
+                        // Back where the receiver was. A half duplex radio
+                        // has one synthesiser, so keying moved it to the
+                        // transmit frequency; leaving it there means the
+                        // waterfall comes back tuned to wherever the channel
+                        // transmits, which looks like reception never
+                        // resumed at all.
+                        let want = tuned(plan.center, soft_ppm);
+                        if dev.center() != want {
+                            if let Err(e) = dev.set_center(want) {
+                                *status.error.lock() =
+                                    Some(format!("could not retune after transmitting: {e}"));
+                            }
+                        }
                         status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     }
 
