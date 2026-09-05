@@ -519,6 +519,19 @@ impl Graph {
                 .map(|&s| PortSpec { spec: self.specs[s], latency: self.latency[s] })
                 .collect();
 
+            // A node fed by both directions at once is always a mistake, and
+            // one that only shows up as nonsense on air. GNU Radio cannot
+            // catch this because its ports carry no direction.
+            let mut flows = ins.iter().filter(|p| !p.spec.is_silence()).map(|p| p.spec.flow);
+            if let Some(first) = flows.next() {
+                if flows.any(|f| f != first) {
+                    return Err(Error::other(format!(
+                        "node {k} ({}) is fed by both a receive and a transmit stream",
+                        self.entries[k].label
+                    )));
+                }
+            }
+
             let outs = self.entries[k].node.negotiate(&ins).map_err(|e| {
                 Error::other(format!("node {k} ({}) rejected its input: {e}", self.entries[k].label))
             })?;
@@ -693,8 +706,25 @@ impl Graph {
         self.tags[INPUT_SLOT].push(t);
     }
 
+    /// Tell the graph what its input now is, and negotiate again.
+    ///
+    /// What a composite node needs: the graph it holds is built before the
+    /// graph around it knows its rate, so the inner input spec is set when the
+    /// outer one negotiates rather than at construction.
+    pub fn set_input_spec(&mut self, spec: StreamSpec) -> Result<()> {
+        self.specs[INPUT_SLOT] = spec;
+        self.negotiate()?;
+        self.bufs[INPUT_SLOT] = Payload::empty_of(spec.kind);
+        Ok(())
+    }
+
     pub fn output(&self) -> &Payload {
         &self.bufs[self.output_slot]
+    }
+
+    /// Tags the output port carried this block.
+    pub fn output_tags(&self) -> &[Tag] {
+        &self.tags[self.output_slot]
     }
 
     /// What a particular node port produced this block.

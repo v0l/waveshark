@@ -26,6 +26,7 @@ pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
 pub mod lora_nodes;
+pub mod tx_nodes;
 pub mod wmbus_nodes;
 
 pub use bank::{ChannelBank, ChannelEvent, Gating};
@@ -46,6 +47,7 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
+pub use tx_nodes::{MorseKeyNode, MorseTxNode, OokModNode};
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use filter_nodes::{FirFilterNode, IirFilterNode};
@@ -65,6 +67,46 @@ use pipeline::{Graph, StreamSpec};
 pub fn registry() -> Registry {
     let mut r = Registry::new();
 
+
+    r.register(
+        StageDesc {
+            name: "morse_tx",
+            summary: "Key text as Morse on a carrier, ready for a transmitter",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(MorseTxNode::new(
+                s.f64_or("wpm", 20.0) as f32,
+                s.f64_or("offset_hz", 0.0),
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "morse_key",
+            summary: "Text to Morse mark and gap timings",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(MorseKeyNode::new(s.f64_or("wpm", 20.0) as f32)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "ook_mod",
+            summary: "Key a carrier on and off from pulse timings, with shaped edges",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(OokModNode::new(
+                s.f64_or("offset_hz", 0.0),
+                s.f64_or("amplitude", 0.25) as f32,
+                s.f64_or("ramp_us", 500.0) as f32,
+            )) as Box<dyn Node>)
+        },
+    );
 
     r.register(
         StageDesc {

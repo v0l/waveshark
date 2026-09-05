@@ -9,3 +9,6 @@ hackrf-usb.workspace = true
 common.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

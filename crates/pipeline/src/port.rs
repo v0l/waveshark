@@ -290,6 +290,53 @@ impl Tag {
     }
 }
 
+/// Which way a stream is going.
+///
+/// GNU Radio has no equivalent: a port there is `gr_complex` and whether it
+/// holds received baseband or a modulator's output is convention, so a
+/// demodulator wired into a USRP sink builds happily and transmits nonsense.
+/// Carrying it on the spec means the graph refuses that at build time, which
+/// matters more here than it does there, because a mistake on this side of
+/// the antenna is radiated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Flow {
+    #[default]
+    Rx,
+    Tx,
+}
+
+/// What the samples on a port represent.
+///
+/// Everything today is a complex envelope about `center`. The distinction is
+/// here so that a stage which ever produces a real intermediate frequency has
+/// to say so, rather than it being inferred from the port being `Real`, which
+/// is also what audio is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Domain {
+    /// Complex baseband, centred on `StreamSpec::center`.
+    #[default]
+    Baseband,
+    /// Real samples on a carrier at `StreamSpec::center`.
+    Passband,
+}
+
+/// Start of a transmit burst, on the sample the carrier comes up.
+///
+/// Named after GNU Radio's `tx_sob`, and consumed the same way: the stage
+/// that hands samples to the radio uses it to key rather than guessing from
+/// the samples going quiet.
+pub const TAG_TX_START: &str = "tx_start";
+
+/// End of a transmit burst, on the last sample of it.
+pub const TAG_TX_END: &str = "tx_end";
+
+/// When a burst should leave the antenna, in seconds on the radio's clock.
+///
+/// GNU Radio's `tx_time`. A transmission that has to land in a slot is the
+/// normal case for anything with a protocol around it, and the scheduler
+/// needs somewhere to say so that survives being buffered.
+pub const TAG_TX_AT: &str = "tx_at";
+
 /// Describes the signal on a port. Stages transform this during negotiation,
 /// which is how a decimator tells everything downstream that the rate changed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -312,17 +359,44 @@ pub struct StreamSpec {
     /// the other's history, which is a lowpass at half the intended cutoff and
     /// crosstalk besides.
     pub channels: usize,
+    /// Which way this stream is going. Receive unless a stage says otherwise.
+    pub flow: Flow,
+    /// What the samples represent.
+    pub domain: Domain,
+}
+
+impl Default for StreamSpec {
+    fn default() -> Self {
+        Self {
+            kind: PortKind::Iq,
+            rate: 0.0,
+            center: Hz(0),
+            bandwidth: 0.0,
+            channels: 1,
+            flow: Flow::Rx,
+            domain: Domain::Baseband,
+        }
+    }
 }
 
 impl StreamSpec {
     pub fn iq(rate: f64, center: Hz) -> Self {
-        Self { kind: PortKind::Iq, rate, center, bandwidth: rate, channels: 1 }
+        Self { kind: PortKind::Iq, rate, center, bandwidth: rate, ..Self::default() }
+    }
+
+    /// The same stream going the other way, for a transmit stage.
+    pub fn transmitting(self) -> Self {
+        Self { flow: Flow::Tx, ..self }
+    }
+
+    pub fn is_tx(&self) -> bool {
+        self.flow == Flow::Tx
     }
 
     /// What an input nothing feeds is told it is reading: real samples at no
     /// rate, of which there are never any.
     pub fn silence() -> Self {
-        Self { kind: PortKind::Real, rate: 0.0, center: Hz(0), bandwidth: 0.0, channels: 1 }
+        Self { kind: PortKind::Real, ..Self::default() }
     }
 
     /// Whether this is the spec of an input nothing feeds.
