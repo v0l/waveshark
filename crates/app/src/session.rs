@@ -21,6 +21,48 @@ use std::path::PathBuf;
 /// digital modes, and this is where they are.
 pub const DEFAULT_CENTER: f64 = 433_920_000.0;
 
+/// What the radio is set to, as the operator set it.
+///
+/// One record, owned by the interface, that every route to a radio setting
+/// goes through: the settings pane changes a field and applies, a restore
+/// applies the whole thing, a device change or a reset applies it again. The
+/// radio's own report of its state is for display and is never the source,
+/// because it lags what was asked for: on connect the session was once
+/// written from a status that still said zero, before the restore had
+/// reached the driver, and the saved values went with it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RadioSettings {
+    /// Gain stages by driver name.
+    pub gains: Vec<(String, GainMode)>,
+    /// Named switches: bias tee, digital AGC and so on.
+    pub toggles: Vec<(String, bool)>,
+    /// List settings by driver name and the option chosen, such as which
+    /// antenna port the cable is in.
+    pub choices: Vec<(String, String)>,
+    pub ppm: f64,
+    /// Transmit gain in dB, which the radio's transmit stages are set to
+    /// when a channel is keyed.
+    pub tx_gain_db: f32,
+}
+
+impl RadioSettings {
+    /// Set one gain stage, replacing any earlier setting of the same stage.
+    pub fn set_gain(&mut self, name: &str, mode: GainMode) {
+        self.gains.retain(|(n, _)| n != name);
+        self.gains.push((name.to_string(), mode));
+    }
+
+    pub fn set_toggle(&mut self, name: &str, on: bool) {
+        self.toggles.retain(|(n, _)| n != name);
+        self.toggles.push((name.to_string(), on));
+    }
+
+    pub fn set_choice(&mut self, name: &str, value: &str) {
+        self.choices.retain(|(n, _)| n != name);
+        self.choices.push((name.to_string(), value.to_string()));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
     /// Device label, matched against what is attached at startup. A label
@@ -38,6 +80,9 @@ pub struct Session {
     /// antenna port the cable is in.
     pub choices: Vec<(String, String)>,
     pub ppm: f64,
+    /// Transmit gain in dB, which the radio's own transmit stages are set to
+    /// when a channel is keyed.
+    pub tx_gain_db: f32,
     /// Where the receiver is, in degrees. Used to resolve an aircraft's
     /// position from a single frame instead of waiting for a matching pair.
     pub location: Option<(f64, f64)>,
@@ -133,6 +178,7 @@ impl Default for Session {
             toggles: Vec::new(),
             choices: Vec::new(),
             ppm: 0.0,
+            tx_gain_db: 0.0,
             location: None,
             language: String::new(),
             country: String::new(),
@@ -154,6 +200,17 @@ impl Default for Session {
 }
 
 impl Session {
+    /// The radio's part of the session.
+    pub fn radio(&self) -> RadioSettings {
+        RadioSettings {
+            gains: self.gains.clone(),
+            toggles: self.toggles.clone(),
+            choices: self.choices.clone(),
+            ppm: self.ppm,
+            tx_gain_db: self.tx_gain_db,
+        }
+    }
+
     /// `$XDG_CONFIG_HOME/waveshark/session`, or `~/.config` when unset.
     pub fn path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -237,6 +294,7 @@ impl Session {
             toggles,
             choices,
             ppm: f("ppm", d.ppm),
+            tx_gain_db: f("tx_gain_db", d.tx_gain_db as f64) as f32,
             location: match (kv.get("lat"), kv.get("lon")) {
                 (Some(a), Some(o)) => a.parse().ok().zip(o.parse().ok()),
                 _ => None,
@@ -284,6 +342,7 @@ impl Session {
         s.push_str(&format!("zoom = {}\n", self.zoom));
         s.push_str(&format!("fft = {}\n", self.fft));
         s.push_str(&format!("ppm = {}\n", self.ppm));
+        s.push_str(&format!("tx_gain_db = {}\n", self.tx_gain_db));
         if let Some((lat, lon)) = self.location {
             s.push_str(&format!("lat = {lat}\nlon = {lon}\n"));
         }
@@ -396,6 +455,7 @@ mod tests {
             toggles: vec![("bias_tee".into(), true)],
             choices: vec![("antenna".into(), "LNAH".into())],
             ppm: -3.5,
+            tx_gain_db: 12.0,
             location: Some((53.6369, -6.6528)),
             language: "en".into(),
             audio_out: "Scarlett 2i2 Analogue".into(),
