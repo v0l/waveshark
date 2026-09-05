@@ -272,34 +272,68 @@ around a burst hits all of it at once.
 
 Measured on rtl_433's corpus by `crates/nodes/tests/source_corpus.rs`, which
 runs both paths over every capture through the same front end and tables, the
-node recovers 50 of the 57 reference decodes against the banks' 48, and loses
+node recovers 53 of the 57 reference decodes against the banks' 48, and loses
 ground on none.
 
 What it keeps up with is a question of how much is transmitting, not only of
 the rate, because the band costs one transform per frame and every open
-source costs a mixer and two decimators at the band's rate plus its decoders.
-Measured by `crates/nodes/examples/auto_bench` on a 48 core machine, with the
-transmitters keying 40 ms bursts every 250 ms spread across the band:
+source costs its extraction plus its decoders. Measured by
+`crates/nodes/examples/auto_bench` on a 48 core machine, in the 131072
+sample blocks a HackRF delivers, with the transmitters keying 40 ms bursts
+every 250 ms spread across the band:
 
 | band | empty | 8 transmitters | 16 transmitters |
 |---|---|---|---|
-| 4 MS/s | 4.6x | 2.9x | |
-| 8 MS/s | 3.3x | | 1.5x |
-| 20 MS/s | 2.4x | | 0.9x |
-| 40 MS/s | 1.0x | | |
+| 4 MS/s | 28x | 5.8x | |
+| 8 MS/s | 15x | | 2.6x |
+| 20 MS/s | 6.5x | | 1.8x |
+| 40 MS/s | 3.1x | | 0.9x |
 
-So a few megahertz of ISM band is comfortable, a 20 MS/s span is real time
-only while quiet, and the per-source cost at the band's rate is what would
-have to change for a busy wide span: a fixed coarse channelizer in front of
-the per-source stage would amortise it, which is the bank's one advantage
-and the next thing worth building if that span is wanted. Three things had
-to be found before those numbers held: the extractor's history ring shifted
-its whole contents every block, the mixer took a sine and cosine per sample,
-and single bins of noise inside a source's range were being folded into its
-extent and reopening it at ten times its width. The reopening itself is
-triggered by the source's centre moving, not its extent growing: a keyed
-signal's edges flicker as its peak dips between repeats, and measured as
-growth that reopened a sensor's burst two thirds of the way through.
+Those numbers are roughly double what they were, and the difference is
+where the per-source work runs. A source used to be cut out of the wideband
+ring by its own mixer and coarse filter at the band's rate, which at 16 MS/s
+was 7% of a core for a 25 kHz sensor and 20% for a LoRa channel, and thirty
+devices bursting on a busy band were three cores before a front end ran.
+Now one polyphase bank runs over the span (`Bank` in `dsp::source`), sixteen
+channels a megahertz wide at 16 MS/s, and each source is cut from the one
+channel that holds it at the channel's rate, or from a pair when it lies
+across an edge: adjacent channels of a 2x oversampled bank cross at -6 dB
+with complementary roll-offs, so their sum, with the upper shifted down a
+spacing, reads flat through the edge to a hundredth of a dB
+(`Channelizer::pair_rotation`, and the test beside it). Only a source wider
+than a channel still goes to the ring. The bank runs while anything reads
+from it and stops two seconds after the last source closes, caught up from
+the ring when the next one opens, so an empty band pays nothing for it.
+`crates/nodes/tests/source_corpus.rs` forces it on at the corpus's rates and
+finds every decode the ring found, and `dsp::source`'s tests hold a banked
+stream to within 0.3 dB and 2 Hz of the ring's.
+
+Three smaller costs went with it. The detector's floor pass ran a fork-join
+across the pool for every frame, 3900 a second at 16 MS/s over a few
+microseconds of arithmetic each; it now runs bin-major over a block's frames
+in one. Classifying a burst measured up to 65536 samples of it and correlated
+the lot through two 131072 point transforms planned afresh each time; it
+measures 16384, correlates 32768, and reuses the plans, at the same result
+on the corpus. And the LoRa scan stepped a quarter symbol at a time through
+six spreading factors on every source wide enough to be a channel; a whole
+symbol cannot miss an eight symbol preamble and costs a quarter as much.
+
+What is left on a busy span is the front ends, and the chain view now says
+so: every node carries its 95th percentile call time and share of real
+time, and the auto node breaks its own down into detection, extraction and
+each kind of front end's processor time across every source it runs on.
+LoRa was the largest of those. It was placed on every source over 44 kHz
+wide, which on a band of hard-keyed sensors is most of them, since their
+splatter measures that wide, and it dechirped six spreading factors on
+signals the burst front end had already named OOK. It is now placed on that
+verdict instead (`AutoNode::place_lora`): the burst front end classifies
+every burst on every source anyway, a chirp is the one thing it names
+reliably, and the front end built on the verdict reads the samples it
+missed from the ring the burst front end keeps, so a short packet is read
+whole after the fact and a long one is caught up and followed live. The
+three off-air Meshtastic captures decode as before, and the LoRa line is
+gone from the busy-span breakdown. The burst router's classification, once
+per burst on every source, is what remains.
 
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.

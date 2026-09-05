@@ -51,6 +51,7 @@ pub struct Frame<'a> {
 pub struct Channelizer {
     channels: usize,
     taps_per_branch: usize,
+    atten_db: f64,
     /// Prototype filter, length `channels * taps_per_branch`.
     proto: Vec<f32>,
     /// Doubled history buffer. The most recent `len` samples in time order
@@ -95,6 +96,7 @@ impl Channelizer {
         Self {
             channels,
             taps_per_branch,
+            atten_db,
             proto,
             hist: vec![C32::new(0.0, 0.0); len * 2],
             pos: 0,
@@ -171,9 +173,8 @@ impl Channelizer {
 
         // Chunk by frames so one FFT scratch buffer is amortised over many
         // frames rather than allocated per frame.
-        let chunk = 256usize.max(1);
+        let chunk = 256usize;
         out.par_chunks_mut(chunk * m).enumerate().for_each(|(ci, dst)| {
-            let mut scratch = vec![C32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
             let f0 = ci * chunk;
             for (j, frame_out) in dst.chunks_exact_mut(m).enumerate() {
                 let f = emitted + (f0 + j) as u64;
@@ -181,26 +182,35 @@ impl Channelizer {
                 let p = (f + 1) * advance as u64 - 1;
                 let newest = (p - start_pos) as usize + hist_len;
 
-                for k in 0..m {
-                    let mut acc = C32::new(0.0, 0.0);
-                    let mut idx = newest - k;
-                    let mut tap = k;
-                    for _ in 0..t {
-                        acc += joined[idx] * proto[tap];
-                        idx = idx.wrapping_sub(m);
-                        tap += m;
+                // Tap rows outer, branches inner: each row reads `m`
+                // consecutive input samples and `m` consecutive taps, so
+                // the inner loop vectorises. Branch-outer walked the input
+                // at a stride of `m` and paid a cache line per multiply.
+                frame_out.fill(C32::new(0.0, 0.0));
+                for row in 0..t {
+                    let hi = newest - row * m;
+                    let samples = &joined[hi + 1 - m..=hi];
+                    let taps = &proto[row * m..(row + 1) * m];
+                    for ((o, &x), &h) in frame_out.iter_mut().zip(samples.iter().rev()).zip(taps) {
+                        *o += x * h;
                     }
-                    frame_out[k] = acc;
                 }
+            }
 
-                fft.process_with_scratch(frame_out, &mut scratch);
+            // Every frame of the chunk in one call: a transform of sixteen
+            // points is a few dozen flops, and calling it once per frame
+            // cost more in the call than in the arithmetic.
+            let mut scratch = vec![C32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+            fft.process_with_scratch(dst, &mut scratch);
 
+            let norm = 1.0 / m as f32;
+            for (j, frame_out) in dst.chunks_exact_mut(m).enumerate() {
+                let f = emitted + (f0 + j) as u64;
                 if f % 2 == 1 {
                     for c in frame_out.iter_mut().skip(1).step_by(2) {
                         *c = -*c;
                     }
                 }
-                let norm = 1.0 / m as f32;
                 for c in frame_out.iter_mut() {
                     *c *= norm;
                 }
@@ -227,6 +237,12 @@ impl Channelizer {
 
     pub fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// Input samples [`Self::process_parallel`] has consumed since the bank
+    /// was made or reset.
+    pub fn stream_position(&self) -> u64 {
+        self.stream_pos
     }
 
     /// Input samples consumed per output frame.
@@ -258,6 +274,33 @@ impl Channelizer {
         let spacing = input_rate / self.channels as f64;
         let m = (offset_hz / spacing).round() as i64;
         m.rem_euclid(self.channels as i64) as usize
+    }
+
+    /// What channel `m + 1`'s output is multiplied by in frame `f` (counted
+    /// from the last reset) so that added to channel `m`'s it reads as one
+    /// stream centred on channel `m`, flat from `m`'s lower edge to
+    /// `m + 1`'s upper one.
+    ///
+    /// Adjacent channels cross at -6 dB and their roll-offs are complementary,
+    /// so a signal on the edge between them is whole in the sum. Shifting the
+    /// upper channel down by one spacing at the 2x oversampled rate is a sign
+    /// per sample, and the prototype's half-sample centre adds a fixed
+    /// `pi / M` on top; the parity of the branch length decides the sign of
+    /// that. Measured rather than derived: the pair reads flat within 0.01 dB
+    /// across the edge with this, and cancels there without it.
+    pub fn pair_rotation(&self, f: u64) -> C32 {
+        let phi = std::f64::consts::PI / self.channels as f64;
+        let sign = if (f as usize + self.taps_per_branch) % 2 == 1 { -1.0f32 } else { 1.0 };
+        C32::new(phi.cos() as f32, phi.sin() as f32) * sign
+    }
+
+    /// Half the width of a channel that reads flat, within a tenth of a dB,
+    /// in hertz: the channel's half width less half the prototype's
+    /// transition.
+    pub fn flat_half_width_hz(&self, input_rate: f64) -> f64 {
+        let n = (self.channels * self.taps_per_branch) as f64;
+        let transition = (self.atten_db - 8.0) / (2.285 * 2.0 * std::f64::consts::PI * n) * input_rate;
+        (self.channel_bandwidth(input_rate) - transition) / 2.0
     }
 
     /// Total group delay through the prototype filter, in input samples.
@@ -535,5 +578,59 @@ mod parallel_tests {
         // Channel parity drives the (-1)^m correction, so a signal in an odd
         // channel is the case that breaks if frame indexing is off by one.
         assert_matches_serial(16, 8, &tone(1 << 15, 7.0 / 16.0), &[501, 1499]);
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::*;
+
+    /// The amplitude a tone at `f` reads at through channel `lo` alone and
+    /// through the pair `lo`, `lo + 1`, in dB.
+    fn read(c: &mut Channelizer, rate: f64, lo: usize, f: f64) -> (f64, f64) {
+        let m = c.channels();
+        c.reset();
+        let tone: Vec<C32> = (0..300_000)
+            .map(|i| {
+                let p = std::f64::consts::TAU * f * i as f64 / rate;
+                C32::new(p.cos() as f32, p.sin() as f32)
+            })
+            .collect();
+        let mut out = Vec::new();
+        let frames = c.process_parallel(&tone, &mut out);
+        let (mut single, mut pair, mut n) = (0.0f64, 0.0f64, 0.0f64);
+        for fr in frames / 2..frames {
+            let ym = out[fr * m + lo];
+            let yn = out[fr * m + (lo + 1) % m];
+            single += ym.norm() as f64;
+            pair += (ym + yn * c.pair_rotation(fr as u64)).norm() as f64;
+            n += 1.0;
+        }
+        (20.0 * (single / n).log10(), 20.0 * (pair / n).log10())
+    }
+
+    /// A tone swept across the edge between two channels reads flat through
+    /// the pair, and the single channel's roll-off is where the flat half
+    /// width says it is.
+    #[test]
+    fn a_pair_of_channels_is_flat_across_their_edge() {
+        let rate = 16_000_000.0;
+        for taps in [8usize, 15, 16] {
+            let mut c = Channelizer::new(16, taps, 60.0);
+            let b = c.channel_bandwidth(rate);
+            let flat = c.flat_half_width_hz(rate);
+            let f_lo = c.channel_offset_hz(3, rate);
+            for k in -8..=28 {
+                let f = f_lo + b * k as f64 / 20.0;
+                let (single, pair) = read(&mut c, rate, 3, f);
+                let inside_pair = f >= f_lo - flat && f <= f_lo + b + flat;
+                if inside_pair {
+                    assert!(pair.abs() < 0.1, "taps {taps}: pair reads {pair:.2} dB at {:+.2} B", k as f64 / 20.0);
+                }
+                if (f - f_lo).abs() <= flat {
+                    assert!(single.abs() < 0.1, "taps {taps}: single reads {single:.2} dB at {:+.2} B", k as f64 / 20.0);
+                }
+            }
+        }
     }
 }
