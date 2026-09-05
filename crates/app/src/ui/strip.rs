@@ -479,6 +479,15 @@ impl Strip<'_> {
                                     ));
                                 }
                             });
+                            // Above everything that comes and goes. The RDS
+                            // readout appears the moment a station is
+                            // identified and disappears when it is lost, and
+                            // a key drawn under it moves out from under the
+                            // pointer mid-transmission: on WFM the carrier
+                            // dropped every time a station name arrived.
+                            if can_tx && Self::channel_tx(ui, ch, keyed, mic, self.cmds) {
+                                tune = Some(i);
+                            }
                             if ch.on {
                                 // Its own level, which runs into the master,
                                 // read against what it is contributing.
@@ -512,9 +521,7 @@ impl Strip<'_> {
                                     }
                                 }
                             }
-                            if can_tx && Self::channel_tx(ui, ch, keyed, mic, self.cmds) {
-                                tune = Some(i);
-                            }
+
                         });
                     ui.add_space(6.0);
                 }
