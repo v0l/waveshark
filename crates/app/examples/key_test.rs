@@ -39,6 +39,9 @@ fn main() -> common::Result<()> {
         flow: pipeline::port::Flow::Tx,
         ..Default::default()
     };
+    // Keying a half duplex radio moves its one synthesiser, which is what
+    // the receiver has to put back afterwards.
+    println!("tuned at {} Hz before keying", dev.center().0);
     let mut g = pipeline::chain(
         input,
         vec![
@@ -48,6 +51,7 @@ fn main() -> common::Result<()> {
         ],
     )?;
 
+    println!("--- transmitting ---");
     let start = std::time::Instant::now();
     let (mut rx_samples, mut blocks) = (0u64, 0u64);
     while start.elapsed().as_secs_f64() < secs {
@@ -87,5 +91,47 @@ fn main() -> common::Result<()> {
             );
         }
     }
+
+    // Unkey, and see whether the receiver comes back: the driver has to put
+    // the radio into receive again and the stream has to start delivering
+    // real samples rather than the noise floor it stands in with.
+    println!("--- unkeying ---");
+    let id = g.order().last().map(|(i, _)| i).unwrap();
+    if let Some(n) = g.node_mut(id) {
+        if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+            s.finish(std::time::Duration::from_secs(1));
+        }
+    }
+    drop(g);
+
+    let after = std::time::Instant::now();
+    let (mut n, mut real) = (0u64, 0u64);
+    while after.elapsed().as_secs_f64() < 3.0 {
+        match rx.read() {
+            Ok(b) => {
+                n += b.samples.len() as u64;
+                if !rx.silent() {
+                    real += b.samples.len() as u64;
+                }
+                let rms = (b.samples.iter().map(|c| c.norm_sqr() as f64).sum::<f64>()
+                    / b.len().max(1) as f64)
+                    .sqrt();
+                if n % (2_000_000 / 2) < 100_000 {
+                    println!(
+                        "{:5.2}s after: {n} samples, {real} real, silent {}, rms {:.5}",
+                        after.elapsed().as_secs_f64(),
+                        rx.silent(),
+                        rms
+                    );
+                }
+            }
+            Err(e) => {
+                println!("receive did not come back: {e}");
+                break;
+            }
+        }
+    }
+    println!("{real} real samples in {:.1}s after unkeying", after.elapsed().as_secs_f64());
+    println!("tuned at {} Hz after unkeying", dev.center().0);
     Ok(())
 }
