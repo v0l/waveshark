@@ -333,17 +333,27 @@ be developed against: what it produces replays through the receiver, so the
 test asserts a decode rather than a waveform, and nothing is radiated while
 it is still wrong.
 
-1. **Encoders, which are the slicers backwards.** `decode::slicer::slice`
-   turns a pulse train into bits under a timing table; the same table turns
-   bits back into a pulse train. Every protocol that has a table gets an
-   encoder nearly for free, which is why the transmit column above mostly
-   mirrors the receive one.
+The first protocol is keyed: `morse_tx` takes text as bytes and produces IQ,
+holding `morse_key` (the table in `decode::morse`, read the same way in both
+directions) and `ook_mod` inside it as an inner graph. The modulator knows
+nothing about Morse, so every protocol with a timing table adds an encoder and
+reuses the carrier. Streams now carry their direction: `StreamSpec::flow` is
+`Rx` or `Tx`, and a node fed by both at once fails to build, which GNU Radio
+cannot check because a port there is complex samples and nothing else. Bursts
+carry `tx_start`, `tx_end` and `tx_at` tags, named after `tx_sob`, `tx_eob`
+and `tx_time` for the same reasons.
 
-2. **Modulator nodes.** A `Package` of mark/gap timings becomes an envelope,
-   and an envelope becomes IQ. Two nodes cover most of this list: OOK keying
-   and two-level FSK. Both need edge shaping rather than hard switching, or
-   the transmission splatters across the band: a raised-cosine ramp of a few
-   microseconds is the difference between a legal signal and interference.
+Still missing:
+
+1. **The rest of the encoders.** `decode::slicer::slice` turns a pulse train
+   into bits under a timing table; the same table turns bits back into a pulse
+   train. Every protocol that has a table gets an encoder nearly for free,
+   which is why the transmit column above mostly mirrors the receive one.
+
+2. **An FSK modulator.** `ook_mod` covers keyed carriers. Two-level FSK needs
+   its own node, and `Package` describes it only by the convention that a mark
+   is one tone: anything with more than two levels needs a richer port than
+   `Pulses`.
 
 3. **Scheduling and limits.** Transmission is time critical in a way reception
    is not, so the graph needs to produce samples ahead of a deadline rather

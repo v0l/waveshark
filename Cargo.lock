@@ -1902,6 +1902,7 @@ dependencies = [
  "crossbeam-channel",
  "hackrf-usb",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

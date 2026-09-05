@@ -690,6 +690,7 @@ impl pipeline::node::Node for AudioBusNode {
             center: common::Hz(0),
             bandwidth: 0.0,
             channels: 2,
+            ..Default::default()
         }])
     }
 
@@ -1011,6 +1012,7 @@ mod tests {
             center: common::Hz(0),
             bandwidth: 0.0,
             channels,
+            ..Default::default()
         };
         let ins: Vec<PortSpec> = (0..n).map(|_| PortSpec { spec, latency: 0 }).collect();
         node.negotiate(&ins).unwrap();

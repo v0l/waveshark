@@ -34,6 +34,7 @@ pub mod lora;
 pub mod lorawan;
 pub mod meshcore;
 pub mod meshtastic;
+pub mod morse;
 #[cfg(feature = "tea")]
 pub mod recover;
 #[cfg(feature = "tea")]
