@@ -163,24 +163,29 @@ impl Simple for FirFilterNode {
 
 /// A real-valued FIR with its own history, kept here because the DSP crate's
 /// one is a decimator and a filter that keeps every sample is not that.
-struct RealFir {
+pub struct RealFir {
     taps: Vec<f32>,
     hist: Vec<f32>,
 }
 
 impl RealFir {
-    fn new(taps: Vec<f32>) -> Self {
+    pub fn new(taps: Vec<f32>) -> Self {
         let n = taps.len();
         Self { taps, hist: vec![0.0; n] }
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.hist.iter_mut().for_each(|v| *v = 0.0);
+    }
+
+    /// Filter a whole buffer in place.
+    pub fn process(&mut self, buf: &mut [f32]) {
+        self.process_strided(buf, 0, 1);
     }
 
     /// Filter every `stride`th sample starting at `offset`, in place: one
     /// channel of an interleaved buffer.
-    fn process_strided(&mut self, buf: &mut [f32], offset: usize, stride: usize) {
+    pub fn process_strided(&mut self, buf: &mut [f32], offset: usize, stride: usize) {
         let n = self.taps.len();
         let mut i = offset;
         while i < buf.len() {
