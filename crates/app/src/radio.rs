@@ -719,6 +719,8 @@ pub enum TxMode {
     Nfm,
     /// 5 kHz deviation, on the 25 kHz grid.
     Fm,
+    /// 75 kHz deviation, which is broadcast FM and 200 kHz wide.
+    Wfm,
     /// Carrier left in, as an airband or broadcast receiver expects.
     Am,
     /// An unmodulated carrier, for measuring what the transmitter is doing.
@@ -734,7 +736,7 @@ pub enum TxMode {
 pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
     match mode {
         ChanMode::Audio(Demod::Nfm) => Some(TxMode::Nfm),
-        ChanMode::Audio(Demod::Wfm) => Some(TxMode::Fm),
+        ChanMode::Audio(Demod::Wfm) => Some(TxMode::Wfm),
         ChanMode::Audio(Demod::Am) => Some(TxMode::Am),
         ChanMode::Audio(Demod::Cw) => Some(TxMode::Carrier),
         ChanMode::Audio(Demod::Usb | Demod::Lsb) => None,
@@ -747,6 +749,7 @@ impl TxMode {
         match self {
             Self::Nfm => "NFM",
             Self::Fm => "FM",
+            Self::Wfm => "WFM",
             Self::Am => "AM",
             Self::Carrier => "CW",
         }
@@ -758,6 +761,7 @@ impl TxMode {
         match self {
             Self::Nfm => 12_500.0,
             Self::Fm => 25_000.0,
+            Self::Wfm => 200_000.0,
             Self::Am => 8_000.0,
             Self::Carrier => 500.0,
         }
