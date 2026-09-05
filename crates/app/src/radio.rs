@@ -1823,6 +1823,7 @@ fn run(
     // while the graph it belongs to was not running.
     let mut tx_gain_db = 0.0f32;
     let mut held: Vec<Cmd> = Vec::new();
+    let mut blocks_since_key: u64 = 0;
     // The transmitter, while one is keyed. A graph like any other, run from
     // the same loop as the receiver: on a full duplex radio both are doing
     // their work at once, and on a half duplex one the receive half is
@@ -1891,6 +1892,7 @@ fn run(
                 // loses the button, and it is not an error.
                 Cmd::Key(None) => {
                     if let Some(g) = tx_graph.take() {
+                        tracing::info!("unkeyed");
                         status.tx_underruns.store(key_down(g), Ordering::Relaxed);
                         status.keyed.store(0, Ordering::Relaxed);
                         status.set_radio(RadioControls::read(dev.as_ref(), ppm));
@@ -1926,10 +1928,12 @@ fn run(
                                 &mic,
                             ) {
                                 Ok(g) => {
+                                    tracing::info!("keyed channel {}", ch.id);
                                     tx_graph = Some(g);
                                     status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
+                                    tracing::warn!("cannot transmit: {e}");
                                     *status.error.lock() =
                                         Some(format!("cannot transmit: {e}"))
                                 }
@@ -2303,12 +2307,36 @@ fn run(
                     .map(|m| (m.peak(), m.agc_gain_db()))
             });
             let (peak, gain_db) = from_node.unwrap_or_else(|| (c.peak(), 0.0));
+            // Said once a second while keyed, because a transmission that
+            // stops is the hardest thing here to see after the fact: the
+            // carrier is gone and nothing on screen says why.
+            if tx_graph.is_some() && blocks_since_key % 50 == 0 {
+                if let Some(g) = tx_graph.as_ref() {
+                    let sink = g
+                        .order()
+                        .last()
+                        .and_then(|(id, _)| g.node(id))
+                        .and_then(|n| n.as_any())
+                        .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
+                    if let Some(s) = sink {
+                        tracing::info!(
+                            "on air: {} samples, {} unfilled, {} blocks refused, mic {:.2}",
+                            s.written(),
+                            s.underruns(),
+                            s.failed_blocks(),
+                            peak
+                        );
+                    }
+                }
+            }
+            blocks_since_key = blocks_since_key.wrapping_add(1);
             status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
             status.mic_gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
         }
 
         if let Some(g) = tx_graph.as_mut() {
             if let Err(e) = pump_tx(g, buf.samples.len()) {
+                tracing::warn!("transmit stopped: {e}");
                 *status.error.lock() = Some(format!("transmit: {e}"));
                 if let Some(g) = tx_graph.take() {
                     status.tx_underruns.store(key_down(g), Ordering::Relaxed);
