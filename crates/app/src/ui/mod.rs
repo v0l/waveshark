@@ -117,6 +117,10 @@ pub struct App {
     location: Option<(f64, f64)>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
+    /// Sound devices by name, empty for the system default. The speaker the
+    /// mix comes out of, and the microphone a keyed channel transmits from.
+    audio_out: String,
+    audio_in: String,
     /// Packet feeds from other receivers, as configured here and saved in
     /// the session.
     feeds: Vec<nodes::FeedSpec>,
@@ -357,6 +361,8 @@ impl Default for App {
             view: View::Spectrum,
             location: None,
             country: String::new(),
+            audio_out: String::new(),
+            audio_in: String::new(),
             feeds: Vec::new(),
             feed_host: String::new(),
             remote: None,
@@ -407,6 +413,8 @@ impl App {
             decode_on: s.decode_on,
             location: s.location,
             country: s.country.clone(),
+            audio_out: s.audio_out.clone(),
+            audio_in: s.audio_in.clone(),
             feeds: s.feeds.clone(),
             log_cap_mb: s.log_cap_mb,
             capture_cap_mb: s.capture_cap_mb,
@@ -466,6 +474,8 @@ impl App {
             location: self.location,
             language: crate::i18n::language().code().to_string(),
             country: self.country.clone(),
+            audio_out: self.audio_out.clone(),
+            audio_in: self.audio_in.clone(),
             band_plan: crate::bands::plan().id().to_string(),
             view: self.scope.prefs(),
             feeds: self.feeds.clone(),
@@ -688,6 +698,12 @@ impl App {
         }
         // A new radio thread has a new graph, whose log and capture are at
         // their defaults until they are told otherwise.
+        // The thread opens the default speaker at startup; this puts the one
+        // the session asked for in its place, and hands over the microphone
+        // to use when a channel is keyed.
+        if !self.audio_out.is_empty() || !self.audio_in.is_empty() {
+            self.send_audio();
+        }
         self.send(Cmd::PacketLogCap(self.log_cap_mb.map(|mb| mb << 20)));
         self.send(Cmd::CaptureCap(self.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)));
         if self.capture {
@@ -1186,6 +1202,12 @@ impl App {
     /// one that knows which chains it already has: sending it the state it
     /// should be in leaves no way for the two to disagree, and it keeps the
     /// chains of channels that did not change.
+    /// Tell the radio thread which sound devices to use.
+    fn send_audio(&mut self) {
+        let (out, input) = (self.audio_out.clone(), self.audio_in.clone());
+        self.send(Cmd::Audio { out, input });
+    }
+
     fn send_channels(&mut self) {
         let specs = self.channel_specs();
         self.send(Cmd::Channels(specs));

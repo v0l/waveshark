@@ -51,6 +51,14 @@ pub struct Session {
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
+    /// Sound devices by name, empty for the system default.
+    ///
+    /// A name rather than an index for the same reason the radio is a label:
+    /// what the host calls device 2 changes when a headset is plugged in, and
+    /// a receiver that starts talking to the wrong output after a reboot is
+    /// indistinguishable from one that has stopped working.
+    pub audio_out: String,
+    pub audio_in: String,
     /// What the packet log folder and the raw capture folder may take, in
     /// megabytes, or `None` for no limit. Absent from an older file means
     /// the default, and a limit set once should not need setting again.
@@ -132,6 +140,8 @@ impl Default for Session {
             dc_block: true,
             decode_on: true,
             volume: 0.5,
+            audio_out: String::new(),
+            audio_in: String::new(),
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
             capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             view: ViewPrefs::default(),
@@ -237,6 +247,8 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
+            audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
+            audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
             capture_cap_mb: cap(kv.get("capture_cap_mb").copied(), d.capture_cap_mb),
             view: ViewPrefs {
@@ -279,6 +291,8 @@ impl Session {
             ("language", &self.language),
             ("country", &self.country),
             ("band_plan", &self.band_plan),
+            ("audio_out", &self.audio_out),
+            ("audio_in", &self.audio_in),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -384,6 +398,8 @@ mod tests {
             ppm: -3.5,
             location: Some((53.6369, -6.6528)),
             language: "en".into(),
+            audio_out: "Scarlett 2i2 Analogue".into(),
+            audio_in: "Scarlett 2i2 Analogue".into(),
             country: "IE".into(),
             band_plan: "europe".into(),
             dc_block: false,
