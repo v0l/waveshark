@@ -32,6 +32,8 @@ pub enum Icon {
     Mute,
     /// Write the raw span to a file.
     Capture,
+    /// Key the transmitter: a mast with waves off it.
+    Transmit,
 }
 
 /// Side of the clickable square, in points.
@@ -175,6 +177,25 @@ impl Icon {
                 p.circle_stroke(c, rad, s);
                 p.circle_filled(c, rad * 0.45, col);
             }
+            Icon::Transmit => {
+                // A mast, a dot at its tip, and two arcs either side of the
+                // tip: the mark on every PTT the trade has made.
+                let tip = Pos2::new(c.x, b.top() + b.height() * 0.28);
+                p.line_segment([tip, Pos2::new(c.x, b.bottom())], s);
+                p.circle_filled(tip, sw * 0.9, col);
+                for (k, rad) in [(0.28f32, 1.0f32), (0.46, 1.0)] {
+                    let r = b.width() * k;
+                    for side in [-1.0f32, 1.0] {
+                        let pts: Vec<Pos2> = (0..=8)
+                            .map(|i| {
+                                let a = -0.9 + 1.8 * i as f32 / 8.0;
+                                Pos2::new(tip.x + side * r * a.cos() * rad, tip.y - r * a.sin())
+                            })
+                            .collect();
+                        p.add(egui::Shape::line(pts, s));
+                    }
+                }
+            }
             Icon::Log => {
                 // Rows with a mark against each, which is what the log is.
                 for i in 0..3 {
@@ -217,8 +238,20 @@ pub fn tint(enabled: bool, selected: bool, hovered: bool) -> Color32 {
 
 /// An icon that behaves like a button, labelled by hover text.
 pub fn icon_button(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, selected: bool) -> Response {
+    icon_button_sized(ui, icon, tip, enabled, selected, SIZE)
+}
+
+/// The same, at a size that fits a row of controls rather than the toolbar.
+pub fn icon_button_sized(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    enabled: bool,
+    selected: bool,
+    size: f32,
+) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(
-        Vec2::splat(SIZE),
+        Vec2::splat(size),
         if enabled { Sense::click() } else { Sense::hover() },
     );
     let hovered = resp.hovered();

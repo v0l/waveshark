@@ -22,6 +22,13 @@ pub(super) struct Strip<'a> {
 }
 
 impl Strip<'_> {
+    /// The mute on a channel or a bus input: the master's speaker icon, at
+    /// row size, so the same control reads the same everywhere on the strip.
+    fn mute_button(ui: &mut egui::Ui, muted: bool, tip: &str) -> egui::Response {
+        let icon = if muted { crate::icons::Icon::Mute } else { crate::icons::Icon::Sound };
+        crate::icons::icon_button_sized(ui, icon, tip, true, muted, 18.0)
+    }
+
     /// Gain and squelch, for the modes that have them.
     ///
     /// Worth a line of its own because on a weak signal these two are the
@@ -142,6 +149,7 @@ impl Strip<'_> {
         ch: &mut Channel,
         keyed: Option<u64>,
         mic: f32,
+        mic_clipped: bool,
         keying: &mut Option<u64>,
         cmds: &mut Vec<Cmd>,
     ) -> bool {
@@ -156,8 +164,10 @@ impl Strip<'_> {
         ui.add_space(6.0);
         ui.separator();
         ui.horizontal(|ui| {
-            theme::Line::new().legend("tx").show(ui);
-            theme::Line::new().value(mode.label()).size(12.0).show(ui);
+            // One line, not a legend beside a value: two `Line`s in a row
+            // sit on two baselines, and the mode read a pixel or two under
+            // its caption.
+            theme::Line::new().legend("tx").value(mode.label()).show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme::Line::new()
                     .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
@@ -174,22 +184,25 @@ impl Strip<'_> {
                     changed = true;
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new().legend("shift").show(ui);
-                let mut khz = tx.shift_hz / 1e3;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut khz)
-                            .speed(0.1)
-                            .range(-10_000.0..=10_000.0)
-                            .suffix(" kHz"),
-                    )
-                    .changed()
-                {
-                    tx.shift_hz = khz * 1e3;
-                    changed = true;
-                }
-            });
+        });
+        // Its own row. Right-aligned beside the source buttons it was drawn
+        // over them at the strip's default width, and the buttons underneath
+        // could not be pressed.
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("shift").show(ui);
+            let mut khz = tx.shift_hz / 1e3;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut khz)
+                        .speed(0.1)
+                        .range(-10_000.0..=10_000.0)
+                        .suffix(" kHz"),
+                )
+                .changed()
+            {
+                tx.shift_hz = khz * 1e3;
+                changed = true;
+            }
         });
 
         match tx.source {
@@ -199,13 +212,23 @@ impl Strip<'_> {
                 // it, so an operator can see they are being heard.
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("mic").show(ui);
-                    let mut g = tx.mic_gain / 3.0;
+                    let mut g = tx.mic_gain / nodes::MIC_GAIN_MAX;
                     if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
-                        tx.mic_gain = (g * 3.0).clamp(0.0, 3.0);
+                        tx.mic_gain = (g * nodes::MIC_GAIN_MAX).clamp(0.0, nodes::MIC_GAIN_MAX);
                         changed = true;
                     }
                     theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
                 });
+                if mic_clipped {
+                    ui.horizontal(|ui| {
+                        ui.add_space(28.0);
+                        theme::Line::new()
+                            .value("input clipping: lower the microphone boost")
+                            .size(11.0)
+                            .tint(theme::FAULT)
+                            .show(ui);
+                    });
+                }
             }
             TxSource::Tone => {
                 ui.horizontal(|ui| {
@@ -245,20 +268,45 @@ impl Strip<'_> {
 
         ui.add_space(4.0);
         let keyed_here = keyed == Some(ch.id);
-        let key = ui.add(
-            egui::Button::new(
-                egui::RichText::new(if keyed_here { "ON AIR" } else { "KEY" })
-                    .size(15.0)
-                    .color(if keyed_here { theme::PANEL } else { theme::READOUT }),
-            )
-            .fill(if keyed_here { theme::READOUT } else { theme::PANEL })
-            .min_size(Vec2::new(VU_W, 26.0))
-            // Dragging, not clicking. A button that only senses clicks
-            // reports the press and then stops tracking the pointer, so a key
-            // held down came back up on its own after a frame or two: the
-            // carrier lasted as long as it took the queue to drain.
-            .sense(Sense::click_and_drag()),
+        // The key: the whole width of the strip, the transmit mark and the
+        // word together in the middle, lit amber while on air. Sensed as a
+        // drag, not a click: a button that only senses clicks reports the
+        // press and then stops tracking the pointer, so a key held down came
+        // back up on its own after a frame or two.
+        let (rect, key) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), 30.0),
+            Sense::click_and_drag(),
         );
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            let (fill, ink) = if keyed_here {
+                (theme::READOUT, theme::PANEL)
+            } else if key.hovered() {
+                (theme::ETCH, theme::VALUE)
+            } else {
+                (theme::WELL, theme::READOUT)
+            };
+            p.rect_filled(rect, 3.0, fill);
+            p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+            let label = if keyed_here { "ON AIR" } else { "TRANSMIT" };
+            let font = FontId::new(13.0, egui::FontFamily::Name(theme::LEGEND_FONT.into()));
+            let galley = p.layout_no_wrap(label.to_string(), font, ink);
+            let icon = 22.0;
+            let gap = 8.0;
+            let total = icon + gap + galley.size().x;
+            let x0 = rect.center().x - total / 2.0;
+            crate::icons::Icon::Transmit.paint(
+                p,
+                Rect::from_center_size(Pos2::new(x0 + icon / 2.0, rect.center().y), Vec2::splat(icon)),
+                ink,
+            );
+            p.galley(
+                Pos2::new(x0 + icon + gap, rect.center().y - galley.size().y / 2.0),
+                galley,
+                ink,
+            );
+        }
+        key.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
         // Held from the pointer rather than from the widget. A key that asks
         // the button whether it is still pressed is a key that lets go
         // whenever the panel relaids itself underneath it: on WFM the RDS
@@ -357,6 +405,9 @@ impl Strip<'_> {
                     .radio
                     .map(|r| r.status.keyed.load(std::sync::atomic::Ordering::Relaxed))
                     .filter(|id| *id != 0);
+                let mic_clipped = self
+                    .radio
+                    .is_some_and(|r| r.status.mic_clipped.load(std::sync::atomic::Ordering::Relaxed));
                 let mut remove = None;
                 let mut tune = None;
                 for (i, ch) in self.st.channels.iter_mut().enumerate() {
@@ -485,7 +536,7 @@ impl Strip<'_> {
                                     if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
                                         tune = Some(i);
                                     }
-                                    if ui.selectable_label(ch.muted, "M").clicked() {
+                                    if Self::mute_button(ui, ch.muted, "Mute this channel").clicked() {
                                         ch.muted = !ch.muted;
                                         tune = Some(i);
                                     }
@@ -508,7 +559,7 @@ impl Strip<'_> {
                                 }
                             }
                             if can_tx
-                                && Self::channel_tx(ui, ch, keyed, mic, &mut self.st.keying, self.cmds)
+                                && Self::channel_tx(ui, ch, keyed, mic, mic_clipped, &mut self.st.keying, self.cmds)
                             {
                                 tune = Some(i);
                             }
@@ -555,7 +606,7 @@ impl Strip<'_> {
                                             ParamValue::Float(v as f64),
                                         ));
                                     }
-                                    if ui.selectable_label(s.muted, "M").clicked() {
+                                    if Self::mute_button(ui, s.muted, "Mute this input").clicked() {
                                         self.cmds.push(Cmd::NodeParam(
                                             bus,
                                             AudioBusNode::param_of(s.port, "mute"),
