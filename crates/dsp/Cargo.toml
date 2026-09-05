@@ -9,3 +9,4 @@ common.workspace = true
 num-complex.workspace = true
 rustfft.workspace = true
 rayon.workspace = true
+wide.workspace = true
