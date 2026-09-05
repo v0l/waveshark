@@ -15,7 +15,7 @@
 //! table adds an encoder and reuses this carrier.
 
 use crate::mod_nodes::OokModNode;
-use common::Result;
+use common::{Result, C32};
 use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -318,6 +318,13 @@ pub struct TxSinkNode {
     written: u64,
     /// Blocks the device could not take, because the radio went away.
     failed: u64,
+    /// The last block handed over, kept so the receiver can be shown what is
+    /// going out. A half duplex radio hears nothing while it transmits, so
+    /// without this the spectrum is a flat floor for the length of every
+    /// over and an operator has no way to see their own signal: whether it
+    /// is where they meant it, how wide it is, or whether the modulation is
+    /// doing anything at all.
+    monitor: Vec<C32>,
 }
 
 impl TxSinkNode {
@@ -328,7 +335,14 @@ impl TxSinkNode {
             center: common::Hz(0),
             written: 0,
             failed: 0,
+            monitor: Vec::new(),
         }
+    }
+
+    /// The last block that went to the radio, for a monitor on the receive
+    /// side. Empty until something has been transmitted.
+    pub fn monitor(&self) -> &[C32] {
+        &self.monitor
     }
 
     /// Complex samples handed to the radio since the node was built.
@@ -393,6 +407,8 @@ impl Simple for TxSinkNode {
             return Ok(());
         }
         let Some(s) = &mut self.stream else { return Ok(()) };
+        self.monitor.clear();
+        self.monitor.extend_from_slice(iq);
         let buf = common::IqBuf::new(iq.to_vec(), self.center, self.rate, self.written);
         match s.write(&buf) {
             Ok(()) => self.written += iq.len() as u64,
