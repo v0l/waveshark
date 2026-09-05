@@ -2383,7 +2383,42 @@ fn run(
         let read_span = tracing::info_span!("rf_read").entered();
         let mut buf = match stream.read() {
             Ok(b) => b,
-            Err(_) => return Ok(()),
+            // The radio has gone: unplugged, reset by hand, or wedged past
+            // what its driver could recover. Reopening it is worth trying,
+            // because the usual cause is the board resetting itself and
+            // coming back a second later, and the alternative is a window
+            // that has to be restarted to speak to a radio that is present.
+            Err(e) => {
+                tracing::warn!("receive stopped: {e}");
+                *status.error.lock() = Some(format!("radio stopped: {e}; reopening"));
+                let mut back = None;
+                for attempt in 1..=3 {
+                    std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
+                    match restart(&entry, Sps(plan.rate as u64), plan.center, gain, ppm) {
+                        Ok(got) => {
+                            back = Some(got);
+                            break;
+                        }
+                        Err(e) => tracing::warn!("reopen {attempt} failed: {e}"),
+                    }
+                }
+                match back {
+                    Some((d, s, soft)) => {
+                        dev = d;
+                        stream = s;
+                        soft_ppm = soft;
+                        status.set_radio(RadioControls::read(dev.as_ref(), ppm));
+                        *status.error.lock() = Some("radio came back".into());
+                        rebuild = true;
+                        continue;
+                    }
+                    None => {
+                        *status.error.lock() =
+                            Some("the radio is gone; pick it again once it is back".into());
+                        return Ok(());
+                    }
+                }
+            }
         };
         drop(read_span);
         status.dropped.store(stream.dropped(), Ordering::Relaxed);

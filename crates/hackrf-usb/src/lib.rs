@@ -19,8 +19,8 @@ pub mod transport;
 
 pub use error::{Error, HackRfErrorCode, Result};
 pub use transport::{
-    AsyncReadControlHandle, AsyncReadHandle, AsyncWriteHandle, HackRf, RECOMMENDED_BUFFER_SIZE,
-    TRANSFER_BUFFER_SIZE, TXVGA_MAX_DB,
+    AsyncReadControlHandle, AsyncReadHandle, AsyncWriteHandle, HackRf, RecvState,
+    RECOMMENDED_BUFFER_SIZE, TRANSFER_BUFFER_SIZE, TXVGA_MAX_DB,
 };
 
 /// HackRF USB Vendor ID (OpenMoko Inc, shared VID).
