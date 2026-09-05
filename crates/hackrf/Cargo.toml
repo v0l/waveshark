@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 hackrf-usb.workspace = true
 common.workspace = true
+parking_lot.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 

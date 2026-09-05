@@ -133,6 +133,7 @@ impl FileSink {
                 }],
                 native_format: format,
                 half_duplex: false,
+                channels: 1,
             }),
         };
         Self {

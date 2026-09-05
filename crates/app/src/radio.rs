@@ -259,95 +259,78 @@ fn restart(
 }
 
 
-/// Transmit on one channel until the interface unkeys, then hand the radio
-/// back.
+/// Start an over on one channel, and give back the graph that runs it.
 ///
-/// Half duplex: the receive stream owns the device, so this drops it, reopens
-/// the radio for transmit, and reopens it again for receive afterwards. The
-/// waterfall stops for as long as the over lasts, which is why the status
-/// says so rather than leaving a gap nobody can account for.
-///
-/// Returns the transfers the radio had to fill with silence, which is what
-/// says whether the transmission had holes in it.
-fn transmit(
-    entry: &crate::devices::Entry,
+/// The radio is not taken away from the receiver to do this. A half duplex
+/// driver keeps the receive stream alive and feeds it a noise floor for the
+/// duration, which is what stops an over from throwing away the spectrum's
+/// averaging, every channel's squelch and every decoder's part-built frame; a
+/// full duplex radio goes on hearing the band while it transmits.
+fn key_up(
+    dev: &mut dyn common::Device,
     ch: &ChannelSpec,
     tx: &TxSpec,
-    rate: Sps,
     center: Hz,
     gain_db: f32,
-    cmd: &Receiver<Cmd>,
-    status: &Status,
-    held: &mut Vec<Cmd>,
-) -> common::Result<u64> {
+) -> common::Result<pipeline::Graph> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
-
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    let mut dev = crate::devices::open(entry)?;
     if !dev.info().can_transmit() {
         return Err(common::Error::TxUnsupported);
     }
     if !dev.info().covers_tx(on_air) {
         return Err(common::Error::other(format!(
-            "{} is outside what this radio transmits",
-            on_air
+            "{on_air} is outside what this radio transmits"
         )));
     }
-    dev.set_rate(rate)?;
-    dev.set_center(on_air)?;
-    let want = (gain_db + tx.trim_db).max(0.0);
-    dev.set_tx_gain("amp", GainMode::Manual(0.0))?;
-    dev.set_tx_gain("txvga", GainMode::Manual(want))?;
-
-    let rate_f = dev.rate().as_f64();
-    let mut g = crate::chain::transmit_graph(tx, rate_f, on_air, dev.start_tx()?)?;
-    status.keyed.store(ch.id, Ordering::Relaxed);
-
-    // A block of about 15 ms, which is short enough that unkeying is not
-    // heard as a delay and long enough that the radio is never waiting.
-    let block = ((rate_f * 0.015) as usize).clamp(4_096, 262_144);
-    let mut underruns = 0u64;
-    let mut stop = false;
-    loop {
-        for c in cmd.try_iter() {
-            match c {
-                Cmd::Key(None) => stop = true,
-                // Keying somewhere else while keyed: finish this over first.
-                Cmd::Key(Some(_)) => stop = true,
-                Cmd::Stop => {
-                    stop = true;
-                    held.push(Cmd::Stop);
-                }
-                // Everything else waits. A retune or a rebuild during an over
-                // would apply to a graph that is not running.
-                other => held.push(other),
-            }
-        }
-        if stop {
-            break;
-        }
-        let buf = g.input_buf();
-        buf.clear();
-        buf.real_mut().resize(block, 0.0);
-        g.run()?;
+    // A half duplex radio transmits where it is tuned, because it has one
+    // synthesiser: asking for a shift it cannot honour would put the
+    // transmission somewhere other than where the strip says.
+    let half = dev.info().tx.as_ref().is_some_and(|t| t.half_duplex);
+    if half && on_air != dev.center() {
+        dev.set_center(on_air)?;
     }
+    dev.set_tx_gain("amp", GainMode::Manual(0.0))?;
+    dev.set_tx_gain("txvga", GainMode::Manual((gain_db + tx.trim_db).max(0.0)))?;
 
+    let rate = dev.rate().as_f64();
+    crate::chain::transmit_graph(tx, rate, on_air, dev.start_tx()?)
+}
+
+/// End the over, letting what is queued reach the antenna first, and say how
+/// many transfers the radio had to fill with silence.
+fn key_down(mut g: pipeline::Graph) -> u64 {
     let id = g.order().last().map(|(id, _)| id);
+    let mut idle = 0;
     if let Some(n) = id.and_then(|id| g.node_mut(id)) {
         if let Some(sink) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
-            // Let what is queued go out before the carrier drops, or the last
-            // few milliseconds of the over are cut off mid-word.
+            // Dropping the sink would cut the last few milliseconds of the
+            // over off mid-word, and on a half duplex radio it is also what
+            // hands the receiver its radio back.
             sink.finish(std::time::Duration::from_secs(1));
-            underruns = sink.underruns();
+            idle = sink.underruns();
         }
     }
-    status.keyed.store(0, Ordering::Relaxed);
-    status.tx_underruns.store(underruns, Ordering::Relaxed);
-    drop(g);
-    drop(dev);
-    Ok(underruns)
+    idle
+}
+
+/// Feed the transmitter one block, the same length as the one the receiver
+/// just processed.
+///
+/// Matching the receive block is what keeps the two halves in step without a
+/// clock: both run at the radio's rate, so a block of receive time is a block
+/// of transmit time. The sink blocks when the radio has enough queued, which
+/// is what paces the whole loop.
+fn pump_tx(g: &mut pipeline::Graph, samples: usize) -> common::Result<()> {
+    if samples == 0 {
+        return Ok(());
+    }
+    let buf = g.input_buf();
+    buf.clear();
+    buf.real_mut().resize(samples, 0.0);
+    g.run()?;
+    Ok(())
 }
 
 /// Put the correction on the device, and say how much of it the receiver has
@@ -1700,6 +1683,11 @@ fn run(
     // while the graph it belongs to was not running.
     let mut tx_gain_db = 0.0f32;
     let mut held: Vec<Cmd> = Vec::new();
+    // The transmitter, while one is keyed. A graph like any other, run from
+    // the same loop as the receiver: on a full duplex radio both are doing
+    // their work at once, and on a half duplex one the receive half is
+    // reading what the driver puts there instead.
+    let mut tx_graph: Option<pipeline::Graph> = None;
     status
         .can_transmit
         .store(dev.info().can_transmit(), Ordering::Relaxed);
@@ -1723,7 +1711,13 @@ fn run(
                 }
                 // Unkeying while not keyed is what the interface sends when it
                 // loses the button, and it is not an error.
-                Cmd::Key(None) => {}
+                Cmd::Key(None) => {
+                    if let Some(g) = tx_graph.take() {
+                        status.tx_underruns.store(key_down(g), Ordering::Relaxed);
+                        status.keyed.store(0, Ordering::Relaxed);
+                        status.set_radio(RadioControls::read(dev.as_ref(), ppm));
+                    }
+                }
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
                     match spec.and_then(|c| c.tx.map(|t| (c, t))) {
@@ -1732,41 +1726,23 @@ fn run(
                                 Some("that channel has no transmit side".into())
                         }
                         Some((ch, tx)) => {
-                            // Half duplex: reception stops for the over, and
-                            // the radio has to be handed over whole.
-                            stream.stop();
-                            drop(stream);
-                            let sent = transmit(
-                                &entry,
-                                &ch,
-                                &tx,
-                                Sps(plan.rate as u64),
-                                plan.center,
-                                tx_gain_db,
-                                &cmd,
-                                status,
-                                &mut held,
-                            );
-                            if let Err(e) = &sent {
-                                *status.error.lock() = Some(format!("transmit failed: {e}"));
-                            }
-                            // Back to receiving, whether or not the over
-                            // worked: a radio left in transmit is worse than
-                            // one that could not transmit.
-                            match restart(&entry, Sps(plan.rate as u64), plan.center, gain, ppm) {
-                                Ok((d, s, soft)) => {
-                                    dev = d;
-                                    stream = s;
-                                    soft_ppm = soft;
+                            // The receive stream is left running. On a half
+                            // duplex radio the driver feeds it a noise floor
+                            // for the length of the over, so the spectrum,
+                            // the channels and the decoders keep their state
+                            // and the waterfall shows the gap rather than
+                            // stopping; on a full duplex one it goes on
+                            // hearing the band.
+                            match key_up(dev.as_mut(), &ch, &tx, plan.center, tx_gain_db) {
+                                Ok(g) => {
+                                    tx_graph = Some(g);
+                                    status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
                                     *status.error.lock() =
-                                        Some(format!("radio did not come back: {e}"));
-                                    return Ok(());
+                                        Some(format!("cannot transmit: {e}"))
                                 }
                             }
-                            status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                            rebuild = true;
                         }
                     }
                 }
@@ -2119,6 +2095,19 @@ fn run(
         // against itself and always say exactly 1x.
         let work = std::time::Instant::now();
         let block_secs = buf.samples.len() as f64 / plan.rate.max(1.0);
+
+        // The transmitter, when one is keyed, runs on the same clock as the
+        // receiver: one block of receive time is one block of transmit time,
+        // and the sink's backpressure paces both.
+        if let Some(g) = tx_graph.as_mut() {
+            if let Err(e) = pump_tx(g, buf.samples.len()) {
+                *status.error.lock() = Some(format!("transmit: {e}"));
+                if let Some(g) = tx_graph.take() {
+                    status.tx_underruns.store(key_down(g), Ordering::Relaxed);
+                }
+                status.keyed.store(0, Ordering::Relaxed);
+            }
+        }
 
         {
             let _g = tracing::info_span!("graph").entered();
