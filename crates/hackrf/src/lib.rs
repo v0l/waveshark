@@ -455,6 +455,7 @@ impl Device for HackRfDevice {
             bytes: Vec::new(),
             shared: self.shared.clone(),
             restore_rx: was_rx,
+            stalled: false,
         }))
     }
 
@@ -497,6 +498,9 @@ pub struct HackRfTxStream {
     /// Whether a receive stream was running when this one started, and so
     /// whether one has to be running again when it finishes.
     restore_rx: bool,
+    /// The writer stopped taking samples: a send timed out. Nothing more is
+    /// offered to it, and the over ends without waiting on it.
+    stalled: bool,
 }
 
 impl HackRfTxStream {
@@ -509,7 +513,9 @@ impl HackRfTxStream {
         // Before anything else: a command sent to a writer that has stopped
         // fails, and the device has to fall back to the reader's channel.
         *self.shared.tx.lock() = None;
-        handle.drain(Duration::from_millis(500));
+        if !self.stalled {
+            handle.drain(Duration::from_millis(500));
+        }
         handle.stop();
         drop(handle);
         if !self.restore_rx {
@@ -525,11 +531,15 @@ impl HackRfTxStream {
                 *self.shared.rx.lock() = Some(handle);
                 self.shared.silent.store(false, std::sync::atomic::Ordering::Relaxed);
             }
-            // The radio did not come back here. Reads keep producing a noise
-            // floor rather than failing, and the watchdog on the read side
-            // will try again: the alternative is the whole graph collapsing
-            // because a transmission ended badly.
-            Err(e) => tracing::warn!("HackRF did not return to receive: {e}"),
+            // The radio did not come back here. The read side is told it is
+            // no longer an over, so its watchdog sees an empty stream and
+            // reopens or resets the board; left silent, it read the over
+            // as still running and produced a noise floor for ever, which
+            // is what a radio that "stopped working" after a key-up was.
+            Err(e) => {
+                tracing::warn!("HackRF did not return to receive: {e}");
+                self.shared.silent.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 }
@@ -546,9 +556,26 @@ impl TxStream for HackRfTxStream {
             return Ok(());
         }
         let Some(h) = &self.handle else { return Err(Error::Disconnected) };
+        if self.stalled {
+            return Err(Error::Disconnected);
+        }
         self.bytes.clear();
         SampleFormat::Cs8.encode(&buf.samples, &mut self.bytes);
-        h.send(std::mem::take(&mut self.bytes)).map_err(map_err)
+        // Bounded, because this runs on the radio thread. A writer whose
+        // transfers have stopped completing fills its queue and a blocking
+        // send then never returns: the whole receiver stood still, not
+        // transmitting and not receiving, until the process was killed.
+        // A few blocks' worth is more than a healthy queue ever needs.
+        let block = Duration::from_secs_f64(buf.samples.len() as f64 / self.rate.as_f64());
+        let patience = (block * 4).max(Duration::from_millis(250));
+        match h.send_timeout(std::mem::take(&mut self.bytes), patience) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.stalled = true;
+                tracing::warn!("HackRF transmitter stopped taking samples: {e}");
+                Err(map_err(e))
+            }
+        }
     }
 
     fn underruns(&self) -> u64 {
