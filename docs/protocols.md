@@ -350,10 +350,13 @@ Still missing:
    train. Every protocol that has a table gets an encoder nearly for free,
    which is why the transmit column above mostly mirrors the receive one.
 
-2. **An FSK modulator.** `ook_mod` covers keyed carriers. Two-level FSK needs
-   its own node, and `Package` describes it only by the convention that a mark
-   is one tone: anything with more than two levels needs a richer port than
-   `Pulses`.
+2. **Modulators past the basic set.** `ook_mod`, `fsk_mod`, `ask_mod`,
+   `am_mod` and `fm_mod` cover keyed carriers, two tones, multi-level
+   amplitude, and voice narrow or wide. `fsk_mod` is CPFSK and describes
+   two-level keying only, by the same convention `dsp::fsk` reads: a mark is
+   the upper tone. Anything with more than two levels needs a port that
+   carries symbols rather than durations, and PSK, GMSK, 4-FSK and OFDM are
+   each their own node.
 
 3. **Scheduling and limits.** Transmission is time critical in a way reception
    is not, so the graph needs to produce samples ahead of a deadline rather

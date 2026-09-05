@@ -26,6 +26,7 @@ pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
 pub mod lora_nodes;
+pub mod mod_nodes;
 pub mod tx_nodes;
 pub mod wmbus_nodes;
 
@@ -47,7 +48,11 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MorseKeyNode, MorseTxNode, OokModNode};
+pub use tx_nodes::{MorseKeyNode, MorseTxNode};
+pub use mod_nodes::{
+    AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
+    NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
+};
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use filter_nodes::{FirFilterNode, IirFilterNode};
@@ -104,6 +109,66 @@ pub fn registry() -> Registry {
                 s.f64_or("offset_hz", 0.0),
                 s.f64_or("amplitude", 0.25) as f32,
                 s.f64_or("ramp_us", 500.0) as f32,
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "fsk_mod",
+            summary: "Key two tones from pulse timings, continuous phase",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(FskModNode::new(
+                s.f64_or("offset_hz", 0.0),
+                s.f64_or("shift_hz", 50_000.0),
+                s.f64_or("amplitude", 0.25) as f32,
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "ask_mod",
+            summary: "Amplitude modulate a carrier with one level per symbol",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(AskModNode::new(
+                s.f64_or("offset_hz", 0.0),
+                s.f64_or("amplitude", 0.25) as f32,
+                s.i64_or("sps", 10).max(1) as usize,
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "am_mod",
+            summary: "Amplitude modulate a carrier with audio, carrier left in",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(AmModNode::new(
+                s.f64_or("offset_hz", 0.0),
+                s.f64_or("depth", 0.8) as f32,
+                s.f64_or("amplitude", 0.25) as f32,
+            )) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "fm_mod",
+            summary: "Frequency modulate a carrier with audio, narrowband to broadcast",
+            category: "transmit",
+        },
+        |s: &Settings| {
+            Ok(Box::new(FmModNode::new(
+                s.f64_or("offset_hz", 0.0),
+                s.f64_or("deviation_hz", FM_DEVIATION_HZ),
+                s.f64_or("amplitude", 0.25) as f32,
             )) as Box<dyn Node>)
         },
     );
