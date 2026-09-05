@@ -146,23 +146,18 @@ impl Strip<'_> {
         cmds: &mut Vec<Cmd>,
     ) -> bool {
         let mut changed = false;
-        let mode = crate::radio::tx_mode_for(&ch.mode);
+        // Nothing to draw for a mode with no modulator behind it. A dead key
+        // and a line of apology take as much room as the controls do and
+        // offer nothing: a channel that cannot transmit is a receiving
+        // channel, which is what the rest of the strip already shows.
+        let Some(mode) = crate::radio::tx_mode_for(&ch.mode) else { return false };
         let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);
 
         ui.add_space(6.0);
         ui.separator();
         ui.horizontal(|ui| {
             theme::Line::new().legend("tx").show(ui);
-            match mode {
-                Some(m) => {
-                    theme::Line::new().value(m.label()).size(12.0).show(ui);
-                }
-                // Said rather than hidden: a mode with no modulator behind it
-                // is a gap in this receiver, not a property of the channel.
-                None => {
-                    theme::Line::new().note("no transmitter for this mode").show(ui);
-                }
-            }
+            theme::Line::new().value(mode.label()).size(12.0).show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme::Line::new()
                     .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
@@ -261,9 +256,7 @@ impl Strip<'_> {
 
         ui.add_space(4.0);
         let keyed_here = keyed == Some(ch.id);
-        let can_key = mode.is_some();
-        let key = ui.add_enabled(
-            can_key,
+        let key = ui.add(
             egui::Button::new(
                 egui::RichText::new(if keyed_here { "ON AIR" } else { "KEY" })
                     .size(15.0)
@@ -284,7 +277,7 @@ impl Strip<'_> {
         // below it moves, and the carrier dropped mid-word. What is held is
         // the mouse button, and it stays held until it is let go.
         let down = ui.input(|i| i.pointer.primary_down());
-        if can_key && keying.is_none() && key.is_pointer_button_down_on() {
+        if keying.is_none() && key.is_pointer_button_down_on() {
             *keying = Some(ch.id);
             cmds.push(Cmd::Key(Some(ch.id)));
         }
@@ -426,17 +419,58 @@ impl Strip<'_> {
                             }
                             theme::Line::new().legend(bands::name_at(ch.freq)).show(ui);
                             ui.add_space(4.0);
-                            // Two rows: broadcast modes, then the ones an
-                            // amateur band needs. Six across is narrower than
-                            // the panel gets on a laptop.
+                            // One list rather than three rows of buttons.
+                            // A channel is in one mode, the modes are a
+                            // closed set, and eleven buttons across a narrow
+                            // panel spent more space on what a channel is not
+                            // doing than on what it is.
                             ui.horizontal(|ui| {
-                                for m in [Demod::Wfm, Demod::Nfm, Demod::Am] {
-                                    let on = ch.mode == ChanMode::Audio(m);
-                                    if ui.selectable_label(on, m.label()).clicked() {
-                                        ch.mode = ChanMode::Audio(m);
-                                        tune = Some(i);
-                                    }
-                                }
+                                let label = ch.mode.label();
+                                egui::ComboBox::from_id_salt(("chan-mode", ch.id))
+                                    .selected_text(label)
+                                    .width(120.0)
+                                    .show_ui(ui, |ui| {
+                                        for m in [
+                                            Demod::Wfm,
+                                            Demod::Nfm,
+                                            Demod::Am,
+                                            Demod::Usb,
+                                            Demod::Lsb,
+                                            Demod::Cw,
+                                        ] {
+                                            let want = ChanMode::Audio(m);
+                                            let on = ch.mode == want;
+                                            if ui.selectable_label(on, m.label()).clicked() && !on {
+                                                ch.mode = want;
+                                                tune = Some(i);
+                                            }
+                                        }
+                                        ui.separator();
+                                        // The front ends that read one
+                                        // channel, asked of the registry
+                                        // rather than listed here: picking
+                                        // one runs that decoder on this
+                                        // frequency alone, which is what
+                                        // makes a single channel readable
+                                        // with the scanner switched off.
+                                        for (kind, width) in crate::chain::channel_fronts() {
+                                            let want = ChanMode::Decode(kind.to_string());
+                                            let on = ch.mode == want;
+                                            let r = ui.selectable_label(
+                                                on,
+                                                crate::chain::front_label(kind),
+                                            );
+                                            if r.clicked() && !on {
+                                                ch.mode = want;
+                                                tune = Some(i);
+                                            }
+                                            r.on_hover_text(format!(
+                                                "decode this frequency as {} in a {:.1} kHz channel",
+                                                crate::chain::front_label(kind),
+                                                width / 1e3,
+                                            ));
+                                        }
+                                    });
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -450,35 +484,6 @@ impl Strip<'_> {
                                         }
                                     },
                                 );
-                            });
-                            ui.horizontal(|ui| {
-                                for m in [Demod::Usb, Demod::Lsb, Demod::Cw] {
-                                    let on = ch.mode == ChanMode::Audio(m);
-                                    if ui.selectable_label(on, m.label()).clicked() {
-                                        ch.mode = ChanMode::Audio(m);
-                                        tune = Some(i);
-                                    }
-                                }
-                            });
-                            // The front ends that read one channel, asked of
-                            // the registry rather than listed here. Picking
-                            // one runs that decoder on this frequency alone,
-                            // which is what makes a single channel readable
-                            // with the scanner switched off.
-                            ui.horizontal_wrapped(|ui| {
-                                for (kind, width) in crate::chain::channel_fronts() {
-                                    let on = ch.mode == ChanMode::Decode(kind.to_string());
-                                    let r = ui.selectable_label(on, crate::chain::front_label(kind));
-                                    if r.clicked() {
-                                        ch.mode = ChanMode::Decode(kind.to_string());
-                                        tune = Some(i);
-                                    }
-                                    r.on_hover_text(format!(
-                                        "decode this frequency as {} in a {:.1} kHz channel",
-                                        crate::chain::front_label(kind),
-                                        width / 1e3,
-                                    ));
-                                }
                             });
                             if ch.on {
                                 // Its own level, which runs into the master,
