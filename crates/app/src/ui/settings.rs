@@ -527,6 +527,28 @@ impl App {
         hint(ui, t("settings.country.help"));
         ui.add_space(10.0);
 
+        // Sound devices. Here rather than with the radio's controls because
+        // they are not the radio: which speaker the mix comes out of and
+        // which microphone a keyed channel transmits from are properties of
+        // this machine.
+        ui.label(legend("Speaker"));
+        let mut out = self.audio_out.clone();
+        if device_combo(ui, "app-audio-out", &mut out, audio::AudioPlayer::devices()) {
+            self.audio_out = out;
+            self.send_audio();
+        }
+        hint(ui, "where the mix, the calls and any replay come out");
+        ui.add_space(10.0);
+
+        ui.label(legend("Microphone"));
+        let mut input = self.audio_in.clone();
+        if device_combo(ui, "app-audio-in", &mut input, audio::AudioCapture::devices()) {
+            self.audio_in = input;
+            self.send_audio();
+        }
+        hint(ui, "what a keyed channel transmits. Opened while keyed and closed on release");
+        ui.add_space(10.0);
+
         ui.label(legend(t("settings.band_plan")));
         let mut plan = crate::bands::plan();
         egui::ComboBox::from_id_salt("app-band-plan")
@@ -1115,4 +1137,34 @@ impl Default for RemoteEdit {
             err: None,
         }
     }
+}
+
+/// A picker over the sound devices a host reports, with the system default at
+/// the top as an empty name.
+///
+/// The default is worth having as a choice rather than as an absence: a host
+/// that gains a device follows the default, and an operator who picked one
+/// deliberately should keep it. Returns whether the selection changed.
+fn device_combo(ui: &mut egui::Ui, id: &str, current: &mut String, names: Vec<String>) -> bool {
+    let mut changed = false;
+    let shown = if current.is_empty() { "System default".to_string() } else { current.clone() };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(current.is_empty(), "System default").clicked()
+                && !current.is_empty()
+            {
+                current.clear();
+                changed = true;
+            }
+            for n in names {
+                let on = *current == n;
+                if ui.selectable_label(on, &n).clicked() && !on {
+                    *current = n;
+                    changed = true;
+                }
+            }
+        });
+    changed
 }

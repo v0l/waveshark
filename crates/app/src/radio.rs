@@ -272,6 +272,7 @@ fn key_up(
     tx: &TxSpec,
     center: Hz,
     gain_db: f32,
+    mic_device: &str,
     mic: &mut Option<audio::AudioCapture>,
 ) -> common::Result<(pipeline::Graph, Option<audio::AudioCapture>)> {
     // Where the channel transmits: its own frequency plus the repeater
@@ -318,9 +319,14 @@ fn key_up(
     let open = match tx.source {
         TxSource::Mic => match mic.take() {
             Some(c) => Some(c),
-            None => Some(audio::AudioCapture::open(48_000).map_err(|e| {
-                common::Error::other(format!("no microphone: {e}"))
-            })?),
+            None => {
+                let opened = match mic_device.is_empty() {
+                    true => audio::AudioCapture::open(48_000),
+                    false => audio::AudioCapture::open_named(mic_device, 48_000),
+                };
+                Some(opened
+                    .map_err(|e| common::Error::other(format!("no microphone: {e}")))?)
+            }
         },
         TxSource::Tone => None,
     };
@@ -505,6 +511,12 @@ pub enum Cmd {
     /// the graph is rebuilt from a plan, so a change is the new table rather
     /// than an instruction to edit one row of it.
     Scanners(crate::scanners::Scanners),
+    /// Which sound devices to use, by name, or empty for the system default.
+    ///
+    /// Both go to the radio thread because both belong to it: the mix is
+    /// written from there and the microphone is opened there, for the length
+    /// of an over and no longer.
+    Audio { out: String, input: String },
     /// Key a channel by id, or unkey with `None`.
     ///
     /// One command for the whole receiver rather than one per channel: every
@@ -1675,7 +1687,11 @@ fn run(
     // like the antenna had fallen out.
     let mut gain = GainMode::Auto;
 
-    let (_player, mut sink) = match AudioPlayer::open(48_000) {
+    // The device the session asked for arrives as a command once the
+    // interface is up, so this is the default until then.
+    let mut audio_out = String::new();
+    let mut audio_in = String::new();
+    let (mut _player, mut sink) = match AudioPlayer::open(48_000) {
         Ok((p, s)) => (Some(p), Some(s)),
         Err(e) => {
             *status.error.lock() = Some(format!("no audio output: {e}"));
@@ -1770,6 +1786,35 @@ fn run(
                 // applying each in turn spends the whole budget retuning to
                 // frequencies already superseded.
                 Cmd::Center(f) => want_center = Some(f),
+                Cmd::Audio { out, input } => {
+                    audio_in = input;
+                    if out != audio_out {
+                        audio_out = out;
+                        // Dropping the old player first: a host that only
+                        // allows one stream per device refuses the second one
+                        // while the first is still open.
+                        let level = sink.as_ref().map(|s: &audio::AudioSink| (s.volume(), s.muted()));
+                        _player = None;
+                        sink = None;
+                        let opened = match audio_out.is_empty() {
+                            true => AudioPlayer::open(48_000),
+                            false => AudioPlayer::open_named(&audio_out, 48_000),
+                        };
+                        match opened {
+                            Ok((p, mut s)) => {
+                                if let Some((v, m)) = level {
+                                    s.set_output(v, m);
+                                }
+                                _player = Some(p);
+                                sink = Some(s);
+                            }
+                            Err(e) => {
+                                *status.error.lock() =
+                                    Some(format!("cannot open that speaker: {e}"))
+                            }
+                        }
+                    }
+                }
                 Cmd::TxGain(db) => {
                     tx_gain_db = db.max(0.0);
                     status.tx_gain_db.store(tx_gain_db.to_bits(), Ordering::Relaxed);
@@ -1807,6 +1852,7 @@ fn run(
                                 &tx,
                                 plan.center,
                                 tx_gain_db,
+                                &audio_in,
                                 &mut mic,
                             ) {
                                 Ok((g, open)) => {
