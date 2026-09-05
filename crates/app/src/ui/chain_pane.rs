@@ -14,7 +14,7 @@ pub(super) struct Chain<'a> {
 impl Chain<'_> {
     /// The signal chain the listening channel is running.
     pub(super) fn show(mut self, ui: &mut egui::Ui) {
-        let Some(topo) = self.st.topo.clone() else {
+        let Some(full) = self.st.topo.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
                     egui::RichText::new("The radio is stopped, so no chain is running.")
@@ -26,7 +26,15 @@ impl Chain<'_> {
         // One direction at a time. They are separate chains that meet only at
         // the radio, and drawn together the transmit half is four stages
         // hidden behind forty.
-        let topo = one_side(&topo, self.st.side);
+        let topo = one_side(&full, self.st.side);
+        // Stages running in the half not drawn, so they are not offered as
+        // ghosts in this one.
+        let elsewhere: Vec<u64> = full
+            .nodes
+            .iter()
+            .filter(|n| !topo.nodes.iter().any(|t| t.id == n.id))
+            .filter_map(|n| n.tag)
+            .collect();
         // Node ids are positions in the built graph, so a rebuild can leave
         // the selection pointing at a stage that is no longer there.
         if self.st.sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
@@ -88,6 +96,8 @@ impl Chain<'_> {
                     &mut self.st.edit,
                     Some(&self.st.patch),
                     self.st.wire,
+                    &elsewhere,
+                    &self.st.scopes,
                 )
             })
             .inner;

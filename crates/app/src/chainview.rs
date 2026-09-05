@@ -12,6 +12,7 @@
 
 use crate::theme;
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use pipeline::cost::Cost;
 use pipeline::graph::Topology;
 use pipeline::port::{PortKind, StreamSpec};
 use std::collections::HashMap;
@@ -26,6 +27,62 @@ const COL_GAP: f32 = 120.0;
 /// A composite node's inner chain, drawn smaller beneath it.
 const INNER_H: f32 = 26.0;
 const INNER_GAP: f32 = 8.0;
+/// One line of a node's own cost breakdown, drawn under its box.
+const PHASE_H: f32 = 13.0;
+/// A scope is drawn as its readings: a wider, taller box with the meter, the
+/// spectrum and the spectrogram inside it, in the graph where the wire is.
+const SCOPE_W: f32 = 250.0;
+const SCOPE_H: f32 = 210.0;
+
+fn box_size(node: &pipeline::graph::TopoNode) -> Vec2 {
+    if node.kind == "scope" {
+        Vec2::new(SCOPE_W, SCOPE_H)
+    } else {
+        Vec2::new(BOX_W, BOX_H)
+    }
+}
+
+/// Whether a stage can be dragged to another size.
+fn resizable(node: &pipeline::graph::TopoNode) -> bool {
+    node.kind == "scope"
+}
+
+/// Side of the square in a resizable box's corner that takes the drag.
+const CORNER: f32 = 12.0;
+
+/// What a stage costs, as text: its 95th percentile call and, where the
+/// stage runs on samples, the share of real time that is.
+///
+/// The share is the number that matters. A millisecond means nothing until
+/// it is set against the block it had to fit in, and it is the share that
+/// says whether this stage is the reason the sparkline is red.
+fn cost_label(c: &Cost) -> Option<String> {
+    if c.calls == 0 {
+        return None;
+    }
+    let t = if c.p95_us >= 10_000 {
+        format!("{:.1} ms", c.p95_us as f32 / 1000.0)
+    } else if c.p95_us >= 1000 {
+        format!("{:.2} ms", c.p95_us as f32 / 1000.0)
+    } else {
+        format!("{} us", c.p95_us)
+    };
+    Some(match c.load() {
+        Some(l) if l >= 0.1 => format!("{t}  {:.0}%", l * 100.0),
+        Some(l) => format!("{t}  {:.1}%", l * 100.0),
+        None => t,
+    })
+}
+
+/// Legend under half real time, amber past it, fault red at and over one:
+/// the same reading the sparkline gives for the whole graph, per stage.
+fn cost_colour(c: &Cost) -> Color32 {
+    match c.load() {
+        Some(l) if l >= 1.0 => theme::FAULT,
+        Some(l) if l >= 0.5 => theme::READOUT,
+        _ => theme::LEGEND,
+    }
+}
 
 fn kind_label(k: PortKind) -> &'static str {
     match k {
@@ -160,12 +217,28 @@ fn lane_height(topo: &Topology, places: &[Place], lane: usize) -> f32 {
         .map(|(n, _)| n.inner.as_ref().map(|t| t.nodes.len()).unwrap_or(0))
         .max()
         .unwrap_or(0);
+    let phases = topo
+        .nodes
+        .iter()
+        .zip(places)
+        .filter(|(_, p)| p.col == lane)
+        .map(|(n, _)| n.phases.len())
+        .max()
+        .unwrap_or(0);
     let extra = if inner == 0 {
         0.0
     } else {
         INNER_GAP + inner as f32 * (INNER_H + INNER_GAP)
     };
-    BOX_H + GAP + extra
+    let phase_extra = if phases == 0 { 0.0 } else { INNER_GAP + phases as f32 * PHASE_H };
+    let tallest = topo
+        .nodes
+        .iter()
+        .zip(places)
+        .filter(|(_, p)| p.col == lane)
+        .map(|(n, _)| box_size(n).y)
+        .fold(BOX_H, f32::max);
+    tallest + GAP + extra + phase_extra
 }
 
 /// Where the operator has put the stages, when they have moved any.
@@ -184,6 +257,9 @@ pub struct Edit {
     /// Centre of each stage relative to the drawing's top left, by the key
     /// that survives a rebuild.
     pub pos: HashMap<u64, Pos2>,
+    /// Size of each stage the operator has resized, by the same key. Only a
+    /// scope offers a corner to drag; the rest are the size their text needs.
+    pub size: HashMap<u64, Vec2>,
     /// Where each box was last drawn, in screen coordinates, and where the
     /// source box was. Kept so that anything outside the drawing can point at
     /// a stage without repeating the layout arithmetic.
@@ -198,6 +274,8 @@ pub struct Edit {
 enum Drag {
     /// Moving a box: which one, and where in it the pointer took hold.
     Node(u64, Vec2),
+    /// Resizing a box from its bottom right corner.
+    Resize(u64),
     /// Drawing a wire, which can be started at either end: from an output
     /// looking for something to feed, or from an input looking for something
     /// to read. Both are how people reach for a connection, and a view that
@@ -259,6 +337,7 @@ impl Default for Edit {
         Self {
             manual: false,
             pos: HashMap::new(),
+            size: HashMap::new(),
             drawn: HashMap::new(),
             drawn_src: Rect::NOTHING,
             drag: None,
@@ -270,6 +349,7 @@ impl Edit {
     /// Forget the arrangement, so the automatic layout draws it again.
     pub fn arrange(&mut self) {
         self.pos.clear();
+        self.size.clear();
         self.drag = None;
     }
 
@@ -342,6 +422,23 @@ pub fn inspector(
                 .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
                 .color(theme::TRACE),
             );
+        }
+    }
+    if let Some(text) = cost_label(&node.cost) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(format!("p95 {text}"))
+                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                .color(cost_colour(&node.cost)),
+        );
+        for (name, c) in &node.phases {
+            if let Some(t) = cost_label(c) {
+                ui.label(
+                    egui::RichText::new(format!("  {name}  {t}"))
+                        .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                        .color(cost_colour(c)),
+                );
+            }
         }
     }
     ui.add_space(10.0);
@@ -439,6 +536,8 @@ pub fn draw(
     edit: &mut Edit,
     patch: Option<&crate::patch::Patch>,
     wire: Option<(u64, usize)>,
+    elsewhere: &[u64],
+    scopes: &[(usize, nodes::ScopeFrame)],
 ) -> Interaction {
     let places = layout(topo);
     // Depth runs left to right and a branch takes a lane of its own down the
@@ -486,7 +585,7 @@ pub fn draw(
         src_auto
     };
     let src = Rect::from_center_size(src_centre, Vec2::new(box_w, BOX_H));
-    stage(&p, src, "Source", "device", true);
+    stage(&p, src, "Source", "device", true, None);
 
     let mut lane_top = vec![0.0f32; lanes];
     let mut y = top;
@@ -501,9 +600,13 @@ pub fn draw(
     // the middle of it.
     let node_keys = keys(topo);
     let mut rects: Vec<Rect> = Vec::with_capacity(topo.nodes.len());
-    for ((i, _node), pl) in topo.nodes.iter().enumerate().zip(&places) {
+    for ((i, node), pl) in topo.nodes.iter().enumerate().zip(&places) {
+        let size = match edit.size.get(&node_keys[i]) {
+            Some(s) if resizable(node) => *s,
+            _ => box_size(node),
+        };
         let x = left + (pl.depth + 1) as f32 * (box_w + COL_GAP) + box_w / 2.0;
-        let auto = Pos2::new(x, lane_top[pl.col] + BOX_H / 2.0);
+        let auto = Pos2::new(x, lane_top[pl.col] + size.y / 2.0);
         // Entering manual mode pins every stage where the automatic layout
         // had just put it. Without that, moving one box would let the rest
         // reflow around the gap it left, which reads as the graph rearranging
@@ -513,7 +616,7 @@ pub fn draw(
         } else {
             auto
         };
-        rects.push(Rect::from_center_size(centre, Vec2::new(box_w, BOX_H)));
+        rects.push(Rect::from_center_size(centre, size));
     }
 
     // Stages that have been added but are not running: a stage whose inputs
@@ -522,10 +625,15 @@ pub fn draw(
     let mut ghosts: Vec<(u64, Rect)> = Vec::new();
     if edit.manual {
         if let Some(patch) = patch {
+            // Not running here and not running in the other half either.
+            // The view draws one direction at a time, and a receive stage
+            // is not a stage waiting to be wired just because the transmit
+            // half is showing: every one of them appeared as a ghost under
+            // the source the moment manual mode was entered on that view.
             for (n, st) in patch
                 .stages()
                 .iter()
-                .filter(|s| !topo.nodes.iter().any(|t| t.tag == Some(s.id)))
+                .filter(|s| !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id))
                 .enumerate()
             {
                 // Under the source, out of the way of the chain that is
@@ -718,7 +826,24 @@ pub fn draw(
         let x = r.center().x;
         let hot = pointer.is_some_and(|q| r.contains(q));
         let on = selected == Some(node.id.0);
-        stage(&p, r, &node.label, &node.kind, false);
+        stage(&p, r, &node.label, &node.kind, false, Some(&node.cost));
+        if node.kind == "scope" {
+            let frame = scopes.iter().find(|(id, _)| *id == node.id.0).map(|(_, f)| f);
+            paint_scope(ui.ctx(), &p, r, node.id.0, frame);
+            if edit.manual {
+                // The grip: two short diagonals in the corner, the mark
+                // every resizable window has carried.
+                let c = Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
+                let hot_c = pointer.is_some_and(|q| c.contains(q));
+                let col = if hot_c { theme::READOUT } else { theme::LEGEND };
+                for k in [4.0f32, 8.0] {
+                    p.line_segment(
+                        [Pos2::new(r.right() - 2.0, r.bottom() - k - 2.0), Pos2::new(r.right() - k - 2.0, r.bottom() - 2.0)],
+                        Stroke::new(1.0, col),
+                    );
+                }
+            }
+        }
         if on || hot {
             p.rect_stroke(
                 r.expand(1.0),
@@ -758,10 +883,13 @@ pub fn draw(
             );
         }
 
+        // Where this node's own time goes, when it can say.
+        let below = if node.phases.is_empty() { r.bottom() } else { phases(&p, r, &node.phases) };
+
         // A composite draws what it runs inside itself, so a bank is not an
         // opaque box with several hundred decoders hidden in it.
         if let Some(inner) = &node.inner {
-            let mut iy = r.bottom() + INNER_GAP;
+            let mut iy = below + INNER_GAP;
             for (k, sub) in inner.nodes.iter().enumerate() {
                 let ir = Rect::from_center_size(
                     Pos2::new(x, iy + INNER_H / 2.0),
@@ -886,6 +1014,14 @@ fn interact(
             if src.contains(q) {
                 return Some(Drag::Node(crate::patch::builtin::SPAN, src.center() - q));
             }
+            if let Some(i) = rects.iter().position(|r| {
+                let c = Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
+                c.contains(q)
+            }) {
+                if resizable(&topo.nodes[i]) {
+                    return Some(Drag::Resize(node_keys[i]));
+                }
+            }
             match rects.iter().position(|r| r.contains(q)) {
                 Some(i) => Some(Drag::Node(node_keys[i], rects[i].center() - q)),
                 None => Some(Drag::Pan),
@@ -897,6 +1033,16 @@ fn interact(
         match drag {
             Drag::Node(k, grab) if resp.dragged() => {
                 edit.pos.insert(k, q + grab - origin.to_vec2());
+            }
+            Drag::Resize(k) if resp.dragged() => {
+                // The top left stays put; the centre moves with the size.
+                if let Some(r) = edit.drawn.get(&k).copied() {
+                    let min = Vec2::new(SCOPE_W, 120.0);
+                    let size = (q - r.min).max(min);
+                    let centre = r.min + size / 2.0;
+                    edit.size.insert(k, size);
+                    edit.pos.insert(k, centre - origin.to_vec2());
+                }
             }
             Drag::Wire { from, to, .. } if resp.dragged() => {
                 edit.drag = Some(Drag::Wire { from, to, at: q })
@@ -1128,7 +1274,110 @@ fn loose(p: &egui::Painter, from: Pos2, to: Pos2) {
     p.circle_filled(to, 3.0, theme::READOUT);
 }
 
-fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
+/// A scope's readings inside its box, under the label line: the meter, the
+/// spectrum auto-ranged to what it is seeing, and the spectrogram.
+fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame: Option<&nodes::ScopeFrame>) {
+    let mono = FontId::new(9.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    let inner = Rect::from_min_max(Pos2::new(r.left() + 8.0, r.top() + 40.0), Pos2::new(r.right() - 8.0, r.bottom() - 8.0));
+    let Some(f) = frame else {
+        p.text(inner.center(), egui::Align2::CENTER_CENTER, "nothing on the wire yet", mono, theme::LEGEND);
+        return;
+    };
+    let db = |v: f32| 20.0 * v.max(1e-6).log10();
+
+    // Level, on the same strip every fader carries, the held peak as a mark.
+    let vu = Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, crate::ui::widgets::VU_H));
+    crate::ui::widgets::Vu::paint(p, vu, f.rms * 2f32.sqrt());
+    let x = vu.left() + f.peak_hold.clamp(0.0, 1.0).sqrt() * vu.width();
+    p.line_segment([Pos2::new(x, vu.top()), Pos2::new(x, vu.bottom())], Stroke::new(1.0, theme::VALUE));
+    p.text(
+        Pos2::new(inner.right(), vu.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{:+.0}/{:+.0} dB", db(f.rms), db(f.peak)),
+        mono.clone(),
+        theme::VALUE,
+    );
+    if f.spectrum.is_empty() {
+        return;
+    }
+
+    let (lo_hz, hi_hz) = if f.real { (0.0, f.rate / 2.0) } else { (f.center_hz - f.rate / 2.0, f.center_hz + f.rate / 2.0) };
+    let fmt = |hz: f64| {
+        if hz.abs() >= 1e6 {
+            format!("{:.3}M", hz / 1e6)
+        } else if hz.abs() >= 1e3 {
+            format!("{:.1}k", hz / 1e3)
+        } else {
+            format!("{hz:.0}")
+        }
+    };
+    let (mut floor, mut top) = (f32::INFINITY, f32::NEG_INFINITY);
+    for row in f.history.iter().chain(std::iter::once(&f.spectrum)) {
+        for &v in row {
+            if v.is_finite() {
+                floor = floor.min(v);
+                top = top.max(v);
+            }
+        }
+    }
+    // Ninety decibels under the loudest thing seen: what a display can
+    // show, and enough that silence reads as black rather than as the shape
+    // of the noise it is scaled against.
+    if !top.is_finite() {
+        top = nodes::scope_nodes::FLOOR_DB + 90.0;
+    }
+    floor = floor.max(top - 90.0);
+    if top - floor < 10.0 {
+        top = floor + 10.0;
+    }
+
+    // Spectrum in the upper part, spectrogram below it.
+    let body_top = vu.bottom() + 6.0;
+    let spec_h = ((inner.bottom() - body_top) * 0.4).max(30.0);
+    let sr = Rect::from_min_max(Pos2::new(inner.left(), body_top), Pos2::new(inner.right(), body_top + spec_h));
+    p.rect_filled(sr, 2.0, theme::WELL);
+    let n = f.spectrum.len();
+    let pts: Vec<Pos2> = f
+        .spectrum
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = sr.left() + (i as f32 + 0.5) / n as f32 * sr.width();
+            let t = ((v - floor) / (top - floor)).clamp(0.0, 1.0);
+            Pos2::new(x, sr.bottom() - 1.0 - t * (sr.height() - 2.0))
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.0, theme::TRACE)));
+    // Range at the top left, one number over the other; the frequency ends
+    // in the bottom corners where they belong.
+    p.text(Pos2::new(sr.left() + 3.0, sr.top() + 2.0), egui::Align2::LEFT_TOP, format!("{top:.0} dB"), mono.clone(), theme::LEGEND);
+    p.text(Pos2::new(sr.left() + 3.0, sr.top() + 13.0), egui::Align2::LEFT_TOP, format!("{floor:.0}"), mono.clone(), theme::LEGEND);
+    p.text(Pos2::new(sr.left() + 3.0, sr.bottom() - 2.0), egui::Align2::LEFT_BOTTOM, fmt(lo_hz), mono.clone(), theme::LEGEND);
+    p.text(Pos2::new(sr.right() - 3.0, sr.bottom() - 2.0), egui::Align2::RIGHT_BOTTOM, fmt(hi_hz), mono.clone(), theme::LEGEND);
+
+    if f.history.is_empty() {
+        return;
+    }
+    let fr = Rect::from_min_max(Pos2::new(inner.left(), sr.bottom() + 4.0), inner.max);
+    if fr.height() < 8.0 {
+        return;
+    }
+    let rows = f.history.len();
+    let cols = n.min(256);
+    let step = (n / cols).max(1);
+    let mut img = egui::ColorImage::new([cols, rows], vec![Color32::BLACK; cols * rows]);
+    for (y, row) in f.history.iter().enumerate() {
+        for x in 0..cols {
+            let v = row[x * step..((x + 1) * step).min(n)].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let t = ((v - floor) / (top - floor)).clamp(0.0, 1.0);
+            img.pixels[y * cols + x] = crate::waterfall::colormap(t);
+        }
+    }
+    let tex = ctx.load_texture(format!("scope-{id}"), img, egui::TextureOptions::LINEAR);
+    p.image(tex.id(), fr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+}
+
+fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool, cost: Option<&Cost>) {
     let fill = if source { theme::WELL } else { theme::PANEL };
     p.rect(r, 3.0, fill, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
     p.text(
@@ -1138,13 +1387,29 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool) {
         FontId::new(12.0, FontFamily::Proportional),
         theme::VALUE,
     );
-    p.text(
-        Pos2::new(r.center().x, r.top() + 26.0),
-        egui::Align2::CENTER_TOP,
-        kind,
-        FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
-        theme::LEGEND,
-    );
+    let mono = FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    // The kind on the left and the cost on the right of one line, so a box
+    // that is costing something says so without growing.
+    let cost_text = cost.and_then(cost_label);
+    if let (Some(text), Some(c)) = (cost_text, cost) {
+        p.text(Pos2::new(r.left() + 8.0, r.top() + 26.0), egui::Align2::LEFT_TOP, kind, mono.clone(), theme::LEGEND);
+        p.text(Pos2::new(r.right() - 8.0, r.top() + 26.0), egui::Align2::RIGHT_TOP, text, mono, cost_colour(c));
+    } else {
+        p.text(Pos2::new(r.center().x, r.top() + 26.0), egui::Align2::CENTER_TOP, kind, mono, theme::LEGEND);
+    }
+}
+
+/// A node's own breakdown, one line per phase, under its box.
+fn phases(p: &egui::Painter, r: Rect, phases: &[(String, Cost)]) -> f32 {
+    let mono = FontId::new(9.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    let mut y = r.bottom() + INNER_GAP;
+    for (name, c) in phases {
+        let Some(text) = cost_label(c) else { continue };
+        p.text(Pos2::new(r.left() + 10.0, y), egui::Align2::LEFT_TOP, name, mono.clone(), theme::LEGEND);
+        p.text(Pos2::new(r.right() - 10.0, y), egui::Align2::RIGHT_TOP, text, mono.clone(), cost_colour(c));
+        y += PHASE_H;
+    }
+    y
 }
 
 /// Which edge of a box a port sits on.
@@ -1288,6 +1553,8 @@ mod tests {
             inner_count: 1,
             sink: false,
             params: Vec::new(),
+            cost: Default::default(),
+            phases: Vec::new(),
         }
     }
 
@@ -1363,7 +1630,7 @@ mod tests {
             let edit = &mut self.edit;
             let out = &mut act;
             let _ = self.ctx.run_ui(input, |ui| {
-                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch), None);
+                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch), None, &[], &[]);
             });
             act
         }
@@ -1623,7 +1890,7 @@ mod tests {
         theme::install(&ctx);
         let frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
-                draw(ui, &topo, 0.0, None, edit, None, None);
+                draw(ui, &topo, 0.0, None, edit, None, None, &[], &[]);
             });
         };
         frame(&mut edit);

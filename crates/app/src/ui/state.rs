@@ -177,6 +177,9 @@ pub(super) struct ChainState {
     /// thread that has to keep draining USB.
     pub topo: Option<pipeline::graph::Topology>,
     pub latency: f64,
+    /// What each scope stage is seeing, by node id, refreshed with the
+    /// spectrum.
+    pub scopes: Vec<(usize, nodes::ScopeFrame)>,
     /// The stage whose settings are showing, by node id.
     pub sel: Option<usize>,
     /// Which half of the receiver the pane is drawing.
