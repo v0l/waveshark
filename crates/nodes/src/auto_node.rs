@@ -24,7 +24,8 @@
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
 use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::event::Event;
 use pipeline::graph::Topology;
@@ -125,6 +126,9 @@ struct Member {
     /// detector did not measure (a channel kept open for the session) still
     /// reports a signal to noise ratio on its packets.
     noise_pow: f32,
+    /// The burst front end inside has named a burst of this source a chirp.
+    /// What places a LoRa front end on the source, late, fed from `ring`.
+    chirp_seen: bool,
 }
 
 /// Longest run of samples kept behind a packet, in seconds.
@@ -157,6 +161,7 @@ impl Member {
             flush_s,
             ring: Vec::new(),
             noise_pow: f32::NAN,
+            chirp_seen: false,
         })
     }
 
@@ -171,8 +176,13 @@ impl Member {
             // rise in the noise is learned within a second or so.
             self.noise_pow = if self.noise_pow.is_nan() { pow } else { pow.min(self.noise_pow * 1.01) };
             self.ring.extend_from_slice(iq);
+            // Trimmed once it holds twice what is kept, not every block:
+            // trimming a full ring by a block's worth moves the whole of it
+            // down, and five members on each of a few sources doing that on
+            // every block was gigabytes a second of memmove on a busy band,
+            // more than the decoding they were keeping the samples for.
             let cap = (RING_MAX_S * rate) as usize;
-            if self.ring.len() > cap {
+            if self.ring.len() >= 2 * cap {
                 let drop = self.ring.len() - cap;
                 self.ring.drain(..drop);
             }
@@ -223,6 +233,9 @@ impl Member {
             // packet stream and carries no rate.
             let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
+                if b.class.modulation == dsp::Modulation::Chirp {
+                    self.chirp_seen = true;
+                }
                 // A diagnostic: with `SR_DUMP_BURSTS` naming a directory,
                 // every burst the router cut is written there as
                 // interleaved f32 IQ, named with the centre, the rate and
@@ -421,6 +434,12 @@ struct Slot {
     /// burst front end's measurement of it is not news: a row saying what
     /// the carrier looks like beside rows saying what it said.
     heard: bool,
+    /// The stream the members were built for, and the width the detector
+    /// measured, for a front end placed after the source opened.
+    spec: StreamSpec,
+    signal_hz: f64,
+    /// A LoRa front end has been placed, or ruled out, for this source.
+    lora_placed: bool,
 }
 
 pub struct AutoNode {
@@ -465,6 +484,12 @@ pub struct AutoNode {
     /// closes and opens again, or decoders rebuilt with the graph, do not
     /// log the same cell's identity a second time.
     announced: HashMap<u64, Vec<Vec<u8>>>,
+    /// Where a block's time went: watching the band, cutting sources out,
+    /// the front ends as a whole, and each kind of front end's processor
+    /// time summed over every source it was running on.
+    phases: BTreeMap<String, pipeline::cost::Ring>,
+    /// Scratch for the per-kind sums of one block.
+    phase_sum: BTreeMap<&'static str, u64>,
 }
 
 impl AutoNode {
@@ -494,7 +519,17 @@ impl AutoNode {
             sticky: Vec::new(),
             pending_sticky: Vec::new(),
             announced: HashMap::new(),
+            phases: BTreeMap::new(),
+            phase_sum: BTreeMap::new(),
         }
+    }
+
+    fn phase(&mut self, name: &str, us: u64, block_s: f64) {
+        let ring = match self.phases.get_mut(name) {
+            Some(r) => r,
+            None => self.phases.entry(name.to_string()).or_default(),
+        };
+        ring.push(us.min(u32::MAX as u64) as u32, block_s);
     }
 
     /// Channels front ends have read something on this session, as
@@ -735,7 +770,15 @@ impl AutoNode {
         if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
             let mut m = Member::build(st.name, spec, Self::place(st.name, st.center_hz, st.width_hz), &self.reg)?;
             m.channel_hz = st.width_hz;
-            return Ok(Slot { id: b.id, center_hz: b.center_hz, members: vec![m], heard: true });
+            return Ok(Slot {
+                id: b.id,
+                center_hz: b.center_hz,
+                members: vec![m],
+                heard: true,
+                spec,
+                signal_hz: b.signal_hz,
+                lora_placed: true,
+            });
         }
         // The front end is told how strong the detector found the source,
         // so a stream that begins inside a transmission is not read as
@@ -777,26 +820,75 @@ impl AutoNode {
                 members.push(m);
             }
         }
-        // LoRa, where the source is one of its channels and the stream holds
-        // two samples a chip. Which channel is the source's own width: a
-        // chirp fills the channel it is sent in, so a signal that only part
-        // fills one is something else standing there. The spreading factor
-        // is not decided here, because the node can tell by trying and
-        // nothing at this level could tell at all.
-        // Judged on the width the detector measured, not the extraction's:
-        // the stream is cut half again wider than the signal, and a 250 kHz
-        // channel measured at 240 kHz came through as a 360 kHz stream, which
-        // read as the 500 kHz channel and dechirped nothing.
-        for bw in crate::lora_nodes::bandwidths_for(b.signal_hz) {
-            if let Ok(mut m) = Member::build("lora", spec, Self::place("lora", hz, bw), &self.reg) {
-                m.channel_hz = bw;
-                members.push(m);
-            }
-        }
+        // LoRa is not placed here. It is the dearest front end to run and
+        // a chirp is the one thing the burst front end names reliably, so
+        // it is placed when that front end has named one; see `place_lora`.
         for m in &mut members {
             m.source_snr_db = b.snr_db;
         }
-        Ok(Slot { id: b.id, center_hz: b.center_hz, members, heard: false })
+        Ok(Slot {
+            id: b.id,
+            center_hz: b.center_hz,
+            members,
+            heard: false,
+            spec,
+            signal_hz: b.signal_hz,
+            lora_placed: false,
+        })
+    }
+
+    /// Place LoRa front ends on a source the burst front end has named a
+    /// chirp, one per channel width the source could be, and read them the
+    /// source's samples so far from the ring the burst front end kept.
+    ///
+    /// Placed on the verdict and not on the width because LoRa was the
+    /// dearest front end on a busy band, dechirping six spreading factors
+    /// on every source over 44 kHz, and on a band of hard-keyed sensors
+    /// most sources measure that wide from their splatter. The verdict
+    /// costs nothing extra: the burst front end classifies every burst
+    /// anyway. What it costs is latency, since a burst is named when it
+    /// ends or half a second in, and the ring is what pays that back: a
+    /// short packet is read whole from it after the fact, and a long one
+    /// is caught up and then followed live.
+    fn place_lora(
+        &mut self,
+        k: usize,
+        at_us: u64,
+        closed: bool,
+        ev: &mut Vec<Event>,
+        pk: &mut Vec<Packet>,
+        heard: &mut Vec<(&'static str, f64)>,
+    ) {
+        let slot = &mut self.slots[k];
+        slot.lora_placed = true;
+        let Some(history) = slot.members.iter().find(|m| m.router.is_some()).map(|m| m.ring.clone()) else {
+            return;
+        };
+        let hz = slot.center_hz as f64;
+        let snr = slot.members.first().map_or(f32::NAN, |m| m.source_snr_db);
+        for bw in crate::lora_nodes::bandwidths_for(slot.signal_hz) {
+            let Ok(mut m) = Member::build("lora", slot.spec, Self::place("lora", hz, bw), &self.reg) else {
+                continue;
+            };
+            m.channel_hz = bw;
+            m.source_snr_db = snr;
+            let before = pk.len();
+            // The samples the source has produced so far, in the blocks the
+            // live path would have handed over, then the flush if it has
+            // already closed.
+            for chunk in history.chunks(16_384) {
+                ev.extend(m.run(chunk, at_us, pk));
+            }
+            if closed {
+                let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * slot.spec.rate) as usize];
+                ev.extend(m.run(&quiet, at_us, pk));
+            }
+            if pk.len() > before {
+                slot.heard = true;
+                heard.push((m.name, m.channel_hz));
+            }
+            slot.members.push(m);
+        }
     }
 
     /// The settings a front end is built with for a channel: where it is
@@ -907,6 +999,10 @@ impl Node for AutoNode {
         self.slots.len().max(1)
     }
 
+    fn phases(&self) -> Vec<(String, pipeline::cost::Cost)> {
+        self.phases.iter().map(|(n, r)| (n.clone(), r.cost())).collect()
+    }
+
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
@@ -950,7 +1046,10 @@ impl Node for AutoNode {
         let c0 = self.center.as_f64();
         let exclude = &self.exclude;
         let spur = self.spur_band;
+        let block_s = c.block_seconds;
+        let t_detect = Instant::now();
         let raw: Vec<SourceEvent> = d.process(iq).to_vec();
+        let detect_us = t_detect.elapsed().as_micros() as u64;
         let others = d
             .live()
             .filter(|s| !spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&(c0 + s.center_hz))))
@@ -1018,7 +1117,10 @@ impl Node for AutoNode {
             }));
         }
         self.blocks.clear();
+        let t_extract = Instant::now();
         e.process(iq, &self.events, &mut self.blocks);
+        let extract_us = t_extract.elapsed().as_micros() as u64;
+        let (bank_feed_us, bank_start_us) = e.take_bank_cost();
         for ev in &self.events {
             if let SourceEvent::Opened(s) = ev {
                 if s.id.0 >= STICKY_ID_BASE {
@@ -1049,16 +1151,18 @@ impl Node for AutoNode {
         let blocks = &self.blocks;
         let wide = &mut self.wide;
         let slots = &mut self.slots;
+        let t_fronts = Instant::now();
         let (wide_results, results): (
-            Vec<(Vec<Event>, Vec<Packet>)>,
-            Vec<(usize, Vec<Event>, Vec<Packet>, bool, Vec<(&'static str, f64)>)>,
+            Vec<(Vec<Event>, Vec<Packet>, &'static str, u64)>,
+            Vec<(usize, Vec<Event>, Vec<Packet>, bool, Vec<(&'static str, f64)>, Vec<(&'static str, u64)>)>,
         ) = rayon::join(
             || {
                 wide.par_iter_mut()
                     .map(|m| {
                         let mut pk = Vec::new();
+                        let t = Instant::now();
                         let ev = m.run(iq, at_us, &mut pk);
-                        (ev, pk)
+                        (ev, pk, m.name, t.elapsed().as_micros() as u64)
                     })
                     .collect()
             },
@@ -1069,26 +1173,30 @@ impl Node for AutoNode {
                     .filter_map(|(k, slot)| {
                         let b = blocks.iter().find(|b| b.id == slot.id)?;
                         let closed = b.state == SourceState::Closed;
-                        let per: Vec<(Vec<Event>, Vec<Packet>, Option<(&'static str, f64)>)> = slot
+                        let per: Vec<(Vec<Event>, Vec<Packet>, Option<(&'static str, f64)>, (&'static str, u64))> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
                                 let mut pk = Vec::new();
+                                let t = Instant::now();
                                 let mut ev = m.run(&b.samples, at_us, &mut pk);
                                 if closed {
                                     let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * b.rate) as usize];
                                     ev.extend(m.run(&quiet, at_us, &mut pk));
                                 }
+                                let us = t.elapsed().as_micros() as u64;
                                 let read = m.router.is_none() && !pk.is_empty();
-                                (ev, pk, read.then_some((m.name, m.channel_hz)))
+                                (ev, pk, read.then_some((m.name, m.channel_hz)), (m.name, us))
                             })
                             .collect();
                         let mut ev = Vec::new();
                         let mut pk = Vec::new();
                         let mut heard = Vec::new();
-                        for (e2, p2, read) in per {
+                        let mut spent = Vec::new();
+                        for (e2, p2, read, cost) in per {
                             ev.extend(e2);
                             pk.extend(p2);
+                            spent.push(cost);
                             if let Some(r) = read {
                                 slot.heard = true;
                                 heard.push(r);
@@ -1111,20 +1219,40 @@ impl Node for AutoNode {
                             pk.clear();
                             ev.retain(|e| !matches!(e, Event::Decoded(_)));
                         }
-                        Some((k, ev, pk, done, heard))
+                        Some((k, ev, pk, done, heard, spent))
                     })
                     .collect()
             },
         );
-        for (ev, pk) in wide_results {
+        let fronts_us = t_fronts.elapsed().as_micros() as u64;
+        self.phase_sum.clear();
+        for (ev, pk, name, us) in wide_results {
             events.extend(ev);
             out.extend(pk);
+            *self.phase_sum.entry(name).or_default() += us;
         }
         let mut results = results;
         results.sort_by_key(|(k, ..)| *k);
+        for (_, _, _, _, _, spent) in &results {
+            for (name, us) in spent {
+                *self.phase_sum.entry(name).or_default() += us;
+            }
+        }
+        self.phase("detect", detect_us, block_s);
+        self.phase("extract", extract_us, block_s);
+        self.phase("extract bank", bank_feed_us, block_s);
+        self.phase("extract catch-up", bank_start_us, block_s);
+        self.phase("fronts", fronts_us, block_s);
+        let sums: Vec<(&'static str, u64)> = self.phase_sum.iter().map(|(n, u)| (*n, *u)).collect();
+        for (name, us) in sums {
+            self.phase(&format!("{name} cpu"), us, block_s);
+        }
         let mut closed = Vec::new();
-        for (k, ev, pk, done, heard) in results {
+        for (k, mut ev, mut pk, done, mut heard, _) in results {
             let center = Hz(self.slots[k].center_hz);
+            if !self.slots[k].lora_placed && self.slots[k].members.iter().any(|m| m.chirp_seen) {
+                self.place_lora(k, at_us, done, &mut ev, &mut pk, &mut heard);
+            }
             for (name, width) in &heard {
                 if let Some(e) = self.remember(name, center.as_f64(), *width) {
                     c.emit(e);
