@@ -199,12 +199,9 @@ impl Strip<'_> {
                 // it, so an operator can see they are being heard.
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("mic").show(ui);
-                    // Over eight, not four: three is where a line level
-                    // interface sits and there has to be room above it for a
-                    // quiet microphone.
-                    let mut g = tx.mic_gain / 8.0;
+                    let mut g = tx.mic_gain / 3.0;
                     if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
-                        tx.mic_gain = (g * 8.0).clamp(0.0, 8.0);
+                        tx.mic_gain = (g * 3.0).clamp(0.0, 3.0);
                         changed = true;
                     }
                     theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
