@@ -307,12 +307,17 @@ pub struct Plan {
     pub tx: Option<TxPlan>,
 }
 
-/// A keyed channel, as the graph needs it.
+/// The transmit chain the receiver should be drawing.
+///
+/// Present whenever the radio can transmit and a channel says what it would
+/// send, not only while a key is down: the stages are in the graph the whole
+/// time, off, so the chain can be read and set up before anything is
+/// radiated, and so keying does not rebuild the graph.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TxPlan {
     pub spec: crate::radio::TxSpec,
     pub mode: crate::radio::TxMode,
-    /// Where it is transmitting, which is the channel plus its shift.
+    /// Where it would transmit: the channel plus its shift.
     pub on_air: Hz,
 }
 
@@ -437,6 +442,52 @@ impl Receiver {
     /// Hand over an open transmitter, for the next rebuild to place.
     pub fn set_transmitter(&mut self, tx: Option<TxSinks>) {
         self.pending_tx = tx;
+    }
+
+    /// Key: give the transmit stage a radio, without rebuilding the graph.
+    ///
+    /// The stages are there whether or not anything is transmitting, so
+    /// keying is one node being handed a device rather than a new graph. A
+    /// rebuild would restart the spectrum's averaging and every decoder
+    /// mid-frame, twice per over.
+    pub fn key(&mut self, stream: Box<dyn common::TxStream>) -> bool {
+        match self.tx_sink_mut() {
+            Some(s) => {
+                s.attach(stream);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Unkey: let the queue out and give the radio back.
+    pub fn unkey(&mut self) -> u64 {
+        match self.tx_sink_mut() {
+            Some(s) => {
+                let idle = s.underruns();
+                s.finish(std::time::Duration::from_secs(1));
+                idle
+            }
+            None => 0,
+        }
+    }
+
+    pub fn keyed(&self) -> bool {
+        self.graph
+            .order()
+            .find(|(_, name)| *name == "radio_tx")
+            .and_then(|(id, _)| self.graph.node(id))
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())
+            .is_some_and(|s| s.keyed())
+    }
+
+    fn tx_sink_mut(&mut self) -> Option<&mut nodes::TxSinkNode> {
+        let id = self.graph.order().find(|(_, name)| *name == "radio_tx").map(|(id, _)| id)?;
+        self.graph
+            .node_mut(id)?
+            .as_any_mut()?
+            .downcast_mut::<nodes::TxSinkNode>()
     }
 
     /// What the transmitter has done, for the interface: samples handed over,
@@ -1939,12 +1990,16 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         p.connect(head, (derived::RING, 0));
     }
 
-    // The transmitter, while a channel is keyed. Four stages: the clock it
-    // takes from the receiver, what is being modulated, the modulator, and
-    // the radio. Derived rather than drawn by hand because it follows the
-    // strip, and in the graph rather than beside it because a transmission
-    // is something the receiver is doing and the chain view is what the
-    // receiver is doing.
+    // The transmitter. Four stages: the clock it takes from the receiver,
+    // what is being modulated, the modulator, and the radio. Derived rather
+    // than drawn by hand because it follows the strip, and in the graph
+    // rather than beside it because a transmission is something the receiver
+    // is doing and the chain view is what the receiver is doing.
+    //
+    // Drawn whether or not a key is down, like the raw capture: a chain that
+    // only exists while transmitting cannot be looked at before transmitting,
+    // which is exactly when an operator wants to look at it, and building it
+    // at key-up would rebuild the graph twice an over.
     if let Some(tx) = &plan.tx {
         use crate::radio::{TxMode, TxSource};
         p.add_derived(derived::TX_CLOCK, "tx_clock", Settings::new());
@@ -2857,17 +2912,19 @@ fn add_patch(
                 Some(r) => Box::new(nodes::RingNode::new(r)) as Box<dyn pipeline::node::Node>,
                 None => continue,
             },
-            // The radio, and the microphone feeding it: both are open
-            // devices, which a description cannot carry. A patch that asks
-            // for them when nothing is keyed gets nothing and the stage
-            // waits, exactly as the recorder's does.
+            // The radio is handed in at key-up rather than built from a
+            // description, so the stage starts idle: it is in the graph
+            // whether or not anything is transmitting, exactly as the raw
+            // capture is.
             None if st.kind == TX_RADIO => match tx.as_mut().and_then(|t| t.stream.take()) {
                 Some(s) => Box::new(nodes::TxSinkNode::new(s)) as Box<dyn pipeline::node::Node>,
-                None => continue,
+                None => Box::new(nodes::TxSinkNode::idle()) as Box<dyn pipeline::node::Node>,
             },
             None if st.kind == "mic" => {
                 let src = tx.as_ref().and_then(|t| t.mic.clone());
                 match src {
+                    // A microphone stage with no microphone is a stage that
+                    // cannot say what it would transmit, so it waits.
                     Some(src) => {
                         let level = st.settings.f64_or("level", 3.0) as f32;
                         let band = (

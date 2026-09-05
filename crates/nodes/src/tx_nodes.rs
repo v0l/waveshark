@@ -312,6 +312,10 @@ impl Simple for ToneNode {
 /// Refuses a receive stream. A demodulator's output wired into a transmitter
 /// is the mistake this exists to make impossible.
 pub struct TxSinkNode {
+    /// The radio, while a channel is keyed. Absent the rest of the time: the
+    /// stage is in the graph whether or not anything is transmitting, so the
+    /// chain can be seen and set up before the key is pressed, and so keying
+    /// does not rebuild the graph and throw away the spectrum's averaging.
     stream: Option<Box<dyn common::TxStream>>,
     rate: common::Sps,
     center: common::Hz,
@@ -328,6 +332,31 @@ pub struct TxSinkNode {
 }
 
 impl TxSinkNode {
+    /// A transmitter with no radio yet: in the graph, and off.
+    pub fn idle() -> Self {
+        Self {
+            stream: None,
+            rate: common::Sps(0),
+            center: common::Hz(0),
+            written: 0,
+            failed: 0,
+            monitor: Vec::new(),
+        }
+    }
+
+    /// Hand it a radio: the key going down.
+    pub fn attach(&mut self, stream: Box<dyn common::TxStream>) {
+        self.finish(std::time::Duration::from_millis(200));
+        self.written = 0;
+        self.failed = 0;
+        self.stream = Some(stream);
+    }
+
+    /// Whether it is transmitting now.
+    pub fn keyed(&self) -> bool {
+        self.stream.is_some()
+    }
+
     pub fn new(stream: Box<dyn common::TxStream>) -> Self {
         Self {
             stream: Some(stream),
@@ -361,12 +390,16 @@ impl TxSinkNode {
     }
 
     /// Let everything written reach the radio, then stop transmitting.
+    ///
+    /// The stage stays in the graph: what it loses is the radio, which is
+    /// also what hands a half duplex one back to the receiver.
     pub fn finish(&mut self, timeout: std::time::Duration) {
         if let Some(s) = &mut self.stream {
             s.drain(timeout);
             s.stop();
         }
         self.stream = None;
+        self.monitor.clear();
     }
 }
 
@@ -406,6 +439,10 @@ impl Simple for TxSinkNode {
         if iq.is_empty() {
             return Ok(());
         }
+        // Not keyed: the chain runs and produces, and nothing leaves the
+        // antenna. That is what makes the stages worth having in the graph
+        // when the key is up, since the modulator's output can be tapped and
+        // the levels set before anything is radiated.
         let Some(s) = &mut self.stream else { return Ok(()) };
         self.monitor.clear();
         self.monitor.extend_from_slice(iq);
