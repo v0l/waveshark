@@ -659,9 +659,7 @@ pub struct TxSpec {
 impl Default for TxSpec {
     fn default() -> Self {
         Self {
-            // Measured rather than chosen: three times is what a Scarlett at
-            // its own unity gain needs to reach full deviation on speech.
-            mic_gain: 3.0,
+            mic_gain: 1.0,
             // A test tone, because the safe default is one that does not open
             // the microphone: keying should not put the room on air until
             // somebody has said it should.

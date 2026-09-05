@@ -2953,7 +2953,7 @@ fn add_patch(
                     // A microphone stage with no microphone is a stage that
                     // cannot say what it would transmit, so it waits.
                     Some(src) => {
-                        let level = st.settings.f64_or("level", 3.0) as f32;
+                        let level = st.settings.f64_or("level", 1.0) as f32;
                         let band = (
                             st.settings.f64_or("low_hz", 200.0),
                             st.settings.f64_or("high_hz", 3_400.0),

@@ -537,7 +537,7 @@ impl MicNode {
     pub fn new(src: std::sync::Arc<dyn audio::AudioSource>, level: f32) -> Self {
         Self {
             src,
-            level: level.clamp(0.0, 8.0),
+            level: level.clamp(0.0, 3.0),
             peak: 0.0,
             // Communications speech: enough bottom for the voice to have
             // weight, and out to 3.4 kHz, which is what a telephone and every
@@ -697,7 +697,7 @@ impl Simple for MicNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("level", self.level as f64, 0.0..=8.0).label("Mic gain").unit("x"),
+            Param::float("level", self.level as f64, 0.0..=3.0).label("Mic gain").unit("x"),
             // The band is here rather than fixed because what sounds right
             // depends on the microphone, the voice and what is listening: a
             // telephone band is the safe default and not the only answer.
@@ -711,7 +711,7 @@ impl Simple for MicNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
             "level" => {
-                self.level = value.as_f64().unwrap_or(3.0).clamp(0.0, 8.0) as f32;
+                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, 3.0) as f32;
                 Ok(())
             }
             "low_hz" => {
