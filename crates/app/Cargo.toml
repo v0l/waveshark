@@ -65,3 +65,7 @@ required-features = ["limesdr"]
 [[example]]
 name = "limesweep"
 required-features = ["limesdr"]
+
+[[example]]
+name = "txcheck"
+required-features = ["limesdr"]
