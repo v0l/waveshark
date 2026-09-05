@@ -124,6 +124,14 @@ pub struct App {
     /// mix comes out of, and the microphone a keyed channel transmits from.
     audio_out: String,
     audio_in: String,
+    /// What the radio is set to, as the operator set it. The one record every
+    /// route to a radio setting writes and reads; see
+    /// [`crate::session::RadioSettings`].
+    radio_settings: crate::session::RadioSettings,
+    /// Whether the radio has a freshly opened device that has not yet been
+    /// given the settings. Set on connect and on reset, cleared once the
+    /// driver has reported its controls and the settings have gone to it.
+    radio_dirty: bool,
     /// Packet feeds from other receivers, as configured here and saved in
     /// the session.
     feeds: Vec<nodes::FeedSpec>,
@@ -150,9 +158,6 @@ pub struct App {
     station_edit: Option<String>,
     saved: crate::session::Session,
     saved_at: Option<std::time::Instant>,
-    /// Gain stages and switches restored from the session, waiting for the
-    /// radio to report its controls so they can be applied to it.
-    pending_radio: Option<crate::session::Session>,
 }
 
 /// Which settings panel is open. Each pane owns its own, because spectrum and
@@ -367,6 +372,8 @@ impl Default for App {
             country: String::new(),
             audio_out: String::new(),
             audio_in: String::new(),
+            radio_settings: Default::default(),
+            radio_dirty: false,
             feeds: Vec::new(),
             feed_host: String::new(),
             remote: None,
@@ -380,7 +387,6 @@ impl Default for App {
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
-            pending_radio: None,
         }
     }
 }
@@ -419,6 +425,7 @@ impl App {
             country: s.country.clone(),
             audio_out: s.audio_out.clone(),
             audio_in: s.audio_in.clone(),
+            radio_settings: s.radio(),
             feeds: s.feeds.clone(),
             log_cap_mb: s.log_cap_mb,
             capture_cap_mb: s.capture_cap_mb,
@@ -432,7 +439,7 @@ impl App {
         app.scope.wf_center = s.center;
         app.audio.volume = s.volume;
         app.log.path = crate::packetlog::PacketLog::default_dir();
-        app.pending_radio = Some(s);
+        app.radio_dirty = true;
         // What was changed about the graph, if anything was. Applied
         // whether or not manual mode is on: the mode only says whether the
         // graph can be edited now.
@@ -453,28 +460,18 @@ impl App {
 
     /// The live settings, in the form they are stored in.
     fn session(&self) -> crate::session::Session {
-        let radio = self.radio.as_ref().map(|r| r.status.radio());
+        let rs = &self.radio_settings;
         crate::session::Session {
             device: self.device.as_ref().map(|d| d.label.clone()),
             center: self.center,
             rate: self.rate * self.zoom.max(1) as f64,
             zoom: self.zoom,
             fft: self.scope.fft,
-            // Read back from the driver rather than from what was asked for,
-            // so the file holds the gain the hardware actually took.
-            gains: radio
-                .as_ref()
-                .map(|r| r.stages.iter().map(|(s, m)| (s.name.clone(), *m)).collect())
-                .unwrap_or_else(|| self.saved.gains.clone()),
-            toggles: radio
-                .as_ref()
-                .map(|r| r.toggles.iter().map(|t| (t.name.clone(), t.on)).collect())
-                .unwrap_or_else(|| self.saved.toggles.clone()),
-            choices: radio
-                .as_ref()
-                .map(|r| r.choices.iter().map(|c| (c.name.clone(), c.selected.clone())).collect())
-                .unwrap_or_else(|| self.saved.choices.clone()),
-            ppm: radio.as_ref().map(|r| r.ppm).unwrap_or(self.saved.ppm),
+            gains: rs.gains.clone(),
+            toggles: rs.toggles.clone(),
+            choices: rs.choices.clone(),
+            ppm: rs.ppm,
+            tx_gain_db: rs.tx_gain_db,
             location: self.location,
             language: crate::i18n::language().code().to_string(),
             country: self.country.clone(),
@@ -516,20 +513,27 @@ impl App {
         self.saved_at = Some(std::time::Instant::now());
     }
 
-    /// Push restored gain stages and switches at the radio once it is up.
+    /// Put the radio settings on the radio.
     ///
-    /// Deferred rather than sent with the tuning: the stage names come from
-    /// the driver, and until it has reported them there is nothing to check a
-    /// saved name against.
-    fn restore_radio_settings(&mut self) {
-        let Some(want) = self.pending_radio.clone() else { return };
+    /// The one path. The settings pane calls it after changing a field, a
+    /// connect or a reset calls it once the driver has reported its controls,
+    /// and a headless start calls it the same way: there is no second copy of
+    /// this logic that could disagree with the first.
+    ///
+    /// Deferred until the driver has reported its controls, because the stage
+    /// names come from the driver and until then there is nothing to check a
+    /// saved name against. A name the radio does not have is left alone
+    /// rather than refused, so a session saved on one radio applies what it
+    /// can to another.
+    fn apply_radio_settings(&mut self) {
         let Some(radio) = self.radio.as_ref() else { return };
         let controls = radio.status.radio();
         if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
         {
             return;
         }
-        self.pending_radio = None;
+        self.radio_dirty = false;
+        let want = self.radio_settings.clone();
         for (name, mode) in &want.gains {
             // "tuner" is not a stage the radio lists: it is the one number a
             // driver distributes across the stages it does have.
@@ -549,9 +553,26 @@ impl App {
                 self.send(Cmd::Choice(name.clone(), value.clone()));
             }
         }
-        if want.ppm != 0.0 {
-            self.send(Cmd::Ppm(want.ppm));
+        self.send(Cmd::Ppm(want.ppm));
+        if !controls.tx_stages.is_empty() {
+            self.send(Cmd::TxGain(want.tx_gain_db));
         }
+    }
+
+    /// The rest of what a freshly opened radio has to be told, which is not
+    /// a radio setting but travels with them on connect.
+    fn restore_radio_settings(&mut self) {
+        if !self.radio_dirty {
+            return;
+        }
+        let Some(radio) = self.radio.as_ref() else { return };
+        let controls = radio.status.radio();
+        if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
+        {
+            return;
+        }
+        self.apply_radio_settings();
+        let want = self.saved.clone();
         if !want.dc_block {
             self.send(Cmd::DcBlock(false));
         }
@@ -604,9 +625,8 @@ impl App {
     /// radio has. Applied once the device reports its controls, the same way
     /// a saved setting is.
     pub fn set_rf_gain(&mut self, db: f32) {
-        let s = self.pending_radio.get_or_insert_with(|| self.saved.clone());
-        s.gains.retain(|(n, _)| n != "tuner");
-        s.gains.push(("tuner".into(), common::GainMode::Manual(db)));
+        self.radio_settings.set_gain("tuner", common::GainMode::Manual(db));
+        self.radio_dirty = true;
     }
 
     /// Start on the radio whose label contains `want`, for when several are
@@ -744,9 +764,10 @@ impl App {
         if !self.calls.subs.is_empty() {
             self.send(Cmd::CallSubs(self.calls.subs.clone()));
         }
-        // Whatever the radio was set to last time has to be pushed at it
-        // again: a new thread means a freshly opened device at its defaults.
-        self.pending_radio = Some(self.saved.clone());
+        // Whatever the radio was set to has to be pushed at it again: a new
+        // thread means a freshly opened device at its defaults. Start and
+        // reset are the same path through here.
+        self.radio_dirty = true;
         self.reset_waterfall();
     }
 

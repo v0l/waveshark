@@ -837,6 +837,10 @@ impl App {
         {
             ui.label(legend("this device has no adjustable stages"));
         }
+        // Every control here writes the one record and applies it at the end,
+        // which is the same route a restore and a reset take: there is no
+        // second way to set the radio that could disagree with the first.
+        let mut changed = false;
 
         for (stage, mode) in &controls.stages {
             let auto = *mode == GainMode::Auto;
@@ -850,10 +854,9 @@ impl App {
                     if stage.auto {
                         let mut on = auto;
                         if ui.checkbox(&mut on, "Auto").changed() {
-                            self.send(Cmd::GainStage(
-                                stage.name.clone(),
-                                if on { GainMode::Auto } else { GainMode::Manual(db) },
-                            ));
+                            let mode = if on { GainMode::Auto } else { GainMode::Manual(db) };
+                            self.radio_settings.set_gain(&stage.name, mode);
+                            changed = true;
                         }
                     }
                     // Under AUTO the number is the hardware's business and
@@ -871,7 +874,8 @@ impl App {
             let slider = egui::Slider::new(&mut db, lo..=hi).show_value(false);
             if ui.add_enabled(!auto, slider).changed() {
                 let want = stage.quantise(db);
-                self.send(Cmd::GainStage(stage.name.clone(), GainMode::Manual(want)));
+                self.radio_settings.set_gain(&stage.name, GainMode::Manual(want));
+                changed = true;
             }
             if !stage.values.is_empty() {
                 hint(ui, &format!("{} steps, {lo:.0} to {hi:.0} dB", stage.values.len()));
@@ -888,9 +892,7 @@ impl App {
         if let Some(stage) = controls.tx_stages.iter().find(|s| s.name == "txvga") {
             ui.separator();
             ui.add_space(6.0);
-            let mut db = f32::from_bits(
-                radio.status.tx_gain_db.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let mut db = self.radio_settings.tx_gain_db;
             ui.horizontal(|ui| {
                 ui.label(legend("Transmit gain"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -899,7 +901,8 @@ impl App {
             });
             let (lo, hi) = (*stage.range.start(), *stage.range.end());
             if ui.add(egui::Slider::new(&mut db, lo..=hi).show_value(false)).changed() {
-                self.send(Cmd::TxGain(stage.quantise(db)));
+                self.radio_settings.tx_gain_db = stage.quantise(db);
+                changed = true;
             }
             hint(
                 ui,
@@ -924,7 +927,8 @@ impl App {
                         }
                     });
                 if picked != c.selected {
-                    self.send(Cmd::Choice(c.name.clone(), picked));
+                    self.radio_settings.set_choice(&c.name, &picked);
+                    changed = true;
                 }
                 hint(ui, &c.help);
                 ui.add_space(8.0);
@@ -937,7 +941,8 @@ impl App {
             for t in &controls.toggles {
                 let mut on = t.on;
                 if ui.checkbox(&mut on, &t.label).changed() {
-                    self.send(Cmd::Toggle(t.name.clone(), on));
+                    self.radio_settings.set_toggle(&t.name, on);
+                    changed = true;
                 }
                 hint(ui, &t.help);
                 ui.add_space(8.0);
@@ -947,12 +952,13 @@ impl App {
         ui.separator();
         ui.add_space(6.0);
         row(ui, "Correction", |ui| {
-            let mut ppm = controls.ppm;
+            let mut ppm = self.radio_settings.ppm;
             if ui
                 .add(egui::DragValue::new(&mut ppm).speed(0.5).range(-200.0..=200.0).suffix(" ppm"))
                 .changed()
             {
-                self.send(Cmd::Ppm(ppm));
+                self.radio_settings.ppm = ppm;
+                changed = true;
             }
         });
         ui.label(
@@ -981,6 +987,10 @@ impl App {
         ui.separator();
         ui.add_space(6.0);
         self.raw_capture(ui);
+
+        if changed {
+            self.apply_radio_settings();
+        }
     }
 
     /// Writing the span to disk exactly as it arrives.
