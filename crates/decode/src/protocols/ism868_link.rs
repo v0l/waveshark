@@ -1,4 +1,4 @@
-//! A two-way 868 MHz alarm mesh, believed to be Ajax Jeweller.
+//! A two-way 868 MHz link with a "GO" sync, vendor unknown.
 //!
 //! Heard continuously in Ireland on 868.100 and 868.500 MHz: 2-FSK at
 //! 19.6 kbaud NRZ, an 80-bit alternating preamble, the sync `47 4F` ("GO"),
@@ -8,18 +8,21 @@
 //! outer bytes changed, each sends every 1 to 15 seconds all day, and there
 //! is no integrity check to find because the check is inside the cipher.
 //!
-//! That is a hub polling devices in TDMA slots and a range extender
-//! repeating it, on the band Ajax publishes for Jeweller (868.0 to 868.6
-//! MHz) with the hopping and the encryption its literature describes. Nobody
-//! has documented the sync word, so the attribution is from behaviour and
-//! the name carries a question mark until a hub is seen doing it. What is
-//! read is the framing; nothing inside is.
+//! Two identities, not a houseful: a hub and a repeater keeping a link up,
+//! rather than sensors reporting. Repeated 8-byte blocks recur at a fixed
+//! offset under the same slot from both identities, which is a 64-bit block
+//! cipher in ECB relaying one payload verbatim.
+//!
+//! Ajax Jeweller fits the band, the hopping and the "block encryption" its
+//! literature claims, but so does every other 868 MHz alarm sold here, and
+//! nobody has published this sync word. So the name says what was measured
+//! and not whose it is. What is read is the framing; nothing inside is.
 
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
-pub struct Jeweller;
+pub struct Ism868Link;
 
 /// "GO".
 const SYNC: u32 = 0x474f;
@@ -32,9 +35,9 @@ const PREAMBLE_MIN: usize = 16;
 const MIN_BYTES: usize = 2 + 12;
 const MAX_BYTES: usize = 2 + 24;
 
-impl Protocol for Jeweller {
+impl Protocol for Ism868Link {
     fn name(&self) -> &'static str {
-        "Ajax-Jeweller?"
+        "ISM868-Link"
     }
 
     fn timing(&self) -> Timing {
@@ -115,7 +118,7 @@ mod tests {
         let frame: Vec<u8> = (0.."474fbbf729ad1fe85e2e03f8c34ba9fc5f9a21987ffa".len() / 2)
             .map(|i| u8::from_str_radix(&"474fbbf729ad1fe85e2e03f8c34ba9fc5f9a21987ffa"[i * 2..i * 2 + 2], 16).unwrap())
             .collect();
-        let r = Jeweller.decode(&bits_of(83, &frame)).expect("a frame");
+        let r = Ism868Link.decode(&bits_of(83, &frame)).expect("a frame");
         assert_eq!(r.fields["node"], Value::Text("2efd".into()));
         assert_eq!(r.fields["slot"], Value::Int(3));
         assert_eq!(r.fields["length"], Value::Int(18));
@@ -134,6 +137,6 @@ mod tests {
                 b.push(byte & (0x80 >> i) != 0);
             }
         }
-        assert!(Jeweller.decode(&b).is_err());
+        assert!(Ism868Link.decode(&b).is_err());
     }
 }
