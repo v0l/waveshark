@@ -1,10 +1,12 @@
-//! Audio playback.
+//! Audio playback, and the microphone capture that feeds a transmission.
 //!
 //! The callback never allocates, locks or blocks: it pops a pre-filled buffer
 //! and returns the drained allocation for reuse.
 
+mod capture;
 mod resample;
 
+pub use capture::{AudioCapture, AudioSource, Canned};
 pub use resample::Resampler;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

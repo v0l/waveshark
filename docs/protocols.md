@@ -362,9 +362,15 @@ which holds the device's `TxStream` and paces the whole chain by blocking
 when the radio has enough queued. `crates/nodes/tests/nfm_tx_path.rs` runs
 that graph into a file sink and demodulates what the "radio" received with
 `dsp::FmDemod`; `crates/app/examples/nfm_tx.rs` is the same graph with a
-HackRF in place of the file. What is not there yet is any audio source
-besides a tone, and any resampler on the transmit side, so the tone is
-generated at the radio's rate rather than at an audio rate.
+HackRF in place of the file. A keyed channel transmits either a test tone or the microphone: `mic`
+(`crates/nodes/src/tx_nodes.rs`) holds an `audio::AudioSource`, resamples it
+from the microphone's rate to the radio's with Catmull-Rom, and is a stage in
+front of the modulator rather than something the radio thread pushes in. The
+microphone is opened on key-up and closed on release, so it is live for
+exactly as long as the carrier. The interpolation is the weak point: at 48 kHz
+into 2 MS/s the images of a 3 kHz tone land near 45 kHz, about 70 dB down,
+where a polyphase filter would do better at the cost of a multiply-accumulate
+per output sample at the radio's rate.
 
 Still missing:
 

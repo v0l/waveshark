@@ -4094,8 +4094,9 @@ pub fn transmit_graph(
     rate: f64,
     center: Hz,
     stream: Box<dyn common::TxStream>,
+    mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
 ) -> Result<Graph> {
-    use crate::radio::TxMode;
+    use crate::radio::{TxMode, TxSource};
 
     let input = StreamSpec {
         kind: PortKind::Real,
@@ -4109,9 +4110,20 @@ pub fn transmit_graph(
     };
     // A carrier is a tone at nothing: the modulator sees silence and leaves
     // the carrier where it is, which is exactly an unmodulated transmission.
-    let level = match tx.mode {
-        TxMode::Carrier => 0.0,
+    // Speech gets no tone laid over it either.
+    let level = match (tx.mode, tx.source) {
+        (TxMode::Carrier, _) | (_, TxSource::Mic) => 0.0,
         _ => 0.8,
+    };
+    // The microphone is a stage in front of the modulator rather than
+    // something the radio thread pushes in, so what is being transmitted can
+    // be seen and tapped between the two.
+    let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
+        (TxSource::Mic, Some(src)) => Box::new(nodes::MicNode::new(src, 1.0)),
+        (TxSource::Mic, None) => {
+            return Err(common::Error::other("no microphone is open to transmit from"))
+        }
+        (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
     };
     let modulator: Box<dyn pipeline::Node> = match tx.mode {
         TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
@@ -4121,7 +4133,7 @@ pub fn transmit_graph(
     pipeline::chain(
         input,
         vec![
-            Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
+            head,
             modulator,
             Box::new(nodes::TxSinkNode::new(stream)),
         ],
@@ -4202,7 +4214,7 @@ mod extraction_tests {
 #[cfg(test)]
 mod tx_tests {
     use super::*;
-    use crate::radio::{TxMode, TxSpec};
+    use crate::radio::{TxMode, TxSource, TxSpec};
     use common::{Device, SampleFormat, Sps};
 
     fn sink(rate: f64) -> (sources::FileSink, std::sync::Arc<parking_lot::Mutex<Vec<u8>>>) {
@@ -4212,7 +4224,7 @@ mod tx_tests {
     fn transmit(tx: TxSpec, rate: f64, blocks: usize) -> Vec<C32> {
         let (mut dev, buf) = sink(rate);
         let mut g =
-            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap()).unwrap();
+            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap(), None).unwrap();
         for _ in 0..blocks {
             let b = g.input_buf();
             b.clear();
@@ -4278,6 +4290,60 @@ mod tx_tests {
     }
 
     #[test]
+    fn a_channel_set_to_the_microphone_transmits_what_it_hears() {
+        // Through the same node the microphone feeds, with a known waveform
+        // where the room would be: a 1 kHz tone at 48 kHz, resampled to the
+        // radio's rate, modulated, and read back off the capture.
+        let rate = 48_000.0;
+        let mic_rate = 48_000.0;
+        let tone: Vec<f32> = (0..4_800)
+            .map(|i| 0.8 * (std::f32::consts::TAU * 1_000.0 * i as f32 / mic_rate as f32).sin())
+            .collect();
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(tone, mic_rate, true));
+
+        let tx = TxSpec { mode: TxMode::Nfm, source: TxSource::Mic, ..Default::default() };
+        let (mut dev, buf) = sink(rate);
+        let mut g =
+            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap(), Some(src))
+                .unwrap();
+        for _ in 0..5 {
+            let b = g.input_buf();
+            b.clear();
+            b.real_mut().resize(4_800, 0.0);
+            g.run().unwrap();
+        }
+        let id = g.order().last().map(|(id, _)| id).unwrap();
+        if let Some(n) = g.node_mut(id) {
+            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+                s.finish(std::time::Duration::from_millis(50));
+            }
+        }
+        let mut iq = Vec::new();
+        SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
+
+        let mut demod = dsp::FmDemod::new(rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio_back = Vec::new();
+        demod.process(&iq, &mut audio_back);
+        let seg = &audio_back[2_000..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = crossings as f64 * rate / seg.len() as f64;
+        assert!((hz - 1_000.0).abs() < 15.0, "what went on air was {hz:.0} Hz");
+    }
+
+    #[test]
+    fn a_channel_set_to_the_microphone_will_not_key_without_one() {
+        // Better than transmitting silence: an over that nobody hears is
+        // indistinguishable from a radio that is not working.
+        let (mut dev, _b) = sink(48_000.0);
+        let tx = TxSpec { source: TxSource::Mic, ..Default::default() };
+        let err = transmit_graph(&tx, 48_000.0, Hz(145_500_000), dev.start_tx().unwrap(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("microphone"), "unhelpful: {err}");
+    }
+
+    #[test]
     fn the_transmit_chain_is_three_stages_ending_in_the_radio() {
         let (mut dev, _b) = sink(48_000.0);
         let g = transmit_graph(
@@ -4285,6 +4351,7 @@ mod tx_tests {
             48_000.0,
             Hz(145_500_000),
             dev.start_tx().unwrap(),
+            None,
         )
         .unwrap();
         let topo = g.topology();

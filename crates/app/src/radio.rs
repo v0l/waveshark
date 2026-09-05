@@ -272,7 +272,8 @@ fn key_up(
     tx: &TxSpec,
     center: Hz,
     gain_db: f32,
-) -> common::Result<pipeline::Graph> {
+    mic: &mut Option<audio::AudioCapture>,
+) -> common::Result<(pipeline::Graph, Option<audio::AudioCapture>)> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
@@ -312,8 +313,22 @@ fn key_up(
         dev.set_tx_gain(&name, GainMode::Manual(db))?;
     }
 
+    // The microphone is opened here and closed when the over ends, so it is
+    // live for exactly as long as the carrier is.
+    let open = match tx.source {
+        TxSource::Mic => match mic.take() {
+            Some(c) => Some(c),
+            None => Some(audio::AudioCapture::open(48_000).map_err(|e| {
+                common::Error::other(format!("no microphone: {e}"))
+            })?),
+        },
+        TxSource::Tone => None,
+    };
+    let src = open.as_ref().map(|c| c.source());
+
     let rate = dev.rate().as_f64();
-    crate::chain::transmit_graph(tx, rate, on_air, dev.start_tx()?)
+    let g = crate::chain::transmit_graph(tx, rate, on_air, dev.start_tx()?, src)?;
+    Ok((g, open))
 }
 
 /// End the over, letting what is queued reach the antenna first, and say how
@@ -552,12 +567,13 @@ pub struct ChannelSpec {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TxSpec {
     pub mode: TxMode,
+    /// What is modulated: the microphone, or a test tone.
+    pub source: TxSource,
     /// Added to the channel's receive frequency when transmitting: the
     /// repeater shift, and zero for simplex.
     pub shift_hz: f64,
-    /// The tone the modulator is fed, until there is a microphone to feed it
-    /// instead. Zero transmits an unmodulated carrier, which is what a power
-    /// measurement wants.
+    /// The tone the modulator is fed under [`TxSource::Tone`], and the tone
+    /// laid over speech under [`TxSource::Mic`] when it is wanted.
     pub tone_hz: f64,
     /// This channel's own offset from the radio's transmit gain, so one
     /// channel into a dummy load and another into an antenna do not need the
@@ -567,7 +583,36 @@ pub struct TxSpec {
 
 impl Default for TxSpec {
     fn default() -> Self {
-        Self { mode: TxMode::Nfm, shift_hz: 0.0, tone_hz: 1_000.0, trim_db: 0.0 }
+        Self {
+            mode: TxMode::Nfm,
+            // A test tone, because the safe default is one that does not open
+            // the microphone: keying should not put the room on air until
+            // somebody has said it should.
+            source: TxSource::Tone,
+            shift_hz: 0.0,
+            tone_hz: 1_000.0,
+            trim_db: 0.0,
+        }
+    }
+}
+
+/// What a keyed channel puts through the modulator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxSource {
+    /// A steady tone, which is what a deviation or power check wants.
+    Tone,
+    /// The microphone, opened when the channel is keyed and closed when it is
+    /// let go. A radio that holds it open between overs is listening to the
+    /// room between overs.
+    Mic,
+}
+
+impl TxSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tone => "TONE",
+            Self::Mic => "MIC",
+        }
     }
 }
 
@@ -1706,6 +1751,8 @@ fn run(
     // their work at once, and on a half duplex one the receive half is
     // reading what the driver puts there instead.
     let mut tx_graph: Option<pipeline::Graph> = None;
+    // The microphone, open only while a channel that wants it is keyed.
+    let mut mic: Option<audio::AudioCapture> = None;
     status
         .can_transmit
         .store(dev.info().can_transmit(), Ordering::Relaxed);
@@ -1735,6 +1782,9 @@ fn run(
                         status.keyed.store(0, Ordering::Relaxed);
                         status.set_radio(RadioControls::read(dev.as_ref(), ppm));
                     }
+                    // Closed with the carrier. A microphone left open between
+                    // overs is a radio listening to the room.
+                    mic = None;
                 }
                 Cmd::Key(Some(id)) => {
                     let spec = plan.channels.iter().find(|c| c.id == id).cloned();
@@ -1751,9 +1801,17 @@ fn run(
                             // and the waterfall shows the gap rather than
                             // stopping; on a full duplex one it goes on
                             // hearing the band.
-                            match key_up(dev.as_mut(), &ch, &tx, plan.center, tx_gain_db) {
-                                Ok(g) => {
+                            match key_up(
+                                dev.as_mut(),
+                                &ch,
+                                &tx,
+                                plan.center,
+                                tx_gain_db,
+                                &mut mic,
+                            ) {
+                                Ok((g, open)) => {
                                     tx_graph = Some(g);
+                                    mic = open;
                                     status.keyed.store(ch.id, Ordering::Relaxed);
                                 }
                                 Err(e) => {
