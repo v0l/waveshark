@@ -1311,7 +1311,7 @@ pub struct Status {
 /// the hardware quantises: ask an R820T for 30 dB and it gives 29.7, ask a
 /// HackRF's LNA for 20 and it gives 16. A control showing the request rather
 /// than the result is lying about the receiver.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RadioControls {
     pub stages: Vec<(common::GainStage, GainMode)>,
     /// The transmit gain stages, empty on a receiver. Kept apart from the
@@ -1321,9 +1321,45 @@ pub struct RadioControls {
     pub toggles: Vec<common::Toggle>,
     pub choices: Vec<common::Choice>,
     pub ppm: f64,
+    /// Where the tuner reaches, in hertz: the lowest and highest of its
+    /// ranges. What the dial is clamped to, which used to be the RTL-SDR's
+    /// 24 to 1766 MHz whatever radio was connected.
+    pub reach: (f64, f64),
+    /// Whether the tuner can be moved at all. A network stream is pinned by
+    /// whoever feeds it, and its dial is a readout.
+    pub tunable: bool,
+}
+
+impl Default for RadioControls {
+    fn default() -> Self {
+        Self {
+            stages: Vec::new(),
+            tx_stages: Vec::new(),
+            toggles: Vec::new(),
+            choices: Vec::new(),
+            ppm: 0.0,
+            reach: (24e6, 1766e6),
+            tunable: true,
+        }
+    }
 }
 
 impl RadioControls {
+    /// The lowest and highest frequency across a device's tuner ranges.
+    fn reach_of(dev: &dyn common::Device) -> (f64, f64) {
+        let mut lo = f64::INFINITY;
+        let mut hi = 0.0f64;
+        for r in &dev.info().ranges {
+            lo = lo.min(r.range.start().as_f64());
+            hi = hi.max(r.range.end().as_f64());
+        }
+        if lo.is_finite() && hi > lo {
+            (lo, hi)
+        } else {
+            (24e6, 1766e6)
+        }
+    }
+
     /// `ppm` is the correction in force, which is not always the device's
     /// own: one that cannot correct itself is corrected by the radio thread,
     /// and reading the setting back off the driver would report zero and
@@ -1349,7 +1385,15 @@ impl RadioControls {
             .as_ref()
             .map(|t| t.gain_stages.clone())
             .unwrap_or_default();
-        Self { stages, tx_stages, toggles: dev.toggles(), choices: dev.choices(), ppm }
+        Self {
+            stages,
+            tx_stages,
+            toggles: dev.toggles(),
+            choices: dev.choices(),
+            ppm,
+            reach: Self::reach_of(dev),
+            tunable: dev.info().kind != common::device::DriverKind::IqStream,
+        }
     }
 }
 
