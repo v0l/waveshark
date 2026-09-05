@@ -480,11 +480,25 @@ impl Simple for TxSinkNode {
 /// down and linear leaves about 48 dB down. A polyphase filter would do
 /// better and costs a multiply-accumulate per output sample, which at 2 MS/s
 /// is the expensive place to spend one.
+/// Most the microphone can be driven into the limiter by, as a voltage
+/// ratio: 20 dB. A radio's microphone amplifier has that much in hand
+/// because the limiter is meant to be reached on every syllable, and a
+/// UV-5R measured off air was deviating twice what the app did at a gain of
+/// 1.7 on the same voice, with the limiter never touched.
+pub const MIC_GAIN_MAX: f32 = 10.0;
+
 pub struct MicNode {
     src: std::sync::Arc<dyn audio::AudioSource>,
     level: f32,
     /// Peak of the last block, before the gain, for a meter beside the key.
     peak: f32,
+    /// The last block arrived already flat-topped: runs of samples sitting
+    /// on one value at the block's own peak, which is a converter or a
+    /// capture chain clipping before anything here ran. Nothing downstream
+    /// can undo it and it sounds like a voice with the body taken out, so
+    /// it is worth a warning where the meter is. An evening went on a
+    /// microphone boost set 6 dB too high before this existed.
+    clipped: bool,
     /// The band the audio is limited to, in hertz, and the filter that does
     /// it.
     ///
@@ -495,6 +509,17 @@ pub struct MicNode {
     /// a blanket over the microphone.
     band: (f64, f64),
     filter: Option<crate::RealFir>,
+    /// Pre-emphasis time constant in microseconds, or zero for flat.
+    ///
+    /// Every FM voice receiver de-emphasises: it rolls the audio off at
+    /// 6 dB an octave above a few hundred hertz, because its transmitter
+    /// boosted it by the same before modulating, and the pair puts the
+    /// FM noise triangle where the ear minds it least. Flat audio through
+    /// that receiver comes out with its consonants 15 to 20 dB down, which
+    /// is speech with the top taken off: a voice you can hear and not
+    /// understand. 750 us is the land mobile and amateur figure.
+    emphasis_us: f64,
+    emphasis: Emphasis,
     /// The rate the filter was designed at, so a parameter change can build a
     /// new one without waiting for the graph to negotiate again.
     src_rate: f64,
@@ -537,14 +562,16 @@ impl MicNode {
     pub fn new(src: std::sync::Arc<dyn audio::AudioSource>, level: f32) -> Self {
         Self {
             src,
-            level: level.clamp(0.0, 3.0),
+            level: level.clamp(0.0, MIC_GAIN_MAX),
             peak: 0.0,
-            // Communications speech: enough bottom for the voice to have
-            // weight, and out to 3.4 kHz, which is what a telephone and every
-            // narrowband radio have used for a century because it is where
-            // intelligibility lives.
-            band: (200.0, 3_400.0),
+            clipped: false,
+            // Communications speech: from 400 Hz, which is where a handheld's
+            // own microphone chain starts and lower sounds muddy beside it,
+            // out to 3.4 kHz, which is where intelligibility lives.
+            band: (400.0, 3_400.0),
             filter: None,
+            emphasis_us: 750.0,
+            emphasis: Emphasis::default(),
             src_rate: 0.0,
             rate: 0.0,
             phase: 0.0,
@@ -566,6 +593,39 @@ impl MicNode {
         self.peak
     }
 
+    /// Whether the microphone's own signal is arriving clipped.
+    pub fn input_clipped(&self) -> bool {
+        self.clipped
+    }
+
+    /// Flat tops: the block's highest or lowest value held by a run of
+    /// samples in a row, more than once. Speech never sits on one value for
+    /// a quarter of a millisecond; a rail does. Each rail on its own, since
+    /// a microphone overloads one side first.
+    fn flat_topped(v: &[f32], peak: f32) -> bool {
+        if peak < 0.1 || v.is_empty() {
+            return false;
+        }
+        let hi = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let lo = v.iter().copied().fold(f32::INFINITY, f32::min);
+        let tol = peak * 0.002;
+        let runs_at = |rail: f32| {
+            let (mut run, mut runs) = (0usize, 0usize);
+            for &x in v {
+                if (x - rail).abs() <= tol {
+                    run += 1;
+                    if run == 12 {
+                        runs += 1;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            runs
+        };
+        runs_at(hi) >= 2 || runs_at(lo) >= 2
+    }
+
 
     /// Build the speech filter for the band and rate now set.
     ///
@@ -577,6 +637,7 @@ impl MicNode {
         if rate <= 0.0 {
             return;
         }
+        self.emphasis = Emphasis::new(rate, self.emphasis_us);
         let (lo, hi) = self.band;
         let hi = hi.min(rate * 0.45);
         let lo = lo.clamp(0.0, hi - 100.0);
@@ -612,6 +673,69 @@ impl MicNode {
                 false
             }
         }
+    }
+}
+
+/// First-order pre-emphasis: a shelf rising from `1 / (2 pi tau)` and
+/// levelling off 12 dB up.
+///
+/// `(1 + s tau) / (1 + s tau / 4)` through the bilinear transform, unity at
+/// DC. At 750 us the corner is 212 Hz and the shelf turns over at 850 Hz,
+/// so 3 kHz sits about 6 dB over 500 Hz.
+///
+/// Less than the textbook 6 dB an octave all the way to 3 kHz, and measured
+/// against a UV-5R rather than the textbook. Twenty decibels of boost in
+/// front of the limiter turned every glottal pulse into a click that hit
+/// the clipper while the body of the vowel between them sat twenty
+/// decibels down: off air, the app's voice was a train of clipped spikes
+/// with silence between, and the radio's was a dense waveform. The clipper
+/// then took the energy the receiver's de-emphasis would have turned back
+/// into the vowel, which is hollow, buzzing speech. The handheld's own
+/// transmitted spectrum falls about 6 dB from 600 Hz to 3 kHz on speech;
+/// with this shelf the app's falls about the same.
+#[derive(Clone, Copy, Debug, Default)]
+struct Emphasis {
+    b0: f32,
+    b1: f32,
+    a1: f32,
+    x1: f32,
+    y1: f32,
+    on: bool,
+}
+
+impl Emphasis {
+    fn new(rate: f64, tau_us: f64) -> Self {
+        if tau_us <= 0.0 || rate <= 0.0 {
+            return Self::default();
+        }
+        let k1 = 2.0 * rate * tau_us * 1e-6;
+        let k2 = k1 / 4.0;
+        let a0 = 1.0 + k2;
+        Self {
+            b0: ((1.0 + k1) / a0) as f32,
+            b1: ((1.0 - k1) / a0) as f32,
+            a1: ((1.0 - k2) / a0) as f32,
+            x1: 0.0,
+            y1: 0.0,
+            on: true,
+        }
+    }
+
+    fn process(&mut self, v: &mut [f32]) {
+        if !self.on {
+            return;
+        }
+        for x in v {
+            let y = self.b0 * *x + self.b1 * self.x1 - self.a1 * self.y1;
+            self.x1 = *x;
+            self.y1 = y;
+            *x = y;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.y1 = 0.0;
     }
 }
 
@@ -663,8 +787,24 @@ impl Simple for MicNode {
         let mut got = Vec::with_capacity(want);
         self.src.take(&mut got, want.saturating_sub(self.pending.len()));
         // Measured before anything is done to it, so the meter shows what the
-        // microphone heard rather than what the leveller made of it.
+        // microphone heard rather than what the limiter made of it.
         self.peak = got.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        if !got.is_empty() {
+            self.clipped = Self::flat_topped(&got, self.peak);
+        }
+        // The order a radio's microphone amplifier does it in: emphasis,
+        // gain, the limiter, then the filter that takes the limiter's
+        // harmonics out before they widen the transmission. The limiter is
+        // a clipper at full deviation. Speech peaks stand ten decibels or
+        // more over its average, so audio scaled to keep the peaks legal
+        // deviates the carrier a third of the way on the average syllable
+        // and the transmission is quiet; clipped, the average comes up and
+        // the peaks stay where they were, which is what every voice radio
+        // does and what one sounds like on the other end.
+        self.emphasis.process(&mut got);
+        for v in &mut got {
+            *v = (*v * self.level).clamp(-1.0, 1.0);
+        }
         if let Some(f) = &mut self.filter {
             f.process(&mut got);
         }
@@ -677,7 +817,7 @@ impl Simple for MicNode {
                 self.next_source();
                 self.phase -= 1.0;
             }
-            let v = cubic(self.window, self.phase as f32) * self.level;
+            let v = cubic(self.window, self.phase as f32);
             out.push(passthrough + v.clamp(-1.0, 1.0));
             self.phase += step;
         }
@@ -690,6 +830,7 @@ impl Simple for MicNode {
         self.pending.clear();
         self.starved = 0;
         self.peak = 0.0;
+        self.emphasis.reset();
         if let Some(f) = &mut self.filter {
             f.reset();
         }
@@ -697,7 +838,10 @@ impl Simple for MicNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("level", self.level as f64, 0.0..=3.0).label("Mic gain").unit("x"),
+            Param::float("level", self.level as f64, 0.0..=MIC_GAIN_MAX as f64).label("Mic gain").unit("x"),
+            Param::float("emphasis_us", self.emphasis_us, 0.0..=1_000.0)
+                .label("Pre-emphasis")
+                .unit("us"),
             // The band is here rather than fixed because what sounds right
             // depends on the microphone, the voice and what is listening: a
             // telephone band is the safe default and not the only answer.
@@ -711,7 +855,7 @@ impl Simple for MicNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
             "level" => {
-                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, 3.0) as f32;
+                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, MIC_GAIN_MAX as f64) as f32;
                 Ok(())
             }
             "low_hz" => {
@@ -721,6 +865,11 @@ impl Simple for MicNode {
             }
             "high_hz" => {
                 self.band.1 = value.as_f64().unwrap_or(3_400.0).max(500.0);
+                self.design();
+                Ok(())
+            }
+            "emphasis_us" => {
+                self.emphasis_us = value.as_f64().unwrap_or(0.0).clamp(0.0, 1_000.0);
                 self.design();
                 Ok(())
             }
@@ -785,6 +934,85 @@ mod mic_tests {
         assert!((hz - 1_000.0).abs() < 15.0, "1 kHz came out at {hz:.0} Hz");
         let peak = seg.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 1.0).abs() < 0.05, "level changed on the way through: {peak}");
+    }
+
+    fn tone_peak(hz: f32, amp: f32, gain: f32, emphasis_us: f64) -> f32 {
+        let tone: Vec<f32> =
+            (0..48_000).map(|i| amp * (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin()).collect();
+        let src = Arc::new(audio::Canned::new(tone, 48_000.0, true));
+        let mut node = MicNode::new(src, gain);
+        node.emphasis_us = emphasis_us;
+        let out = run(&mut node, 48_000.0, 8_000);
+        out[4_000..].iter().fold(0.0f32, |m, v| m.max(v.abs()))
+    }
+
+    /// The top of the speech band goes out a few decibels over the bottom,
+    /// which is what a receiver's de-emphasis takes back out; flat, it would
+    /// arrive with the consonants missing, and boosted by the full twenty
+    /// the limiter ate the vowels.
+    #[test]
+    fn speech_is_pre_emphasised_the_way_a_receiver_expects() {
+        let low = tone_peak(800.0, 0.01, 1.0, 750.0);
+        let high = tone_peak(2_500.0, 0.01, 1.0, 750.0);
+        let db = 20.0 * (high / low).log10();
+        assert!((1.5..=6.0).contains(&db), "2.5 kHz sits {db:.1} dB over 800 Hz");
+        // And the octave under 630 Hz is well down, the way a handheld's is.
+        let bass = tone_peak(300.0, 0.01, 1.0, 750.0);
+        let bass_db = 20.0 * (bass / low).log10();
+        assert!(bass_db < -8.0, "300 Hz is only {bass_db:.1} dB under 800 Hz");
+        let flat_low = tone_peak(800.0, 0.01, 1.0, 0.0);
+        let flat_high = tone_peak(2_500.0, 0.01, 1.0, 0.0);
+        let flat = 20.0 * (flat_high / flat_low).log10();
+        assert!(flat.abs() < 1.5, "with emphasis off the band tilts {flat:.1} dB");
+    }
+
+    /// Driven hard, the audio limits at full deviation and the limiter's
+    /// harmonics stay inside the band: what leaves is a clipped tone, not a
+    /// square wave.
+    #[test]
+    fn the_limiter_holds_full_deviation_and_the_filter_cleans_up_after_it() {
+        let peak = tone_peak(1_000.0, 0.5, 3.0, 0.0);
+        assert!(peak <= 1.05 && peak > 0.9, "overdriven audio came out at {peak}");
+        // A hard-clipped 1 kHz tone has its third harmonic 10 dB down; the
+        // 3.4 kHz filter leaves a fundamental with a little third in it, so
+        // the waveform's zero crossings are still 2000 a second.
+        let tone: Vec<f32> =
+            (0..48_000).map(|i| 0.5 * (std::f32::consts::TAU * 1_000.0 * i as f32 / 48_000.0).sin()).collect();
+        let src = Arc::new(audio::Canned::new(tone, 48_000.0, true));
+        let mut node = MicNode::new(src, 3.0);
+        node.emphasis_us = 0.0;
+        let out = run(&mut node, 48_000.0, 48_000);
+        let seg = &out[4_000..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f64;
+        let hz = crossings * 48_000.0 / seg.len() as f64;
+        assert!((hz - 1_000.0).abs() < 15.0, "clipping put the tone at {hz:.0} Hz");
+        // Above the band there is nothing: the fifth harmonic at 5 kHz is
+        // what the clipper made and the filter took away.
+        let bin = |f: f64| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, v) in seg.iter().enumerate() {
+                let p = std::f64::consts::TAU * f * i as f64 / 48_000.0;
+                re += *v as f64 * p.cos();
+                im += *v as f64 * p.sin();
+            }
+            (re * re + im * im).sqrt() / seg.len() as f64
+        };
+        let fifth_db = 20.0 * (bin(5_000.0) / bin(1_000.0)).log10();
+        assert!(fifth_db < -40.0, "the fifth harmonic is only {fifth_db:.0} dB down");
+    }
+
+    /// A capture already clipping is reported as such; clean speech is not.
+    #[test]
+    fn a_flat_topped_input_is_called_clipped() {
+        let clean: Vec<f32> =
+            (0..4800).map(|i| 0.4 * (std::f32::consts::TAU * 150.0 * i as f32 / 48_000.0).sin()).collect();
+        let clipped: Vec<f32> = clean.iter().map(|v| v.clamp(-0.25, 0.4)).collect();
+        assert!(!MicNode::flat_topped(&clean, 0.4));
+        assert!(MicNode::flat_topped(&clipped, 0.4));
+        let src = Arc::new(audio::Canned::new(clipped, 48_000.0, true));
+        let mut node = MicNode::new(src, 1.0);
+        let _ = run(&mut node, 48_000.0, 4_000);
+        assert!(node.input_clipped());
     }
 
     #[test]
@@ -869,3 +1097,4 @@ impl Simple for TxClockNode {
         Ok(())
     }
 }
+
