@@ -35,19 +35,33 @@ impl Dial {
     /// Draw the readout and apply wheel input. Returns the possibly-updated
     /// frequency.
     pub fn show(&mut self, ui: &mut Ui, hz: f64, size: f32) -> DialOut {
+        self.show_tunable(ui, hz, size, true)
+    }
+
+    /// The same readout on a tuner that cannot be moved: a network stream
+    /// pinned by whoever feeds it. The digits are drawn but take no input,
+    /// and say so, since a dial that looks live and ignores every drag reads
+    /// as broken rather than as fixed.
+    pub fn show_tunable(&mut self, ui: &mut Ui, hz: f64, size: f32, tunable: bool) -> DialOut {
         let digit_w = size * 0.62;
         let gap = size * 0.22;
         let width = DECADES.len() as f32 * digit_w + GROUP_AFTER.len() as f32 * gap + size * 2.4;
         let height = size * 1.5;
 
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(width, height),
+            if tunable { Sense::click_and_drag() } else { Sense::hover() },
+        );
         let p = ui.painter_at(rect);
 
         p.rect_filled(rect, 2.0, theme::WELL);
         p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+        if !tunable {
+            self.hot = None;
+            response.clone().on_hover_text("This source is pinned by the radio feeding it");
+        }
 
-        let hover = response.hover_pos();
+        let hover = if tunable { response.hover_pos() } else { None };
         let mut hot = None;
 
         // Above 100 MHz the leading digit is significant; below it, it is a

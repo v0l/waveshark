@@ -26,7 +26,7 @@ impl App {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let out = self.dial.show(ui, self.center, 34.0);
+                    let out = self.dial.show_tunable(ui, self.center, 34.0, self.tunable);
                     if out.changed {
                         self.retune(out.hz);
                     }

@@ -88,6 +88,10 @@ pub struct App {
     open: Option<Settings>,
     devices: Vec<crate::devices::Entry>,
     device: Option<crate::devices::Entry>,
+    /// Where the connected tuner reaches and whether it can be moved, from
+    /// the radio thread's reading of the device.
+    reach: (f64, f64),
+    tunable: bool,
     spans: Vec<crate::devices::Span>,
     /// Software decimation currently applied, 1 for none.
     zoom: usize,
@@ -356,6 +360,8 @@ impl Default for App {
             open: None,
             devices: Vec::new(),
             device: None,
+            reach: (24e6, 1766e6),
+            tunable: true,
             spans: Vec::new(),
             zoom: 1,
             soak: None,
@@ -850,6 +856,11 @@ impl App {
         if let Some(f) = self.device.as_ref().and_then(|d| d.pinned) {
             self.center = f.as_f64();
         }
+        {
+            let c = radio.status.radio();
+            self.reach = c.reach;
+            self.tunable = c.tunable;
+        }
         // Every frame is peak-held into the pending row, not just the one that
         // happens to be last in the queue. Folding only the last of each batch
         // tied a waterfall row's content to how often the interface repainted:
@@ -1202,7 +1213,8 @@ impl App {
     }
 
     fn retune(&mut self, hz: f64) {
-        self.center = hz.clamp(24e6, 1766e6);
+        let (lo, hi) = self.reach;
+        self.center = hz.clamp(lo, hi);
         self.send(Cmd::Center(Hz(self.center as u64)));
         self.retune_listener();
     }
@@ -1956,6 +1968,9 @@ mod tests {
         );
     }
 
+    /// The clamp follows the radio that is connected, not the dongle the
+    /// numbers were written for: a HackRF reaches 6 GHz and 1 MHz, and both
+    /// were unreachable while this was the RTL-SDR's range.
     #[test]
     fn retuning_stays_inside_what_the_tuner_can_reach() {
         let mut a = app();
@@ -1963,6 +1978,12 @@ mod tests {
         assert_eq!(a.center, 24e6);
         a.retune(9e9);
         assert_eq!(a.center, 1766e6);
+
+        a.reach = (1e6, 6e9);
+        a.retune(1.0);
+        assert_eq!(a.center, 1e6);
+        a.retune(9e9);
+        assert_eq!(a.center, 6e9);
     }
 
     #[test]
