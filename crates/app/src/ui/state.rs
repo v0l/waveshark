@@ -454,6 +454,10 @@ pub(super) struct AudioState {
     pub call_agc: bool,
     /// Which publication of the levels was last taken from the radio.
     pub levels_rev: u64,
+    /// The channel being keyed, while the mouse button is down. Held here
+    /// rather than read back off the key, because the key moves when the
+    /// panel relaids itself and a transmission must not.
+    pub keying: Option<u64>,
 }
 
 impl Default for AudioState {
@@ -469,6 +473,7 @@ impl Default for AudioState {
             call_muted: false,
             call_agc: true,
             levels_rev: 0,
+            keying: None,
         }
     }
 }

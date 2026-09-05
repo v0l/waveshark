@@ -142,6 +142,7 @@ impl Strip<'_> {
         ch: &mut Channel,
         keyed: Option<u64>,
         mic: (f32, f32),
+        keying: &mut Option<u64>,
         cmds: &mut Vec<Cmd>,
     ) -> bool {
         let mut changed = false;
@@ -279,11 +280,19 @@ impl Strip<'_> {
             // carrier lasted as long as it took the queue to drain.
             .sense(Sense::click_and_drag()),
         );
-        // Held, not toggled: released, lost focus and the pointer leaving all
-        // drop the carrier.
-        if can_key && key.is_pointer_button_down_on() && !keyed_here {
+        // Held from the pointer rather than from the widget. A key that asks
+        // the button whether it is still pressed is a key that lets go
+        // whenever the panel relaids itself underneath it: on WFM the RDS
+        // readout appears the moment a station is identified, everything
+        // below it moves, and the carrier dropped mid-word. What is held is
+        // the mouse button, and it stays held until it is let go.
+        let down = ui.input(|i| i.pointer.primary_down());
+        if can_key && keying.is_none() && key.is_pointer_button_down_on() {
+            *keying = Some(ch.id);
             cmds.push(Cmd::Key(Some(ch.id)));
-        } else if keyed_here && !key.is_pointer_button_down_on() {
+        }
+        if *keying == Some(ch.id) && !down {
+            *keying = None;
             cmds.push(Cmd::Key(None));
         }
         changed
@@ -479,15 +488,6 @@ impl Strip<'_> {
                                     ));
                                 }
                             });
-                            // Above everything that comes and goes. The RDS
-                            // readout appears the moment a station is
-                            // identified and disappears when it is lost, and
-                            // a key drawn under it moves out from under the
-                            // pointer mid-transmission: on WFM the carrier
-                            // dropped every time a station name arrived.
-                            if can_tx && Self::channel_tx(ui, ch, keyed, mic, self.cmds) {
-                                tune = Some(i);
-                            }
                             if ch.on {
                                 // Its own level, which runs into the master,
                                 // read against what it is contributing.
@@ -520,6 +520,11 @@ impl Strip<'_> {
                                         tune = Some(i);
                                     }
                                 }
+                            }
+                            if can_tx
+                                && Self::channel_tx(ui, ch, keyed, mic, &mut self.st.keying, self.cmds)
+                            {
+                                tune = Some(i);
                             }
 
                         });
