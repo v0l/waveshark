@@ -15,7 +15,44 @@
 //! offset correlates at all of them. Peak alone called an empty band OFDM.
 
 use common::C32;
-use rustfft::FftPlanner;
+use rustfft::{Fft, FftPlanner};
+use std::cell::RefCell;
+use std::sync::Arc;
+
+/// Samples a correlation is taken over. Lags run to 8192 at most, so a
+/// window a few times that measures the same thing as the whole burst; the
+/// whole burst cost a transform of 131072 points, twice, on every burst
+/// classified, which was half of what a classification cost.
+const TAKE: usize = 1 << 15;
+
+/// A forward and inverse plan of one size.
+type Pair = (Arc<dyn Fft<f32>>, Arc<dyn Fft<f32>>);
+
+/// Plans made so far, by size.
+#[derive(Default)]
+struct Plans {
+    planner: Option<FftPlanner<f32>>,
+    made: Vec<(usize, Pair)>,
+}
+
+thread_local! {
+    /// Reused: planning a large transform computes its twiddles, and a
+    /// planner made per call did that on every burst.
+    static PLANS: RefCell<Plans> = RefCell::new(Plans::default());
+}
+
+fn plans(n: usize) -> Pair {
+    PLANS.with(|p| {
+        let mut p = p.borrow_mut();
+        if let Some((_, pair)) = p.made.iter().find(|(k, _)| *k == n) {
+            return pair.clone();
+        }
+        let planner = p.planner.get_or_insert_with(FftPlanner::new);
+        let pair = (planner.plan_fft_forward(n), planner.plan_fft_inverse(n));
+        p.made.push((n, pair.clone()));
+        pair
+    })
+}
 
 /// Peak, its lag, and the peak over the median across lags.
 pub struct Cyclic {
@@ -40,27 +77,27 @@ pub fn complex(z: &[C32], lag_min: usize) -> Cyclic {
 
 /// Autocorrelation of envelope power, with its mean removed.
 pub fn envelope(z: &[C32], lag_min: usize) -> Cyclic {
-    let take = z.len().min(1 << 17);
+    let take = z.len().min(TAKE);
     let mean = z[..take].iter().map(|s| s.norm_sqr()).sum::<f32>() / take.max(1) as f32;
     correlate(z.iter().map(|s| C32::new(s.norm_sqr() - mean, 0.0)), z.len(), lag_min)
 }
 
 fn correlate(src: impl Iterator<Item = C32>, len: usize, lag_min: usize) -> Cyclic {
-    let take = len.min(1 << 17);
+    let take = len.min(TAKE);
     if take < 4 * lag_min.max(1) {
         return Cyclic { peak: 0.0, lag: 0, ratio: 1.0 };
     }
     let n = (2 * take).next_power_of_two();
-    let mut planner = FftPlanner::<f32>::new();
+    let (forward, inverse) = plans(n);
     let mut buf = vec![C32::new(0.0, 0.0); n];
     for (b, s) in buf.iter_mut().zip(src.take(take)) {
         *b = s;
     }
-    planner.plan_fft_forward(n).process(&mut buf);
+    forward.process(&mut buf);
     for b in buf.iter_mut() {
         *b = C32::new(b.norm_sqr(), 0.0);
     }
-    planner.plan_fft_inverse(n).process(&mut buf);
+    inverse.process(&mut buf);
 
     let r0 = buf[0].re.max(1e-20);
     let hi = (take / 2).min(8192).max(lag_min + 1);
