@@ -42,6 +42,7 @@
 //! full width from its start, but one that widens once and holds is read
 //! through the filter it opened with.
 
+use crate::channelizer::Channelizer;
 use crate::fir::{self, FirDecim};
 use crate::mixer::Mixer;
 use crate::window;
@@ -216,6 +217,11 @@ pub struct SourceConfig {
     /// since nothing this receiver reads is wider than a 500 kHz LoRa
     /// channel. Set it above the widest signal a front end reads.
     pub max_width_hz: f64,
+    /// Channel width the shared extraction bank aims for, in hertz, and the
+    /// fewest channels worth running it with. See [`Bank`]. Zero channels
+    /// disables it.
+    pub bank_channel_hz: f64,
+    pub bank_min_channels: usize,
 }
 
 impl Default for SourceConfig {
@@ -246,6 +252,8 @@ impl Default for SourceConfig {
             regrow: 1.5,
             history_s: 0.3,
             max_width_hz: 600_000.0,
+            bank_channel_hz: BANK_CHANNEL_HZ,
+            bank_min_channels: BANK_MIN_CHANNELS,
         }
     }
 }
@@ -305,6 +313,81 @@ impl SourceEvent {
         match self {
             SourceEvent::Opened(s) | SourceEvent::Closed(s) | SourceEvent::Superseded(s) => s,
         }
+    }
+}
+
+/// The scalars of one frame's floor pass: what every bin does with that
+/// frame, decided once from the shared counters.
+#[derive(Clone, Copy, Debug)]
+struct FrameStep {
+    frame: u64,
+    silent: bool,
+    seed: bool,
+    settled: bool,
+    completing: bool,
+    stored: usize,
+    head: usize,
+    bias: f32,
+}
+
+/// Bins per task of the floor pass, and per chunk of [`Rows`].
+const BIN_CHUNK: usize = 256;
+
+/// The floor pass's output for every frame of a block: one chunk of bins
+/// per task, each holding every frame of its bins, so the tasks write
+/// nothing in common.
+#[derive(Default)]
+struct Rows {
+    chunks: Vec<RowChunk>,
+}
+
+#[derive(Default)]
+struct RowChunk {
+    /// Frame-major within the chunk: frame `f`, bin `i` of the chunk, at
+    /// `f * BIN_CHUNK + i`.
+    ratio: Vec<f32>,
+    raw_ratio: Vec<f32>,
+    power: Vec<f32>,
+    floor: Vec<f32>,
+}
+
+/// One frame's bins, for the frame pass.
+///
+/// `ratio` is the smoothed power over the floor, zero before the floor is
+/// known, and `raw_ratio` this frame's own power over it, unsmoothed.
+/// Sensitivity comes from the smoothed power and timing from the raw: a
+/// 45 dB signal takes thirty frames of smoothing to decay under the close
+/// threshold after it stops, and a source that lingered that long would be
+/// timed 8 ms late; the raw frame says at once that it is gone.
+struct Bins<'a> {
+    rows: &'a Rows,
+    f: usize,
+}
+
+impl Bins<'_> {
+    #[inline]
+    fn at(&self, i: usize) -> (&RowChunk, usize) {
+        (&self.rows.chunks[i / BIN_CHUNK], self.f * BIN_CHUNK + i % BIN_CHUNK)
+    }
+    #[inline]
+    fn ratio(&self, i: usize) -> f32 {
+        let (c, k) = self.at(i);
+        c.ratio[k]
+    }
+    #[inline]
+    fn raw_ratio(&self, i: usize) -> f32 {
+        let (c, k) = self.at(i);
+        c.raw_ratio[k]
+    }
+    #[inline]
+    fn power(&self, i: usize) -> f32 {
+        let (c, k) = self.at(i);
+        c.power[k]
+    }
+    #[inline]
+    fn floor(&self, i: usize) -> f32 {
+        let (c, k) = self.at(i);
+        c.floor[k]
     }
 }
 
@@ -539,6 +622,9 @@ pub struct SourceDetector {
     alpha: f32,
     /// Smoothed power per bin, in display order (lowest frequency first).
     power: Vec<f32>,
+    /// Every frame of the block's ratios, powers and floors, frame-major,
+    /// written by the floor pass and read by the frame pass.
+    rows: Rows,
     floor: FloorBank,
     /// Ceiling on each bin's floor, from the floor of the bins around it, or
     /// infinity where there is not enough history to measure one. Applied to
@@ -561,19 +647,10 @@ pub struct SourceDetector {
     /// nothing, and a real device on the same frequency still opens because
     /// its silences let the minimum fall to the noise.
     cap_skip: Option<(usize, usize)>,
-    /// The floor as a power, per bin, once measured.
-    floor_lin: Vec<f32>,
-    /// Smoothed power over the floor, as a ratio; zero before the floor is
-    /// known. Kept linear: a logarithm per bin per frame is what the span
-    /// the detector keeps up with was being spent on.
+    /// Smoothed power over the floor in the last frame, as a ratio; zero
+    /// before the floor is known. Kept linear: a logarithm per bin per frame
+    /// is what the span the detector keeps up with was being spent on.
     ratio: Vec<f32>,
-    /// This frame's own power over the floor, unsmoothed, as a ratio.
-    ///
-    /// Sensitivity comes from the smoothed power and timing from this. A
-    /// 45 dB signal takes thirty frames of smoothing to decay under the
-    /// close threshold after it stops, and a source that lingered that long
-    /// would be timed 8 ms late; the raw frame says at once that it is gone.
-    raw_ratio: Vec<f32>,
     /// Bins the stream's declared bandwidth reaches. Outside it is filter
     /// roll-off, which is not a signal.
     bin_lo: usize,
@@ -643,9 +720,8 @@ impl SourceDetector {
             cap_first: 0,
             cap_scratch: Vec::new(),
             cap_skip: None,
-            floor_lin: vec![0.0; n],
+            rows: Rows::default(),
             ratio: vec![0.0; n],
-            raw_ratio: vec![0.0; n],
             bin_lo,
             bin_hi,
             frame: 0,
@@ -738,9 +814,7 @@ impl SourceDetector {
         self.cap.fill(f32::INFINITY);
         self.cap_at = 0;
         self.cap_first = 0;
-        self.floor_lin.fill(0.0);
         self.ratio.fill(0.0);
-        self.raw_ratio.fill(0.0);
         self.frame = 0;
         self.settle_at = 0;
         self.silent_so_far = true;
@@ -757,9 +831,8 @@ impl SourceDetector {
         let count = if self.pending.len() >= n { (self.pending.len() - n) / hop + 1 } else { 0 };
 
         // The transforms first, across the pool: every frame's spectrum is
-        // independent of every other's, and at 20 MS/s the transforms are
-        // the whole cost of the detector. The floor, the runs and the tracks
-        // are then a cheap pass in frame order.
+        // independent of every other's. The floor, the runs and the tracks
+        // are then a pass in frame order.
         self.spectra.resize(count * n, 0.0);
         self.silent.resize(count, false);
         self.saturated.resize(count, false);
@@ -809,7 +882,33 @@ impl SourceDetector {
         let spectra = std::mem::take(&mut self.spectra);
         let silent = std::mem::take(&mut self.silent);
         let saturated = std::mem::take(&mut self.saturated);
+
+        // The floor pass runs bin-major over a run of frames: every bin
+        // steps through the frames on its own, and the bins are shared out
+        // across the pool once per run rather than once per frame. Frame by
+        // frame it was 3900 fork-joins a second at 16 MS/s over a few
+        // microseconds of arithmetic each, and serial it was a fifth of real
+        // time at 20 MS/s on one thread. A run ends where the caps are due,
+        // since they are read across every bin's floor as it stood then.
+        let mut steps: Vec<FrameStep> = Vec::with_capacity(count);
+        let mut run_start = 0usize;
         for f in 0..count {
+            let (step, caps_due) = self.plan_frame(silent[f]);
+            if caps_due {
+                if f > run_start {
+                    self.floor_run(&spectra, run_start, &steps[run_start..f]);
+                }
+                self.measure_caps_at(step.frame);
+                run_start = f;
+            }
+            steps.push(step);
+        }
+        if count > run_start {
+            self.floor_run(&spectra, run_start, &steps[run_start..count]);
+        }
+
+        let rows = std::mem::take(&mut self.rows);
+        for (f, step) in steps.iter().enumerate() {
             // The frames either side too: the converter clips a symbol
             // or two after the signal's edge lit the band, and it is that
             // edge frame's splash, read with the ordinary margin, that
@@ -817,8 +916,19 @@ impl SourceDetector {
             let lo = f.saturating_sub(SATURATION_SMEAR);
             let hi = (f + SATURATION_SMEAR).min(count - 1);
             self.frame_saturated = saturated[lo..=hi].iter().any(|s| *s);
-            self.frame_from(&spectra[f * n..(f + 1) * n], silent[f]);
+            self.frame = step.frame;
+            let bins = Bins { rows: &rows, f };
+            self.segment(&bins);
+            self.track(&bins);
         }
+        if let Some(last) = steps.last() {
+            self.frame = last.frame + 1;
+            let bins = Bins { rows: &rows, f: count - 1 };
+            for i in 0..n {
+                self.ratio[i] = bins.ratio(i);
+            }
+        }
+        self.rows = rows;
         self.spectra = spectra;
         self.silent = silent;
         self.saturated = saturated;
@@ -829,9 +939,9 @@ impl SourceDetector {
         &self.events
     }
 
-    /// One frame, given its raw power per bin in display order.
-    fn frame_from(&mut self, raw: &[f32], silent: bool) {
-        let alpha = self.alpha;
+    /// The scalars of one frame's floor pass, stepping the shared counters
+    /// past it, and whether the caps are due before it.
+    fn plan_frame(&mut self, silent: bool) -> (FrameStep, bool) {
         // The smoother is seeded from the first frame and the floor waits
         // for it to settle. Starting the smoother from zero puts a run of
         // near-zero frames into every bin's minimum, and for the whole of
@@ -847,10 +957,6 @@ impl SourceDetector {
         // then clears.
         let settled = self.frame >= self.settle_at + SETTLE_FRAMES;
         let seed = self.frame == self.settle_at;
-
-        // Every bin, across the pool. The floor's counters are shared, so
-        // the bias is one number for the frame and the shared state is
-        // stepped once afterwards.
         let measure = settled && !silent;
         let completing = measure && self.floor.completing();
         let stored = if completing {
@@ -858,71 +964,102 @@ impl SourceDetector {
         } else {
             self.floor.stored
         };
-        let head = self.floor.head;
-        let sc = self.floor.sub_count;
-        let bias = if measure { floor_bias(alpha, self.floor.frames_after()) } else { 1.0 };
-        if measure {
-            self.measure_caps();
-        }
-        const CHUNK: usize = 256;
-        self.power
-            .par_chunks_mut(CHUNK)
-            .zip(self.floor.current.par_chunks_mut(CHUNK))
-            .zip(self.floor.min.par_chunks_mut(CHUNK))
-            .zip(self.floor.mins.par_chunks_mut(CHUNK * sc))
-            .zip(self.floor_lin.par_chunks_mut(CHUNK))
-            .zip(self.ratio.par_chunks_mut(CHUNK))
-            .zip(self.raw_ratio.par_chunks_mut(CHUNK))
-            .zip(self.cap.par_chunks(CHUNK))
-            .zip(raw.par_chunks(CHUNK))
-            .for_each(
-                |((((((((power, current), min), mins), floor), ratio), raw_ratio), cap), raw)| {
-                for i in 0..power.len() {
-                    let p = raw[i];
-                    if silent {
-                        ratio[i] = 0.0;
-                        raw_ratio[i] = 0.0;
-                        continue;
-                    }
-                    if seed {
-                        power[i] = p;
-                    } else {
-                        power[i] += alpha * (p - power[i]);
-                    }
-                    if !settled {
-                        ratio[i] = 0.0;
-                        raw_ratio[i] = 0.0;
-                        continue;
-                    }
-                    let m = floor_update(
-                        power[i],
-                        &mut current[i],
-                        &mut mins[i * sc..(i + 1) * sc],
-                        &mut min[i],
-                        completing,
-                        head,
-                        stored,
-                    );
-                    let f = m.min(cap[i]) * bias;
-                    if f > 0.0 && f.is_finite() {
-                        floor[i] = f;
-                        ratio[i] = power[i] / f;
-                        raw_ratio[i] = p / f;
-                    } else {
-                        floor[i] = 0.0;
-                        ratio[i] = 0.0;
-                        raw_ratio[i] = 0.0;
-                    }
-                }
-                },
-            );
+        let step = FrameStep {
+            frame: self.frame,
+            silent,
+            seed,
+            settled,
+            completing,
+            stored,
+            head: self.floor.head,
+            bias: if measure { floor_bias(self.alpha, self.floor.frames_after()) } else { 1.0 },
+        };
+        let caps_due = measure && self.caps_due(self.frame);
         if measure {
             self.floor.advance();
         }
-
-        self.segment();
-        self.track();
         self.frame += 1;
+        (step, caps_due)
+    }
+
+    /// The floor pass over frames `steps`, whose spectra start at row
+    /// `first` of `spectra`, leaving each frame's ratios in `rows`.
+    fn floor_run(&mut self, spectra: &[f32], first: usize, steps: &[FrameStep]) {
+        let n = self.n;
+        let count = first + steps.len();
+        let chunks = n.div_ceil(BIN_CHUNK);
+        self.rows.chunks.resize_with(chunks, RowChunk::default);
+        for c in &mut self.rows.chunks {
+            for v in [&mut c.ratio, &mut c.raw_ratio, &mut c.power, &mut c.floor] {
+                if v.len() < count * BIN_CHUNK {
+                    v.resize(count * BIN_CHUNK, 0.0);
+                }
+            }
+        }
+        let alpha = self.alpha;
+        let sc = self.floor.sub_count;
+        self.power
+            .par_chunks_mut(BIN_CHUNK)
+            .zip(self.floor.current.par_chunks_mut(BIN_CHUNK))
+            .zip(self.floor.min.par_chunks_mut(BIN_CHUNK))
+            .zip(self.floor.mins.par_chunks_mut(BIN_CHUNK * sc))
+            .zip(self.cap.par_chunks(BIN_CHUNK))
+            .zip(self.rows.chunks.par_iter_mut())
+            .enumerate()
+            .for_each(|(ci, (((((power, current), min), mins), cap), rows))| {
+                let b0 = ci * BIN_CHUNK;
+                let w = power.len();
+                for (k, step) in steps.iter().enumerate() {
+                    let f = first + k;
+                    let raw = &spectra[f * n + b0..f * n + b0 + w];
+                    let at = f * BIN_CHUNK;
+                    let ratio = &mut rows.ratio[at..at + w];
+                    let raw_ratio = &mut rows.raw_ratio[at..at + w];
+                    let out_power = &mut rows.power[at..at + w];
+                    let floor = &mut rows.floor[at..at + w];
+                    for i in 0..w {
+                        let p = raw[i];
+                        if step.silent {
+                            ratio[i] = 0.0;
+                            raw_ratio[i] = 0.0;
+                            out_power[i] = power[i];
+                            floor[i] = 0.0;
+                            continue;
+                        }
+                        if step.seed {
+                            power[i] = p;
+                        } else {
+                            power[i] += alpha * (p - power[i]);
+                        }
+                        out_power[i] = power[i];
+                        if !step.settled {
+                            ratio[i] = 0.0;
+                            raw_ratio[i] = 0.0;
+                            floor[i] = 0.0;
+                            continue;
+                        }
+                        let m = floor_update(
+                            power[i],
+                            &mut current[i],
+                            &mut mins[i * sc..(i + 1) * sc],
+                            &mut min[i],
+                            step.completing,
+                            step.head,
+                            step.stored,
+                        );
+                        let fl = m.min(cap[i]) * step.bias;
+                        if fl > 0.0 && fl.is_finite() {
+                            floor[i] = fl;
+                            ratio[i] = power[i] / fl;
+                            raw_ratio[i] = p / fl;
+                        } else {
+                            floor[i] = 0.0;
+                            ratio[i] = 0.0;
+                            raw_ratio[i] = 0.0;
+                        }
+                    }
+                }
+            });
     }
 
     /// Set each bin's ceiling from the median floor of the chunk it is in.
@@ -931,18 +1068,19 @@ impl SourceDetector {
     /// frame's power, so a burst passing through a chunk cannot lift the
     /// ceiling for the bins beside it, and the number it produces is the one
     /// the rest of the floor is already expressed in.
-    fn measure_caps(&mut self) {
+    fn caps_due(&self, frame: u64) -> bool {
         let refresh = self.floor.sub_len as u64;
-        if self.cap_at != 0 && self.frame < self.cap_at + refresh {
-            return;
+        if self.cap_at != 0 && frame < self.cap_at + refresh {
+            return false;
         }
         // Nothing complete yet: the running minimum is still falling towards
         // the noise, and a ceiling from it would be measured on a floor that
         // is about to move.
-        if self.floor.stored == 0 {
-            return;
-        }
-        self.cap_at = self.frame.max(1);
+        self.floor.stored > 0
+    }
+
+    fn measure_caps_at(&mut self, frame: u64) {
+        self.cap_at = frame.max(1);
         if self.cap_first == 0 {
             self.cap_first = self.cap_at;
         }
@@ -971,15 +1109,15 @@ impl SourceDetector {
     /// A bin's smoothed power above the floor, as a weight for the centroid
     /// and the extent.
     #[inline]
-    fn excess(&self, i: usize) -> f64 {
-        if self.ratio[i] <= 0.0 {
+    fn excess(bins: &Bins, i: usize) -> f64 {
+        if bins.ratio(i) <= 0.0 {
             return 0.0;
         }
-        (self.power[i] - self.floor_lin[i]).max(0.0) as f64
+        (bins.power(i) - bins.floor(i)).max(0.0) as f64
     }
 
     /// Group the hot bins of this frame into runs.
-    fn segment(&mut self) {
+    fn segment(&mut self, bins: &Bins) {
         self.segs.clear();
         let close = self.cfg.close_db;
         let close_r = 10f32.powf(close / 10.0);
@@ -988,7 +1126,7 @@ impl SourceDetector {
         let mut cur: Option<(usize, usize)> = None;
         let mut gap = 0usize;
         for i in self.bin_lo..=self.bin_hi {
-            let hot = self.ratio[i] >= close_r;
+            let hot = bins.ratio(i) >= close_r;
             match (&mut cur, hot) {
                 (Some(r), true) => {
                     r.1 = i;
@@ -1021,7 +1159,7 @@ impl SourceDetector {
         // saturates the same way and is still two tones. The rest is what
         // the converter made of it.
         if self.frame_saturated && !runs.is_empty() {
-            let peak = |r: &(usize, usize)| (r.0..=r.1).map(|i| self.ratio[i]).fold(0.0f32, f32::max);
+            let peak = |r: &(usize, usize)| (r.0..=r.1).map(|i| bins.ratio(i)).fold(0.0f32, f32::max);
             let best = runs.iter().copied().max_by(|a, b| peak(a).total_cmp(&peak(b))).unwrap();
             let top = peak(&best);
             let pair_bins = (self.cfg.pair_hz / self.bin_hz()).round() as usize;
@@ -1039,14 +1177,14 @@ impl SourceDetector {
             let mut peak_w = -1.0f64;
             let mut peak_raw_w = 0.0f64;
             for i in lo..=hi {
-                peak_r = peak_r.max(self.ratio[i]);
-                raw_sum += self.raw_ratio[i];
-                let w = self.excess(i);
+                peak_r = peak_r.max(bins.ratio(i));
+                raw_sum += bins.raw_ratio(i);
+                let w = Self::excess(bins, i);
                 if w > peak_w {
                     peak_w = w;
                     peak_bin = i;
                 }
-                let raw_w = (self.floor_lin[i] * (self.raw_ratio[i] - 1.0)).max(0.0) as f64;
+                let raw_w = (bins.floor(i) * (bins.raw_ratio(i) - 1.0)).max(0.0) as f64;
                 peak_raw_w = peak_raw_w.max(raw_w);
             }
             let raw_mean = raw_sum / (hi - lo + 1) as f32;
@@ -1083,7 +1221,7 @@ impl SourceDetector {
             let floor_w = reference * 10f64.powf(-(extent_db as f64) / 10.0);
             let (mut a, mut b) = (peak_bin, peak_bin);
             for i in lo..=hi {
-                if self.excess(i) >= floor_w {
+                if Self::excess(bins, i) >= floor_w {
                     a = a.min(i);
                     b = b.max(i);
                 }
@@ -1098,7 +1236,7 @@ impl SourceDetector {
             let mut wsum = 0.0f64;
             let mut w_all = 0.0f64;
             for i in a..=b {
-                let w = self.excess(i);
+                let w = Self::excess(bins, i);
                 wsum += w * i as f64;
                 w_all += w;
             }
@@ -1109,7 +1247,7 @@ impl SourceDetector {
 
     /// Match this frame's runs to the sources being followed, open the
     /// candidates that have lasted, and close the sources that have not.
-    fn track(&mut self) {
+    fn track(&mut self, bins: &Bins) {
         let guard = self.cfg.guard_bins;
         let n = self.n;
         let bin_hz = self.bin_hz();
@@ -1171,9 +1309,9 @@ impl SourceDetector {
                 // splash of a burst ending bridged the run to a spur 40 kHz
                 // away, and the spur's power kept the source present after
                 // the burst was gone.
-                let bins = t.occ_lo..=t.occ_hi.min(n - 1);
-                let count = bins.clone().count().max(1) as f32;
-                let mean = bins.map(|i| self.raw_ratio[i]).sum::<f32>() / count;
+                let occ = t.occ_lo..=t.occ_hi.min(n - 1);
+                let count = occ.clone().count().max(1) as f32;
+                let mean = occ.map(|i| bins.raw_ratio(i)).sum::<f32>() / count;
                 mean >= close_r
             })
             .collect();
@@ -1486,17 +1624,8 @@ fn frame_start(frame: u64, hop: u64) -> u64 {
     frame * hop
 }
 
-/// One source's extraction: a mixer and two decimators with a cursor into
-/// the ring.
-///
-/// Two stages because one cannot be both cheap and sharp. The final filter
-/// has to stop just past the signal's edge, or noise from there out to the
-/// output Nyquist and its alias reach the demodulator: measured on the Fine
-/// Offset recording that cost 5 dB against a channel bank, the difference
-/// between decoding and not. A filter that sharp designed at the input rate
-/// runs to tens of thousands of taps at 20 MS/s. So a coarse stage with a
-/// wide transition brings the rate down first, and the sharp one runs at a
-/// rate where it is a couple of hundred taps.
+/// One source's extraction: a mixer and the two decimators of
+/// [`design_stages`], with a cursor into what feeds it.
 struct Chan {
     id: SourceId,
     center_hz: u64,
@@ -1507,6 +1636,9 @@ struct Chan {
     /// Coarse stage, absent when the total decimation is small.
     coarse: Option<FirDecim>,
     fir: FirDecim,
+    /// Where the samples come from: the wideband ring, or one channel of
+    /// the shared bank.
+    feed: Feed,
     /// Wideband index of the next sample to extract.
     cursor: u64,
     /// Wideband index to stop at, once the source has closed.
@@ -1517,6 +1649,19 @@ struct Chan {
     snr_db: f32,
     mixed: Vec<C32>,
     out: Vec<C32>,
+}
+
+/// What a source is cut out of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Feed {
+    /// The wideband ring: the mixer and the coarse stage run at the input
+    /// rate. What every source did before the bank, and what a wide one or
+    /// one straddling a channel edge still does.
+    Direct,
+    /// Channel `m` of the shared bank, at the bank's rate, summed with
+    /// channel `m + 1` when the source lies across the edge between them.
+    /// `next` is the bank frame to read next.
+    Bank { m: usize, pair: bool, next: u64 },
 }
 
 impl Chan {
@@ -1533,6 +1678,36 @@ impl Chan {
             None => self.fir.process(&self.mixed, out),
         }
     }
+}
+
+/// The two stages that bring a source from `rate` down to about `want`:
+/// coarse by as much as leaves the sharp stage a few times the width to
+/// work in, and only when there is enough decimation to share.
+///
+/// Two stages because one cannot be both cheap and sharp. The final filter
+/// has to stop just past the signal's edge, or noise from there out to the
+/// output Nyquist and its alias reach the demodulator: measured on the Fine
+/// Offset recording that cost 5 dB against a channel bank, the difference
+/// between decoding and not. A filter that sharp designed at the input rate
+/// runs to tens of thousands of taps at 20 MS/s.
+///
+/// `floored` says the rate came from the floor rather than from the width,
+/// and there the measurement is the wrong thing to filter to. What is
+/// measured is the bins within `extent_db` of the peak, which for a clean
+/// 12.5 kHz channel can be the two-bin minimum: a 2 kHz passband over a
+/// 25 kHz stream cut the sidebands off an M17 transmission and left a
+/// demodulator that could see the carrier and read nothing from it. When
+/// the rate is at the floor the stream is wider than the signal asked for,
+/// so it is filled.
+fn design_stages(rate: f64, bw: f64, want: f64, floored: bool, atten_db: f64) -> (Option<FirDecim>, FirDecim, f64) {
+    let total = ((rate / want).floor() as usize).max(1);
+    let f1 = ((rate / (bw * 6.0)).floor() as usize).clamp(1, total);
+    let (f1, f2) = if f1 >= 2 && total / f1 >= 1 { (f1, total / f1) } else { (1, total) };
+    let rate1 = rate / f1 as f64;
+    let out_rate = rate1 / f2 as f64;
+    let pb = if floored { (out_rate * 0.4).max(bw / 2.0) } else { bw / 2.0 };
+    let coarse = (f1 > 1).then(|| FirDecim::design_hz(rate, f1, pb, atten_db));
+    (coarse, sharp_decimator(rate1, f2, pb, atten_db), out_rate)
 }
 
 /// A decimator whose stopband starts just past the passband, so the noise
@@ -1569,6 +1744,199 @@ pub struct SourceExtractor {
     lead: u64,
     tail: u64,
     chans: Vec<Chan>,
+    /// The shared bank narrow sources are cut from, on spans wide enough to
+    /// need it.
+    bank: Option<Bank>,
+}
+
+/// One polyphase bank over the span, feeding every narrow source at once.
+///
+/// Extracting a source straight from the wideband ring costs a mixer and a
+/// coarse filter at the input rate, per source: at 16 MS/s that measured 7%
+/// of a core for a 25 kHz sensor and 20% for a LoRa channel, and thirty
+/// bursting devices on a busy band were three cores before a single front
+/// end ran. The bank pays the input rate once and hands each source the one
+/// channel that holds it, at the channel rate, which at 16 MS/s is 32 times
+/// less to mix and filter per source.
+///
+/// A source across the edge between two channels is read from both: the
+/// 2x oversampled channels cross at -6 dB with complementary roll-offs, so
+/// the sum, with the upper channel shifted down a spacing, is flat through
+/// the edge ([`Channelizer::pair_rotation`]). With that every source up to
+/// a channel wide is served from the bank, and only a wider one goes to the
+/// ring.
+///
+/// It runs only while something needs it. The lead-in a new source wants is
+/// a few milliseconds, so the bank is caught up from the wideband ring the
+/// moment a source is placed on it, streams while any source reads from it,
+/// and stops when the last one closes: an empty band pays nothing.
+struct Bank {
+    chan: Channelizer,
+    m: usize,
+    /// Input samples per frame, and the prototype's group delay in input
+    /// samples: frame `f` is centred on input sample `(f + 1) * adv - 1 - delay`.
+    adv: u64,
+    delay: u64,
+    /// Every channel's output at every frame kept, a circular store of
+    /// `cap` rows of `m`: frame `f` is at row `f % cap`. Frames `base..head`
+    /// are valid. Sized to reach as far back as the wideband ring does, so
+    /// any source the ring could serve the bank can too; a fixed store
+    /// rather than a growing one because shifting tens of megabytes down
+    /// when it filled stalled the block it happened in.
+    frames: Vec<C32>,
+    cap: usize,
+    base: u64,
+    head: u64,
+    /// Whether the bank is streaming, and the input sample its stream is
+    /// indexed from, a multiple of `adv` so its frames line up with the
+    /// wideband count.
+    running: bool,
+    origin: u64,
+    /// Input samples since a source last read from the bank.
+    idle: u64,
+    /// Microseconds spent streaming and catching up in the current block,
+    /// for the node above to report.
+    feed_us: u64,
+    start_us: u64,
+    rate: f64,
+    /// Channel spacing, and how far from a channel's centre a signal reads
+    /// flat. A source within `flat` of one centre is read from that channel;
+    /// one across the edge between two is read from both, which reads flat
+    /// from `-flat` below the lower centre to `flat` above the upper.
+    spacing: f64,
+    flat: f64,
+    scratch: Vec<C32>,
+}
+
+/// Channel width the bank aims for.
+///
+/// A source is read from a channel only when the whole of its extraction
+/// sits inside that channel's flat half width, so the wider the channel the
+/// more sources qualify: at a megahertz nearly every sensor, pager and voice
+/// channel does, most LoRa channels do, and only a source across a channel
+/// edge or wider than half a channel goes to the wideband ring. The price
+/// is the channel rate the source is then mixed and filtered from, two
+/// megasamples here against sixteen from the ring, which is still the bulk
+/// of the saving; below that the second stage is the same one the ring path
+/// runs.
+const BANK_CHANNEL_HZ: f64 = 1_000_000.0;
+/// Below this many channels the direct path costs so little that the bank
+/// is not worth its fixed cost.
+const BANK_MIN_CHANNELS: usize = 8;
+/// Taps per branch. Sets the transition width and so how much of each
+/// channel reads flat, not the stopband, which the Kaiser window fixes at
+/// the attenuation asked for. Eight leaves about half of each channel flat
+/// at 16 MS/s and costs half what sixteen did per input sample; a source in
+/// the other half is read from the pair, which costs a second gather and
+/// nothing else.
+const BANK_TAPS: usize = 8;
+/// Seconds with nothing reading before the bank stops. Catching up again
+/// costs a block's worth of channelizing, so on a band where something keys
+/// up every second or so the bank should simply stay running.
+const BANK_IDLE_S: f64 = 2.0;
+
+impl Bank {
+    fn new(rate: f64, cfg: &SourceConfig, keep_samples: usize) -> Option<Self> {
+        if cfg.bank_min_channels == 0 || cfg.bank_channel_hz <= 0.0 {
+            return None;
+        }
+        let m = ((rate / cfg.bank_channel_hz).log2().round() as i32).max(0);
+        let m = (1usize << m).clamp(2, 1024);
+        if m < cfg.bank_min_channels.max(2) {
+            return None;
+        }
+        let atten_db = cfg.atten_db;
+        let chan = Channelizer::new(m, BANK_TAPS, atten_db);
+        let adv = chan.advance() as u64;
+        Some(Self {
+            delay: chan.latency_samples() as u64,
+            adv,
+            m,
+            cap: keep_samples / adv as usize + 2048,
+            frames: Vec::new(),
+            base: 0,
+            head: 0,
+            running: false,
+            origin: 0,
+            idle: 0,
+            feed_us: 0,
+            start_us: 0,
+            rate: chan.channel_rate(rate),
+            spacing: chan.channel_bandwidth(rate),
+            flat: chan.flat_half_width_hz(rate),
+            scratch: Vec::new(),
+            chan,
+        })
+    }
+
+    /// The frame centred nearest wideband sample `x`.
+    fn frame_at(&self, x: u64) -> u64 {
+        (x + self.delay) / self.adv
+    }
+
+    /// Wideband sample frame `f` is centred on.
+    fn sample_at(&self, f: u64) -> u64 {
+        ((f + 1) * self.adv).saturating_sub(1 + self.delay)
+    }
+
+    fn end(&self) -> u64 {
+        self.head
+    }
+
+    fn row(&self, f: u64) -> usize {
+        (f % self.cap as u64) as usize * self.m
+    }
+
+    /// Feed input indexed from wideband sample `at` and keep the frames.
+    fn feed(&mut self, input: &[C32], at: u64) {
+        debug_assert_eq!(at, self.origin + self.chan_pos());
+        let t = std::time::Instant::now();
+        let n = self.chan.process_parallel(input, &mut self.scratch);
+        self.feed_us += t.elapsed().as_micros() as u64;
+        if n == 0 {
+            return;
+        }
+        if self.frames.is_empty() {
+            self.frames.resize(self.cap * self.m, C32::new(0.0, 0.0));
+        }
+        if self.head == self.base {
+            // The channelizer counts frames from its origin; the first one
+            // out covers the origin's first `adv` samples.
+            let first = self.origin / self.adv + (self.chan_pos() - input.len() as u64) / self.adv;
+            self.base = first;
+            self.head = first;
+        }
+        for (k, frame) in self.scratch.chunks_exact(self.m).enumerate() {
+            let row = self.row(self.head + k as u64);
+            self.frames[row..row + self.m].copy_from_slice(frame);
+        }
+        self.head += n as u64;
+        self.base = self.base.max(self.head.saturating_sub(self.cap as u64));
+    }
+
+    fn chan_pos(&self) -> u64 {
+        self.chan.stream_position()
+    }
+
+    /// Start streaming so that frames from wideband sample `from` on exist,
+    /// caught up from the ring.
+    fn start(&mut self, ring: &[C32], ring_base: u64, from: u64) {
+        let origin = (from / self.adv) * self.adv;
+        let origin = origin.max((ring_base / self.adv + 1) * self.adv);
+        self.chan.reset();
+        self.base = 0;
+        self.head = 0;
+        self.origin = origin;
+        self.running = true;
+        self.idle = 0;
+        let off = (origin - ring_base) as usize;
+        if off < ring.len() {
+            let t = std::time::Instant::now();
+            let input = &ring[off..];
+            self.feed(input, origin);
+            self.start_us += t.elapsed().as_micros() as u64;
+        }
+    }
 }
 
 impl SourceExtractor {
@@ -1592,7 +1960,27 @@ impl SourceExtractor {
             lead,
             tail,
             chans: Vec::new(),
+            bank: Bank::new(rate, &cfg, (keep + lead as usize + 4096).max((cfg.history_s * rate) as usize)),
         }
+    }
+
+    /// Whether the shared bank is streaming, for tests and the view.
+    pub fn bank_running(&self) -> bool {
+        self.bank.as_ref().is_some_and(|b| b.running)
+    }
+
+    /// Microseconds the bank spent this block streaming, and catching up
+    /// from the ring when a source started it. Reading resets both.
+    pub fn take_bank_cost(&mut self) -> (u64, u64) {
+        match &mut self.bank {
+            Some(b) => (std::mem::take(&mut b.feed_us), std::mem::take(&mut b.start_us)),
+            None => (0, 0),
+        }
+    }
+
+    /// How many open sources are read from the bank rather than the ring.
+    pub fn banked(&self) -> usize {
+        self.chans.iter().filter(|c| matches!(c.feed, Feed::Bank { .. })).count()
     }
 
     /// Sources being extracted, open or draining their tail.
@@ -1604,6 +1992,11 @@ impl SourceExtractor {
         self.ring.clear();
         self.base = 0;
         self.chans.clear();
+        if let Some(b) = &mut self.bank {
+            b.running = false;
+            b.base = 0;
+            b.head = 0;
+        }
     }
 
     /// Design an extraction for a source: its centre, and a rate that fits
@@ -1612,39 +2005,28 @@ impl SourceExtractor {
         let bw = (s.bandwidth_hz() * self.cfg.width_margin).max(self.cfg.bin_hz * 2.0);
         let want = (bw * self.cfg.oversample).max(self.cfg.min_rate_hz);
         // Whether the rate came from the width or from the floor, which
-        // decides what the extraction filter should keep; see below.
+        // decides what the extraction filter should keep.
         let floored = bw * self.cfg.oversample < self.cfg.min_rate_hz;
-        let total = ((self.rate / want).floor() as usize).max(1);
-        // Coarse by as much as leaves the sharp stage a few times the width
-        // to work in, and only when there is enough decimation to share.
-        let f1 = ((self.rate / (bw * 6.0)).floor() as usize).clamp(1, total);
-        let (f1, f2) = if f1 >= 2 && total / f1 >= 1 { (f1, total / f1) } else { (1, total) };
-        let rate1 = self.rate / f1 as f64;
-        let out_rate = rate1 / f2 as f64;
-        // Normally the measured half-width: the stream is cut out around the
-        // signal and its neighbours are filtered away. A narrow source is
-        // different, because its rate comes from the floor rather than from
-        // its width, and there the measurement is the wrong thing to filter
-        // to. What is measured is the bins within `extent_db` of the peak,
-        // which for a clean 12.5 kHz channel can be the two-bin minimum: a
-        // 2 kHz passband over a 25 kHz stream cut the sidebands off an M17
-        // transmission and left a demodulator that could see the carrier and
-        // read nothing from it. When the rate is at the floor the stream is
-        // wider than the signal asked for, so it is filled.
-        let pb = if floored { (out_rate * 0.4).max(bw / 2.0) } else { bw / 2.0 };
-        let coarse =
-            (f1 > 1).then(|| FirDecim::design_hz(self.rate, f1, pb, self.cfg.atten_db));
-        let fir = sharp_decimator(rate1, f2, pb, self.cfg.atten_db);
         let start = s.start_sample.saturating_sub(self.lead).max(self.base);
+
+        let (feed, rate, shift) = match self.bank_feed(s, bw, want, start) {
+            Some(feed @ Feed::Bank { m, .. }) => {
+                let bank = self.bank.as_ref().unwrap();
+                (feed, bank.rate, s.center_hz - bank.chan.channel_offset_hz(m, self.rate))
+            }
+            _ => (Feed::Direct, self.rate, s.center_hz),
+        };
+        let (coarse, fir, out_rate) = design_stages(rate, bw, want, floored, self.cfg.atten_db);
         self.chans.push(Chan {
             id: s.id,
             center_hz: (self.center_hz + s.center_hz).max(0.0) as u64,
             bandwidth_hz: bw.min(out_rate),
             signal_hz: s.bandwidth_hz(),
             out_rate,
-            mixer: Mixer::new(-s.center_hz, self.rate),
+            mixer: Mixer::new(-shift, rate),
             coarse,
             fir,
+            feed,
             cursor: start,
             end: None,
             superseded: false,
@@ -1655,6 +2037,54 @@ impl SourceExtractor {
         });
     }
 
+    /// The bank channel a source can be read from, starting the bank if it
+    /// is not running, or nothing when the source needs the wideband ring:
+    /// too wide for a channel, across a channel edge, wanting a rate the
+    /// channel cannot give, or starting further back than the bank keeps.
+    fn bank_feed(&mut self, s: &Source, bw: f64, want: f64, start: u64) -> Option<Feed> {
+        let bank = self.bank.as_mut()?;
+        if want > bank.rate {
+            return None;
+        }
+        let (lo, hi) = (s.center_hz - bw / 2.0, s.center_hz + bw / 2.0);
+        let nearest = bank.chan.channel_for_offset(s.center_hz, self.rate);
+        let f_near = bank.chan.channel_offset_hz(nearest, self.rate);
+        let (m, pair) = if lo >= f_near - bank.flat && hi <= f_near + bank.flat {
+            (nearest, false)
+        } else if bw <= bank.spacing {
+            // Across an edge: the pair on the side the source leans to.
+            let m = if s.center_hz >= f_near { nearest } else { (nearest + bank.m - 1) % bank.m };
+            let f_m = bank.chan.channel_offset_hz(m, self.rate);
+            if lo < f_m - bank.flat || hi > f_m + bank.spacing + bank.flat {
+                return None;
+            }
+            (m, true)
+        } else {
+            return None;
+        };
+        // Priming wants the filter's length of frames before the lead-in.
+        let prime = fir::estimate_taps(1e-4, self.cfg.atten_db).min(1024) as u64;
+        let first = bank.frame_at(start);
+        let need = first.saturating_sub(prime);
+        if bank.running {
+            // Started before the store reaches: the ring has it.
+            if need < bank.base {
+                return None;
+            }
+        } else {
+            let from = bank.sample_at(need).max(self.base);
+            if from < self.base + bank.delay {
+                return None;
+            }
+            bank.start(&self.ring, self.base, from);
+            if need < bank.base {
+                return None;
+            }
+        }
+        bank.idle = 0;
+        Some(Feed::Bank { m, pair, next: first })
+    }
+
     /// Append a block and the detector's verdict on it, and produce a block
     /// per source being extracted.
     ///
@@ -1663,6 +2093,11 @@ impl SourceExtractor {
     pub fn process(&mut self, input: &[C32], events: &[SourceEvent], out: &mut Vec<SourceBlock>) {
         self.ring.extend_from_slice(input);
         let end = self.base + self.ring.len() as u64;
+        if let Some(b) = &mut self.bank {
+            if b.running {
+                b.feed(input, end - input.len() as u64);
+            }
+        }
 
         for e in events {
             match e {
@@ -1686,64 +2121,13 @@ impl SourceExtractor {
 
         let base = self.base;
         let ring = &self.ring;
+        let bank = self.bank.as_ref();
         let blocks: Vec<SourceBlock> = self
             .chans
             .par_iter_mut()
-            .filter_map(|c| {
-                let stop = c.end.map_or(end, |e| e.min(end));
-                let from = c.cursor.max(base);
-                let state = if !c.opened {
-                    SourceState::Opened
-                } else if c.end.is_some_and(|e| stop >= e) {
-                    if c.superseded { SourceState::Superseded } else { SourceState::Closed }
-                } else {
-                    SourceState::Running
-                };
-                c.out.clear();
-                if !c.opened {
-                    // Prime the filter so the stream does not open with its
-                    // transient. A fresh filter's first output is the first
-                    // sample through an empty history, near zero whatever
-                    // the input, and a gate downstream that seeds its noise
-                    // estimate from the first sample it sees then has a
-                    // floor of nothing and opens on the noise that follows.
-                    // Whatever the ring holds before the lead-in is real
-                    // noise; failing that, the lead-in itself, twice.
-                    let taps = (c.fir.taps() * c.coarse.as_ref().map_or(1, |f| f.factor())
-                        + c.coarse.as_ref().map_or(0, |f| f.taps())) as u64;
-                    let (p0, p1) = if from > base + taps {
-                        (from - taps, from)
-                    } else {
-                        (from, (from + taps).min(stop))
-                    };
-                    if p1 > p0 {
-                        let mut discard = Vec::new();
-                        c.extract(&ring[(p0 - base) as usize..(p1 - base) as usize], &mut discard);
-                    }
-                }
-                if stop > from {
-                    let slice = &ring[(from - base) as usize..(stop - base) as usize];
-                    let mut out = std::mem::take(&mut c.out);
-                    c.extract(slice, &mut out);
-                    c.out = out;
-                }
-                let start_sample = from;
-                c.cursor = stop.max(c.cursor);
-                if c.out.is_empty() && state == SourceState::Running {
-                    return None;
-                }
-                c.opened = true;
-                Some(SourceBlock {
-                    id: c.id,
-                    state,
-                    center_hz: c.center_hz,
-                    bandwidth_hz: c.bandwidth_hz,
-                    signal_hz: c.signal_hz,
-                    rate: c.out_rate,
-                    start_sample,
-                    snr_db: c.snr_db,
-                    samples: std::mem::take(&mut c.out),
-                })
+            .filter_map(|c| match c.feed {
+                Feed::Direct => Self::extract_direct(c, ring, base, end),
+                Feed::Bank { m, pair, next } => Self::extract_banked(c, bank?, m, pair, next, end),
             })
             .collect();
 
@@ -1754,6 +2138,21 @@ impl SourceExtractor {
             .collect();
         self.chans.retain(|c| !closed.contains(&c.id));
         out.extend(blocks);
+
+        if let Some(b) = &mut self.bank {
+            if b.running {
+                if self.chans.iter().any(|c| matches!(c.feed, Feed::Bank { .. })) {
+                    b.idle = 0;
+                } else {
+                    b.idle += input.len() as u64;
+                    if b.idle as f64 >= BANK_IDLE_S * self.rate {
+                        b.running = false;
+                        b.base = 0;
+                        b.head = 0;
+                    }
+                }
+            }
+        }
 
         // Nothing still refers to anything older than the newest `keep`
         // samples, and every cursor is at the ring's end. Trimmed only once
@@ -1766,6 +2165,147 @@ impl SourceExtractor {
             self.ring.drain(..drop);
             self.base += drop as u64;
         }
+    }
+
+    /// One block of a source read from the wideband ring.
+    fn extract_direct(c: &mut Chan, ring: &[C32], base: u64, end: u64) -> Option<SourceBlock> {
+        let stop = c.end.map_or(end, |e| e.min(end));
+        let from = c.cursor.max(base);
+        let state = if !c.opened {
+            SourceState::Opened
+        } else if c.end.is_some_and(|e| stop >= e) {
+            if c.superseded { SourceState::Superseded } else { SourceState::Closed }
+        } else {
+            SourceState::Running
+        };
+        c.out.clear();
+        if !c.opened {
+            // Prime the filter so the stream does not open with its
+            // transient. A fresh filter's first output is the first
+            // sample through an empty history, near zero whatever
+            // the input, and a gate downstream that seeds its noise
+            // estimate from the first sample it sees then has a
+            // floor of nothing and opens on the noise that follows.
+            // Whatever the ring holds before the lead-in is real
+            // noise; failing that, the lead-in itself, twice.
+            let taps = (c.fir.taps() * c.coarse.as_ref().map_or(1, |f| f.factor())
+                + c.coarse.as_ref().map_or(0, |f| f.taps())) as u64;
+            let (p0, p1) = if from > base + taps {
+                (from - taps, from)
+            } else {
+                (from, (from + taps).min(stop))
+            };
+            if p1 > p0 {
+                let mut discard = Vec::new();
+                c.extract(&ring[(p0 - base) as usize..(p1 - base) as usize], &mut discard);
+            }
+        }
+        if stop > from {
+            let slice = &ring[(from - base) as usize..(stop - base) as usize];
+            let mut out = std::mem::take(&mut c.out);
+            c.extract(slice, &mut out);
+            c.out = out;
+        }
+        let start_sample = from;
+        c.cursor = stop.max(c.cursor);
+        if c.out.is_empty() && state == SourceState::Running {
+            return None;
+        }
+        c.opened = true;
+        Some(SourceBlock {
+            id: c.id,
+            state,
+            center_hz: c.center_hz,
+            bandwidth_hz: c.bandwidth_hz,
+            signal_hz: c.signal_hz,
+            rate: c.out_rate,
+            start_sample,
+            snr_db: c.snr_db,
+            samples: std::mem::take(&mut c.out),
+        })
+    }
+
+    /// One block of a source read from channel `m` of the bank, from frame
+    /// `next` to the last frame the bank has, or the source's end.
+    fn extract_banked(c: &mut Chan, bank: &Bank, m: usize, pair: bool, next: u64, end: u64) -> Option<SourceBlock> {
+        let avail = bank.end();
+        let stop_frame = c.end.map_or(avail, |e| bank.frame_at(e).min(avail));
+        let from = next.max(bank.base);
+        let state = if !c.opened {
+            SourceState::Opened
+        } else if c.end.is_some_and(|e| stop_frame >= bank.frame_at(e)) {
+            if c.superseded { SourceState::Superseded } else { SourceState::Closed }
+        } else {
+            SourceState::Running
+        };
+        c.out.clear();
+        let mut gather = Vec::new();
+        if !c.opened {
+            let taps = (c.fir.taps() * c.coarse.as_ref().map_or(1, |f| f.factor())
+                + c.coarse.as_ref().map_or(0, |f| f.taps())) as u64;
+            let (p0, p1) = if from > bank.base + taps {
+                (from - taps, from)
+            } else {
+                (from, (from + taps).min(stop_frame))
+            };
+            if p1 > p0 {
+                gather.clear();
+                bank_channel(bank, m, pair, p0, p1, &mut gather);
+                let mut discard = Vec::new();
+                c.extract(&gather, &mut discard);
+            }
+        }
+        if stop_frame > from {
+            gather.clear();
+            bank_channel(bank, m, pair, from, stop_frame, &mut gather);
+            let mut out = std::mem::take(&mut c.out);
+            c.extract(&gather, &mut out);
+            c.out = out;
+        }
+        let start_sample = bank.sample_at(from);
+        let reached = stop_frame.max(from);
+        c.feed = Feed::Bank { m, pair, next: reached };
+        c.cursor = bank.sample_at(reached).min(end);
+        if c.out.is_empty() && state == SourceState::Running {
+            return None;
+        }
+        c.opened = true;
+        Some(SourceBlock {
+            id: c.id,
+            state,
+            center_hz: c.center_hz,
+            bandwidth_hz: c.bandwidth_hz,
+            signal_hz: c.signal_hz,
+            rate: c.out_rate,
+            start_sample,
+            snr_db: c.snr_db,
+            samples: std::mem::take(&mut c.out),
+        })
+    }
+}
+
+/// Frames `[a, b)` of channel `m`, with channel `m + 1` folded in when the
+/// source straddles them, appended to `out`.
+fn bank_channel(bank: &Bank, m: usize, pair: bool, a: u64, b: u64, out: &mut Vec<C32>) {
+    let a = a.max(bank.base);
+    let b = b.min(bank.end());
+    if b <= a {
+        return;
+    }
+    out.reserve((b - a) as usize);
+    if !pair {
+        out.extend((a..b).map(|f| bank.frames[bank.row(f) + m]));
+        return;
+    }
+    let upper = (m + 1) % bank.m;
+    // The rotation depends on the frame count since the bank's reset, which
+    // is the frame index less the frame the origin sits at.
+    let origin_frame = bank.origin / bank.adv;
+    let rot = [bank.chan.pair_rotation(0), bank.chan.pair_rotation(1)];
+    for f in a..b {
+        let row = bank.row(f);
+        let r = rot[((f - origin_frame) % 2) as usize];
+        out.push(bank.frames[row + m] + bank.frames[row + upper] * r);
     }
 }
 
@@ -2047,6 +2587,88 @@ mod tests {
         assert!((0.35..0.65).contains(&ratio), "keying lost, on ratio {ratio}");
         assert!(RATE / rate >= 2.0, "a 4 kHz signal came out at {rate}, no decimation");
         assert_eq!(e.active(), 0, "the source was dropped once closed");
+    }
+
+    /// Run the keyed-tone stream through detector and extractor with the
+    /// given config, returning the extracted stream and the first block.
+    fn keyed_tone_through(c: SourceConfig, hz: f64) -> (Vec<C32>, SourceBlock, usize) {
+        let mut d = SourceDetector::new(RATE, RATE, c);
+        let mut e = SourceExtractor::new(RATE, 100e6, d.latency_samples(), c);
+        let mut x = noise(1_000_000, 0.05, 9);
+        let start = 300_000;
+        for (i, s) in tone(200_000, hz, RATE, 0.3).iter().enumerate() {
+            if (i / 500) % 2 == 0 {
+                x[start + i] += *s;
+            }
+        }
+        let mut blocks = Vec::new();
+        let mut banked = 0;
+        for chunk in x.chunks(8192) {
+            let ev = d.process(chunk).to_vec();
+            e.process(chunk, &ev, &mut blocks);
+            banked = banked.max(e.banked());
+        }
+        assert!(!blocks.is_empty(), "nothing extracted");
+        let first = blocks[0].clone();
+        let mut all = Vec::new();
+        let mut expect = first.start_sample;
+        let factor = (RATE / first.rate).round() as u64;
+        for b in &blocks {
+            let off = b.start_sample as i64 - expect as i64;
+            assert!(off.unsigned_abs() < factor, "gap before block at {}", b.start_sample);
+            expect = b.start_sample + b.samples.len() as u64 * factor;
+            all.extend_from_slice(&b.samples);
+        }
+        (all, first, banked)
+    }
+
+    /// Residual frequency and on-ratio of the keyed tone in an extracted
+    /// stream.
+    fn keyed_tone_quality(all: &[C32], rate: f64, c: &SourceConfig) -> (f64, f64, f64) {
+        let lead = (c.lead_us as f64 * 1e-6 * rate) as usize;
+        let body_len = (100_000.0 * rate / RATE) as usize;
+        let body = &all[lead + 1000..lead + body_len];
+        let mut acc = C32::new(0.0, 0.0);
+        let mut level = 0.0f64;
+        let mut on = 0usize;
+        for w in body.windows(2) {
+            if w[0].norm() > 0.15 && w[1].norm() > 0.15 {
+                acc += w[1] * w[0].conj();
+                level += w[0].norm() as f64;
+                on += 1;
+            }
+        }
+        let residual_hz = acc.arg() as f64 / std::f64::consts::TAU * rate;
+        (residual_hz, on as f64 / body.len() as f64, level / on.max(1) as f64)
+    }
+
+    /// A source read from the shared bank is the same stream as one read from
+    /// the ring: same residual, same keying, same level. Tried at an offset
+    /// well inside a channel and at one on the edge between two, which is
+    /// read from the pair.
+    #[test]
+    fn the_bank_gives_the_stream_the_ring_gives() {
+        let mut direct = cfg();
+        direct.bank_min_channels = 0;
+        let mut banked = cfg();
+        // Channels 62.5 kHz wide at this rate: the keyed tone measures about
+        // 14 kHz and is cut 20 kHz wide, which sits inside one channel near
+        // its centre and across two anywhere else.
+        banked.bank_channel_hz = 62_500.0;
+        banked.bank_min_channels = 4;
+        for hz in [-87_500.0, -123_000.0] {
+            let (a, fa, ba) = keyed_tone_through(direct, hz);
+            let (b, fb, bb) = keyed_tone_through(banked, hz);
+            assert_eq!(ba, 0, "the direct config ran the bank");
+            assert!(bb > 0, "the banked config did not use the bank at {hz} Hz");
+            assert_eq!(fa.rate, fb.rate, "rates differ at {hz} Hz");
+            let (ra, oa, la) = keyed_tone_quality(&a, fa.rate, &direct);
+            let (rb, ob, lb) = keyed_tone_quality(&b, fb.rate, &banked);
+            assert!((ra - rb).abs() < 2.0, "residual {ra} vs {rb} Hz at {hz} Hz");
+            assert!((oa - ob).abs() < 0.03, "keying {oa} vs {ob} at {hz} Hz");
+            let db = 20.0 * (lb / la).log10();
+            assert!(db.abs() < 0.3, "level differs by {db:.2} dB at {hz} Hz");
+        }
     }
 
     #[test]

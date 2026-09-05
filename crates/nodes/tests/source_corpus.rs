@@ -45,8 +45,12 @@ fn reports(pkgs: &[Package]) -> Vec<Report> {
 }
 
 fn through_auto(buf: &common::IqBuf) -> Vec<Package> {
+    through_auto_with(buf, NodeSpec::new("auto"))
+}
+
+fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
     let spec = StreamSpec::iq(buf.rate.as_f64(), buf.center);
-    let mut g = build_chain(spec, &[NodeSpec::new("auto")], &registry()).expect("build");
+    let mut g = build_chain(spec, &[auto], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     // Silence at the end lets the last source drain its tail.
@@ -120,4 +124,34 @@ fn the_auto_node_hears_at_least_what_the_banks_did() {
         "auto recovered {source_total} reference decodes against the banks' {bank_total}, \
          and lost ground on {lost:?}"
     );
+}
+
+/// The shared extraction bank reads a source the way the wideband ring
+/// does. On a wide span nearly every source is cut from the bank, so its
+/// output has to decode exactly as well; the corpus is recorded at rates
+/// too low for the bank to run at its default width, so it is forced on
+/// here with channels a few times a sensor's width, which puts every
+/// capture through it, most through a pair of channels.
+#[test]
+fn the_bank_hears_what_the_ring_did() {
+    let fixtures = fixtures();
+    if fixtures.is_empty() {
+        eprintln!("skipping: no rtl_433 fixtures, run testdata/fetch.sh to enable");
+        return;
+    }
+    let banked = NodeSpec::new("auto").f("bank_channel_hz", 62_500.0).f("bank_min_channels", 4.0);
+    let mut lost: Vec<String> = Vec::new();
+    let (mut ring_total, mut bank_total) = (0usize, 0usize);
+    for f in &fixtures {
+        let buf = load(f);
+        let r = hits(f, &reports(&through_auto(&buf)));
+        let b = hits(f, &reports(&through_auto_with(&buf, banked.clone())));
+        ring_total += r;
+        bank_total += b;
+        if b < r {
+            lost.push(format!("{} ({r} -> {b})", f.name));
+        }
+    }
+    eprintln!("ring {ring_total}, bank {bank_total}");
+    assert!(lost.is_empty(), "the bank lost decodes the ring found: {lost:?}");
 }

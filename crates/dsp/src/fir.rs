@@ -418,3 +418,4 @@ mod decim_hz_tests {
         assert!(rms(&keep[2000..]) > 0.6, "passband lost at {}", rms(&keep[2000..]));
     }
 }
+

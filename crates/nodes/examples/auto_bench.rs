@@ -5,6 +5,10 @@
 //! wall clock: above 1.0 keeps up with a live radio.
 //!
 //!     cargo run --release -p nodes --example auto_bench -- 4000000 8
+//!
+//! `BLOCK=131072` feeds blocks the size a HackRF delivers rather than the
+//! 16384 default, `PHASES=1` prints where the node's time went, and
+//! `NO_BANK=1` reads every source from the wideband ring for comparison.
 
 use common::{Hz, C32};
 use nodes::{build_chain, registry, NodeSpec};
@@ -54,8 +58,12 @@ fn main() {
             t += period;
         }
     }
-    let mut g = build_chain(StreamSpec::iq(rate, Hz::mhz(868)), &[NodeSpec::new("auto")], &registry()).unwrap();
-    let block = 16_384;
+    let mut auto = NodeSpec::new("auto");
+    if std::env::var_os("NO_BANK").is_some() {
+        auto = auto.f("bank_min_channels", 0.0);
+    }
+    let mut g = build_chain(StreamSpec::iq(rate, Hz::mhz(868)), &[auto], &registry()).unwrap();
+    let block: usize = std::env::var("BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(16_384);
     // Warm up on the first second, then time the rest.
     let warm = (rate as usize).min(iq.len());
     for b in iq[..warm].chunks(block) {
@@ -74,4 +82,11 @@ fn main() {
         rate / 1e6,
         audio / wall
     );
+    if std::env::var_os("PHASES").is_some() {
+        for n in &g.topology().nodes {
+            for (name, c) in &n.phases {
+                println!("    {:<18} p95 {:>8} us  mean {:>8.0} us", name, c.p95_us, c.mean_us);
+            }
+        }
+    }
 }
