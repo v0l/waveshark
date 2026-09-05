@@ -14,9 +14,11 @@ mod bresser;
 mod ev1527;
 mod fineoffset;
 mod globaltronics;
+mod hanshow;
 mod ism868_link;
 mod keyfob;
 mod lacrosse;
+mod esl;
 mod nexus;
 mod oregon;
 mod rubicson;
@@ -27,11 +29,16 @@ mod x10;
 
 pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, AcuriteWind};
 pub use bresser::Bresser3Ch;
+pub use esl::Esl;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
 pub use globaltronics::{GtWt02, GtWt03};
+pub use hanshow::Hanshow;
 pub use ism868_link::Ism868Link;
-pub use keyfob::{Ansonic, Bett, came12_bit, came24_bit, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3, NiceFlo, Princeton};
+pub use keyfob::{
+    came12_bit, came24_bit, Ansonic, Bett, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3,
+    NiceFlo, Princeton,
+};
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
 pub use oregon::{OregonV2, OregonV3};
@@ -91,9 +98,7 @@ pub(crate) fn rows_of(
     starts
         .into_iter()
         .zip(ends)
-        .filter(move |(start, end)| {
-            row_bits.contains(&(end - start)) && start + want <= bits.len()
-        })
+        .filter(move |(start, end)| row_bits.contains(&(end - start)) && start + want <= bits.len())
         .map(move |(start, _)| {
             bits.slice(start, want)
                 .as_padded_bytes()
