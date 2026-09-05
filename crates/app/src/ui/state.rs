@@ -162,6 +162,12 @@ pub(super) struct ChainState {
     pub latency: f64,
     /// The stage whose settings are showing, by node id.
     pub sel: Option<usize>,
+    /// Show only the transmit stages.
+    ///
+    /// The chain a transmission runs is four stages in a graph of forty, and
+    /// on a wide span it is off the edge of the pane behind the banks. This
+    /// is a way to look at what is going out without hunting for it.
+    pub only_tx: bool,
     /// Manual mode and where the stages have been dragged to.
     pub edit: crate::chainview::Edit,
     /// The graph as it is running, with the operator's edits in it: what the
