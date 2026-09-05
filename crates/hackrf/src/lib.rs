@@ -551,13 +551,19 @@ impl Drop for HackRfTxStream {
 
 /// Level the driver feeds a receiver while the radio is transmitting.
 ///
-/// Not zero. A silent stream is not something a receiver ever sees, and the
-/// code downstream is built for what one does see: the spectrum would draw a
-/// floor at minus infinity, the level gates would have nothing to measure a
-/// threshold against, and an AGC would wind itself all the way up in the
-/// couple of seconds an over lasts. A floor 90 dB down is a quiet band, which
-/// is a state everything already handles.
-const SILENCE_RMS: f32 = 3e-5;
+/// Not zero, and not arbitrarily small either. A silent stream is not
+/// something a receiver ever sees, and the code downstream is built for what
+/// one does see: the spectrum would draw a floor at minus infinity, the level
+/// gates would have nothing to measure a threshold against, and an AGC would
+/// wind itself all the way up in the couple of seconds an over lasts.
+///
+/// Three least significant bits of the eight bit converter, which is what
+/// this radio's own floor measures at 95.8 MHz with the front end running.
+/// A floor far below that is not a quiet band but a broken converter, and
+/// the ADC health check says so: at 90 dB down every sample lands on the
+/// same value and the interface reports a starved converter for the length
+/// of every over.
+const SILENCE_RMS: f32 = 3.0 / 128.0;
 
 pub struct HackRfStream {
     shared: std::sync::Arc<Shared>,
@@ -784,7 +790,10 @@ mod tests {
         let rms =
             (a.samples.iter().map(|c| c.norm_sqr() as f64).sum::<f64>() / a.len() as f64).sqrt();
         let db = 20.0 * rms.log10();
-        assert!((-110.0..-70.0).contains(&db), "silence reads {db:.0} dBFS");
+        // A quiet band on an eight bit converter, not an empty one: below
+        // about 50 dB down every sample lands on the same code and the ADC
+        // health check calls the converter starved.
+        assert!((-45.0..-25.0).contains(&db), "silence reads {db:.0} dBFS");
         // Noise, not a constant: a steady value is a carrier at DC to
         // everything downstream.
         let first = a.samples[0];
