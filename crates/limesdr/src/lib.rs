@@ -20,7 +20,7 @@
 //! difference between streaming and not.
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
-use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps, C32};
+use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream, C32};
 use limesdr_sys as ffi;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -50,6 +50,11 @@ const USABLE_RATIO: f32 = 0.85;
 
 /// Combined RX gain range LimeSuite distributes across LNA, TIA and PGA.
 const GAIN_MAX_DB: f32 = 73.0;
+
+/// Full scale of the transmit gain LimeSuite distributes across the TX chain.
+/// Less than the receive range because there are fewer stages to spread it
+/// over: no LNA, and the PA driver is the last of them.
+const TX_GAIN_MAX_DB: f32 = 64.0;
 
 /// RX channel opened by default. The board has two, each with its own set of
 /// RF connectors, but streaming both doubles the USB load for an antenna most
@@ -81,6 +86,11 @@ fn chunk_samples(rate: Sps) -> usize {
 }
 /// How long a single read waits before it is treated as a stall.
 const RECV_TIMEOUT_MS: u32 = 1000;
+
+/// How long a send waits for room in the transmit FIFO. Longer than a FIFO
+/// takes to drain at any supported rate, so a timeout means the radio has
+/// stopped consuming rather than that it is briefly behind.
+const SEND_TIMEOUT_MS: u32 = 1000;
 /// Samples in one link packet at the 12-bit link format, which is what
 /// LimeSuite's dropped and overrun counters are counted in.
 const SAMPLES_PER_PACKET: u64 = 1360;
@@ -245,6 +255,16 @@ pub struct LimeSdr {
     /// Whether the chip's internal test tone replaces the antenna.
     test_signal: bool,
     streaming: Arc<AtomicBool>,
+    /// Where the transmitter is tuned, which is its own synthesiser and not
+    /// the receiver's: this radio can listen on a repeater's output while
+    /// transmitting on its input.
+    tx_center: Hz,
+    /// Transmit gain, starting at nothing. A transmitter that comes up at
+    /// whatever the last session left behind puts power into whatever is on
+    /// the port before the operator has looked at it.
+    tx_gain_db: f32,
+    tx_chan: usize,
+    transmitting: Arc<AtomicBool>,
 }
 
 impl LimeSdr {
@@ -315,6 +335,12 @@ impl LimeSdr {
 
         let antennas = rx_antennas(&handle);
         let channels = unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_RX) }.max(1) as usize;
+        // A LimeSDR-USB is 2x2 and a Mini is 1x1, so this is asked rather
+        // than assumed: a board with one transmitter told it had two would
+        // fail at the second stream rather than at the setting that asked
+        // for it.
+        let tx_channels =
+            unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_TX) }.max(1) as usize;
 
         let rate_max = e.rate_max().0.min(reported_rate_max(&handle).unwrap_or(u64::MAX));
         let info = DeviceInfo {
@@ -347,7 +373,28 @@ impl LimeSdr {
             }],
             native_format: SampleFormat::Cf32,
             usable_bandwidth_ratio: USABLE_RATIO,
-            tx: None,
+            tx: Some(common::TxInfo {
+                ranges: vec![TunerRange {
+                    range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),
+                    label: "100 kHz - 3.8 GHz",
+                }],
+                rate_range: Sps(RATE_MIN)..=Sps(rate_max.max(RATE_MIN)),
+                gain_stages: vec![common::GainStage {
+                    name: "gain".into(),
+                    label: "TX gain (IAMP + PAD)".into(),
+                    range: 0.0..=TX_GAIN_MAX_DB,
+                    values: Vec::new(),
+                    step: 1.0,
+                    auto: false,
+                }],
+                native_format: SampleFormat::Cf32,
+                // The whole point of this radio on a transmit path: separate
+                // receive and transmit chains with their own synthesisers, so
+                // an over is not a gap in the waterfall and a repeater split
+                // is two frequencies at once rather than a retune.
+                half_duplex: false,
+                channels: tx_channels,
+            }),
         };
 
         let mut me = Self {
@@ -363,6 +410,10 @@ impl LimeSdr {
             calibrate: false,
             test_signal: false,
             streaming: Arc::new(AtomicBool::new(false)),
+            tx_center: Hz::mhz(100),
+            tx_gain_db: 0.0,
+            tx_chan: DEFAULT_CHAN,
+            transmitting: Arc::new(AtomicBool::new(false)),
         };
         let rate = me.rate;
         me.set_rate(rate)?;
@@ -733,6 +784,138 @@ impl Device for LimeSdr {
         true
     }
 
+    fn set_tx_gain(&mut self, stage: &str, mode: GainMode) -> Result<()> {
+        if stage != "gain" && !stage.is_empty() {
+            return Err(Error::other(format!("no transmit gain stage named {stage}")));
+        }
+        // No transmit AGC, and guessing an operating point for a transmitter
+        // means guessing how much power to radiate: auto is the bottom.
+        let db = match mode {
+            GainMode::Auto => 0.0,
+            GainMode::Manual(db) => db,
+        }
+        .clamp(0.0, TX_GAIN_MAX_DB);
+        let _g = self.handle.ctl.lock().unwrap();
+        check(
+            unsafe {
+                ffi::LMS_SetGaindB(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, db.round() as u32)
+            },
+            "LMS_SetGaindB",
+        )?;
+        self.tx_gain_db = db;
+        Ok(())
+    }
+
+    fn tx_gains(&self) -> Vec<(String, GainMode)> {
+        let mut db = 0u32;
+        let rc = unsafe {
+            ffi::LMS_GetGaindB(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, &mut db)
+        };
+        let v = if rc == ffi::LMS_SUCCESS { db as f32 } else { self.tx_gain_db };
+        vec![("gain".into(), GainMode::Manual(v))]
+    }
+
+    fn set_tx_center(&mut self, f: Hz) -> Result<()> {
+        if f.0 < FREQ_MIN || f.0 > FREQ_MAX {
+            return Err(Error::FreqOutOfRange { req: f, lo: Hz(FREQ_MIN), hi: Hz(FREQ_MAX) });
+        }
+        let _g = self.handle.ctl.lock().unwrap();
+        check(
+            unsafe {
+                ffi::LMS_SetLOFrequency(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, f.0 as f64)
+            },
+            "LMS_SetLOFrequency",
+        )?;
+        self.tx_center = f;
+        Ok(())
+    }
+
+    fn tx_center(&self) -> Hz {
+        self.tx_center
+    }
+
+    fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
+        if self.transmitting.swap(true, Ordering::SeqCst) {
+            return Err(Error::Busy);
+        }
+        let start = || -> Result<ffi::lms_stream_t> {
+            let g = self.handle.ctl.lock().unwrap();
+            check(
+                unsafe {
+                    ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, true)
+                },
+                "LMS_EnableChannel",
+            )?;
+            // The transmit chain comes up wherever LMS_Init left it, and its
+            // synthesiser is not the receiver's, so it is tuned here even
+            // when both ends are on the same frequency.
+            check(
+                unsafe {
+                    ffi::LMS_SetLOFrequency(
+                        self.handle.ptr(),
+                        ffi::LMS_CH_TX,
+                        self.tx_chan,
+                        self.tx_center.0 as f64,
+                    )
+                },
+                "LMS_SetLOFrequency",
+            )?;
+            check(
+                unsafe {
+                    ffi::LMS_SetGaindB(
+                        self.handle.ptr(),
+                        ffi::LMS_CH_TX,
+                        self.tx_chan,
+                        self.tx_gain_db.round() as u32,
+                    )
+                },
+                "LMS_SetGaindB",
+            )?;
+            drop(g);
+
+            let chunk = chunk_samples(self.rate);
+            let mut stream = ffi::lms_stream_t {
+                handle: 0,
+                isTx: true,
+                channel: self.tx_chan as u32,
+                fifoSize: (self.rate.0 * FIFO_MS / 1000).max(chunk as u64 * 4) as u32,
+                throughputVsLatency: if self.rate.0 > 20_000_000 { 1.0 } else { 0.5 },
+                dataFmt: ffi::LMS_FMT_F32,
+                linkFmt: ffi::LMS_LINK_FMT_DEFAULT,
+            };
+            let g = self.handle.ctl.lock().unwrap();
+            check(
+                unsafe { ffi::LMS_SetupStream(self.handle.ptr(), &mut stream) },
+                "LMS_SetupStream",
+            )?;
+            drop(g);
+            if let Err(e) = check(unsafe { ffi::LMS_StartStream(&mut stream) }, "LMS_StartStream") {
+                unsafe { ffi::LMS_DestroyStream(self.handle.ptr(), &mut stream) };
+                return Err(e);
+            }
+            Ok(stream)
+        };
+
+        match start() {
+            Ok(stream) => Ok(Box::new(LimeTxStream {
+                handle: self.handle.clone(),
+                stream: StreamPtr(stream),
+                rate: self.rate,
+                chan: self.tx_chan,
+                underruns: AtomicU64::new(0),
+                stopped: false,
+                transmitting: self.transmitting.clone(),
+            })),
+            Err(e) => {
+                let _ = unsafe {
+                    ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, false)
+                };
+                self.transmitting.store(false, Ordering::SeqCst);
+                Err(e)
+            }
+        }
+    }
+
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
         if self.streaming.swap(true, Ordering::SeqCst) {
             return Err(Error::Busy);
@@ -889,6 +1072,132 @@ impl Drop for LimeStream {
         self.stop();
         unsafe { ffi::LMS_DestroyStream(self.handle.ptr(), &mut self.stream.0) };
         self.streaming.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The transmit side of a full duplex radio.
+///
+/// Runs alongside [`LimeStream`] rather than instead of it: the two are
+/// separate chains on the chip with their own synthesisers, so an over does
+/// not interrupt reception and the two ends of a repeater pair can be tuned
+/// independently.
+pub struct LimeTxStream {
+    handle: Arc<Handle>,
+    stream: StreamPtr,
+    rate: Sps,
+    chan: usize,
+    underruns: AtomicU64,
+    stopped: bool,
+    transmitting: Arc<AtomicBool>,
+}
+
+impl LimeTxStream {
+    /// Samples the FIFO still holds, which is what a drain waits on.
+    fn queued(&self) -> u64 {
+        let mut st = ffi::lms_stream_status_t {
+            active: false,
+            fifoFilledCount: 0,
+            fifoSize: 0,
+            underrun: 0,
+            overrun: 0,
+            droppedPackets: 0,
+            sampleRate: 0.0,
+            linkRate: 0.0,
+            timestamp: 0,
+        };
+        let p = &self.stream.0 as *const ffi::lms_stream_t as *mut ffi::lms_stream_t;
+        if unsafe { ffi::LMS_GetStreamStatus(p, &mut st) } != ffi::LMS_SUCCESS {
+            return 0;
+        }
+        // The counter resets on every read, so the total has to accumulate
+        // here, exactly as the receive side's does.
+        if st.underrun > 0 {
+            self.underruns.fetch_add(st.underrun as u64, Ordering::Relaxed);
+        }
+        st.fifoFilledCount as u64
+    }
+}
+
+impl TxStream for LimeTxStream {
+    fn write(&mut self, buf: &IqBuf) -> Result<()> {
+        if self.stopped {
+            return Err(Error::Disconnected);
+        }
+        // A block at another rate would go out at this one, stretched or
+        // compressed: the wrong bandwidth on the wrong frequency.
+        if buf.rate != self.rate {
+            return Err(Error::RateUnsupported { req: buf.rate });
+        }
+        if buf.samples.is_empty() {
+            return Ok(());
+        }
+        let mut sent = 0usize;
+        while sent < buf.samples.len() {
+            // `C32` is two f32, which is the interleaved layout LMS_FMT_F32
+            // reads, so the graph's own buffer goes straight to the radio.
+            let n = unsafe {
+                ffi::LMS_SendStream(
+                    &mut self.stream.0,
+                    buf.samples[sent..].as_ptr().cast(),
+                    buf.samples.len() - sent,
+                    std::ptr::null(),
+                    SEND_TIMEOUT_MS,
+                )
+            };
+            if n < 0 {
+                return Err(Error::other(format!("LMS_SendStream failed: {}", last_error())));
+            }
+            if n == 0 {
+                // The FIFO is full and stayed full for the timeout, which is
+                // the radio not consuming: it has gone away rather than being
+                // busy, since a running transmitter drains at the sample rate.
+                return Err(Error::Disconnected);
+            }
+            sent += n as usize;
+        }
+        self.queued();
+        Ok(())
+    }
+
+    fn underruns(&self) -> u64 {
+        self.queued();
+        self.underruns.load(Ordering::Relaxed)
+    }
+
+    fn drain(&mut self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.queued() == 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        false
+    }
+
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        unsafe { ffi::LMS_StopStream(&mut self.stream.0) };
+        // Off, not idle: an enabled transmit chain draws current and leaves
+        // the driver stage biased with nothing to send.
+        let _g = self.handle.ctl.lock().unwrap();
+        let _ = unsafe {
+            ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, self.chan, false)
+        };
+    }
+}
+
+impl Drop for LimeTxStream {
+    fn drop(&mut self) {
+        // The tail first: dropping with the FIFO full cuts the end of the
+        // transmission off mid-word.
+        self.drain(std::time::Duration::from_millis(500));
+        self.stop();
+        unsafe { ffi::LMS_DestroyStream(self.handle.ptr(), &mut self.stream.0) };
+        self.transmitting.store(false, Ordering::SeqCst);
     }
 }
 

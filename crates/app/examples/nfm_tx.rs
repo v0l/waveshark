@@ -1,6 +1,10 @@
 //! Transmit narrowband FM from the graph, into a real radio.
 //!
-//! Usage: `nfm_tx [freq_hz] [seconds] [txvga_db] [tone_hz]`
+//! Usage: `nfm_tx [freq_hz] [seconds] [gain_db] [tone_hz] [device]`
+//!
+//! `device` is `hackrf` (the default) or `lime`. On the LimeSDR the transmit
+//! chain is its own, so this can run while something else is receiving on the
+//! same board.
 //!
 //! The same chain the round trip test runs, with a HackRF where the file
 //! sink is: tone, `fm_mod` at 2.5 kHz deviation, `radio_tx`. Nothing here
@@ -27,13 +31,31 @@ fn main() -> common::Result<()> {
     let secs: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2.0);
     let txvga: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let tone: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1_000.0);
+    let which = args.next().unwrap_or_else(|| "hackrf".into());
 
-    let mut dev = hackrf::HackRfDevice::open_first()?;
+    let mut dev: Box<dyn Device> = match which.as_str() {
+        "lime" | "limesdr" => Box::new(limesdr::LimeSdr::open_first()?),
+        _ => Box::new(hackrf::HackRfDevice::open_first()?),
+    };
     assert!(dev.info().covers_tx(Hz(freq)), "{freq} Hz is outside the transmit range");
     dev.set_rate(Sps(RATE as u64))?;
     dev.set_center(Hz(freq))?;
-    dev.set_tx_gain("amp", GainMode::Manual(0.0))?;
-    dev.set_tx_gain("txvga", GainMode::Manual(txvga))?;
+    // Whatever this radio calls its transmit stages, and the amp left out:
+    // it is a switch rather than a level.
+    let stages: Vec<String> = dev
+        .info()
+        .tx
+        .as_ref()
+        .map(|t| t.gain_stages.iter().map(|s| s.name.clone()).collect())
+        .unwrap_or_default();
+    for name in &stages {
+        let db = if name == "amp" { 0.0 } else { txvga };
+        dev.set_tx_gain(name, GainMode::Manual(db))?;
+    }
+    let half = dev.info().tx.as_ref().is_some_and(|t| t.half_duplex);
+    if !half {
+        dev.set_tx_center(Hz(freq))?;
+    }
 
     let input = StreamSpec {
         kind: PortKind::Real,
@@ -53,8 +75,9 @@ fn main() -> common::Result<()> {
     )?;
 
     println!(
-        "transmitting {secs:.1} s of NFM at {:.4} MHz, {tone} Hz tone, TXVGA {txvga} dB",
-        freq as f64 / 1e6
+        "transmitting {secs:.1} s of NFM at {:.4} MHz, {tone} Hz tone, gain {txvga} dB, {}",
+        freq as f64 / 1e6,
+        if half { "half duplex" } else { "full duplex" }
     );
     let blocks = (secs * RATE / BLOCK as f64).ceil() as usize;
     let start = std::time::Instant::now();

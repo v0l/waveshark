@@ -284,15 +284,33 @@ fn key_up(
             "{on_air} is outside what this radio transmits"
         )));
     }
-    // A half duplex radio transmits where it is tuned, because it has one
-    // synthesiser: asking for a shift it cannot honour would put the
-    // transmission somewhere other than where the strip says.
+    // A half duplex radio has one synthesiser, so it is retuned for the over
+    // and the receiver hears the transmit frequency while it lasts. A full
+    // duplex one has a synthesiser per direction, which is what makes a
+    // repeater pair one radio listening on the output and transmitting on the
+    // input at the same time.
     let half = dev.info().tx.as_ref().is_some_and(|t| t.half_duplex);
-    if half && on_air != dev.center() {
-        dev.set_center(on_air)?;
+    match half {
+        true if on_air != dev.center() => dev.set_center(on_air)?,
+        true => {}
+        false => dev.set_tx_center(on_air)?,
     }
-    dev.set_tx_gain("amp", GainMode::Manual(0.0))?;
-    dev.set_tx_gain("txvga", GainMode::Manual((gain_db + tx.trim_db).max(0.0)))?;
+    // By the names the device gave, rather than by a list of radios kept
+    // here: a HackRF has an amp and a TXVGA, a LimeSDR has one distributed
+    // gain, and a driver added later will have its own.
+    let want = (gain_db + tx.trim_db).max(0.0);
+    let stages: Vec<String> = dev
+        .info()
+        .tx
+        .as_ref()
+        .map(|t| t.gain_stages.iter().map(|s| s.name.clone()).collect())
+        .unwrap_or_default();
+    for name in stages {
+        // The front end amp is a switch, not a level, and switching it in
+        // because the gain was turned up is a 14 dB surprise.
+        let db = if name == "amp" { 0.0 } else { want };
+        dev.set_tx_gain(&name, GainMode::Manual(db))?;
+    }
 
     let rate = dev.rate().as_f64();
     crate::chain::transmit_graph(tx, rate, on_air, dev.start_tx()?)
