@@ -57,6 +57,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         muted: true,
         squelch_db: None,
         agc: true,
+            tx: None,
     }]));
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -118,6 +119,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             muted: true,
             squelch_db: None,
             agc: true,
+            tx: None,
         }]));
         println!("decoding a WFM channel while measuring");
     }

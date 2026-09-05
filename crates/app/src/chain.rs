@@ -3264,6 +3264,7 @@ mod tests {
             muted: false,
             squelch_db: None,
             agc: true,
+            tx: None,
         }
     }
 
@@ -4077,6 +4078,56 @@ mod scan_mark_tests {
     }
 }
 
+/// The transmitter, as a graph.
+///
+/// The same shape as the receive side and built the same way: what goes on
+/// air is a chain of stages, so it can be drawn, tapped and parameterised
+/// rather than being something the radio thread does to a buffer. A keyed
+/// channel is `tone` into a modulator into `radio_tx`, and the sink is what
+/// paces it, since the device's write blocks once the radio has enough.
+///
+/// Everything runs at the radio's rate, because there is no resampler on this
+/// side yet. Generating a 1 kHz tone at 2 MS/s is wasteful and honest; a
+/// resampler is the next thing this wants.
+pub fn transmit_graph(
+    tx: &crate::radio::TxSpec,
+    rate: f64,
+    center: Hz,
+    stream: Box<dyn common::TxStream>,
+) -> Result<Graph> {
+    use crate::radio::TxMode;
+
+    let input = StreamSpec {
+        kind: PortKind::Real,
+        rate,
+        center,
+        // What the audio occupies, which is what a modulator checks its
+        // deviation against rather than assuming the stream is full of it.
+        bandwidth: 6_000.0,
+        flow: pipeline::port::Flow::Tx,
+        ..Default::default()
+    };
+    // A carrier is a tone at nothing: the modulator sees silence and leaves
+    // the carrier where it is, which is exactly an unmodulated transmission.
+    let level = match tx.mode {
+        TxMode::Carrier => 0.0,
+        _ => 0.8,
+    };
+    let modulator: Box<dyn pipeline::Node> = match tx.mode {
+        TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
+        TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
+        TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
+    };
+    pipeline::chain(
+        input,
+        vec![
+            Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
+            modulator,
+            Box::new(nodes::TxSinkNode::new(stream)),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod extraction_tests {
     use super::tests::{anywhere, plan};
@@ -4147,3 +4198,98 @@ mod extraction_tests {
     }
 }
 
+
+#[cfg(test)]
+mod tx_tests {
+    use super::*;
+    use crate::radio::{TxMode, TxSpec};
+    use common::{Device, SampleFormat, Sps};
+
+    fn sink(rate: f64) -> (sources::FileSink, std::sync::Arc<parking_lot::Mutex<Vec<u8>>>) {
+        sources::FileSink::in_memory(Sps(rate as u64), SampleFormat::Cs8)
+    }
+
+    fn transmit(tx: TxSpec, rate: f64, blocks: usize) -> Vec<C32> {
+        let (mut dev, buf) = sink(rate);
+        let mut g =
+            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap()).unwrap();
+        for _ in 0..blocks {
+            let b = g.input_buf();
+            b.clear();
+            b.real_mut().resize(4_800, 0.0);
+            g.run().unwrap();
+        }
+        let id = g.order().last().map(|(id, _)| id).unwrap();
+        if let Some(n) = g.node_mut(id) {
+            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+                s.finish(std::time::Duration::from_millis(50));
+            }
+        }
+        let mut iq = Vec::new();
+        SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
+        iq
+    }
+
+    #[test]
+    fn a_keyed_nfm_channel_is_a_tone_on_a_carrier() {
+        let rate = 48_000.0;
+        let tx = TxSpec { mode: TxMode::Nfm, tone_hz: 1_000.0, ..Default::default() };
+        let iq = transmit(tx, rate, 5);
+        assert_eq!(iq.len(), 5 * 4_800);
+
+        let mut demod = dsp::FmDemod::new(rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&iq, &mut audio);
+        let seg = &audio[1_000..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = crossings as f64 * rate / seg.len() as f64;
+        assert!((hz - 1_000.0).abs() < 10.0, "recovered {hz:.0} Hz");
+    }
+
+    #[test]
+    fn the_carrier_mode_transmits_nothing_but_a_carrier() {
+        // What a power measurement wants, and the check that a mode with no
+        // audio still keys: a steady envelope and no deviation.
+        let rate = 48_000.0;
+        let iq = transmit(TxSpec { mode: TxMode::Carrier, ..Default::default() }, rate, 2);
+        let mut demod = dsp::FmDemod::new(rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&iq, &mut audio);
+        let worst = audio[100..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(worst < 0.05, "an unmodulated carrier deviated by {worst}");
+        let level = iq[100].norm();
+        assert!(iq.iter().skip(100).all(|s| (s.norm() - level).abs() < 0.02));
+    }
+
+    #[test]
+    fn an_am_channel_modulates_its_envelope() {
+        let rate = 48_000.0;
+        let iq = transmit(
+            TxSpec { mode: TxMode::Am, tone_hz: 1_000.0, ..Default::default() },
+            rate,
+            2,
+        );
+        let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+        for s in iq.iter().skip(100) {
+            lo = lo.min(s.norm());
+            hi = hi.max(s.norm());
+        }
+        assert!(hi > lo * 3.0, "envelope barely moved: {lo} to {hi}");
+    }
+
+    #[test]
+    fn the_transmit_chain_is_three_stages_ending_in_the_radio() {
+        let (mut dev, _b) = sink(48_000.0);
+        let g = transmit_graph(
+            &TxSpec::default(),
+            48_000.0,
+            Hz(145_500_000),
+            dev.start_tx().unwrap(),
+        )
+        .unwrap();
+        let topo = g.topology();
+        let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
+        assert!(g.output_spec().is_tx());
+    }
+}

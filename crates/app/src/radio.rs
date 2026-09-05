@@ -258,6 +258,98 @@ fn restart(
     Ok((dev, stream, soft))
 }
 
+
+/// Transmit on one channel until the interface unkeys, then hand the radio
+/// back.
+///
+/// Half duplex: the receive stream owns the device, so this drops it, reopens
+/// the radio for transmit, and reopens it again for receive afterwards. The
+/// waterfall stops for as long as the over lasts, which is why the status
+/// says so rather than leaving a gap nobody can account for.
+///
+/// Returns the transfers the radio had to fill with silence, which is what
+/// says whether the transmission had holes in it.
+fn transmit(
+    entry: &crate::devices::Entry,
+    ch: &ChannelSpec,
+    tx: &TxSpec,
+    rate: Sps,
+    center: Hz,
+    gain_db: f32,
+    cmd: &Receiver<Cmd>,
+    status: &Status,
+    held: &mut Vec<Cmd>,
+) -> common::Result<u64> {
+    // Where the channel transmits: its own frequency plus the repeater
+    // shift, which is zero for simplex.
+    let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
+
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let mut dev = crate::devices::open(entry)?;
+    if !dev.info().can_transmit() {
+        return Err(common::Error::TxUnsupported);
+    }
+    if !dev.info().covers_tx(on_air) {
+        return Err(common::Error::other(format!(
+            "{} is outside what this radio transmits",
+            on_air
+        )));
+    }
+    dev.set_rate(rate)?;
+    dev.set_center(on_air)?;
+    let want = (gain_db + tx.trim_db).max(0.0);
+    dev.set_tx_gain("amp", GainMode::Manual(0.0))?;
+    dev.set_tx_gain("txvga", GainMode::Manual(want))?;
+
+    let rate_f = dev.rate().as_f64();
+    let mut g = crate::chain::transmit_graph(tx, rate_f, on_air, dev.start_tx()?)?;
+    status.keyed.store(ch.id, Ordering::Relaxed);
+
+    // A block of about 15 ms, which is short enough that unkeying is not
+    // heard as a delay and long enough that the radio is never waiting.
+    let block = ((rate_f * 0.015) as usize).clamp(4_096, 262_144);
+    let mut underruns = 0u64;
+    let mut stop = false;
+    loop {
+        for c in cmd.try_iter() {
+            match c {
+                Cmd::Key(None) => stop = true,
+                // Keying somewhere else while keyed: finish this over first.
+                Cmd::Key(Some(_)) => stop = true,
+                Cmd::Stop => {
+                    stop = true;
+                    held.push(Cmd::Stop);
+                }
+                // Everything else waits. A retune or a rebuild during an over
+                // would apply to a graph that is not running.
+                other => held.push(other),
+            }
+        }
+        if stop {
+            break;
+        }
+        let buf = g.input_buf();
+        buf.clear();
+        buf.real_mut().resize(block, 0.0);
+        g.run()?;
+    }
+
+    let id = g.order().last().map(|(id, _)| id);
+    if let Some(n) = id.and_then(|id| g.node_mut(id)) {
+        if let Some(sink) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+            // Let what is queued go out before the carrier drops, or the last
+            // few milliseconds of the over are cut off mid-word.
+            sink.finish(std::time::Duration::from_secs(1));
+            underruns = sink.underruns();
+        }
+    }
+    status.keyed.store(0, Ordering::Relaxed);
+    status.tx_underruns.store(underruns, Ordering::Relaxed);
+    drop(g);
+    drop(dev);
+    Ok(underruns)
+}
+
 /// Put the correction on the device, and say how much of it the receiver has
 /// to apply itself.
 ///
@@ -397,6 +489,15 @@ pub enum Cmd {
     /// the graph is rebuilt from a plan, so a change is the new table rather
     /// than an instruction to edit one row of it.
     Scanners(crate::scanners::Scanners),
+    /// Key a channel by id, or unkey with `None`.
+    ///
+    /// One command for the whole receiver rather than one per channel: every
+    /// radio here that transmits is half duplex, so keying stops reception,
+    /// and two channels keyed at once is not a state the hardware has.
+    Key(Option<u64>),
+    /// The radio's transmit gain, in dB, which a channel's own trim is added
+    /// to when it is keyed.
+    TxGain(f32),
     /// Whether the graph is being edited, for the view. Nothing about what
     /// runs depends on it: the operator's edits apply either way.
     Manual(bool),
@@ -436,6 +537,72 @@ pub struct ChannelSpec {
     /// None leaves the mode's own default.
     pub squelch_db: Option<f32>,
     pub agc: bool,
+    /// What this channel does when it is keyed, or `None` for a channel that
+    /// only listens, which is every channel until somebody says otherwise.
+    ///
+    /// Part of the channel rather than a list of its own because a repeater
+    /// channel is one channel: it listens on the output and transmits on the
+    /// input, and two entries kept in step by hand is how an operator ends up
+    /// transmitting on the wrong half of the pair.
+    pub tx: Option<TxSpec>,
+}
+
+/// What a channel puts on the air when it is keyed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TxSpec {
+    pub mode: TxMode,
+    /// Added to the channel's receive frequency when transmitting: the
+    /// repeater shift, and zero for simplex.
+    pub shift_hz: f64,
+    /// The tone the modulator is fed, until there is a microphone to feed it
+    /// instead. Zero transmits an unmodulated carrier, which is what a power
+    /// measurement wants.
+    pub tone_hz: f64,
+    /// This channel's own offset from the radio's transmit gain, so one
+    /// channel into a dummy load and another into an antenna do not need the
+    /// gain moved between them.
+    pub trim_db: f32,
+}
+
+impl Default for TxSpec {
+    fn default() -> Self {
+        Self { mode: TxMode::Nfm, shift_hz: 0.0, tone_hz: 1_000.0, trim_db: 0.0 }
+    }
+}
+
+/// How a keyed channel is modulated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxMode {
+    /// 2.5 kHz deviation, the 12.5 kHz channel standard.
+    Nfm,
+    /// 5 kHz deviation, on the 25 kHz grid.
+    Fm,
+    /// Carrier left in, as an airband or broadcast receiver expects.
+    Am,
+    /// An unmodulated carrier, for measuring what the transmitter is doing.
+    Carrier,
+}
+
+impl TxMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nfm => "NFM",
+            Self::Fm => "FM",
+            Self::Am => "AM",
+            Self::Carrier => "CW",
+        }
+    }
+
+    /// What the transmission occupies, for the strip to show and for a band
+    /// plan check to compare against.
+    pub fn bandwidth(self) -> f64 {
+        match self {
+            Self::Nfm => 12_500.0,
+            Self::Fm => 25_000.0,
+            Self::Am => 8_000.0,
+            Self::Carrier => 500.0,
+        }
+    }
 }
 
 /// What one running channel is doing, for its controls to show.
@@ -936,6 +1103,17 @@ pub struct Status {
     pub zoom: AtomicU64,
     /// Whether the operator owns the shape of the graph.
     pub manual: AtomicBool,
+    /// Whether this radio can transmit at all, so the strip knows whether to
+    /// offer a key at all rather than offering one that always fails.
+    pub can_transmit: AtomicBool,
+    /// The channel being transmitted on, or zero for none. Half duplex, so
+    /// there is one of these and not one per channel: the radio cannot key
+    /// two channels at once and the interface should not be able to say so.
+    pub keyed: AtomicU64,
+    /// Transfers the radio sent as silence during the last transmission.
+    pub tx_underruns: AtomicU64,
+    /// The radio's transmit gain, in dB, as the device took it.
+    pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
     /// through the chain view changed one, so the strip can follow.
     levels: parking_lot::Mutex<(u64, crate::chain::AudioPlan, Vec<ChannelSpec>)>,
@@ -983,6 +1161,10 @@ pub struct Status {
 #[derive(Clone, Debug, Default)]
 pub struct RadioControls {
     pub stages: Vec<(common::GainStage, GainMode)>,
+    /// The transmit gain stages, empty on a receiver. Kept apart from the
+    /// receive ones because they are different hardware: a HackRF's transmit
+    /// chain shares nothing with its LNA and baseband VGA.
+    pub tx_stages: Vec<common::GainStage>,
     pub toggles: Vec<common::Toggle>,
     pub choices: Vec<common::Choice>,
     pub ppm: f64,
@@ -1008,7 +1190,13 @@ impl RadioControls {
                 (st.clone(), mode)
             })
             .collect();
-        Self { stages, toggles: dev.toggles(), choices: dev.choices(), ppm }
+        let tx_stages = dev
+            .info()
+            .tx
+            .as_ref()
+            .map(|t| t.gain_stages.clone())
+            .unwrap_or_default();
+        Self { stages, tx_stages, toggles: dev.toggles(), choices: dev.choices(), ppm }
     }
 }
 
@@ -1082,6 +1270,10 @@ impl Default for Status {
             m17_on: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
             manual: AtomicBool::new(false),
+            can_transmit: AtomicBool::new(false),
+            keyed: AtomicU64::new(0),
+            tx_underruns: AtomicU64::new(0),
+            tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
             levels: parking_lot::Mutex::new((0, crate::chain::AudioPlan::default(), Vec::new())),
             patch_rev: AtomicU64::new(0),
@@ -1349,6 +1541,7 @@ impl Audio {
             muted: false,
             squelch_db: None,
             agc: true,
+            tx: None,
         };
         let plan = Plan {
             center: Hz(0),
@@ -1503,9 +1696,17 @@ fn run(
     let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
+    // The radio's own transmit gain, and the commands an over held back
+    // while the graph it belongs to was not running.
+    let mut tx_gain_db = 0.0f32;
+    let mut held: Vec<Cmd> = Vec::new();
+    status
+        .can_transmit
+        .store(dev.info().can_transmit(), Ordering::Relaxed);
 
     loop {
-        for c in cmd.try_iter() {
+        let batch: Vec<Cmd> = held.drain(..).chain(cmd.try_iter()).collect();
+        for c in batch {
             match c {
                 Cmd::Stop => {
                     stream.stop();
@@ -1516,6 +1717,59 @@ fn run(
                 // applying each in turn spends the whole budget retuning to
                 // frequencies already superseded.
                 Cmd::Center(f) => want_center = Some(f),
+                Cmd::TxGain(db) => {
+                    tx_gain_db = db.max(0.0);
+                    status.tx_gain_db.store(tx_gain_db.to_bits(), Ordering::Relaxed);
+                }
+                // Unkeying while not keyed is what the interface sends when it
+                // loses the button, and it is not an error.
+                Cmd::Key(None) => {}
+                Cmd::Key(Some(id)) => {
+                    let spec = plan.channels.iter().find(|c| c.id == id).cloned();
+                    match spec.and_then(|c| c.tx.map(|t| (c, t))) {
+                        None => {
+                            *status.error.lock() =
+                                Some("that channel has no transmit side".into())
+                        }
+                        Some((ch, tx)) => {
+                            // Half duplex: reception stops for the over, and
+                            // the radio has to be handed over whole.
+                            stream.stop();
+                            drop(stream);
+                            let sent = transmit(
+                                &entry,
+                                &ch,
+                                &tx,
+                                Sps(plan.rate as u64),
+                                plan.center,
+                                tx_gain_db,
+                                &cmd,
+                                status,
+                                &mut held,
+                            );
+                            if let Err(e) = &sent {
+                                *status.error.lock() = Some(format!("transmit failed: {e}"));
+                            }
+                            // Back to receiving, whether or not the over
+                            // worked: a radio left in transmit is worse than
+                            // one that could not transmit.
+                            match restart(&entry, Sps(plan.rate as u64), plan.center, gain, ppm) {
+                                Ok((d, s, soft)) => {
+                                    dev = d;
+                                    stream = s;
+                                    soft_ppm = soft;
+                                }
+                                Err(e) => {
+                                    *status.error.lock() =
+                                        Some(format!("radio did not come back: {e}"));
+                                    return Ok(());
+                                }
+                            }
+                            status.set_radio(RadioControls::read(dev.as_ref(), ppm));
+                            rebuild = true;
+                        }
+                    }
+                }
                 Cmd::Rate(r) => {
                     // A HackRF's streaming reader owns the device and its
                     // control channel does not carry the sample rate, so the
@@ -2191,6 +2445,7 @@ pub(crate) mod tests {
             muted: false,
             squelch_db: None,
             agc: true,
+            tx: None,
         };
         let outside = ChannelSpec { id: 2, offset_hz: -994_200_000.0, ..inside.clone() };
         assert!(inside.offset_hz.abs() <= rate / 2.0);
@@ -2763,6 +3018,7 @@ pub(crate) mod tests {
             muted: false,
             squelch_db: None,
             agc: true,
+            tx: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
@@ -3384,6 +3640,7 @@ mod zoom_tests {
             muted: false,
             squelch_db: Some(-200.0),
             agc: false,
+            tx: None,
         }];
         let mut rx =
             crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain");
