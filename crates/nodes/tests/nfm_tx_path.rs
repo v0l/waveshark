@@ -151,3 +151,29 @@ fn a_block_the_radio_refuses_does_not_stop_the_graph() {
     }
     transmit(&mut g, 2);
 }
+
+#[test]
+fn what_went_to_the_radio_can_be_read_back_off_the_sink() {
+    // The monitor: a half duplex radio hears nothing while it transmits, so
+    // the receiver is shown the transmitter's own samples instead. What is
+    // asserted here is that they are the samples that went out, not a copy
+    // taken somewhere else that could drift from them.
+    let (mut sink, captured) = sources::FileSink::in_memory(Sps(RATE as u64), SampleFormat::Cs8);
+    let mut g = tx_graph(sink.start_tx().unwrap());
+    transmit(&mut g, 3);
+
+    let id = g.order().last().map(|(id, _)| id).unwrap();
+    let node = g.node(id).and_then(|n| n.as_any());
+    let tx = node.and_then(|a| a.downcast_ref::<TxSinkNode>()).unwrap();
+    let monitor = tx.monitor();
+    assert_eq!(monitor.len(), BLOCK, "the monitor holds the last block");
+
+    let mut went_out = Vec::new();
+    SampleFormat::Cs8.convert(&captured.lock(), &mut went_out);
+    let tail = &went_out[went_out.len() - BLOCK..];
+    for (a, b) in monitor.iter().zip(tail) {
+        // Cs8 quantises at 1/128, so this is exact to within the capture's
+        // own resolution.
+        assert!((a - b).norm() < 0.01, "{a} was monitored for {b}");
+    }
+}

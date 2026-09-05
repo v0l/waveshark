@@ -382,6 +382,52 @@ fn key_down(mut g: pipeline::Graph) -> u64 {
     idle
 }
 
+/// Put what is going out into what the receiver sees.
+///
+/// A half duplex radio hears nothing while it transmits, so the driver hands
+/// its receive stream a noise floor and the spectrum is flat for the length
+/// of the over. That is honest and useless: an operator wants to see their
+/// own signal, and it is the only way to check without a second radio that
+/// the transmission is where it was meant to be, is the width it should be,
+/// and is being modulated at all.
+///
+/// So the transmitter's own samples are mixed into the receive block, shifted
+/// by the difference between where it is transmitting and where the receiver
+/// is tuned, exactly as a real signal on that frequency would arrive. The
+/// level is what the modulator produced, which is not calibrated against
+/// anything: this is a monitor, not a measurement, and a transmission on the
+/// waterfall is drawn in the same place a receiver across the room would see
+/// it and not at the strength it would see it.
+///
+/// Only while the radio is deaf. A full duplex radio hears its own
+/// transmission for real, and mirroring on top of that would draw it twice.
+fn mirror_tx(
+    g: &pipeline::Graph,
+    into: &mut [C32],
+    shift_hz: f64,
+    rate: f64,
+    mixer: &mut dsp::Mixer,
+    scratch: &mut Vec<C32>,
+) {
+    let sink = g
+        .order()
+        .last()
+        .and_then(|(id, _)| g.node(id))
+        .and_then(|n| n.as_any())
+        .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>());
+    let Some(sink) = sink else { return };
+    let sent = sink.monitor();
+    if sent.is_empty() {
+        return;
+    }
+    mixer.set_shift(shift_hz, rate);
+    scratch.clear();
+    mixer.process(sent, scratch);
+    for (dst, src) in into.iter_mut().zip(scratch.iter()) {
+        *dst += *src;
+    }
+}
+
 /// Feed the transmitter one block, the same length as the one the receiver
 /// just processed.
 ///
@@ -1824,6 +1870,11 @@ fn run(
     let mut tx_gain_db = 0.0f32;
     let mut held: Vec<Cmd> = Vec::new();
     let mut blocks_since_key: u64 = 0;
+    // Where the transmitter is, and the mixer that puts it back on the
+    // spectrum where it belongs.
+    let mut keyed_hz = 0.0f64;
+    let mut monitor_mix = dsp::Mixer::new(0.0, 1.0);
+    let mut monitor_buf: Vec<C32> = Vec::new();
     // The transmitter, while one is keyed. A graph like any other, run from
     // the same loop as the receiver: on a full duplex radio both are doing
     // their work at once, and on a half duplex one the receive half is
@@ -1928,6 +1979,7 @@ fn run(
                                 &mic,
                             ) {
                                 Ok(g) => {
+                                    keyed_hz = plan.center.as_f64() + ch.offset_hz + tx.shift_hz;
                                     tracing::info!("keyed channel {}", ch.id);
                                     tx_graph = Some(g);
                                     status.keyed.store(ch.id, Ordering::Relaxed);
@@ -2279,7 +2331,7 @@ fn run(
         }
 
         let read_span = tracing::info_span!("rf_read").entered();
-        let buf = match stream.read() {
+        let mut buf = match stream.read() {
             Ok(b) => b,
             Err(_) => return Ok(()),
         };
@@ -2343,6 +2395,12 @@ fn run(
                 }
                 status.keyed.store(0, Ordering::Relaxed);
             }
+        }
+
+        // What is going out, drawn where a receiver would have heard it.
+        if let (Some(g), true) = (tx_graph.as_ref(), stream.silent()) {
+            let shift = keyed_hz - plan.center.as_f64();
+            mirror_tx(g, &mut buf.samples, shift, plan.rate, &mut monitor_mix, &mut monitor_buf);
         }
 
         {
