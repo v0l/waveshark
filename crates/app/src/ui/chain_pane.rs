@@ -23,6 +23,13 @@ impl Chain<'_> {
             });
             return;
         };
+        // Only what goes out, when that is what is being looked at. The
+        // transmit chain is four stages in a graph that on a wide span holds
+        // forty, and finding them among the banks is not reading a diagram.
+        let topo = match self.st.only_tx {
+            false => topo,
+            true => transmit_only(&topo),
+        };
         // Node ids are positions in the built graph, so a rebuild can leave
         // the selection pointing at a stage that is no longer there.
         if self.st.sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
@@ -154,6 +161,34 @@ impl Chain<'_> {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            // Whether the pane is showing the receiver or the transmitter.
+            // Disabled when nothing is keyed, because an empty pane with a
+            // button that did nothing would read as a fault.
+            let has_tx = self
+                .st
+                .topo
+                .as_ref()
+                .is_some_and(|t| t.nodes.iter().any(|n| n.kind == "radio_tx"));
+            if !has_tx {
+                self.st.only_tx = false;
+            }
+            let label = if self.st.only_tx { "TX ONLY" } else { "TX" };
+            if ui
+                .add_enabled(
+                    has_tx,
+                    egui::Button::new(label).fill(if self.st.only_tx {
+                        theme::READOUT
+                    } else {
+                        theme::WELL
+                    }),
+                )
+                .on_hover_text("Show only the chain that is transmitting")
+                .clicked()
+            {
+                self.st.only_tx = !self.st.only_tx;
+            }
+        });
+        ui.horizontal(|ui| {
             if ui
                 .add_enabled(self.st.edit.moved(), egui::Button::new("ARRANGE"))
                 .on_hover_text("Lay the stages out again from the graph")
@@ -246,4 +281,20 @@ impl Chain<'_> {
         }
     }
 
+}
+
+/// The transmit half of a chain, on its own.
+///
+/// Everything a keyed transmission runs through: the clock it takes from the
+/// receiver, what is being modulated, the modulator, and the radio. Found by
+/// what the stages carry rather than by a list of names kept here, so a
+/// modulator added later appears without this being touched: a transmit
+/// stream is marked as one on the port, which is the whole reason the
+/// direction is on the spec.
+fn transmit_only(topo: &pipeline::graph::Topology) -> pipeline::graph::Topology {
+    let mut out = topo.clone();
+    out.nodes.retain(|n| {
+        n.outputs.iter().any(|(_, s)| s.is_tx()) || n.inputs.iter().any(|(_, s)| s.is_tx())
+    });
+    out
 }

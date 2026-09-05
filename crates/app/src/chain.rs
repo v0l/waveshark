@@ -1953,7 +1953,12 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     if let Some(tx) = &plan.tx {
         use crate::radio::{TxMode, TxSource};
         p.add_derived(derived::TX_CLOCK, "tx_clock", Settings::new());
-        p.connect(head, (derived::TX_CLOCK, 0));
+        // From the raw span, not from the head. The head is downstream of the
+        // zoom decimator, so a chain taken from there runs at the zoomed rate
+        // and hands the radio blocks at a rate it is not sampling: the device
+        // refuses every one of them and transmits its own idle filler, which
+        // on air is a carrier full of holes and nothing else.
+        p.connect(Source::Span, (derived::TX_CLOCK, 0));
 
         let band = tx_audio_band(tx.mode);
         let (kind, mut settings) = match tx.spec.source {
