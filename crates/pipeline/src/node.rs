@@ -130,6 +130,13 @@ pub trait Node: Send + 'static {
         1
     }
 
+    /// Where the time inside one call goes, for a node that does several
+    /// things per block and can say which cost what. The graph measures the
+    /// call as a whole; this is the breakdown only the node can give.
+    fn phases(&self) -> Vec<(String, crate::cost::Cost)> {
+        Vec::new()
+    }
+
     /// Whether this node ends the stream rather than passing one on.
     ///
     /// A spectrum display, a recorder and a channel bank all consume samples
@@ -229,6 +236,10 @@ pub trait Simple: Send {
     fn subgraph_count(&self) -> usize {
         1
     }
+    /// See [`Node::phases`].
+    fn phases(&self) -> Vec<(String, crate::cost::Cost)> {
+        Vec::new()
+    }
     /// See [`Node::is_sink`].
     fn is_sink(&self) -> bool {
         false
@@ -317,6 +328,9 @@ impl<T: Simple + 'static> Node for T {
     }
     fn subgraph_count(&self) -> usize {
         Simple::subgraph_count(self)
+    }
+    fn phases(&self) -> Vec<(String, crate::cost::Cost)> {
+        Simple::phases(self)
     }
     fn is_sink(&self) -> bool {
         Simple::is_sink(self)

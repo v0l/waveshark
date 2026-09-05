@@ -13,6 +13,7 @@
 //! Stream tags and a separate async event path are kept, because both are
 //! things GNU Radio got right.
 
+pub mod cost;
 pub mod event;
 pub mod graph;
 pub mod node;
@@ -20,6 +21,7 @@ pub mod param;
 pub mod port;
 pub mod registry;
 
+pub use cost::Cost;
 pub use event::{Decoded, Event};
 pub use graph::{chain, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT};
 pub use node::{Node, NodeCtx, PortSpec, Simple};
