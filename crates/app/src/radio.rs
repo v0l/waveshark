@@ -659,7 +659,7 @@ pub struct TxSpec {
 impl Default for TxSpec {
     fn default() -> Self {
         Self {
-            mic_gain: 1.0,
+            mic_gain: 3.0,
             // A test tone, because the safe default is one that does not open
             // the microphone: keying should not put the room on air until
             // somebody has said it should.
@@ -1202,6 +1202,8 @@ pub struct Status {
     stations: parking_lot::Mutex<Vec<(u64, StationInfo)>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
+    /// What each scope stage in the chain is seeing, by node id.
+    scopes: parking_lot::Mutex<Vec<(usize, nodes::ScopeFrame)>>,
     /// Delay through that chain in milliseconds, as f32 bits.
     chain_latency: AtomicU32,
     /// Packets decoded across the whole span since the radio started.
@@ -1261,6 +1263,8 @@ pub struct Status {
     pub tx_underruns: AtomicU64,
     /// What the microphone is hearing, as f32 bits.
     pub mic_level: AtomicU32,
+    /// The microphone is arriving clipped from the capture side.
+    pub mic_clipped: AtomicBool,
     /// The radio's transmit gain, in dB, as the device took it.
     pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
@@ -1395,6 +1399,7 @@ impl Default for Status {
             channels: parking_lot::Mutex::new(Vec::new()),
             stations: parking_lot::Mutex::new(Vec::new()),
             chain: parking_lot::Mutex::new(None),
+            scopes: parking_lot::Mutex::new(Vec::new()),
             chain_latency: AtomicU32::new(0),
             decoded: AtomicU64::new(0),
             scan_channels: AtomicU64::new(0),
@@ -1423,6 +1428,7 @@ impl Default for Status {
             keyed: AtomicU64::new(0),
             tx_underruns: AtomicU64::new(0),
             mic_level: AtomicU32::new(0),
+            mic_clipped: AtomicBool::new(false),
             tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
             levels: parking_lot::Mutex::new((0, crate::chain::AudioPlan::default(), Vec::new())),
@@ -1559,6 +1565,11 @@ impl Status {
 
     pub fn chain_latency(&self) -> f64 {
         f64::from(f32::from_bits(self.chain_latency.load(Ordering::Relaxed)))
+    }
+
+    /// The scopes' latest frames, for the inspector.
+    pub fn scopes(&self) -> Vec<(usize, nodes::ScopeFrame)> {
+        self.scopes.lock().clone()
     }
 
     fn set_chain(&self, t: Option<pipeline::graph::Topology>, latency_ms: f64) {
@@ -2483,6 +2494,7 @@ fn run(
             }
             blocks_since_key = blocks_since_key.wrapping_add(1);
             status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
+            status.mic_clipped.store(rx.keyed() && rx.mic_clipped(), Ordering::Relaxed);
         }
 
         // What is going out, drawn where a receiver would have heard it.
@@ -2528,6 +2540,13 @@ fn run(
             if last_chain.elapsed() >= CHAIN_PUBLISH {
                 publish_chain(status, &rx);
                 last_chain = std::time::Instant::now();
+            }
+            // Scopes are a display and refresh with the spectrum, not with
+            // the chain: a scope republished once a second is a scope
+            // showing a second-old picture.
+            let scopes = rx.scopes();
+            if !scopes.is_empty() || !status.scopes.lock().is_empty() {
+                *status.scopes.lock() = scopes;
             }
             // The rate the spectrum sees rather than the one the radio
             // delivers: in manual mode a stage can sit between the two, and
@@ -3722,7 +3741,8 @@ pub(crate) mod tests {
             eprintln!("skipping: an unoptimised build says nothing about throughput");
             return;
         }
-        let rate = 2_400_000.0;
+        // SCAN_RATE=16000000 asks the same question of a wideband span.
+        let rate = std::env::var("SCAN_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(2_400_000.0);
         let mut rx = replay_receiver(&empty_buf(rate, Hz::mhz(868)), None).unwrap();
         let b = block(262_144);
         // One pass to warm the filters and the pool.

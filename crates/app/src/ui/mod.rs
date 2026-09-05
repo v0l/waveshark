@@ -39,7 +39,7 @@ mod settings;
 mod settings_rows;
 mod state;
 mod strip;
-mod widgets;
+pub(crate) mod widgets;
 
 use crate::bands;
 use crate::dial::Dial;
@@ -858,6 +858,7 @@ impl App {
         // long as the drag lasted.
         self.chain.topo = radio.status.chain();
         self.chain.latency = radio.status.chain_latency();
+        self.chain.scopes = radio.status.scopes();
         // An edit that will not build is refused and the last one that did
         // goes back, so what is on screen has to be what the receiver is
         // running rather than what was last asked for.

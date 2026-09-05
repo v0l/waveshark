@@ -509,12 +509,19 @@ impl Receiver {
     /// hearing.
     pub fn tx_state(&self) -> Option<(u64, u64, f32)> {
         let sink = self.tx_sink()?;
-        let mic = self
-            .tx_mic
+        Some((sink.written(), sink.underruns(), self.tx_mic().map(|m| m.peak()).unwrap_or(0.0)))
+    }
+
+    /// Whether the microphone's signal is arriving already clipped.
+    pub fn mic_clipped(&self) -> bool {
+        self.tx_mic().is_some_and(|m| m.input_clipped())
+    }
+
+    fn tx_mic(&self) -> Option<&nodes::MicNode> {
+        self.tx_mic
             .and_then(|id| self.graph.node(id))
             .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::MicNode>());
-        Some((sink.written(), sink.underruns(), mic.map(|m| m.peak()).unwrap_or(0.0)))
+            .and_then(|a| a.downcast_ref::<nodes::MicNode>())
     }
 
     /// The last block the transmitter sent, for showing it on the receiver's
@@ -1455,6 +1462,29 @@ impl Receiver {
         self.graph.topology()
     }
 
+    /// The latest readings of every scope in the graph, by node id, for the
+    /// inspector to draw. Reading takes the fresh flag, so a caller polling
+    /// faster than a scope refreshes sees the same frame again unchanged.
+    pub fn scopes(&mut self) -> Vec<(usize, nodes::ScopeFrame)> {
+        let ids: Vec<NodeId> = self.graph.order().map(|(id, _)| id).collect();
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(scope) = self
+                .graph
+                .node_mut(id)
+                .and_then(|n| n.as_any_mut())
+                .and_then(|a| a.downcast_mut::<nodes::ScopeNode>())
+            else {
+                continue;
+            };
+            let (frame, _) = scope.frame();
+            if !frame.spectrum.is_empty() || frame.peak > 0.0 {
+                out.push((id.0, frame.clone()));
+            }
+        }
+        out
+    }
+
     /// The waves the graph runs in, for debugging what runs beside what.
     pub fn run_levels(&self) -> Vec<Vec<&str>> {
         self.graph.run_levels()
@@ -1914,9 +1944,16 @@ const TX_RADIO: &str = "radio_tx";
 pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
     use crate::radio::TxMode;
     match mode {
-        // Communications speech, out to where intelligibility lives.
-        TxMode::Nfm | TxMode::Fm | TxMode::Carrier => (200.0, 3_400.0),
-        TxMode::Am => (200.0, 4_000.0),
+        // Communications speech, out to where intelligibility lives. The low
+        // cut is high on purpose: measured off air, a handheld puts 7 to
+        // 12 dB less into the octave under 630 Hz than a flat microphone
+        // does, and audio with that octave left in sounds muddy beside it
+        // whatever the level. A 400 Hz cut through the 255 tap filter is
+        // about 10 dB down at 300 and 3 dB at 500, which is the shape the
+        // radio has.
+        TxMode::Nfm | TxMode::Carrier => (400.0, 3_400.0),
+        TxMode::Fm => (400.0, 4_000.0),
+        TxMode::Am => (300.0, 4_000.0),
         // Broadcast, where 15 kHz is the standard and the pilot is above it.
         TxMode::Wfm => (30.0, 15_000.0),
     }
@@ -2034,6 +2071,15 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             TxSource::Mic => {
                 let mut s = Settings::new();
                 s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
+                // What the receiving radio de-emphasises by: 750 us on a
+                // voice channel, 50 us on broadcast FM in Europe, nothing
+                // on AM.
+                let emphasis = match tx.mode {
+                    TxMode::Nfm | TxMode::Fm | TxMode::Carrier => 750.0,
+                    TxMode::Wfm => 50.0,
+                    TxMode::Am => 0.0,
+                };
+                s.insert("emphasis_us".into(), pipeline::ParamValue::Float(emphasis));
                 ("mic", s)
             }
             TxSource::Tone => {
@@ -4401,13 +4447,7 @@ pub fn transmit_graph(
     // allows 12.5. The limiting happens in the microphone stage, at the
     // microphone's own rate, because a filter this sharp is unaffordable at
     // the radio's.
-    let band = match mode {
-        // Communications speech, out to where intelligibility lives.
-        TxMode::Nfm | TxMode::Fm | TxMode::Carrier => (200.0, 3_400.0),
-        TxMode::Am => (200.0, 4_000.0),
-        // Broadcast, where 15 kHz is the standard and the pilot is above it.
-        TxMode::Wfm => (30.0, 15_000.0),
-    };
+    let band = tx_audio_band(mode);
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
         (TxSource::Mic, Some(src)) => {
             Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band))

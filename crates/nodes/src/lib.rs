@@ -20,6 +20,7 @@ pub mod modes_nodes;
 pub mod feed_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
+pub mod scope_nodes;
 pub mod bank_node;
 pub mod filter_nodes;
 pub mod sink_nodes;
@@ -48,7 +49,7 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto_node::AutoNode;
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode};
+pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX};
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
     NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
@@ -57,6 +58,7 @@ pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
+pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
     RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
@@ -373,6 +375,8 @@ pub fn registry() -> Registry {
             cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
             cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
             cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
+            cfg.bank_channel_hz = s.f64_or("bank_channel_hz", cfg.bank_channel_hz);
+            cfg.bank_min_channels = s.f64_or("bank_min_channels", cfg.bank_min_channels as f64) as usize;
             if cfg.close_db >= cfg.open_db {
                 cfg.close_db = cfg.open_db - 1.0;
             }
@@ -481,6 +485,20 @@ pub fn registry() -> Registry {
             category: "filter",
         },
         |_s: &Settings| Ok(Box::new(DcBlockNode::new()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "scope",
+            summary: "Look at a wire: a spectrum, a spectrogram and a level meter of \
+                      whatever passes through, which it passes on untouched",
+            category: "sink",
+        },
+        |s: &Settings| {
+            let mut n = ScopeNode::new(s.i64_or("fft_size", 1024).max(64) as usize);
+            let _ = n.set_param("refresh_hz", pipeline::ParamValue::Float(s.f64_or("refresh_hz", 30.0)));
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
     );
 
     r.register(
