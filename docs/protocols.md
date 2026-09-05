@@ -317,28 +317,35 @@ codewords the message text can be read back out of.
 
 ## Transmit
 
-Nothing transmits yet, and the gap is structural rather than protocol by
-protocol. Four things are missing:
+Nothing goes on air yet, and the gap is structural rather than protocol by
+protocol. The device layer is in place; three things above it are missing.
 
-1. **A transmitting device.** `common::device::Device` has `start_rx` and no
-   counterpart. It needs `start_tx` returning a sink, and the `hackrf` crate
-   needs the transmit half of the USB protocol and its gain controls. The
-   RTL-SDR cannot transmit at all, so the trait has to make that a capability
-   rather than an assumption.
+The device layer, done: `Device::start_tx` returns a `TxStream`, which takes
+blocks and reports the transfers the radio sent as zeros because nothing was
+queued in time. A radio that transmits says so through `DeviceInfo::tx`,
+which carries the transmit tuning ranges and gain stages separately from the
+receive ones because they are different hardware; the default is `None`, so
+an RTL-SDR refuses rather than failing at the first block. `hackrf-usb` holds
+the transmit half of the USB protocol (bulk OUT, `TRANSCEIVER_MODE_TRANSMIT`,
+TXVGA gain) and keeps transfers queued ahead of the radio. `sources::FileSink`
+is the same trait writing a capture instead, which is what a modulator should
+be developed against: what it produces replays through the receiver, so the
+test asserts a decode rather than a waveform, and nothing is radiated while
+it is still wrong.
 
-2. **Encoders, which are the slicers backwards.** `decode::slicer::slice`
+1. **Encoders, which are the slicers backwards.** `decode::slicer::slice`
    turns a pulse train into bits under a timing table; the same table turns
    bits back into a pulse train. Every protocol that has a table gets an
    encoder nearly for free, which is why the transmit column above mostly
    mirrors the receive one.
 
-3. **Modulator nodes.** A `Package` of mark/gap timings becomes an envelope,
+2. **Modulator nodes.** A `Package` of mark/gap timings becomes an envelope,
    and an envelope becomes IQ. Two nodes cover most of this list: OOK keying
    and two-level FSK. Both need edge shaping rather than hard switching, or
    the transmission splatters across the band: a raised-cosine ramp of a few
    microseconds is the difference between a legal signal and interference.
 
-4. **Scheduling and limits.** Transmission is time critical in a way reception
+3. **Scheduling and limits.** Transmission is time critical in a way reception
    is not, so the graph needs to produce samples ahead of a deadline rather
    than in response to input. ISM bands also carry duty cycle limits (1% in
    parts of 868 MHz), and the transmitter should enforce them rather than

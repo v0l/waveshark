@@ -1,15 +1,17 @@
-//! HackRF One support, adapting `rs-hackrf` to the workspace `Device` trait.
+//! HackRF One support, adapting `hackrf-usb` to the workspace `Device` trait.
 //!
-//! The USB protocol work is `rs-hackrf`'s; this crate is the translation layer:
-//! capability reporting, Cs8 to complex float conversion, and the gain policy.
+//! The USB protocol work is `hackrf-usb`'s; this crate is the translation
+//! layer: capability reporting, Cs8 conversion in both directions, and the
+//! gain policy.
 
 pub mod gain;
 
 use common::{
     Device, DeviceInfo, DriverKind, Error, GainMode, Hz, IqBuf, Result, RxStream, SampleFormat,
-    Sps, TunerRange, C32,
+    Sps, TunerRange, TxInfo, TxStream, C32,
 };
-use rs_hackrf::{AsyncReadControlHandle, AsyncReadHandle, HackRf};
+use hackrf_usb::{AsyncReadControlHandle, AsyncReadHandle, AsyncWriteHandle, HackRf};
+use std::time::Duration;
 
 /// Datasheet tuning range.
 const FREQ_MIN: u64 = 1_000_000;
@@ -22,7 +24,7 @@ const RATE_MAX: u64 = 20_000_000;
 /// outer eighth at each edge is roll-off rather than usable span.
 const USABLE_RATIO: f32 = 0.75;
 
-fn map_err(e: rs_hackrf::Error) -> Error {
+fn map_err(e: hackrf_usb::Error) -> Error {
     let s = e.to_string();
     if s.contains("Access") || s.contains("permission") || s.contains("Permission") {
         Error::Permission
@@ -46,8 +48,11 @@ pub struct HackRfDevice {
     center: Hz,
     rate: Sps,
     stages: gain::Stages,
-    /// Set while streaming so tuning still works without stopping RX.
+    tx_stages: gain::TxStages,
+    /// Set while streaming so tuning still works without stopping RX or TX.
     ctrl: Option<AsyncReadControlHandle>,
+    /// Set while transmitting, so gain changes go to the transmit stages.
+    transmitting: bool,
 }
 
 impl HackRfDevice {
@@ -60,7 +65,7 @@ impl HackRfDevice {
         let version = dev.version().unwrap_or_else(|_| "unknown".into());
         let board = dev
             .board_id()
-            .map(rs_hackrf::transport::board_id_name)
+            .map(hackrf_usb::transport::board_id_name)
             .unwrap_or("HackRF");
 
         let info = DeviceInfo {
@@ -105,6 +110,35 @@ impl HackRfDevice {
             ],
             native_format: SampleFormat::Cs8,
             usable_bandwidth_ratio: USABLE_RATIO,
+            tx: Some(TxInfo {
+                ranges: vec![TunerRange {
+                    range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),
+                    label: "1 MHz - 6 GHz",
+                }],
+                rate_range: Sps(RATE_MIN)..=Sps(RATE_MAX),
+                // Two stages on transmit, and neither is the receive path's:
+                // the LNA and baseband VGA are not in circuit at all.
+                gain_stages: vec![
+                    common::GainStage {
+                        name: "amp".into(),
+                        label: "Front end amp".into(),
+                        range: 0.0..=gain::AMP_DB,
+                        values: vec![0.0, gain::AMP_DB],
+                        step: gain::AMP_DB,
+                        auto: false,
+                    },
+                    common::GainStage {
+                        name: "txvga".into(),
+                        label: "Transmit IF gain".into(),
+                        range: 0.0..=gain::TXVGA_MAX_DB,
+                        values: Vec::new(),
+                        step: 1.0,
+                        auto: false,
+                    },
+                ],
+                native_format: SampleFormat::Cs8,
+                half_duplex: true,
+            }),
         };
 
         let mut d = Self {
@@ -113,7 +147,9 @@ impl HackRfDevice {
             center: Hz(100_000_000),
             rate: Sps(8_000_000),
             stages: gain::Stages::from_total(32.0),
+            tx_stages: gain::TxStages::default(),
             ctrl: None,
+            transmitting: false,
         };
         d.set_rate(Sps(8_000_000))?;
         d.set_center(Hz(100_000_000))?;
@@ -127,6 +163,19 @@ impl HackRfDevice {
 
     fn hw(&self) -> Result<&HackRf> {
         self.dev.as_ref().ok_or(Error::Disconnected)
+    }
+
+    fn apply_tx_gain(&self) -> Result<()> {
+        let gain::TxStages { amp, txvga } = self.tx_stages;
+        if let Some(c) = &self.ctrl {
+            c.set_amp_enable(amp).map_err(map_err)?;
+            c.set_txvga_gain(txvga).map_err(map_err)?;
+        } else {
+            let d = self.hw()?;
+            d.set_amp_enable(amp).map_err(map_err)?;
+            d.set_txvga_gain(txvga).map_err(map_err)?;
+        }
+        Ok(())
     }
 
     fn apply_gain(&self) -> Result<()> {
@@ -183,7 +232,7 @@ impl Device for HackRfDevice {
         d.set_sample_rate(r.0 as u32).map_err(map_err)?;
         // set_sample_rate picks a filter, but be explicit: the default must
         // stay below the rate or out-of-band energy folds into the span.
-        let bw = rs_hackrf::transport::compute_baseband_filter_bw((r.0 as u32) * 3 / 4);
+        let bw = hackrf_usb::transport::compute_baseband_filter_bw((r.0 as u32) * 3 / 4);
         d.set_baseband_filter_bandwidth(bw).map_err(map_err)?;
         self.rate = r;
         Ok(())
@@ -200,6 +249,9 @@ impl Device for HackRfDevice {
             GainMode::Auto => 32.0,
             GainMode::Manual(db) => db,
         };
+        if self.transmitting {
+            return Err(Error::HalfDuplexBusy);
+        }
         if !self.stages.set(stage, db) {
             return Err(Error::other(format!("no gain stage named {stage}")));
         }
@@ -219,6 +271,57 @@ impl Device for HackRfDevice {
 
     fn rate_needs_restart(&self) -> bool {
         true
+    }
+
+    fn set_tx_gain(&mut self, stage: &str, mode: GainMode) -> Result<()> {
+        // There is no transmit AGC either, and guessing an operating point
+        // for a transmitter means guessing how much power to radiate. Auto
+        // means the bottom of the range.
+        let db = match mode {
+            GainMode::Auto => 0.0,
+            GainMode::Manual(db) => db,
+        };
+        if !self.tx_stages.set(stage, db) {
+            return Err(Error::other(format!("no transmit gain stage named {stage}")));
+        }
+        match self.transmitting {
+            true => self.apply_tx_gain(),
+            // Applying it now would switch the front end amp on while the
+            // receiver is running, which is a receive setting with the same
+            // name. It goes on the hardware when transmit starts.
+            false => Ok(()),
+        }
+    }
+
+    fn tx_gains(&self) -> Vec<(String, GainMode)> {
+        vec![
+            (
+                "amp".into(),
+                GainMode::Manual(if self.tx_stages.amp { gain::AMP_DB } else { 0.0 }),
+            ),
+            ("txvga".into(), GainMode::Manual(self.tx_stages.txvga as f32)),
+        ]
+    }
+
+    fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
+        // Half duplex: the receive stream owns the device, so a caller that
+        // is still receiving has to drop its stream and reopen the radio
+        // before it can transmit.
+        let dev = self.dev.take().ok_or(Error::HalfDuplexBusy)?;
+        let handle = dev.into_streaming_writer(0, 0).map_err(map_err)?;
+        self.ctrl = Some(handle.control_handle());
+        self.transmitting = true;
+        // As with receive, entering the mode re-initialises the front end,
+        // so the tuning and the gain have to be set again after it.
+        if let Some(c) = &self.ctrl {
+            c.tune(self.center.0).map_err(map_err)?;
+        }
+        self.apply_tx_gain()?;
+        Ok(Box::new(HackRfTxStream {
+            handle,
+            rate: self.rate,
+            bytes: Vec::new(),
+        }))
     }
 
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
@@ -241,6 +344,57 @@ impl Device for HackRfDevice {
             last_dropped: 0,
             samples: Vec::new(),
         }))
+    }
+}
+
+pub struct HackRfTxStream {
+    handle: AsyncWriteHandle,
+    rate: Sps,
+    /// Reused so a block at the sample rate does not allocate per call.
+    bytes: Vec<u8>,
+}
+
+impl TxStream for HackRfTxStream {
+    fn write(&mut self, buf: &IqBuf) -> Result<()> {
+        // A block at another rate would go out at this one, stretched or
+        // compressed: the wrong bandwidth on the wrong frequency. Resampling
+        // belongs upstream where the graph can see it.
+        if buf.rate != self.rate {
+            return Err(Error::RateUnsupported { req: buf.rate });
+        }
+        if buf.samples.is_empty() {
+            return Ok(());
+        }
+        self.bytes.clear();
+        SampleFormat::Cs8.encode(&buf.samples, &mut self.bytes);
+        self.handle
+            .send(std::mem::take(&mut self.bytes))
+            .map_err(map_err)
+    }
+
+    fn underruns(&self) -> u64 {
+        self.handle.idle_transfers()
+    }
+
+    fn drain(&mut self, timeout: Duration) -> bool {
+        self.handle.drain(timeout)
+    }
+
+    fn stop(&mut self) {
+        self.handle.stop();
+    }
+}
+
+/// Let the tail out before the transmitter is torn down.
+///
+/// Dropping the handle cancels transfers that have not gone out yet, so a
+/// caller that drops immediately after its last `write` truncates the end of
+/// the transmission. A short drain first costs nothing when the queue is
+/// already empty.
+impl Drop for HackRfTxStream {
+    fn drop(&mut self) {
+        self.handle.drain(Duration::from_millis(500));
+        self.handle.stop();
     }
 }
 
@@ -282,7 +436,7 @@ impl RxStream for HackRfStream {
     fn dropped(&self) -> u64 {
         // Chunks, not samples, so scale by what a chunk holds.
         let c = self.handle.control_handle().dropped_chunks();
-        c.saturating_mul((rs_hackrf::TRANSFER_BUFFER_SIZE / 2) as u64)
+        c.saturating_mul((hackrf_usb::TRANSFER_BUFFER_SIZE / 2) as u64)
     }
 
     fn stop(&mut self) {

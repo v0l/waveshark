@@ -25,6 +25,12 @@ pub enum Error {
     #[error("stream overrun: {dropped} samples dropped")]
     Overrun { dropped: u64 },
 
+    #[error("this device cannot transmit")]
+    TxUnsupported,
+
+    #[error("cannot transmit while receiving on a half duplex radio")]
+    HalfDuplexBusy,
+
     #[error("unsupported tuner: {0}")]
     UnsupportedTuner(String),
 

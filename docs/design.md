@@ -13,11 +13,12 @@ the [README](../README.md).
 | `pipeline` | the flow graph: typed DAG, rate negotiation, stream tags, events |
 | `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders |
 | `nodes` | DSP and decoders as graph nodes, the registry, and the wideband channel bank |
-| `sources` | file replay with rtl_433-style filename metadata |
+| `sources` | file replay with rtl_433-style filename metadata, and the file sink that transmit is tested into |
 | `audio` | cpal playback with a drift-tracking resampler |
 | `app` | egui front end: spectrum, waterfall, tuner, channels, chain view |
 | `rtlsdr-sys` | bindgen FFI to librtlsdr |
-| `hackrf` | HackRF One, adapting `rs-hackrf` to the `Device` trait |
+| `hackrf` | HackRF One, adapting `hackrf-usb` to the `Device` trait |
+| `hackrf-usb` | HackRF USB transport, receive and transmit; vendored from `rs-hackrf` (MIT) |
 | `rtlsdr` | safe driver with an async streaming thread |
 | `limesdr-sys` | bindgen FFI to LimeSuite's LMS API |
 | `limesdr` | LimeSDR-USB and Mini, 100 kHz to 3.8 GHz |
@@ -776,8 +777,8 @@ anything borrowed from them can be relicensed into this one:
 | `ship162` | AIS |
 | `datalink` | VDL2 and ARINC 629 |
 
-They share the Desperado workspace with `rs-hackrf`, which this repo already
-depends on for HackRF USB support.
+They share the Desperado workspace with `rs-hackrf`, whose transport this
+repo vendors as `hackrf-usb` for HackRF USB support.
 
 ## Licensing rationale
 

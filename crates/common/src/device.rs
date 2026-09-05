@@ -3,7 +3,7 @@
 //! Deliberately narrow. Drivers expose capabilities as data (`DeviceInfo`) so
 //! the UI can build controls generically instead of special-casing each radio.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::iq::{IqBuf, SampleFormat};
 use crate::units::{Hz, Sps};
 use std::ops::RangeInclusive;
@@ -163,6 +163,26 @@ pub enum GainMode {
     Manual(f32),
 }
 
+/// What a device can do on transmit, or `None` for a receiver.
+///
+/// Separate from the receive side rather than folded into it because none of
+/// it matches: a HackRF transmits over the same tuning range at a different
+/// gain stage entirely, and an RTL-SDR has no transmitter at all. A caller
+/// asks for this and gets `None` rather than discovering the hardware cannot
+/// transmit when the first buffer is refused.
+#[derive(Clone, Debug)]
+pub struct TxInfo {
+    /// Spans this device can transmit on, which need not be what it receives.
+    pub ranges: Vec<TunerRange>,
+    pub rate_range: RangeInclusive<Sps>,
+    /// Transmit gain stages in signal path order.
+    pub gain_stages: Vec<GainStage>,
+    pub native_format: SampleFormat,
+    /// Whether the radio has to stop receiving to transmit. Every radio here
+    /// that transmits at all is half duplex, but a caller should ask.
+    pub half_duplex: bool,
+}
+
 /// Everything the UI needs to render controls for a device without knowing
 /// which driver it is.
 #[derive(Clone, Debug)]
@@ -185,11 +205,24 @@ pub struct DeviceInfo {
     /// HackRF's usable span is well under its nominal rate; the channelizer
     /// uses this to avoid detecting garbage at the band edges.
     pub usable_bandwidth_ratio: f32,
+    /// Present only on a radio that transmits.
+    pub tx: Option<TxInfo>,
 }
 
 impl DeviceInfo {
     pub fn covers(&self, f: Hz) -> bool {
         self.ranges.iter().any(|r| r.range.contains(&f))
+    }
+
+    pub fn can_transmit(&self) -> bool {
+        self.tx.is_some()
+    }
+
+    /// Whether this device will transmit at `f`.
+    pub fn covers_tx(&self, f: Hz) -> bool {
+        self.tx
+            .as_ref()
+            .is_some_and(|t| t.ranges.iter().any(|r| r.range.contains(&f)))
     }
 }
 
@@ -266,6 +299,23 @@ pub trait Device: Send {
 
     /// Begin streaming. Consumes control of sampling until the stream drops.
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>>;
+
+    /// Set one transmit gain stage by the name given in `TxInfo::gain_stages`.
+    fn set_tx_gain(&mut self, _stage: &str, _mode: GainMode) -> Result<()> {
+        Err(Error::TxUnsupported)
+    }
+
+    fn tx_gains(&self) -> Vec<(String, GainMode)> {
+        Vec::new()
+    }
+
+    /// Begin transmitting. Half duplex radios stop receiving to do it, so the
+    /// caller must have dropped the receive stream first.
+    ///
+    /// Defaults to refusing, which is the honest answer for every receiver.
+    fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
+        Err(Error::TxUnsupported)
+    }
 }
 
 /// A running sample stream.
@@ -281,5 +331,34 @@ pub trait RxStream: Send {
     fn dropped(&self) -> u64;
 
     /// Request the stream stop. `read` will return `Disconnected` afterwards.
+    fn stop(&mut self);
+}
+
+/// A running transmit stream.
+///
+/// The mirror of [`RxStream`], and deliberately as narrow: a producer hands
+/// over blocks and is told how far behind it is falling. Where a receiver
+/// drops samples a transmitter emits silence, so `underruns` counts what went
+/// out unfilled rather than what was lost.
+pub trait TxStream: Send {
+    /// Hand one block over for transmission.
+    ///
+    /// Blocks while the device has enough queued, which is what paces a
+    /// producer to the sample rate. Returns `Err(Error::Disconnected)` once
+    /// the device is gone.
+    fn write(&mut self, buf: &IqBuf) -> Result<()>;
+
+    /// Transfers the device sent as zeros because nothing was queued in time.
+    ///
+    /// Non-zero means the signal on air has gaps in it, which is a different
+    /// failure from a dropped receive buffer: it is radiated.
+    fn underruns(&self) -> u64;
+
+    /// Block until everything already written has been handed to the device,
+    /// or until the timeout expires. Returns whether it emptied.
+    fn drain(&mut self, timeout: std::time::Duration) -> bool;
+
+    /// Stop transmitting. Anything not yet sent is discarded, so call
+    /// [`Self::drain`] first if the tail matters.
     fn stop(&mut self);
 }
