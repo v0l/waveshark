@@ -4091,6 +4091,7 @@ mod scan_mark_tests {
 /// resampler is the next thing this wants.
 pub fn transmit_graph(
     tx: &crate::radio::TxSpec,
+    mode: crate::radio::TxMode,
     rate: f64,
     center: Hz,
     stream: Box<dyn common::TxStream>,
@@ -4111,7 +4112,7 @@ pub fn transmit_graph(
     // A carrier is a tone at nothing: the modulator sees silence and leaves
     // the carrier where it is, which is exactly an unmodulated transmission.
     // Speech gets no tone laid over it either.
-    let level = match (tx.mode, tx.source) {
+    let level = match (mode, tx.source) {
         (TxMode::Carrier, _) | (_, TxSource::Mic) => 0.0,
         _ => 0.8,
     };
@@ -4119,13 +4120,15 @@ pub fn transmit_graph(
     // something the radio thread pushes in, so what is being transmitted can
     // be seen and tapped between the two.
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
-        (TxSource::Mic, Some(src)) => Box::new(nodes::MicNode::new(src, 1.0)),
+        (TxSource::Mic, Some(src)) => {
+            Box::new(nodes::MicNode::new(src, tx.mic_gain, tx.mic_agc))
+        }
         (TxSource::Mic, None) => {
             return Err(common::Error::other("no microphone is open to transmit from"))
         }
         (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
     };
-    let modulator: Box<dyn pipeline::Node> = match tx.mode {
+    let modulator: Box<dyn pipeline::Node> = match mode {
         TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
         TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
@@ -4221,10 +4224,10 @@ mod tx_tests {
         sources::FileSink::in_memory(Sps(rate as u64), SampleFormat::Cs8)
     }
 
-    fn transmit(tx: TxSpec, rate: f64, blocks: usize) -> Vec<C32> {
+    fn transmit(tx: TxSpec, mode: TxMode, rate: f64, blocks: usize) -> Vec<C32> {
         let (mut dev, buf) = sink(rate);
-        let mut g =
-            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap(), None).unwrap();
+        let mut g = transmit_graph(&tx, mode, rate, Hz(145_500_000), dev.start_tx().unwrap(), None)
+            .unwrap();
         for _ in 0..blocks {
             let b = g.input_buf();
             b.clear();
@@ -4245,8 +4248,8 @@ mod tx_tests {
     #[test]
     fn a_keyed_nfm_channel_is_a_tone_on_a_carrier() {
         let rate = 48_000.0;
-        let tx = TxSpec { mode: TxMode::Nfm, tone_hz: 1_000.0, ..Default::default() };
-        let iq = transmit(tx, rate, 5);
+        let tx = TxSpec { tone_hz: 1_000.0, ..Default::default() };
+        let iq = transmit(tx, TxMode::Nfm, rate, 5);
         assert_eq!(iq.len(), 5 * 4_800);
 
         let mut demod = dsp::FmDemod::new(rate, nodes::NBFM_DEVIATION_HZ);
@@ -4263,7 +4266,7 @@ mod tx_tests {
         // What a power measurement wants, and the check that a mode with no
         // audio still keys: a steady envelope and no deviation.
         let rate = 48_000.0;
-        let iq = transmit(TxSpec { mode: TxMode::Carrier, ..Default::default() }, rate, 2);
+        let iq = transmit(TxSpec::default(), TxMode::Carrier, rate, 2);
         let mut demod = dsp::FmDemod::new(rate, nodes::NBFM_DEVIATION_HZ);
         let mut audio = Vec::new();
         demod.process(&iq, &mut audio);
@@ -4276,11 +4279,7 @@ mod tx_tests {
     #[test]
     fn an_am_channel_modulates_its_envelope() {
         let rate = 48_000.0;
-        let iq = transmit(
-            TxSpec { mode: TxMode::Am, tone_hz: 1_000.0, ..Default::default() },
-            rate,
-            2,
-        );
+        let iq = transmit(TxSpec { tone_hz: 1_000.0, ..Default::default() }, TxMode::Am, rate, 2);
         let (mut lo, mut hi) = (f32::MAX, 0.0f32);
         for s in iq.iter().skip(100) {
             lo = lo.min(s.norm());
@@ -4302,11 +4301,20 @@ mod tx_tests {
         let src: std::sync::Arc<dyn audio::AudioSource> =
             std::sync::Arc::new(audio::Canned::new(tone, mic_rate, true));
 
-        let tx = TxSpec { mode: TxMode::Nfm, source: TxSource::Mic, ..Default::default() };
+        // Levelling off, because what is under test is the path rather than
+        // the leveller: an AGC winding up over the first tenth of a second
+        // changes the amplitude while it does it, which is what it is for.
+        let tx = TxSpec { source: TxSource::Mic, mic_agc: false, ..Default::default() };
         let (mut dev, buf) = sink(rate);
-        let mut g =
-            transmit_graph(&tx, rate, Hz(145_500_000), dev.start_tx().unwrap(), Some(src))
-                .unwrap();
+        let mut g = transmit_graph(
+            &tx,
+            TxMode::Nfm,
+            rate,
+            Hz(145_500_000),
+            dev.start_tx().unwrap(),
+            Some(src),
+        )
+        .unwrap();
         for _ in 0..5 {
             let b = g.input_buf();
             b.clear();
@@ -4337,9 +4345,16 @@ mod tx_tests {
         // indistinguishable from a radio that is not working.
         let (mut dev, _b) = sink(48_000.0);
         let tx = TxSpec { source: TxSource::Mic, ..Default::default() };
-        let err = transmit_graph(&tx, 48_000.0, Hz(145_500_000), dev.start_tx().unwrap(), None)
-            .unwrap_err()
-            .to_string();
+        let err = transmit_graph(
+            &tx,
+            TxMode::Nfm,
+            48_000.0,
+            Hz(145_500_000),
+            dev.start_tx().unwrap(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("microphone"), "unhelpful: {err}");
     }
 
@@ -4348,6 +4363,7 @@ mod tx_tests {
         let (mut dev, _b) = sink(48_000.0);
         let g = transmit_graph(
             &TxSpec::default(),
+            TxMode::Nfm,
             48_000.0,
             Hz(145_500_000),
             dev.start_tx().unwrap(),

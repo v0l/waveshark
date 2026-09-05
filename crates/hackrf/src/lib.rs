@@ -60,6 +60,14 @@ pub fn enumerate() -> Vec<String> {
 pub struct Shared {
     /// The reader, while there is one. Taken out for the duration of an over.
     rx: parking_lot::Mutex<Option<AsyncReadHandle>>,
+    /// The transmitter's control channel, while an over is running.
+    ///
+    /// Held here rather than on the device because the device is not told
+    /// when an over ends: the transmit stream is what ends it, and a stored
+    /// handle to a thread that has exited refuses every command with
+    /// "control channel closed", which is what stopped the first key-up from
+    /// working at all.
+    tx: parking_lot::Mutex<Option<AsyncReadControlHandle>>,
     /// Whether reads should produce silence rather than samples.
     silent: std::sync::atomic::AtomicBool,
     /// Which unit to reopen: the same one, by the index it was opened at.
@@ -79,10 +87,7 @@ pub struct HackRfDevice {
     rate: Sps,
     stages: gain::Stages,
     tx_stages: gain::TxStages,
-    /// Set while streaming so tuning still works without stopping RX or TX.
-    ctrl: Option<AsyncReadControlHandle>,
-    /// Set while transmitting, so gain changes go to the transmit stages.
-    transmitting: bool,
+
     shared: std::sync::Arc<Shared>,
     /// The index this unit was opened at, for reopening it after an over.
     index: usize,
@@ -182,10 +187,9 @@ impl HackRfDevice {
             rate: Sps(8_000_000),
             stages: gain::Stages::from_total(32.0),
             tx_stages: gain::TxStages::default(),
-            ctrl: None,
-            transmitting: false,
             shared: std::sync::Arc::new(Shared {
                 rx: parking_lot::Mutex::new(None),
+                tx: parking_lot::Mutex::new(None),
                 silent: std::sync::atomic::AtomicBool::new(false),
                 index,
             }),
@@ -205,9 +209,25 @@ impl HackRfDevice {
         self.dev.as_ref().ok_or(Error::Disconnected)
     }
 
+    /// The control channel of whichever stream is running now.
+    ///
+    /// Asked for on every call rather than stored, because which stream is
+    /// running changes underneath this: an over replaces the reader with a
+    /// writer and puts the reader back when it ends.
+    fn ctl(&self) -> Option<AsyncReadControlHandle> {
+        if let Some(c) = self.shared.tx.lock().as_ref() {
+            return Some(c.clone());
+        }
+        self.shared.rx.lock().as_ref().map(|h| h.control_handle())
+    }
+
+    fn transmitting(&self) -> bool {
+        self.shared.tx.lock().is_some()
+    }
+
     fn apply_tx_gain(&self) -> Result<()> {
         let gain::TxStages { amp, txvga } = self.tx_stages;
-        if let Some(c) = &self.ctrl {
+        if let Some(c) = self.ctl() {
             c.set_amp_enable(amp).map_err(map_err)?;
             c.set_txvga_gain(txvga).map_err(map_err)?;
         } else {
@@ -220,7 +240,7 @@ impl HackRfDevice {
 
     fn apply_gain(&self) -> Result<()> {
         let gain::Stages { amp, lna, vga } = self.stages;
-        if let Some(c) = &self.ctrl {
+        if let Some(c) = self.ctl() {
             c.set_amp_enable(amp).map_err(map_err)?;
             c.set_lna_gain(lna).map_err(map_err)?;
             c.set_vga_gain(vga).map_err(map_err)?;
@@ -252,7 +272,7 @@ impl Device for HackRfDevice {
         }
         // Retuning through the control handle keeps the stream running; going
         // via the device while streaming would need RX stopped and restarted.
-        match &self.ctrl {
+        match self.ctl() {
             Some(c) => c.tune(f.0).map_err(map_err)?,
             None => self.hw()?.set_freq(f.0).map_err(map_err)?,
         }
@@ -289,7 +309,7 @@ impl Device for HackRfDevice {
             GainMode::Auto => 32.0,
             GainMode::Manual(db) => db,
         };
-        if self.transmitting {
+        if self.transmitting() {
             return Err(Error::HalfDuplexBusy);
         }
         if !self.stages.set(stage, db) {
@@ -324,7 +344,7 @@ impl Device for HackRfDevice {
         if !self.tx_stages.set(stage, db) {
             return Err(Error::other(format!("no transmit gain stage named {stage}")));
         }
-        match self.transmitting {
+        match self.transmitting() {
             true => self.apply_tx_gain(),
             // Applying it now would switch the front end amp on while the
             // receiver is running, which is a receive setting with the same
@@ -377,11 +397,10 @@ impl Device for HackRfDevice {
             }
         };
         let handle = dev.into_streaming_writer(0, 0).map_err(map_err)?;
-        self.ctrl = Some(handle.control_handle());
-        self.transmitting = true;
+        *self.shared.tx.lock() = Some(handle.control_handle());
         // As with receive, entering the mode re-initialises the front end,
         // so the tuning and the gain have to be set again after it.
-        if let Some(c) = &self.ctrl {
+        if let Some(c) = self.ctl() {
             c.tune(self.center.0).map_err(map_err)?;
         }
         self.apply_tx_gain()?;
@@ -399,16 +418,14 @@ impl Device for HackRfDevice {
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
         let dev = self.dev.take().ok_or(Error::Disconnected)?;
         let handle = dev.into_streaming_reader(0, 0).map_err(map_err)?;
-        self.ctrl = Some(handle.control_handle());
         // Entering receive mode re-initialises the front end, so the tune and
         // the gains set before streaming do not survive it: at 95.8 MHz the
         // floor reads 3 LSB rms without this and 23 with it, the difference
         // between hearing the FM band and hearing the converter.
-        if let Some(c) = &self.ctrl {
-            c.tune(self.center.0).map_err(map_err)?;
-        }
-        self.apply_gain()?;
+        let ctl = handle.control_handle();
         *self.shared.rx.lock() = Some(handle);
+        ctl.tune(self.center.0).map_err(map_err)?;
+        self.apply_gain()?;
         self.shared.silent.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(Box::new(HackRfStream {
             shared: self.shared.clone(),
@@ -446,6 +463,9 @@ impl HackRfTxStream {
     /// handle is taken the first time.
     fn hand_back(&mut self) {
         let Some(handle) = self.handle.take() else { return };
+        // Before anything else: a command sent to a writer that has stopped
+        // fails, and the device has to fall back to the reader's channel.
+        *self.shared.tx.lock() = None;
         handle.drain(Duration::from_millis(500));
         handle.stop();
         drop(handle);
@@ -734,6 +754,7 @@ mod tests {
         // about 90 dB down.
         let shared = std::sync::Arc::new(Shared {
             rx: parking_lot::Mutex::new(None),
+            tx: parking_lot::Mutex::new(None),
             silent: std::sync::atomic::AtomicBool::new(true),
             index: 0,
         });
@@ -771,6 +792,7 @@ mod tests {
         // a hundred times real time for the length of an over.
         let shared = std::sync::Arc::new(Shared {
             rx: parking_lot::Mutex::new(None),
+            tx: parking_lot::Mutex::new(None),
             silent: std::sync::atomic::AtomicBool::new(true),
             index: 0,
         });
