@@ -1,0 +1,13 @@
+[package]
+name = "hackrf-usb"
+version.workspace = true
+edition = "2024"
+# Vendored from rs-hackrf, which is MIT; the additions here keep that licence
+# so the file can go back upstream.
+license = "MIT"
+description = "USB transport for HackRF One, receive and transmit"
+
+[dependencies]
+nusb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

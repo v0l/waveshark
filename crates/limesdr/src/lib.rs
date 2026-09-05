@@ -347,6 +347,7 @@ impl LimeSdr {
             }],
             native_format: SampleFormat::Cf32,
             usable_bandwidth_ratio: USABLE_RATIO,
+            tx: None,
         };
 
         let mut me = Self {

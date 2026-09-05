@@ -1,7 +1,7 @@
 //! Splitting one gain figure across the HackRF's three stages.
 //!
 //! The hardware exposes an RF amp, an LNA and a baseband VGA separately.
-//! `rs-hackrf` sets each one; deciding how much to ask of each is ours.
+//! The USB layer sets each one; deciding how much to ask of each is ours.
 
 /// LNA gain is 0-40 dB in 8 dB steps.
 pub fn quantise_lna(db: f32) -> u32 {
@@ -13,8 +13,44 @@ pub fn quantise_vga(db: f32) -> u32 {
     ((db.clamp(0.0, 62.0) / 2.0).round() as u32) * 2
 }
 
-/// Front-end amp contribution when switched in.
+/// Front-end amp contribution when switched in, receiving or transmitting.
 pub const AMP_DB: f32 = 14.0;
+
+/// Transmit IF gain is 0-47 dB in 1 dB steps.
+pub fn quantise_txvga(db: f32) -> u32 {
+    db.clamp(0.0, TXVGA_MAX_DB).round() as u32
+}
+
+/// Full scale of the transmit IF gain, in dB.
+pub const TXVGA_MAX_DB: f32 = hackrf_usb::TXVGA_MAX_DB as f32;
+
+/// What the two transmit stages are set to.
+///
+/// Starting at zero, and staying there until something asks otherwise. A
+/// transmitter that comes up at whatever the last session left behind puts
+/// power into whatever is on the antenna port before the operator has looked
+/// at it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TxStages {
+    pub amp: bool,
+    pub txvga: u32,
+}
+
+impl TxStages {
+    /// Set one stage by name. Returns false for a name this hardware lacks.
+    pub fn set(&mut self, stage: &str, db: f32) -> bool {
+        match stage {
+            "amp" => self.amp = db >= AMP_DB / 2.0,
+            "txvga" | "tuner" | "" => self.txvga = quantise_txvga(db),
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn total_db(&self) -> f32 {
+        (if self.amp { AMP_DB } else { 0.0 }) + self.txvga as f32
+    }
+}
 /// Total gain available across all three stages.
 pub const MAX_DB: f32 = AMP_DB + 40.0 + 62.0;
 
@@ -147,6 +183,24 @@ mod tests {
             let got = achieved(db) as f32;
             assert!((got - db).abs() <= 8.0, "asked {db}, got {got}");
         }
+    }
+
+    #[test]
+    fn transmit_gain_starts_at_nothing() {
+        let st = TxStages::default();
+        assert_eq!((st.amp, st.txvga), (false, 0));
+        assert_eq!(st.total_db(), 0.0);
+    }
+
+    #[test]
+    fn transmit_stages_are_set_independently_and_clamped() {
+        let mut st = TxStages::default();
+        assert!(st.set("txvga", 100.0));
+        assert_eq!(st.txvga, 47, "TXVGA must clamp at full scale");
+        assert!(!st.amp, "setting the IF gain switched the amp in");
+        assert!(st.set("amp", 14.0) && st.amp);
+        assert!(st.set("txvga", -5.0) && st.txvga == 0);
+        assert!(!st.set("lna", 8.0), "there is no LNA on transmit");
     }
 
     #[test]

@@ -228,6 +228,7 @@ impl RtlSdr {
             // the outer ~20% of the span is contaminated by the decimation
             // filter's transition and by the DC spur's skirt.
             usable_bandwidth_ratio: 0.80,
+            tx: None,
         };
 
         let mut me = Self {

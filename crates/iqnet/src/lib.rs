@@ -171,6 +171,7 @@ impl IqNet {
             // Unknown from here: the server does not say what is feeding it.
             // The usual answer is an RTL-SDR, so assume its filtering.
             usable_bandwidth_ratio: 0.80,
+            tx: None,
         };
         Self {
             addr: p.addr.clone(),
