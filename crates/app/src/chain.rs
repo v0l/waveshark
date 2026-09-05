@@ -2349,11 +2349,12 @@ fn puts_packets_on_bus(kind: &str) -> bool {
 /// The stages of one strip channel, in the order they are built. A decode
 /// channel uses the first two and then its front end; an audio one uses the
 /// rest.
-const CHAN_STAGES: [&str; 9] = [
+const CHAN_STAGES: [&str; 10] = [
     "chan_mix",
     "chan_ifdec",
     "chan_front",
     "chan_demod",
+    "chan_scope",
     "chan_squelch",
     "chan_audiodec",
     "chan_deemph",
@@ -2707,6 +2708,18 @@ fn audio_channel_stages(
     // that: measured on an empty 2 m channel, a squelch after the filter saw
     // a clean signal and held itself open on pure noise.
     let mut tail = Source::Stage(dem, 0);
+
+    // A scope on the demodulator's raw output, in every channel the strip
+    // builds. It is where the questions about a channel are answered: what
+    // the discriminator is putting out, how much of it is hiss, and what the
+    // squelch behind it is deciding against. It passes the stream through
+    // and costs a small transform thirty times a second.
+    let mut sc = Settings::new();
+    sc.insert("label".into(), V::Text("Demod scope".into()));
+    let scope = at(p, "chan_scope", "scope", sc);
+    p.connect(tail, (scope, 0));
+    tail = Source::Stage(scope, 0);
+
     if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
         let mut s = Settings::new();
         s.insert(
@@ -2876,6 +2889,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "deemphasis" => "De-emphasis".into(),
         "agc" => "AGC".into(),
         "squelch" => "Squelch".into(),
+        "scope" => "Scope".into(),
         "pulse_detect" => "OOK pulses".into(),
         "ask_detect" => "ASK pulses".into(),
         "fsk_detect" => "FSK pulses".into(),
@@ -3802,7 +3816,7 @@ mod tests {
             .iter()
             .filter(|s| s.settings.contains_key("channel"))
             .count();
-        assert_eq!(chan_stages, 8, "an NFM chain is eight stages, and no more were kept");
+        assert_eq!(chan_stages, 9, "an NFM chain is nine stages, and no more were kept");
         // A fader drag in manual mode is a number on the bus, not a rebuild
         // that would drop every source the auto node had open.
         p.channels[0].volume = 0.3;
