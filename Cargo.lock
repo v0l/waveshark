@@ -1901,6 +1901,7 @@ dependencies = [
  "common",
  "crossbeam-channel",
  "hackrf-usb",
+ "parking_lot",
  "tracing",
  "tracing-subscriber",
 ]

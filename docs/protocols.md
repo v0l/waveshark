@@ -343,6 +343,16 @@ cannot check because a port there is complex samples and nothing else. Bursts
 carry `tx_start`, `tx_end` and `tx_at` tags, named after `tx_sob`, `tx_eob`
 and `tx_time` for the same reasons.
 
+Half duplex is the driver's problem, not the receiver's. Keying does not tear
+the receive stream down: the HackRF driver takes the reader away, feeds the
+stream a noise floor about 90 dB down at the same rate and centre for the
+length of the over, and puts the radio back when the transmit stream is
+dropped. The receive graph runs throughout, so the spectrum's averaging,
+every channel's squelch and every part-built frame survive an over, and the
+waterfall shows the gap instead of stopping. `RxStream::silent` says which it
+is. A LimeSDR is 2x2 and full duplex, so it needs none of that and its
+`TxInfo` will say so; its transmit side is not written yet.
+
 NFM runs end to end from the graph: `tone` into `fm_mod` into `radio_tx`,
 which holds the device's `TxStream` and paces the whole chain by blocking
 when the radio has enough queued. `crates/nodes/tests/nfm_tx_path.rs` runs

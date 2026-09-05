@@ -178,9 +178,15 @@ pub struct TxInfo {
     /// Transmit gain stages in signal path order.
     pub gain_stages: Vec<GainStage>,
     pub native_format: SampleFormat,
-    /// Whether the radio has to stop receiving to transmit. Every radio here
-    /// that transmits at all is half duplex, but a caller should ask.
+    /// Whether the radio has to stop receiving to transmit.
+    ///
+    /// A HackRF does: one converter, one signal path, and an over is a gap in
+    /// the waterfall. A LimeSDR does not, and a caller that assumed otherwise
+    /// would throw away half of what it can do.
     pub half_duplex: bool,
+    /// Independent transmit chains. One on a HackRF, two on a LimeSDR, which
+    /// is 2x2: two receivers and two transmitters that run at once.
+    pub channels: usize,
 }
 
 /// Everything the UI needs to render controls for a device without knowing
@@ -329,6 +335,20 @@ pub trait RxStream: Send {
 
     /// Total samples dropped since the stream started.
     fn dropped(&self) -> u64;
+
+    /// Whether what is being read is the driver standing in for the radio
+    /// rather than the radio itself.
+    ///
+    /// A half duplex radio cannot receive while it transmits, and a driver
+    /// that says so by ending the stream makes every layer above deal with
+    /// the radio vanishing and coming back. The alternative, and what the
+    /// HackRF driver does, is to keep the stream and feed it a noise floor
+    /// for the length of the over. This is how a receiver tells that apart
+    /// from a dead band, and it is false on a full duplex radio, which
+    /// receives through its own transmissions.
+    fn silent(&self) -> bool {
+        false
+    }
 
     /// Request the stream stop. `read` will return `Disconnected` afterwards.
     fn stop(&mut self);
