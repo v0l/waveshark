@@ -288,15 +288,14 @@ impl AudioPlayer {
         Self::open_on(device, want_rate)
     }
 
-    /// List output devices, deduplicated. ALSA reports the same card under
-    /// dozens of plugin aliases, which is noise in a device picker.
+    /// Sound cards this machine has, without ALSA's plugin aliases.
     pub fn devices() -> Vec<String> {
         let host = cpal::default_host();
         let mut seen = std::collections::BTreeSet::new();
         host.output_devices()
             .map(|it| {
                 it.map(|d| d.to_string())
-                    .filter(|n| seen.insert(n.clone()))
+                    .filter(|n| seen.insert(n.clone()) && crate::capture::is_real_device(n))
                     .collect()
             })
             .unwrap_or_default()

@@ -73,14 +73,14 @@ impl AudioCapture {
         Self::open_on(device, want_rate)
     }
 
-    /// Input devices, deduplicated the way the output list is.
+    /// Microphones this machine has, without ALSA's plugin aliases.
     pub fn devices() -> Vec<String> {
         let host = cpal::default_host();
         let mut seen = std::collections::BTreeSet::new();
         host.input_devices()
             .map(|it| {
                 it.map(|d| d.to_string())
-                    .filter(|n| seen.insert(n.clone()))
+                    .filter(|n| seen.insert(n.clone()) && is_real_device(n))
                     .collect()
             })
             .unwrap_or_default()
@@ -232,9 +232,69 @@ impl AudioSource for Canned {
     }
 }
 
+/// Whether a name cpal reported is a sound card rather than one of ALSA's
+/// plugins.
+///
+/// ALSA exposes its whole plugin chain as devices: rate converters, channel
+/// up and downmixers, a Speex processor, the null sink, and a route to every
+/// other sound system on the machine. Two dozen entries for a laptop with one
+/// headset is not a picker anybody can use, and none of the plugins is a
+/// thing an operator means to talk into.
+///
+/// Matched on the names ALSA gives them, which are stable because they come
+/// from the description field of the plugin definitions rather than from
+/// hardware. A card whose name happens to contain one of these words is lost,
+/// which is why the list is words that only appear in plugin descriptions.
+pub(crate) fn is_real_device(name: &str) -> bool {
+    const PLUGINS: &[&str] = &[
+        "Discard all samples",
+        "Rate Converter",
+        "Plugin using",
+        "Plugin for channel",
+        "Open Sound System",
+        "JACK Audio Connection Kit",
+        "Direct sample",
+        "Direct hardware device without any conversions",
+        "Hardware device with all software conversions",
+    ];
+    !PLUGINS.iter().any(|p| name.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picker_shows_sound_cards_and_not_alsa_plugins() {
+        // The real list off a workstation, which is what made the point: one
+        // interface and one motherboard codec, behind twenty-two entries.
+        let reported = [
+            "Discard all samples (playback) or generate zero samples (capture)",
+            "Rate Converter Plugin Using Libav/FFmpeg Library",
+            "JACK Audio Connection Kit",
+            "Open Sound System",
+            "PipeWire Sound Server",
+            "PulseAudio Sound Server",
+            "Plugin using Speex DSP (resample, agc, denoise, echo, dereverb)",
+            "Plugin for channel upmix (4,6,8)",
+            "Default ALSA Output (currently PipeWire Media Server)",
+            "HD-Audio Generic, ALC1220 Analog",
+            "Scarlett 2i2 USB, USB Audio",
+            "Scarlett 2i2 USB",
+        ];
+        let kept: Vec<&str> = reported.into_iter().filter(|n| is_real_device(n)).collect();
+        assert_eq!(
+            kept,
+            [
+                "PipeWire Sound Server",
+                "PulseAudio Sound Server",
+                "Default ALSA Output (currently PipeWire Media Server)",
+                "HD-Audio Generic, ALC1220 Analog",
+                "Scarlett 2i2 USB, USB Audio",
+                "Scarlett 2i2 USB",
+            ]
+        );
+    }
 
     #[test]
     fn a_canned_source_hands_over_what_it_was_given() {
