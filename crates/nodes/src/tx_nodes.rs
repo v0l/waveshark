@@ -446,11 +446,6 @@ impl Simple for TxSinkNode {
 pub struct MicNode {
     src: std::sync::Arc<dyn audio::AudioSource>,
     level: f32,
-    /// Levelling, as a radio's microphone amplifier does it: a quiet talker
-    /// stays audible and a loud one does not overdeviate. The same
-    /// [`dsp::agc::Agc`] the listening channels use, with the same voice
-    /// constants, because it is the same job in the other direction.
-    agc: Option<dsp::agc::Agc>,
     /// Peak of the last block, before the gain, for a meter beside the key.
     peak: f32,
     /// The band the audio is limited to, in hertz, and the filter that does
@@ -489,17 +484,23 @@ impl MicNode {
     pub fn with_band(
         src: std::sync::Arc<dyn audio::AudioSource>,
         level: f32,
-        agc: bool,
         band: (f64, f64),
     ) -> Self {
-        Self { band, ..Self::new(src, level, agc) }
+        Self { band, ..Self::new(src, level) }
     }
 
-    pub fn new(src: std::sync::Arc<dyn audio::AudioSource>, level: f32, agc: bool) -> Self {
+    /// Speech, at a level the operator sets against the meter.
+    ///
+    /// There is no levelling here on purpose. An AGC on a transmitter has
+    /// nothing to level against between words, so it winds all the way up and
+    /// puts the room on air at full deviation: what a listener hears is a
+    /// gate opening onto hiss every time the talker pauses. A radio's
+    /// microphone amplifier limits rather than levels, and until there is a
+    /// limiter the honest control is the fader and the meter beside it.
+    pub fn new(src: std::sync::Arc<dyn audio::AudioSource>, level: f32) -> Self {
         Self {
             src,
-            level: level.clamp(0.0, 4.0),
-            agc: agc.then(|| dsp::agc::Agc::voice(48_000.0)),
+            level: level.clamp(0.0, 8.0),
             peak: 0.0,
             // Communications speech: enough bottom for the voice to have
             // weight, and out to 3.4 kHz, which is what a telephone and every
@@ -528,10 +529,6 @@ impl MicNode {
         self.peak
     }
 
-    /// What the leveller is adding, in dB, or zero when it is off.
-    pub fn agc_gain_db(&self) -> f32 {
-        self.agc.as_ref().map(|a| a.gain_db()).unwrap_or(0.0)
-    }
 
     /// Build the speech filter for the band and rate now set.
     ///
@@ -606,13 +603,6 @@ impl Simple for MicNode {
             return Err(common::Error::other("the microphone reports no sample rate"));
         }
         self.rate = input.spec.rate;
-        // Levelled at the microphone's rate rather than the radio's: the
-        // attack and release constants are in seconds, and running them over
-        // a stream forty times faster makes a leveller that reacts forty
-        // times too slowly.
-        if self.agc.is_some() {
-            self.agc = Some(dsp::agc::Agc::voice(self.src.rate()));
-        }
         self.src_rate = self.src.rate();
         self.design();
         Ok(input.spec)
@@ -641,9 +631,6 @@ impl Simple for MicNode {
         if let Some(f) = &mut self.filter {
             f.process(&mut got);
         }
-        if let Some(agc) = &mut self.agc {
-            agc.process(&mut got);
-        }
         self.pending.extend(got);
 
         let out = output.real_mut();
@@ -669,15 +656,11 @@ impl Simple for MicNode {
         if let Some(f) = &mut self.filter {
             f.reset();
         }
-        if let Some(a) = &mut self.agc {
-            a.reset();
-        }
     }
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("level", self.level as f64, 0.0..=4.0).label("Mic gain").unit("x"),
-            Param::bool("agc", self.agc.is_some()).label("Mic levelling"),
+            Param::float("level", self.level as f64, 0.0..=8.0).label("Mic gain").unit("x"),
             // The band is here rather than fixed because what sounds right
             // depends on the microphone, the voice and what is listening: a
             // telephone band is the safe default and not the only answer.
@@ -690,17 +673,8 @@ impl Simple for MicNode {
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
-            "agc" => {
-                let on = value.as_bool().unwrap_or(true);
-                self.agc = match (on, self.agc.take()) {
-                    (true, Some(a)) => Some(a),
-                    (true, None) => Some(dsp::agc::Agc::voice(self.src.rate())),
-                    (false, _) => None,
-                };
-                Ok(())
-            }
             "level" => {
-                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, 4.0) as f32;
+                self.level = value.as_f64().unwrap_or(3.0).clamp(0.0, 8.0) as f32;
                 Ok(())
             }
             "low_hz" => {
@@ -759,7 +733,7 @@ mod mic_tests {
             .map(|i| (std::f32::consts::TAU * 1_000.0 * i as f32 / mic_rate as f32).sin())
             .collect();
         let src = Arc::new(audio::Canned::new(tone, mic_rate, true));
-        let mut node = MicNode::new(src, 1.0, false);
+        let mut node = MicNode::new(src, 1.0);
         let out = run(&mut node, out_rate, 48_000);
 
         assert_eq!(out.len(), 48_000);
@@ -782,7 +756,7 @@ mod mic_tests {
         // deviation for as long as the microphone is behind: a tone off
         // frequency rather than a gap.
         let src = Arc::new(audio::Canned::new(vec![1.0; 100], 48_000.0, false));
-        let mut node = MicNode::new(src, 1.0, false);
+        let mut node = MicNode::new(src, 1.0);
         let out = run(&mut node, 48_000.0, 4_000);
         assert!(node.starved() > 0, "the source ran out and nothing noticed");
         let tail = &out[out.len() - 500..];
@@ -798,157 +772,10 @@ mod mic_tests {
             .map(|i| 0.5 * (std::f32::consts::TAU * 1_000.0 * i as f32 / 48_000.0).sin())
             .collect();
         let src = Arc::new(audio::Canned::new(tone, 48_000.0, true));
-        let mut node = MicNode::new(src, 2.0, false);
+        let mut node = MicNode::new(src, 2.0);
         let out = run(&mut node, 48_000.0, 4_000);
         let peak = out[1_000..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 1.0).abs() < 0.05, "0.5 at twice gain came out at {peak}");
-    }
-}
-
-#[cfg(test)]
-mod mic_agc_tests {
-    use super::*;
-    use std::sync::Arc;
-
-    #[test]
-    fn levelling_brings_a_quiet_talker_up() {
-        // What a radio's microphone amplifier does. Without it a quiet talker
-        // deviates by a few hundred hertz and is unreadable at the far end,
-        // and the operator has no way to know.
-        let mic_rate = 48_000.0;
-        let quiet: Vec<f32> = (0..48_000)
-            .map(|i| 0.02 * (std::f32::consts::TAU * 700.0 * i as f32 / mic_rate as f32).sin())
-            .collect();
-        let src = Arc::new(audio::Canned::new(quiet, mic_rate, true));
-        let mut node = MicNode::new(src, 1.0, true);
-        let s = StreamSpec {
-            kind: PortKind::Real,
-            rate: mic_rate,
-            center: common::Hz(145_500_000),
-            bandwidth: 6_000.0,
-            flow: Flow::Tx,
-            ..Default::default()
-        };
-        Simple::negotiate(&mut node, &PortSpec { spec: s, latency: 0 }).unwrap();
-
-        let mut last = Vec::new();
-        for _ in 0..10 {
-            let input = Payload::Real(vec![0.0; 4_800]);
-            let mut out = Payload::Real(Vec::new());
-            let (mut ev, mut tg) = (Vec::new(), Vec::new());
-            let ins = [PortSpec { spec: s, latency: 0 }];
-            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-            Simple::process(&mut node, &input, &mut out, &mut ctx).unwrap();
-            last = match out {
-                Payload::Real(v) => v,
-                _ => unreachable!(),
-            };
-        }
-        let peak = last.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak > 0.2, "a 2% signal came out at {peak} after a second of levelling");
-        assert!(peak <= 1.0, "levelling drove it past full scale: {peak}");
-        assert!(node.agc_gain_db() > 6.0, "the leveller reports {} dB", node.agc_gain_db());
-
-        // And the meter shows what the microphone heard, not what the
-        // leveller made of it: the operator is judging their own voice.
-        assert!((node.peak() - 0.02).abs() < 0.005, "meter reads {}", node.peak());
-    }
-
-    #[test]
-    fn levelling_off_leaves_the_signal_alone() {
-        let tone: Vec<f32> = (0..48_000)
-            .map(|i| 0.1 * (std::f32::consts::TAU * 1_000.0 * i as f32 / 48_000.0).sin())
-            .collect();
-        let src = Arc::new(audio::Canned::new(tone, 48_000.0, true));
-        let mut node = MicNode::new(src, 1.0, false);
-        let s = StreamSpec {
-            kind: PortKind::Real,
-            rate: 48_000.0,
-            center: common::Hz(0),
-            bandwidth: 6_000.0,
-            flow: Flow::Tx,
-            ..Default::default()
-        };
-        Simple::negotiate(&mut node, &PortSpec { spec: s, latency: 0 }).unwrap();
-        let mut v = Vec::new();
-        for _ in 0..2 {
-            let input = Payload::Real(vec![0.0; 4_800]);
-            let mut out = Payload::Real(Vec::new());
-            let (mut ev, mut tg) = (Vec::new(), Vec::new());
-            let ins = [PortSpec { spec: s, latency: 0 }];
-            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-            Simple::process(&mut node, &input, &mut out, &mut ctx).unwrap();
-            v = match out {
-                Payload::Real(v) => v,
-                _ => unreachable!(),
-            };
-        }
-        let peak = v[1_000..].iter().fold(0.0f32, |m, x| m.max(x.abs()));
-        assert!((peak - 0.1).abs() < 0.01, "0.1 came out at {peak}");
-        assert_eq!(node.agc_gain_db(), 0.0);
-    }
-}
-
-#[cfg(test)]
-mod mic_band_tests {
-    use super::*;
-    use std::sync::Arc;
-
-    /// Level at `hz` after the microphone stage, relative to what went in.
-    fn response_at(hz: f64, band: (f64, f64)) -> f32 {
-        let mic_rate = 48_000.0;
-        let tone: Vec<f32> = (0..48_000)
-            .map(|i| (std::f32::consts::TAU * hz as f32 * i as f32 / mic_rate as f32).sin())
-            .collect();
-        let src = Arc::new(audio::Canned::new(tone, mic_rate, true));
-        let mut node = MicNode::with_band(src, 1.0, false, band);
-        let s = StreamSpec {
-            kind: PortKind::Real,
-            rate: mic_rate,
-            center: common::Hz(0),
-            bandwidth: 6_000.0,
-            flow: Flow::Tx,
-            ..Default::default()
-        };
-        Simple::negotiate(&mut node, &PortSpec { spec: s, latency: 0 }).unwrap();
-        let mut out = Vec::new();
-        for _ in 0..3 {
-            let input = Payload::Real(vec![0.0; 8_000]);
-            let mut o = Payload::Real(Vec::new());
-            let (mut ev, mut tg) = (Vec::new(), Vec::new());
-            let ins = [PortSpec { spec: s, latency: 0 }];
-            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-            Simple::process(&mut node, &input, &mut o, &mut ctx).unwrap();
-            out = match o {
-                Payload::Real(v) => v,
-                _ => unreachable!(),
-            };
-        }
-        // Past the filter's own settling, which is 255 taps.
-        out[1_000..].iter().fold(0.0f32, |m, v| m.max(v.abs()))
-    }
-
-    #[test]
-    fn speech_passes_flat_and_only_what_is_outside_the_band_is_cut() {
-        // The complaint this fixes: filtering at the radio's rate meant a
-        // hundred taps at two megasamples, which cannot make a three
-        // kilohertz cutoff and rolled off from a few hundred hertz instead.
-        // Speech through it sounded like a blanket over the microphone.
-        let band = (200.0, 3_400.0);
-        for hz in [400.0, 1_000.0, 2_000.0, 3_000.0] {
-            let a = response_at(hz, band);
-            assert!(a > 0.85, "{hz} Hz came through at {a}, which is muffled");
-        }
-        // And the edges are real: rumble below and hiss above are gone.
-        assert!(response_at(50.0, band) < 0.2, "50 Hz rumble is still there");
-        assert!(response_at(6_000.0, band) < 0.1, "6 kHz is outside a 3.4 kHz channel");
-    }
-
-    #[test]
-    fn a_broadcast_channel_keeps_its_top_end() {
-        // The same stage, told it has 200 kHz to play with rather than 12.5.
-        let band = (30.0, 15_000.0);
-        assert!(response_at(10_000.0, band) > 0.85, "broadcast audio must not be telephone audio");
     }
 }
 

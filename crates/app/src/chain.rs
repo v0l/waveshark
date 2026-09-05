@@ -442,7 +442,7 @@ impl Receiver {
     /// What the transmitter has done, for the interface: samples handed over,
     /// transfers the radio had to fill itself, and what the microphone is
     /// hearing.
-    pub fn tx_state(&self) -> Option<(u64, u64, f32, f32)> {
+    pub fn tx_state(&self) -> Option<(u64, u64, f32)> {
         let sink = self
             .graph
             .order()
@@ -457,12 +457,7 @@ impl Receiver {
             .and_then(|(id, _)| self.graph.node(id))
             .and_then(|n| n.as_any())
             .and_then(|a| a.downcast_ref::<nodes::MicNode>());
-        Some((
-            sink.written(),
-            sink.underruns(),
-            mic.map(|m| m.peak()).unwrap_or(0.0),
-            mic.map(|m| m.agc_gain_db()).unwrap_or(0.0),
-        ))
+        Some((sink.written(), sink.underruns(), mic.map(|m| m.peak()).unwrap_or(0.0)))
     }
 
     /// The last block the transmitter sent, for showing it on the receiver's
@@ -1965,7 +1960,6 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             TxSource::Mic => {
                 let mut s = Settings::new();
                 s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
-                s.insert("agc".into(), pipeline::ParamValue::Bool(tx.spec.mic_agc));
                 ("mic", s)
             }
             TxSource::Tone => {
@@ -2875,13 +2869,12 @@ fn add_patch(
                 let src = tx.as_ref().and_then(|t| t.mic.clone());
                 match src {
                     Some(src) => {
-                        let level = st.settings.f64_or("level", 1.0) as f32;
-                        let agc = st.settings.bool_or("agc", true);
+                        let level = st.settings.f64_or("level", 3.0) as f32;
                         let band = (
                             st.settings.f64_or("low_hz", 200.0),
                             st.settings.f64_or("high_hz", 3_400.0),
                         );
-                        Box::new(nodes::MicNode::with_band(src, level, agc, band))
+                        Box::new(nodes::MicNode::with_band(src, level, band))
                             as Box<dyn pipeline::node::Node>
                     }
                     None => continue,
@@ -4333,7 +4326,7 @@ pub fn transmit_graph(
     };
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
         (TxSource::Mic, Some(src)) => {
-            Box::new(nodes::MicNode::with_band(src, tx.mic_gain, tx.mic_agc, band))
+            Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band))
         }
         (TxSource::Mic, None) => {
             return Err(common::Error::other("no microphone is open to transmit from"))
@@ -4513,7 +4506,7 @@ mod tx_tests {
         // Levelling off, because what is under test is the path rather than
         // the leveller: an AGC winding up over the first tenth of a second
         // changes the amplitude while it does it, which is what it is for.
-        let tx = TxSpec { source: TxSource::Mic, mic_agc: false, ..Default::default() };
+        let tx = TxSpec { source: TxSource::Mic, ..Default::default() };
         let (mut dev, buf) = sink(rate);
         let mut g = transmit_graph(
             &tx,
@@ -4583,7 +4576,7 @@ mod tx_tests {
             .collect();
         let src: std::sync::Arc<dyn audio::AudioSource> =
             std::sync::Arc::new(audio::Canned::new(noisy, 48_000.0, true));
-        let tx = TxSpec { source: TxSource::Mic, mic_agc: false, ..Default::default() };
+        let tx = TxSpec { source: TxSource::Mic, ..Default::default() };
         let (mut dev, buf) = sink(rate);
         let mut g = transmit_graph(
             &tx,

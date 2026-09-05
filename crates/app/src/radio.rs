@@ -619,11 +619,12 @@ pub struct TxSpec {
     /// What is modulated: the microphone, or a test tone.
     pub source: TxSource,
     /// Microphone gain, as a multiplier before the modulator.
+    ///
+    /// Set against the meter and left alone. There is no levelling on the
+    /// transmit side: an AGC has nothing to level against between words, so
+    /// it winds up and puts the room on air at full deviation every time the
+    /// talker pauses.
     pub mic_gain: f32,
-    /// Whether speech is levelled on the way out, which is what a radio's
-    /// microphone amplifier does and what keeps a quiet talker audible
-    /// without a loud one splattering.
-    pub mic_agc: bool,
     /// Added to the channel's receive frequency when transmitting: the
     /// repeater shift, and zero for simplex.
     pub shift_hz: f64,
@@ -639,8 +640,9 @@ pub struct TxSpec {
 impl Default for TxSpec {
     fn default() -> Self {
         Self {
-            mic_gain: 1.0,
-            mic_agc: true,
+            // Measured rather than chosen: three times is what a Scarlett at
+            // its own unity gain needs to reach full deviation on speech.
+            mic_gain: 3.0,
             // A test tone, because the safe default is one that does not open
             // the microphone: keying should not put the room on air until
             // somebody has said it should.
@@ -1240,10 +1242,8 @@ pub struct Status {
     pub keyed: AtomicU64,
     /// Transfers the radio sent as silence during the last transmission.
     pub tx_underruns: AtomicU64,
-    /// What the microphone is hearing while a channel is keyed, as f32 bits,
-    /// and what the levelling is adding to it.
+    /// What the microphone is hearing, as f32 bits.
     pub mic_level: AtomicU32,
-    pub mic_gain_db: AtomicU32,
     /// The radio's transmit gain, in dB, as the device took it.
     pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
@@ -1406,7 +1406,6 @@ impl Default for Status {
             keyed: AtomicU64::new(0),
             tx_underruns: AtomicU64::new(0),
             mic_level: AtomicU32::new(0),
-            mic_gain_db: AtomicU32::new(0),
             tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
             levels: parking_lot::Mutex::new((0, crate::chain::AudioPlan::default(), Vec::new())),
@@ -2399,14 +2398,14 @@ fn run(
         // instead of from the capture.
         if let Some(c) = mic.as_ref() {
             let keyed_now = rx.tx_state();
-            let (peak, gain_db) = match keyed_now {
-                Some((_, _, peak, db)) if plan.tx.is_some() => (peak, db),
-                _ => (c.peak(), 0.0),
+            let peak = match keyed_now {
+                Some((_, _, peak)) if plan.tx.is_some() => peak,
+                _ => c.peak(),
             };
             // Said once a second while keyed, because a transmission that
             // stops is the hardest thing here to see after the fact: the
             // carrier is gone and nothing on screen says why.
-            if let (Some((sent, idle, _, _)), 0) = (keyed_now, blocks_since_key % 50) {
+            if let (Some((sent, idle, _)), 0) = (keyed_now, blocks_since_key % 50) {
                 if plan.tx.is_some() {
                     tracing::info!("on air: {sent} samples, {idle} unfilled, mic {peak:.2}");
                     status.tx_underruns.store(idle, Ordering::Relaxed);
@@ -2414,7 +2413,6 @@ fn run(
             }
             blocks_since_key = blocks_since_key.wrapping_add(1);
             status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
-            status.mic_gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
         }
 
         // What is going out, drawn where a receiver would have heard it.
