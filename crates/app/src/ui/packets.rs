@@ -41,7 +41,11 @@ impl Log<'_> {
             // list; one that is quiet wants the waterfall back.
             .resizable(true)
             .min_size(64.0)
-            .max_size(720.0)
+            // Nearly the whole window: with a packet open the inspector
+            // holds the burst, the fields, the wiki's guesses and the
+            // bytes, and a fixed cap left them fighting for 700 pixels on
+            // a tall screen.
+            .max_size((ui.ctx().content_rect().height() - 160.0).max(240.0))
             .show_separator_line(true)
             .frame(
                 egui::Frame::NONE
@@ -106,6 +110,11 @@ impl Log<'_> {
                     self.inspector(ui, rec, inspect_h, avail);
                 }
             });
+        if let Some(rec) = self.st.sigid.clone() {
+            if sigid_modal(ui.ctx(), &rec) {
+                self.st.sigid = None;
+            }
+        }
         self.acts
     }
 
@@ -138,10 +147,14 @@ impl Log<'_> {
         // them in, and the first line of the body sat against the clip and
         // lost the top of its letters to it.
         child.add_space(3.0);
-        if packet_detail(&mut child, rec) {
+        let asked = packet_detail(&mut child, rec);
+        if asked.play {
             if let Some(a) = rec.audio.clone() {
                 self.cmds.push(Cmd::Play(a));
             }
+        }
+        if asked.sigid {
+            self.st.sigid = Some(rec.clone());
         }
     }
 

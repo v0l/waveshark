@@ -72,12 +72,19 @@ pub(super) fn row_color(rec: &DecodeRecord) -> Color32 {
 /// when the answer is wrong, or when the protocol is unknown and the bytes are
 /// all there is. Both are also what a view widget would consume: a map reads
 /// the fields, an image pane reads the bytes and the media type.
+/// What the operator asked of a packet from its detail pane.
+#[derive(Default)]
+pub(super) struct Asked {
+    /// Hear the transmission again. The caller turns it into a command:
+    /// the audio device belongs to the radio thread, and a view does not
+    /// get to open its own.
+    pub play: bool,
+    /// Open the signal identification modal on this packet.
+    pub sigid: bool,
+}
+
 /// The detail pane under the packet list.
-///
-/// Returns whether the operator asked to hear the transmission again, which
-/// the caller turns into a command: the audio device belongs to the radio
-/// thread, and a view does not get to open its own.
-pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
+pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
     // The burst view takes up to half the room the inspector was dragged
     // to, never less than its natural height, so dragging the divider up
     // grows the RF view and the bytes together rather than only the
@@ -95,11 +102,11 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
     ui.add_space(4.0);
     // A voice transmission's payload is what was said, so the row offers to
     // say it again. The bytes below are the vocoder's, and nobody reads those.
-    let mut play = false;
+    let mut asked = Asked::default();
     if let Some(a) = &rec.audio {
         let (peak, rms) = crate::audiobus::levels_db(a);
         ui.horizontal(|ui| {
-            play = ui.button("PLAY").clicked();
+            asked.play = ui.button("PLAY").clicked();
             theme::Line::new()
                 .legend("speech")
                 .value(format!("{:.1} s", a.seconds()))
@@ -123,8 +130,187 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> bool {
         });
         ui.add_space(4.0);
     }
+    // Anything not verified is open to question: a burst nothing claimed,
+    // and a decode from a protocol with no check, which reads framing off
+    // whatever carries its sync word and cannot say whose it is.
+    if rec.crc != Some(true) {
+        ui.horizontal(|ui| {
+            asked.sigid = ui
+                .button("CHECK SIGID")
+                .on_hover_text("what the signal identification wiki lists near this burst")
+                .clicked();
+        });
+        ui.add_space(4.0);
+    }
     hex_dump(ui, &rec.bytes);
-    play
+    asked
+}
+
+/// What the burst was measured to be, in the wiki's terms.
+fn sigid_query(rec: &DecodeRecord) -> datasets::sigid::Query {
+    let field = |k: &str| rec.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    let unconstrained = matches!(rec.modulation, "unknown" | "noise-like" | "?" | "");
+    datasets::sigid::Query {
+        center_hz: rec.freq,
+        bandwidth_hz: (rec.channel_hz > 0.0).then_some(rec.channel_hz),
+        modulation: (!unconstrained).then(|| rec.modulation.to_string()),
+        period_us: field("symbol_period_us").and_then(|v| v.as_f64()),
+    }
+}
+
+/// The same measurements, as a report somebody else can read.
+fn sigid_observation(rec: &DecodeRecord) -> datasets::sigid::Observation {
+    let field = |k: &str| rec.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    let q = sigid_query(rec);
+    // A decoder that named it without a check is worth passing on as the
+    // guess it is.
+    let notes = if rec.is_known() {
+        Some(format!("Read as {} (no integrity check): {}", rec.model, rec.detail))
+    } else {
+        Some(rec.detail.clone())
+    };
+    datasets::sigid::Observation {
+        center_hz: rec.freq,
+        modulation: q.modulation,
+        bandwidth_hz: q.bandwidth_hz,
+        baud: field("baud").and_then(|v| v.as_f64()),
+        // The samples kept run from lead-in to the silence that ended the
+        // burst, so their length is not the burst's; the detail line carries
+        // the measured one and goes in the notes.
+        duration_ms: None,
+        sync_hex: field("sync").map(|v| v.to_string()),
+        preamble_bits: field("preamble_bits").and_then(|v| v.as_i64()).map(|n| n as u32),
+        frame_bytes: field("frame_bytes").and_then(|v| v.as_i64()).map(|n| n as usize),
+        location: None,
+        notes,
+    }
+}
+
+/// How many candidates are worth a line. Past the first few the score is
+/// a bracketing range plus a keying, which is every pager and cellular
+/// entry in the band.
+const SIGID_SHOWN: usize = 12;
+
+/// The signal identification modal: the wiki's guesses at an unknown
+/// burst, and where to send it when it has none.
+///
+/// Asking for the database starts its download the first time; until it
+/// lands the modal says so rather than nothing, so the operator knows there
+/// is something to wait for. Returns whether it was closed.
+pub(super) fn sigid_modal(ctx: &egui::Context, rec: &DecodeRecord) -> bool {
+    let mut close = false;
+    let r = egui::containers::Modal::new(egui::Id::new("sigid"))
+        .backdrop_color(Color32::from_black_alpha(150))
+        .show(ctx, |ui| {
+            ui.set_width(640.0);
+            widgets::modal_title(ui, "Signal identification");
+            let q = sigid_query(rec);
+            theme::Line::new()
+                .legend("burst")
+                .value(format!(
+                    "{} {} {}",
+                    fmt_hz(rec.freq),
+                    rec.modulation,
+                    q.bandwidth_hz.map(|b| format!("{} wide", datasets::sigid::fmt_hz(b))).unwrap_or_default()
+                ))
+                .show(ui);
+            if !rec.detail.is_empty() {
+                widgets::hint(ui, &rec.detail);
+            }
+            ui.add_space(8.0);
+            match crate::data::sigid() {
+                None => {
+                    ui.label(legend("loading the signal identification wiki"));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
+                Some(db) => {
+                    let m = db.matches(&q);
+                    ui.label(legend(&match m.len() {
+                        0 => "nothing listed near this frequency".to_string(),
+                        n => format!("{n} entries near {}, best first", datasets::sigid::fmt_hz(q.center_hz)),
+                    }));
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for m in m.iter().take(SIGID_SHOWN) {
+                            sigid_row(ui, m);
+                        }
+                    });
+                }
+            }
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(6.0);
+            let o = sigid_observation(rec);
+            ui.horizontal(|ui| {
+                if ui
+                    .button("REPORT TO ARTEMIS")
+                    .on_hover_text("open a GitHub issue against the Artemis database with these measurements filled in")
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(o.artemis_issue_url()));
+                }
+                if ui
+                    .button("ADD TO SIGIDWIKI")
+                    .on_hover_text("open the wiki's unidentified signal form (needs a wiki account)")
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(o.sigidwiki_form_url()));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.button(crate::i18n::t("ui.close")).clicked();
+                });
+            });
+        });
+    close || r.should_close()
+}
+
+/// One candidate as a card: the name and the wiki's numbers in the header,
+/// the rail cyan for a signal the wiki has named and amber for one it is
+/// still asking about, and the first sentence of what it says underneath.
+fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
+    let s = m.signal;
+    let rail = if s.identified { theme::TRACE } else { theme::READOUT };
+    widgets::card(
+        ui,
+        Some(rail),
+        |ui| {
+            let name = egui::RichText::new(&s.name).font(FontId::proportional(12.5)).color(theme::VALUE);
+            if ui.link(name).on_hover_text(&s.url).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(s.url.clone()));
+            }
+            if !s.identified {
+                ui.label(legend("unid"));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(mono(&format!("{:.2}", m.score), theme::LEGEND));
+                ui.add_space(6.0);
+                ui.label(mono(&m.why, theme::LEGEND));
+            });
+        },
+        |ui| {
+            let blurb = s.blurb();
+            if !blurb.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new(&blurb).font(FontId::proportional(11.0)).color(theme::LEGEND)).wrap());
+            }
+            let mut facts: Vec<String> = Vec::new();
+            if !s.modulations.is_empty() {
+                facts.push(s.modulations.join("/"));
+            }
+            if !s.modes.is_empty() {
+                facts.push(s.modes.join("/"));
+            }
+            if !s.locations.is_empty() {
+                facts.push(s.locations.join(", "));
+            }
+            if !s.categories.is_empty() && s.identified {
+                facts.push(s.categories.join(", "));
+            }
+            if !facts.is_empty() {
+                ui.label(mono(&facts.join("  "), theme::LEGEND));
+            }
+        },
+    );
+    ui.add_space(4.0);
 }
 
 /// One column of the burst view: the loudest sample in the column, and the

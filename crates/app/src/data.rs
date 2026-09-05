@@ -13,6 +13,7 @@
 use datasets::airports::Airport;
 use datasets::gateways::Gateway;
 use datasets::radioid::{Repeater, Users};
+use datasets::sigid;
 use datasets::{Cache, When};
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -43,6 +44,11 @@ static USERS: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static NXDN: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static REPEATERS: RwLock<Option<Arc<Vec<Repeater>>>> = RwLock::new(None);
 static GATEWAYS: RwLock<Option<Arc<Vec<Gateway>>>> = RwLock::new(None);
+/// The two halves of the wiki, held apart because they are two files from
+/// two publishers refreshed on their own, and joined on read.
+static ARTEMIS: RwLock<Option<Arc<Vec<sigid::Signal>>>> = RwLock::new(None);
+static UNID: RwLock<Option<Arc<Vec<sigid::Signal>>>> = RwLock::new(None);
+static SIGID: RwLock<Option<Arc<sigid::Db>>> = RwLock::new(None);
 
 /// The DMR ID registry: what the number in a DMR frame belongs to.
 ///
@@ -74,6 +80,26 @@ pub fn gateways() -> Option<Arc<Vec<Gateway>>> {
     on_demand(Which::Gateways, &GATEWAYS)
 }
 
+/// The signal identification wiki, both halves, for the inspector's guess
+/// at what an unknown burst is.
+pub fn sigid() -> Option<Arc<sigid::Db>> {
+    let a = on_demand(Which::Artemis, &ARTEMIS);
+    let u = on_demand(Which::SigIdUnid, &UNID);
+    if let Some(db) = SIGID.read().clone() {
+        return Some(db);
+    }
+    // Whichever half has landed is worth answering from. The join is
+    // redone when the other arrives, or either is refreshed.
+    let a = a?;
+    let mut signals = (*a).clone();
+    if let Some(u) = u {
+        signals.extend(u.iter().cloned());
+    }
+    let db = Arc::new(sigid::Db { signals });
+    *SIGID.write() = Some(db.clone());
+    Some(db)
+}
+
 fn on_demand<T>(which: Which, held: &'static RwLock<Option<Arc<T>>>) -> Option<Arc<T>> {
     if let Some(v) = held.read().clone() {
         return Some(v);
@@ -94,15 +120,19 @@ pub enum Which {
     DmrIds,
     NxdnIds,
     Gateways,
+    Artemis,
+    SigIdUnid,
 }
 
 impl Which {
-    pub const ALL: [Which; 5] = [
+    pub const ALL: [Which; 7] = [
         Which::Airports,
         Which::Repeaters,
         Which::DmrIds,
         Which::NxdnIds,
         Which::Gateways,
+        Which::Artemis,
+        Which::SigIdUnid,
     ];
 
     pub fn label(self) -> &'static str {
@@ -112,6 +142,8 @@ impl Which {
             Which::DmrIds => "DMR IDs",
             Which::NxdnIds => "NXDN IDs",
             Which::Gateways => "Digital voice gateways",
+            Which::Artemis => "Identified signals",
+            Which::SigIdUnid => "Unidentified signals",
         }
     }
 
@@ -125,6 +157,8 @@ impl Which {
                 [one] => one.publisher,
                 _ => "several host files",
             },
+            Which::Artemis => "github.com/AresValley/Artemis-DB",
+            Which::SigIdUnid => "sigidwiki.com",
             _ => "radioid.net",
         }
     }
@@ -148,6 +182,15 @@ impl Which {
                 "Where the digital voice networks can be reached: the address and port of \
                  every reflector, and which of its channels carry the mode spoken there."
             }
+            Which::Artemis => {
+                "Every signal the Signal Identification Wiki names, with frequency, keying \
+                 and width, as the Artemis crawler packages it: the SQLite file at the front \
+                 of its release, without the waterfalls and audio behind it."
+            }
+            Which::SigIdUnid => {
+                "The signals the wiki is still asking about, from its own database query. \
+                 A burst that matches one of these has been heard by somebody else too."
+            }
         }
     }
 
@@ -159,6 +202,8 @@ impl Which {
             Which::DmrIds => vec![radioid::users_source()],
             Which::NxdnIds => vec![radioid::nxdn_source()],
             Which::Gateways => gateways::sources(),
+            Which::Artemis => vec![sigid::artemis_source()],
+            Which::SigIdUnid => vec![sigid::unid_source()],
         }
     }
 
@@ -177,6 +222,8 @@ impl Which {
             Which::DmrIds => USERS.read().as_ref().map(|u| u.len()),
             Which::NxdnIds => NXDN.read().as_ref().map(|u| u.len()),
             Which::Gateways => GATEWAYS.read().as_ref().map(|g| g.len()),
+            Which::Artemis => ARTEMIS.read().as_ref().map(|s| s.len()),
+            Which::SigIdUnid => UNID.read().as_ref().map(|s| s.len()),
         }
     }
 
@@ -203,7 +250,7 @@ impl Work {
     }
 }
 
-static WORK: [Work; 5] = [Work::new(), Work::new(), Work::new(), Work::new(), Work::new()];
+static WORK: [Work; 7] = [Work::new(), Work::new(), Work::new(), Work::new(), Work::new(), Work::new(), Work::new()];
 
 /// A dataset as the settings pane shows it: what is held, how big it is on
 /// disk, when it was last checked, and whatever went wrong last time.
@@ -337,6 +384,26 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
                 *GATEWAYS.write() = Some(Arc::new(g));
             }
         }
+        Which::Artemis => {
+            if ARTEMIS.read().is_none() {
+                *ARTEMIS.write() = Some(Arc::new(sigid::load_artemis(cache)?));
+                *SIGID.write() = None;
+            }
+            if let Some(s) = sigid::refresh_artemis(cache, when)? {
+                *ARTEMIS.write() = Some(Arc::new(s));
+                *SIGID.write() = None;
+            }
+        }
+        Which::SigIdUnid => {
+            if UNID.read().is_none() {
+                *UNID.write() = Some(Arc::new(sigid::load_unid(cache)?));
+                *SIGID.write() = None;
+            }
+            if let Some(s) = sigid::refresh_unid(cache, when)? {
+                *UNID.write() = Some(Arc::new(s));
+                *SIGID.write() = None;
+            }
+        }
     }
     Ok(())
 }
@@ -405,6 +472,16 @@ pub fn fetch_all() {
         datasets::gateways::refresh(&cache, When::Now).map(|u| u.is_some()),
         datasets::gateways::load(&cache).map(|g| g.len()),
     );
+    each(
+        "identified signals",
+        datasets::sigid::refresh_artemis(&cache, When::Now).map(|u| u.is_some()),
+        datasets::sigid::load_artemis(&cache).map(|d| d.len()),
+    );
+    each(
+        "unidentified signals",
+        datasets::sigid::refresh_unid(&cache, When::Now).map(|u| u.is_some()),
+        datasets::sigid::load_unid(&cache).map(|d| d.len()),
+    );
 }
 
 fn each(
@@ -468,7 +545,7 @@ mod tests {
             assert!(!w.sources().is_empty(), "{} has no source", w.label());
         }
         let idx: Vec<usize> = Which::ALL.iter().map(|w| w.index()).collect();
-        assert_eq!(idx, [0, 1, 2, 3, 4], "slot indices must be distinct");
+        assert_eq!(idx, [0, 1, 2, 3, 4, 5, 6], "slot indices must be distinct");
         assert_eq!(WORK.len(), Which::ALL.len());
     }
 }

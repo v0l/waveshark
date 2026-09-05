@@ -307,6 +307,8 @@ pub(super) struct LogState {
     /// Where the log is being written, for the status line. The log itself
     /// lives in the graph, on the radio thread.
     pub path: Option<std::path::PathBuf>,
+    /// The packet the signal identification modal is open on, if it is.
+    pub sigid: Option<DecodeRecord>,
 }
 
 impl Default for LogState {
@@ -315,6 +317,7 @@ impl Default for LogState {
             decodes: Vec::new(),
             next_packet: 1,
             selected: None,
+            sigid: None,
             inspector_h: 116.0 + super::BURST_VIEW_H + 24.0,
             show_unknown: true,
             open: true,
