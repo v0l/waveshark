@@ -17,7 +17,7 @@
 //! reaches the call list.
 
 use common::Result;
-use decode::tetra::{Address, CallPdu, Event, RESOURCE, TRAFFIC, TRAFFIC_END};
+use decode::tetra::{Address, CallPdu, Event, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, RESOURCE, TRAFFIC, TRAFFIC_END};
 use decode::voice::CallDecoder;
 use std::collections::HashMap;
 
@@ -148,9 +148,13 @@ struct Traffic {
 /// logged call is decodable again by something written later.
 const TRAFFIC_BURST_TAG: u8 = 7;
 /// Body: tag, timeslot, marker, flags, frame, slot counter, the SSI the
-/// marker was given to or zero, 510 bits packed.
-const TRAFFIC_BURST_LEN: usize = 1 + 1 + 1 + 1 + 1 + 8 + 4 + SLOT_BITS.div_ceil(8);
-const TB_BITS_AT: usize = 17;
+/// marker was given to or zero, the SSI granted transmission or zero, 510
+/// bits packed. Rows logged before the talker was carried are four bytes
+/// shorter and still read.
+const TRAFFIC_BURST_LEN_V1: usize = 1 + 1 + 1 + 1 + 1 + 8 + 4 + SLOT_BITS.div_ceil(8);
+const TRAFFIC_BURST_LEN: usize = TRAFFIC_BURST_LEN_V1 + 4;
+const TB_BITS_AT_V1: usize = 17;
+const TB_BITS_AT: usize = 21;
 const TB_FLAG_CRC_OK: u8 = 0x01;
 const TB_FLAG_ENCRYPTED: u8 = 0x02;
 /// Ring of channel samples behind the demodulator, in slots. A burst is
@@ -165,6 +169,8 @@ struct VoiceBurst {
     marker: u8,
     /// Who the marker's traffic was granted to, when a call PDU said.
     to: Option<u32>,
+    /// Who was granted transmission on it, when a call PDU said.
+    from: Option<u32>,
     frame: u8,
     crc_ok: bool,
     pcm: Vec<f32>,
@@ -209,6 +215,12 @@ pub struct TetraNode {
     /// never says what it carries, so this is the only thing that can tell
     /// a data call's traffic from a voice one's.
     marker_speech: HashMap<u8, bool>,
+    /// Who is transmitting, by the group they were granted it on: the
+    /// transmitting party a D-TX GRANTED names, or the calling party of a
+    /// D-SETUP, until a D-TX CEASED or D-RELEASE on that group. The
+    /// traffic itself never says who is talking; only the signalling that
+    /// handed the slot over does.
+    talkers: HashMap<u32, u32>,
     /// Traffic on each timeslot right now, by timeslot number.
     traffic: HashMap<u8, Traffic>,
     /// A speech decoder per timeslot carrying traffic, holding the vocoder's
@@ -257,6 +269,7 @@ impl TetraNode {
             cell_band: None,
             markers: HashMap::new(),
             marker_speech: HashMap::new(),
+            talkers: HashMap::new(),
             traffic: HashMap::new(),
             voice_calls: HashMap::new(),
             crypto: Crypto::new(),
@@ -346,6 +359,11 @@ impl TetraNode {
         true
     }
 
+    /// Who was last granted transmission on the group a marker belongs to.
+    fn talker(&self, marker: u8) -> Option<u32> {
+        self.markers.get(&marker).and_then(|ssi| self.talkers.get(ssi)).copied()
+    }
+
     /// A traffic event for a marker, addressed to the party it was given to
     /// when that is known and to the marker itself otherwise.
     fn traffic_event(&self, pdu: u8, tn: u8, marker: u8, seconds: f32, slot: u64) -> Event {
@@ -353,6 +371,7 @@ impl TetraNode {
             Some(ssi) => Address::Ssi(*ssi),
             None => Address::UsageMarker(marker),
         };
+        let from = self.talker(marker);
         let time = self.rx.time_at(slot).map(|mut t| {
             t.tn = tn;
             t
@@ -366,7 +385,7 @@ impl TetraNode {
             e2e: None,
             speech: self.marker_speech.get(&marker).copied(),
             call_id: None,
-            from: None,
+            from,
             group: None,
             time,
             alloc: None,
@@ -498,6 +517,7 @@ impl TetraNode {
                 tn,
                 marker,
                 to: self.markers.get(&marker).copied(),
+                from: self.talker(marker),
                 frame: time.frame,
                 crc_ok,
                 pcm: mine,
@@ -524,11 +544,12 @@ impl TetraNode {
                     Some(ssi) => ssi.to_string(),
                     None => format!("marker {m}"),
                 });
+                let from = marker.and_then(|m| self.talker(m)).map(|s| s.to_string());
                 common::Voice {
                     system: "TETRA",
                     channel_hz: self.channel_hz,
                     to,
-                    from: None,
+                    from,
                     rate: VOICE_HZ,
                     pcm: pcm.remove(&tn).unwrap_or_default(),
                 }
@@ -659,6 +680,17 @@ impl Node for TetraNode {
                     }
                     if let (Some(m), Some(speech)) = (c.marker, c.speech) {
                         self.marker_speech.insert(m, speech);
+                    }
+                    if let Some(group) = c.address.ssi() {
+                        match (c.pdu, c.from) {
+                            (D_TX_GRANTED | D_SETUP, Some(who)) => {
+                                self.talkers.insert(group, who);
+                            }
+                            (D_TX_CEASED | D_RELEASE | D_DISCONNECT, _) => {
+                                self.talkers.remove(&group);
+                            }
+                            _ => {}
+                        }
                     }
                     if c.aie != 0 {
                         self.last_aie = c.aie;
@@ -806,31 +838,41 @@ fn encode_traffic_burst(vb: &VoiceBurst, b: &Burst, encrypted: bool) -> Vec<u8> 
     v.push(vb.frame);
     v.extend_from_slice(&b.slot.to_be_bytes());
     v.extend_from_slice(&vb.to.unwrap_or(0).to_be_bytes());
+    v.extend_from_slice(&vb.from.unwrap_or(0).to_be_bytes());
     v.extend(b.bits.chunks(8).map(|c| c.iter().fold(0u8, |acc, &bit| (acc << 1) | (bit & 1))));
     v
 }
 
 /// The 510 bits of a logged traffic burst, for anything reading it again.
 pub fn traffic_burst_bits(bytes: &[u8]) -> Option<[u8; SLOT_BITS]> {
-    if bytes.len() != TRAFFIC_BURST_LEN || bytes[0] != TRAFFIC_BURST_TAG {
-        return None;
-    }
+    let (at, _) = traffic_burst_layout(bytes)?;
     let mut bits = [0u8; SLOT_BITS];
     for (i, bit) in bits.iter_mut().enumerate() {
-        *bit = (bytes[TB_BITS_AT + i / 8] >> (7 - i % 8)) & 1;
+        *bit = (bytes[at + i / 8] >> (7 - i % 8)) & 1;
     }
     Some(bits)
+}
+
+/// Where the bits start and whether the row carries a talker, by length.
+fn traffic_burst_layout(bytes: &[u8]) -> Option<(usize, bool)> {
+    if bytes.first() != Some(&TRAFFIC_BURST_TAG) {
+        return None;
+    }
+    match bytes.len() {
+        TRAFFIC_BURST_LEN => Some((TB_BITS_AT, true)),
+        TRAFFIC_BURST_LEN_V1 => Some((TB_BITS_AT_V1, false)),
+        _ => None,
+    }
 }
 
 /// The row a traffic burst becomes.
 fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
-    if bytes.len() != TRAFFIC_BURST_LEN || bytes[0] != TRAFFIC_BURST_TAG {
-        return None;
-    }
+    let (_, with_talker) = traffic_burst_layout(bytes)?;
     let (tn, marker, flags, frame) = (bytes[1], bytes[2], bytes[3], bytes[4]);
     let slot = u64::from_be_bytes(bytes[5..13].try_into().ok()?);
     let to = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
+    let from = if with_talker { u32::from_be_bytes(bytes[17..21].try_into().ok()?) } else { 0 };
     let crc_ok = flags & TB_FLAG_CRC_OK != 0;
     let mut fields: Vec<(String, Value)> = vec![
         ("voice".into(), Value::Bool(true)),
@@ -843,6 +885,9 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ("slot".into(), Value::Int(slot as i64)),
         ("crc".into(), Value::Bool(crc_ok)),
     ];
+    if from != 0 {
+        fields.push(("from".into(), Value::Text(from.to_string())));
+    }
     // No airtime here: the traffic end row carries the whole call's, and a
     // list that added both would count it twice.
     if flags & TB_FLAG_ENCRYPTED != 0 {
