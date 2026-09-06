@@ -1195,6 +1195,7 @@ impl App {
             scanners: &self.scanners,
             patch: &self.chain.patch,
             decode_on: self.decode_on,
+            err: self.err.as_deref(),
             acts: Vec::new(),
         }
         .show(ui);
@@ -1739,6 +1740,7 @@ mod tests {
             scanners: &a.scanners,
             patch: &a.chain.patch,
             decode_on: a.decode_on,
+            err: None,
             acts: Vec::new(),
         }
     }

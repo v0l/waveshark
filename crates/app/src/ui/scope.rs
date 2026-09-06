@@ -34,6 +34,10 @@ pub(super) struct Scope<'a> {
     pub scanners: &'a crate::scanners::Scanners,
     pub patch: &'a crate::patch::Patch,
     pub decode_on: bool,
+    /// What the receiver last refused or lost, shown over the plot with the
+    /// converter's own warning. One place for everything that is wrong, so a
+    /// fault is looked for in one place.
+    pub err: Option<&'a str>,
     /// What the pane wants done when the frame is over.
     pub acts: Vec<Action>,
 }
@@ -131,7 +135,7 @@ impl Scope<'_> {
         // margin note rather than as a signal.
         self.scan_marks(&p, &plot);
         self.source_marks(&p, &plot);
-        self.adc_warning(&p, &plot);
+        self.faults(&p, &plot);
         self.ribbon(&p, &ribbon);
 
         p.rect_filled(fall, 0.0, theme::CHASSIS);
@@ -548,37 +552,47 @@ impl Scope<'_> {
         );
     }
 
-    /// One line over the plot when the converter is starved or clipping.
+    /// The faults, over the plot: the converter starved or clipping, and
+    /// whatever the receiver last refused or lost.
     ///
-    /// Waits a second of frames so a burst that clips its own peak does not
-    /// flash it, and says what to do rather than what was measured: nobody
-    /// reading "3 levels" knows that means turn the gain up.
-    fn adc_warning(&self, p: &egui::Painter, plot: &Rect) {
+    /// The converter's line waits a second of frames so a burst that clips
+    /// its own peak does not flash it, and says what to do rather than what
+    /// was measured: nobody reading "3 levels" knows that means turn the gain
+    /// up. Drawn here rather than as a line in the header because the plot is
+    /// where the eyes are, and a fault in the header of a pane nobody is
+    /// looking at is a fault nobody sees.
+    fn faults(&self, p: &egui::Painter, plot: &Rect) {
         const HOLD_FRAMES: u32 = 30;
-        if self.st.adc_bad_frames < HOLD_FRAMES {
-            return;
+        let mut lines: Vec<String> = Vec::new();
+        if self.st.adc_bad_frames >= HOLD_FRAMES {
+            lines.push(if self.st.adc.clipping() {
+                format!(
+                    "ADC CLIPPING  {:.0}% of samples on the rail: lower the gain",
+                    self.st.adc.clipped * 100.0
+                )
+            } else {
+                format!(
+                    "ADC STARVED  samples take {} values: raise the gain",
+                    self.st.adc.levels
+                )
+            });
         }
-        let text = if self.st.adc.clipping() {
-            format!(
-                "ADC CLIPPING  {:.0}% of samples on the rail: lower the gain",
-                self.st.adc.clipped * 100.0
-            )
-        } else {
-            format!(
-                "ADC STARVED  samples take {} values: raise the gain",
-                self.st.adc.levels
-            )
-        };
+        if let Some(e) = self.err {
+            lines.push(e.to_string());
+        }
         let font = FontId::new(11.0, FontFamily::Name(theme::READOUT_FONT.into()));
-        let at = Pos2::new(plot.center().x, plot.top() + 8.0);
-        let galley = p.layout_no_wrap(text, font, theme::FAULT);
-        let r = Rect::from_center_size(
-            Pos2::new(at.x, at.y + galley.size().y / 2.0),
-            galley.size() + egui::vec2(16.0, 6.0),
-        );
-        p.rect_filled(r, 2.0, theme::WELL.gamma_multiply(0.9));
-        p.rect_stroke(r, 2.0, Stroke::new(1.0, theme::FAULT), egui::StrokeKind::Outside);
-        p.galley(r.min + egui::vec2(8.0, 3.0), galley, theme::FAULT);
+        let mut top = plot.top() + 8.0;
+        for text in lines {
+            let galley = p.layout_no_wrap(text, font.clone(), theme::FAULT);
+            let r = Rect::from_center_size(
+                Pos2::new(plot.center().x, top + galley.size().y / 2.0 + 3.0),
+                galley.size() + egui::vec2(16.0, 6.0),
+            );
+            p.rect_filled(r, 2.0, theme::WELL.gamma_multiply(0.9));
+            p.rect_stroke(r, 2.0, Stroke::new(1.0, theme::FAULT), egui::StrokeKind::Outside);
+            p.galley(r.min + egui::vec2(8.0, 3.0), galley, theme::FAULT);
+            top = r.bottom() + 4.0;
+        }
     }
 
     fn trace(&self, p: &egui::Painter, plot: &Rect) {
