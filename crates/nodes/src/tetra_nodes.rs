@@ -513,10 +513,17 @@ impl TetraNode {
         seen_tn
             .into_iter()
             .map(|tn| {
+                // Named as the log row names it, so a subscription made from
+                // the row matches the speech. A slot the network assigned by
+                // usage marker without ever saying which group the marker is
+                // used to come through with no name at all, and the bus drops
+                // speech with nobody to match it against: a clear call was
+                // listed, ticked, and never heard.
                 let marker = self.traffic.get(&tn).map(|t| t.marker);
-                let to = marker
-                    .and_then(|m| self.markers.get(&m))
-                    .map(|ssi| ssi.to_string());
+                let to = marker.map(|m| match self.markers.get(&m) {
+                    Some(ssi) => ssi.to_string(),
+                    None => format!("marker {m}"),
+                });
                 common::Voice {
                     system: "TETRA",
                     channel_hz: self.channel_hz,
@@ -1064,13 +1071,17 @@ mod tests {
         let ins = [spec(rate, hz)];
         let tags = Vec::new();
         let mut rows = Vec::new();
+        let mut voices: Vec<common::Voice> = Vec::new();
         for chunk in iq.chunks(16_384) {
             let input = Payload::Iq(chunk.to_vec());
             let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&[&input], &mut outs, &mut ctx).unwrap();
-            let [out, _voice] = outs;
+            let [out, voice] = outs;
+            if let Payload::Voice(v) = voice {
+                voices.extend(v);
+            }
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(b) = p.body {
@@ -1149,13 +1160,17 @@ mod tests {
         let ins = [spec(rate, hz)];
         let tags = Vec::new();
         let mut rows = Vec::new();
+        let mut voices: Vec<common::Voice> = Vec::new();
         for chunk in iq.chunks(16_384) {
             let input = Payload::Iq(chunk.to_vec());
             let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&[&input], &mut outs, &mut ctx).unwrap();
-            let [out, _voice] = outs;
+            let [out, voice] = outs;
+            if let Payload::Voice(v) = voice {
+                voices.extend(v);
+            }
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(b) = &p.body {
@@ -1192,6 +1207,15 @@ mod tests {
         let secs: f64 = get(traffic[1], "seconds").unwrap().parse().unwrap();
         let want = 29.0 * 4.0 * 255.0 / 18_000.0;
         assert!((secs - want).abs() < 0.2, "{secs} s of traffic, wanted about {want:.2}");
+        // The speech is named as the row is. The network never said which
+        // group marker 23 stands for, and speech with no name is dropped by
+        // the bus, so a call that was listed and ticked was never heard.
+        assert!(!voices.is_empty(), "no speech left the node");
+        assert!(
+            voices.iter().all(|v| v.to.as_deref() == Some("marker 23")),
+            "{:?}",
+            voices.iter().map(|v| v.to.clone()).collect::<Vec<_>>()
+        );
     }
 
     /// The cipher-agnostic passive path: one IV seen twice with different
