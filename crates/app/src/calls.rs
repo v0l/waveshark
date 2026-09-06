@@ -70,6 +70,9 @@ pub struct Call {
     /// How, as the system names it: "AIE-3", "E2E", or "decrypted" once a
     /// key has undone it. `None` when the decode did not say.
     pub cipher: Option<String>,
+    /// The vocoder the speech is in, as the front end names it: "AMBE+2
+    /// 2450", "Codec 2 3200", "ACELP 4.6k". `None` when it did not say.
+    pub codec: Option<String>,
     pub first: Instant,
     pub last: Instant,
     /// Separate keyings of the microphone, not packets.
@@ -158,6 +161,7 @@ impl Calls {
             None => is_group(&to),
         };
         let cipher = text(rec, &["encryption"]).filter(|t| !t.eq_ignore_ascii_case("none"));
+        let codec = text(rec, &["codec"]).filter(|t| !t.is_empty());
         let encrypted = cipher.as_deref().is_some_and(|t| !t.eq_ignore_ascii_case("decrypted"))
             || rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("encrypted", Value::Bool(true))));
         let seconds = rec
@@ -195,6 +199,9 @@ impl Calls {
             if cipher.is_some() {
                 c.cipher = cipher;
             }
+            if codec.is_some() {
+                c.codec = codec;
+            }
             return true;
         }
 
@@ -206,6 +213,7 @@ impl Calls {
             group,
             encrypted,
             cipher,
+            codec,
             first: at,
             last: at,
             overs: u64::from(!live),

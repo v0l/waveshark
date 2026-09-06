@@ -144,6 +144,10 @@ fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Va
     }
     let group = flags & FLAG_GROUP != 0;
     fields.push(("voice".to_string(), Value::Bool(true)));
+    // DMR speech is always AMBE+2 at 2450 bit/s of speech under 1150 of
+    // FEC; there is no other vocoder in the standard, so this is the one
+    // thing a listener can read off the mode alone.
+    fields.push(("codec".to_string(), Value::Text("AMBE+2 2450".to_string())));
     fields.push(("to".to_string(), Value::Text(dst.to_string())));
     fields.push(("from".to_string(), Value::Text(src.to_string())));
     fields.push((

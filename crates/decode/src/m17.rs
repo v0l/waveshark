@@ -581,8 +581,18 @@ pub fn fields(lsf: &Lsf) -> Vec<(String, Value)> {
         (true, DataType::Reserved) => "stream",
     };
     f.push(("mode".into(), Value::Text(mode.into())));
-    if matches!(mode, "voice" | "voice+data") {
-        f.push(("voice".into(), Value::Bool(true)));
+    // Codec 2 at 3200 bit/s fills a voice frame; with data alongside the
+    // speech drops to 1600 to make room (M17 spec 1.0, stream type).
+    match mode {
+        "voice" => {
+            f.push(("voice".into(), Value::Bool(true)));
+            f.push(("codec".into(), Value::Text("Codec 2 3200".into())));
+        }
+        "voice+data" => {
+            f.push(("voice".into(), Value::Bool(true)));
+            f.push(("codec".into(), Value::Text("Codec 2 1600".into())));
+        }
+        _ => {}
     }
     if lsf.encryption() != Encryption::None {
         let e = match lsf.encryption() {
