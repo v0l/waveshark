@@ -175,13 +175,34 @@ impl Calls {
         let live = rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
 
         // A channel is matched loosely: the same talkgroup found by two front
-        // ends a few hundred hertz apart is one call, not two rows.
-        if let Some(c) = self.seen.iter_mut().find(|c| {
+        // ends a few hundred hertz apart is one call, not two rows. And a
+        // caller is matched only where both sides name one: on TETRA the
+        // grant names who is talking and the traffic that follows does
+        // not, and treating those as two callers listed every call twice,
+        // once with a name and once without.
+        let same = |c: &Call| {
             c.system == system
                 && c.to == to
-                && c.from == from
                 && (c.channel_hz - rec.freq).abs() < rec.channel_hz.max(1.0)
-        }) {
+        };
+        let found = self
+            .seen
+            .iter()
+            .position(|c| same(c) && c.from == from)
+            .or_else(|| {
+                // The one most recently heard, since that is the call the
+                // unnamed traffic belongs to.
+                self.seen
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| same(c) && (c.from.is_none() || from.is_none()) && c.age(at) < LIVE)
+                    .max_by_key(|(_, c)| c.last)
+                    .map(|(i, _)| i)
+            });
+        if let Some(c) = found.map(|i| &mut self.seen[i]) {
+            if c.from.is_none() {
+                c.from = from;
+            }
             // A gap longer than the hang time is a new conversation on the
             // same group, so the old one keeps its duration rather than
             // stretching across the silence.
@@ -352,6 +373,25 @@ mod tests {
         assert_eq!(list[0].overs, 1, "the count restarted");
         assert_eq!(list[0].seconds, 2.0);
         assert!(list[0].span() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn traffic_that_does_not_name_its_caller_joins_the_grant_that_did() {
+        // On TETRA the grant says who is talking and the bursts that follow
+        // say nothing, and on a network that never grants by name the bursts
+        // are all there is. Either way it is one call, with the caller
+        // filled in from whichever row carried it.
+        let mut c = Calls::new();
+        let to = ("to", Value::Text("2001".into()));
+        c.update(&voice("TETRA-Voice", 391.7e6, &[to.clone()]), t(0));
+        c.update(&voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70311".into())), to.clone()]), t(1));
+        c.update(&voice("TETRA-Voice", 391.7e6, &[to.clone()]), t(2));
+        let list = c.active(t(2));
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0].from.as_deref(), Some("70311"));
+        // A different named caller is still a different row.
+        c.update(&voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70312".into())), to.clone()]), t(3));
+        assert_eq!(c.active(t(3)).len(), 2);
     }
 
     #[test]
