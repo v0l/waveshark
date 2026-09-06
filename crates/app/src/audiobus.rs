@@ -327,14 +327,19 @@ impl AudioBus {
     }
 
     /// What each voice source put into the mix last block, keyed as
-    /// `system:channel`, for a meter on its row.
+    /// `system:channel:to`, for a meter on its row.
     pub fn levels(&self) -> Vec<(String, f32)> {
         self.peaks.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
     /// The key a voice source's meter is filed under.
-    pub fn key_of(system: &str, channel_hz: f64) -> String {
-        format!("{system}:{channel_hz:.0}")
+    ///
+    /// The group is part of it because a trunked system carries several of
+    /// them on one carrier: keyed by frequency alone, every talkgroup on a
+    /// TETRA channel shared one meter and the whole column moved together
+    /// whenever any one of them was speaking.
+    pub fn key_of(system: &str, channel_hz: f64, to: &str) -> String {
+        format!("{system}:{channel_hz:.0}:{to}")
     }
 
     /// What the subscriptions say about one transmission: the gain to mix it
@@ -359,10 +364,13 @@ impl AudioBus {
         if v.pcm.is_empty() || gain <= 0.0 {
             return false;
         }
-        let key = Self::key_of(v.system, v.channel_hz);
+        let key = Self::key_of(v.system, v.channel_hz, v.to);
+        // Resampling state is per carrier, not per group: only one group on a
+        // channel is ever speaking, and a map keyed by group would grow for
+        // as long as the receiver runs.
         let rs = self
             .rs
-            .entry(key.clone())
+            .entry(format!("{}:{:.0}", v.system, v.channel_hz))
             .or_insert_with(|| audio::Resampler::new(v.rate, self.out_rate, 4));
         self.scratch.clear();
         rs.process(v.pcm, &mut self.scratch);
@@ -849,6 +857,21 @@ mod tests {
         assert!(!b.listening());
         assert!(!b.push(voice("ALL", "M0ABC", &pcm)));
         assert!(b.render(0).is_empty());
+    }
+
+    #[test]
+    fn each_group_on_a_carrier_meters_on_its_own() {
+        // A trunked system puts several groups on one frequency. Keyed by
+        // frequency alone every row in the call list read the same level, so
+        // the whole column moved whenever anybody spoke.
+        let mut b = bus(&[Rule::System("M17".into())]);
+        let pcm = vec![0.5f32; 160];
+        assert!(b.push(voice("TG100", "M0ABC", &pcm)));
+        let levels = b.levels();
+        let loud = AudioBus::key_of("M17", 433_475_000.0, "TG100");
+        let quiet = AudioBus::key_of("M17", 433_475_000.0, "TG200");
+        assert!(levels.iter().any(|(k, v)| *k == loud && *v > 0.1), "{levels:?}");
+        assert!(!levels.iter().any(|(k, _)| *k == quiet), "a silent group read a level");
     }
 
     #[test]

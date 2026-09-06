@@ -167,7 +167,7 @@ impl CallList<'_> {
                         // what it answers is whether this call is reaching
                         // the speaker, and a bar answers that at a glance.
                         if i == LEVEL_COL {
-                            let key = crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz);
+                            let key = crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz, &c.to);
                             let peak = levels
                                 .iter()
                                 .find(|(k, _)| *k == key)
