@@ -46,7 +46,7 @@ pub use pocsag_nodes::PocsagNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
-pub use auto_node::AutoNode;
+pub use auto_node::{AutoNode, AUTO_OPEN_DB};
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
 pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX};
@@ -370,7 +370,7 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            let mut cfg = dsp::SourceConfig::default();
+            let mut cfg = dsp::SourceConfig { open_db: AUTO_OPEN_DB, ..Default::default() };
             cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
             cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
             cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;

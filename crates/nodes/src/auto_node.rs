@@ -38,6 +38,14 @@ use rayon::prelude::*;
 
 use crate::{build_chain, NodeSpec};
 
+/// SNR a bin must reach before the auto node opens a source there.
+///
+/// Above the detector's own default because this node builds a decoder chain
+/// for everything it opens: on a band with a strong transmitter on it, the
+/// weakest openings are mostly the splash and spurs around one signal, and
+/// each of them costs a chain.
+pub const AUTO_OPEN_DB: f32 = 15.0;
+
 /// Widest a source can be and still be a narrowband voice or data channel
 /// worth trying the frame decoders on, in hertz.
 ///
