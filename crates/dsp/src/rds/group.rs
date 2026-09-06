@@ -227,7 +227,8 @@ mod tests {
     fn name_groups(pi: u16, name: &[u8; 8]) -> Vec<Group> {
         (0..4)
             .map(|seg| {
-                let b = (0 << 12) | (0 << 11) | (9 << 5) | seg as u16;
+                // Block B: group 0, version A, TP clear, PTY 9, segment.
+                let b = (9 << 5) | seg as u16;
                 let d = ((name[seg * 2] as u16) << 8) | name[seg * 2 + 1] as u16;
                 group(pi, b, 0, d)
             })
@@ -284,7 +285,8 @@ mod tests {
         }
         (0..16)
             .map(|seg| {
-                let b = (2 << 12) | (0 << 11) | (10 << 5) | ((ab as u16) << 4) | seg as u16;
+                // Block B: group 2, version A, PTY 10, A/B flag, segment.
+                let b = (2 << 12) | (10 << 5) | ((ab as u16) << 4) | seg as u16;
                 let c = ((buf[seg * 4] as u16) << 8) | buf[seg * 4 + 1] as u16;
                 let d = ((buf[seg * 4 + 2] as u16) << 8) | buf[seg * 4 + 3] as u16;
                 group(pi, b, c, d)

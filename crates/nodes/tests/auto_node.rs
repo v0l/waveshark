@@ -13,7 +13,7 @@ fn fixture(name: &str) -> Option<common::IqBuf> {
         eprintln!("skipping: {name} absent, run testdata/fetch.sh");
         return None;
     }
-    Some(FileSource::open(&p).ok()?.read_all().ok()?)
+    FileSource::open(&p).ok()?.read_all().ok()
 }
 
 /// Run a stream through one stage, in radio-sized blocks, and collect the
@@ -22,7 +22,7 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
     let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in iq.chunks(16_384).chain(std::iter::repeat(&silence[..]).take(4)) {
+    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
         match g.output() {
             pipeline::Payload::Packets(p) => out.extend_from_slice(p),
@@ -166,7 +166,7 @@ fn events(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<pipeline::e
     let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in iq.chunks(16_384).chain(std::iter::repeat(&silence[..]).take(8)) {
+    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
         out.extend_from_slice(g.feed_iq(block).expect("run"));
     }
     out

@@ -34,7 +34,7 @@ fn fixture() -> Option<common::IqBuf> {
     if !p.exists() {
         return None;
     }
-    Some(FileSource::open(&p).ok()?.read_all().ok()?)
+    FileSource::open(&p).ok()?.read_all().ok()
 }
 
 macro_rules! need_fixture {

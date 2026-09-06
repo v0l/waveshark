@@ -637,7 +637,7 @@ mod tests {
             nibbles.push(b & 0x0f);
             nibbles.push(b >> 4);
         }
-        while nibbles.len() % ppm != 0 {
+        while !nibbles.len().is_multiple_of(ppm) {
             nibbles.push(0);
         }
 

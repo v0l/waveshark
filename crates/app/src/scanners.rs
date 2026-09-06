@@ -800,7 +800,7 @@ mod tests {
             s.active(439_987_500.0, 2_400_000.0).iter().map(|b| b.name.as_str()).collect();
         assert_eq!(running, ["Pager"]);
         // The off state round-trips through the file.
-        assert!(Scanners::parse(&s.render()).list[0].enabled == false);
+        assert!(!Scanners::parse(&s.render()).list[0].enabled);
     }
 
     #[test]

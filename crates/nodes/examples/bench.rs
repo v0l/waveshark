@@ -27,7 +27,7 @@ fn signal(n: usize, rate: f64) -> Vec<C32> {
         .map(|i| {
             let t = i as f64 / rate;
             // A 1 kHz OOK burst pattern across part of the span.
-            let on = ((t * 1000.0) as u64) % 3 == 0;
+            let on = ((t * 1000.0) as u64).is_multiple_of(3);
             let a = if on { 0.5 } else { 0.0 };
             let ph = (t * 40_000.0 * std::f64::consts::TAU).rem_euclid(std::f64::consts::TAU);
             C32::new(a * ph.cos() as f32 + rng() * 0.05, a * ph.sin() as f32 + rng() * 0.05)

@@ -345,7 +345,7 @@ mod tests {
         let total_us = lead_us + DATA_US + bytes.len() as f32 * 8.0 + 10.0;
         let mut v = vec![C32::new(0.0, 0.0); (total_us * spus) as usize];
         // Pulses are half a microsecond, however many samples that is.
-        let mut put = |us: f32, v: &mut Vec<C32>| {
+        let put = |us: f32, v: &mut Vec<C32>| {
             let from = ((lead_us + us) * spus).ceil() as usize;
             let to = ((lead_us + us + 0.5) * spus).ceil() as usize;
             for s in v.iter_mut().take(to).skip(from) {

@@ -24,7 +24,7 @@ fn main() {
         let mut t = start;
         while t + burst < iq.len() {
             for i in 0..burst {
-                let on = (i / (rate as usize / 2000)) % 2 == 0;
+                let on = (i / (rate as usize / 2000)).is_multiple_of(2);
                 ph += std::f64::consts::TAU * off / rate;
                 if on {
                     iq[t + i] += C32::new(0.2 * ph.cos() as f32, 0.2 * ph.sin() as f32);

@@ -357,12 +357,12 @@ mod tests {
         let init = scramb_init(272, 1234, 17);
         let mut bits = vec![0u8; 120];
         scramble(init, &mut bits);
-        assert!(bits.iter().any(|&b| b == 1), "the sequence is not all zeros");
+        assert!(bits.contains(&1), "the sequence is not all zeros");
         let mut twice = bits.clone();
         scramble(init, &mut twice);
         assert!(twice.iter().all(|&b| b == 0));
         // The identity packs as e-bits above the two fixed ones.
-        assert_eq!(scramb_init(0x3ff, 0x3fff, 0x3f), 0xffff_ffff & !0);
+        assert_eq!(scramb_init(0x3ff, 0x3fff, 0x3f), !0);
         assert_eq!(scramb_init(0, 0, 0), 3);
     }
 

@@ -22,7 +22,7 @@ fn fixture_path() -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata")
         .join(FIXTURE);
-    p.exists().then(|| p)
+    p.exists().then_some(p)
 }
 
 fn packages() -> Option<Vec<dsp::Package>> {

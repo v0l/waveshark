@@ -16,7 +16,7 @@ fn sinc(x: f64) -> f64 {
 /// to the -6 dB point. `taps` should be odd for a true linear-phase type-I
 /// filter; an even count is bumped up by one.
 pub fn lowpass(taps: usize, cutoff: f64, atten_db: f64) -> Vec<f32> {
-    let n = if taps % 2 == 0 { taps + 1 } else { taps };
+    let n = if taps.is_multiple_of(2) { taps + 1 } else { taps };
     let beta = kaiser_beta_for_atten(atten_db);
     let w = kaiser(n, beta);
     let mid = (n - 1) as f64 / 2.0;

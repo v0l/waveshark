@@ -75,7 +75,7 @@ impl Rule {
             // Case-insensitive because a callsign is written both ways and
             // nobody means a different aircraft by it.
             Rule::Group(g) => v.to.eq_ignore_ascii_case(g),
-            Rule::Caller(c) => v.from.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(c)),
+            Rule::Caller(c) => v.from.is_some_and(|f| f.eq_ignore_ascii_case(c)),
             // Half a kilohertz, which is a rounding rather than a channel:
             // the narrowest grid anything here uses is 12.5 kHz.
             Rule::Channel(hz) => (v.channel_hz - hz).abs() < 500.0,

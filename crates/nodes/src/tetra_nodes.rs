@@ -197,7 +197,7 @@ impl LspWatch {
             let jumped = lsp
                 .iter()
                 .zip(self.last.iter().zip(Self::JUMPS))
-                .any(|((&a, (&b, t)))| a.abs_diff(b) > t);
+                .any(|(&a, (&b, t))| a.abs_diff(b) > t);
             self.jumped += u32::from(jumped);
         }
         self.last = lsp;
@@ -600,7 +600,7 @@ impl TetraNode {
             // `tea` feature, passes through untouched.
             self.crypto.decrypt_speech(&mut frames, cell.colour, time);
 
-            let dec = self.voice_calls.entry(tn).or_insert_with(CallDecoder::new);
+            let dec = self.voice_calls.entry(tn).or_default();
             let buf = pcm.entry(tn).or_default();
             let mut mine = Vec::new();
             for frame in &frames {
@@ -833,8 +833,8 @@ impl Node for TetraNode {
                 // spell of them, like a bare resource, so a radio that keeps
                 // re-registering is not a scroll. Harvested for pairing too.
                 Event::Mm(m) => {
-                    self.note_clear_identity(&m, slot);
-                    if !self.worth_an_mm_row(&m, slot) {
+                    self.note_clear_identity(m, slot);
+                    if !self.worth_an_mm_row(m, slot) {
                         continue;
                     }
                     (&mut None, None)
@@ -1285,7 +1285,7 @@ mod tests {
             put(&mut pdu, 31, 10, 272);
             put(&mut pdu, 41, 14, 91);
             let sb1 = coding::encode_block(&coding::BLK_BSCH, coding::SCRAMB_INIT, &pdu);
-            let bkn2 = coding::encode_block(&coding::BLK_HALF, scramb, &vec![0u8; 124]);
+            let bkn2 = coding::encode_block(&coding::BLK_HALF, scramb, &[0u8; 124]);
             bits.extend_from_slice(&synth::sync_burst(&sb1, &aach(scramb, 0, 10, 10), &bkn2));
             // Slots 2 to 4: normal bursts; slot 2 carries usage marker 23
             // for the first thirty frames, then falls idle.
@@ -1399,7 +1399,7 @@ mod tests {
             put(&mut pdu, 31, 10, 272);
             put(&mut pdu, 41, 14, 91);
             let sb1 = coding::encode_block(&coding::BLK_BSCH, coding::SCRAMB_INIT, &pdu);
-            let bkn2 = coding::encode_block(&coding::BLK_HALF, scramb, &vec![0u8; 124]);
+            let bkn2 = coding::encode_block(&coding::BLK_HALF, scramb, &[0u8; 124]);
             bits.extend_from_slice(&synth::sync_burst(&sb1, &aach(scramb, 0, 10, 10), &bkn2));
             for tn in 2..=4 {
                 let bb = if tn == 2 && frame <= 30 {

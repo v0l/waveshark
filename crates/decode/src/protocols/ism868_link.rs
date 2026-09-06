@@ -61,7 +61,7 @@ impl Protocol for Ism868Link {
                 continue;
             }
             let alternating = (1..=PREAMBLE_MIN).all(|k| bits.get(at - k) != bits.get(at - k + 1))
-                || (at >= PREAMBLE_MIN + 1 && (1..=PREAMBLE_MIN).all(|k| bits.get(at - k - 1) != bits.get(at - k)));
+                || (at > PREAMBLE_MIN && (1..=PREAMBLE_MIN).all(|k| bits.get(at - k - 1) != bits.get(at - k)));
             if !alternating {
                 continue;
             }

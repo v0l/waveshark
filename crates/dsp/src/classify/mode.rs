@@ -204,11 +204,9 @@ mod tests {
                 "{} wants a family no hypothesis can emit",
                 m.name
             );
-            for range in [m.baud, m.tone_sep_hz, m.sweep_hz_per_s, m.symbol_period_s, m.duration_s]
+            for (lo, hi) in [m.baud, m.tone_sep_hz, m.sweep_hz_per_s, m.symbol_period_s, m.duration_s].into_iter().flatten()
             {
-                if let Some((lo, hi)) = range {
-                    assert!(lo < hi, "{} has an inverted range", m.name);
-                }
+                assert!(lo < hi, "{} has an inverted range", m.name);
             }
         }
     }

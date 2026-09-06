@@ -21,7 +21,7 @@ fn fixture() -> Option<common::IqBuf> {
     if !p.exists() {
         return None;
     }
-    Some(FileSource::open(&p).ok()?.read_all().ok()?)
+    FileSource::open(&p).ok()?.read_all().ok()
 }
 
 macro_rules! need_fixture {
@@ -345,7 +345,7 @@ fn an_unreadable_burst_is_still_reported() {
         phase += std::f64::consts::TAU * f / rate;
         iq.push(C32::new(phase.cos() as f32, phase.sin() as f32));
     }
-    iq.extend(std::iter::repeat(C32::new(0.0, 0.0)).take(4096));
+    iq.extend(std::iter::repeat_n(C32::new(0.0, 0.0), 4096));
 
     let mut node = nodes::decode_nodes::BurstRouteNode::default_ism();
     let spec = pipeline::StreamSpec::iq(rate, common::Hz(433_920_000));

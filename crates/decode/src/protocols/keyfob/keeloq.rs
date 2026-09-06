@@ -130,7 +130,7 @@ mod tests {
     /// Encode a frame the way the chip sends it.
     fn frame(hop: u32, serial: u32, button: u32, vlow: bool, rpt: bool) -> Vec<(u32, u32)> {
         let mut p = vec![(1650, 150)];
-        p.extend(std::iter::repeat((TE, TE)).take(11));
+        p.extend(std::iter::repeat_n((TE, TE), 11));
         p.push((TE, 10 * TE));
         let word: u128 = hop as u128
             | (serial as u128) << 32

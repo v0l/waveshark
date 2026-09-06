@@ -280,7 +280,7 @@ impl TetraDemod {
                 (BurstKind::Normal2, &self.p_steps, NDB_TRAIN / 2),
             ] {
                 let (q, rot) = self.correlate(t + at_sym as f64 * self.sps, steps);
-                if best.map_or(true, |b| q > b.2) {
+                if best.is_none_or(|b| q > b.2) {
                     best = Some((t, kind, q, rot));
                 }
             }

@@ -46,16 +46,6 @@ use crate::{build_chain, NodeSpec};
 /// each of them costs a chain.
 pub const AUTO_OPEN_DB: f32 = 15.0;
 
-/// Widest a source can be and still be a narrowband voice or data channel
-/// worth trying the frame decoders on, in hertz.
-///
-/// There is no lower bound worth writing here. What the detector measures is
-/// the bins within [`SourceConfig::extent_db`] of the peak, which for a clean
-/// 12.5 kHz channel is a few kilohertz and can be the two-bin minimum: an M17
-/// transmission on 433.475 MHz measured 4 kHz, and a 6 kHz floor threw away
-/// its decoders before they saw a sample. The decoders each decide for
-/// themselves whether the bits are theirs, so the cost of trying is CPU and
-/// the cost of not trying is silence.
 /// How much wider than its declared channel a source may measure and still
 /// have that channel's front end placed on it. A clean channel measures a
 /// little over its width (an M17 12.5 kHz channel lands around 25 kHz once
@@ -67,15 +57,6 @@ const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 /// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
 /// with what the extraction adds around it.
 const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
-
-/// Silence fed to a source's decoders after its last block is what each
-/// asks for through [`Node::flush_s`]. A pager transmission has no closing
-/// flag: it ends when the batch that should follow is not there, and the
-/// demodulator only says so once it has heard enough silence to be sure. A
-/// DMR over that lost its terminator ends on a second and a half of it.
-/// Dropping the decoder the moment the source closes drops the page, or the
-/// over, with it: a handheld's every over was decoded to the end and never
-/// reported, while the same front end placed by hand reported all of them.
 
 /// How often a transmission that never ends is reported, in seconds.
 ///
@@ -121,7 +102,10 @@ struct Member {
     /// zero for one that measures the burst rather than reading a channel.
     channel_hz: f64,
     /// Silence to feed after the source closes, in seconds: the most any
-    /// node in the graph asked for.
+    /// node in the graph asked for through [`Node::flush_s`]. A pager
+    /// transmission has no closing flag and a DMR over that lost its
+    /// terminator ends on a second and a half of silence, so dropping the
+    /// decoder when the source closes drops the page or the over with it.
     flush_s: f64,
     /// The source's samples since the last packet left, up to
     /// [`RING_MAX_S`], so a packet from a front end that did not cut its

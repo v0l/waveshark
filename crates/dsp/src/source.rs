@@ -1283,7 +1283,7 @@ impl SourceDetector {
                     continue;
                 }
                 let overlap = s.hi.min(hi) - s.lo.max(lo) + 1;
-                if best.map_or(true, |(_, o)| overlap > o) {
+                if best.is_none_or(|(_, o)| overlap > o) {
                     best = Some((ti, overlap));
                 }
             }

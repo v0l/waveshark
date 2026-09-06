@@ -85,7 +85,7 @@ impl Channelizer {
     /// 90 dB of stopband with a Kaiser prototype, which is enough to stop a
     /// strong pager transmitter from painting false detections across the band.
     pub fn new(channels: usize, taps_per_branch: usize, atten_db: f64) -> Self {
-        assert!(channels >= 2 && channels % 2 == 0, "channels must be even and >= 2");
+        assert!(channels >= 2 && channels.is_multiple_of(2), "channels must be even and >= 2");
         assert!(taps_per_branch >= 2, "need at least 2 taps per branch");
 
         let len = channels * taps_per_branch;

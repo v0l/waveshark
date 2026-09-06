@@ -19,7 +19,8 @@ fn rds_bits(pi: u16, name: &[u8; 8], repeats: usize) -> Vec<u8> {
     let offs = [Offset::A, Offset::B, Offset::C, Offset::D];
     let mut groups = Vec::new();
     for seg in 0..4usize {
-        let b = (0 << 12) | (9 << 5) | seg as u16;
+        // Block B: group 0, version A, PTY 9, segment.
+        let b = (9 << 5) | seg as u16;
         let d = ((name[seg * 2] as u16) << 8) | name[seg * 2 + 1] as u16;
         groups.push([pi, b, 0u16, d]);
     }
@@ -167,7 +168,7 @@ fn a_stereo_broadcast_separates_and_reports_its_blend() {
     let r = run(&mut n, &iq);
     assert!(n.blend() > 0.9, "blend only reached {:.2}", n.blend());
 
-    let half = r.audio.len() / 2 & !1;
+    let half = (r.audio.len() / 2) & !1;
     let (mut le, mut re) = (0.0f64, 0.0f64);
     for f in r.audio[half..].chunks_exact(2) {
         le += (f[0] as f64).powi(2);
@@ -204,7 +205,7 @@ fn a_mono_broadcast_yields_identical_channels() {
     let mut n = WfmDemodNode::new();
     let iq = broadcast_with(&rds_bits(0xC479, b"SUPERRAD", 4), 0.1, false, 0.0);
     let r = run(&mut n, &iq);
-    let half = r.audio.len() / 2 & !1;
+    let half = (r.audio.len() / 2) & !1;
     let mut worst = 0.0f32;
     for f in r.audio[half..].chunks_exact(2) {
         worst = worst.max((f[0] - f[1]).abs());

@@ -424,7 +424,7 @@ pub fn squawk_13(id: u16) -> Option<u16> {
     }
     // C1 A1 C2 A2 C4 A4 X B1 D1 B2 D2 B4 D4, from the top of the field, and
     // each digit's own bits run 4, 2, 1 rather than in field order.
-    let at = |i: u32| ((id >> (12 - i)) & 1) as u16;
+    let at = |i: u32| (id >> (12 - i)) & 1;
     let a = (at(5) << 2) | (at(3) << 1) | at(1);
     let b = (at(11) << 2) | (at(9) << 1) | at(7);
     let c = (at(4) << 2) | (at(2) << 1) | at(0);

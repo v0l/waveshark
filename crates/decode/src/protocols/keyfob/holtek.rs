@@ -80,8 +80,7 @@ mod tests {
         }
         // Serial is transmitted LSB first, so it goes on the wire reversed
         // and the decoder reverses it back to `serial`.
-        let data = (header as u64) << 36 | reverse_key(serial, 20) << 16 | btn_field;
-        data
+        (header as u64) << 36 | reverse_key(serial, 20) << 16 | btn_field
     }
 
     /// Build decode input: invert the on-air frame.
