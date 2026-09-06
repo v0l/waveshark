@@ -375,7 +375,7 @@ impl AudioPlayer {
 
         let stream = device
             .build_output_stream(
-                config.clone(),
+                config,
                 move |out: &mut [f32], _| {
                     if cb_stats.muted.load(Ordering::Relaxed) {
                         out.fill(0.0);

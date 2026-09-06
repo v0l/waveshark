@@ -703,7 +703,7 @@ mod tests {
         };
         let mut meta = [0u8; 14];
         meta[0] = 1 << 4 | 2;
-        meta[1] = 0b1110 << 4 | 0b010 << 1 | 0; // valid position, altitude, velocity
+        meta[1] = 0b1110 << 4 | 0b010 << 1; // valid position, altitude, velocity
         meta[2] = 90; // bearing, due east
         meta[3..6].copy_from_slice(&enc(lat, 90.0));
         meta[6..9].copy_from_slice(&enc(lon, 180.0));

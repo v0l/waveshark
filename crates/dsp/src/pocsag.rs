@@ -327,7 +327,7 @@ impl Framer {
                         self.words.push(IDLE);
                     }
                 }
-                if self.words.len() % BATCH_WORDS == 0 {
+                if self.words.len().is_multiple_of(BATCH_WORDS) {
                     if self.words.len() >= MAX_BATCHES * BATCH_WORDS {
                         return self.finish();
                     }

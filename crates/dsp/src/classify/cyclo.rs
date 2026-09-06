@@ -72,7 +72,7 @@ pub fn lag_floor(occupied_fraction: f32) -> usize {
 
 /// Autocorrelation of the samples themselves, by FFT.
 pub fn complex(z: &[C32], lag_min: usize) -> Cyclic {
-    correlate(z.iter().map(|s| *s), z.len(), lag_min)
+    correlate(z.iter().copied(), z.len(), lag_min)
 }
 
 /// Autocorrelation of envelope power, with its mean removed.
@@ -120,5 +120,5 @@ fn correlate(src: impl Iterator<Item = C32>, len: usize, lag_min: usize) -> Cycl
 
 /// What autocorrelation noise alone reaches: a few times one over root N.
 pub fn noise_bound(samples: usize) -> f32 {
-    5.0 / (samples.min(1 << 17).max(1) as f32).sqrt()
+    5.0 / (samples.clamp(1, 1 << 17) as f32).sqrt()
 }

@@ -800,14 +800,14 @@ impl RxStream for HackRfStream {
                 // unplugged or reset by hand, and it is worth one attempt to
                 // get it back before the receiver above is told.
                 hackrf_usb::RecvState::Closed => {
-                    if self.attempts >= REOPENS_BEFORE_RESET + 1 {
+                    if self.attempts > REOPENS_BEFORE_RESET {
                         return Err(Error::Disconnected);
                     }
                     self.revive("stopped streaming");
                 }
                 hackrf_usb::RecvState::Empty => {
                     if self.last_real.elapsed() > DEAD_AFTER {
-                        if self.attempts >= REOPENS_BEFORE_RESET + 1 {
+                        if self.attempts > REOPENS_BEFORE_RESET {
                             return Err(Error::Disconnected);
                         }
                         self.revive("has sent nothing");

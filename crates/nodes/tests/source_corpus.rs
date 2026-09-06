@@ -54,7 +54,7 @@ fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     // Silence at the end lets the last source drain its tail.
-    for block in buf.samples.chunks(16_384).chain(std::iter::repeat(&silence[..]).take(4)) {
+    for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
         let pk = g.output().as_packets().unwrap_or(&[]);
         out.extend(pk.iter().filter_map(|p| p.package()));

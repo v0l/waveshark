@@ -378,7 +378,7 @@ impl RdsDemod {
                 // the frozen arm was not the strongest one, so it stayed on a
                 // worse hypothesis indefinitely. Hysteresis keeps switching
                 // rare instead.
-                if self.syms % RESELECT_SYMS == 0 {
+                if self.syms.is_multiple_of(RESELECT_SYMS) {
                     // Hysteresis against the incumbent only. Comparing each
                     // candidate against a running maximum instead means an arm
                     // that leads by less than the margin can never take over,
@@ -583,7 +583,7 @@ mod tests {
 #[cfg(test)]
 mod diag {
     use super::*;
-    use std::f64::consts::TAU;
+
     const RATE: f64 = 228_000.0;
 
     #[test]

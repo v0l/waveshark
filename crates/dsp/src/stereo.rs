@@ -76,7 +76,7 @@ impl StereoDecoder {
             phase: 0.0,
             freq: PILOT_HZ,
             err_lp: 0.0,
-            err_alpha: (TAU * fc / (rate + TAU * fc)) as f64,
+            err_alpha: TAU * fc / (rate + TAU * fc),
             kp: 0.15,
             ki: 0.0005,
             lock_lp: 0.0,

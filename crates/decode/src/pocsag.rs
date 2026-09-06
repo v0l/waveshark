@@ -194,7 +194,7 @@ pub fn encode(address: u32, function: u8, body: &Body) -> Vec<u32> {
     // space character for a numeric page, and with nulls for an alphanumeric
     // one, which is what a pager display drops rather than shows.
     if let Body::Numeric(_) = body {
-        while bits.len() % 20 != 0 {
+        while !bits.len().is_multiple_of(20) {
             let space = NUMERIC.iter().position(|&c| c == ' ').unwrap_or(12);
             bits.extend((0..4).map(|i| space >> i & 1 == 1));
         }
@@ -209,7 +209,7 @@ pub fn encode(address: u32, function: u8, body: &Body) -> Vec<u32> {
         out.push(w);
     }
     // Pad to whole batches, since that is what a transmission is made of.
-    while out.len() % BATCH_WORDS != 0 {
+    while !out.len().is_multiple_of(BATCH_WORDS) {
         out.push(idle);
     }
     out

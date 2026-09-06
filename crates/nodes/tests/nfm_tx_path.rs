@@ -9,7 +9,7 @@
 
 use common::{Device, Hz, SampleFormat, Sps};
 use nodes::{FmModNode, ToneNode, TxSinkNode, NBFM_DEVIATION_HZ};
-use pipeline::port::{Flow, Payload, PortKind, StreamSpec};
+use pipeline::port::{Flow, PortKind, StreamSpec};
 use pipeline::{chain, Graph};
 
 /// Audio and transmit rate. One rate throughout, because the modulator does

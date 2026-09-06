@@ -257,7 +257,7 @@ fn parse(text: &str) -> Vec<Capture> {
         (String::new(), String::new(), String::new(), 0.0f64);
     let (mut burst_us, mut occupancy_min, mut bridge_us) = (None, 0.0f32, 2000.0f64);
     let value = |l: &str| l.split('=').nth(1).unwrap_or("").trim().trim_matches('"').to_string();
-    let mut flush = |name: &mut String,
+    let flush = |name: &mut String,
                      family: &mut String,
                      format: &mut String,
                      rate: f64,

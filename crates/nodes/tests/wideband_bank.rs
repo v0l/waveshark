@@ -34,7 +34,7 @@ fn fixture() -> Option<common::IqBuf> {
     if !p.exists() {
         return None;
     }
-    Some(FileSource::open(&p).ok()?.read_all().ok()?)
+    FileSource::open(&p).ok()?.read_all().ok()
 }
 
 macro_rules! need_fixture {
@@ -333,7 +333,7 @@ fn the_automatic_chain_measures_the_burst_before_choosing_a_front_end() {
     // No decoder here: a channel finds bursts, and the protocols run once
     // on the packet bus over everything every front end produced.
     assert!(
-        !kinds.iter().any(|k| *k == "protocol_decode"),
+        !kinds.contains(&"protocol_decode"),
         "the protocols moved to the bus: {kinds:?}"
     );
 }

@@ -364,7 +364,7 @@ impl Simple for LoraNode {
                 // product of a strong burst, is not a frame.
                 Ok(frame)
                     if frame.crc_ok != Some(true)
-                        && !(!frame.header.has_crc && KNOWN_SYNC.contains(&packet.sync_word)) =>
+                        && (frame.header.has_crc || !KNOWN_SYNC.contains(&packet.sync_word)) =>
                 {
                     c.emit(Event::Warning {
                         stage: "lora".into(),

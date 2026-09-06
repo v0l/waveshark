@@ -72,7 +72,7 @@ pub fn parse_key(s: &str) -> Option<Vec<u8>> {
     if s.is_empty() {
         return None;
     }
-    let hex = s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let hex = s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit());
     let bytes = if hex {
         (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()).collect::<Option<Vec<u8>>>()?
     } else {

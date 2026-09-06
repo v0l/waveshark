@@ -29,7 +29,7 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     if let Some(s) = rest.strip_prefix('"') {
         s.split('"').next()
     } else {
-        rest.split(|c: char| c == ',' || c == '}').next().map(str::trim)
+        rest.split([',', '}']).next().map(str::trim)
     }
 }
 
@@ -40,7 +40,7 @@ fn frames(path: &Path) -> Vec<(u64, Vec<u8>)> {
         .expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in buf.samples.chunks(16_384).chain(std::iter::repeat(&silence[..]).take(8)) {
+    for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
         g.feed_iq(block).expect("run");
         for p in g.output().as_packets().unwrap_or(&[]) {
             if let PacketBody::Frame(f) = &p.body {

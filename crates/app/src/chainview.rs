@@ -984,11 +984,11 @@ fn interact(
     // than a port is wide: hit-testing the current position meant every drag
     // that started on a port was read as a drag of the box behind it.
     if resp.drag_started() {
-        edit.drag = press.or_else(|| resp.interact_pointer_pos()).and_then(|q| {
+        edit.drag = press.or_else(|| resp.interact_pointer_pos()).map(|q| {
             // Ports first: they sit on the edge of a box, so testing the box
             // first would mean a wire could never be started at all.
             if let Some(from) = output_at(topo, rects, ghosts, src, q) {
-                return Some(Drag::Wire { from: Some(from), to: None, at: q });
+                return Drag::Wire { from: Some(from), to: None, at: q };
             }
             // Taking hold of a wire where it lands, which is how a connection
             // is moved rather than deleted and drawn again.
@@ -1006,25 +1006,25 @@ fn interact(
                     None if crate::patch::builtin::is(tag) => Some(Source::Span),
                     None => None,
                 };
-                return Some(Drag::Wire { from, to: Some((tag, port)), at: q });
+                return Drag::Wire { from, to: Some((tag, port)), at: q };
             }
             if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
-                return Some(Drag::Node(*id, r.center() - q));
+                return Drag::Node(*id, r.center() - q);
             }
             if src.contains(q) {
-                return Some(Drag::Node(crate::patch::builtin::SPAN, src.center() - q));
+                return Drag::Node(crate::patch::builtin::SPAN, src.center() - q);
             }
             if let Some(i) = rects.iter().position(|r| {
                 let c = Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
                 c.contains(q)
             }) {
                 if resizable(&topo.nodes[i]) {
-                    return Some(Drag::Resize(node_keys[i]));
+                    return Drag::Resize(node_keys[i]);
                 }
             }
             match rects.iter().position(|r| r.contains(q)) {
-                Some(i) => Some(Drag::Node(node_keys[i], rects[i].center() - q)),
-                None => Some(Drag::Pan),
+                Some(i) => Drag::Node(node_keys[i], rects[i].center() - q),
+                None => Drag::Pan,
             }
         });
     }
@@ -1874,7 +1874,7 @@ mod tests {
         h.move_to(from + Vec2::new(0.0, 20.0));
         let act = h.release(onto);
         assert_eq!(
-            act.link.map(|(f, to, port)| (f, to, port)),
+            act.link,
             Some((crate::patch::Source::Stage(id, 0), sink, 0)),
         );
     }

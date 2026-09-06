@@ -546,7 +546,9 @@ mod tests {
         // choice the slicer makes.
         let mut pulses: Vec<(u32, u32)> = Vec::new();
         let mut idx = 0;
-        let _leading = if runs[0].0 { 0 } else { runs[0].1; idx = 1; 0 };
+        if !runs[0].0 {
+            idx = 1;
+        }
         loop {
             let mut mw = 0;
             while idx < runs.len() && runs[idx].0 {

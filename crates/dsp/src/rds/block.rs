@@ -224,13 +224,13 @@ impl BlockSync {
         }
         self.bits = 0;
 
-        let expected_ok = match (self.slot, found) {
-            (0, Some(Offset::A)) => true,
-            (1, Some(Offset::B)) => true,
-            (2, Some(Offset::C)) | (2, Some(Offset::CPrime)) => true,
-            (3, Some(Offset::D)) => true,
-            _ => false,
-        };
+        let expected_ok = matches!(
+            (self.slot, found),
+            (0, Some(Offset::A))
+                | (1, Some(Offset::B))
+                | (2, Some(Offset::C | Offset::CPrime))
+                | (3, Some(Offset::D))
+        );
         if expected_ok {
             self.good += 1;
             self.bad = 0;

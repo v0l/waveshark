@@ -6,7 +6,7 @@
 //! signals off the air. Nothing here knows it is a test signal, and nothing
 //! radiates.
 
-use common::{Device, Hz, IqBuf, SampleFormat, Sps, TxStream};
+use common::{Device, Hz, IqBuf, SampleFormat, Sps};
 use nodes::MorseTxNode;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Flow, Payload, PortKind, StreamSpec, TAG_TX_END, TAG_TX_START};

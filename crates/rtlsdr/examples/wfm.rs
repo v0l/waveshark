@@ -17,7 +17,7 @@ use std::f64::consts::TAU;
 const RF_RATE: u64 = 2_400_000;
 /// 2.4 MS/s / 8 = 300 kHz, comfortably wider than WFM's ~200 kHz occupancy.
 const IF_DECIM: usize = 8;
-const IF_RATE: f64 = RF_RATE as f64 / IF_DECIM as usize as f64;
+const IF_RATE: f64 = RF_RATE as f64 / IF_DECIM as f64;
 /// 300 kHz / 6 = 50 kHz audio, keeping the 19 kHz pilot inside Nyquist.
 const AUDIO_DECIM: usize = 6;
 

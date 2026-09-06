@@ -20,7 +20,8 @@ const BAUD: f64 = 1187.5;
 fn groups(pi: u16, name: &[u8; 8], text: &str) -> Vec<[u16; 4]> {
     let mut g = Vec::new();
     for seg in 0..4usize {
-        let b = (0 << 12) | (9 << 5) | seg as u16;
+        // Block B: group 0, version A, PTY 9, segment.
+        let b = (9 << 5) | seg as u16;
         let d = ((name[seg * 2] as u16) << 8) | name[seg * 2 + 1] as u16;
         g.push([pi, b, 0, d]);
     }

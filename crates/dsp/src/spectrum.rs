@@ -305,7 +305,7 @@ mod tests {
         let floor: f32 = db
             .iter()
             .enumerate()
-            .filter(|(i, _)| (*i as i32 - peak_bin as i32).abs() > 10)
+            .filter(|(i, _)| (*i as i32 - peak_bin).abs() > 10)
             .map(|(_, v)| *v)
             .fold(f32::MIN, f32::max);
         // Blackman-Harris reaches roughly -92 dB sidelobes.

@@ -3794,13 +3794,13 @@ mod tests {
         let front = patch
             .stages()
             .iter()
-            .find(|s| s.kind == "auto" && s.settings.get("channel").is_some())
+            .find(|s| s.kind == "auto" && s.settings.contains_key("channel"))
             .expect("the auto front end");
         assert_eq!(front.settings.f64_or("band_lo_hz", 0.0), 433_080_000.0);
         assert_eq!(front.settings.f64_or("band_hi_hz", 0.0), 433_120_000.0);
         // The tuner's centre is 100 kHz away, so there is no spur inside this
         // band to tell the node about.
-        assert!(front.settings.get("spur_hz").is_none());
+        assert!(!front.settings.contains_key("spur_hz"));
 
         let to = |bus: u64, port: usize| {
             patch.links().iter().any(|l| {

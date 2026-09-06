@@ -85,7 +85,7 @@ impl BitBuffer {
     }
 
     pub fn push(&mut self, bit: bool) {
-        if self.len % 8 == 0 {
+        if self.len.is_multiple_of(8) {
             self.bytes.push(0);
         }
         if bit {

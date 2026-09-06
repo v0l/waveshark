@@ -354,7 +354,7 @@ mod tests {
         let mut out = Vec::new();
         conv_encode(&vec![0u8; 240], &P1, &mut out);
         assert_eq!(out.len(), 368, "link setup");
-        conv_encode(&vec![0u8; 144], &P2, &mut out);
+        conv_encode(&[0u8; 144], &P2, &mut out);
         assert_eq!(out.len(), 272, "stream contents");
         conv_encode(&vec![0u8; 206], &P3, &mut out);
         assert_eq!(out.len(), 368, "packet contents");

@@ -58,7 +58,7 @@ fn the_pll_locks_to_the_broadcast_pilot() {
     let (disc, rate) = (disc.as_slice(), *rate);
     let mut d = StereoDecoder::new(rate);
     let (mut l, mut r) = (Vec::new(), Vec::new());
-    d.process(&disc, &mut l, &mut r);
+    d.process(disc, &mut l, &mut r);
     assert!(d.is_locked(), "no lock on a real pilot, indicator {:.3}", d.lock());
     // The pilot is 19 kHz by regulation; a real transmitter is within a few Hz.
     assert!(
@@ -74,7 +74,7 @@ fn a_mono_broadcast_does_not_produce_invented_separation() {
     let (disc, rate) = (disc.as_slice(), *rate);
     let mut d = StereoDecoder::new(rate);
     let (mut l, mut r) = (Vec::new(), Vec::new());
-    d.process(&disc, &mut l, &mut r);
+    d.process(disc, &mut l, &mut r);
     let half = l.len() / 2;
     let rms = |v: &[f32]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
     let (a, b) = (rms(&l[half..]), rms(&r[half..]));

@@ -236,7 +236,7 @@ impl Demod {
             self.chips_at = self.sample.saturating_sub(self.run as u64);
         }
         let level = self.level as u8;
-        self.chips.extend(std::iter::repeat(level).take(n));
+        self.chips.extend(std::iter::repeat_n(level, n));
         if self.chips.len() > MAX_CHIPS {
             let drop = self.chips.len() - MAX_CHIPS;
             self.chips.drain(..drop);

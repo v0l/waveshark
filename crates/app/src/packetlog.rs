@@ -422,7 +422,7 @@ fn put_measure(m: &common::Measure) -> Vec<u8> {
 /// The measurement at the front of a body, and the rest of the body.
 fn take_measure(body: &[u8]) -> Option<(common::Measure, &[u8])> {
     let mut at = 0usize;
-    let mut take_str = |at: &mut usize| -> Option<String> {
+    let take_str = |at: &mut usize| -> Option<String> {
         let n = u16::from_le_bytes(body.get(*at..*at + 2)?.try_into().ok()?) as usize;
         *at += 2;
         let s = String::from_utf8_lossy(body.get(*at..*at + n)?).into_owned();
