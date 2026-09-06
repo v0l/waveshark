@@ -24,6 +24,16 @@ const QUEUE_DEPTH: usize = 32;
 /// a block. Targeting the mean rather than the peak keeps the loop near
 /// equilibrium instead of chasing an unreachable level.
 const TARGET_BACKLOG: f64 = 1024.0;
+/// Backlog past which the callback throws queued audio away to get back to
+/// now, in samples per channel: a quarter of a second at 48 kHz.
+///
+/// The drift loop trims the rate by a tenth of a percent at most, which is
+/// right for a clock that is slightly off and useless for a queue that is a
+/// second behind: at that rate it would take twenty minutes to catch up, and
+/// the whole time a call would be heard a second after it was seen. A burst
+/// of audio arriving faster than real time, which is what a front end fed a
+/// stretch of history at once produces, is the case that put it there.
+const MAX_BACKLOG: i64 = 12_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -45,6 +55,9 @@ pub struct AudioStats {
     /// Callbacks that ran out of samples and emitted silence: too slow.
     pub underruns: AtomicU64,
     pub samples_played: AtomicU64,
+    /// Blocks thrown away by the callback to bring a queue that had fallen
+    /// behind back to now.
+    pub skipped: AtomicU64,
     /// Set by the producer, read by the device callback: while it is on the
     /// device is fed silence and whatever is queued is thrown away.
     pub muted: AtomicBool,
@@ -379,6 +392,17 @@ impl AudioPlayer {
                         return;
                     }
                     let volume = f32::from_bits(cb_stats.volume.load(Ordering::Relaxed));
+                    // Too far behind to trim back: skip queued blocks until
+                    // what is left is a queue and not a delay. A click now
+                    // beats every word for the next twenty minutes arriving
+                    // late.
+                    while cb_stats.backlog.load(Ordering::Relaxed) > MAX_BACKLOG {
+                        let Ok(b) = rx.try_recv() else { break };
+                        let n = (b.len() / ch as usize) as i64;
+                        cb_stats.backlog.fetch_sub(n, Ordering::Relaxed);
+                        cb_stats.skipped.fetch_add(1, Ordering::Relaxed);
+                        let _ = recycle_tx.try_send(b);
+                    }
                     let mut written = 0;
                     while written < out.len() {
                         if pos >= current.len() {
