@@ -275,15 +275,6 @@ impl App {
                         ui.add_space(18.0);
                     });
                 });
-
-            if let Some(e) = &self.err {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(e)
-                            .color(theme::FAULT)
-                            .font(FontId::proportional(12.0)),
-                    );
-                }
             });
     }
 
