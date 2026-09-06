@@ -332,6 +332,10 @@ pub(super) struct LogState {
     pub decodes: Vec<Logged>,
     /// Number given to the next packet.
     pub next_packet: u64,
+    /// What the time column counts from: when the receiver started. Fixed
+    /// rather than read off the head of the list, which is bounded and drops
+    /// its oldest rows, moving every row's time whenever it did.
+    pub origin: Instant,
     /// Packet whose bytes are shown in the dump.
     pub selected: Option<u64>,
     /// Height of the inspector inside the log window, dragged by its top
@@ -357,6 +361,7 @@ impl Default for LogState {
         Self {
             decodes: Vec::new(),
             next_packet: 1,
+            origin: Instant::now(),
             selected: None,
             sigid: None,
             inspector_h: 116.0 + super::BURST_VIEW_H + 24.0,

@@ -299,16 +299,7 @@ impl Log<'_> {
             ui.label(legend(&waiting));
             return;
         }
-        // Zero is the first row the filter actually draws. Taken from the
-        // head of the whole list it was often a hidden unknown, so every
-        // unknown that arrived or aged out of the list moved the origin and
-        // the known rows' seconds changed without a visible row changing.
-        let t0 = self
-            .st
-            .decodes
-            .iter()
-            .find(|l| self.st.show_unknown || l.rec.is_known())
-            .map(|l| l.rec.at);
+        let t0 = self.st.origin;
         let mut clicked = None;
         let mut pin: Option<(f64, String)> = None;
 
@@ -351,12 +342,10 @@ impl Log<'_> {
             }
 
             let col = row_color(rec);
-            // Seconds since the first packet in the list, the way a capture is
-            // timed rather than a wall clock, so two transmissions can be
-            // compared without arithmetic.
-            let secs = t0
-                .map(|t0| rec.at.saturating_duration_since(t0).as_secs_f64())
-                .unwrap_or(0.0);
+            // Seconds since the receiver started, the way a capture is timed
+            // rather than a wall clock, so two transmissions can be compared
+            // without arithmetic.
+            let secs = rec.at.saturating_duration_since(t0).as_secs_f64();
             let text = [
                 (format!("{:>4}", log.id), col),
                 (format!("{secs:8.3}"), theme::LEGEND),
