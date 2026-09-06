@@ -13,8 +13,82 @@
 use crate::tea::Collision;
 use bytemuck::{Pod, Zeroable};
 use poll_promise::Promise;
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::OnceLock;
 use wgpu::util::DeviceExt;
+
+/// The message the crypto worker handles: the searchers to bring up, and the
+/// searches to run on them.
+enum Job {
+    Warm,
+    Tea1 {
+        frames: Vec<Collision>,
+        range: core::ops::Range<u64>,
+        chunk: u32,
+        /// The worker answers with whether the search ran, and what it found:
+        /// with no adapter nothing was swept, and the caller falls back to
+        /// the CPU pool instead of recording an exhaustion.
+        done: Sender<(bool, Option<u32>)>,
+    },
+    Ta61 {
+        pairs: Vec<crate::ta61::IdPair>,
+        range: core::ops::Range<u64>,
+        chunk: u32,
+        done: Sender<(bool, Option<[u8; 8]>)>,
+    },
+}
+
+/// The worker thread crypto runs on. Both GPU searchers live on it: an
+/// adapter/device pair takes hundreds of milliseconds to bring up and about
+/// as long to tear down, so holding one per TETRA node meant the radio
+/// thread created and destroyed a Vulkan device every time a source opened
+/// or closed a slot, which froze the receiver for seconds. One worker, one
+/// device pair, for the life of the process.
+///
+/// `None` is poison: the thread failed to spawn or has died, which is not
+/// expected to heal, so it is not retried.
+fn worker() -> Option<&'static Sender<Job>> {
+    static WORKER: OnceLock<Option<Sender<Job>>> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (tx, rx) = channel::<Job>();
+            std::thread::Builder::new()
+                .name("tetra-crypto".into())
+                .spawn(move || {
+                    let mut tea1: Option<GpuSearch> = None;
+                    let mut ta61: Option<Ta61Gpu> = None;
+                    while let Ok(job) = rx.recv() {
+                        match job {
+                            Job::Warm => {}
+                            Job::Tea1 { frames, range, chunk, done } => {
+                                let g = tea1.get_or_insert_with(|| {
+                                    GpuSearch::new().unwrap_or(GpuSearch::FALLBACK)
+                                });
+                                let _ = done.send((g.found, g.search(&frames, range, chunk)));
+                            }
+                            Job::Ta61 { pairs, range, chunk, done } => {
+                                let g = ta61.get_or_insert_with(|| {
+                                    Ta61Gpu::new().unwrap_or(Ta61Gpu::FALLBACK)
+                                });
+                                let _ = done.send((g.found, g.search(&pairs, range, chunk)));
+                            }
+                        }
+                    }
+                })
+                .ok()?;
+            Some(tx)
+        })
+        .as_ref()
+}
+
+/// Ask the worker to bring up the GPU searchers now, so the first real
+/// search does not pay the device setup. Called once when the first TETRA
+/// node is built; with no adapter present the searchers stay `None`.
+pub fn warm() {
+    if let Some(tx) = worker() {
+        let _ = tx.send(Job::Warm);
+    }
+}
 
 /// Drive a future to completion on this thread. wgpu's adapter and device
 /// requests resolve on the first poll on native backends, so a no-op waker
@@ -53,15 +127,18 @@ struct Params {
 }
 
 /// A GPU-backed search. Holds the device and pipeline so a run is just buffer
-/// writes and dispatches.
+/// writes and dispatches. One lives on the crypto worker for the life of the
+/// process; the `found` marker is the no-adapter form.
 pub struct GpuSearch {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    bgl: wgpu::BindGroupLayout,
-    sbox: wgpu::Buffer,
-    lut_a: wgpu::Buffer,
-    lut_b: wgpu::Buffer,
+    device: Option<wgpu::Device>,
+    queue: Option<wgpu::Queue>,
+    pipeline: Option<wgpu::ComputePipeline>,
+    bgl: Option<wgpu::BindGroupLayout>,
+    sbox: Option<wgpu::Buffer>,
+    lut_a: Option<wgpu::Buffer>,
+    lut_b: Option<wgpu::Buffer>,
+    /// The no-adapter form answers exhausted to everything.
+    found: bool,
 }
 
 impl GpuSearch {
@@ -71,16 +148,40 @@ impl GpuSearch {
         block_on(Self::new_async())
     }
 
-    /// Run [`search`](Self::search) on a background thread, returning a promise
-    /// the UI loop polls with `.ready()` each frame. This is how a node kicks
-    /// off recovery without blocking: the GPU churns while the receiver runs.
+    /// No adapter: every search reports exhausted. Built on the worker when
+    /// device setup returns `None`, so a search there never has to say
+    /// whether the GPU is missing, only what it found.
+    const FALLBACK: Self = GpuSearch {
+        device: None,
+        queue: None,
+        pipeline: None,
+        bgl: None,
+        sbox: None,
+        lut_a: None,
+        lut_b: None,
+        found: false,
+    };
+
+    /// Run [`search`](Self::search) on the crypto worker, returning a promise
+    /// the node polls each block. `None` when the worker thread could not be
+    /// started, which is how the node learns to use the CPU search instead.
+    ///
+    /// A `false` answer is the no-adapter report: the worker could not bring
+    /// up a device, so the search was not run at all, and the caller should
+    /// take the CPU path rather than treat the space as swept.
     pub fn spawn(
-        self: Arc<Self>,
         frames: Vec<Collision>,
         range: core::ops::Range<u64>,
         chunk: u32,
-    ) -> Promise<Option<u32>> {
-        Promise::spawn_thread("tea1-gpu", move || self.search(&frames, range, chunk))
+    ) -> Option<Promise<(bool, Option<u32>)>> {
+        let tx = worker()?.clone();
+        Some(Promise::spawn_thread("tea1-gpu", move || {
+            let (done, rx) = channel();
+            if tx.send(Job::Tea1 { frames, range, chunk, done }).is_err() {
+                return (false, None);
+            }
+            rx.recv().unwrap_or((false, None))
+        }))
     }
 
     async fn new_async() -> Option<Self> {
@@ -146,13 +247,14 @@ impl GpuSearch {
         };
 
         Some(GpuSearch {
-            sbox: mk(&sbox_u32, "sbox"),
-            lut_a: mk(&lut_a, "lut_a"),
-            lut_b: mk(&lut_b, "lut_b"),
-            device,
-            queue,
-            pipeline,
-            bgl,
+            sbox: Some(mk(&sbox_u32, "sbox")),
+            lut_a: Some(mk(&lut_a, "lut_a")),
+            lut_b: Some(mk(&lut_b, "lut_b")),
+            device: Some(device),
+            queue: Some(queue),
+            pipeline: Some(pipeline),
+            bgl: Some(bgl),
+            found: true,
         })
     }
 
@@ -161,6 +263,16 @@ impl GpuSearch {
     /// in chunks of `chunk` registers; the shader stops early on a hit within
     /// a chunk, and a hit ends the sweep.
     pub fn search(&self, frames: &[Collision], range: core::ops::Range<u64>, chunk: u32) -> Option<u32> {
+        if !self.found {
+            return None;
+        }
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+        let pipeline = self.pipeline.as_ref().unwrap();
+        let bgl = self.bgl.as_ref().unwrap();
+        let sbox = self.sbox.as_ref().unwrap();
+        let lut_a = self.lut_a.as_ref().unwrap();
+        let lut_b = self.lut_b.as_ref().unwrap();
         assert!(frames.len() >= 2 && frames.len() <= MAX_FRAMES);
         let ks_len = frames.iter().map(|f| f.ct.len()).min().unwrap_or(0).min(MAX_KS);
 
@@ -173,7 +285,7 @@ impl GpuSearch {
             }
         }
 
-        let found = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let found = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("found"),
             size: 4,
             usage: wgpu::BufferUsages::STORAGE
@@ -181,7 +293,7 @@ impl GpuSearch {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let reg_out = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let reg_out = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reg"),
             size: 4,
             usage: wgpu::BufferUsages::STORAGE
@@ -189,7 +301,7 @@ impl GpuSearch {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size: 8,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -200,40 +312,40 @@ impl GpuSearch {
         while at < range.end {
             let count = ((range.end - at).min(chunk as u64)) as u32;
             let params = Params { base: at as u32, count, n_frames: frames.len() as u32, ks_len: ks_len as u32, ivs, ct };
-            let pbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("params"),
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::STORAGE,
             });
             // Reset found=0, reg_out=0xffffffff.
-            self.queue.write_buffer(&found, 0, &0u32.to_le_bytes());
-            self.queue.write_buffer(&reg_out, 0, &u32::MAX.to_le_bytes());
+            queue.write_buffer(&found, 0, &0u32.to_le_bytes());
+            queue.write_buffer(&reg_out, 0, &u32::MAX.to_le_bytes());
 
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bind"),
-                layout: &self.bgl,
+                layout: &bgl,
                 entries: &[
                     bind(0, pbuf.as_entire_binding()),
-                    bind(1, self.sbox.as_entire_binding()),
-                    bind(2, self.lut_a.as_entire_binding()),
-                    bind(3, self.lut_b.as_entire_binding()),
+                    bind(1, sbox.as_entire_binding()),
+                    bind(2, lut_a.as_entire_binding()),
+                    bind(3, lut_b.as_entire_binding()),
                     bind(4, found.as_entire_binding()),
                     bind(5, reg_out.as_entire_binding()),
                 ],
             });
 
-            let mut enc = self.device.create_command_encoder(&Default::default());
+            let mut enc = device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.pipeline);
+                pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &bind, &[]);
                 pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
             }
             enc.copy_buffer_to_buffer(&found, 0, &readback, 0, 4);
             enc.copy_buffer_to_buffer(&reg_out, 0, &readback, 4, 4);
-            self.queue.submit([enc.finish()]);
+            queue.submit([enc.finish()]);
 
-            let out = read_two(&self.device, &readback);
+            let out = read_two(&device, &readback);
             if out[0] != 0 {
                 return Some(out[1]);
             }
@@ -259,13 +371,16 @@ struct Ta61Params {
 }
 
 /// A GPU search for the TA61 intermediate secret `c` from (SSI, ESI) pairs.
+/// One lives on the crypto worker for the life of the process.
 pub struct Ta61Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    bgl: wgpu::BindGroupLayout,
-    sbox: wgpu::Buffer,
-    inv_sbox: wgpu::Buffer,
+    device: Option<wgpu::Device>,
+    queue: Option<wgpu::Queue>,
+    pipeline: Option<wgpu::ComputePipeline>,
+    bgl: Option<wgpu::BindGroupLayout>,
+    sbox: Option<wgpu::Buffer>,
+    inv_sbox: Option<wgpu::Buffer>,
+    /// The no-adapter form answers exhausted to everything.
+    found: bool,
 }
 
 impl Ta61Gpu {
@@ -330,26 +445,46 @@ impl Ta61Gpu {
             })
         };
         Some(Ta61Gpu {
-            sbox: mk(&sbox, "ta61-sbox"),
-            inv_sbox: mk(&inv, "ta61-inv"),
-            device,
-            queue,
-            pipeline,
-            bgl,
+            sbox: Some(mk(&sbox, "ta61-sbox")),
+            inv_sbox: Some(mk(&inv, "ta61-inv")),
+            device: Some(device),
+            queue: Some(queue),
+            pipeline: Some(pipeline),
+            bgl: Some(bgl),
+            found: true,
         })
     }
 
     /// Sweep `range` of the 2^40 space for the `c` consistent with every
     /// pair. Dispatches in `chunk`-sized batches; a hit ends the sweep.
-    /// Run [`search`](Self::search) on a background thread, returning a
-    /// promise the node polls each block while the GPU sweeps the 2^40 space.
+    /// No adapter: every search reports exhausted. See [`GpuSearch::FALLBACK`].
+    const FALLBACK: Self = Ta61Gpu {
+        device: None,
+        queue: None,
+        pipeline: None,
+        bgl: None,
+        sbox: None,
+        inv_sbox: None,
+        found: false,
+    };
+
+    /// Run [`search`](Self::search) on the crypto worker, returning a promise
+    /// the node polls each block while the GPU sweeps the 2^40 space. `None`
+    /// when the worker thread could not be started. The boolean is the
+    /// no-adapter report, as on [`GpuSearch::spawn`].
     pub fn spawn(
-        self: Arc<Self>,
         pairs: Vec<crate::ta61::IdPair>,
         range: core::ops::Range<u64>,
         chunk: u32,
-    ) -> Promise<Option<[u8; 8]>> {
-        Promise::spawn_thread("ta61-gpu", move || self.search(&pairs, range, chunk))
+    ) -> Option<Promise<(bool, Option<[u8; 8]>)>> {
+        let tx = worker()?.clone();
+        Some(Promise::spawn_thread("ta61-gpu", move || {
+            let (done, rx) = channel();
+            if tx.send(Job::Ta61 { pairs, range, chunk, done }).is_err() {
+                return (false, None);
+            }
+            rx.recv().unwrap_or((false, None))
+        }))
     }
 
     pub fn search(
@@ -358,6 +493,15 @@ impl Ta61Gpu {
         range: core::ops::Range<u64>,
         chunk: u32,
     ) -> Option<[u8; 8]> {
+        if !self.found {
+            return None;
+        }
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+        let pipeline = self.pipeline.as_ref().unwrap();
+        let bgl = self.bgl.as_ref().unwrap();
+        let sbox = self.sbox.as_ref().unwrap();
+        let inv_sbox = self.inv_sbox.as_ref().unwrap();
         assert!(pairs.len() >= 2 && pairs.len() <= MAX_PAIRS);
         let mut ssi = [0u32; MAX_PAIRS];
         let mut esi = [0u32; MAX_PAIRS];
@@ -368,7 +512,7 @@ impl Ta61Gpu {
         let found = self.rw_buf("found");
         let c_lo = self.rw_buf("c_lo");
         let c_hi = self.rw_buf("c_hi");
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ta61-readback"),
             size: 12,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -386,36 +530,36 @@ impl Ta61Gpu {
                 ssi,
                 esi,
             };
-            let pbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ta61-params"),
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-            self.queue.write_buffer(&found, 0, &0u32.to_le_bytes());
-            let binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            queue.write_buffer(&found, 0, &0u32.to_le_bytes());
+            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ta61-bind"),
-                layout: &self.bgl,
+                layout: &bgl,
                 entries: &[
                     bind(0, pbuf.as_entire_binding()),
-                    bind(1, self.sbox.as_entire_binding()),
-                    bind(2, self.inv_sbox.as_entire_binding()),
+                    bind(1, sbox.as_entire_binding()),
+                    bind(2, inv_sbox.as_entire_binding()),
                     bind(3, found.as_entire_binding()),
                     bind(4, c_lo.as_entire_binding()),
                     bind(5, c_hi.as_entire_binding()),
                 ],
             });
-            let mut enc = self.device.create_command_encoder(&Default::default());
+            let mut enc = device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&self.pipeline);
+                pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &binding, &[]);
                 pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
             }
             enc.copy_buffer_to_buffer(&found, 0, &readback, 0, 4);
             enc.copy_buffer_to_buffer(&c_lo, 0, &readback, 4, 4);
             enc.copy_buffer_to_buffer(&c_hi, 0, &readback, 8, 4);
-            self.queue.submit([enc.finish()]);
-            let out = read_n::<3>(&self.device, &readback);
+            queue.submit([enc.finish()]);
+            let out = read_n::<3>(&device, &readback);
             if out[0] != 0 {
                 let mut c = [0u8; 8];
                 c[..4].copy_from_slice(&out[1].to_le_bytes());
@@ -428,7 +572,7 @@ impl Ta61Gpu {
     }
 
     fn rw_buf(&self, label: &str) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: 4,
             usage: wgpu::BufferUsages::STORAGE
@@ -535,14 +679,19 @@ mod tests {
             Collision { ts: ts(6), ct: hex("151ef027") },
             Collision { ts: ts(7), ct: hex("4d00159e") },
         ];
-        let promise = Arc::new(gpu).spawn(frames, 0..0x2_0000, 1 << 16);
+        let Some(promise) = GpuSearch::spawn(frames, 0..0x2_0000, 1 << 16) else {
+            panic!("worker did not start");
+        };
         // Poll as the UI loop would, until the background thread answers.
         loop {
-            if let Some(got) = promise.ready() {
-                assert_eq!(*got, Some(0x111));
-                break;
+            match promise.poll() {
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+                std::task::Poll::Ready(&(found, got)) => {
+                    assert!(found, "worker says no adapter");
+                    assert_eq!(got, Some(0x111));
+                    break;
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 

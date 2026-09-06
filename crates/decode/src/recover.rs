@@ -22,6 +22,8 @@ pub enum Progress {
     /// The whole space was swept and nothing fit; the collisions were not a
     /// real equal-plaintext set, or the timestamps were wrong.
     Exhausted,
+    /// The GPU has no adapter, and the space was not swept at all.
+    NoGpu,
 }
 
 /// A recovery in flight. Dropping it signals the workers to stop.
@@ -153,6 +155,8 @@ mod tests {
                     assert!(spins < 5_000, "search did not finish");
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
+                Progress::NoGpu => unreachable!(),
+
             }
         }
     }
@@ -173,6 +177,7 @@ mod tests {
                 Progress::Exhausted => break,
                 Progress::Found(_) => panic!("no key should fit this window"),
                 Progress::Running => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Progress::NoGpu => unreachable!(),
             }
         }
     }

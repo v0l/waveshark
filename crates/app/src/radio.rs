@@ -1012,7 +1012,6 @@ const DEDUPE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300)
 /// Scan a buffer while recording, as the radio thread does. Test support.
 /// A receiver set up to sweep a capture, the way the live one sweeps the air.
 pub(crate) fn replay_receiver(buf: &common::IqBuf, rec: Option<crate::record::Recorder>) -> anyhow::Result<crate::chain::Receiver> {
-    let rate = buf.rate.as_f64();
     // A 1090 MHz capture goes through the wideband path instead of the
     // channel banks, the same way the live receiver decides: 1090 carries
     // nothing the ISM banks understand, so running them there only spends CPU
@@ -4203,4 +4202,3 @@ mod zoom_tests {
         assert!(db < -60.0, "a signal outside the span folded in at {db:.1} dBFS");
     }
 }
-

@@ -20,22 +20,36 @@ mod imp {
     use dsp::tetra::TdmaTime;
     use poll_promise::Promise;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     /// A TEA1 register search in flight, on the GPU or the CPU.
     enum RecoveryJob {
-        Gpu(Promise<Option<u32>>),
+        /// The frames are kept with the promise so a no-adapter report can
+        /// hand them to the CPU pool: they also moved into the worker
+        /// request, so without them a fallback would have to re-send the
+        /// whole space, which is the duplicate that must not happen.
+        Gpu(Vec<Collision>, Promise<(bool, Option<u32>)>),
         Cpu(Search),
     }
 
     impl RecoveryJob {
         /// The recovered register, if the search has finished with one.
+        /// A `Gpu` promise that answers `(false, _)` is the worker's
+        /// no-adapter report: re-run the space on the CPU pool rather than
+        /// take it as exhausted, which would count a real TEA1 network as
+        /// ruled out. A search the worker has not answered yet stays in
+        /// place, so the same space is not sent again.
         fn poll(&mut self) -> Progress {
             match self {
-                RecoveryJob::Gpu(p) => match p.ready() {
-                    Some(Some(reg)) => Progress::Found(*reg),
-                    Some(None) => Progress::Exhausted,
-                    None => Progress::Running,
+                RecoveryJob::Gpu(frames, p) => match p.poll() {
+                    std::task::Poll::Pending => Progress::Running,
+                    std::task::Poll::Ready(&(found, reg)) => match reg {
+                        Some(reg) => Progress::Found(reg),
+                        None if !found => Progress::NoGpu,
+                        None => {
+                            frames.clear();
+                            Progress::Exhausted
+                        }
+                    },
                 },
                 RecoveryJob::Cpu(s) => s.poll(),
             }
@@ -58,8 +72,12 @@ mod imp {
         /// Enciphered SDUs grouped by message: the equal-plaintext sets a
         /// TEA1 key search runs on (TETRA:BURST section 5.2).
         collisions: HashMap<u64, Vec<Collision>>,
-        /// The GPU searcher, built once; `None` with no adapter, CPU then.
-        gpu: Option<Arc<GpuSearch>>,
+        /// Whether the crypto worker ran and reported no adapter, so every
+        /// later search goes straight to the CPU pool. `false` is the first
+        /// search still being decided, and also a search that has been sent
+        /// but not yet answered.
+        gpu_answered: bool,
+        gpu_attempted: bool,
         /// A key recovery in flight: colour code, message signature, search.
         recovery: Option<(u8, u64, RecoveryJob)>,
         /// Message signatures whose whole-space search exhausted.
@@ -88,11 +106,12 @@ mod imp {
         /// Whether an identity-secret search has run and exhausted on the
         /// pairs held, so it is not started again until a new pair arrives.
         id_searched: bool,
-        /// The GPU searcher for the TA61 secret; `None` with no adapter (the
-        /// 2^40 sweep is GPU-only).
-        id_gpu: Option<Arc<Ta61Gpu>>,
-        /// An identity-secret search in flight: the colour, and the promise.
-        id_search: Option<(u8, Promise<Option<[u8; 8]>>)>,
+        /// Whether the crypto worker answered an identity search; the 2^40
+        /// sweep is GPU-only, so a `None` answer means it never runs.
+        id_gpu_answered: bool,
+        /// The identity search in flight: the colour, and the promise, which
+        /// reports whether the worker had an adapter and what it found.
+        id_search: Option<(u8, Promise<(bool, Option<[u8; 8]>)>)>,
     }
 
     impl Crypto {
@@ -101,7 +120,8 @@ mod imp {
                 keys: HashMap::new(),
                 id_secrets: HashMap::new(),
                 collisions: HashMap::new(),
-                gpu: GpuSearch::new().map(Arc::new),
+                gpu_answered: false,
+                gpu_attempted: false,
                 recovery: None,
                 dead_sigs: std::collections::HashSet::new(),
                 exhausted: 0,
@@ -114,7 +134,7 @@ mod imp {
                 pending_ssi: None,
                 seen_esi: std::collections::HashSet::new(),
                 id_searched: false,
-                id_gpu: Ta61Gpu::new().map(Arc::new),
+                id_gpu_answered: false,
                 id_search: None,
             }
         }
@@ -184,7 +204,7 @@ mod imp {
                 return Recovery::NotTea1;
             }
             if let Some((_, _, job)) = &self.recovery {
-                return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_)) };
+                return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_, _)) };
             }
             if !self.dead_sigs.is_empty() && self.collisions.is_empty() {
                 return Recovery::Exhausted { dropped: self.dead_sigs.len() };
@@ -283,29 +303,48 @@ mod imp {
                 return;
             }
             self.crypto.id_searched = true;
-            let Some(gpu) = self.crypto.id_gpu.clone() else { return };
+            if self.crypto.id_gpu_answered {
+                return;
+            }
             let pairs = self.crypto.id_pairs.clone();
-            self.crypto.id_search = Some((colour, gpu.spawn(pairs, 0..1u64 << 40, 1 << 22)));
+            match Ta61Gpu::spawn(pairs, 0..1u64 << 40, 1 << 22) {
+                Some(p) => self.crypto.id_search = Some((colour, p)),
+                None => self.crypto.id_gpu_answered = true,
+            }
         }
 
         /// Poll a running identity-secret search; on success install the
         /// secret so the cell's identities de-anonymise, and report its
         /// colour.
         pub(crate) fn poll_id_recovery(&mut self) -> Option<u8> {
-            let (colour, promise) = self.crypto.id_search.as_ref()?;
+            if !self.crypto.id_searched {
+                return None;
+            }
+            let Some((colour, p)) = self.crypto.id_search.as_ref() else { return None };
             let colour = *colour;
-            match promise.ready() {
-                None => None,
-                Some(None) => {
-                    self.crypto.id_search = None;
-                    None
-                }
-                Some(Some(c)) => {
-                    let c = *c;
-                    self.crypto.id_search = None;
-                    self.crypto.id_secrets.insert(colour, c);
-                    Some(colour)
-                }
+            match p.poll() {
+                std::task::Poll::Pending => None,
+                std::task::Poll::Ready(&(found, c)) => match c {
+                    Some(c) => {
+                        self.crypto.id_search = None;
+                        self.crypto.id_secrets.insert(colour, c);
+                        self.crypto.id_gpu_answered = true;
+                        Some(colour)
+                    }
+                    None if !found => {
+                        // The worker has no adapter, so this space never
+                        // runs: leave the search settled so the same pairs
+                        // are not sent again; a new pair re-opens it.
+                        self.crypto.id_search = None;
+                        self.crypto.id_gpu_answered = true;
+                        None
+                    }
+                    None => {
+                        self.crypto.id_search = None;
+                        self.crypto.id_gpu_answered = true;
+                        None
+                    }
+                },
             }
         }
 
@@ -434,18 +473,45 @@ mod imp {
             }
         }
 
-        /// Start a register search over the whole space, on the GPU if there
-        /// is one, else across CPU threads.
+        /// The CPU form of the register search, used when the crypto worker
+        /// reports no adapter.
+        fn cpu_search(frames: Vec<Collision>) -> RecoveryJob {
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            RecoveryJob::Cpu(Search::start(frames, threads))
+        }
+
+        /// Start a register search over the whole space, on the GPU if the
+        /// crypto worker has one, else across CPU threads. Each space runs
+        /// on exactly one path: the frames kept beside the GPU promise are
+        /// what a no-adapter report hands to the CPU pool, so nothing is
+        /// searched twice.
         fn start_recovery(&mut self, colour: u8, sig: u64, frames: Vec<Collision>) {
-            let job = match &self.crypto.gpu {
-                Some(gpu) => RecoveryJob::Gpu(gpu.clone().spawn(frames, 0..1u64 << 32, 1 << 20)),
-                None => {
-                    let threads =
-                        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                    RecoveryJob::Cpu(Search::start(frames, threads))
+            match (self.crypto.gpu_answered, self.crypto.gpu_attempted) {
+                // The GPU is known missing: the space goes straight to the
+                // CPU pool, and only there.
+                (true, _) => self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames))),
+                // The first GPU attempt is in flight, so no other search may
+                // run yet: the space is kept collecting and tried again when
+                // the worker has said whether it has an adapter.
+                (false, true) => {}
+                // First search: ask the worker. The same frames move into the
+                // request and are kept beside the promise, so whichever path
+                // finishes the search, it is run exactly once.
+                (false, false) => {
+                    self.crypto.gpu_attempted = true;
+                    match GpuSearch::spawn(frames.clone(), 0..1u64 << 32, 1 << 20) {
+                        Some(p) => {
+                            self.crypto.recovery =
+                                Some((colour, sig, RecoveryJob::Gpu(frames, p)));
+                        }
+                        None => {
+                            // The worker itself is gone: it can never answer.
+                            self.crypto.gpu_answered = true;
+                            self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames)));
+                        }
+                    }
                 }
-            };
-            self.crypto.recovery = Some((colour, sig, job));
+            }
         }
 
         /// Poll a running search; on success install the key so the next
@@ -462,6 +528,24 @@ mod imp {
             let (colour, sig) = (*colour, *sig);
             match job.poll() {
                 Progress::Running => None,
+                // The GPU has no adapter: the space was not swept, so hand it
+                // to the CPU pool and poll that from now on. The frames were
+                // kept beside the promise for exactly this, and the GPU
+                // attempt never ran, so the CPU run is the one search, not a
+                // duplicate.
+                Progress::NoGpu => {
+                    self.crypto.gpu_answered = true;
+                    let frames = match &mut self.crypto.recovery {
+                        Some((_, _, RecoveryJob::Gpu(frames, _))) => Some(std::mem::take(frames)),
+                        _ => None,
+                    };
+                    match frames {
+                        Some(frames) =>
+                            self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames))),
+                        None => {}
+                    }
+                    None
+                },
                 Progress::Found(reg) => {
                     self.crypto.keys.insert(colour, Key::Tea1(reg));
                     self.crypto.recovery = None;
