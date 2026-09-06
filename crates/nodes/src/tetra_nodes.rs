@@ -163,32 +163,21 @@ const TB_FLAG_ENCRYPTED: u8 = 0x02;
 const RING_SLOTS: usize = 8;
 
 /// How a timeslot's speech frames move, watched to tell clear speech from
-/// ciphertext. Two independent signals, either of which silences the slot:
-///
-///   * CRC: whether the class-2 CRC of the frames passes. On clear speech
-///     at a usable signal it almost always does; sustained failure is a
-///     slot carrying garbage.
-///   * LSP: whether the three LSP indices drift like speech or jump like
-///     random bits. The ACELP codec interpolates its LSPs across frames, so
-///     a clear call's indices move a little each frame; ciphertext decodes
-///     to uniform indices that jump half their range most frames.
-///
-/// The pair covers both readings of where TETRA sits the encryption step:
-/// if the CRC is computed over ciphertext it passes on an enciphered call
-/// and the LSP watch catches it; if it is computed over plaintext it fails
-/// there and the CRC watch catches it. Either way the slot is silence
-/// labelled enciphered, the only honest answer a node can give when the
-/// grant that named the call's encryption was never heard (a call joined
-/// late, or a traffic carrier with no control channel on it).
-struct SlotWatch {
+/// ciphertext. The ACELP codec interpolates its LSPs across frames, so a
+/// clear call's three LSP indices drift a little each frame; ciphertext
+/// decodes to uniformly random indices that jump half their range most
+/// frames. Enough frames of mostly-jumping indices is an enciphered slot:
+/// the only in-band word a node gets when the grant that named the call's
+/// encryption was never heard (a call joined late, or a traffic carrier
+/// with no control channel on it).
+struct LspWatch {
     last: [u16; 3],
     frames: u32,
-    crc_fail: u32,
     jumped: u32,
     verdict: Option<bool>,
 }
 
-impl SlotWatch {
+impl LspWatch {
     /// Sixteen frames of evidence before answering, and the verdict is
     /// sticky: a verdict that flapped would let static through between
     /// clear bursts.
@@ -200,10 +189,10 @@ impl SlotWatch {
     const JUMPS: [u16; 3] = [128, 256, 256];
 
     fn new() -> Self {
-        SlotWatch { last: [0; 3], frames: 0, crc_fail: 0, jumped: 0, verdict: None }
+        LspWatch { last: [0; 3], frames: 0, jumped: 0, verdict: None }
     }
 
-    fn observe(&mut self, lsp: [u16; 3], crc_ok: bool) {
+    fn observe(&mut self, lsp: [u16; 3]) {
         if self.frames > 0 {
             let jumped = lsp
                 .iter()
@@ -211,16 +200,12 @@ impl SlotWatch {
                 .any(|((&a, (&b, t)))| a.abs_diff(b) > t);
             self.jumped += u32::from(jumped);
         }
-        self.crc_fail += u32::from(!crc_ok);
         self.last = lsp;
         self.frames += 1;
         if self.verdict.is_none() && self.frames >= Self::ENOUGH {
-            // CRC: 19/20 failed is far past anything a real voice channel
-            // at a usable signal does. LSP: the line between ~0.58 for
-            // random and ~0 for speech keeps margin on both sides.
-            let all_garbage = self.crc_fail * 20 > self.frames * 19;
-            let random_bits = self.jumped * 5 > self.frames * 2;
-            self.verdict = Some(all_garbage || random_bits);
+            // The line between ~0.58 for random and ~0 for speech keeps
+            // margin on both sides.
+            self.verdict = Some(self.jumped * 5 > self.frames * 2);
         }
     }
 
@@ -292,7 +277,7 @@ pub struct TetraNode {
     traffic: HashMap<u8, Traffic>,
     /// How each timeslot's speech frames move, for telling ciphertext from
     /// speech when no signalling named the call's encryption.
-    slot_by_tn: HashMap<u8, SlotWatch>,
+    lsp_by_tn: HashMap<u8, LspWatch>,
     /// A speech decoder per timeslot carrying traffic, holding the vocoder's
     /// inter-frame state for that call and, when known, its key.
     voice_calls: HashMap<u8, CallDecoder>,
@@ -345,7 +330,7 @@ impl TetraNode {
             marker_speech: HashMap::new(),
             talkers: HashMap::new(),
             traffic: HashMap::new(),
-            slot_by_tn: HashMap::new(),
+            lsp_by_tn: HashMap::new(),
             voice_calls: HashMap::new(),
             crypto: Crypto::new(),
             slot_now: 0,
@@ -500,7 +485,7 @@ impl TetraNode {
                 self.end_traffic(tn, slot, out);
                 // A new call on the slot: the evidence of the last one must
                 // not mark this one enciphered.
-                self.slot_by_tn.remove(&tn);
+                self.lsp_by_tn.remove(&tn);
                 self.traffic.insert(
                     tn,
                     Traffic { marker: m, since: slot, last: slot, frames: 1, reported: false },
@@ -541,7 +526,7 @@ impl TetraNode {
     /// LSP indices move rather than from signalling: a node that joined a
     /// call late never saw the grant that would have said.
     fn slot_enciphered(&self, tn: u8) -> bool {
-        self.slot_by_tn.get(&tn).is_some_and(SlotWatch::enciphered)
+        self.lsp_by_tn.get(&tn).is_some_and(LspWatch::enciphered)
     }
 
     /// Decode the speech a traffic slot carries into PCM, one [`common::Voice`]
@@ -591,10 +576,10 @@ impl TetraNode {
             // frames that are going to be played as they are: a keyed slot
             // is decrypted first, and its watch is never consulted.
             if !keyed {
-                let watch = self.slot_by_tn.entry(tn).or_insert_with(SlotWatch::new);
+                let watch = self.lsp_by_tn.entry(tn).or_insert_with(LspWatch::new);
                 for f in &frames {
                     let parm = decode::vocoder::Decoder::frame_to_parm(f);
-                    watch.observe([parm[0] as u16, parm[1] as u16, parm[2] as u16], crc_ok);
+                    watch.observe([parm[0] as u16, parm[1] as u16, parm[2] as u16]);
                 }
             }
 
@@ -932,7 +917,7 @@ impl Node for TetraNode {
         self.markers.clear();
         self.marker_speech.clear();
         self.traffic.clear();
-        self.slot_by_tn.clear();
+        self.lsp_by_tn.clear();
         self.voice_calls.clear();
         self.crypto.reset();
     }
