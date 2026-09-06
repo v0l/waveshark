@@ -162,6 +162,58 @@ const TB_FLAG_ENCRYPTED: u8 = 0x02;
 /// holds a slot of history, so a few slots is plenty.
 const RING_SLOTS: usize = 8;
 
+/// How a timeslot's speech frames move, watched to tell clear speech from
+/// ciphertext. The ACELP codec interpolates its LSPs across frames, so a
+/// clear call's three LSP indices drift a little each frame; ciphertext
+/// decodes to uniformly random indices that jump half their range most
+/// frames. Enough frames of mostly-jumping indices is an enciphered slot:
+/// the only in-band word a node gets when the grant that named the call's
+/// encryption was never heard (a call joined late, or a traffic carrier
+/// with no control channel on it).
+struct LspWatch {
+    last: [u16; 3],
+    frames: u32,
+    jumped: u32,
+    verdict: Option<bool>,
+}
+
+impl LspWatch {
+    /// Sixteen frames of evidence before answering, and the verdict is
+    /// sticky: a verdict that flapped would let static through between
+    /// clear bursts.
+    const ENOUGH: u32 = 16;
+    /// Half of each LSP index's range (8/9/9 bits, per the vocoder's
+    /// `BITNO`). Uniform random indices exceed it a quarter of the time
+    /// each, so over half of ciphertext frames jump somewhere; speech,
+    /// which interpolates its LSPs, jumps like this almost never.
+    const JUMPS: [u16; 3] = [128, 256, 256];
+
+    fn new() -> Self {
+        LspWatch { last: [0; 3], frames: 0, jumped: 0, verdict: None }
+    }
+
+    fn observe(&mut self, lsp: [u16; 3]) {
+        if self.frames > 0 {
+            let jumped = lsp
+                .iter()
+                .zip(self.last.iter().zip(Self::JUMPS))
+                .any(|((&a, (&b, t)))| a.abs_diff(b) > t);
+            self.jumped += u32::from(jumped);
+        }
+        self.last = lsp;
+        self.frames += 1;
+        if self.verdict.is_none() && self.frames >= Self::ENOUGH {
+            // The line between ~0.58 for random and ~0 for speech keeps
+            // margin on both sides.
+            self.verdict = Some(self.jumped * 5 > self.frames * 2);
+        }
+    }
+
+    fn enciphered(&self) -> bool {
+        self.verdict == Some(true)
+    }
+}
+
 /// One traffic burst's speech, for its packet.
 struct VoiceBurst {
     burst_index: usize,
@@ -223,6 +275,9 @@ pub struct TetraNode {
     talkers: HashMap<u32, u32>,
     /// Traffic on each timeslot right now, by timeslot number.
     traffic: HashMap<u8, Traffic>,
+    /// How each timeslot's speech frames move, for telling ciphertext from
+    /// speech when no signalling named the call's encryption.
+    lsp_by_tn: HashMap<u8, LspWatch>,
     /// A speech decoder per timeslot carrying traffic, holding the vocoder's
     /// inter-frame state for that call and, when known, its key.
     voice_calls: HashMap<u8, CallDecoder>,
@@ -275,6 +330,7 @@ impl TetraNode {
             marker_speech: HashMap::new(),
             talkers: HashMap::new(),
             traffic: HashMap::new(),
+            lsp_by_tn: HashMap::new(),
             voice_calls: HashMap::new(),
             crypto: Crypto::new(),
             slot_now: 0,
@@ -380,12 +436,22 @@ impl TetraNode {
             t.tn = tn;
             t
         });
+        // The encryption the slot itself is evidence of: the signalling may
+        // never have been heard (a traffic carrier, a call joined late), and
+        // frames that move like ciphertext are then the only word on it.
+        let aie = if self.last_aie != 0 {
+            self.last_aie
+        } else if self.slot_enciphered(tn) {
+            3
+        } else {
+            0
+        };
         Event::Call(CallPdu {
             pdu,
             address,
             // The traffic itself is enciphered whenever its signalling is;
             // a cell that encrypts encrypts everything.
-            aie: self.last_aie,
+            aie,
             e2e: None,
             speech: self.marker_speech.get(&marker).copied(),
             call_id: None,
@@ -417,6 +483,9 @@ impl TetraNode {
             }
             (Some(m), _) => {
                 self.end_traffic(tn, slot, out);
+                // A new call on the slot: the evidence of the last one must
+                // not mark this one enciphered.
+                self.lsp_by_tn.remove(&tn);
                 self.traffic.insert(
                     tn,
                     Traffic { marker: m, since: slot, last: slot, frames: 1, reported: false },
@@ -453,6 +522,13 @@ impl TetraNode {
         }
     }
 
+    /// Whether a timeslot's speech is enciphered, from how its frames'
+    /// LSP indices move rather than from signalling: a node that joined a
+    /// call late never saw the grant that would have said.
+    fn slot_enciphered(&self, tn: u8) -> bool {
+        self.lsp_by_tn.get(&tn).is_some_and(LspWatch::enciphered)
+    }
+
     /// Decode the speech a traffic slot carries into PCM, one [`common::Voice`]
     /// per call heard this block. A traffic burst is a continuous burst
     /// (`Normal1`, training sequence 1) on a timeslot the access assign field
@@ -478,14 +554,7 @@ impl TetraNode {
 
     fn decode_voice(&mut self, bursts: &[Burst], per_burst: &mut Vec<VoiceBurst>) -> Vec<common::Voice> {
         let Some(cell) = self.rx.cell else { return Vec::new() };
-        // An enciphered call with no key is silence, not noise: the STEC
-        // frames are ciphertext, and feeding those to the vocoder would
-        // synthesise random speech parameters. Only decode when the traffic
-        // is clear or a key can undo it. A stock build never holds a key, so
-        // enciphered traffic is always silence there.
-        if self.last_aie != 0 && !self.crypto.can_decrypt(cell.colour) {
-            return Vec::new();
-        }
+        let keyed = self.crypto.can_decrypt(cell.colour);
         let mut pcm: HashMap<u8, Vec<f32>> = HashMap::new();
         let mut seen_tn: Vec<u8> = Vec::new();
 
@@ -502,6 +571,29 @@ impl TetraNode {
             chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
             chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
             let (mut frames, crc_ok) = speech::decode(cell.scramb, &chan);
+
+            // What the frames say about this slot. The LSP watch runs on
+            // frames that are going to be played as they are: a keyed slot
+            // is decrypted first, and its watch is never consulted.
+            if !keyed {
+                let watch = self.lsp_by_tn.entry(tn).or_insert_with(LspWatch::new);
+                for f in &frames {
+                    let parm = decode::vocoder::Decoder::frame_to_parm(f);
+                    watch.observe([parm[0] as u16, parm[1] as u16, parm[2] as u16]);
+                }
+            }
+
+            // An enciphered call with no key is silence, not noise: the STEC
+            // frames are ciphertext, and feeding those to the vocoder would
+            // synthesise random speech parameters, which comes out of the
+            // speaker as static on a row labelled clear. The grant naming
+            // the call's encryption may never have been heard, so the
+            // frames' own evidence decides too. A stock build never holds a
+            // key, so enciphered traffic is always silence there.
+            let enciphered = self.last_aie != 0 || self.slot_enciphered(tn);
+            if enciphered && !keyed {
+                continue;
+            }
 
             // Decrypt each STEC frame in place before the vocoder sees it,
             // when the call is keyed. Clear traffic, or a build without the
@@ -791,7 +883,11 @@ impl Node for TetraNode {
                 rssi_dbfs: f32::NAN,
                 snr_db: f32::NAN,
                 modulation: Some("pi/4-DQPSK"),
-                body: common::PacketBody::Frame(encode_traffic_burst(&vb, b, self.last_aie != 0)),
+                body: common::PacketBody::Frame(encode_traffic_burst(
+                    &vb,
+                    b,
+                    self.last_aie != 0 || self.slot_enciphered(vb.tn),
+                )),
                 iq: self.burst_iq(b),
                 audio: (!vb.pcm.is_empty())
                     .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ })),
@@ -821,6 +917,7 @@ impl Node for TetraNode {
         self.markers.clear();
         self.marker_speech.clear();
         self.traffic.clear();
+        self.lsp_by_tn.clear();
         self.voice_calls.clear();
         self.crypto.reset();
     }
@@ -1264,6 +1361,117 @@ mod tests {
             voices.iter().all(|v| v.to.as_deref() == Some("marker 23")),
             "{:?}",
             voices.iter().map(|v| v.to.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A call the node joined late, with no grant ever seen: ciphertext
+    /// STEC frames reached the vocoder and came out as static on rows
+    /// labelled clear, because the slot's own frames are the only word on
+    /// its encryption when no signalling named it. Their LSP indices jump
+    /// like random bits, the watch says so, and the slot goes silent and
+    /// labelled enciphered instead.
+    #[test]
+    fn ciphertext_without_a_grant_goes_silent_and_says_so() {
+        use dsp::tetra::speech;
+        let (rate, hz) = (300_000.0, 390_000_000.0);
+        let scramb = coding::scramb_init(272, 91, 7);
+        let mut bits = Vec::new();
+        let frames = 40u32;
+        // Two speech frames a slot: a clear call's would carry speech
+        // parameters; this call enciphers, so the STEC bits are uniform
+        // random, one bit per byte. Deterministic so a failure replays.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut ct = [0u8; speech::FRAME_BITS * 2];
+        for c in ct.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *c = (x >> 63) as u8;
+        }
+        let (cta, ctb) = ct.split_at(speech::FRAME_BITS);
+        let (cta, ctb) = (cta.try_into().unwrap(), ctb.try_into().unwrap());
+        for frame in 1..=frames {
+            let mut pdu = vec![0u8; 60];
+            put(&mut pdu, 4, 6, 7);
+            put(&mut pdu, 10, 2, 0);
+            put(&mut pdu, 12, 5, frame % 18 + 1);
+            put(&mut pdu, 17, 6, frame / 18 + 1);
+            put(&mut pdu, 31, 10, 272);
+            put(&mut pdu, 41, 14, 91);
+            let sb1 = coding::encode_block(&coding::BLK_BSCH, coding::SCRAMB_INIT, &pdu);
+            let bkn2 = coding::encode_block(&coding::BLK_HALF, scramb, &vec![0u8; 124]);
+            bits.extend_from_slice(&synth::sync_burst(&sb1, &aach(scramb, 0, 10, 10), &bkn2));
+            for tn in 2..=4 {
+                let bb = if tn == 2 && frame <= 30 {
+                    aach(scramb, 3, 23, 0)
+                } else {
+                    aach(scramb, 3, 0, 0)
+                };
+                // Slot 2 carries the ciphertext frames through the same
+                // channel coding a clear call gets: encryption is applied
+                // before coding, so the CRC checks and the channel decoder
+                // recovers the ciphertext faithfully.
+                let bkn = if tn == 2 && frame <= 30 {
+                    speech::encode(scramb, &cta, &ctb)
+                } else {
+                    speech::encode(scramb, &[0; speech::FRAME_BITS], &[0; speech::FRAME_BITS])
+                };
+                bits.extend_from_slice(&synth::normal_burst(&bkn[..216], &bb, &bkn[216..], false));
+            }
+        }
+        let iq = synth::modulate(&bits, rate, 750.0);
+
+        let mut node = TetraNode::new(hz);
+        node.negotiate(&[spec(rate, hz)]).unwrap();
+        let ins = [spec(rate, hz)];
+        let tags = Vec::new();
+        let mut rows = Vec::new();
+        let mut voices: Vec<common::Voice> = Vec::new();
+        for chunk in iq.chunks(16_384) {
+            let input = Payload::Iq(chunk.to_vec());
+            let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&[&input], &mut outs, &mut ctx).unwrap();
+            let [out, voice] = outs;
+            if let Payload::Voice(v) = voice {
+                voices.extend(v);
+            }
+            if let Payload::Packets(ps) = out {
+                for p in ps {
+                    if let common::PacketBody::Frame(b) = &p.body {
+                        rows.push(tetra_decoded(b, Hz(hz as u64)).unwrap());
+                    }
+                }
+            }
+        }
+        let get =
+            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string());
+        let bursts: Vec<&Decoded> =
+            rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
+        let traffic: Vec<&Decoded> =
+            rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
+        assert!(!bursts.is_empty(), "no traffic was followed at all");
+        // A verdict needs its sixteen frames, so the first bursts of a call
+        // joined mid-stream do play before the slot is judged: that is the
+        // best a node can do without the grant, and a clear call must not
+        // be muted for it. What must never happen is static for the whole
+        // call, and a burst row is only emitted while the slot is still
+        // played, so rows and voices run out together.
+        assert!(voices.len() <= 8, "{} voices of static left the node", voices.len());
+        assert!(
+            bursts.len() == voices.len(),
+            "burst rows outlive the speech they were played with"
+        );
+        // The start row is judged with the frames it has, so it may still
+        // say none; by the end of the call the evidence is in, and the end
+        // row says what the frames proved, so a key found later has a row
+        // to change.
+        assert!(
+            traffic.last().map(|r| get(r, "encryption").as_deref() == Some("AIE-3"))
+                == Some(true),
+            "{:?}",
+            traffic.iter().map(|r| get(r, "encryption")).collect::<Vec<_>>()
         );
     }
 
