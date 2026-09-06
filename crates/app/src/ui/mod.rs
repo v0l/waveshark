@@ -79,6 +79,9 @@ pub struct App {
 
     radio: Option<Radio>,
     err: Option<String>,
+    /// When `err` was set, so it can fade rather than stay until the next
+    /// one replaces it.
+    err_at: Option<std::time::Instant>,
 
     center: f64,
     rate: f64,
@@ -318,6 +321,9 @@ const VU_W: f32 = 130.0;
 const PEAK_HEADROOM_DB: f32 = 12.0;
 const MIN_SPAN_DB: f32 = 50.0;
 
+/// How long a fault stays over the spectrum.
+const ERR_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Share of the scope pane the spectrum gets by default.
 const DEFAULT_PLOT_FRAC: f32 = 0.34;
 /// Range the split can be dragged to. Neither pane may be squeezed to nothing:
@@ -354,6 +360,7 @@ impl Default for App {
             record_dir: None,
             radio: None,
             err: None,
+            err_at: None,
             center: crate::session::DEFAULT_CENTER,
             rate: 2_304_000.0,
             dial: Dial::new(),
@@ -704,6 +711,7 @@ impl App {
         self.err = None;
         let Some(entry) = self.device.clone() else {
             self.err = Some("no radio found. plug one in, then press RESCAN.".into());
+            self.err_at = Some(std::time::Instant::now());
             return;
         };
         self.spans = crate::devices::spans_with_zoom(&device_rates(&entry));
@@ -831,6 +839,14 @@ impl App {
         }
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
+            self.err_at = Some(std::time::Instant::now());
+        }
+        // A fault is worth a look, not a permanent fixture: the radio going
+        // quiet re-raises itself every frame for as long as it is true, and
+        // anything else was true once.
+        if self.err_at.is_some_and(|t| t.elapsed() > ERR_SHOWN_FOR) {
+            self.err = None;
+            self.err_at = None;
         }
         let mut frames: Vec<Frame> = Vec::new();
         while let Ok(f) = radio.frames.try_recv() {
@@ -850,6 +866,7 @@ impl App {
                     "the radio has sent nothing for {:.0} s; it may need unplugging",
                     since.as_secs_f32()
                 ));
+                self.err_at = Some(std::time::Instant::now());
             }
         }
         // A pinned radio cannot be retuned, and a dial left wherever it was
@@ -1068,6 +1085,8 @@ impl App {
         let acts = strip::Strip {
             st: &mut self.audio,
             radio: self.radio.as_ref(),
+            center: self.center,
+            rate: self.rate,
             acts: Vec::new(),
             cmds: &mut self.cmds,
         }

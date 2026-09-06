@@ -782,20 +782,11 @@ impl Receiver {
         // its gain, its squelch and its station, not the graph for a node.
         let mut chans: Vec<Chan> = Vec::new();
         for spec in &plan.channels {
-            if spec.offset_hz.abs() > plan.eff_rate() / 2.0 {
-                refused = Some(format!(
-                    "{:.4} MHz is outside the span",
-                    (plan.center.as_f64() + spec.offset_hz) / 1e6,
-                ));
-                continue;
-            }
-            if plan.eff_rate() < spec.min_rate() {
-                refused = Some(format!(
-                    "{} needs a span of at least {:.0} kHz; this one is {:.0} kHz",
-                    spec.mode.label(),
-                    spec.min_rate() / 1e3,
-                    plan.eff_rate() / 1e3,
-                ));
+            // A channel the span does not cover, or cannot hold at its
+            // width, is left out and the strip shows it as out of reach. It
+            // used to be a fault, and restoring a session tuned elsewhere
+            // raised one per channel for something the dial fixes.
+            if spec.offset_hz.abs() > plan.eff_rate() / 2.0 || plan.eff_rate() < spec.min_rate() {
                 continue;
             }
             let of = |what: &str| -> Option<NodeId> {
@@ -4144,7 +4135,7 @@ mod tests {
         p.channels = vec![chan(1, -994_200_000.0, Demod::Wfm)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.channels().is_empty());
-        assert!(rx.refused.unwrap().contains("outside the span"));
+        assert!(rx.refused.is_none(), "not a fault: the dial fixes it");
     }
 
     #[test]

@@ -17,6 +17,10 @@ pub(super) enum Action {
 pub(super) struct Strip<'a> {
     pub st: &'a mut AudioState,
     pub radio: Option<&'a Radio>,
+    /// What the radio is sampling, so a channel it cannot reach is drawn as
+    /// such rather than reported as a fault.
+    pub center: f64,
+    pub rate: f64,
     pub acts: Vec<Action>,
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -513,7 +517,17 @@ impl Strip<'_> {
                                 ch.freq = d.hz;
                                 tune = Some(i);
                             }
-                            theme::Line::new().legend(bands::name_at(ch.freq)).show(ui);
+                            // A channel the span does not cover is not built,
+                            // and says so where the channel is rather than
+                            // as an error: a session restored on another
+                            // tuning leaves several of these, and they are
+                            // waiting for the dial, not wrong.
+                            let reach = (ch.freq - self.center).abs() <= self.rate / 2.0;
+                            let mut line = theme::Line::new().legend(bands::name_at(ch.freq));
+                            if !reach {
+                                line = line.value("outside span").tint(theme::LEGEND).size(11.0);
+                            }
+                            line.show(ui);
                             ui.add_space(4.0);
                             // One list rather than three rows of buttons.
                             // A channel is in one mode, the modes are a
