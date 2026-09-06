@@ -26,6 +26,7 @@ mod theme;
 mod radio;
 mod record;
 mod scanners;
+mod memory;
 mod session;
 mod shutdown;
 mod ui;

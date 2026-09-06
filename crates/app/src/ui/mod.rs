@@ -153,6 +153,9 @@ pub struct App {
     scanner_edit: Option<Vec<ScannerRow>>,
     /// The live table, as the radio thread has it.
     scanners: crate::scanners::Scanners,
+    /// The memory bank, and the group the next save goes into.
+    memory: crate::memory::Memory,
+    memory_group: String,
     log_dir_edit: String,
     log_dir: Option<std::path::PathBuf>,
     log_cap_mb: Option<u64>,
@@ -181,6 +184,8 @@ pub enum Settings {
     PacketLog,
     /// The scanner table: which front end runs on which frequency.
     Scanners,
+    /// The memory bank: saved channels, in groups.
+    Memory,
     /// Everything about where this receiver is rather than what it is doing:
     /// language, country, band plan, station position.
     App,
@@ -393,6 +398,8 @@ impl Default for App {
             feed_kind: nodes::FEED_KINDS[0],
             scanner_edit: None,
             scanners: crate::scanners::Scanners::default(),
+            memory: Default::default(),
+            memory_group: crate::memory::UNGROUPED.into(),
             log_dir_edit: String::new(),
             log_dir: None,
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -443,6 +450,7 @@ impl App {
             log_cap_mb: s.log_cap_mb,
             capture_cap_mb: s.capture_cap_mb,
             scanners: crate::scanners::Scanners::load(),
+            memory: crate::memory::Memory::load(),
             saved: s.clone(),
             ..Default::default()
         };
@@ -1087,6 +1095,8 @@ impl App {
             radio: self.radio.as_ref(),
             center: self.center,
             rate: self.rate,
+            memory: &mut self.memory,
+            memory_group: &mut self.memory_group,
             acts: Vec::new(),
             cmds: &mut self.cmds,
         }
@@ -1094,6 +1104,7 @@ impl App {
         for a in acts {
             match a {
                 strip::Action::Channels => self.send_channels(),
+                strip::Action::Open(w) => self.open = Some(w),
             }
         }
     }
@@ -1249,6 +1260,20 @@ impl App {
 
     fn add_channel(&mut self, freq: f64) {
         self.push_channel(freq, ChanMode::Audio(bands::demod_at(freq)), None);
+    }
+
+    /// A saved channel onto the strip, and the dial to it if the span does
+    /// not reach it: recalling a channel is asking to hear it.
+    fn recall(&mut self, s: &crate::memory::Saved) {
+        if (s.freq - self.center).abs() > self.rate / 2.0 {
+            self.retune(s.freq);
+        }
+        let label = if s.label.trim().is_empty() { None } else { Some(s.label.clone()) };
+        self.push_channel(s.freq, s.mode.clone(), label);
+        if let Some(c) = self.audio.channels.last_mut() {
+            c.bandwidth_hz = s.bandwidth_hz;
+        }
+        self.send_channels();
     }
 
     /// A channel on the strip, tuned to `freq` and doing `mode` with it.

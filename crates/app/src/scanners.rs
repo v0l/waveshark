@@ -553,7 +553,7 @@ impl Scanner {
 }
 
 /// The unit suffix of a value, so `433.05 - 434.79 MHz` can write it once.
-fn unit_of(s: &str) -> f64 {
+pub(crate) fn unit_of(s: &str) -> f64 {
     let s = s.trim().to_ascii_lowercase();
     if s.ends_with("ghz") {
         1e9
@@ -567,7 +567,7 @@ fn unit_of(s: &str) -> f64 {
 }
 
 /// `162.025 MHz`, `150 kHz`, or a bare number in hertz.
-fn hz(s: &str) -> Option<f64> {
+pub(crate) fn hz(s: &str) -> Option<f64> {
     hz_with(s, unit_of(s))
 }
 
@@ -578,7 +578,7 @@ fn hz_with(s: &str, unit: f64) -> Option<f64> {
 }
 
 /// Print a frequency without trailing zeros: 162.025, not 162.025000.
-fn num(v: f64) -> String {
+pub(crate) fn num(v: f64) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     s.to_string()
