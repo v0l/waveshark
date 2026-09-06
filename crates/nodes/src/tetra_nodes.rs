@@ -47,6 +47,10 @@ const DEMOD_HZ: f64 = 72_000.0;
 /// The rate the TETRA vocoder speaks: 8 kHz.
 pub const VOICE_HZ: f64 = 8_000.0;
 
+/// The one vocoder TETRA speech uses: ACELP at 4.567 kbit/s (ETSI EN 300
+/// 395-2), named as such so a call row says what it is carrying.
+const TETRA_CODEC: &str = "ACELP 4.6k";
+
 /// Two outputs: the packet log, and the speech the traffic slots carry.
 const OUT_PACKETS: usize = 0;
 const OUT_VOICE: usize = 1;
@@ -823,6 +827,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let crc_ok = flags & TB_FLAG_CRC_OK != 0;
     let mut fields: Vec<(String, Value)> = vec![
         ("voice".into(), Value::Bool(true)),
+        ("codec".into(), Value::Text(TETRA_CODEC.into())),
         ("live".into(), Value::Bool(true)),
         ("to".into(), Value::Text(if to != 0 { to.to_string() } else { format!("marker {marker}") })),
         ("timeslot".into(), Value::Int(tn.into())),
@@ -897,6 +902,7 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // not evidence of any.
             if c.is_call() {
                 fields.push(("voice".into(), Value::Bool(true)));
+                fields.push(("codec".into(), Value::Text(TETRA_CODEC.into())));
             }
             match c.address {
                 Address::Ssi(s) | Address::Ussi(s) => {

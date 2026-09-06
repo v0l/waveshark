@@ -14,13 +14,14 @@ use crate::calls::Call;
 ///
 /// The two subscription boxes come first, because that is what this pane is
 /// for: the rest of the row is what tells you whether to tick them.
-const COLS: [(&str, f32); 10] = [
+const COLS: [(&str, f32); 11] = [
     ("grp", 34.0),
     ("who", 34.0),
     ("system", 60.0),
     ("channel", 100.0),
     ("group / party", 180.0),
     ("caller", 110.0),
+    ("codec", 100.0),
     ("level", 70.0),
     ("airtime", 74.0),
     ("overs", 50.0),
@@ -264,7 +265,7 @@ impl CallList<'_> {
 }
 
 /// Which of the columns after the checkboxes is the meter.
-const LEVEL_COL: usize = 4;
+const LEVEL_COL: usize = 5;
 
 /// One row's text and colours, from the system column onwards.
 fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Color32)> {
@@ -285,6 +286,7 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
             if c.encrypted { theme::FAULT } else { party },
         ),
         (c.from.clone().unwrap_or_else(|| "-".into()), theme::VALUE),
+        (c.codec.clone().unwrap_or_else(|| "-".into()), theme::LEGEND),
         // The meter is painted over this one; the text is what a row without
         // a level would have shown.
         (String::new(), theme::VALUE),
