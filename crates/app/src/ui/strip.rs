@@ -525,10 +525,13 @@ impl Strip<'_> {
                             let reach = (ch.freq - self.center).abs() <= self.rate / 2.0;
                             let mut line = theme::Line::new().legend(bands::name_at(ch.freq));
                             if !reach {
-                                line = line.value("outside span").tint(theme::LEGEND).size(11.0);
+                                line = line.gap(12.0).legend("outside span").tint(theme::FAULT);
                             }
                             line.show(ui);
                             ui.add_space(4.0);
+                            // Everything below is about a channel that runs,
+                            // and this one cannot until the dial reaches it.
+                            ui.add_enabled_ui(reach, |ui| {
                             // One list rather than three rows of buttons.
                             // A channel is in one mode, the modes are a
                             // closed set, and eleven buttons across a narrow
@@ -652,7 +655,7 @@ impl Strip<'_> {
                             {
                                 tune = Some(i);
                             }
-
+                            });
                         });
                     ui.add_space(6.0);
                 }
