@@ -162,6 +162,8 @@ impl Calls {
         };
         let cipher = text(rec, &["encryption"]).filter(|t| !t.eq_ignore_ascii_case("none"));
         let codec = text(rec, &["codec"]).filter(|t| !t.is_empty());
+        let says_encryption = cipher.is_some()
+            || rec.fields.iter().any(|(k, _)| k == "encryption" || k == "encrypted");
         let encrypted = cipher.as_deref().is_some_and(|t| !t.eq_ignore_ascii_case("decrypted"))
             || rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("encrypted", Value::Bool(true))));
         let seconds = rec
@@ -216,7 +218,13 @@ impl Calls {
                 c.overs += 1;
             }
             c.seconds += seconds;
-            c.encrypted = encrypted;
+            // Only a decode that carries the field may change this. TETRA
+            // names the cipher in the grant and not in the traffic that
+            // follows, so overwriting from every record flipped the call back
+            // to clear while it still carried the cipher's name.
+            if says_encryption {
+                c.encrypted = encrypted;
+            }
             if cipher.is_some() {
                 c.cipher = cipher;
             }
@@ -460,5 +468,27 @@ mod tests {
             t(0),
         );
         assert!(c.active(t(0))[0].encrypted, "there is no point listening to this one");
+    }
+
+    #[test]
+    fn traffic_that_says_nothing_leaves_the_cipher_standing() {
+        // TETRA names the cipher in the grant; the traffic frames after it
+        // say nothing either way, and they must not clear it.
+        let mut c = Calls::new();
+        let grant = voice(
+            "TETRA-Voice",
+            393.9e6,
+            &[
+                ("to", Value::Text("marker 56".into())),
+                ("encryption", Value::Text("AIE-3".into())),
+            ],
+        );
+        c.update(&grant, t(0));
+        let traffic =
+            voice("TETRA-Voice", 393.9e6, &[("to", Value::Text("marker 56".into()))]);
+        c.update(&traffic, t(1));
+        let call = &c.active(t(1))[0];
+        assert!(call.encrypted, "the row would have gone from red to blue");
+        assert_eq!(call.cipher.as_deref(), Some("AIE-3"));
     }
 }
