@@ -14,6 +14,7 @@ impl App {
             Settings::Radio => "Radio",
             Settings::PacketLog => "Packet log",
             Settings::Scanners => "Scanners",
+            Settings::Memory => "Memory bank",
             Settings::App => crate::i18n::t("settings.title"),
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
@@ -22,7 +23,7 @@ impl App {
                 ui.set_width(match which {
                     Settings::Radio | Settings::PacketLog => 420.0,
                     Settings::App => 520.0,
-                    Settings::Scanners => 560.0,
+                    Settings::Scanners | Settings::Memory => 560.0,
                     _ => 320.0,
                 });
                 modal_title(ui, title);
@@ -32,6 +33,7 @@ impl App {
                     Settings::Radio => self.radio_settings(ui),
                     Settings::PacketLog => self.packet_log_settings(ui),
                     Settings::Scanners => self.scanner_settings(ui),
+                    Settings::Memory => self.memory_pane(ui),
                     Settings::App => self.app_settings(ui),
                 }
                 ui.add_space(12.0);
@@ -57,6 +59,68 @@ impl App {
     /// question this pane answers is "why is nothing decoding here", and the
     /// answer is a frequency compared against a list of ranges. That is a
     /// thing to show, not a thing to make somebody read.
+    /// The memory bank: what was saved, by group, and a way back to it.
+    fn memory_pane(&mut self, ui: &mut egui::Ui) {
+        if self.memory.list.is_empty() {
+            hint(ui, "Nothing saved yet. SAVE on a strip channel puts it here.");
+        }
+        let mut recall: Option<crate::memory::Saved> = None;
+        let mut remove: Option<usize> = None;
+        let groups: Vec<String> = self.memory.groups().iter().map(|g| g.to_string()).collect();
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            for g in &groups {
+                egui::CollapsingHeader::new(legend(g))
+                    .id_salt(("memory", g))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let rows: Vec<(usize, crate::memory::Saved)> =
+                            self.memory.in_group(g).map(|(i, s)| (i, s.clone())).collect();
+                        for (i, s) in rows {
+                            ui.horizontal(|ui| {
+                                let reach = (s.freq - self.center).abs() <= self.rate / 2.0;
+                                let mut line = theme::Line::new()
+                                    .set(format!("{:.4}", s.freq / 1e6))
+                                    .gap(10.0)
+                                    .legend(&s.mode.label());
+                                if let Some(bw) = s.bandwidth_hz {
+                                    line = line.gap(10.0).value(format!("{} kHz", crate::scanners::num(bw / 1e3)));
+                                }
+                                if !s.label.is_empty() {
+                                    line = line.gap(12.0).words(&s.label);
+                                }
+                                line.show(ui);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("×").on_hover_text("forget this channel").clicked() {
+                                        remove = Some(i);
+                                    }
+                                    let tip = if reach {
+                                        "put this channel on the strip"
+                                    } else {
+                                        "tune to this channel and put it on the strip"
+                                    };
+                                    if ui.small_button("RECALL").on_hover_text(tip).clicked() {
+                                        recall = Some(s.clone());
+                                    }
+                                });
+                            });
+                        }
+                    });
+            }
+        });
+        if let Some(i) = remove {
+            self.memory.remove(i);
+            let _ = self.memory.save();
+        }
+        if let Some(s) = recall {
+            self.recall(&s);
+            self.open = None;
+        }
+        if let Some(p) = crate::memory::Memory::path() {
+            ui.add_space(4.0);
+            hint(ui, &p.display().to_string());
+        }
+    }
+
     /// The scope's own panels, and whatever they asked for afterwards.
     fn scope_settings(&mut self, ui: &mut egui::Ui, spectrum: bool) {
         let mut pane = scope_settings::ScopeSettings {

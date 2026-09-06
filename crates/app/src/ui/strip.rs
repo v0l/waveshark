@@ -11,6 +11,8 @@ use pipeline::param::ParamValue;
 pub(super) enum Action {
     /// The channel list changed, so the radio needs the whole of it.
     Channels,
+    /// Open a dialog.
+    Open(Settings),
 }
 
 /// The strip, over the levels it sets.
@@ -21,6 +23,9 @@ pub(super) struct Strip<'a> {
     /// such rather than reported as a fault.
     pub center: f64,
     pub rate: f64,
+    /// The memory bank a channel is saved into, and the group it goes in.
+    pub memory: &'a mut crate::memory::Memory,
+    pub memory_group: &'a mut String,
     pub acts: Vec<Action>,
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -395,7 +400,14 @@ impl Strip<'_> {
                     .inner_margin(egui::Margin::symmetric(12, 10)),
             )
             .show(ui, |ui| {
-                ui.label(legend("channels"));
+                ui.horizontal(|ui| {
+                    ui.label(legend("channels"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("BANK").on_hover_text("saved channels").clicked() {
+                            self.acts.push(Action::Open(Settings::Memory));
+                        }
+                    });
+                });
                 ui.add_space(6.0);
 
                 // The master, which every channel's own level runs into.
@@ -506,6 +518,28 @@ impl Strip<'_> {
                                         if ui.small_button("REMOVE").clicked() {
                                             remove = Some(i);
                                         }
+                                        // Into the bank, under a group named
+                                        // here. The last group used is
+                                        // offered, since channels are saved
+                                        // in runs.
+                                        ui.menu_button("SAVE", |ui| {
+                                            ui.set_min_width(180.0);
+                                            theme::Line::new().legend("group").show(ui);
+                                            let r = ui.text_edit_singleline(self.memory_group);
+                                            let enter = r.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                            if enter || ui.button("SAVE").clicked() {
+                                                self.memory.add(crate::memory::Saved {
+                                                    group: self.memory_group.clone(),
+                                                    label: ch.label.clone(),
+                                                    freq: ch.freq,
+                                                    mode: ch.mode.clone(),
+                                                    bandwidth_hz: ch.bandwidth_hz,
+                                                });
+                                                let _ = self.memory.save();
+                                                ui.close();
+                                            }
+                                        });
                                     },
                                 );
                             });

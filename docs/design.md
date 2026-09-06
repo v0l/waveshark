@@ -725,6 +725,17 @@ wrote down in advance; an auto channel is a range somebody pointed at on the
 spectrum, which is what is wanted when the interesting thing is 40 kHz wide
 and nowhere near an allocation anybody named.
 
+Channels worth coming back to go in the memory bank,
+`~/.config/waveshark/channels`, one line per channel under a `[group]`
+heading: frequency, mode, an optional width, and a label. SAVE on a strip
+channel files it under a group named there; BANK opens the list by group, and
+RECALL puts a channel back on the strip, moving the dial to it if the span
+does not reach it. What is kept is what rebuilds the channel. Levels and
+squelch are set against the signal on the day and stay the strip's. It is a
+file of its own rather than part of the session for the reason the scanner
+table is: the session is rewritten every few seconds, and a list somebody
+curates by hand cannot live in a file the program keeps overwriting.
+
 Band plans differ by ITU region and by regulator inside one, so a table that is
 right in Dublin is wrong in Denver: 915 MHz is the licence-free band an
 American sees key fobs and weather sensors in, and the GSM uplink a European
