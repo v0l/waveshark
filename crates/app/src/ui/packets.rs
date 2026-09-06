@@ -299,7 +299,16 @@ impl Log<'_> {
             ui.label(legend(&waiting));
             return;
         }
-        let t0 = self.st.decodes.first().map(|l| l.rec.at);
+        // Zero is the first row the filter actually draws. Taken from the
+        // head of the whole list it was often a hidden unknown, so every
+        // unknown that arrived or aged out of the list moved the origin and
+        // the known rows' seconds changed without a visible row changing.
+        let t0 = self
+            .st
+            .decodes
+            .iter()
+            .find(|l| self.st.show_unknown || l.rec.is_known())
+            .map(|l| l.rec.at);
         let mut clicked = None;
         let mut pin: Option<(f64, String)> = None;
 
