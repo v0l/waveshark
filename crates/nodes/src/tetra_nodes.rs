@@ -246,6 +246,10 @@ impl Default for TetraNode {
 
 impl TetraNode {
     pub fn new(channel_hz: f64) -> Self {
+        // The crypto worker and its GPU devices live for the process; ask
+        // for them here so the first real search does not pay the setup.
+        #[cfg(feature = "tea")]
+        decode::gpu::warm();
         Self {
             channel_hz,
             // All replaced at negotiation, when the real rate is known.
