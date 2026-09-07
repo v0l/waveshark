@@ -436,6 +436,7 @@ impl TetraNode {
             width_hz: CHANNEL_WIDTH_HZ,
             role: "traffic".into(),
             hold_s: Some(TRAFFIC_CARRIER_HOLD_S),
+            settings: Default::default(),
         });
     }
 

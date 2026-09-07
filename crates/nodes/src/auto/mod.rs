@@ -1153,7 +1153,7 @@ mod tests {
         let center = Hz::mhz(434);
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
-        n.remember_for("pocsag", 434_100_000.0, 25_000.0, Some(0.5), None);
+        n.remember_for("pocsag", 434_100_000.0, 25_000.0, Some(0.5), None, Default::default());
         assert_eq!(n.remembered().len(), 1);
         let iq = keyed(rate, 356_000.0);
         let ins = [spec(rate, center)];
@@ -1271,7 +1271,7 @@ mod tests {
     fn a_decoder_can_ask_for_a_side_channel_and_it_goes_with_the_asker() {
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(395))]).unwrap();
-        n.remember_for("tetra", 395_100_000.0, 25_000.0, Some(1.0), None);
+        n.remember_for("tetra", 395_100_000.0, 25_000.0, Some(1.0), None, Default::default());
         let b = SourceBlock {
             id: n.sticky[0].id,
             state: SourceState::Opened,
@@ -1292,6 +1292,7 @@ mod tests {
             width_hz: 25_000.0,
             role: "traffic".into(),
             hold_s: Some(30.0),
+            settings: Default::default(),
         };
         assert!(n.answer(Some(0), "tetra", ask, &mut said).is_none());
         let at: Vec<f64> = n.remembered().into_iter().map(|(_, hz, _)| hz).collect();
@@ -1303,6 +1304,7 @@ mod tests {
             width_hz: 25_000.0,
             role: "traffic".into(),
             hold_s: None,
+            settings: Default::default(),
         };
         assert_eq!(
             n.answer(Some(0), "tetra", far.clone(), &mut said),
@@ -1312,5 +1314,50 @@ mod tests {
         let parent = n.sticky[0].id;
         n.forget(&[parent]);
         assert!(n.remembered().is_empty(), "{:?}", n.remembered());
+    }
+
+    /// What the asker said the decoder needs reaches it, with where its
+    /// stream sits in the span: a GSM carrier a beacon sent a phone to is
+    /// built timed from the beacon.
+    #[test]
+    fn a_channel_asked_for_is_built_with_what_the_asker_said() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(947))]).unwrap();
+        let mut said = Vec::new();
+        let mut settings = pipeline::registry::Settings::new();
+        settings.insert("timeslot".into(), ParamValue::Int(1));
+        settings.insert("anchor_span_sample".into(), ParamValue::Float(12_345.0));
+        settings.insert("anchor_frame".into(), ParamValue::Int(100));
+        settings.insert("tsc".into(), ParamValue::Int(6));
+        let ask = Request::OpenChannel {
+            protocol: "gsm".into(),
+            center_hz: 947_800_000.0,
+            width_hz: 200_000.0,
+            role: "SDCCH/8".into(),
+            hold_s: Some(60.0),
+            settings,
+        };
+        assert!(n.answer(None, "gsm", ask, &mut said).is_none());
+        let b = SourceBlock {
+            id: n.sticky[0].id,
+            state: SourceState::Opened,
+            center_hz: 947_800_000,
+            bandwidth_hz: 200_000.0,
+            signal_hz: 200_000.0,
+            rate: 1_200_000.0,
+            start_sample: 50_000,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b).unwrap();
+        let m = &slot.members[0];
+        let gsm = m
+            .graph
+            .order()
+            .filter_map(|(id, _)| m.graph.node(id))
+            .filter_map(|node| node.as_any())
+            .find_map(|a| a.downcast_ref::<crate::gsm_nodes::GsmNode>())
+            .expect("a gsm node");
+        assert!(gsm.anchored(), "the beacon's timing never reached it");
     }
 }

@@ -4,7 +4,7 @@
 use common::{Packet, Result, C32};
 use pipeline::event::Event;
 use pipeline::port::{PortKind, StreamSpec};
-use pipeline::registry::Registry;
+use pipeline::registry::{Registry, Settings};
 use pipeline::{Graph, Out};
 
 use crate::protocol::{Placed, Protocol};
@@ -108,13 +108,21 @@ impl Member {
     }
 
     /// A protocol's decoder for a placed channel.
+    /// A protocol's decoder for a placed channel. `extra` is what the
+    /// decoder is told beyond its channel: where its stream sits in the
+    /// span, and whatever the channel's asker said it needs.
     pub(super) fn place(
         p: &'static dyn Protocol,
         spec: StreamSpec,
         at: Placed,
+        extra: &Settings,
         reg: &Registry,
     ) -> Result<Self> {
-        let mut m = Self::build(p.id(), Some(p), spec, p.chain(at), reg)?;
+        let mut chain = p.chain(at);
+        if let Some(last) = chain.last_mut() {
+            last.settings.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        let mut m = Self::build(p.id(), Some(p), spec, chain, reg)?;
         m.channel_hz = at.width_hz;
         m.source_snr_db = at.snr_db;
         Ok(m)

@@ -81,6 +81,7 @@ impl AutoNode {
                 width_hz,
                 role,
                 hold_s,
+                settings,
             } => {
                 let Some(proto) = protocol::by_id(&p) else {
                     out.push(warn(format!(
@@ -95,12 +96,13 @@ impl AutoNode {
                         width_hz,
                         role,
                         hold_s,
+                        settings,
                     });
                 }
                 let hold = hold_s.or(hold_of(proto.id()));
                 let parent = name.zip(asker);
                 if self
-                    .remember_for(proto.id(), center_hz, width_hz, hold, parent)
+                    .remember_for(proto.id(), center_hz, width_hz, hold, parent, settings)
                     .is_some()
                 {
                     out.push(warn(format!(
@@ -125,7 +127,7 @@ impl AutoNode {
                 let id = self.slots[k].id;
                 self.forget(&[id]);
                 self.expiring.push(id);
-                if let Some(e) = self.remember_for(name, hz, w, hold_of(name), None) {
+                if let Some(e) = self.remember_for(name, hz, w, hold_of(name), None, Default::default()) {
                     out.push(e);
                 }
                 None

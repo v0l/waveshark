@@ -2,6 +2,7 @@
 
 use common::SourceId;
 use pipeline::event::Event;
+use pipeline::registry::Settings;
 
 use super::AutoNode;
 use crate::protocol::{self, Stickiness};
@@ -36,6 +37,8 @@ pub(super) struct Sticky {
     /// The channel that asked for this one, as (protocol, centre), for a
     /// side channel that goes when its parent does.
     pub(super) parent: Option<(&'static str, f64)>,
+    /// What the asker said the decoder there should be told.
+    pub(super) settings: Settings,
 }
 
 /// Source ids counted down from the top, where the detector's never reach.
@@ -128,7 +131,7 @@ impl AutoNode {
             Some(Stickiness::Latch { hold_s }) => hold_s,
             Some(Stickiness::Claim) | None => None,
         };
-        self.remember_for(name, center_hz, width_hz, hold_s, None)
+        self.remember_for(name, center_hz, width_hz, hold_s, None, Settings::new())
     }
 
     pub(super) fn remember_for(
@@ -138,6 +141,7 @@ impl AutoNode {
         width_hz: f64,
         hold_s: Option<f64>,
         parent: Option<(&'static str, f64)>,
+        settings: Settings,
     ) -> Option<Event> {
         if width_hz <= 0.0 {
             return None;
@@ -157,6 +161,7 @@ impl AutoNode {
             hold_s,
             last_heard_s: self.now_s,
             parent,
+            settings,
         });
         self.pending_sticky.push(id);
         self.apply_locked();

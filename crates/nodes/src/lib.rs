@@ -277,7 +277,9 @@ pub fn registry() -> Registry {
         },
         |s: &Settings| {
             let hz = s.f64_or("channel_hz", gsm_nodes::DEFAULT_HZ);
-            Ok(Box::new(gsm_nodes::GsmNode::new(hz, Default::default())) as Box<dyn Node>)
+            let mut n = gsm_nodes::GsmNode::new(hz, Default::default());
+            n.configure(s);
+            Ok(Box::new(n) as Box<dyn Node>)
         },
     );
 

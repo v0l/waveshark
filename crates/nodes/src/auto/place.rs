@@ -3,6 +3,8 @@
 use common::{Hz, Packet, Result, SourceBlock, SourceId, C32};
 use pipeline::event::Event;
 use pipeline::port::StreamSpec;
+use pipeline::registry::Settings;
+use pipeline::ParamValue;
 
 use super::{AutoNode, Member};
 use crate::protocol::{self, Placed, Protocol};
@@ -29,6 +31,9 @@ pub(super) struct Slot {
     /// A channel remembered from earlier, which runs the one decoder that
     /// earned it and nothing else.
     pub(super) remembered: bool,
+    /// Where the stream sits in the span, as every decoder placed on it is
+    /// told.
+    pub(super) origin: Settings,
 }
 
 impl AutoNode {
@@ -46,6 +51,13 @@ impl AutoNode {
     pub(super) fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
+        // Where this stream sits in the span, so a decoder that has to be
+        // timed from another carrier's decoder can say where in the span
+        // its timing was measured, and the other can find that in its own
+        // samples.
+        let mut origin = Settings::new();
+        origin.insert("span_origin_sample".into(), ParamValue::Float(b.start_sample as f64));
+        origin.insert("span_rate_hz".into(), ParamValue::Float(self.rate));
         if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
             let p = protocol::by_id(st.name)
                 .ok_or_else(|| common::Error::other(format!("no protocol {:?}", st.name)))?;
@@ -55,7 +67,9 @@ impl AutoNode {
                 rate: b.rate,
                 snr_db: b.snr_db,
             };
-            let m = Member::place(p, spec, at, &self.reg)?;
+            let mut extra = origin.clone();
+            extra.extend(st.settings.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let m = Member::place(p, spec, at, &extra, &self.reg)?;
             return Ok(Slot {
                 id: b.id,
                 center_hz: b.center_hz,
@@ -66,6 +80,7 @@ impl AutoNode {
                 tried: Vec::new(),
                 verdicts_seen: 0,
                 remembered: true,
+                origin,
             });
         }
         // The front end is told how strong the detector found the source,
@@ -91,7 +106,7 @@ impl AutoNode {
                     rate: b.rate,
                     snr_db: b.snr_db,
                 };
-                if let Ok(m) = Member::place(*p, spec, at, &self.reg) {
+                if let Ok(m) = Member::place(*p, spec, at, &origin, &self.reg) {
                     members.push(m);
                 }
             }
@@ -106,6 +121,7 @@ impl AutoNode {
             tried: Vec::new(),
             verdicts_seen: 0,
             remembered: false,
+            origin,
         })
     }
 
@@ -167,7 +183,7 @@ impl AutoNode {
                     rate: slot.spec.rate,
                     snr_db: snr,
                 };
-                let Ok(mut m) = Member::place(*p, slot.spec, at, reg) else {
+                let Ok(mut m) = Member::place(*p, slot.spec, at, &slot.origin, reg) else {
                     continue;
                 };
                 let before = pk.len();

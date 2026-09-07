@@ -236,6 +236,12 @@ pub struct SchDetector {
     /// A cell hands a phone a channel on one of these, and following it is
     /// how a receiver sees what happens next.
     following: u8,
+    /// Frame timing taken from another carrier, for one that has no
+    /// synchronisation burst of its own. See [`SchDetector::anchor`].
+    anchor: Option<Anchor>,
+    /// The last synchronisation burst read, and where it sat in the channel
+    /// stream: what a carrier this one sends a phone to is timed from.
+    last_sync: Option<Anchor>,
     /// The last synchronisation burst decoded but not yet reported, and where
     /// it sat. Held back until a second one agrees with it about what time it
     /// is; see `corroborate`.
@@ -243,6 +249,19 @@ pub struct SchDetector {
     /// Where the samples added by the last call sit in `buf`, so a caller can
     /// measure the channel this cut out rather than the span it came from.
     last: std::ops::Range<usize>,
+}
+
+/// A point in the channel stream whose frame number is known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Anchor {
+    /// Where the first symbol of timeslot zero of that frame sits, in
+    /// channel samples.
+    pub at: f64,
+    pub frame_number: u32,
+    /// The cell's colour code, which is the training sequence its channels
+    /// use.
+    pub tsc: u8,
+    pub freq_offset_hz: f64,
 }
 
 /// A run of samples whose phase advance looks like a tone.
@@ -376,9 +395,47 @@ impl SchDetector {
             pending: Vec::new(),
             blocks: Vec::new(),
             following: 0,
+            anchor: None,
+            last_sync: None,
             held: None,
             last: 0..0,
         }
+    }
+
+    /// Time this carrier from another one.
+    ///
+    /// Only the beacon carrier of a cell transmits the frequency correction
+    /// and synchronisation bursts; the other carriers keep the beacon's
+    /// frame timing and never say what it is. A phone sent to one of them
+    /// counts from the beacon, and so does this: given where one frame of
+    /// the beacon started, in this channel's samples, the blocks of every
+    /// followed timeslot are scheduled from there and read the way they
+    /// would be after a synchronisation burst. Where the anchor came from,
+    /// and in whose samples it was measured, is the caller's problem; the
+    /// burst search reaches six symbols either side of where a burst is
+    /// expected, which is the slack a conversion between two streams of the
+    /// same span has to land inside.
+    pub fn anchor(&mut self, a: Anchor) {
+        self.anchor = Some(a);
+    }
+
+    /// The last synchronisation burst read, and where it sat.
+    pub fn last_sync(&self) -> Option<Anchor> {
+        self.last_sync
+    }
+
+    /// Where a position in the input stream lands in the channel stream,
+    /// the channel filter's delay included, and back.
+    pub fn channel_of_input(&self, input_sample: f64) -> f64 {
+        input_sample * self.work / self.rate_in() + self.decim.latency() as f64
+    }
+
+    pub fn input_of_channel(&self, channel_sample: f64) -> f64 {
+        (channel_sample - self.decim.latency() as f64) * self.rate_in() / self.work
+    }
+
+    fn rate_in(&self) -> f64 {
+        self.work * self.decim.factor() as f64
     }
 
     /// Whether a span sampled at `rate` can carry this at all.
@@ -398,6 +455,7 @@ impl SchDetector {
         self.pending.clear();
         self.blocks.clear();
         self.held = None;
+        self.last_sync = None;
         self.last = 0..0;
     }
 
@@ -447,8 +505,35 @@ impl SchDetector {
         self.extend_products(before);
         self.search_tone();
         self.decode_pending(out);
+        self.roll_anchor();
         self.decode_blocks(out);
         self.trim();
+    }
+
+    /// Schedule the followed timeslots from the anchor, ten frames at a
+    /// time, as each synchronisation burst would have.
+    fn roll_anchor(&mut self) {
+        let Some(mut a) = self.anchor else { return };
+        let frame = FRAME_SYMBOLS * self.sps;
+        let step = 10.0 * frame;
+        let end = (self.base + self.buf.len() as u64) as f64;
+        // An anchor behind the buffer is moved up to it: what fell before
+        // the first sample cannot be read.
+        if a.at + step < self.base as f64 {
+            let k = ((self.base as f64 - a.at) / step).ceil();
+            a.at += k * step;
+            a.frame_number = (a.frame_number + 10 * k as u32) % HYPERFRAME;
+        }
+        // Scheduled as soon as the frame the anchor names is in the buffer,
+        // as a synchronisation burst schedules the frames after it: the
+        // blocks are pending from then on, which is what keeps their
+        // samples from being trimmed before they can be read.
+        while a.at <= end {
+            self.schedule_following(a.at, a.frame_number, a.tsc, a.freq_offset_hz);
+            a.at += step;
+            a.frame_number = (a.frame_number + 10) % HYPERFRAME;
+        }
+        self.anchor = Some(a);
     }
 
     /// The product of each new sample with the one before it. The first
@@ -620,8 +705,13 @@ impl SchDetector {
     /// bursts say how many frames passed, and the two have to agree. Noise
     /// cannot do that twice in a row.
     fn corroborate(&mut self, hit: SchHit, at: f64, out: &mut Vec<Hit>) {
-        const HYPERFRAME: u32 = 51 * 26 * 2048;
         let frame = FRAME_SYMBOLS * self.sps;
+        self.last_sync = Some(Anchor {
+            at,
+            frame_number: hit.sch.frame_number,
+            tsc: hit.sch.bcc & 7,
+            freq_offset_hz: hit.freq_offset_hz,
+        });
         if let Some((prev, prev_at)) = self.held.take() {
             let elapsed = ((at - prev_at) / frame).round();
             let want = (prev.sch.frame_number + elapsed as u32) % HYPERFRAME;
@@ -659,7 +749,14 @@ impl SchDetector {
                 timeslot: 0,
             });
         }
+        self.schedule_following(at, hit.sch.frame_number, hit.sch.bcc & 7, freq_offset_hz);
+    }
 
+    /// The signalling blocks of the followed timeslots in the ten frames
+    /// after a known one.
+    fn schedule_following(&mut self, at: f64, frame_number: u32, tsc: u8, freq_offset_hz: f64) {
+        let frame = FRAME_SYMBOLS * self.sps;
+        let tsc = usize::from(tsc & 7);
         // A timeslot the cell has assigned to somebody carries eight
         // signalling channels in the 51 frames of its own multiframe: four
         // frames each, starting every fourth frame up to frame 47, with the
@@ -674,7 +771,7 @@ impl SchDetector {
                 continue;
             }
             for n in 1..=10u32 {
-                let fnum = hit.sch.frame_number + n;
+                let fnum = frame_number + n;
                 if fnum % 51 % 4 != 0 || fnum % 51 >= 48 {
                     continue;
                 }
@@ -932,21 +1029,64 @@ pub fn is_downlink_band(hz: f64) -> bool {
     DOWNLINK_BANDS.iter().any(|&(lo, hi)| hz >= lo && hz <= hi)
 }
 
+/// The frame numbers count 51 * 26 * 2048 TDMA frames and wrap.
+pub const HYPERFRAME: u32 = 51 * 26 * 2048;
+
+/// The downlink frequency of a channel number, in the band plan `near_hz`
+/// is in. Needed because the numbers are reused: 512 is the bottom of both
+/// DCS 1800 and PCS 1900, and a cell only ever names channels of its own
+/// band.
+pub fn hz_of_arfcn(arfcn: u16, near_hz: f64) -> Option<f64> {
+    for &(first, base, count) in &PLANS {
+        // The whole band the plan belongs to, not the plan's own channels:
+        // a cell on a P-GSM carrier names E-GSM channels as readily as its
+        // own.
+        let (lo, hi) = BANDS
+            .iter()
+            .copied()
+            .find(|(lo, hi)| (*lo..=*hi).contains(&base))
+            .unwrap_or((base, base));
+        if !(lo..=hi).contains(&near_hz) {
+            continue;
+        }
+        // E-GSM counts 975 through 1023 and then 0.
+        let n = if first == 975 && arfcn < 975 {
+            u32::from(arfcn) + 1024 - 975
+        } else {
+            let Some(n) = u32::from(arfcn).checked_sub(u32::from(first)) else { continue };
+            n
+        };
+        if n < u32::from(count) {
+            return Some(base + f64::from(n) * CHANNEL_SPACING_HZ);
+        }
+    }
+    None
+}
+
+/// The downlink bands, for telling which plan a frequency belongs to.
+const BANDS: [(f64, f64); 4] = [
+    (869.2e6, 894.2e6),
+    (925.2e6, 960.0e6),
+    (1805.2e6, 1880.0e6),
+    (1930.2e6, 1990.0e6),
+];
+
+/// Each band plan: the first channel number, the frequency it sits at, and
+/// how many channels follow it.
+const PLANS: [(u16, f64, u16); 5] = [
+    (128, 869.2e6, 124),   // GSM 850
+    (1, 935.2e6, 124),     // P-GSM 900
+    (975, 925.2e6, 50),    // E-GSM 900, which counts up through 1023 to 0
+    (512, 1805.2e6, 374),  // DCS 1800
+    (512, 1930.2e6, 299),  // PCS 1900
+];
+
 /// The channel number a downlink frequency carries, where it is one.
 ///
 /// Worth reporting rather than the frequency alone: a cell is configured,
 /// logged and talked about by ARFCN, and the number is what makes a decode
 /// comparable with anybody else's.
 pub fn arfcn(hz: f64) -> Option<u16> {
-    // Each entry is the first channel number, the frequency it sits at, and
-    // how many channels follow it.
-    const PLANS: [(u16, f64, u16); 5] = [
-        (128, 869.2e6, 124),   // GSM 850
-        (1, 935.2e6, 124),     // P-GSM 900
-        (975, 925.2e6, 49),    // E-GSM 900, which counts up through 1023 to 0
-        (512, 1805.2e6, 374),  // DCS 1800
-        (512, 1930.2e6, 299),  // PCS 1900
-    ];
     for &(first, base, count) in &PLANS {
         let n = ((hz - base) / CHANNEL_SPACING_HZ).round();
         if n < 0.0 || n >= f64::from(count) {
@@ -1389,6 +1529,71 @@ mod tests {
         // one it can name rather than pretending the frequency is
         // unambiguous.
         assert_eq!(arfcn(890.2e6), Some(233));
+    }
+
+    /// A carrier with no beacon of its own is read from another's timing.
+    ///
+    /// Only the beacon carrier transmits a synchronisation burst; the
+    /// carriers a cell sends phones to keep its frame timing and never say
+    /// what it is. Handed where one frame of the beacon started, this
+    /// carrier's followed timeslot is read as if the burst had been its
+    /// own.
+    #[test]
+    fn a_carrier_without_a_beacon_is_read_from_an_anchor() {
+        let rate = 2_400_000.0;
+        let bcc = 3u8;
+        // A frame at the start of a control multiframe, so the block on
+        // timeslot one begins four frames on.
+        let frame_number = 51 * 26 * 9;
+        let mut block = [0x2Bu8; 23];
+        block[..6].copy_from_slice(&[0x03, 0x03, 0x01, 0x06, 0x35, 0x00]);
+        let sps = 8;
+        let work = SYMBOL_RATE * sps as f64;
+        let lead = 300.0;
+        let total = ((lead * 2.0 + 24.0 * FRAME_SYMBOLS) * sps as f64) as usize;
+        let mut base = vec![C32::new(0.0, 0.0); total];
+        let mut place = |at: f64, wave: &[C32]| {
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(wave);
+        };
+        for (n, data) in bcch::encode(&block).unwrap().iter().enumerate() {
+            let bits = normal_burst_bits(data, usize::from(bcc));
+            let at = lead + (4.0 + n as f64) * FRAME_SYMBOLS + BURST_SYMBOLS;
+            place(at, &modulate(&bits, sps));
+        }
+        let iq = resample(&base, work, rate, 0.0, 0.02);
+
+        let mut det = SchDetector::new(rate, 0.0, 0.0, GsmConfig::default());
+        det.follow(1);
+        // Where the frame started, in this detector's input samples.
+        let at_input = lead * rate / SYMBOL_RATE;
+        det.anchor(Anchor {
+            at: det.channel_of_input(at_input),
+            frame_number,
+            tsc: bcc,
+            freq_offset_hz: 0.0,
+        });
+        let mut out = Vec::new();
+        for chunk in iq.chunks(8192) {
+            det.process(chunk, &mut out);
+        }
+        assert!(syncs(&out).is_empty(), "there is no beacon on this carrier");
+        let got = blocks(&out);
+        assert_eq!(got.len(), 1, "expected the block, got {got:?}");
+        assert_eq!(got[0].bytes, block);
+        assert_eq!(got[0].timeslot, 1);
+        assert_eq!(got[0].frame_number, frame_number + 4);
+    }
+
+    #[test]
+    fn a_channel_number_names_its_downlink_in_the_band_of_the_cell() {
+        assert_eq!(hz_of_arfcn(1, 947.4e6), Some(935.2e6));
+        assert_eq!(hz_of_arfcn(62, 947.4e6), Some(947.4e6));
+        assert_eq!(hz_of_arfcn(1023, 947.4e6), Some(934.8e6), "E-GSM wraps");
+        assert_eq!(hz_of_arfcn(0, 947.4e6), Some(935.0e6));
+        assert_eq!(hz_of_arfcn(512, 1810.0e6), Some(1805.2e6), "DCS 1800");
+        assert_eq!(hz_of_arfcn(512, 1950.0e6), Some(1930.2e6), "PCS 1900 reuses the numbers");
+        assert_eq!(hz_of_arfcn(700, 947.4e6), None, "not a 900 channel");
     }
 
     /// A burst split across block boundaries is still one burst.
