@@ -231,6 +231,10 @@ pub struct Receiver {
     capture: Option<NodeId>,
     /// The audio bus, where every channel and every voice front end meets.
     audio: Option<NodeId>,
+    /// The video bus, where every picture meets. `None` until something in
+    /// the graph produces one, since a receiver with no camera in earshot
+    /// should not carry a bus for it.
+    video: Option<NodeId>,
     modes: Option<NodeId>,
     ais: Option<NodeId>,
     aprs: Option<NodeId>,
@@ -452,6 +456,7 @@ impl Receiver {
             tx_mic: None,
             capture: None,
             audio: None,
+            video: None,
             modes: None,
             ais: None,
             aprs: None,
@@ -621,6 +626,7 @@ impl Receiver {
         self.record = None;
         self.capture = None;
         self.audio = None;
+        self.video = None;
         self.modes = None;
         self.ais = None;
         self.aprs = None;
@@ -717,6 +723,7 @@ impl Receiver {
         let mut patch = base.clone();
         plan.edits.apply(&mut patch);
         sync_audio(&mut patch, plan);
+        sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
         let (patch_packets, patch_ids, reused) = match add_patch(
             &mut b,
@@ -759,6 +766,7 @@ impl Receiver {
         let tx_mic = stage_of("mic");
         let capture = stage_of("iq_capture");
         let audio = stage_of("audio_bus");
+        let video = stage_of("video_bus");
 
         // The front ends are stages in the patch now, so what runs is what
         // the graph says rather than a second reading of the scanner table.
@@ -986,6 +994,7 @@ impl Receiver {
         self.tx_mic = tx_mic;
         self.capture = capture;
         self.audio = audio;
+        self.video = video;
         self.bus = bus;
         self.decode = decode;
         self.ais = ais;
@@ -1215,6 +1224,45 @@ impl Receiver {
 
     /// The bus's position in the running graph, for setting its parameters
     /// by the same route the chain view uses.
+    /// The video bus, for what is being watched and what else is being
+    /// received. `None` when nothing in the graph produces pictures.
+    pub fn video(&self) -> Option<&crate::videobus::VideoBusNode> {
+        downcast::<crate::videobus::VideoBusNode>(&self.graph, self.video?)
+    }
+
+    pub fn video_mut(&mut self) -> Option<&mut crate::videobus::VideoBusNode> {
+        let id = self.video?;
+        self.graph
+            .node_mut(id)
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<crate::videobus::VideoBusNode>())
+    }
+
+    /// The picture the bus is publishing, if any.
+    pub fn watched_video(&self) -> Option<common::VideoFrame> {
+        self.video().and_then(|n| n.bus().watched().cloned())
+    }
+
+    /// Every input of the video bus: which one, what it is called, and how
+    /// complete its last picture was.
+    pub fn video_inputs(&self) -> Vec<(usize, String, f32)> {
+        let Some(bus) = self.video().map(|n| n.bus()) else {
+            return Vec::new();
+        };
+        bus.thumbnails()
+            .map(|(k, f)| {
+                let label = match bus.strips().get(k).map(|s| s.label.as_str()) {
+                    Some(l) if !l.is_empty() => l.to_string(),
+                    _ => f
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| format!("{:.3} MHz", f.channel_hz / 1e6)),
+                };
+                (k, label, f.completeness())
+            })
+            .collect()
+    }
+
     pub fn audio_node_id(&self) -> Option<usize> {
         self.audio.map(|id| id.0)
     }
@@ -2093,6 +2141,15 @@ const BUS_TAILS: [&str; 12] = [
 const VOICE_TAILS: [(&str, usize); 5] =
     [("m17", 1), ("tetra", 1), ("dmr", 1), ("auto", 1), ("voice", 1)];
 
+/// The stages that produce pictures, and the port each leaves them on.
+///
+/// The video counterpart of [`VOICE_TAILS`] and read the same way: a stage
+/// that decodes video by itself puts it on its only output, and the auto node
+/// puts whatever a source turned out to be on a port of its own, so a camera
+/// it finds reaches the bus without anything here knowing which front end
+/// read it.
+const VIDEO_TAILS: [(&str, usize); 2] = [("video", 0), ("auto", 2)];
+
 /// The port a front end's speech leaves on, if it has any.
 fn voice_port(kind: &str) -> Option<usize> {
     VOICE_TAILS.iter().find(|(k, _)| *k == kind).map(|(_, port)| *port)
@@ -2158,6 +2215,8 @@ pub mod derived {
     pub const TX_SOURCE: u64 = Patch::DERIVED_BASE + 11;
     pub const TX_MOD: u64 = Patch::DERIVED_BASE + 12;
     pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
+    /// The video bus, where every picture the receiver has meets.
+    pub const VIDEO: u64 = Patch::DERIVED_BASE + 16;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2478,6 +2537,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // be on the bus with the rest. Drawn afterwards, its packets went
     // nowhere: nothing was wired to it and the log stayed empty.
     sync_audio(&mut p, plan);
+    // And everything that produces a picture meets at the video bus, for the
+    // same reason and in the same place.
+    sync_video(&mut p);
 
     // Everything that produces packets meets at the bus, and everything that
     // consumes them hangs off the far side. One input per source: the bus is
@@ -2558,6 +2620,47 @@ const CHAN_STAGES: [&str; 11] = [
     "chan_agc",
     "chan_blend",
 ];
+
+/// The video bus, and what feeds it.
+///
+/// Drawn whenever something in the patch can produce pictures, which the auto
+/// node always can: it publishes whatever front end it placed on a source, so
+/// a camera it finds reaches the bus without anything here knowing which
+/// front end read it. Exactly the arrangement the audio bus has with voice
+/// ports, and for the same reason: a picture that arrives somewhere other
+/// than the bus is a picture no view can find.
+fn sync_video(p: &mut crate::patch::Patch) {
+    use crate::patch::Source;
+    use pipeline::registry::Settings;
+    use pipeline::ParamValue as V;
+
+    let feeds: Vec<(u64, usize, String)> = p
+        .stages()
+        .iter()
+        .filter_map(|st| {
+            let (_, port) = VIDEO_TAILS.iter().find(|(kind, _)| *kind == st.kind)?;
+            Some((st.id, *port, stage_label(&st.kind, &st.settings)))
+        })
+        .collect();
+    if feeds.is_empty() {
+        p.remove(derived::VIDEO);
+        return;
+    }
+    let bus = derived::VIDEO;
+    let mut s: Settings = p.stage(bus).map(|s| s.settings.clone()).unwrap_or_default();
+    s.insert("label".into(), V::Text("Video".into()));
+    // The stage has to exist before anything can be wired into it, the way
+    // the audio bus is added before its inputs are drawn.
+    p.add_derived(bus, "video_bus", s.clone());
+    for (k, (id, port, label)) in feeds.iter().enumerate() {
+        p.connect(Source::Stage(*id, *port), (bus, k));
+        s.entry(format!("label{k}")).or_insert(V::Text(label.clone()));
+    }
+    // One spare, the way the audio bus keeps one, so a chain drawn by hand
+    // has an input to land on.
+    s.insert("inputs".into(), V::Int(feeds.len() as i64 + 1));
+    p.add_derived(bus, "video_bus", s);
+}
 
 /// The stages the strip owns, drawn into a patch: one chain per listening
 /// channel, and the bus every chain and every voice front end ends at.
@@ -3282,6 +3385,22 @@ pub fn registry() -> pipeline::registry::Registry {
                 "min_speech_s",
                 pipeline::ParamValue::Float(s.f64_or("min_speech_s", 0.6)),
             )?;
+            Ok(Box::new(n) as Box<dyn pipeline::node::Node>)
+        },
+    );
+    r.register(
+        StageDesc {
+            name: "video_bus",
+            summary: "Every picture the receiver has in one place: pictures do \
+                      not sum, so this one selects what is watched and keeps \
+                      the last field of everything else",
+            category: "video",
+        },
+        |s: &pipeline::registry::Settings| {
+            let mut n = crate::videobus::VideoBusNode::new();
+            for (name, value) in s {
+                let _ = pipeline::node::Node::set_param(&mut n, name, value.clone());
+            }
             Ok(Box::new(n) as Box<dyn pipeline::node::Node>)
         },
     );
@@ -4145,6 +4264,10 @@ mod tests {
         };
         assert!(to(derived::BUS, 0), "its packets never reach the log");
         assert!(to(derived::AUDIO, 1), "its speech never reaches the mixer");
+        // And whatever it finds that produces a picture, on the port it
+        // publishes those on: the video bus is where a camera it opened lands,
+        // with nothing here knowing which front end read it.
+        assert!(to(derived::VIDEO, 2), "its pictures never reach the video bus");
 
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert_eq!(rx.channels().len(), 1);

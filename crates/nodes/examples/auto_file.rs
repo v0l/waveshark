@@ -6,15 +6,37 @@ use pipeline::StreamSpec;
 
 fn main() {
     let path = std::env::args().nth(1).expect("file");
-    let rate: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(2_048_000.0);
-    let centre: f64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(869_200_000.0);
+    let rate: f64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_048_000.0);
+    let centre: f64 = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(869_200_000.0);
     // Through the file source, so the format and the rate come from the
     // name rather than from an assumption that every capture is cu8.
-    let buf = sources::FileSource::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
+    let buf = sources::FileSource::open(std::path::Path::new(&path))
+        .unwrap()
+        .read_all()
+        .unwrap();
     let iq: Vec<C32> = buf.samples.clone();
-    let rate = if buf.rate.as_f64() > 0.0 { buf.rate.as_f64() } else { rate };
-    let centre = if buf.center.0 > 0 { buf.center.as_f64() } else { centre };
-    let mut g = build_chain(StreamSpec::iq(rate, Hz(centre as i64 as u64)), &[NodeSpec::new("auto")], &registry()).unwrap();
+    let rate = if buf.rate.as_f64() > 0.0 {
+        buf.rate.as_f64()
+    } else {
+        rate
+    };
+    let centre = if buf.center.0 > 0 {
+        buf.center.as_f64()
+    } else {
+        centre
+    };
+    let mut g = build_chain(
+        StreamSpec::iq(rate, Hz(centre as i64 as u64)),
+        &[NodeSpec::new("auto")],
+        &registry(),
+    )
+    .unwrap();
     let block = 16_384;
     let t0 = std::time::Instant::now();
     let mut packets = 0usize;
@@ -78,8 +100,18 @@ fn main() {
         }
         let dt = t.elapsed().as_secs_f64();
         let real = block as f64 / rate;
-        if dt > real { slow_blocks += 1; }
-        if dt > worst { worst = dt; eprintln!("block {i} at {:.2}s took {:.1} ms ({:.1}x block)", i as f64 * real, dt * 1e3, dt / real); }
+        if dt > real {
+            slow_blocks += 1;
+        }
+        if dt > worst {
+            worst = dt;
+            eprintln!(
+                "block {i} at {:.2}s took {:.1} ms ({:.1}x block)",
+                i as f64 * real,
+                dt * 1e3,
+                dt / real
+            );
+        }
     }
     let wall = t0.elapsed().as_secs_f64();
     let secs = iq.len() as f64 / rate;
@@ -87,10 +119,18 @@ fn main() {
         for (id, name) in g.order() {
             if let Some(node) = g.node(id) {
                 for (phase, cost) in node.phases() {
-                    eprintln!("{name:14} {phase:22} {:8.3} ms {:6.1}%", cost.p95_us as f64 / 1000.0, cost.load().unwrap_or(0.0) * 100.0);
+                    eprintln!(
+                        "{name:14} {phase:22} {:8.3} ms {:6.1}%",
+                        cost.p95_us as f64 / 1000.0,
+                        cost.load().unwrap_or(0.0) * 100.0
+                    );
                 }
             }
         }
     }
-    println!("{:.2}x real time, {packets} packets, {slow_blocks} of {} blocks slower than real time", secs / wall, iq.len() / block);
+    println!(
+        "{:.2}x real time, {packets} packets, {slow_blocks} of {} blocks slower than real time",
+        secs / wall,
+        iq.len() / block
+    );
 }

@@ -40,6 +40,7 @@ mod scope_settings;
 mod settings;
 mod settings_rows;
 mod state;
+mod video_pane;
 mod strip;
 pub(crate) mod widgets;
 
@@ -72,6 +73,7 @@ pub struct App {
     calls: state::CallsState,
     messages: state::MessagesState,
     links: state::LinksState,
+    video: video_pane::VideoState,
     #[allow(dead_code)]
     keys: state::KeysState,
     audio: state::AudioState,
@@ -224,6 +226,7 @@ enum View {
     Messages,
     Links,
     Devices,
+    Video,
     Keys,
 }
 
@@ -237,6 +240,7 @@ impl View {
             View::Messages => "Messages",
             View::Links => "Data links",
             View::Devices => "Devices",
+            View::Video => "Video",
             View::Keys => "Keys",
         }
     }
@@ -380,6 +384,7 @@ impl Default for App {
             calls: state::CallsState::default(),
             messages: state::MessagesState::default(),
             links: state::LinksState::default(),
+            video: video_pane::VideoState::default(),
             keys: state::KeysState::default(),
             audio: state::AudioState::default(),
             cmds: Vec::new(),
@@ -1305,6 +1310,21 @@ impl App {
         }
     }
 
+    /// Draw whatever the video bus is publishing.
+    fn video_view(&mut self, ui: &mut egui::Ui) {
+        let (frame, inputs) = match self.radio.as_ref() {
+            Some(r) => (r.status.video(), r.status.video_inputs()),
+            None => (None, Vec::new()),
+        };
+        video_pane::VideoPane {
+            st: &mut self.video,
+            frame,
+            inputs,
+            cmds: &mut self.cmds,
+        }
+        .show(ui);
+    }
+
     /// Draw the message list, then do what its buttons asked for.
     fn message_view(&mut self, ui: &mut egui::Ui) {
         let act = messages_pane::Msgs { st: &mut self.messages }.show(ui);
@@ -1692,6 +1712,7 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
+                    View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),
                 });
         }

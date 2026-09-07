@@ -114,7 +114,8 @@ fn a_capture_of_the_transmission_replays_as_the_same_text() {
 
     let (mut sink, buf) = sources::FileSink::in_memory(Sps(RATE as u64), SampleFormat::Cs8);
     let mut tx = sink.start_tx().unwrap();
-    tx.write(&IqBuf::new(iq, Hz(433_920_000), Sps(RATE as u64), 0)).unwrap();
+    tx.write(&IqBuf::new(iq, Hz(433_920_000), Sps(RATE as u64), 0))
+        .unwrap();
     tx.drain(std::time::Duration::from_millis(50));
     assert_eq!(tx.underruns(), 0);
 
@@ -153,5 +154,8 @@ fn a_receive_stream_cannot_be_wired_into_a_transmit_stage() {
     // Accepted here, since a lone stage cannot know: what refuses it is the
     // graph, which sees both directions meeting at one node.
     let out = node.negotiate(&[PortSpec { spec, latency: 0 }]).unwrap();
-    assert!(out[0].is_tx(), "the modulator's output must be marked as transmit");
+    assert!(
+        out[0].is_tx(),
+        "the modulator's output must be marked as transmit"
+    );
 }

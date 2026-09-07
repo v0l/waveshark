@@ -46,12 +46,16 @@ impl Protocol for X10Rf {
         let b = find_frame(bits, FRAME_BYTES, |b| {
             b[0] ^ b[1] == 0xff
                 && b[2] ^ b[3] == 0xff
-                && FIXED.iter().zip(b).all(|((mask, want), v)| v & mask == *want)
+                && FIXED
+                    .iter()
+                    .zip(b)
+                    .all(|((mask, want), v)| v & mask == *want)
         })
         .ok_or(match bits.len() {
-            n if n < FRAME_BYTES * 8 => {
-                DecodeError::WrongLength { got: n, want: FRAME_BYTES * 8 }
-            }
+            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength {
+                got: n,
+                want: FRAME_BYTES * 8,
+            },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -60,7 +64,9 @@ impl Protocol for X10Rf {
         // hardware's rotary switch was wired.
         let h: Vec<u8> = (4..8).map(|i| (b[0] >> (7 - (i - 4))) & 1).collect();
         let house = ((!(h[0] ^ h[1]) & 1) << 3) | ((!h[1] & 1) << 2) | ((h[1] ^ h[2]) << 1) | h[3];
-        let mut unit = ((b[0] & 0x04) << 1) | ((b[2] & 0x40) >> 4) | ((b[2] & 0x08) >> 2)
+        let mut unit = ((b[0] & 0x04) << 1)
+            | ((b[2] & 0x40) >> 4)
+            | ((b[2] & 0x08) >> 2)
             | ((b[2] & 0x10) >> 4);
         unit += 1;
 
@@ -84,8 +90,7 @@ impl Protocol for X10Rf {
         } else {
             "OFF"
         };
-        Ok(r
-            .text("channel", ((b'A' + house) as char).to_string())
+        Ok(r.text("channel", ((b'A' + house) as char).to_string())
             .int("unit", unit as i64)
             .text("state", state))
     }
@@ -136,6 +141,9 @@ mod tests {
     fn the_constant_bits_are_enforced() {
         // 0x62 sets a bit that is zero in every real frame. Without this check
         // the complement pair alone would accept it.
-        assert_eq!(X10Rf.decode(&frame(0x62, 0x00)), Err(DecodeError::CrcFailed));
+        assert_eq!(
+            X10Rf.decode(&frame(0x62, 0x00)),
+            Err(DecodeError::CrcFailed)
+        );
     }
 }

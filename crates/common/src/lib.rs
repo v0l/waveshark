@@ -22,7 +22,9 @@ pub use iq::{IqBuf, SampleFormat, C32};
 pub use decode::{
     media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
 };
-pub use pulse::{Frame, IqBurst, Measure, Package, Packet, PacketBody, Pulse, Speech, Voice};
+pub use pulse::{
+    Frame, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse, Speech, VideoFrame, Voice,
+};
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;
 pub use units::{Hz, Sps};

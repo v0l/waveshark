@@ -52,6 +52,17 @@ claims what it can render.
   tiles, with a table of tracks beside it. Described in full below.
   `crates/app/src/ui/map_pane/`.
 
+- **Video**: whatever the video bus is publishing, drawn. A view over that
+  bus the way the call list is a view over the audio one: it reads a field off
+  the status and knows nothing about which front end produced it or on what
+  band. Two things it does that a plain image viewer would not. It prints
+  `lines_seen` over the picture and colours the caption when the field is
+  incomplete, because analogue video has no integrity check of any kind and a
+  fade looks like a picture until the count is read. And it clears itself half
+  a second after the last field rather than holding the last one, since a
+  still picture of a transmitter that has gone away is the worst thing this
+  pane could do. `crates/app/src/ui/video_pane.rs`.
+
 - **Calls**: who is talking, from anything that decodes speech. Its own header
   says what makes it a view rather than a protocol pane: it is fed from the
   bus, not from a protocol, and reads `from`, `to`, `seconds`, `call_type` and

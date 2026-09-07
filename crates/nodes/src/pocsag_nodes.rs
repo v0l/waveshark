@@ -91,7 +91,9 @@ impl Simple for PocsagNode {
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other("pocsag needs its channel inside the span"));
+            return Err(common::Error::other(
+                "pocsag needs its channel inside the span",
+            ));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         let audio_rate = rate / factor as f64;
@@ -196,7 +198,10 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(center as u64)),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -263,7 +268,13 @@ mod tests {
         assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
         assert_eq!(decodes[0].media_type, media::TEXT);
         assert_eq!(decodes[0].crc_ok, Some(true));
-        let get = |k: &str| decodes[0].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            decodes[0]
+                .fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("address"), Some(common::Value::Int(1_234_568)));
     }
 
@@ -273,8 +284,16 @@ mod tests {
     fn one_transmission_becomes_a_row_for_each_page() {
         let mut contents = pocsag::encode(1_000_001, 3, &Body::Alpha("FIRST".into()));
         contents.extend(pocsag::encode(2_000_002, 0, &Body::Numeric("112".into())));
-        let words: Vec<u32> = contents.into_iter().map(dsp::pocsag::encode_codeword).collect();
-        let t = Transmission { codewords: words, baud: 1200, corrected: 0, lost: 0 };
+        let words: Vec<u32> = contents
+            .into_iter()
+            .map(dsp::pocsag::encode_codeword)
+            .collect();
+        let t = Transmission {
+            codewords: words,
+            baud: 1200,
+            corrected: 0,
+            lost: 0,
+        };
 
         let decodes = pocsag_decoded(&t.to_bytes(), Hz(DEFAULT_HZ as u64));
         assert_eq!(decodes.len(), 2);

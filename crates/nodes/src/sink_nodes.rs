@@ -232,7 +232,9 @@ impl Simple for SpectrumNode {
                 self.set_refresh(v.as_f64().unwrap_or(30.0) as f32);
                 Ok(())
             }
-            _ => Err(Error::other(format!("spectrum: unknown parameter {name:?}"))),
+            _ => Err(Error::other(format!(
+                "spectrum: unknown parameter {name:?}"
+            ))),
         }
     }
 }
@@ -367,7 +369,10 @@ pub struct PacketBusNode {
 
 impl PacketBusNode {
     pub fn new(inputs: usize) -> Self {
-        Self { sink: None, inputs: inputs.max(1) }
+        Self {
+            sink: None,
+            inputs: inputs.max(1),
+        }
     }
 
     pub fn with_sink(mut self, sink: Option<Box<dyn PacketSink>>) -> Self {
@@ -450,13 +455,19 @@ impl pipeline::node::Node for PacketBusNode {
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         for i in inputs {
-            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames | PortKind::Packets) {
+            if !matches!(
+                i.spec.kind,
+                PortKind::Pulses | PortKind::Frames | PortKind::Packets
+            ) {
                 return Err(Error::other(
                     "the packet bus takes detected bursts, demodulated frames or packets",
                 ));
             }
         }
-        let first = inputs.first().map(|i| i.spec).unwrap_or(StreamSpec::iq(0.0, common::Hz(0)));
+        let first = inputs
+            .first()
+            .map(|i| i.spec)
+            .unwrap_or(StreamSpec::iq(0.0, common::Hz(0)));
         let mut out = first.with_kind(PortKind::Packets);
         // Packets are events in time, not a sampled stream.
         out.rate = 0.0;
@@ -530,7 +541,11 @@ impl Default for DcBlockNode {
 
 impl DcBlockNode {
     pub fn new() -> Self {
-        Self { dc: None, rate: 0.0, enabled: true }
+        Self {
+            dc: None,
+            rate: 0.0,
+            enabled: true,
+        }
     }
 
     pub fn set_enabled(&mut self, on: bool) {
@@ -608,7 +623,9 @@ impl Simple for DcBlockNode {
                 self.set_enabled(v.as_bool().unwrap_or(true));
                 Ok(())
             }
-            _ => Err(Error::other(format!("dc_block: unknown parameter {name:?}"))),
+            _ => Err(Error::other(format!(
+                "dc_block: unknown parameter {name:?}"
+            ))),
         }
     }
 }
@@ -619,7 +636,10 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(433_920_000)),
+            latency: 0,
+        }
     }
 
     fn tone(n: usize) -> Vec<C32> {
@@ -648,7 +668,10 @@ mod tests {
         };
 
         assert!(!run(64, &mut s), "a quarter of a frame is not a frame");
-        assert!(run(256, &mut s), "past a full frame there is something to draw");
+        assert!(
+            run(256, &mut s),
+            "past a full frame there is something to draw"
+        );
         // At 2.4 MS/s and 30 frames a second, the next 80k samples are not
         // worth transforming.
         assert!(!run(4096, &mut s), "the gate holds off the next frame");
@@ -731,7 +754,13 @@ mod adc_tests {
     fn two_values_is_starved_and_a_driven_converter_is_not() {
         let starved: Vec<C32> = (0..4096)
             .map(|i| {
-                let v = |k: u32| if (i * 7 + k).is_multiple_of(3) { -0.5 / 127.5 } else { 0.5 / 127.5 };
+                let v = |k: u32| {
+                    if (i * 7 + k).is_multiple_of(3) {
+                        -0.5 / 127.5
+                    } else {
+                        0.5 / 127.5
+                    }
+                };
                 C32::new(v(0), v(1))
             })
             .collect();
@@ -749,7 +778,13 @@ mod adc_tests {
         assert!(!h.starved() && !h.clipping(), "{h:?}");
 
         let railed: Vec<C32> = (0..4096)
-            .map(|i| if i % 4 == 0 { C32::new(1.0, -1.0) } else { C32::new(0.1, 0.2) })
+            .map(|i| {
+                if i % 4 == 0 {
+                    C32::new(1.0, -1.0)
+                } else {
+                    C32::new(0.1, 0.2)
+                }
+            })
             .collect();
         assert!(AdcHealth::measure(&railed).clipping());
     }

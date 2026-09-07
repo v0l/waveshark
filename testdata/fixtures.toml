@@ -262,3 +262,146 @@ radio_id = 1_234_567
 call_type = "group"
 overs = 1
 seconds_min = 3.0
+
+[[capture]]
+name = "odid_holybro_2431M_20000k.cs8"
+sha256 = "599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287"
+url = "https://nostr.download/599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287.xz"
+compression = "xz"
+center_hz = 2_431_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Open Drone ID over Bluetooth legacy advertising, from a Holybro RemoteID
+module (an ESP32 running ArduRemoteID) on an S500 airframe, on a bench with no
+GPS fix and no flight controller attached. HackRF at 20 MS/s tuned to 2431 MHz,
+which puts advertising channel 38 inside the span and the tuner's DC spike well
+away from it. Six seconds of the band held 78 advertisements that passed the
+link layer's CRC-24, 28 of them from the module.
+
+Cut down from the 234 MB recording to the bursts themselves by
+`crates/nodes/examples/odid_probe.rs`, which keeps 2 ms either side of each
+packet so the level gate still has a floor to measure against. All 28 packets
+come back out of the cut, and the file is a fiftieth of the size.
+
+The evidence is the transmitter's, twice over: every packet passed a CRC-24
+this project did not compute the input to, and the message layout is ASTM
+F3411 as `opendroneid/opendroneid-core-c` implements it. What the module is
+saying is its shipped configuration rather than anything set for the test, so
+the expectations below are deliberately thin: the UAS ID, the ID type, the
+aircraft type, and that a location message arrives with its position marked
+absent. It has no fix, so it says so, and a decoder that reports a position
+here has invented one.
+
+Do not key an expectation on the Bluetooth address. It is a random address and
+it rotated between two recordings ten minutes apart; the UAS ID is what
+identifies the aircraft.
+"""
+
+[capture.expect]
+channel = 38
+packets_min = 20
+uas_id = "123"
+id_type = "utm uuid"
+ua_type = "aeroplane"
+position_reported = false
+
+[[capture]]
+name = "odid_bt5lr_holybro_2474M_20000k.cs8"
+sha256 = "aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0"
+url = "https://nostr.download/aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0.xz"
+compression = "xz"
+center_hz = 2_474_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Open Drone ID over Bluetooth 5 Long Range, from the same Holybro RemoteID
+module as odid_holybro_2431M_20000k.cs8 and on the same bench. HackRF at
+20 MS/s tuned to 2474 MHz, which covers advertising channel 39 and data
+channels 30 to 36.
+
+What is in it is the auxiliary half of extended advertising. On the primary
+channel the module sends an ADV_EXT_IND carrying no payload at all, only a
+pointer to a data channel chosen afresh each time; over 46 seconds those
+pointers named 24 different channels, so a span covering seven of the 37
+catches roughly a fifth of them. The packets kept here are the auxiliary ones
+themselves, eleven AUX_ADV_IND at S=8 on channels 31 to 36, each carrying a
+whole ASTM F3411 message pack: basic id, location, self id and operator id in
+one reception rather than four.
+
+Cut from the 1.8 GB recording by `crates/nodes/examples/odid_probe.rs` with
+ODID_DATA=1 and ODID_ONLY_LR=1, which keeps the long range packets and drops
+the two hundred legacy advertisements alongside them. 329 times smaller, and
+all eleven come back out of the cut.
+
+The evidence is the link layer's CRC-24, computed over a body this project
+did not construct, behind a convolutional code whose Viterbi survivor has to
+be right for the CRC to pass at all. What the module says inside is its
+shipped configuration, so the expectations are thin on purpose; see the
+legacy capture's entry for why.
+
+This capture is also what fixes a size: an uncoded advertisement is at most
+376 us but a message pack at S=8 is about 8.5 ms, and a burst cap of 4 ms cut
+every one of them short while the tiny pointers on the primary channel still
+decoded. A receiver that reads the primary channel and reports nothing from
+the auxiliary one is showing that symptom.
+"""
+
+[capture.expect]
+packs_min = 8
+messages_per_pack = 4
+coding = "S8"
+data_channels = [31, 32, 33, 34, 35, 36]
+uas_id = "123"
+
+[[capture]]
+name = "pal_camera_5865M_20000k.cs8"
+sha256 = "48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59"
+url = "https://nostr.download/48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59.xz"
+compression = "xz"
+center_hz = 5_865_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Analogue video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
+which the 5.8 GHz channel plan names A1 or B8 because two bands share that
+frequency.
+HackRF at 20 MS/s, 240 ms cut out of a 3.6 second recording, holding six
+fields of which three carry all 288 lines. The camera is looking at a room
+with a window, so the picture has both a saturated highlight and dark
+corners, and the colour subcarrier is carrying real chroma rather than a test
+pattern.
+
+What the capture is evidence of is that the whole chain works on real RF, and
+what it fixed is more useful than what it confirmed:
+
+A discriminator on a 20 MHz span gives a video baseband carrying all of that
+bandwidth's noise while the picture occupies 5 MHz of it. Slicing that
+unfiltered finds no sync at all, because a single noisy sample above the
+threshold ends a run that has to last 4.7 us. This capture produced zero
+fields until a quarter-microsecond running mean went in front of the slicer.
+
+The colour subcarrier has to free-run rather than restart each line. Sync
+edges land on whole samples, and at 20 MS/s one sample is 80 degrees of a
+4.43 MHz subcarrier, so a per-line phase origin rotates the hue nearly a full
+turn from line to line. With a continuous phase the burst holds steady near
+-80 degrees, drifting a few degrees over a field, which is the tuner's own
+offset.
+
+Blanking is the 13th percentile of the sorted samples, not the 30th. A line
+is 7.3% sync and another 11% porches, so taking it higher reads picture as
+black level: a full-scale ramp came back peaking at 61%.
+
+Also worth recording because it contradicts what the datasheets suggest: the
+occupied bandwidth is about 4.6 MHz with roughly 1 MHz rms deviation, not the
+20 to 30 MHz the manuals imply, so a 20 MS/s span is not clipping this
+transmitter at all. Audio is present on a 6.5 MHz subcarrier and is not
+decoded.
+"""
+
+[capture.expect]
+standard = "PAL"
+fields_min = 4
+full_lines_min = 250
+colour = true
+channel = "A1 or B8"

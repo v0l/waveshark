@@ -24,8 +24,6 @@
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
 use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
-use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::event::Event;
 use pipeline::graph::Topology;
@@ -35,6 +33,8 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::Registry;
 use pipeline::{Graph, Out};
 use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use crate::{build_chain, NodeSpec};
 
@@ -78,6 +78,12 @@ struct Member {
     packets: Vec<Out>,
     /// Front ends that carry speech, on the port it travels out on.
     voice: Vec<Out>,
+    /// Pictures, for a front end inside that produces them. Same arrangement
+    /// as `voice` and for the same reason: what a source turns out to be
+    /// decides what leaves the node, and a video front end placed on a source
+    /// must have somewhere to publish to without the auto node knowing which
+    /// front end it was.
+    video: Vec<Out>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -134,14 +140,35 @@ const RING_MAX_S: f64 = 2.0;
 /// spreading factor over the narrowest bandwidth.
 const IQ_KEEP_S: f64 = 0.25;
 
+/// How wide a source has to be before a video front end is placed on it.
+///
+/// The AKK transmitter measured here occupied about 4.6 MHz, and nothing else
+/// this receiver reads is anywhere near that: the widest is BLE at 2 MHz.
+/// Three is comfortably between them.
+const VIDEO_MIN_HZ: f64 = 3e6;
+
+/// And how fast the stream carrying it has to be. PAL luma reaches 5 MHz with
+/// the colour subcarrier at 4.43, so a slower stream cannot hold a picture
+/// whatever the source measured.
+const VIDEO_MIN_RATE_HZ: f64 = 12e6;
+
 impl Member {
-    fn build(name: &'static str, spec: StreamSpec, settings: NodeSpec, reg: &Registry) -> Result<Self> {
+    fn build(
+        name: &'static str,
+        spec: StreamSpec,
+        settings: NodeSpec,
+        reg: &Registry,
+    ) -> Result<Self> {
         let graph = build_chain(spec, &[settings], reg)?;
         let pulses = taps(&graph, PortKind::Pulses);
         let frames = taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
-        let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
+        let video = taps(&graph, PortKind::Video);
+        let router = graph
+            .order()
+            .find(|(_, n)| *n == "burst_route")
+            .map(|(id, _)| id);
         let flush_s = graph
             .order()
             .filter_map(|(id, _)| graph.node(id).map(|n| n.flush_s()))
@@ -153,6 +180,7 @@ impl Member {
             frames,
             packets,
             voice,
+            video,
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
@@ -174,7 +202,11 @@ impl Member {
             // The floor follows the quietest block and climbs a hundredth
             // a block, so a burst does not become the floor and a real
             // rise in the noise is learned within a second or so.
-            self.noise_pow = if self.noise_pow.is_nan() { pow } else { pow.min(self.noise_pow * 1.01) };
+            self.noise_pow = if self.noise_pow.is_nan() {
+                pow
+            } else {
+                pow.min(self.noise_pow * 1.01)
+            };
             self.ring.extend_from_slice(iq);
             // Trimmed once it holds twice what is kept, not every block:
             // trimming a full ring by a block's worth moves the whole of it
@@ -228,7 +260,10 @@ impl Member {
         buf.iq_mut().extend_from_slice(iq);
         let mut events = match self.graph.run() {
             Ok(ev) => ev.to_vec(),
-            Err(e) => vec![Event::Warning { stage: self.name.into(), message: e.to_string() }],
+            Err(e) => vec![Event::Warning {
+                stage: self.name.into(),
+                message: e.to_string(),
+            }],
         };
         if let Some(id) = self.router {
             let spec = self.graph.spec_of(id.o());
@@ -256,8 +291,10 @@ impl Member {
                 // invisible, and that is how the TETRA carriers were found
                 // to be read as OFDM.
                 if let Some(dir) = std::env::var_os("SR_DUMP_BURSTS") {
-                    let path = std::path::Path::new(&dir)
-                        .join(format!("burst_{}_{}_{}.c64", center_hz, rate as u64, b.start_sample));
+                    let path = std::path::Path::new(&dir).join(format!(
+                        "burst_{}_{}_{}.c64",
+                        center_hz, rate as u64, b.start_sample
+                    ));
                     if !path.exists() {
                         let mut bytes = Vec::with_capacity(b.iq.len() * 8);
                         for c in &b.iq {
@@ -338,7 +375,9 @@ impl Member {
         }
         for t in &self.pulses {
             let spec = self.graph.spec_of(*t);
-            let Some(pkgs) = self.graph.buf(*t).and_then(|p| p.as_pulses()) else { continue };
+            let Some(pkgs) = self.graph.buf(*t).and_then(|p| p.as_pulses()) else {
+                continue;
+            };
             for p in pkgs {
                 out.push(Packet::of_pulses(
                     at_us,
@@ -348,7 +387,9 @@ impl Member {
             }
         }
         for t in &self.packets {
-            let Some(pk) = self.graph.buf(*t).and_then(|p| p.as_packets()) else { continue };
+            let Some(pk) = self.graph.buf(*t).and_then(|p| p.as_packets()) else {
+                continue;
+            };
             // Taken as they are, except for a level the front end left
             // unmeasured: a dechirp reports its processing gain, not a
             // channel level, so the LoRa node leaves both NaN and the
@@ -365,7 +406,9 @@ impl Member {
         }
         for t in &self.frames {
             let spec = self.graph.spec_of(*t);
-            let Some(frames) = self.graph.buf(*t).and_then(|p| p.as_frames()) else { continue };
+            let Some(frames) = self.graph.buf(*t).and_then(|p| p.as_frames()) else {
+                continue;
+            };
             for f in frames {
                 // What the front end measured, where it measured anything:
                 // it read the channel this frame came off, and the source's
@@ -561,7 +604,10 @@ impl AutoNode {
     /// Channels front ends have read something on this session, as
     /// (front end, centre, width) in hertz.
     pub fn remembered(&self) -> Vec<(&'static str, f64, f64)> {
-        self.sticky.iter().map(|s| (s.name, s.center_hz, s.width_hz)).collect()
+        self.sticky
+            .iter()
+            .map(|s| (s.name, s.center_hz, s.width_hz))
+            .collect()
     }
 
     /// Limit detection to a band inside the input, or `None` for all of it.
@@ -639,7 +685,10 @@ impl AutoNode {
 
     /// Sources open right now.
     pub fn live(&self) -> Vec<dsp::Source> {
-        self.detector.as_ref().map(|d| d.live().copied().collect()).unwrap_or_default()
+        self.detector
+            .as_ref()
+            .map(|d| d.live().copied().collect())
+            .unwrap_or_default()
     }
 
     /// What decoded in the last block, and where.
@@ -714,8 +763,12 @@ impl AutoNode {
     fn each_inner_tetra(&mut self, mut f: impl FnMut(&mut crate::tetra_nodes::TetraNode)) {
         for slot in &mut self.slots {
             for m in &mut slot.members {
-                let ids: Vec<_> =
-                    m.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
+                let ids: Vec<_> = m
+                    .graph
+                    .order()
+                    .filter(|(_, n)| *n == "tetra")
+                    .map(|(id, _)| id)
+                    .collect();
                 for id in ids {
                     if let Some(n) = m.graph.node_mut(id) {
                         if let Some(t) = n
@@ -734,7 +787,22 @@ impl AutoNode {
         for slot in &self.slots {
             for m in &slot.members {
                 for t in &m.voice {
-                    let Some(v) = m.graph.buf(*t).and_then(|p| p.as_voice()) else { continue };
+                    let Some(v) = m.graph.buf(*t).and_then(|p| p.as_voice()) else {
+                        continue;
+                    };
+                    out.extend(v.iter().cloned());
+                }
+            }
+        }
+    }
+
+    fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
+        for slot in &self.slots {
+            for m in &slot.members {
+                for t in &m.video {
+                    let Some(v) = m.graph.buf(*t).and_then(|p| p.as_video()) else {
+                        continue;
+                    };
                     out.extend(v.iter().cloned());
                 }
             }
@@ -747,7 +815,12 @@ impl AutoNode {
         }
         let d = SourceDetector::new(self.rate, self.input_bw, self.cfg);
         let keep = d.latency_samples();
-        self.extractor = Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
+        self.extractor = Some(SourceExtractor::new(
+            self.rate,
+            self.center.as_f64(),
+            keep,
+            self.cfg,
+        ));
         self.detector = Some(d);
         self.slots.clear();
         self.pending_sticky = self.sticky.iter().map(|s| s.id).collect();
@@ -766,13 +839,19 @@ impl AutoNode {
         let covers = |lo: f64, hi: f64| c - half <= lo && hi <= c + half;
         let modes = (1_089_000_000.0, 1_091_000_000.0);
         if self.rate >= 2_000_000.0 && covers(modes.0, modes.1) {
-            self.wide.push(Member::build("mode_s", spec, NodeSpec::new("mode_s"), &self.reg)?);
+            self.wide.push(Member::build(
+                "mode_s",
+                spec,
+                NodeSpec::new("mode_s"),
+                &self.reg,
+            )?);
             self.exclude.push(modes);
         }
         let w = crate::ais_nodes::CHANNEL_WIDTH_HZ;
         let ais = (dsp::ais::CHANNEL_HZ[0] - w, dsp::ais::CHANNEL_HZ[1] + w);
         if covers(ais.0, ais.1) {
-            self.wide.push(Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?);
+            self.wide
+                .push(Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?);
             self.exclude.push(ais);
         }
         // Bluetooth advertising, on whichever of the three channels the span
@@ -783,7 +862,8 @@ impl AutoNode {
         let bw = crate::ble_nodes::CHANNEL_WIDTH_HZ / 2.0;
         for (_, hz) in dsp::ble::ADV_CHANNELS {
             if self.rate >= 4_000_000.0 && covers(hz - bw, hz + bw) {
-                self.wide.push(Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?);
+                self.wide
+                    .push(Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?);
                 self.exclude.push((hz - bw, hz + bw));
                 break;
             }
@@ -813,7 +893,10 @@ impl AutoNode {
     fn query_narrowband(&self) -> Vec<(&'static str, &'static [f64])> {
         let mut out = Vec::new();
         for desc in self.reg.by_category("decode") {
-            let Ok(node) = self.reg.build(desc.name, &NodeSpec::new(desc.name).settings) else {
+            let Ok(node) = self
+                .reg
+                .build(desc.name, &NodeSpec::new(desc.name).settings)
+            else {
                 continue;
             };
             let ch = node.channels();
@@ -828,7 +911,12 @@ impl AutoNode {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
         if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
-            let mut m = Member::build(st.name, spec, Self::place(st.name, st.center_hz, st.width_hz), &self.reg)?;
+            let mut m = Member::build(
+                st.name,
+                spec,
+                Self::place(st.name, st.center_hz, st.width_hz),
+                &self.reg,
+            )?;
             m.channel_hz = st.width_hz;
             return Ok(Slot {
                 id: b.id,
@@ -853,11 +941,13 @@ impl AutoNode {
         // splattered measurement does not put a 12.5 kHz decoder on a
         // 200 kHz signal, but a channel measured a little wide still places.
         for (name, widths) in &self.narrowband {
-            let fits = widths.iter().any(|&w| {
-                b.rate > w && b.bandwidth_hz <= w * CHANNEL_WIDTH_TOLERANCE
-            });
+            let fits = widths
+                .iter()
+                .any(|&w| b.rate > w && b.bandwidth_hz <= w * CHANNEL_WIDTH_TOLERANCE);
             if fits {
-                if let Ok(mut m) = Member::build(name, spec, Self::place(name, hz, widths[0]), &self.reg) {
+                if let Ok(mut m) =
+                    Member::build(name, spec, Self::place(name, hz, widths[0]), &self.reg)
+                {
                     m.channel_hz = widths[0];
                     members.push(m);
                 }
@@ -868,15 +958,31 @@ impl AutoNode {
         // correlates continuously, not worth paying on every 433 MHz burst.
         if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
             let w = crate::tetra_nodes::CHANNEL_WIDTH_HZ;
-            if let Ok(mut m) = Member::build("tetra", spec, Self::place("tetra", hz, w), &self.reg) {
+            if let Ok(mut m) = Member::build("tetra", spec, Self::place("tetra", hz, w), &self.reg)
+            {
                 m.channel_hz = w;
                 members.push(m);
             }
         }
         if METER_HZ.contains(&b.bandwidth_hz) {
             let w = crate::wmbus_nodes::CHANNEL_WIDTH_HZ;
-            if let Ok(mut m) = Member::build("wmbus", spec, Self::place("wmbus", hz, w), &self.reg) {
+            if let Ok(mut m) = Member::build("wmbus", spec, Self::place("wmbus", hz, w), &self.reg)
+            {
                 m.channel_hz = w;
+                members.push(m);
+            }
+        }
+        // Analogue video, by width: a PAL carrier occupies megahertz where
+        // everything else here occupies kilohertz, so a source this wide is
+        // either video or nothing this receiver reads, and the front end
+        // costs an FM demodulation and a slicer. The picture only assembles
+        // if the sync pulses are really there, so a wide source that is not
+        // video produces no fields rather than a wrong picture.
+        if b.bandwidth_hz >= VIDEO_MIN_HZ && b.rate >= VIDEO_MIN_RATE_HZ {
+            if let Ok(mut m) =
+                Member::build("video", spec, Self::place("video", hz, b.bandwidth_hz), &self.reg)
+            {
+                m.channel_hz = b.bandwidth_hz;
                 members.push(m);
             }
         }
@@ -921,13 +1027,20 @@ impl AutoNode {
     ) {
         let slot = &mut self.slots[k];
         slot.lora_placed = true;
-        let Some(history) = slot.members.iter().find(|m| m.router.is_some()).map(|m| m.ring.clone()) else {
+        let Some(history) = slot
+            .members
+            .iter()
+            .find(|m| m.router.is_some())
+            .map(|m| m.ring.clone())
+        else {
             return;
         };
         let hz = slot.center_hz as f64;
         let snr = slot.members.first().map_or(f32::NAN, |m| m.source_snr_db);
         for bw in crate::lora_nodes::bandwidths_for(slot.signal_hz) {
-            let Ok(mut m) = Member::build("lora", slot.spec, Self::place("lora", hz, bw), &self.reg) else {
+            let Ok(mut m) =
+                Member::build("lora", slot.spec, Self::place("lora", hz, bw), &self.reg)
+            else {
                 continue;
             };
             m.channel_hz = bw;
@@ -967,12 +1080,18 @@ impl AutoNode {
         if width_hz <= 0.0 {
             return None;
         }
-        let same = |s: &Sticky| s.name == name && (s.center_hz - center_hz).abs() <= s.width_hz / 2.0;
+        let same =
+            |s: &Sticky| s.name == name && (s.center_hz - center_hz).abs() <= s.width_hz / 2.0;
         if self.sticky.iter().any(same) {
             return None;
         }
         let id = SourceId(STICKY_ID_BASE + self.sticky.len() as u64);
-        self.sticky.push(Sticky { id, name, center_hz, width_hz });
+        self.sticky.push(Sticky {
+            id,
+            name,
+            center_hz,
+            width_hz,
+        });
         self.pending_sticky.push(id);
         self.apply_locked();
         Some(Event::Warning {
@@ -983,8 +1102,6 @@ impl AutoNode {
             ),
         })
     }
-
-
 }
 
 /// Lock a source onto the channel plan when it is plainly on it.
@@ -1026,6 +1143,7 @@ fn now_us() -> u64 {
 /// What comes out: everything decoded, and everything heard.
 const OUT_PACKETS: usize = 0;
 const OUT_VOICE: usize = 1;
+const OUT_VIDEO: usize = 2;
 
 impl Node for AutoNode {
     fn name(&self) -> &str {
@@ -1045,7 +1163,7 @@ impl Node for AutoNode {
     }
 
     fn num_outputs(&self) -> usize {
-        2
+        3
     }
 
     fn subgraph(&self) -> Option<Topology> {
@@ -1061,7 +1179,10 @@ impl Node for AutoNode {
     }
 
     fn phases(&self) -> Vec<(String, pipeline::cost::Cost)> {
-        self.phases.iter().map(|(n, r)| (n.clone(), r.cost())).collect()
+        self.phases
+            .iter()
+            .map(|(n, r)| (n.clone(), r.cost()))
+            .collect()
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -1071,7 +1192,11 @@ impl Node for AutoNode {
         }
         self.rate = i.spec.rate;
         self.center = i.spec.center;
-        self.input_bw = if i.spec.bandwidth > 0.0 { i.spec.bandwidth.min(i.spec.rate) } else { i.spec.rate };
+        self.input_bw = if i.spec.bandwidth > 0.0 {
+            i.spec.bandwidth.min(i.spec.rate)
+        } else {
+            i.spec.rate
+        };
         self.rebuild()?;
         // Packets are events in time, not a sampled stream, and each one
         // carries its own frequency and width.
@@ -1082,7 +1207,11 @@ impl Node for AutoNode {
         // vocoder's rate rather than the radio's.
         let mut voice = out.with_kind(PortKind::Voice);
         voice.rate = crate::m17_nodes::VOICE_HZ;
-        Ok(vec![out, voice])
+        // Pictures from whatever front end inside is producing them. A field
+        // is not a sampled stream, so the rate says nothing and the frame
+        // carries its own geometry.
+        let video = out.with_kind(PortKind::Video);
+        Ok(vec![out, voice, video])
     }
 
     fn process(
@@ -1122,11 +1251,16 @@ impl Node for AutoNode {
         // is already reading, and opening a source for it spends a stream and
         // an extraction to log the same burst twice.
         let sticky = &self.sticky;
-        let covered = |hz: f64, _w: f64| {
-            sticky.iter().any(|s| (s.center_hz - hz).abs() <= s.width_hz / 2.0)
+        let covered = |hz: f64, w: f64| {
+            sticky.iter().any(|s| {
+                (s.center_hz - hz).abs() <= s.width_hz / 2.0
+                    && w <= s.width_hz * CHANNEL_WIDTH_TOLERANCE
+            })
         };
         self.events.extend(raw.iter().filter(|ev| {
-            let SourceEvent::Opened(s) = ev else { return true };
+            let SourceEvent::Opened(s) = ev else {
+                return true;
+            };
             let hz = c0 + s.center_hz;
             if exclude.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz)) {
                 return false;
@@ -1154,7 +1288,9 @@ impl Node for AutoNode {
         // begins.
         let half = self.input_bw / 2.0;
         for id in std::mem::take(&mut self.pending_sticky) {
-            let Some(st) = self.sticky.iter().find(|s| s.id == id) else { continue };
+            let Some(st) = self.sticky.iter().find(|s| s.id == id) else {
+                continue;
+            };
             let off = st.center_hz - c0;
             if off.abs() + st.width_hz / 2.0 > half {
                 continue;
@@ -1164,7 +1300,8 @@ impl Node for AutoNode {
             // the new one would start mid-transmission without the header
             // the old one read. It takes over once that source closes.
             let busy = self.slots.iter().any(|sl| {
-                sl.id.0 < STICKY_ID_BASE && (sl.center_hz as f64 - st.center_hz).abs() <= st.width_hz / 2.0
+                sl.id.0 < STICKY_ID_BASE
+                    && (sl.center_hz as f64 - st.center_hz).abs() <= st.width_hz / 2.0
             });
             if busy {
                 self.pending_sticky.push(id);
@@ -1219,7 +1356,14 @@ impl Node for AutoNode {
         let t_fronts = Instant::now();
         let (wide_results, results): (
             Vec<(Vec<Event>, Vec<Packet>, &'static str, u64)>,
-            Vec<(usize, Vec<Event>, Vec<Packet>, bool, Vec<(&'static str, f64)>, Vec<(&'static str, u64)>)>,
+            Vec<(
+                usize,
+                Vec<Event>,
+                Vec<Packet>,
+                bool,
+                Vec<(&'static str, f64)>,
+                Vec<(&'static str, u64)>,
+            )>,
         ) = rayon::join(
             || {
                 wide.par_iter_mut()
@@ -1238,7 +1382,12 @@ impl Node for AutoNode {
                     .filter_map(|(k, slot)| {
                         let b = blocks.iter().find(|b| b.id == slot.id)?;
                         let closed = b.state == SourceState::Closed;
-                        let per: Vec<(Vec<Event>, Vec<Packet>, Option<(&'static str, f64)>, (&'static str, u64))> = slot
+                        let per: Vec<(
+                            Vec<Event>,
+                            Vec<Packet>,
+                            Option<(&'static str, f64)>,
+                            (&'static str, u64),
+                        )> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
@@ -1246,7 +1395,8 @@ impl Node for AutoNode {
                                 let t = Instant::now();
                                 let mut ev = m.run(&b.samples, at_us, &mut pk);
                                 if closed {
-                                    let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * b.rate) as usize];
+                                    let quiet =
+                                        vec![C32::new(0.0, 0.0); (m.flush_s * b.rate) as usize];
                                     ev.extend(m.run(&quiet, at_us, &mut pk));
                                 }
                                 let us = t.elapsed().as_micros() as u64;
@@ -1275,8 +1425,7 @@ impl Node for AutoNode {
                                     && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
                             });
                         }
-                        let done =
-                            matches!(b.state, SourceState::Closed | SourceState::Superseded);
+                        let done = matches!(b.state, SourceState::Closed | SourceState::Superseded);
                         if b.state == SourceState::Superseded {
                             // A wider stream for the same transmitter takes over
                             // from its start. Whatever this one made of the sliver it
@@ -1341,7 +1490,9 @@ impl Node for AutoNode {
                     .map(|(_, w)| *w)
                     .fold(0.0, f64::max);
                 self.slots[k].members.retain(|m| {
-                    heard.iter().any(|(n, w)| *n == m.name && (*n != "lora" || *w >= widest))
+                    heard
+                        .iter()
+                        .any(|(n, w)| *n == m.name && (*n != "lora" || *w >= widest))
                 });
             }
             for e in ev {
@@ -1368,6 +1519,7 @@ impl Node for AutoNode {
         }
         self.slots.retain(|s| !closed.contains(&s.id));
         self.inner_voice(outputs[OUT_VOICE].voice_mut());
+        self.inner_video(outputs[OUT_VIDEO].video_mut());
 
         for e in events {
             match &e {
@@ -1498,7 +1650,10 @@ mod tests {
     use pipeline::node::Node;
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, center), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, center),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -1507,7 +1662,10 @@ mod tests {
         let out = Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
         assert_eq!(out[0].kind, PortKind::Packets);
         assert!(n.wide().is_empty(), "nothing span-wide belongs at 433 MHz");
-        assert!(Node::subgraph(&n).is_some(), "the burst front end is shown before any source");
+        assert!(
+            Node::subgraph(&n).is_some(),
+            "the burst front end is shown before any source"
+        );
     }
 
     /// Noise with a keyed carrier `offset` hertz up from the centre for the
@@ -1542,7 +1700,11 @@ mod tests {
         let mut opened = Vec::new();
         for block in iq.chunks(16_384) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
             Node::process(n, &[&input], &mut out, &mut ctx).unwrap();
@@ -1552,6 +1714,26 @@ mod tests {
             }));
         }
         opened
+    }
+
+    /// A source megahertz wide is either analogue video or nothing this
+    /// receiver reads, so the front end is placed by width the way TETRA is
+    /// placed by band. The picture only assembles if the sync pulses are
+    /// really there, so a wide source that is not video costs a demodulation
+    /// and produces nothing.
+    #[test]
+    fn a_source_wide_enough_to_be_a_picture_gets_a_video_front_end() {
+        let placed = |bandwidth_hz: f64, rate: f64| -> bool {
+            bandwidth_hz >= VIDEO_MIN_HZ && rate >= VIDEO_MIN_RATE_HZ
+        };
+        // A 5.8 GHz video carrier at 20 MS/s: the one measured here was
+        // 4.6 MHz wide.
+        assert!(placed(4.6e6, 20e6));
+        // BLE is the widest thing here that is not video, at 2 MHz.
+        assert!(!placed(2e6, 20e6));
+        // And a wide source on a span too slow to hold a picture is not one:
+        // PAL luma reaches 5 MHz with the subcarrier at 4.43.
+        assert!(!placed(4.6e6, 8e6));
     }
 
     #[test]
@@ -1566,14 +1748,23 @@ mod tests {
         let mut plain = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut plain, &[spec(rate, center)]).unwrap();
         let measured = openings(&mut plain, rate, center, &iq);
-        assert!(measured.iter().any(|o| (o - 356_000.0).abs() < 5_000.0), "{measured:?}");
-        assert!(!measured.iter().any(|o| (o - 350_000.0).abs() < 1.0), "not on the grid yet");
+        assert!(
+            measured.iter().any(|o| (o - 356_000.0).abs() < 5_000.0),
+            "{measured:?}"
+        );
+        assert!(
+            !measured.iter().any(|o| (o - 350_000.0).abs() < 1.0),
+            "not on the grid yet"
+        );
 
         let mut planned = AutoNode::new("auto", SourceConfig::default());
         planned.set_raster(Some((0.0, 25_000.0)));
         Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
         let locked = openings(&mut planned, rate, center, &iq);
-        assert!(locked.iter().any(|o| (o - 350_000.0).abs() < 1.0), "{locked:?}");
+        assert!(
+            locked.iter().any(|o| (o - 350_000.0).abs() < 1.0),
+            "{locked:?}"
+        );
 
         // Half a channel off the grid is not on it, and stays as measured.
         let iq = keyed(rate, 362_500.0);
@@ -1581,8 +1772,13 @@ mod tests {
         planned.set_raster(Some((0.0, 25_000.0)));
         Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
         let between = openings(&mut planned, rate, center, &iq);
-        assert!(between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0), "{between:?}");
-        assert!(!between.iter().any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0));
+        assert!(
+            between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0),
+            "{between:?}"
+        );
+        assert!(!between
+            .iter()
+            .any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0));
     }
 
     #[test]
@@ -1625,7 +1821,11 @@ mod tests {
         for block in iq.chunks(16_384) {
             let input = Payload::Iq(block.to_vec());
             // Packets and speech: the node has a port for each.
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
             Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();
@@ -1634,8 +1834,14 @@ mod tests {
                 _ => None,
             }));
         }
-        assert!(opened.iter().any(|o| (o - 350_000.0).abs() < 10_000.0), "the real one opened: {opened:?}");
-        assert!(!opened.iter().any(|o| o.abs() < 10_000.0), "the spur opened: {opened:?}");
+        assert!(
+            opened.iter().any(|o| (o - 350_000.0).abs() < 10_000.0),
+            "the real one opened: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|o| o.abs() < 10_000.0),
+            "the spur opened: {opened:?}"
+        );
     }
 
     #[test]
@@ -1717,7 +1923,10 @@ mod tests {
         assert_eq!(locked[0].0, "ble");
         assert!((locked[0].1 - 2_426_000_000.0).abs() < 1.0, "{locked:?}");
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2450))]).unwrap();
-        assert!(n.wide().is_empty(), "no advertising channel inside that span");
+        assert!(
+            n.wide().is_empty(),
+            "no advertising channel inside that span"
+        );
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }

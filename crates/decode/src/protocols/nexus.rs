@@ -38,7 +38,10 @@ impl Protocol for NexusTh {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         if bits.len() < FRAME_BITS {
-            return Err(DecodeError::WrongLength { got: bits.len(), want: FRAME_BITS });
+            return Err(DecodeError::WrongLength {
+                got: bits.len(),
+                want: FRAME_BITS,
+            });
         }
         // A protocol with no checksum needs corroboration from somewhere. A
         // buffer holding exactly one frame is that: the burst began and ended
@@ -106,7 +109,13 @@ fn plausible(b: &[u8]) -> bool {
     // The Rubicson/Solight-TE44/EMOS family has an all but identical layout
     // whose last byte is a real CRC rather than humidity. A frame satisfying
     // that CRC is theirs, not ours, so hand it over rather than claim it.
-    let crc_in = [b[0], b[1], b[2], b[3] & 0xf0, ((b[3] & 0x0f) << 4) | (b[4] >> 4)];
+    let crc_in = [
+        b[0],
+        b[1],
+        b[2],
+        b[3] & 0xf0,
+        ((b[3] & 0x0f) << 4) | (b[4] >> 4),
+    ];
     crc8(&crc_in, 0x31, 0x6c) != 0
 }
 

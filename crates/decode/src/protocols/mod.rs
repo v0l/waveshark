@@ -11,6 +11,7 @@
 
 mod acurite;
 mod bresser;
+mod esl;
 mod ev1527;
 mod fineoffset;
 mod globaltronics;
@@ -18,7 +19,6 @@ mod hanshow;
 mod ism868_link;
 mod keyfob;
 mod lacrosse;
-mod esl;
 mod nexus;
 mod oregon;
 mod rubicson;

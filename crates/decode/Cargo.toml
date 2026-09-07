@@ -10,6 +10,7 @@ dsp.workspace = true
 aes.workspace = true
 ctr.workspace = true
 sha2.workspace = true
+md-5.workspace = true
 hmac.workspace = true
 wgpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }

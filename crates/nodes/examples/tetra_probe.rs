@@ -50,14 +50,21 @@ fn main() {
                         let f2: u8 = b.bits[8..14].iter().fold(0, |a, v| a << 1 | v);
                         let tn = b.time.map(|t| t.tn).unwrap_or(0);
                         let f18 = b.time.map(|t| t.frame == 18).unwrap_or(false);
-                        *aach.entry(format!("tn{tn} f18={f18} hdr {hdr} f1 {f1} f2 {f2}")).or_insert(0u32) += 1;
+                        *aach
+                            .entry(format!("tn{tn} f18={f18} hdr {hdr} f1 {f1} f2 {f2}"))
+                            .or_insert(0u32) += 1;
                         continue;
                     }
                     if matches!(b.lchan, dsp::tetra::Lchan::Bsch) {
                         continue;
                     }
                     let full = std::env::var_os("TETRA_FULL").is_some();
-                    let head: String = b.bits.iter().take(if full { 268 } else { 40 }).map(|v| char::from(b'0' + v)).collect();
+                    let head: String = b
+                        .bits
+                        .iter()
+                        .take(if full { 268 } else { 40 })
+                        .map(|v| char::from(b'0' + v))
+                        .collect();
                     match decode::tetra::Event::from_block(b) {
                         Some(decode::tetra::Event::Call(c)) => {
                             *tally.entry(c.name()).or_insert(0u32) += 1;
@@ -75,11 +82,13 @@ fn main() {
                             }
                         }
                         Some(other) => {
-                            *tally.entry(match other {
-                                decode::tetra::Event::Sync(_) => "SYNC",
-                                decode::tetra::Event::Sysinfo(_) => "SYSINFO",
-                                _ => "?",
-                            }).or_insert(0) += 1;
+                            *tally
+                                .entry(match other {
+                                    decode::tetra::Event::Sync(_) => "SYNC",
+                                    decode::tetra::Event::Sysinfo(_) => "SYSINFO",
+                                    _ => "?",
+                                })
+                                .or_insert(0) += 1;
                         }
                         None => {
                             *tally.entry("unparsed").or_insert(0) += 1;

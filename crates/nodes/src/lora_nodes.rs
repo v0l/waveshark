@@ -71,6 +71,12 @@ const OUTSIDE_RATIO: f32 = 1.5;
 /// same buffer and a far longer packet than anyone sends.
 const HOLD_SECONDS: f64 = 6.5;
 
+/// Whether a centre is in the 2.4 GHz ISM band, where LoRa is an SX128x and
+/// therefore inverted.
+fn is_2g4(center_hz: f64) -> bool {
+    (2_400e6..=2_500e6).contains(&center_hz)
+}
+
 pub struct LoraNode {
     /// Channel bandwidth in hertz, or zero to take it from the source.
     bandwidth_hz: f64,
@@ -205,7 +211,11 @@ impl Simple for LoraNode {
         let bw = if self.bandwidth_hz > 0.0 {
             self.bandwidth_hz
         } else {
-            let width = if i.spec.bandwidth > 0.0 { i.spec.bandwidth } else { rate };
+            let width = if i.spec.bandwidth > 0.0 {
+                i.spec.bandwidth
+            } else {
+                rate
+            };
             bandwidth_for(width).ok_or_else(|| {
                 common::Error::other(format!(
                     "lora: {width:.0} Hz is not one of its channels, which fill \
@@ -248,11 +258,28 @@ impl Simple for LoraNode {
         self.pending.clear();
         self.bandwidth_hz = bw;
         self.center_hz = i.spec.center.as_f64();
-        self.demods = match self.sf {
-            0 => dsp::lora::SCANNED_SPREADING_FACTORS
-                .map(|sf| Demod::new(dsp::lora::Config::for_sf(sf)))
+        // Every LoRa transmitter on 2.4 GHz is an SX128x, and that family
+        // sends with I and Q swapped against the SX127x convention, so a
+        // demodulator built for 868 MHz finds nothing there at all. The band
+        // decides it, because nothing else on 2.4 GHz chirps this way and a
+        // node that tried both ways up would cost twice as much on every
+        // source to read a transmitter that does not exist.
+        let inverted = is_2g4(self.center_hz);
+        let cfg = |sf: u8| {
+            if inverted {
+                dsp::lora::Config::inverted_for_sf(sf)
+            } else {
+                dsp::lora::Config::for_sf(sf)
+            }
+        };
+        self.demods = match (self.sf, inverted) {
+            // The SX128x rates use SF5 to SF8, and scanning 9 to 12 there
+            // would be scanning for something no chip in the band sends.
+            (0, true) => (5..=8u8).map(|sf| Demod::new(cfg(sf))).collect(),
+            (0, false) => dsp::lora::SCANNED_SPREADING_FACTORS
+                .map(|sf| Demod::new(cfg(sf)))
                 .collect(),
-            sf => vec![Demod::new(dsp::lora::Config::for_sf(sf))],
+            (sf, _) => vec![Demod::new(cfg(sf))],
         };
         self.scanned = vec![0; self.demods.len()];
         self.held.clear();
@@ -269,7 +296,9 @@ impl Simple for LoraNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let (Some(iq), Some(decim)) = (i.as_iq(), self.decim.as_mut()) else { return Ok(()) };
+        let (Some(iq), Some(decim)) = (i.as_iq(), self.decim.as_mut()) else {
+            return Ok(());
+        };
         // Decimate to near the target, then resample the last few percent to
         // exactly OVERSAMPLE per chip. `pending` holds the decimator output
         // with the fractional read position carried between blocks.
@@ -285,7 +314,8 @@ impl Simple for LoraNode {
         while (self.resample_pos as usize) + 1 < self.pending.len() {
             let idx = self.resample_pos as usize;
             let frac = (self.resample_pos - idx as f64) as f32;
-            self.held.push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
+            self.held
+                .push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
             self.resample_pos += step;
         }
         // Drop consumed pending samples, keeping the one the position still
@@ -307,7 +337,9 @@ impl Simple for LoraNode {
             let order: Vec<usize> = match self.locked_sf {
                 Some(sf) => {
                     let at = self.demods.iter().position(|d| d.spreading_factor() == sf);
-                    at.into_iter().chain((0..self.demods.len()).filter(|k| Some(*k) != at)).collect()
+                    at.into_iter()
+                        .chain((0..self.demods.len()).filter(|k| Some(*k) != at))
+                        .collect()
                 }
                 None => (0..self.demods.len()).collect(),
             };
@@ -396,7 +428,10 @@ impl Simple for LoraNode {
                     let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
                     let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
                         let noise = power(before).max(1e-20);
-                        (10.0 * sig.log10(), 10.0 * ((sig - noise).max(noise * 0.01) / noise).log10())
+                        (
+                            10.0 * sig.log10(),
+                            10.0 * ((sig - noise).max(noise * 0.01) / noise).log10(),
+                        )
                     } else {
                         (10.0 * sig.max(1e-20).log10(), f32::NAN)
                     };
@@ -451,8 +486,7 @@ impl Simple for LoraNode {
         vec![
             Param::float("bandwidth_hz", self.bandwidth_hz, 0.0..=500_000.0)
                 .label("Channel bandwidth, 0 to measure it"),
-            Param::float("sf", self.sf as f64, 0.0..=12.0)
-                .label("Spreading factor, 0 to find it"),
+            Param::float("sf", self.sf as f64, 0.0..=12.0).label("Spreading factor, 0 to find it"),
         ]
     }
 
@@ -461,10 +495,18 @@ impl Simple for LoraNode {
             "bandwidth_hz" => self.bandwidth_hz = v.as_f64().unwrap_or(0.0).max(0.0),
             "sf" => {
                 let sf = v.as_f64().unwrap_or(0.0) as u8;
-                self.sf = if sf == 0 || dsp::lora::SPREADING_FACTORS.contains(&sf) { sf } else { 0 };
+                self.sf = if sf == 0 || dsp::lora::SPREADING_FACTORS.contains(&sf) {
+                    sf
+                } else {
+                    0
+                };
                 self.locked_sf = None;
             }
-            _ => return Err(common::Error::other(format!("lora: unknown parameter {name:?}"))),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "lora: unknown parameter {name:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -484,7 +526,10 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ("spreading_factor".into(), Value::Int(i64::from(r.sf))),
         ("bandwidth_hz".into(), Value::Float(r.bandwidth_hz)),
         ("coding_rate".into(), Value::Text(cr.clone())),
-        ("sync_word".into(), Value::Text(format!("0x{:02x}", r.sync_word))),
+        (
+            "sync_word".into(),
+            Value::Text(format!("0x{:02x}", r.sync_word)),
+        ),
         ("payload_len".into(), Value::Int(r.payload.len() as i64)),
     ];
 
@@ -517,7 +562,10 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(d) = &body {
         fields.push(("port".into(), Value::Text(d.port().into())));
         if d.data.reply_id != 0 {
-            fields.push(("reply_to".into(), Value::Text(format!("{:08x}", d.data.reply_id))));
+            fields.push((
+                "reply_to".into(),
+                Value::Text(format!("{:08x}", d.data.reply_id)),
+            ));
         }
         match &d.message {
             meshtastic::Message::Text(t) => {
@@ -647,7 +695,10 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             }
         }
         if let Some((m, on)) = p.any_message() {
-            fields.push(("channel".into(), Value::Text(on.unwrap_or_else(|| "Public (default key)".into()))));
+            fields.push((
+                "channel".into(),
+                Value::Text(on.unwrap_or_else(|| "Public (default key)".into())),
+            ));
             // The text travels as `sender: message`, and the name in front of
             // it is part of the plaintext rather than a protocol field. A
             // group message carries no signature, so anyone holding the
@@ -674,12 +725,21 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         fields.push(("type".into(), Value::Text(f.mtype.name().into())));
         match &f.body {
             lorawan::Body::Join(j) => {
-                fields.push(("dev_eui".into(), Value::Text(lorawan::format_eui(j.dev_eui))));
-                fields.push(("join_eui".into(), Value::Text(lorawan::format_eui(j.join_eui))));
+                fields.push((
+                    "dev_eui".into(),
+                    Value::Text(lorawan::format_eui(j.dev_eui)),
+                ));
+                fields.push((
+                    "join_eui".into(),
+                    Value::Text(lorawan::format_eui(j.join_eui)),
+                ));
                 fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
             }
             lorawan::Body::Data(d) => {
-                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
+                fields.push((
+                    "dev_addr".into(),
+                    Value::Text(format!("{:08x}", d.dev_addr)),
+                ));
                 fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
                 if let Some(p) = d.f_port {
                     fields.push(("port".into(), Value::Int(i64::from(p))));
@@ -719,12 +779,10 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // it is what tells two networks apart.
             let says = match body.as_ref().map(|d| (&d.message, d.port())) {
                 Some((meshtastic::Message::Text(t), _)) => format!(", \"{t}\""),
-                Some((meshtastic::Message::Position(p), _)) => {
-                    match (p.latitude, p.longitude) {
-                        (Some(lat), Some(lon)) => format!(", at {lat:.5}, {lon:.5}"),
-                        _ => ", position".to_string(),
-                    }
-                }
+                Some((meshtastic::Message::Position(p), _)) => match (p.latitude, p.longitude) {
+                    (Some(lat), Some(lon)) => format!(", at {lat:.5}, {lon:.5}"),
+                    _ => ", position".to_string(),
+                },
                 Some((meshtastic::Message::NodeInfo(u), _)) => {
                     format!(", is {} ({})", u.long_name, u.short_name)
                 }
@@ -738,7 +796,11 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             format!(
                 "{shape}, {:08x} to {}, {} of {} hops left{chan}{says}",
                 m.source,
-                if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
+                if m.is_broadcast() {
+                    "everyone".into()
+                } else {
+                    format!("{:08x}", m.destination)
+                },
                 m.hop_limit,
                 m.hop_start,
             )
@@ -781,10 +843,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                             lorawan::format_eui(j.join_eui)
                         )),
                         lorawan::Body::Data(d) => {
-                            s.push_str(&format!(
-                                ", {:08x} frame {}",
-                                d.dev_addr, d.f_cnt
-                            ));
+                            s.push_str(&format!(", {:08x} frame {}", d.dev_addr, d.f_cnt));
                             match d.f_port {
                                 Some(0) => s.push_str(", mac commands"),
                                 Some(p) => s.push_str(&format!(", port {p}")),
@@ -879,7 +938,31 @@ mod tests {
     fn spec(rate: f64, bandwidth: f64) -> PortSpec {
         let mut s = StreamSpec::iq(rate, Hz(869_525_000));
         s.bandwidth = bandwidth;
-        PortSpec { spec: s, latency: 0 }
+        PortSpec {
+            spec: s,
+            latency: 0,
+        }
+    }
+
+    /// A source on 2.4 GHz is an SX128x, so the node reads it the other way
+    /// up and looks only at the spreading factors that family uses. Getting
+    /// this wrong is not a degradation: an ExpressLRS handset sending a
+    /// hundred packets a second reads as an empty band.
+    #[test]
+    fn a_source_on_2g4_is_read_the_way_an_sx128x_transmits() {
+        assert!(is_2g4(2_440_400_000.0));
+        assert!(!is_2g4(869_525_000.0));
+
+        let mut n = LoraNode::new(812_500.0);
+        let mut s = StreamSpec::iq(4_000_000.0, Hz(2_440_400_000));
+        s.bandwidth = 812_500.0;
+        n.negotiate(&PortSpec { spec: s, latency: 0 }).expect("a 2.4 GHz source");
+        assert_eq!(n.demods.len(), 4, "SF5 to SF8, which is what the band uses");
+        assert!(n.demods.iter().all(|d| d.inverted()));
+
+        let mut n = LoraNode::new(250_000.0);
+        n.negotiate(&spec(2_000_000.0, 250_000.0)).expect("an 868 MHz source");
+        assert!(n.demods.iter().all(|d| !d.inverted()));
     }
 
     #[test]
@@ -903,8 +986,14 @@ mod tests {
         let mut n = LoraNode::default();
         assert!(n.negotiate(&spec(2_000_000.0, 250_000.0)).is_ok());
         let mut n = LoraNode::default();
-        assert!(n.negotiate(&spec(300_000.0, 250_000.0)).is_err(), "under two samples a chip");
+        assert!(
+            n.negotiate(&spec(300_000.0, 250_000.0)).is_err(),
+            "under two samples a chip"
+        );
         let mut n = LoraNode::default();
-        assert!(n.negotiate(&spec(2_000_000.0, 25_000.0)).is_err(), "not a LoRa channel");
+        assert!(
+            n.negotiate(&spec(2_000_000.0, 25_000.0)).is_err(),
+            "not a LoRa channel"
+        );
     }
 }

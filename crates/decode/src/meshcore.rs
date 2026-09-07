@@ -179,10 +179,7 @@ impl PayloadType {
     fn min_payload(self) -> usize {
         match self {
             // destination hash, source hash, cipher MAC.
-            PayloadType::Req
-            | PayloadType::Response
-            | PayloadType::TxtMsg
-            | PayloadType::Path => 4,
+            PayloadType::Req | PayloadType::Response | PayloadType::TxtMsg | PayloadType::Path => 4,
             // A CRC of the message it acknowledges, and nothing else.
             PayloadType::Ack => 4,
             PayloadType::Advert => ADVERT_FIXED,
@@ -295,7 +292,9 @@ impl<'a> Packet<'a> {
 
     /// The advertisement this packet carries, if it is one.
     pub fn advert(&self) -> Option<Advert> {
-        (self.payload_type == PayloadType::Advert).then(|| Advert::parse(self.payload)).flatten()
+        (self.payload_type == PayloadType::Advert)
+            .then(|| Advert::parse(self.payload))
+            .flatten()
     }
 
     /// The group message this carries, if `channel` is the one it was sent on.
@@ -407,7 +406,10 @@ impl Channel {
         let mut secret = [0u8; 32];
         let n = psk.len().min(32);
         secret[..n].copy_from_slice(&psk[..n]);
-        Channel { secret, hash: crypto::sha256(&psk[..n])[0] }
+        Channel {
+            secret,
+            hash: crypto::sha256(&psk[..n])[0],
+        }
     }
 
     /// The public channel, which every node is configured with out of the box.
@@ -486,7 +488,10 @@ impl GroupMessage {
         let body = &plain[5..];
         let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
         let text = std::str::from_utf8(&body[..end]).ok()?;
-        Some(GroupMessage { timestamp, text: text.to_owned() })
+        Some(GroupMessage {
+            timestamp,
+            text: text.to_owned(),
+        })
     }
 }
 
@@ -720,7 +725,9 @@ mod tests {
         for _ in 0..TRIES {
             let mut buf = [0u8; 64];
             for b in buf.iter_mut() {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 *b = (x >> 56) as u8;
             }
             if let Some(p) = Packet::parse(&buf) {
@@ -734,7 +741,10 @@ mod tests {
         // together throw out most noise and cannot throw out all of it, which
         // is the whole reason `corroborated` exists. Adverts never happen by
         // chance, which is why one is worth believing.
-        assert!(parsed * 10 < TRIES, "{parsed} of {TRIES} random buffers parsed");
+        assert!(
+            parsed * 10 < TRIES,
+            "{parsed} of {TRIES} random buffers parsed"
+        );
         assert_eq!(adverts, 0, "a random buffer read as a full advert");
     }
 
@@ -745,7 +755,10 @@ mod tests {
             v.extend(std::iter::repeat_n(0xaa, n));
             v
         };
-        assert!(Packet::parse(&ack(4)).is_some(), "four bytes is the checksum");
+        assert!(
+            Packet::parse(&ack(4)).is_some(),
+            "four bytes is the checksum"
+        );
         assert!(Packet::parse(&ack(3)).is_none());
         assert!(Packet::parse(&ack(5)).is_none());
     }
@@ -820,11 +833,17 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(other.hash, public.hash, "no colliding key found to test with");
+        assert_eq!(
+            other.hash, public.hash,
+            "no colliding key found to test with"
+        );
 
         let bytes = group_packet(&other, 1_760_000_000, 0, "private: hello");
         let p = Packet::parse(&bytes).expect("a packet");
-        assert!(p.public_message().is_none(), "the tag must refuse a wrong key");
+        assert!(
+            p.public_message().is_none(),
+            "the tag must refuse a wrong key"
+        );
         assert!(!p.corroborated());
         // And the channel that did send it still reads it.
         assert_eq!(p.group_message(&other).unwrap().text, "private: hello");

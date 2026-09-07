@@ -30,7 +30,11 @@ impl Default for WmbusNode {
 
 impl WmbusNode {
     pub fn new() -> Self {
-        Self { demod: None, meter: crate::FrameMeter::new(1.0, 0, 0.05), frames: 0 }
+        Self {
+            demod: None,
+            meter: crate::FrameMeter::new(1.0, 0, 0.05),
+            frames: 0,
+        }
     }
 
     /// Frames that passed their CRCs since the node was made.
@@ -66,12 +70,21 @@ impl Simple for WmbusNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let (Some(iq), Some(d)) = (i.as_iq(), self.demod.as_mut()) else { return Ok(()) };
+        let (Some(iq), Some(d)) = (i.as_iq(), self.demod.as_mut()) else {
+            return Ok(());
+        };
         self.meter.feed(iq);
         let rate = c.inputs[0].spec.rate.max(1.0);
         for f in d.process(iq) {
             self.frames += 1;
-            c.emit(Event::Metric { name: "wmbus_mode", value: if f.mode == dsp::wmbus::Mode::T { 1.0 } else { 2.0 } });
+            c.emit(Event::Metric {
+                name: "wmbus_mode",
+                value: if f.mode == dsp::wmbus::Mode::T {
+                    1.0
+                } else {
+                    2.0
+                },
+            });
             let _ = rate;
             o.frames_mut().push(self.meter.frame(f.bytes.clone()));
         }
@@ -94,11 +107,18 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_modulation("2-FSK")
         .with_crc(Some(true))
         .with_bandwidth(CHANNEL_WIDTH_HZ);
-    let fields: Vec<(String, common::Value)> =
-        r.fields.iter().filter(|(k, _)| k.as_str() != "data").map(|(k, v)| (k.clone(), v.clone())).collect();
+    let fields: Vec<(String, common::Value)> = r
+        .fields
+        .iter()
+        .filter(|(k, _)| k.as_str() != "data")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
     let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
-    let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
+    let kind = r
+        .get("type_string")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     let enc = r.get("payload_encrypted").is_some();
     let text = format!(
         "{m} {kind} {id}{}",

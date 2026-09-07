@@ -59,7 +59,10 @@ pub struct Hanshow {
 impl Hanshow {
     /// The uplink rate the radio table gives, 500 kbit/s: 2 us per bit.
     pub fn uplink_500k() -> Self {
-        Self { name: "Hanshow-500k", bit_us: 2 }
+        Self {
+            name: "Hanshow-500k",
+            bit_us: 2,
+        }
     }
 
     /// The rate the capture settings imply, 100 kbit/s at 20 samples per
@@ -67,7 +70,10 @@ impl Hanshow {
     /// settings disagree about which one carries the heartbeat, so both are
     /// tried rather than picking one.
     pub fn uplink_100k() -> Self {
-        Self { name: "Hanshow-100k", bit_us: 10 }
+        Self {
+            name: "Hanshow-100k",
+            bit_us: 10,
+        }
     }
 }
 
@@ -104,15 +110,19 @@ impl Protocol for Hanshow {
 
         let start = at + SYNC_BITS;
         let avail = (bits.len() - start) / 8;
-        let body: Vec<u8> =
-            (0..avail).filter_map(|i| bits.extract(start + i * 8, 8).map(|v| v as u8)).collect();
+        let body: Vec<u8> = (0..avail)
+            .filter_map(|i| bits.extract(start + i * 8, 8).map(|v| v as u8))
+            .collect();
         let want = match body.first() {
             Some(&CTRL_TABLE) => TABLE_LEN,
             Some(&(CTRL_NORMAL | CTRL_REED | CTRL_REQ)) => NORMAL_LEN,
             _ => return Err(DecodeError::NotThisProtocol),
         };
         if body.len() < want {
-            return Err(DecodeError::WrongLength { got: body.len(), want });
+            return Err(DecodeError::WrongLength {
+                got: body.len(),
+                want,
+            });
         }
         let body = &body[..want];
 
@@ -132,7 +142,10 @@ impl Protocol for Hanshow {
                 .int("width", i64::from(u16::from_le_bytes([body[7], body[8]])))
                 .int("dpi", i64::from(body[9]))
                 .int("pages", i64::from(body[10]))
-                .int("flash_bytes", i64::from(u16::from_le_bytes([body[11], body[12]]))),
+                .int(
+                    "flash_bytes",
+                    i64::from(u16::from_le_bytes([body[11], body[12]])),
+                ),
             ctrl => {
                 let info = body[13];
                 r.text(
@@ -191,7 +204,9 @@ mod tests {
 
     #[test]
     fn a_heartbeat_reports_the_tag_and_its_channels() {
-        let r = Hanshow::uplink_100k().decode(&on_air(&NORMAL, false)).expect("a frame");
+        let r = Hanshow::uplink_100k()
+            .decode(&on_air(&NORMAL, false))
+            .expect("a frame");
         assert_eq!(r.fields["kind"], Value::Text("heartbeat".into()));
         assert_eq!(r.fields["esl_id"], Value::Text("50c3cc62".into()));
         assert_eq!(r.fields["wakeup_chan"], Value::Int(0x97));
@@ -206,7 +221,9 @@ mod tests {
     /// the carrier the tuner sits, so the frame has to read either way round.
     #[test]
     fn an_inverted_capture_reads_the_same() {
-        let r = Hanshow::uplink_100k().decode(&on_air(&NORMAL, true)).expect("a frame");
+        let r = Hanshow::uplink_100k()
+            .decode(&on_air(&NORMAL, true))
+            .expect("a frame");
         assert_eq!(r.fields["inverted"], Value::Bool(true));
         assert_eq!(r.fields["esl_id"], Value::Text("50c3cc62".into()));
     }
@@ -217,7 +234,9 @@ mod tests {
             0x84, 0x20, 0x26, 0xa3, 0x54, 0x7a, 0x00, 0xfa, 0x00, 0x83, 0x04, 0xe8, 0x00, 0xcc,
             0x00, 0x14, 0x01, 0xd5, 0x00, 0x00, 0x20, 0x03, 0x00, 0xe2, 0x1f,
         ];
-        let r = Hanshow::uplink_500k().decode(&on_air(&body, false)).expect("a frame");
+        let r = Hanshow::uplink_500k()
+            .decode(&on_air(&body, false))
+            .expect("a frame");
         assert_eq!(r.fields["kind"], Value::Text("table-heartbeat".into()));
         assert_eq!(r.fields["height"], Value::Int(122));
         assert_eq!(r.fields["width"], Value::Int(250));
@@ -230,11 +249,15 @@ mod tests {
     fn an_unknown_control_byte_is_refused() {
         let mut body = NORMAL;
         body[0] = 0x11;
-        assert!(Hanshow::uplink_100k().decode(&on_air(&body, false)).is_err());
+        assert!(Hanshow::uplink_100k()
+            .decode(&on_air(&body, false))
+            .is_err());
     }
 
     #[test]
     fn a_truncated_frame_is_refused() {
-        assert!(Hanshow::uplink_100k().decode(&on_air(&NORMAL[..12], false)).is_err());
+        assert!(Hanshow::uplink_100k()
+            .decode(&on_air(&NORMAL[..12], false))
+            .is_err());
     }
 }

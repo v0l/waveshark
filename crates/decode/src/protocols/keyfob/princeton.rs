@@ -103,6 +103,9 @@ mod tests {
 
     #[test]
     fn a_zero_code_is_not_this_protocol() {
-        assert_eq!(Princeton.decode(&input(0)), Err(DecodeError::NotThisProtocol));
+        assert_eq!(
+            Princeton.decode(&input(0)),
+            Err(DecodeError::NotThisProtocol)
+        );
     }
 }

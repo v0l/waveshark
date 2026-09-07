@@ -420,6 +420,77 @@ pub struct Voice {
     pub pcm: Vec<f32>,
 }
 
+/// How a video frame's samples are laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pixels {
+    /// One byte a pixel, 0 for black and 255 for peak white.
+    Luma8,
+    /// Three bytes a pixel, red then green then blue.
+    Rgb8,
+}
+
+impl Pixels {
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::Luma8 => 1,
+            Self::Rgb8 => 3,
+        }
+    }
+}
+
+/// A picture as it was received, with what it was received from.
+///
+/// The video counterpart of [`Voice`], and here for the same reason: a field
+/// does not arrive at the rate the graph negotiated. It arrives fifty times a
+/// second in one lump, at the camera's rate rather than the receiver's, and
+/// it carries what it came from. Squeezed through a byte port it would lose
+/// its geometry; through a real-valued one it would be a lie about the rate.
+///
+/// The samples are behind an `Arc` because a field is half a megabyte and the
+/// receiver hands the same one to a pane, a recorder and whatever else is
+/// watching. Nothing here copies it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoFrame {
+    /// What produced it: "analogue video", and later "APT", "SSTV". What a
+    /// subscription names, the way [`Voice::system`] is.
+    ///
+    /// The system, not the use it is being put to: a model aircraft's camera
+    /// and a security camera send the same composite video and differ only in
+    /// where they send it, which `channel_hz` and `label` already say.
+    pub system: &'static str,
+    /// Centre of the channel it was received on.
+    pub channel_hz: f64,
+    /// What the channel is called where it has a name: a channel of the
+    /// 5.8 GHz plan pilots use, a satellite, a callsign. `None` on a band with
+    /// no naming convention, which is a fact about the band rather than a
+    /// gap.
+    pub label: Option<String>,
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Pixels,
+    pub samples: std::sync::Arc<Vec<u8>>,
+    /// Rows that were actually received, out of `height`.
+    ///
+    /// Analogue video has no integrity check of any kind, so this is the only
+    /// thing a viewer has to judge a picture by: a field assembled from a
+    /// third of its lines is a picture of a fade, and a receiver that draws it
+    /// without saying so is claiming more than it knows.
+    pub lines_seen: usize,
+    /// Fields since the front end started, so a viewer can tell a repeated
+    /// frame from a still picture.
+    pub sequence: u64,
+}
+
+impl VideoFrame {
+    /// How complete the picture is, 0 to 1.
+    pub fn completeness(&self) -> f32 {
+        if self.height == 0 {
+            return 0.0;
+        }
+        self.lines_seen as f32 / self.height as f32
+    }
+}
+
 /// What the demodulator actually produced.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PacketBody {

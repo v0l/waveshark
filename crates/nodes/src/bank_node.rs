@@ -153,7 +153,11 @@ impl BankNode {
         let Some(g) = (0..self.bank.channels()).find_map(|c| self.bank.graph(c)) else {
             return Vec::new();
         };
-        g.topology().nodes.into_iter().flat_map(|n| n.params).collect()
+        g.topology()
+            .nodes
+            .into_iter()
+            .flat_map(|n| n.params)
+            .collect()
     }
 
     /// Set a parameter on every channel's copy of the decoder.
@@ -165,7 +169,9 @@ impl BankNode {
         let mut found = false;
         let mut err = None;
         for ch in 0..self.bank.channels() {
-            let Some(g) = self.bank.graph_mut(ch) else { continue };
+            let Some(g) = self.bank.graph_mut(ch) else {
+                continue;
+            };
             let ids: Vec<_> = g.topology().nodes.iter().map(|n| n.id).collect();
             for id in ids {
                 let Some(node) = g.node_mut(id) else { continue };
@@ -234,7 +240,9 @@ impl Simple for BankNode {
     }
 
     fn subgraph(&self) -> Option<Topology> {
-        (0..self.bank.channels()).find_map(|c| self.bank.graph(c)).map(|g| g.topology())
+        (0..self.bank.channels())
+            .find_map(|c| self.bank.graph(c))
+            .map(|g| g.topology())
     }
 
     fn subgraph_count(&self) -> usize {
@@ -323,7 +331,10 @@ mod tests {
     }
 
     fn spec(rate: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(433_920_000)),
+            latency: 0,
+        }
     }
 
     #[test]

@@ -186,7 +186,11 @@ fn decode_implicit_at(
     };
 
     Ok(Frame {
-        header: Header { length: p.length, coding_rate: p.coding_rate, has_crc: p.has_crc },
+        header: Header {
+            length: p.length,
+            coding_rate: p.coding_rate,
+            has_crc: p.has_crc,
+        },
         payload,
         crc_ok,
         bin_offset: offset,
@@ -439,7 +443,9 @@ impl Received {
     }
 
     pub fn meshtastic(&self) -> Option<Meshtastic> {
-        (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
+        (self.sync_word == MESHTASTIC_SYNC)
+            .then(|| Meshtastic::parse(&self.payload))
+            .flatten()
     }
 
     /// The LoRaWAN frame this is, if it is one.
@@ -490,10 +496,14 @@ impl Received {
         if let Some(d) = Decoded::of(ciphertext, m.source, m.packet_id, &DEFAULT_KEY) {
             return Some((d, None));
         }
-        let mut held: Vec<Channel> = crate::channel_keys::for_system(crate::channel_keys::System::Meshtastic)
-            .into_iter()
-            .map(|k| Channel { name: k.name, psk: k.key })
-            .collect();
+        let mut held: Vec<Channel> =
+            crate::channel_keys::for_system(crate::channel_keys::System::Meshtastic)
+                .into_iter()
+                .map(|k| Channel {
+                    name: k.name,
+                    psk: k.key,
+                })
+                .collect();
         held.sort_by_key(|c| c.hash() != Some(m.channel_hash));
         for c in held {
             let Some(key) = c.key() else { continue };
@@ -696,9 +706,15 @@ mod tests {
     fn an_implicit_packet_round_trips_without_a_header() {
         for sf in [5u8, 6, 7] {
             for cr in 1..=4u8 {
-                let payload: Vec<u8> = (0..12u8).map(|i| i.wrapping_mul(37).wrapping_add(5)).collect();
+                let payload: Vec<u8> = (0..12u8)
+                    .map(|i| i.wrapping_mul(37).wrapping_add(5))
+                    .collect();
                 let symbols = encode_implicit(&payload, sf, cr);
-                let p = Implicit { length: payload.len(), coding_rate: cr, has_crc: true };
+                let p = Implicit {
+                    length: payload.len(),
+                    coding_rate: cr,
+                    has_crc: true,
+                };
                 let f = decode_implicit(&symbols, sf, false, p)
                     .unwrap_or_else(|e| panic!("SF{sf} 4/{}: {e:?}", cr + 4));
                 assert_eq!(f.payload, payload, "SF{sf} 4/{}", cr + 4);
@@ -711,8 +727,15 @@ mod tests {
     /// than used as a block width.
     #[test]
     fn an_implicit_decode_refuses_an_impossible_coding_rate() {
-        let p = Implicit { length: 4, coding_rate: 7, has_crc: false };
-        assert!(matches!(decode_implicit(&[0; 32], 7, false, p), Err(Error::BadCodingRate)));
+        let p = Implicit {
+            length: 4,
+            coding_rate: 7,
+            has_crc: false,
+        };
+        assert!(matches!(
+            decode_implicit(&[0; 32], 7, false, p),
+            Err(Error::BadCodingRate)
+        ));
     }
 
     #[test]
@@ -740,6 +763,9 @@ mod tests {
         let m = Meshtastic::parse(&payload).unwrap();
         assert_eq!(m.well_known_channel(), Some("LongFast (default key)"));
         payload[13] = 0x5b;
-        assert_eq!(Meshtastic::parse(&payload).unwrap().well_known_channel(), None);
+        assert_eq!(
+            Meshtastic::parse(&payload).unwrap().well_known_channel(),
+            None
+        );
     }
 }
