@@ -336,3 +336,54 @@ messages_per_pack = 4
 coding = "S8"
 data_channels = [31, 32, 33, 34, 35, 36]
 uas_id = "123"
+
+[[capture]]
+name = "fpv_pal_akk_5865M_20000k.cs8"
+sha256 = "48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59"
+url = "https://nostr.download/48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59.xz"
+compression = "xz"
+center_hz = 5_865_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Analogue FPV video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
+which the channel plan names A1 or B8 because two bands share that frequency.
+HackRF at 20 MS/s, 240 ms cut out of a 3.6 second recording, holding six
+fields of which three carry all 288 lines. The camera is looking at a room
+with a window, so the picture has both a saturated highlight and dark
+corners, and the colour subcarrier is carrying real chroma rather than a test
+pattern.
+
+What the capture is evidence of is that the whole chain works on real RF, and
+what it fixed is more useful than what it confirmed:
+
+A discriminator on a 20 MHz span gives a video baseband carrying all of that
+bandwidth's noise while the picture occupies 5 MHz of it. Slicing that
+unfiltered finds no sync at all, because a single noisy sample above the
+threshold ends a run that has to last 4.7 us. This capture produced zero
+fields until a quarter-microsecond running mean went in front of the slicer.
+
+The colour subcarrier has to free-run rather than restart each line. Sync
+edges land on whole samples, and at 20 MS/s one sample is 80 degrees of a
+4.43 MHz subcarrier, so a per-line phase origin rotates the hue nearly a full
+turn from line to line. With a continuous phase the burst holds steady near
+-80 degrees, drifting a few degrees over a field, which is the tuner's own
+offset.
+
+Blanking is the 13th percentile of the sorted samples, not the 30th. A line
+is 7.3% sync and another 11% porches, so taking it higher reads picture as
+black level: a full-scale ramp came back peaking at 61%.
+
+Also worth recording because it contradicts what the datasheets suggest: the
+occupied bandwidth is about 4.6 MHz with roughly 1 MHz rms deviation, not the
+20 to 30 MHz the manuals imply, so a 20 MS/s span is not clipping this
+transmitter at all. Audio is present on a 6.5 MHz subcarrier and is not
+decoded.
+"""
+
+[capture.expect]
+standard = "PAL"
+fields_min = 4
+full_lines_min = 250
+colour = true
+channel = "A1 or B8"
