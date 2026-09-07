@@ -26,8 +26,6 @@ pub(super) struct Devices<'a> {
 pub(super) enum Action {
     /// Show this device's sightings on the map, or none.
     Select(Option<i64>),
-    /// Put the dial on the frequency a device was last heard at.
-    Tune(f64),
     /// Write the survey out as WiGLE CSV, beside the survey file.
     Export,
 }
@@ -154,9 +152,11 @@ impl Devices<'_> {
                             ))
                             .size(11.0)
                             .color(theme::LEGEND);
-                            if ui.selectable_label(false, freq).clicked() {
-                                act = Some(Action::Tune(d.center_hz as f64));
-                            }
+                            // A reading, not a control: a device list is for
+                            // what has been heard, and clicking a row to
+                            // retune took the receiver off the band it was
+                            // surveying.
+                            ui.label(freq);
                             ui.end_row();
                         }
                     });

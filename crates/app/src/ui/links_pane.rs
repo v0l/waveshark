@@ -18,8 +18,6 @@ pub(super) struct LinksView<'a> {
 }
 
 pub(super) enum Action {
-    /// Tune the dial to the channel a link was heard on.
-    Tune(f64),
     /// Throw the directory away.
     Clear,
     /// Read the packet log back into the directory, so it holds what was
@@ -121,9 +119,6 @@ impl LinksView<'_> {
                         if r.clicked() {
                             self.st.chosen =
                                 if picked { None } else { Some(l.title()) };
-                        }
-                        if r.double_clicked() {
-                            act = Some(Action::Tune(l.channel_hz));
                         }
                     }
                 });

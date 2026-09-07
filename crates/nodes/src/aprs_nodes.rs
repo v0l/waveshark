@@ -168,6 +168,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         .flatten();
 
     let mut fix = None;
+    let mut media = pipeline::event::media::BYTES;
     let mut report = common::ReportDetail::Bare;
     let protocol = match &aprs_report {
         Some(aprs::Report::Position { position, comment }) => {
@@ -206,6 +207,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         Some(aprs::Report::Message { to, text }) => {
             fields.push(("addressee".into(), Value::Text(to.clone())));
             fields.push(("message".into(), Value::Text(text.clone())));
+            media = pipeline::event::media::TEXT;
             "APRS-Message"
         }
         Some(aprs::Report::Other(k)) => {
@@ -238,6 +240,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         .with_crc(Some(true));
     d.position = fix;
     d.report = report;
+    d.media_type = media;
     d
 }
 

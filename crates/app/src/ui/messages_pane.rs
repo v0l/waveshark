@@ -19,8 +19,6 @@ pub(super) struct Msgs<'a> {
 
 /// What the list wants done that it cannot do itself.
 pub(super) enum Action {
-    /// Tune the dial to the channel a message was heard on.
-    Tune(f64),
     /// Throw the list away.
     Clear,
 }
@@ -93,9 +91,13 @@ impl Msgs<'_> {
                 .inner_margin(egui::Margin::symmetric(12, 0))
                 .show(ui, |ui| {
                     for m in &shown {
-                        if message_card(ui, m, now).clicked() {
-                            act = Some(Action::Tune(m.channel_hz));
-                        }
+                        // Drawn and not clickable. A message is a thing that
+                        // was said, and the frequency it arrived on is a
+                        // detail of how it got here: retuning the receiver
+                        // because somebody read a page is the last thing
+                        // this view should do, and it took the receiver off
+                        // whatever it was watching.
+                        message_card(ui, m, now);
                     }
                 });
             ui.add_space(8.0);
