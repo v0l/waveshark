@@ -35,6 +35,9 @@ pub struct GsmNode {
     cfg: GsmConfig,
     /// Which carrier to watch, as a frequency.
     channel_hz: f64,
+    /// The channel number this carrier is, so a grant naming it can be told
+    /// from one naming another carrier the receiver is not listening to.
+    arfcn: u16,
     det: SchDetector,
     meter: crate::FrameMeter,
     hits: Vec<Hit>,
@@ -54,6 +57,7 @@ impl GsmNode {
         Self {
             cfg,
             channel_hz,
+            arfcn: gsm::arfcn(channel_hz).unwrap_or(u16::MAX),
             det: SchDetector::new(rate, channel_hz, channel_hz, cfg),
             meter: crate::FrameMeter::new(rate, channel_hz as u64, 0.25),
             hits: Vec::new(),
@@ -88,6 +92,7 @@ impl Simple for GsmNode {
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
             return Err(common::Error::other("gsm needs its carrier inside the span"));
         }
+        self.arfcn = gsm::arfcn(self.channel_hz).unwrap_or(u16::MAX);
         self.det = SchDetector::new(rate, center, self.channel_hz, self.cfg);
         self.meter =
             crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
@@ -119,7 +124,21 @@ impl Simple for GsmNode {
                     let Some(b) = sch::pack(&s.sch) else { continue };
                     (b.to_vec(), s.start_sample, s.samples)
                 }
-                Hit::Block(b) => (b.bytes.to_vec(), b.start_sample, b.samples),
+                Hit::Block(b) => {
+                    // A block off the beacon's own timeslot may be an
+                    // assignment, and an assignment says where the next part
+                    // of the transaction happens. Following it is the only
+                    // way to see a channel a cell hands out: nothing on the
+                    // air says one is in use.
+                    if b.timeslot == 0 {
+                        if let Some(g) = decode::gsm::parse(&b.bytes).and_then(|m| m.grant) {
+                            if g.arfcn == Some(self.arfcn) && g.timeslot != 0 {
+                                self.det.follow(g.timeslot);
+                            }
+                        }
+                    }
+                    (b.bytes.to_vec(), b.start_sample, b.samples)
+                }
             };
             self.accepted += 1;
             // The burst's own samples rather than the quarter second of
@@ -214,7 +233,12 @@ fn sync_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
 
 fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
-    let msg = decode::gsm::parse(bytes)?;
+    // Two kinds of block share one length. A broadcast block addresses
+    // nobody and starts with a pseudo length; a block off a channel the cell
+    // assigned has a link layer in front of it. The broadcast reading is
+    // tried first because it is the more specific claim: it requires the
+    // radio resource discriminator in a fixed place.
+    let msg = decode::gsm::parse(bytes).or_else(|| decode::gsm::parse_dedicated(bytes))?;
     let mut fields: Vec<(String, Value)> = vec![
         ("message".into(), Value::Text(msg.name.into())),
         ("message_type".into(), Value::Int(i64::from(msg.type_id))),
@@ -247,6 +271,12 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         if permanent > 0 {
             fields.push(("paged_by_identity".into(), Value::Int(permanent as i64)));
         }
+    }
+    if let Some(id) = &msg.identity {
+        fields.push(("phone".into(), Value::Text(id.to_string())));
+    }
+    if msg.sapi != 0 {
+        fields.push(("sapi".into(), Value::Int(i64::from(msg.sapi))));
     }
     if let Some(g) = msg.grant {
         fields.push(("channel_type".into(), Value::Text(g.kind.into())));
@@ -292,6 +322,9 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     for p in &msg.pages {
         detail.push_str(&format!(" {p}"));
     }
+    if let Some(id) = &msg.identity {
+        detail.push_str(&format!(" {id}"));
+    }
     if let Some(g) = msg.grant {
         detail.push_str(&format!(" {} sub {} TS {}", g.kind, g.subchannel, g.timeslot));
         match (g.arfcn, g.hopping) {
@@ -305,7 +338,13 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         party = arfcn.map(|n| format!("ARFCN {n}"));
     }
 
-    let protocol = if msg.name.starts_with("SI") { "GSM-SI" } else { "GSM-CCCH" };
+    let protocol = match msg.name {
+        n if n.starts_with("SI") => "GSM-SI",
+        n if n.starts_with("Paging") || n.starts_with("Imm") => "GSM-CCCH",
+        // A channel the cell assigned: what happens on it is a transaction
+        // with one phone rather than something broadcast.
+        _ => "GSM-SDCCH",
+    };
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
@@ -423,6 +462,23 @@ mod tests {
         assert_eq!(get("cell_id"), Some(Value::Int(0x1234)));
         assert_eq!(get("plmn"), Some(Value::Text("262-01".into())));
         assert_eq!(d.detail.as_deref(), Some("SI3 262-01 LAC 11051 CI 4660"));
+    }
+
+    /// A block off a channel the cell assigned becomes its own kind of row:
+    /// a transaction with one phone rather than something broadcast.
+    #[test]
+    fn a_dedicated_block_becomes_a_row_naming_the_phone() {
+        use common::Value;
+        let mut b = vec![0x01, 0x03, 15 << 2, 0x05, 0x08, 0x70];
+        b.extend_from_slice(&[0x00, 0xF1, 0x10, 0x00, 0x01, 0x33]);
+        b.extend_from_slice(&[0x05, 0xF4, 0xAA, 0xBB, 0xCC, 0xDD]);
+        b.resize(23, 0x2B);
+        let d = gsm_decoded(&b, Hz(947_400_000)).expect("a row");
+        assert_eq!(d.protocol, "GSM-SDCCH");
+        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("message"), Some(Value::Text("LocationUpdatingRequest".into())));
+        assert_eq!(get("phone"), Some(Value::Text("TMSI AABBCCDD".into())));
+        assert!(d.detail.as_deref().unwrap().contains("001-01"));
     }
 
     /// A filler frame is not a row. A cell with nothing to say fills its

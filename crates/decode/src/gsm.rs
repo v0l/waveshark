@@ -309,6 +309,150 @@ pub struct Message {
     pub pages: Vec<Identity>,
     /// The channel an immediate assignment grants.
     pub grant: Option<Grant>,
+    /// The service the frame belonged to on a dedicated channel: zero is
+    /// signalling and three is short messages. Zero on the broadcast
+    /// channel, which addresses nobody.
+    pub sapi: u8,
+    /// The phone a dedicated message names, where it names one. This is the
+    /// exchange that happens before ciphering starts: a phone arriving on a
+    /// signalling channel says who it is, and a network that does not
+    /// recognise the temporary identity asks for the permanent one.
+    pub identity: Option<Identity>,
+}
+
+impl Message {
+    fn named(name: &'static str, type_id: u8) -> Self {
+        Self {
+            name,
+            type_id,
+            cell_id: None,
+            lai: None,
+            channels: Vec::new(),
+            channels_are_neighbours: false,
+            pages: Vec::new(),
+            grant: None,
+            sapi: 0,
+            identity: None,
+        }
+    }
+}
+
+/// A layer 3 message on a dedicated channel, 3GPP TS 24.008 and 44.018.
+///
+/// The first octet's low nibble says which protocol the message belongs to
+/// and the second is its type. Only the messages that say something about
+/// who is on the channel are read past their name: everything else is worth
+/// a row saying it happened and nothing more.
+fn parse_l3(b: &[u8]) -> Option<Message> {
+    let (pd, type_id) = (b.first()? & 0x0F, *b.get(1)?);
+    let body = &b[2..];
+    // A length-prefixed identity at `at`.
+    let ident_at = |at: usize| -> Option<Identity> {
+        let len = usize::from(*body.get(at)?);
+        identity(body.get(at + 1..at + 1 + len)?)
+    };
+    let mut m = match (pd, type_id) {
+        // Mobility management: the phone arriving, being asked who it is,
+        // and being given a new temporary identity.
+        (0x05, 0x08) => {
+            let mut m = Message::named("LocationUpdatingRequest", type_id);
+            m.lai = body.get(1..6).and_then(lai);
+            // Location updating type, the area it was last in, one octet of
+            // classmark, then the phone.
+            m.identity = ident_at(7);
+            m
+        }
+        (0x05, 0x01) => Message::named("ImsiDetach", type_id),
+        (0x05, 0x02) => {
+            let mut m = Message::named("LocationUpdatingAccept", type_id);
+            m.lai = body.get(..5).and_then(lai);
+            m
+        }
+        (0x05, 0x04) => Message::named("LocationUpdatingReject", type_id),
+        (0x05, 0x12) => Message::named("AuthenticationRequest", type_id),
+        (0x05, 0x14) => Message::named("AuthenticationResponse", type_id),
+        (0x05, 0x18) => Message::named("IdentityRequest", type_id),
+        (0x05, 0x19) => {
+            let mut m = Message::named("IdentityResponse", type_id);
+            m.identity = ident_at(0);
+            m
+        }
+        (0x05, 0x1A) => {
+            let mut m = Message::named("TmsiReallocationCommand", type_id);
+            m.lai = body.get(..5).and_then(lai);
+            m.identity = ident_at(5);
+            m
+        }
+        (0x05, 0x24) => {
+            let mut m = Message::named("CmServiceRequest", type_id);
+            // Service type and key sequence, then the classmark as a length
+            // and a value, then the phone.
+            let after = 1 + usize::from(*body.first().unwrap_or(&0)) + 1;
+            m.identity = ident_at(after.min(body.len()));
+            m
+        }
+        (0x05, 0x21) => Message::named("CmServiceAccept", type_id),
+        (0x05, 0x23) => Message::named("CmServiceReject", type_id),
+        // Radio resource, as it appears on a dedicated channel rather than
+        // on the broadcast one.
+        (0x06, 0x27) => {
+            let mut m = Message::named("PagingResponse", type_id);
+            let after = 1 + usize::from(*body.get(1).unwrap_or(&0)) + 1;
+            m.identity = ident_at(after.min(body.len()));
+            m
+        }
+        (0x06, 0x35) => Message::named("CipheringModeCommand", type_id),
+        (0x06, 0x32) => Message::named("CipheringModeComplete", type_id),
+        (0x06, 0x0D) => Message::named("ChannelRelease", type_id),
+        (0x06, 0x2E) => Message::named("AssignmentCommand", type_id),
+        (0x06, 0x29) => Message::named("AssignmentComplete", type_id),
+        (0x06, 0x2B) => Message::named("HandoverCommand", type_id),
+        (0x06, 0x15) => Message::named("ClassmarkChange", type_id),
+        (0x06, 0x16) => Message::named("ClassmarkEnquiry", type_id),
+        (0x06, 0x06) => Message::named("SI5ter", type_id),
+        // Call control and short messages, named only: what they carry is
+        // the call itself, and by the time one appears the channel is
+        // ciphered.
+        (0x03, _) => Message::named("CallControl", type_id),
+        (0x09, _) => Message::named("ShortMessage", type_id),
+        _ => return None,
+    };
+    m.type_id = type_id;
+    Some(m)
+}
+
+/// Read a block off a dedicated channel.
+
+/// Read a signalling channel block a cell has assigned to a phone.
+///
+/// The blocks are the same 23 bytes and the same coding, but a dedicated
+/// channel puts a link layer in front of the message: an address saying which
+/// service the frame belongs to, a control field carrying the sequence
+/// numbers, and a length. The broadcast channel skips all three, because
+/// nothing there is acknowledged and nobody is addressed.
+///
+/// `None` where the frame carries no message: an unacknowledged fill frame,
+/// a link layer acknowledgement with nothing behind it, or padding.
+pub fn parse_dedicated(block: &[u8]) -> Option<Message> {
+    let (&address, &control, &length) = (block.first()?, block.get(1)?, block.get(2)?);
+    // Bits 4 and 3 of the address are the service access point: zero is
+    // signalling, three is short messages. The rest is the direction bit and
+    // two extension bits that are always set on this link.
+    let sapi = address >> 2 & 0x07;
+    // A control field with its low bit clear is an information frame, and
+    // one ending in 0b11 is unnumbered. Supervisory frames, ending in 0b01,
+    // acknowledge and carry nothing.
+    if control & 0x03 == 0x01 {
+        return None;
+    }
+    // The length's top six bits are the count of message octets.
+    let len = usize::from(length >> 2);
+    if len == 0 || 3 + len > block.len() {
+        return None;
+    }
+    let mut msg = parse_l3(&block[3..3 + len])?;
+    msg.sapi = sapi;
+    Some(msg)
 }
 
 /// Read a block off the broadcast or common control channel.
@@ -381,6 +525,8 @@ pub fn parse(block: &[u8]) -> Option<Message> {
         // mistaken for another, since a second has to arrive behind its tag.
         pages: pages(type_id, &block[3..]),
         grant: (type_id == 0x3F).then(|| grant(body)).flatten(),
+        sapi: 0,
+        identity: None,
     })
 }
 
@@ -590,6 +736,50 @@ mod tests {
         assert_eq!((g.kind, g.timeslot, g.tsc), ("TCH/F", 2, 5));
         assert_eq!(g.arfcn, None);
         assert_eq!(g.hopping, Some((9, 42)));
+    }
+
+    /// A phone arriving on a signalling channel says where it was and who
+    /// it is, before anything is ciphered.
+    #[test]
+    fn a_location_update_names_the_phone_and_where_it_came_from() {
+        // Link layer: signalling service, an unnumbered frame, and a length
+        // of 15 octets. Then mobility management, location updating request,
+        // the update type, the area the phone was last in, a classmark, and
+        // the phone as a length and a temporary identity.
+        let mut b = vec![0x01, 0x03, 15 << 2, 0x05, 0x08, 0x70];
+        b.extend_from_slice(&[0x62, 0xF2, 0x10, 0x0C, 0x81]);
+        b.extend_from_slice(&[0x33]);
+        b.extend_from_slice(&[0x05, 0xF4, 0xAA, 0xBB, 0xCC, 0xDD]);
+        b.resize(23, 0x2B);
+        let m = parse_dedicated(&b).expect("a message");
+        assert_eq!(m.name, "LocationUpdatingRequest");
+        assert_eq!(m.lai.map(|l| (l.to_string(), l.lac)), Some(("262-01".into(), 0x0C81)));
+        assert_eq!(m.identity, Some(Identity::Tmsi(0xAABB_CCDD)));
+        assert_eq!(m.sapi, 0);
+    }
+
+    /// The exchange that gives a permanent identity away: the network does
+    /// not recognise the temporary one and asks.
+    #[test]
+    fn an_identity_response_carries_what_was_asked_for() {
+        let mut b = vec![0x01, 0x03, 11 << 2, 0x05, 0x19, 0x08];
+        b.extend_from_slice(&[0x29, 0x27, 0x10, 0x43, 0x65, 0x87, 0x09, 0x21]);
+        b.resize(23, 0x2B);
+        let m = parse_dedicated(&b).unwrap();
+        assert_eq!(m.name, "IdentityResponse");
+        assert_eq!(m.identity, Some(Identity::Imsi("272013456789012".into())));
+    }
+
+    /// A link layer frame with nothing behind it is not a message. A
+    /// dedicated channel is full of these: an acknowledgement, or a fill
+    /// frame keeping the link alive.
+    #[test]
+    fn an_empty_link_frame_is_not_a_message() {
+        // A supervisory frame, which acknowledges and carries nothing.
+        assert!(parse_dedicated(&[0x01, 0x01, 0x00, 0x2B, 0x2B]).is_none());
+        // An unnumbered frame with a length of zero.
+        assert!(parse_dedicated(&[0x03, 0x03, 0x01, 0x2B, 0x2B]).is_none());
+        assert!(parse_dedicated(&[0x2B; 23]).is_none());
     }
 
     #[test]
