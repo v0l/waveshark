@@ -15,22 +15,29 @@ decoded or not.
 
 | | where | what you get |
 |---|---|---|
-| ISM devices | 433, 868, 915 MHz | 33 decoders from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, mostly with a stable device ID |
+| ISM devices | 433, 868, 915 MHz | 39 decoders, most from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, shelf labels, mostly with a stable device ID |
 | Unknown bursts | anywhere | coding inferred and bits sliced out, enough to recognise the same device again and reverse engineer it |
-| Aircraft | 1090 MHz | ADS-B and Mode S into a flight table and map: callsign, altitude, speed, track, position |
+| Aircraft | 1090 MHz | ADS-B and Mode S onto a map with a track table: callsign, altitude, speed, track, position |
 | Shipping | marine VHF | AIS positions and vessel identity on the same map |
 | APRS | 144.800, 144.390 US, 144.640 JP | packet stations and vehicle trackers, Mic-E included |
 | Pagers | wherever you point it | POCSAG at 512, 1200 and 2400 bit/s, message text in clear |
-| M17 | amateur VHF and UHF | who called whom, for how long, and packet-mode messages in full |
+| DMR | 136-174, 400-470 MHz | who called whom on which talkgroup, and speech with `--features ambe` |
+| TETRA | 390-400 MHz | the network, its cells and who is called, with decryption and key recovery under `--features tea` |
+| M17 | amateur VHF and UHF | who called whom, for how long, packet messages in full, and Codec 2 speech |
+| LoRa mesh | 433, 868, 915 MHz | LoRaWAN join requests and addresses, Meshtastic text under the public keys, MeshCore adverts |
+| Utility meters | 868.95 MHz | wireless M-Bus mode T: manufacturer, meter number, version and type |
 | Voice | any band | WFM with stereo and RDS, NFM, AM, USB, LSB, CW, several channels at once |
 
-Receive only. Nothing here keys a radio. [`docs/protocols.md`](docs/protocols.md)
-is the roadmap.
+It transmits too, on a radio that can: a microphone or a tone into NFM, WFM or
+AM, drawn as the TX side of the same flow graph.
+[`docs/protocols.md`](docs/protocols.md) is the roadmap.
 
 ## Hardware
 
-Any RTL2832U dongle, a HackRF One, or a LimeSDR USB or Mini. A €30 RTL-SDR does
-all of the above; a HackRF buys you wider spans.
+Any RTL2832U dongle, a HackRF One, or a LimeSDR USB or Mini, and a tuner on
+another machine over iqstream with `--stream <host>`. A €30 RTL-SDR does all of
+the receiving above; a HackRF buys you wider spans and a transmitter, and a
+LimeSDR both of those plus full duplex.
 
 ## Install
 
@@ -40,14 +47,30 @@ x86_64 or Windows x86_64.
 The Linux binary links librtlsdr rather than bundling it, so install
 `librtlsdr0` or `rtl-sdr` for the udev rules that let you open a dongle without
 root. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
-[Zadig](https://zadig.akeo.ie/) first or nothing can open the device.
+[Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
+Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
+is built without the driver.
 
 From source:
 
 ```sh
-sudo apt install librtlsdr-dev liblimesuite-dev   # rtl-sdr-devel + LimeSuite-devel on Fedora
+sudo apt install librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
+  libasound2-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
+  libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 cargo run --release -p app
 ```
+
+Two decoders are off by default and are turned on at build time:
+
+```sh
+cargo run --release -p app --features tea    # TETRA decryption and key recovery
+cargo run --release -p app --features ambe   # DMR speech through the AMBE vocoder
+```
+
+`tea` links the TETRA ciphers and a wgpu key search. Without it the keys view
+is still there, listing enciphered channels and saying nothing can read them. `ambe` builds `crates/mbe`, a port of the AMBE and IMBE vocoders,
+whose algorithms are patent encumbered, so nothing compiles it unless you ask.
+Without it DMR still says who is talking and decodes no speech.
 
 ## Using it
 
@@ -61,17 +84,30 @@ look. Click the spectrum to place a channel and listen, drag to pan, scroll to
 scrub, shift to snap to the band plan.
 
 The list along the bottom is every burst heard, with frequency, modulation,
-RSSI, SNR and what was made of it. Click a row for a hex dump; `UNKNOWN` hides
-the unclaimed ones. The view selector swaps the spectrum for the flight table,
-the map, or the live DSP graph. SETTINGS is the radio's own gain and switches,
-SETUP is language, country, band plan and your position.
+RSSI, SNR and what was made of it. Click a row for its envelope, its
+instantaneous frequency and a hex dump. SETTINGS beside the list is the packet
+log, including the switch that hides unclaimed bursts; SCANNERS is the table
+deciding what decodes where.
+
+The view selector swaps the spectrum for the signal chain, the map and its
+track table, the call list, the messages, or the keys. In the header, the
+sliders icon is the radio itself (gain, switches, antenna, channel, crystal
+correction) and the setup icon is language, country, band plan, your position
+and the cached datasets.
+
+The signal chain is not a diagram of the receiver, it is the receiver. Unlock
+it and you can add stages, delete them, drag them and draw wires; what is kept
+is the difference you made, so the graph goes on following the dial and the
+scanner table with your edits still on it.
 
 ## The packet log
 
 Every burst goes to `$XDG_DATA_HOME/waveshark/packets`, one file a day, on by
 default, because the interesting transmission is always the one that happened
-before you thought to record. What is stored is the raw mark and gap timings
-rather than the parsed fields, so a better decoder can be run over it later:
+before you thought to record. What is stored is the mark and gap timings, the
+frame bytes and the burst's own samples rather than the parsed fields, so a
+better decoder can be run over it later, and a different demodulator can be run
+over it as well:
 
 ```sh
 waveshark --replay 2025-08-31.wspkt
@@ -82,8 +118,8 @@ waveshark --replay 2025-08-31.wspkt
 15:55:47   433.9200 MHz   305 pulses   16.4 dB  unclaimed
 ```
 
-`--packet-log <dir>` moves it, `--no-packet-log` turns it off, and it stops at
-512 MB.
+`--packet-log <dir>` moves it and `--no-packet-log` turns it off. The folder is
+held to 2 GB by deleting the oldest days, so it rolls rather than stopping.
 
 Collecting has consequences: pager traffic carries medical and personal detail
 in clear, and device IDs are a record of who was where. Interception and
@@ -110,19 +146,31 @@ every time. A capture that decodes is a test fixture.
 --tune <mhz>           start tuned and listening; repeat for several channels
 --mode <mode>          wfm, nfm, am, usb, lsb or cw
 --span <khz>           nearest span, narrowed in software if the radio cannot
+--device <name>        pick a radio when several are plugged in
+--stream <host>        offer an iqstream server as a radio
 --location <lat,lon>   your position, for aircraft positions from a single frame
 --record [dir]         write every burst that decodes to a directory of captures
+--capture-iq           write the raw span from the moment the radio starts
 --replay [path]        decode a capture, a directory, or a packet log
+--headless             run with no window, scanning and logging as it would
+--print-log            print every packet as it arrives, window or not
+--fetch-data           warm the dataset cache before going somewhere offline
 --squelch-probe [mhz]  report what the squelch reads on a frequency
 --probe [mhz]          check the signal path with no display
 ```
 
+`--chain`, `--flights`, `--calls`, `--messages`, `--scanners`, `--gain` and
+`--setup` open on a view.
+
 ## Status
 
 Verified against other people's decoders, not just its own: 52 recordings from
-rtl_433's corpus are replayed in CI and every field must match rtl_433 25.02,
-plus ADS-B against dump1090. Coverage is the thin part, thirty-three ISM
-decoders where the goal is hundreds, and the browser build
+rtl_433's corpus are replayed field for field against what rtl_433 25.02 made
+of them, plus ADS-B against dump1090, and off-air captures of M17, DMR, TETRA
+and Meshtastic are asserted against what the transmission itself says. Those
+tests need `testdata/fetch.sh` to have pulled the recordings, and skip cleanly
+when it has not, which is also what happens in CI. Coverage is the thin part,
+thirty-nine ISM decoders where the goal is hundreds, and the browser build
 ([`docs/web.md`](docs/web.md)) is still a plan.
 
 ## Documentation

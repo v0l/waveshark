@@ -683,7 +683,7 @@ struct Args {
     #[arg(long)]
     capture_iq: bool,
 
-    /// Where decoded packets are appended as JSON lines. Defaults to
+    /// Where the binary packet log is written, one file a day. Defaults to
     /// $XDG_DATA_HOME/waveshark/packets
     #[arg(long, value_name = "DIR")]
     packet_log: Option<PathBuf>,
