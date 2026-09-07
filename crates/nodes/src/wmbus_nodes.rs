@@ -157,12 +157,17 @@ impl Protocol for Wmbus {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: 0.0,
+            feed_rate_hz: 0.0,
             span_wide: false,
             families: &[],
         }
     }
     fn accepts_width(&self, source_width_hz: f64) -> bool {
         METER_HZ.contains(&source_width_hz)
+    }
+    /// Mode T and C meters, at 868.95 MHz.
+    fn default_hz(&self) -> f64 {
+        868_950_000.0
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("wmbus")]

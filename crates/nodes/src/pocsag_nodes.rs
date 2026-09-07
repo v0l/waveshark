@@ -11,7 +11,7 @@
 //! frame that passed a check sequence, this carries a run of codewords that
 //! passed theirs.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::pocsag::{self, Body};
@@ -83,9 +83,6 @@ impl Simple for PocsagNode {
         "pocsag"
     }
 
-    fn channels(&self) -> &'static [f64] {
-        &[CHANNEL_WIDTH_HZ]
-    }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
@@ -211,9 +208,21 @@ impl Protocol for Pocsag {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: CHANNEL_WIDTH_HZ,
+            feed_rate_hz: 192_000.0,
             span_wide: false,
             families: &[],
         }
+    }
+    /// The amateur DAPNET channel: amateur rather than commercial because
+    /// it is the one paging frequency that is the same across Europe.
+    fn default_hz(&self) -> f64 {
+        439_987_500.0
+    }
+    fn stage_label(&self, hz: f64) -> String {
+        format!("{:.4} pager", hz / 1e6)
+    }
+    fn marks(&self, hz: f64) -> Vec<Mark> {
+        vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label: "POCSAG".into() }]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("pocsag").f("channel_hz", at.center_hz)]

@@ -1062,9 +1062,16 @@ impl Protocol for Dmr {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: CHANNEL_WIDTH_HZ,
+            feed_rate_hz: 192_000.0,
             span_wide: false,
             families: &[],
         }
+    }
+    fn default_hz(&self) -> f64 {
+        DEFAULT_HZ
+    }
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("dmr").f("channel_hz", at.center_hz)]
@@ -1275,9 +1282,6 @@ impl Node for DmrNode {
         "dmr"
     }
 
-    fn channels(&self) -> &'static [f64] {
-        &[CHANNEL_WIDTH_HZ]
-    }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)

@@ -3444,7 +3444,7 @@ pub(crate) mod tests {
 
         let mut plan = replay_plan(&buf, false);
         plan.fronts = vec![crate::scanners::FrontAt {
-            front: crate::scanners::Front::Gsm(center.as_f64()),
+            front: crate::scanners::Front::protocol("gsm", center.as_f64()),
             band: (center.as_f64() - 200_000.0, center.as_f64() + 200_000.0),
         }];
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();

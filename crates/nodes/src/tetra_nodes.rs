@@ -1265,6 +1265,7 @@ impl Protocol for Tetra {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: MIN_RATE_HZ,
+            feed_rate_hz: 300_000.0,
             span_wide: false,
             families: &[],
         }
@@ -1273,6 +1274,12 @@ impl Protocol for Tetra {
     /// splatter makes it; the band decides, not the width.
     fn accepts_width(&self, _source_width_hz: f64) -> bool {
         true
+    }
+    fn default_hz(&self) -> f64 {
+        390_000_000.0
+    }
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("tetra").f("channel_hz", at.center_hz)]

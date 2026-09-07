@@ -784,15 +784,19 @@ impl Receiver {
         // out of the derived graph, and the interface has to be told why
         // rather than left wondering where its pager channel went.
         for at in &plan.fronts {
-            let (hz, width, what) = match at.front {
-                Front::Aprs(hz) => (hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ, "aprs"),
-                Front::Pocsag(hz) => (hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ, "pocsag"),
-                Front::M17(hz) => (hz, nodes::m17_nodes::CHANNEL_WIDTH_HZ, "m17"),
-                _ => continue,
+            let (Front::Protocol { hz, .. }, Some(proto)) = (&at.front, at.front.proto()) else {
+                continue;
             };
-            if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - width {
-                refused =
-                    Some(format!("{:.4} MHz is too near the span edge for {what}", hz / 1e6));
+            let shape = proto.shape();
+            if shape.span_wide {
+                continue;
+            }
+            if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - shape.widths[0] {
+                refused = Some(format!(
+                    "{:.4} MHz is too near the span edge for {}",
+                    hz / 1e6,
+                    proto.label()
+                ));
             }
         }
         let modes = of_kind("mode_s").first().copied();
@@ -2018,45 +2022,35 @@ pub fn bank_label(width_hz: f64) -> String {
 /// Bandwidth a Mode S transmission occupies, for the log's channel column.
 const MODES_BAND_HZ: f64 = 2_000_000.0;
 
-/// The front ends a strip channel can run, with the channel each expects.
-///
-/// Asked of the registry, not listed here. A decode stage that declares a
-/// channel width through `Node::channels` is one that reads a fixed channel,
-/// which is exactly what a strip channel points at; one that declares none is
-/// placed by band or sweeps, and belongs in the scanner table instead. Built
-/// once, because building every decode stage to ask it a question is not work
-/// to repeat per frame.
-pub fn channel_fronts() -> &'static [(&'static str, f64)] {
-    static FRONTS: std::sync::OnceLock<Vec<(&'static str, f64)>> = std::sync::OnceLock::new();
-    FRONTS.get_or_init(|| {
-        let reg = nodes::registry();
-        let mut out: Vec<(&'static str, f64)> = reg
-            .by_category("decode")
-            .filter_map(|d| {
-                let node = reg.build(d.name, &Default::default()).ok()?;
-                // The narrowest channel it declares: a mode keyed at several
-                // spacings still fits in its widest, and the marker on the
-                // spectrum should not claim more of the band than it reads.
-                let w = node.channels().iter().cloned().fold(f64::INFINITY, f64::min);
-                w.is_finite().then_some((d.name, w))
-            })
-            .collect();
-        out.sort_by_key(|(name, _)| *name);
-        out
-    })
+/// The protocols a strip channel can be set to, with the channel each
+/// expects: every registered one, span-wide or not. A decoder that reads a
+/// span is put on a channel as wide as what it reads.
+pub fn channel_fronts() -> Vec<(&'static str, f64)> {
+    nodes::protocol::all()
+        .iter()
+        .map(|p| (p.id(), p.shape().widths[0]))
+        .collect()
 }
 
-/// The channel one of those front ends expects, or None if it is not one.
+/// The channel a protocol's decoder expects, or None if there is no such
+/// protocol.
 pub fn front_width(kind: &str) -> Option<f64> {
-    channel_fronts().iter().find(|(k, _)| *k == kind).map(|(_, w)| *w)
+    nodes::protocol::by_id(kind).map(|p| p.shape().widths[0])
+}
+
+/// The protocol a word names: its registry id, or its label as a strip
+/// button or a saved channel writes it.
+pub fn front_kind(word: &str) -> Option<&'static str> {
+    let w = word.to_ascii_lowercase();
+    nodes::protocol::all()
+        .iter()
+        .find(|p| p.id() == w || p.label().eq_ignore_ascii_case(&w))
+        .map(|p| p.id())
 }
 
 /// What a front end is called on a strip button.
-///
-/// The registry name in capitals: every one of these is an acronym, and a
-/// second table mapping "m17" to "M17" would be a table to keep in step.
 pub fn front_label(kind: &str) -> String {
-    kind.to_uppercase()
+    nodes::protocol::by_id(kind).map_or_else(|| kind.to_uppercase(), |p| p.label().to_uppercase())
 }
 
 /// The band a front end needs, and the slowest rate it can be handed.
@@ -2069,43 +2063,19 @@ pub fn front_label(kind: &str) -> String {
 /// and stops Mode S running its envelope detector across a whole 40 MHz span.
 fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64), f64)> {
     match front {
-        // Mode S is 2 MHz wide and its detector refuses anything slower.
-        Front::ModeS => Some(((1_089_000_000.0, 1_091_000_000.0), 2_400_000.0)),
-        Front::Ais => {
-            let w = nodes::ais_nodes::CHANNEL_WIDTH_HZ;
-            Some((
-                (dsp::ais::CHANNEL_HZ[0] - w, dsp::ais::CHANNEL_HZ[1] + w),
-                // The detector mixes both channels itself and wants room
-                // between them, so this stays well above their separation.
-                600_000.0,
-            ))
-        }
-        Front::Aprs(hz) => {
-            let w = nodes::aprs_nodes::CHANNEL_WIDTH_HZ;
-            Some(((hz - w, hz + w), 192_000.0))
-        }
-        Front::Pocsag(hz) => {
-            let w = nodes::pocsag_nodes::CHANNEL_WIDTH_HZ;
-            Some(((hz - w, hz + w), 192_000.0))
-        }
-        Front::M17(hz) => {
-            let w = nodes::m17_nodes::CHANNEL_WIDTH_HZ;
-            Some(((hz - w, hz + w), 192_000.0))
-        }
-        Front::Gsm(hz) => {
-            let w = nodes::gsm_nodes::CHANNEL_WIDTH_HZ;
-            // Three samples a symbol is the floor the detector refuses below,
-            // and this leaves four: the burst is sampled where the training
-            // sequence says, not where a sample happens to land, so the
-            // interpolator wants something to work with.
-            Some(((hz - w, hz + w), 1_200_000.0))
-        }
-        Front::Ble(hz) => {
-            let w = nodes::ble_nodes::CHANNEL_WIDTH_HZ;
-            // The demodulator refuses anything under 4 MS/s: at 1 Mbit/s the
-            // bit centres have to be found in the samples themselves, and
-            // four of them a symbol is where the packet count stops moving.
-            Some(((hz - w, hz + w), 8_000_000.0))
+        Front::Protocol { hz, .. } => {
+            let p = front.proto()?;
+            let shape = p.shape();
+            let w = shape.widths[0];
+            // A span-wide decoder is handed the band it owns; one that reads
+            // a channel is handed twice the channel, and mixes and filters
+            // its own out of that.
+            let band = if shape.span_wide {
+                (hz - w / 2.0, hz + w / 2.0)
+            } else {
+                (hz - w, hz + w)
+            };
+            Some((band, shape.feed_rate_hz))
         }
         Front::Banks(widths) => {
             let band = at.band;
@@ -2119,45 +2089,51 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
     }
 }
 
-
-
-/// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 12] = [
+/// Patch stages whose output the packet bus accepts, besides every
+/// protocol's decoder.
+const BUS_TAILS: [&str; 6] = [
     "pulse_detect",
     "ask_detect",
     "fsk_detect",
     "bank",
     "source_decode",
     "auto",
-    "mode_s",
-    "ais",
-    "aprs",
-    "pocsag",
-    "m17",
-    "ble",
 ];
 
-/// Stages that carry speech, and the output port it leaves on.
-///
-/// The same arrangement as [`BUS_TAILS`], and for the same reason: the patch
-/// is a description, written before any node exists to be asked. What each
-/// front end does with the port is its own business; this only says which
-/// wire to draw.
-const VOICE_TAILS: [(&str, usize); 5] =
-    [("m17", 1), ("tetra", 1), ("dmr", 1), ("auto", 1), ("voice", 1)];
+/// Whether a stage of this kind puts frames or packets on its first output.
+fn bus_tail(kind: &str) -> bool {
+    BUS_TAILS.contains(&kind)
+        || nodes::protocol::by_id(kind).is_some_and(|p| {
+            matches!(p.outputs().first(), Some(PortKind::Frames | PortKind::Packets))
+        })
+}
 
-/// The stages that produce pictures, and the port each leaves them on.
+/// The port a stage of this kind puts speech on, if it has one.
 ///
-/// The video counterpart of [`VOICE_TAILS`] and read the same way: a stage
-/// that decodes video by itself puts it on its only output, and the auto node
-/// puts whatever a source turned out to be on a port of its own, so a camera
-/// it finds reaches the bus without anything here knowing which front end
-/// read it.
-const VIDEO_TAILS: [(&str, usize); 2] = [("video", 0), ("auto", 2)];
-
-/// The port a front end's speech leaves on, if it has any.
+/// The patch is a description, written before any node exists to be asked,
+/// so this is answered from what each protocol declares of its chain. The
+/// auto node puts whatever front end it placed on a source on a port of its
+/// own, and a voice channel's decoder on its second.
 fn voice_port(kind: &str) -> Option<usize> {
-    VOICE_TAILS.iter().find(|(k, _)| *k == kind).map(|(_, port)| *port)
+    match kind {
+        "auto" | "voice" => Some(1),
+        _ => nodes::protocol::by_id(kind)?
+            .outputs()
+            .iter()
+            .position(|k| *k == PortKind::Voice),
+    }
+}
+
+/// The port a stage of this kind puts pictures on, if it has one. Read the
+/// way [`voice_port`] is, and for the same reason.
+fn video_port(kind: &str) -> Option<usize> {
+    match kind {
+        "auto" => Some(2),
+        _ => nodes::protocol::by_id(kind)?
+            .outputs()
+            .iter()
+            .position(|k| *k == PortKind::Video),
+    }
 }
 
 /// Stages that report something a position can be resolved from, so the
@@ -2410,70 +2386,36 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         let fits =
             |hz: f64, width: f64| (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width;
         match front {
-            Front::ModeS => {
-                let id = p.add_derived(derived::at("mode_s", 0, 0), "mode_s", Settings::new());
-                p.connect(src, (id, 0));
-            }
-            Front::Ais => {
-                let id = p.add_derived(derived::at("ais", 0, 0), "ais", Settings::new());
-                p.connect(src, (id, 0));
-            }
-            Front::Aprs(hz) if fits(*hz, nodes::aprs_nodes::CHANNEL_WIDTH_HZ) => {
-                let mut s = Settings::new();
-                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
-                s.insert(
-                    "label".into(),
-                    pipeline::ParamValue::Text(format!("{:.3} APRS", hz / 1e6)),
-                );
-                let id = p.add_derived(derived::at("aprs", *hz as u64, 0), "aprs", s);
-                p.connect(src, (id, 0));
-            }
-            Front::Pocsag(hz) if fits(*hz, nodes::pocsag_nodes::CHANNEL_WIDTH_HZ) => {
-                let mut s = Settings::new();
-                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
-                s.insert(
-                    "label".into(),
-                    pipeline::ParamValue::Text(format!("{:.4} pager", hz / 1e6)),
-                );
-                let id = p.add_derived(derived::at("pocsag", *hz as u64, 0), "pocsag", s);
-                p.connect(src, (id, 0));
-            }
-            Front::M17(hz) if fits(*hz, nodes::m17_nodes::CHANNEL_WIDTH_HZ) => {
-                let mut s = Settings::new();
-                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
-                s.insert(
-                    "label".into(),
-                    pipeline::ParamValue::Text(format!("{:.4} M17", hz / 1e6)),
-                );
-                let id = p.add_derived(derived::at("m17", *hz as u64, 0), "m17", s);
-                p.connect(src, (id, 0));
-            }
-            Front::Ble(hz) if fits(*hz, nodes::ble_nodes::CHANNEL_WIDTH_HZ) => {
-                let mut s = Settings::new();
-                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
-                s.insert(
-                    "label".into(),
-                    pipeline::ParamValue::Text(format!("{:.0} BLE", hz / 1e6)),
-                );
-                let id = p.add_derived(derived::at("ble", *hz as u64, 0), "ble", s);
-                p.connect(src, (id, 0));
-            }
-            Front::Gsm(hz) if fits(*hz, nodes::gsm_nodes::CHANNEL_WIDTH_HZ) => {
-                let mut s = Settings::new();
-                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
-                let name = match dsp::gsm::arfcn(*hz) {
-                    Some(n) => format!("ARFCN {n}"),
-                    None => format!("{:.1} GSM", hz / 1e6),
+            Front::Protocol { hz, .. } => {
+                let Some(proto) = front.proto() else { continue };
+                let shape = proto.shape();
+                if !shape.span_wide && !fits(*hz, shape.widths[0]) {
+                    continue;
+                }
+                let at = nodes::Placed {
+                    center_hz: *hz,
+                    width_hz: shape.widths[0],
+                    rate: plan.eff_rate(),
+                    snr_db: f32::NAN,
                 };
-                s.insert("label".into(), pipeline::ParamValue::Text(name));
-                let id = p.add_derived(derived::at("gsm", *hz as u64, 0), "gsm", s);
-                p.connect(src, (id, 0));
+                // A span-wide decoder is one stage wherever it is placed;
+                // one on a channel is keyed by the channel, so two blocks
+                // pinning two pager channels are two decoders.
+                let key = if shape.span_wide { 0 } else { *hz as u64 };
+                let mut from = src;
+                let chain = proto.chain(at);
+                let last = chain.len() - 1;
+                for (i, stage) in chain.into_iter().enumerate() {
+                    let mut settings = stage.settings;
+                    if i == last {
+                        settings
+                            .insert("label".into(), pipeline::ParamValue::Text(proto.stage_label(*hz)));
+                    }
+                    let id = p.add_derived(derived::at(proto.id(), key, i as u64), &stage.kind, settings);
+                    p.connect(from, (id, 0));
+                    from = Source::Stage(id, 0);
+                }
             }
-            Front::Aprs(_)
-            | Front::Pocsag(_)
-            | Front::M17(_)
-            | Front::Ble(_)
-            | Front::Gsm(_) => {}
             Front::Auto => {
                 // One node over the band, whatever the band holds. The band
                 // is passed on so it ignores the margin the power-of-two
@@ -2621,7 +2563,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 /// are what a strip channel can be set to, and a decoder nobody wired to the
 /// bus decodes into silence.
 fn puts_packets_on_bus(kind: &str) -> bool {
-    BUS_TAILS.contains(&kind) || kind == "feed" || kind == "voice" || front_width(kind).is_some()
+    bus_tail(kind) || kind == "feed" || kind == "voice"
 }
 
 /// The stages of one strip channel, in the order they are built. A decode
@@ -2658,8 +2600,8 @@ fn sync_video(p: &mut crate::patch::Patch) {
         .stages()
         .iter()
         .filter_map(|st| {
-            let (_, port) = VIDEO_TAILS.iter().find(|(kind, _)| *kind == st.kind)?;
-            Some((st.id, *port, stage_label(&st.kind, &st.settings)))
+            let port = video_port(&st.kind)?;
+            Some((st.id, port, stage_label(&st.kind, &st.settings)))
         })
         .collect();
     if feeds.is_empty() {
@@ -2782,8 +2724,8 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     let mut owned: Vec<(Source, Option<&ChannelSpec>, String)> =
         tails.iter().map(|(tail, spec)| (*tail, Some(*spec), spec.label.clone())).collect();
     for st in p.stages() {
-        if let Some((_, port)) = VOICE_TAILS.iter().find(|(kind, _)| *kind == st.kind) {
-            let from = Source::Stage(st.id, *port);
+        if let Some(port) = voice_port(&st.kind) {
+            let from = Source::Stage(st.id, port);
             // A front end the strip owns is already here, with the fader and
             // the name the operator gave it. Adding it again as a loose voice
             // port would put the same speech into the mix twice.
@@ -3014,8 +2956,15 @@ fn decode_channel_stages(
     // handed, so this only has to bring the rate down far enough that it is
     // not doing that at the radio's. Decimating to the channel itself would
     // leave the node no transition band and no room for the tuning error the
-    // dial has, so the target is well above it.
-    let target = (width * DECODE_RATE_RATIO).max(DECODE_MIN_RATE_HZ);
+    // dial has, so the target is well above it: what the protocol asks to
+    // be fed, or a multiple of the channel where it asks for nothing.
+    let proto = nodes::protocol::by_id(kind);
+    let feed = proto.map_or(0.0, |p| p.shape().feed_rate_hz);
+    let target = if feed > 0.0 {
+        feed
+    } else {
+        (width * DECODE_RATE_RATIO).max(DECODE_MIN_RATE_HZ)
+    };
     let dec = ((rate / target).floor() as usize).max(1);
     let mut ifd = Settings::new();
     ifd.insert("factor".into(), V::Int(dec as i64));
@@ -3028,12 +2977,31 @@ fn decode_channel_stages(
     // The mixer moved the channel to the middle of the stream and said so, so
     // the front end is told the frequency it is really on: it reads its own
     // channel out of the stream's centre, and every packet it puts on the bus
-    // is labelled with where it came from.
-    let mut s = Settings::new();
-    s.insert("channel_hz".into(), V::Float(center + hz));
-    s.insert("label".into(), V::Text(spec.label.clone()));
-    let f = at(p, "chan_front", kind, s);
-    p.connect(Source::Stage(i, 0), (f, 0));
+    // is labelled with where it came from. The protocol says what stages
+    // that takes; the last of them is the channel's front.
+    let placed = nodes::Placed {
+        center_hz: center + hz,
+        width_hz: width,
+        rate: rate / dec as f64,
+        snr_db: f32::NAN,
+    };
+    let chain = match proto {
+        Some(p) => p.chain(placed),
+        None => vec![nodes::NodeSpec::new(kind).f("channel_hz", center + hz)],
+    };
+    let last = chain.len() - 1;
+    let mut from = Source::Stage(i, 0);
+    let mut f = 0;
+    for (n, stage) in chain.into_iter().enumerate() {
+        let mut s = stage.settings;
+        let what = if n == last { "chan_front".to_string() } else { format!("chan_front_{n}") };
+        if n == last {
+            s.insert("label".into(), V::Text(spec.label.clone()));
+        }
+        f = at(p, &what, &stage.kind, s);
+        p.connect(from, (f, 0));
+        from = Source::Stage(f, 0);
+    }
     f
 }
 
@@ -3641,7 +3609,7 @@ fn add_patch(
         // protocols run once over all of it. Anything else at the end of a
         // chain is one the operator has not finished, and wiring it to the
         // bus would hand the bus a stream of the wrong type.
-        if BUS_TAILS.contains(&kind.as_str()) && patch.is_tail(id) {
+        if bus_tail(kind.as_str()) && patch.is_tail(id) {
             packets.push(nid);
         }
     }
@@ -3700,51 +3668,12 @@ pub fn scan_marks(
     let mut out = Vec::new();
     for at in scanners.fronts(center, rate) {
         match &at.front {
-            Front::ModeS => out.push(ScanMark::Channel {
-                hz: 1_090_000_000.0,
-                width: MODES_BAND_HZ,
-                label: "Mode S".into(),
-            }),
-            Front::Ais => {
-                for (i, hz) in dsp::ais::CHANNEL_HZ.iter().enumerate() {
-                    out.push(ScanMark::Channel {
-                        hz: *hz,
-                        width: nodes::ais_nodes::CHANNEL_WIDTH_HZ,
-                        label: format!("AIS {}", if i == 0 { "A" } else { "B" }),
-                    });
+            Front::Protocol { hz, .. } => {
+                let Some(proto) = at.front.proto() else { continue };
+                for m in proto.marks(*hz) {
+                    out.push(ScanMark::Channel { hz: m.hz, width: m.width_hz, label: m.label });
                 }
             }
-            Front::Aprs(hz) => out.push(ScanMark::Channel {
-                hz: *hz,
-                width: nodes::aprs_nodes::CHANNEL_WIDTH_HZ,
-                label: "APRS".into(),
-            }),
-            Front::Ble(hz) => out.push(ScanMark::Channel {
-                hz: *hz,
-                width: nodes::ble_nodes::CHANNEL_WIDTH_HZ,
-                label: match nodes::ble_nodes::channel_of(*hz) {
-                    Some(ch) => format!("BLE {ch}"),
-                    None => "BLE".into(),
-                },
-            }),
-            Front::Gsm(hz) => out.push(ScanMark::Channel {
-                hz: *hz,
-                width: nodes::gsm_nodes::CHANNEL_WIDTH_HZ,
-                label: match dsp::gsm::arfcn(*hz) {
-                    Some(n) => format!("GSM {n}"),
-                    None => "GSM".into(),
-                },
-            }),
-            Front::Pocsag(hz) => out.push(ScanMark::Channel {
-                hz: *hz,
-                width: nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
-                label: "POCSAG".into(),
-            }),
-            Front::M17(hz) => out.push(ScanMark::Channel {
-                hz: *hz,
-                width: nodes::m17_nodes::CHANNEL_WIDTH_HZ,
-                label: "M17".into(),
-            }),
             Front::Auto => {
                 // No grid to draw: the band is watched whole and whatever
                 // is in it is found where it is.
@@ -4262,6 +4191,36 @@ mod tests {
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
+    /// Every protocol the auto node can place is a mode a strip channel can
+    /// be set to, span-wide ones included: the registry is the one list, so
+    /// a decoder that reads a fixed allocation is a channel at that
+    /// allocation rather than a special case the strip cannot offer.
+    #[test]
+    fn every_protocol_is_a_channel_mode() {
+        for proto in nodes::protocol::all() {
+            let shape = proto.shape();
+            let hz = proto.default_hz();
+            // A span wide enough to hold the channel with the margin the
+            // strip demands, at the rate the decoder is fed.
+            let rate = (shape.widths[0] * 4.0).max(shape.feed_rate_hz * 2.0).max(2_400_000.0);
+            let mut p = plan(rate, Hz(hz as u64));
+            p.fronts.clear();
+            let mut spec = chan(1, 0.0, Demod::Nfm);
+            spec.mode = ChanMode::Decode(proto.id().to_string());
+            p.channels = vec![spec];
+            let patch = derived_patch(&p);
+            assert!(
+                patch.stages().iter().any(|s| s.kind == proto.id()),
+                "{}: no front end drawn",
+                proto.id()
+            );
+            let rx = Receiver::build(&p, Sinks::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", proto.id()));
+            assert_eq!(rx.channels().len(), 1, "{}", proto.id());
+            assert!(rx.refused.is_none(), "{}: {:?}", proto.id(), rx.refused);
+        }
+    }
+
     #[test]
     fn an_auto_channel_watches_the_band_it_was_given() {
         // The scanner table's front end, put where somebody pointed: the
@@ -4366,7 +4325,7 @@ mod tests {
         // and the bus is the node on the end of them.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.fronts = vec![crate::scanners::FrontAt {
-            front: Front::M17(433_475_000.0),
+            front: Front::protocol("m17", 433_475_000.0),
             band: (0.0, f64::INFINITY),
         }];
         let rx = Receiver::build(&p, Sinks::default()).expect("a receiver");
@@ -4558,7 +4517,7 @@ mod tests {
         // still there and the front ends are the new band's.
         p.center = Hz::mhz(1090);
         p.fronts = vec![crate::scanners::FrontAt {
-            front: Front::ModeS,
+            front: Front::named("mode_s").unwrap(),
             band: (0.0, f64::INFINITY),
         }];
         rx.rebuild(&p).unwrap();
@@ -4681,7 +4640,7 @@ mod tests {
         // it knew about was not running; one wired to the bus ahead of the
         // protocols would have to decode the frame for itself.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.fronts = vec![anywhere(Front::ModeS)];
+        p.fronts = vec![anywhere(Front::named("mode_s").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -4709,7 +4668,7 @@ mod tests {
     #[test]
     fn ais_reaches_the_tracker_through_the_bus_like_mode_s_does() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.fronts = vec![anywhere(Front::Ais)];
+        p.fronts = vec![anywhere(Front::named("ais").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.ais_on(), "the AIS decoder is not running");
         let topo = rx.topology();
@@ -4746,7 +4705,7 @@ mod tests {
     #[test]
     fn two_front_ends_on_one_span_both_reach_the_bus() {
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Pocsag(153_350_000.0))];
+        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("pocsag", 153_350_000.0))];
         // The pager channel is nine megahertz away, well outside this span,
         // so it is dropped rather than built into a node that would refuse
         // its own input and take the graph down.
@@ -4757,7 +4716,7 @@ mod tests {
 
         // Both inside the span now.
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Pocsag(145_000_000.0))];
+        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("pocsag", 145_000_000.0))];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.aprs_on() && rx.pocsag_on(), "both front ends should run");
         let topo = rx.topology();
@@ -4782,7 +4741,7 @@ mod tests {
     #[test]
     fn the_ism_banks_do_not_run_on_the_ais_band() {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
-        p.fronts = vec![anywhere(Front::Ais)];
+        p.fronts = vec![anywhere(Front::named("ais").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         assert!(
@@ -4845,7 +4804,7 @@ mod tests {
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         p.center = Hz::mhz(1090);
         p.fronts.clear();
-        p.fronts = vec![anywhere(Front::ModeS)];
+        p.fronts = vec![anywhere(Front::named("mode_s").unwrap())];
         rx.rebuild(&p).expect("a receiver that can retune onto 1090");
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
@@ -4857,7 +4816,7 @@ mod tests {
         // Turning the log off stops writing to disk; it must not disconnect
         // every view from the traffic.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.fronts = vec![anywhere(Front::ModeS)];
+        p.fronts = vec![anywhere(Front::named("mode_s").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));
@@ -5170,7 +5129,7 @@ mod extraction_tests {
         // inside `process`, with a mixer over every sample and a filter of
         // several thousand taps, none of it visible in the chain.
         let mut p = plan(20_000_000.0, Hz::mhz(440));
-        p.fronts = vec![anywhere(Front::Pocsag(439_987_500.0))];
+        p.fronts = vec![anywhere(Front::protocol("pocsag", 439_987_500.0))];
         let labels = topo_labels(&p);
         assert!(labels.iter().any(|l| l.contains("mixer")), "{labels:?}");
         assert!(labels.iter().any(|l| l.starts_with('/')), "{labels:?}");
@@ -5182,7 +5141,7 @@ mod extraction_tests {
         // every carrier in the span added together, which lifts the floor its
         // preamble threshold is measured against and invents edges.
         let mut p = plan(20_000_000.0, Hz::mhz(1090));
-        p.fronts = vec![anywhere(Front::ModeS)];
+        p.fronts = vec![anywhere(Front::named("mode_s").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let modes = topo.nodes.iter().find(|n| n.kind == "mode_s").expect("a mode s node");
@@ -5197,7 +5156,7 @@ mod extraction_tests {
         // internally, and what follows it is a 12.5 kHz channel filtered at
         // 300 kHz instead of at the radio's rate.
         let mut p = plan(2_400_000.0, Hz(439_987_500));
-        p.fronts = vec![anywhere(Front::Pocsag(439_987_500.0))];
+        p.fronts = vec![anywhere(Front::protocol("pocsag", 439_987_500.0))];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let pager = topo.nodes.iter().find(|n| n.kind == "pocsag").expect("a pager node");
@@ -5209,7 +5168,7 @@ mod extraction_tests {
         // A mixer that shifts by nothing and a decimator that divides by one
         // are two passes over every sample to achieve nothing.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
-        p.fronts = vec![anywhere(Front::ModeS)];
+        p.fronts = vec![anywhere(Front::named("mode_s").unwrap())];
         let labels = topo_labels(&p);
         assert!(!labels.iter().any(|l| l.contains("mixer")), "{labels:?}");
     }
@@ -5217,7 +5176,7 @@ mod extraction_tests {
     #[test]
     fn two_front_ends_in_one_band_share_one_extraction() {
         let mut p = plan(20_000_000.0, Hz::mhz(145));
-        p.fronts = vec![anywhere(Front::Aprs(144_800_000.0)), anywhere(Front::Aprs(144_800_000.0))];
+        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("aprs", 144_800_000.0))];
         let labels = topo_labels(&p);
         let mixers = labels.iter().filter(|l| l.contains("mixer")).count();
         assert_eq!(mixers, 1, "{labels:?}");

@@ -167,18 +167,6 @@ pub trait Node: Send + 'static {
         1
     }
 
-    /// The channel width(s), in hertz, this node expects to receive when it is
-    /// a narrowband front end tuned to one channel. Empty (the default) means
-    /// the node is not an auto-placeable channel: a filter, a sink, a wideband
-    /// decoder, or a front end whose placement is decided by band rather than
-    /// width. A non-empty list lets the auto node ask what a front end wants
-    /// rather than keep its own table of who fits where, and place it on a
-    /// detected source whose width matches one of them. More than one width is
-    /// for a mode that is keyed at several channel spacings.
-    fn channels(&self) -> &'static [f64] {
-        &[]
-    }
-
     /// The band this node is reading right now, in hertz, when it has taken
     /// one: `(lo, hi)`, absolute.
     ///
@@ -262,10 +250,6 @@ pub trait Simple: Send {
     fn is_sink(&self) -> bool {
         false
     }
-    /// See [`Node::channels`].
-    fn channels(&self) -> &'static [f64] {
-        &[]
-    }
     /// See [`Node::claimed_hz`].
     fn claimed_hz(&self) -> Option<(f64, f64)> {
         None
@@ -304,9 +288,6 @@ impl<T: Simple + 'static> Node for T {
     }
     fn latency(&self, _port: usize) -> u64 {
         Simple::latency(self)
-    }
-    fn channels(&self) -> &'static [f64] {
-        Simple::channels(self)
     }
     fn claimed_hz(&self) -> Option<(f64, f64)> {
         Simple::claimed_hz(self)

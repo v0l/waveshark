@@ -15,6 +15,7 @@
 use crate::NodeSpec;
 use common::Packet;
 use dsp::Modulation;
+use pipeline::port::PortKind;
 
 /// Where in the spectrum a protocol's transmitters can be.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +73,11 @@ pub struct Shape {
     pub widths: &'static [f64],
     /// The slowest stream it will accept.
     pub min_rate_hz: f64,
+    /// The rate to hand it when the receiver cuts a band out for it, which
+    /// leaves the decoder room above its floor: four samples a symbol where
+    /// three is refused, a transition band for its own filter. Zero to let
+    /// the receiver choose from the width.
+    pub feed_rate_hz: f64,
     /// Reads the span itself, where the span reaches its placement, rather
     /// than a source cut out of it: Mode S is shorter than a detector frame,
     /// a camera's carrier is the whole span.
@@ -96,6 +102,14 @@ pub enum Stickiness {
     /// The decoder says what it is reading through `Node::claimed_hz`, and
     /// owns that once it does, and nothing before.
     Claim,
+}
+
+/// A marker on the spectrum for a placed channel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub hz: f64,
+    pub width_hz: f64,
+    pub label: String,
 }
 
 /// A channel a decoder is being built for.
@@ -127,7 +141,37 @@ pub trait Protocol: Send + Sync {
 
     fn placement(&self) -> Placement;
 
+    /// The frequency to offer when somebody places it by hand: the calling
+    /// channel, the one allocation, the middle of the band.
+    fn default_hz(&self) -> f64 {
+        self.placement().default_hz().unwrap_or(0.0)
+    }
+
     fn shape(&self) -> Shape;
+
+    /// What the last stage of the chain puts out, by port: frames from a
+    /// decoder that produces bytes, packets from one that builds its own,
+    /// speech and pictures beside them where it carries any. Written down
+    /// rather than asked of a node because the receiver draws its wires
+    /// from a description, before any node exists to negotiate with; the
+    /// test beside the registry checks it against what the chain says.
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Frames]
+    }
+
+    /// What a stage placed at `hz` is called in the chain view.
+    fn stage_label(&self, hz: f64) -> String {
+        format!("{:.4} {}", hz / 1e6, self.label().to_uppercase())
+    }
+
+    /// The markers the spectrum draws for a decoder placed at `hz`.
+    fn marks(&self, hz: f64) -> Vec<Mark> {
+        vec![Mark {
+            hz,
+            width_hz: self.shape().widths[0],
+            label: self.label().to_uppercase(),
+        }]
+    }
 
     fn stickiness(&self) -> Stickiness {
         Stickiness::Latch
@@ -202,17 +246,27 @@ mod tests {
         let reg = crate::registry();
         for p in all() {
             assert!(reg.contains(p.id()), "{} has no stage", p.id());
+            let hz = p.default_hz();
+            assert!(hz > 0.0, "{} offers no frequency", p.id());
+            let shape = p.shape();
+            let rate = shape.min_rate_hz.max(shape.widths[0] * 4.0).max(25_000.0);
             let at = Placed {
-                center_hz: p.placement().default_hz().unwrap_or(433_000_000.0),
-                width_hz: p.shape().widths[0],
-                rate: p.shape().min_rate_hz.max(p.shape().widths[0] * 2.0),
+                center_hz: hz,
+                width_hz: shape.widths[0],
+                rate,
                 snr_db: 20.0,
             };
             let chain = p.chain(at);
             assert!(!chain.is_empty(), "{} builds no chain", p.id());
-            for s in &chain {
-                assert!(reg.contains(&s.kind), "{}: no stage {}", p.id(), s.kind);
-            }
+            // The declared outputs are what the built chain negotiates.
+            let spec = pipeline::port::StreamSpec::iq(rate, common::Hz(hz as u64));
+            let g = crate::build_chain(spec, &chain, &reg)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+            let (tail, _) = g.order().last().expect("a tail");
+            let outs = g.node(tail).map(|n| n.num_outputs()).unwrap_or(0);
+            let kinds: Vec<PortKind> =
+                (0..outs).filter_map(|k| g.spec_of(tail.out(k)).map(|s| s.kind)).collect();
+            assert_eq!(kinds, p.outputs(), "{}", p.id());
         }
     }
 

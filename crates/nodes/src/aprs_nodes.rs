@@ -86,9 +86,6 @@ impl Simple for AprsNode {
         "aprs"
     }
 
-    fn channels(&self) -> &'static [f64] {
-        &[CHANNEL_WIDTH_HZ]
-    }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
@@ -268,9 +265,18 @@ impl Protocol for Aprs {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: CHANNEL_WIDTH_HZ,
+            feed_rate_hz: 192_000.0,
             span_wide: false,
             families: &[],
         }
+    }
+    /// Where APRS is across Europe. North America is 144.390 and Japan
+    /// 144.640.
+    fn default_hz(&self) -> f64 {
+        DEFAULT_HZ
+    }
+    fn stage_label(&self, hz: f64) -> String {
+        format!("{:.3} APRS", hz / 1e6)
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("aprs").f("channel_hz", at.center_hz)]
