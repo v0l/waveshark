@@ -27,7 +27,7 @@ pub mod dmr;
 pub mod dmr_bp;
 pub mod elrs;
 pub mod flysky;
-pub mod fpv;
+pub mod video_channels;
 pub mod framing;
 pub mod frsky;
 #[cfg(feature = "tea")]

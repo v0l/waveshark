@@ -835,7 +835,8 @@ span  = 250 kHz
 front = auto
 
 [ISM 5.8]
-# Wi-Fi and FPV video. Above what most receivers tune, so the block simply
+# Wi-Fi and the analogue video links that share the band. Above what most
+# receivers tune, so the block simply
 # never matches on those.
 range = 5725 - 5875 MHz
 span  = 250 kHz

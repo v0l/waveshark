@@ -1,11 +1,11 @@
-//! The 5.8 GHz analogue FPV channel plan.
+//! The 5.8 GHz analogue video channel plan.
 //!
 //! There is no standard here, only convention. Five bands accumulated from
 //! different manufacturers, they overlap each other, and a transmitter is set
 //! by a band letter and a channel number printed on a card. Naming the
 //! channel a carrier sits on is most of what a receiver can say about an
-//! analogue link before it demodulates it, and it is what a pilot means by
-//! "who is on 5800".
+//! analogue link before it demodulates it, and it is what somebody means when
+//! they say "who is on 5800".
 //!
 //! Frequencies as every transmitter's manual lists them, including the
 //! duplicates: R1 and F1 are both 5658 MHz, A5 and R2 are both 5732, and so
