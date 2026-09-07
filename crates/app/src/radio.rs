@@ -561,6 +561,10 @@ pub enum Cmd {
     /// instructions rather than an edit to them: the same bargain the
     /// scanner table and the feeds make.
     CallSubs(Vec<crate::audiobus::Subscription>),
+    /// Which picture to watch, as a whole set of rules like `CallSubs`: an
+    /// input of the video bus, or everything, which is what a receiver
+    /// watching one channel wants and what a receiver scanning several does.
+    WatchVideo(Vec<crate::videobus::Rule>),
     /// Stop a replay part way through.
     StopPlay,
     /// The level all call audio is heard at, from the channel strip.
@@ -1253,6 +1257,17 @@ pub struct Status {
     /// two stations each have their own, and sharing one would print the
     /// first channel's name over every other.
     stations: parking_lot::Mutex<Vec<(u64, StationInfo)>>,
+    /// The picture the video bus is publishing, when anything is producing
+    /// one.
+    ///
+    /// One field rather than a stream: a field is half a megabyte, the
+    /// interface redraws when it likes, and a viewer that is two fields
+    /// behind is showing something that was true 40 ms ago. The frame is the
+    /// `Arc` the front end made, so republishing it copies a pointer.
+    video: parking_lot::Mutex<Option<common::VideoFrame>>,
+    /// Every input of the video bus: which one, what it is called, and how
+    /// complete its last picture was. What a pane offers to switch between.
+    video_inputs: parking_lot::Mutex<Vec<(usize, String, f32)>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
     /// What each scope stage in the chain is seeing, by node id.
@@ -1495,6 +1510,8 @@ impl Default for Status {
             radio: parking_lot::Mutex::new(RadioControls::default()),
             channels: parking_lot::Mutex::new(Vec::new()),
             stations: parking_lot::Mutex::new(Vec::new()),
+            video: parking_lot::Mutex::new(None),
+            video_inputs: parking_lot::Mutex::new(Vec::new()),
             chain: parking_lot::Mutex::new(None),
             scopes: parking_lot::Mutex::new(Vec::new()),
             chain_latency: AtomicU32::new(0),
@@ -1701,6 +1718,33 @@ impl Status {
             Some((_, cur)) if *cur != next => *cur = next,
             Some(_) => {}
             None => cur.push((id, next)),
+        }
+    }
+
+    /// The picture being received, if any.
+    pub fn video(&self) -> Option<common::VideoFrame> {
+        self.video.lock().clone()
+    }
+
+    /// What the video bus is receiving, whether or not it is being watched.
+    pub fn video_inputs(&self) -> Vec<(usize, String, f32)> {
+        self.video_inputs.lock().clone()
+    }
+
+    fn set_video_inputs(&self, inputs: Vec<(usize, String, f32)>) {
+        let mut cur = self.video_inputs.lock();
+        if *cur != inputs {
+            *cur = inputs;
+        }
+    }
+
+    /// Publish a field, or clear the pane when the receiver stops producing
+    /// them: a still picture left on the screen after the transmitter went
+    /// away is the worst thing a video pane can do.
+    fn set_video(&self, frame: Option<common::VideoFrame>) {
+        let mut cur = self.video.lock();
+        if cur.as_ref().map(|f| f.sequence) != frame.as_ref().map(|f| f.sequence) {
+            *cur = frame;
         }
     }
 
@@ -1982,6 +2026,8 @@ fn run(
     // What the bus is subscribed to, kept outside the graph because the bus
     // is a node and a rebuild can hand back a new one.
     let mut calls = BusSettings::default();
+    // The same for the video bus: what is being watched outlives the node.
+    let mut watching: Vec<crate::videobus::Rule> = vec![crate::videobus::Rule::Everything];
     let mut call_dir: Option<std::path::PathBuf> = None;
     let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
@@ -2400,6 +2446,15 @@ fn run(
                         b.bus_mut().set_subscriptions(subs);
                     }
                 }
+                // Kept here as well as on the node, for the same reason the
+                // call subscriptions are: a rebuild must not silently change
+                // what is being watched.
+                Cmd::WatchVideo(rules) => {
+                    watching = rules.clone();
+                    if let Some(b) = rx.video_mut() {
+                        b.bus_mut().set_rules(rules);
+                    }
+                }
                 Cmd::StopPlay => {
                     if let Some(b) = rx.audio_mut() {
                         b.bus_mut().stop_replay();
@@ -2515,6 +2570,9 @@ fn run(
             // A bus built afresh is subscribed to nothing, exactly as the
             // capture comes back switched off.
             calls.apply(&mut rx);
+            if let Some(b) = rx.video_mut() {
+                b.bus_mut().set_rules(watching.clone());
+            }
             // What is running, described the way the view draws it, and
             // what the receiver drew underneath the edits, which is what an
             // edited copy is read against.
@@ -2690,6 +2748,8 @@ fn run(
                 cap.and_then(|c| c.path()).map(|p| p.display().to_string());
         }
         status.logged.store(rx.logged(), Ordering::Relaxed);
+        status.set_video(rx.watched_video());
+        status.set_video_inputs(rx.video_inputs());
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);
         let chans = rx.bank_channels();
