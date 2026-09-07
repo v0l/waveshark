@@ -32,7 +32,17 @@ fn main() {
         iq.len() as f64 / rate
     );
 
-    let mut det = BleDetector::new(rate, center, BleConfig::default());
+    // The data channels are where an extended advertisement puts its
+    // payload, so they are read when asked for: ODID_DATA=1.
+    let cfg = BleConfig {
+        data_channels: std::env::var("ODID_DATA").is_ok(),
+        max_burst_us: std::env::var("ODID_MAXBURST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(BleConfig::default().max_burst_us),
+        ..BleConfig::default()
+    };
+    let mut det = BleDetector::new(rate, center, cfg);
     eprintln!("channels in span: {:?}", det.channels());
     let mut frames = Vec::new();
     for chunk in iq.chunks(1 << 20) {
@@ -64,11 +74,24 @@ fn main() {
             continue;
         }
         drones += 1;
+        // A fixture for the long range path wants the long range packets and
+        // not the two hundred legacy ones alongside them: ODID_ONLY_LR=1.
+        if std::env::var("ODID_ONLY_LR").is_ok() && f.coding.is_none() {
+            continue;
+        }
         // A legacy advertisement is at most 47 bytes at a microsecond a bit,
         // so 400 us covers the longest one; 2 ms of margin either side is the
         // floor the detector takes its noise estimate from.
         let margin = (0.002 * rate) as u64;
-        let len = (0.0004 * rate) as u64;
+        // A long range packet carries the same PDU eight or two times more
+        // slowly, so its samples run that much longer and a window cut for an
+        // uncoded advertisement would take the front of it and nothing else.
+        let spread = match f.coding {
+            Some(dsp::ble_coded::Coding::S8) => 8.0,
+            Some(dsp::ble_coded::Coding::S2) => 2.0,
+            None => 1.0,
+        };
+        let len = ((f.pdu.len() + 16) as f64 * 8.0 * spread * 1e-6 * rate) as u64;
         keep.push((
             f.start_sample.saturating_sub(margin),
             f.start_sample + len + margin,

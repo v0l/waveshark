@@ -288,3 +288,51 @@ uas_id = "123"
 id_type = "utm uuid"
 ua_type = "aeroplane"
 position_reported = false
+
+[[capture]]
+name = "odid_bt5lr_holybro_2474M_20000k.cs8"
+sha256 = "aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0"
+url = "https://nostr.download/aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0.xz"
+compression = "xz"
+center_hz = 2_474_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Open Drone ID over Bluetooth 5 Long Range, from the same Holybro RemoteID
+module as odid_holybro_2431M_20000k.cs8 and on the same bench. HackRF at
+20 MS/s tuned to 2474 MHz, which covers advertising channel 39 and data
+channels 30 to 36.
+
+What is in it is the auxiliary half of extended advertising. On the primary
+channel the module sends an ADV_EXT_IND carrying no payload at all, only a
+pointer to a data channel chosen afresh each time; over 46 seconds those
+pointers named 24 different channels, so a span covering seven of the 37
+catches roughly a fifth of them. The packets kept here are the auxiliary ones
+themselves, eleven AUX_ADV_IND at S=8 on channels 31 to 36, each carrying a
+whole ASTM F3411 message pack: basic id, location, self id and operator id in
+one reception rather than four.
+
+Cut from the 1.8 GB recording by `crates/nodes/examples/odid_probe.rs` with
+ODID_DATA=1 and ODID_ONLY_LR=1, which keeps the long range packets and drops
+the two hundred legacy advertisements alongside them. 329 times smaller, and
+all eleven come back out of the cut.
+
+The evidence is the link layer's CRC-24, computed over a body this project
+did not construct, behind a convolutional code whose Viterbi survivor has to
+be right for the CRC to pass at all. What the module says inside is its
+shipped configuration, so the expectations are thin on purpose; see the
+legacy capture's entry for why.
+
+This capture is also what fixes a size: an uncoded advertisement is at most
+376 us but a message pack at S=8 is about 8.5 ms, and a burst cap of 4 ms cut
+every one of them short while the tiny pointers on the primary channel still
+decoded. A receiver that reads the primary channel and reports nothing from
+the auxiliary one is showing that symptom.
+"""
+
+[capture.expect]
+packs_min = 8
+messages_per_pack = 4
+coding = "S8"
+data_channels = [31, 32, 33, 34, 35, 36]
+uas_id = "123"
