@@ -270,6 +270,9 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
     if let Some(id) = &m.identity {
         s.push_str(&format!(" {id}"));
     }
+    if let Some((_, ta)) = m.sacch {
+        s.push_str(&format!(" phone {} m away", u32::from(ta) * 554));
+    }
     if !m.channels.is_empty() {
         s.push_str(&format!(
             " {} {}",

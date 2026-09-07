@@ -439,6 +439,10 @@ pub struct Message {
     /// signalling and three is short messages. Zero on the broadcast
     /// channel, which addresses nobody.
     pub sapi: u8,
+    /// The power level and timing advance a slow associated channel's
+    /// header carries, where the block came from one. The advance is a range
+    /// to the phone, 554 metres a step, measured again every block.
+    pub sacch: Option<(u8, u8)>,
     /// The phone a dedicated message names, where it names one. This is the
     /// exchange that happens before ciphering starts: a phone arriving on a
     /// signalling channel says who it is, and a network that does not
@@ -458,6 +462,7 @@ impl Message {
             pages: Vec::new(),
             grant: None,
             sapi: 0,
+            sacch: None,
             identity: None,
         }
     }
@@ -535,7 +540,35 @@ fn parse_l3(b: &[u8]) -> Option<Message> {
         (0x06, 0x2B) => Message::named("HandoverCommand", type_id),
         (0x06, 0x15) => Message::named("ClassmarkChange", type_id),
         (0x06, 0x16) => Message::named("ClassmarkEnquiry", type_id),
-        (0x06, 0x06) => Message::named("SI5ter", type_id),
+        // The slow channel that rides alongside a dedicated one repeats the
+        // neighbour list and the cell's identity, so a receiver that joined
+        // a transaction late still learns where it is. Types 5 and 6 exist
+        // only here: they are the same information the broadcast channel
+        // carries, sent again to a phone that is no longer listening to it.
+        (0x06, 0x1D) => {
+            let mut m = Message::named("SI5", type_id);
+            m.channels = body.get(..16).and_then(channels).unwrap_or_default();
+            m.channels_are_neighbours = true;
+            m
+        }
+        (0x06, 0x05) => {
+            let mut m = Message::named("SI5bis", type_id);
+            m.channels = body.get(..16).and_then(channels).unwrap_or_default();
+            m.channels_are_neighbours = true;
+            m
+        }
+        (0x06, 0x06) => {
+            let mut m = Message::named("SI5ter", type_id);
+            m.channels = body.get(..16).and_then(channels).unwrap_or_default();
+            m.channels_are_neighbours = true;
+            m
+        }
+        (0x06, 0x1E) => {
+            let mut m = Message::named("SI6", type_id);
+            m.cell_id = body.get(..2).map(|b| u16::from(b[0]) << 8 | u16::from(b[1]));
+            m.lai = body.get(2..7).and_then(lai);
+            m
+        }
         // Call control and short messages, named only: what they carry is
         // the call itself, and by the time one appears the channel is
         // ciphered.
@@ -558,6 +591,19 @@ fn parse_l3(b: &[u8]) -> Option<Message> {
 /// `None` where the frame carries no message: an unacknowledged fill frame,
 /// a link layer acknowledgement with nothing behind it, or padding.
 pub fn parse_dedicated(block: &[u8]) -> Option<Message> {
+    if let Some(m) = link_frame(block) {
+        return Some(m);
+    }
+    // The slow channel alongside a dedicated one puts two octets in front of
+    // the link layer: the power the network wants the phone to use, and the
+    // timing advance it should transmit at. That advance is a live range to
+    // the phone, remeasured twice a second for as long as the channel is up.
+    let mut m = link_frame(block.get(2..)?)?;
+    m.sacch = Some((block[0] & 0x1F, block[1] & 0x3F));
+    Some(m)
+}
+
+fn link_frame(block: &[u8]) -> Option<Message> {
     let (&address, &control, &length) = (block.first()?, block.get(1)?, block.get(2)?);
     // Bits 4 and 3 of the address are the service access point: zero is
     // signalling, three is short messages. The rest is the direction bit and
@@ -650,6 +696,7 @@ pub fn parse(block: &[u8]) -> Option<Message> {
         pages: pages(type_id, &block[3..]),
         grant: (type_id == 0x3F).then(|| grant(body)).flatten(),
         sapi: 0,
+        sacch: None,
         identity: None,
     })
 }
@@ -923,6 +970,23 @@ mod tests {
         let m = parse_dedicated(&b).unwrap();
         assert_eq!(m.name, "IdentityResponse");
         assert_eq!(m.identity, Some(Identity::Imsi("272013456789012".into())));
+    }
+
+    /// The slow channel alongside a call: two octets of layer 1 in front of
+    /// the link layer, and the cell repeating its own identity for a phone
+    /// that is no longer listening to the broadcast channel.
+    #[test]
+    fn a_slow_channel_block_carries_a_range_and_the_cell() {
+        // Ordered power level 12, timing advance 5, then a link frame
+        // holding system information type 6.
+        let mut b = vec![0x0C, 0x05, 0x03, 0x03, 12 << 2, 0x06, 0x1E];
+        b.extend_from_slice(&[0x00, 0x01, 0x00, 0xF1, 0x10, 0x00, 0x01]);
+        b.resize(23, 0x2B);
+        let m = parse_dedicated(&b).expect("a message");
+        assert_eq!(m.name, "SI6");
+        assert_eq!(m.sacch, Some((12, 5)));
+        assert_eq!(m.cell_id, Some(1));
+        assert_eq!(m.lai.map(|l| l.to_string()), Some("001-01".into()));
     }
 
     /// A link layer frame with nothing behind it is not a message. A

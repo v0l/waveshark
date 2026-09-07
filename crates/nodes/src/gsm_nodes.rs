@@ -275,6 +275,11 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(id) = &msg.identity {
         fields.push(("phone".into(), Value::Text(id.to_string())));
     }
+    if let Some((power, ta)) = msg.sacch {
+        fields.push(("ordered_power".into(), Value::Int(i64::from(power))));
+        fields.push(("timing_advance".into(), Value::Int(i64::from(ta))));
+        fields.push(("range_m".into(), Value::Int(i64::from(ta) * 554)));
+    }
     if msg.sapi != 0 {
         fields.push(("sapi".into(), Value::Int(i64::from(msg.sapi))));
     }
@@ -324,6 +329,9 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     }
     if let Some(id) = &msg.identity {
         detail.push_str(&format!(" {id}"));
+    }
+    if let Some((_, ta)) = msg.sacch {
+        detail.push_str(&format!(" {} m away", u32::from(ta) * 554));
     }
     if let Some(g) = msg.grant {
         detail.push_str(&format!(" {} sub {} TS {}", g.kind, g.subchannel, g.timeslot));
