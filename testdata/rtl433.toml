@@ -460,3 +460,27 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-b
 reference_sha256 = "9ae83df069391f8d45fa902ca345e1e9b3d4509e1b7c35c21c5bcc86f5c901d3"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/master/tests/m-bus/04/g001_868.9M_1000k.json"
 description = "Techem meter, mode T"
+
+[[sample]]
+name = "wmbus_kam_c_868.6M_1000k.cu8"
+sha256 = "f05d11a80cb53874cab33e27a774da9b345806f01f30b2fcdc00fc272b0636e3"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g001_868.6M_1000k.cu8"
+reference_sha256 = "e345f0a00e47ca672ab60cf38ae6f96700a3690c0004138c8e4b9212424cba5d"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g001_868.6M_1000k.json"
+description = "Kamstrup cold water meter, mode C: bytes sent raw rather than through the 3-of-6 code, which is what distinguishes C from the four mode T captures above. Its extended link layer is unencrypted"
+
+[[sample]]
+name = "wmbus_kaw_c_868.6M_1000k.cu8"
+sha256 = "727e31910d73ac2912e4bf4f91a0ba73d32914b77e76b49c56c980fb1838e47e"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g002_868.6M_1000k.cu8"
+reference_sha256 = "0d73df60e74ce56e512b0c9778d8e2fdc85666bae426a1d70b59c22871b74e0c"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g002_868.6M_1000k.json"
+description = "A second mode C meter, this one AES encrypted at the link layer, so what reports is who sent it and nothing else. The longest mode C frame here at 79 payload bytes, so it exercises more than one block CRC"
+
+[[sample]]
+name = "wmbus_kam_c2_868.6M_1000k.cu8"
+sha256 = "88efe903122fdf51ed80deaa49a182fcbf0281de96185d1bf1c402dcdfbf32de"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g003_868.6M_1000k.cu8"
+reference_sha256 = "ad4a4f50ca1a448b5b0cee1ffc841de0475336c083d439c9b731704d6ebb9269"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g003_868.6M_1000k.json"
+description = "The same Kamstrup meter transmitting again, differing only in its access counter, which is the check that a decode reads the frame rather than a constant"

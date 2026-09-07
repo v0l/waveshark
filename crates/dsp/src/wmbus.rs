@@ -15,13 +15,11 @@
 //! meter's number, the kind of meter, and where the encrypted part starts,
 //! is the decode crate's business.
 //!
-//! Verified against rtl_433's recordings of four meters in mode T: a Diehl
-//! and a Techem water meter, a Bernina/BMeters water meter, and an Itron
-//! component behind a repeater. Mode C's frame layout is decoded and its
-//! CRC checked, but the C recordings do not yet demodulate here: their
-//! signal needs a slicer this one does not have, and a frame the receiver
-//! cannot recover is not claimed. Mode S, the older 32.768 kchip/s
-//! Manchester mode, is not here either: nothing recorded it.
+//! Verified against rtl_433's recordings of seven meters: four in mode T,
+//! a Diehl and a Techem water meter, a Bernina/BMeters water meter and an
+//! Itron component behind a repeater, and three in mode C from two
+//! Kamstrup water meters. Mode S, the older 32.768 kchip/s Manchester
+//! mode, is not here: nothing recorded it.
 
 use common::C32;
 
