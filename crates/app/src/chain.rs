@@ -2477,7 +2477,10 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             .any(|s| TRACK_SOURCES.contains(&s.kind.as_str()) || s.kind == "feed");
         if makes_tracks {
             let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
-            p.connect(Source::Stage(bus, 0), (t, 0));
+            // Downstream of the protocols and not beside them: the packets
+            // that arrive here carry what they decoded to, so the map reads
+            // one decode rather than parsing the frame a second time.
+            p.connect(Source::Stage(decode, 0), (t, 0));
         }
 
         // The device database is another consumer of the bus, and it is in
@@ -2485,7 +2488,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // file is a setting on a node that is already there, so turning it on
         // mid-drive does not rebuild the receiver under the packets.
         let survey = p.add_derived(derived::SURVEY, "survey", Settings::new());
-        p.connect(Source::Stage(bus, 0), (survey, 0));
+        p.connect(Source::Stage(decode, 0), (survey, 0));
     }
 
     p
@@ -4360,20 +4363,29 @@ mod tests {
 
     #[test]
     fn a_view_reads_the_bus_rather_than_the_demodulator() {
-        // The whole shape of it: sources feed the log, consumers hang off the
-        // far side. A view wired straight to a demodulator would have to be
-        // rebuilt for every new source, and would see nothing when the source
-        // it knew about was not running.
+        // The whole shape of it: sources feed the log, the protocols run once
+        // over everything on it, and consumers hang off the far side of
+        // those. A view wired straight to a demodulator would have to be
+        // rebuilt for every new source and would see nothing when the source
+        // it knew about was not running; one wired to the bus ahead of the
+        // protocols would have to decode the frame for itself.
         let mut p = plan(2_400_000.0, Hz::mhz(1090));
         p.fronts = vec![anywhere(Front::ModeS)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
+        let decode = topo.nodes.iter().find(|n| n.label == "Protocols").expect("the protocols");
         let tracker = topo.nodes.iter().find(|n| n.label == "Tracks").expect("a tracker");
-        let from_bus = bus.outputs.iter().any(|(slot, _)| {
-            tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot)
-        });
-        assert!(from_bus, "the flight list is not fed by the bus");
+        let bus_to_decode = bus
+            .outputs
+            .iter()
+            .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(bus_to_decode, "the protocols are not fed by the bus");
+        let from_decode = decode
+            .outputs
+            .iter()
+            .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(from_decode, "the flight list is not fed by the decoded bus");
         assert_eq!(tracker.inputs[0].1.kind, pipeline::PortKind::Packets);
     }
 
@@ -4398,11 +4410,19 @@ mod tests {
             .iter()
             .any(|(slot, _)| bus.inputs.iter().any(|(in_slot, _)| in_slot == slot));
         assert!(to_bus, "AIS does not reach the bus");
-        let from_bus = bus
+        // And the tracker reads the far side of the protocols, which is the
+        // bus with what each packet decoded to on it.
+        let decode = topo.nodes.iter().find(|n| n.label == "Protocols").expect("the protocols");
+        let bus_to_decode = bus
+            .outputs
+            .iter()
+            .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
+        assert!(bus_to_decode, "the protocols are not fed by the bus");
+        let from_decode = decode
             .outputs
             .iter()
             .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(from_bus, "the tracker is not fed by the bus");
+        assert!(from_decode, "the tracker is not fed by the decoded bus");
     }
 
     /// A span wide enough for two protocols runs both of them, and both

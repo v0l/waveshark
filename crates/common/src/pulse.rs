@@ -5,7 +5,7 @@
 //! happens to produce them. The detector lives in `dsp`; the shape of what it
 //! emits belongs to everybody.
 
-use crate::C32;
+use crate::{Decoded, C32};
 
 /// One mark/gap pair, in microseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +220,20 @@ pub struct Packet {
     /// minute of speech is megabytes, and the log, the player and anything
     /// writing it to a file all want the one copy.
     pub audio: Option<std::sync::Arc<Speech>>,
+    /// What the protocols made of it, filled in by the one stage that runs
+    /// them and read by everything downstream.
+    ///
+    /// A conclusion travelling *beside* its evidence, never in place of it:
+    /// the timings and the bytes are still here, so a decode can be checked
+    /// against them or made again by a decoder written later. Empty until the
+    /// protocols node has seen the packet, and empty afterwards for a burst
+    /// nothing claimed.
+    ///
+    /// This is what stops each view parsing for itself. The map used to
+    /// re-parse ADS-B, AIS and APRS, and the device database ran the whole
+    /// table a second time, so a decoder fix reached the packet list and not
+    /// the map until somebody noticed.
+    pub decodes: Vec<Decoded>,
     /// What the burst was measured to be, when something measured it before
     /// deciding how to read it. Travels with the timings because it is
     /// evidence about the same burst: a chirp's sweep rate or a keyed
@@ -425,6 +439,7 @@ impl Packet {
             iq: None,
             audio: None,
             measure: None,
+            decodes: Vec::new(),
         }
     }
 
@@ -437,6 +452,7 @@ impl Packet {
             iq: None,
             audio: None,
             measure: None,
+            decodes: Vec::new(),
         }
     }
 
