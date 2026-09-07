@@ -151,6 +151,29 @@ invisible on synthesised M17.
    cut those, or the whole band appears to switch on at once and every source
    opens in the same frame.
 
+   `cargo run --release -p sources --example cut` does both cuts. With
+   `--bursts` it keeps the samples the transmissions were in and drops the
+   silence, which on a packet capture is most of the file: the BLE fixture is
+   a seventeenth of what was recorded and every packet still decodes. With
+   `--seconds N` (and `--skip N`) it keeps a window, which is all a continuous
+   signal allows. It copies bytes straight out of the input, so the output is
+   the same recording at the same scale.
+
+   Two things to check before uploading a cut. The margin either side of a
+   burst is not decoration: a detector takes its noise floor from a percentile
+   of the file, so cutting too close moves the floor and the capture stops
+   being evidence of what it was evidence of. The BLE capture reads five of
+   eleven packets as MSK with 4 ms of margin, as it did uncut, and six of
+   eleven with 2 ms. And every join is a discontinuity: cutting the 1090 MHz
+   capture close manufactured a Mode S frame out of a splice, which is why
+   that one is uploaded whole. Run the tests that use the capture before and
+   after and expect the same numbers, not merely a pass.
+
+   Cut for what is in the file as well as for its size. A recording is of a
+   real band at a real place and time, and whatever the test does not look at
+   is published anyway. Where the identity is the evidence, say so in the
+   description rather than pretending otherwise.
+
 2. **Name it so the file carries its own metadata.**
    `<what>_<centre>M_<rate>k.<format>`, for example
    `m17_openrtx_434.02M_2400k.cu8`. `sources::parse_filename` reads the centre
