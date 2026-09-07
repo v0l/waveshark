@@ -43,6 +43,13 @@ pub enum PartyKind {
     Broadcast,
     /// A base station, repeater or gateway, where the protocol says so.
     Infrastructure,
+    /// A name the system hands out and takes back: a GSM temporary
+    /// subscriber identity, reallocated as a phone moves.
+    ///
+    /// A party for as long as it lasts and never a device. Two sightings of
+    /// one of these are not evidence of the same handset, and a survey that
+    /// treated them as an identity would fill with ghosts.
+    Temporary,
 }
 
 impl Party {
@@ -56,6 +63,10 @@ impl Party {
 
     pub fn infrastructure(id: impl Into<String>) -> Self {
         Self { kind: PartyKind::Infrastructure, id: id.into() }
+    }
+
+    pub fn temporary(id: impl Into<String>) -> Self {
+        Self { kind: PartyKind::Temporary, id: id.into() }
     }
 
     pub fn broadcast() -> Self {

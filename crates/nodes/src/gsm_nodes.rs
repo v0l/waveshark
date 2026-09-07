@@ -212,10 +212,20 @@ fn snr_of(quality: f32) -> f32 {
 }
 
 pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    gsm_rows(bytes, center).into_iter().next()
+}
+
+/// What one block says, as rows.
+///
+/// Usually one. A paging request names up to four phones in a single
+/// message, and each of those is a link between the cell and one handset, so
+/// it becomes a row each: the same shape POCSAG has, where a transmitter
+/// empties its queue in one go and the queue is what a reader wants.
+pub fn gsm_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
     match bytes.len() {
-        4 => sync_decoded(bytes, center),
-        gsm::bcch::BLOCK_BYTES => block_decoded(bytes, center),
-        _ => None,
+        4 => sync_decoded(bytes, center).into_iter().collect(),
+        gsm::bcch::BLOCK_BYTES => block_rows(bytes, center),
+        _ => Vec::new(),
     }
 }
 
@@ -257,14 +267,17 @@ fn sync_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     )
 }
 
-fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
     use common::Value;
     // Two kinds of block share one length. A broadcast block addresses
     // nobody and starts with a pseudo length; a block off a channel the cell
     // assigned has a link layer in front of it. The broadcast reading is
     // tried first because it is the more specific claim: it requires the
     // radio resource discriminator in a fixed place.
-    let msg = decode::gsm::parse(bytes).or_else(|| decode::gsm::parse_dedicated(bytes))?;
+    let Some(msg) = decode::gsm::parse(bytes).or_else(|| decode::gsm::parse_dedicated(bytes))
+    else {
+        return Vec::new();
+    };
     let mut fields: Vec<(String, Value)> = vec![
         ("message".into(), Value::Text(msg.name.into())),
         ("message_type".into(), Value::Int(i64::from(msg.type_id))),
@@ -394,13 +407,45 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         // Forty bits of Fire code held over the block before it left the
         // demodulator.
         .with_crc(Some(true));
-    if let Some(p) = party {
-        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(p)));
+    if let Some(p) = &party {
+        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::infrastructure(
+            p.clone(),
+        )));
     }
     if let Some(who) = who {
         d = d.by(who);
     }
-    Some(d)
+
+    // A page is a link: this cell calling one handset. One row each, because
+    // a link is a pair and a message that names four phones is four calls.
+    // The identity is the phone's, and what kind it is matters: a temporary
+    // one is reallocated, so it is a party for as long as it lasts and never
+    // a device. Neither is: the cell transmits, the phone is only spoken of.
+    if !msg.pages.is_empty() {
+        let cell = pipeline::event::Party::infrastructure(
+            party.clone().unwrap_or_else(|| format!("{:.1} MHz", center.as_f64() / 1e6)),
+        );
+        let rows: Vec<Decoded> = msg
+            .pages
+            .iter()
+            .map(|id| {
+                let to = match id {
+                    decode::gsm::Identity::Tmsi(_) => {
+                        pipeline::event::Party::temporary(id.to_string())
+                    }
+                    _ => pipeline::event::Party::unit(id.to_string()),
+                };
+                let mut r = d.clone();
+                r.detail = Some(format!("{} {id}", msg.name));
+                r.fields.retain(|(k, _)| k != "paging");
+                r.fields.push(("paged".into(), Value::Text(id.to_string())));
+                r.link = Some(pipeline::event::Link::between(cell.clone(), to));
+                r
+            })
+            .collect();
+        return rows;
+    }
+    vec![d]
 }
 
 #[cfg(test)]
@@ -576,4 +621,31 @@ mod tests {
         // floor rather than a divide by zero.
         (0..n).map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.05).collect()
     }
+    /// A page is a call from a cell to one handset, so a request naming two
+    /// is two rows and two links. The phone is a party and never a device:
+    /// the cell transmitted, the phone was only spoken of, and a temporary
+    /// identity is one the network hands back.
+    #[test]
+    fn a_paging_request_becomes_a_link_per_phone() {
+        use pipeline::event::PartyKind;
+        let mut b = vec![0x2D, 0x06, 0x21, 0x00];
+        b.extend_from_slice(&[0x05, 0xF4, 0x00, 0x00, 0x00, 0x01]);
+        b.extend_from_slice(&[0x17, 0x08, 0x29, 0x27, 0x10, 0x43, 0x65, 0x87, 0x09, 0x21]);
+        b.resize(23, 0x2B);
+
+        let rows = gsm_rows(&b, Hz(947_400_000));
+        assert_eq!(rows.len(), 2, "a request naming two phones is two rows");
+        let to: Vec<_> = rows.iter().filter_map(|r| r.link.as_ref()?.to.clone()).collect();
+        assert_eq!(to[0].kind, PartyKind::Temporary, "a TMSI is not a lasting name");
+        assert_eq!(to[0].id, "TMSI 00000001");
+        assert_eq!(to[1].kind, PartyKind::Unit);
+        assert_eq!(to[1].id, "IMSI 272013456789012");
+        // The cell is the end that transmitted, and it is infrastructure.
+        let from = rows[0].link.as_ref().and_then(|l| l.from.clone()).expect("a cell");
+        assert_eq!(from.kind, PartyKind::Infrastructure);
+        // And neither phone is a device: nothing here identified itself to
+        // this receiver.
+        assert!(rows.iter().all(|r| r.identity.is_none()));
+    }
+
 }
