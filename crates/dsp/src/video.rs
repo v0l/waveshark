@@ -262,6 +262,9 @@ pub struct SyncSeparator {
     /// Whether the level tracker has seen enough to be trusted.
     primed: bool,
     hist: Vec<f32>,
+    /// Samples since a field last completed, which is how a lost picture is
+    /// told from a running one.
+    since_field: usize,
     /// Samples of a run below the sync threshold, for telling a horizontal
     /// pulse from a vertical one.
     low_run: usize,
@@ -346,6 +349,7 @@ impl SyncSeparator {
             lines_seen: 0,
             primed: false,
             hist: Vec::new(),
+            since_field: 0,
             low_run: 0,
             smooth: Vec::new(),
             smooth_at: 0,
@@ -395,14 +399,53 @@ impl SyncSeparator {
     /// washes the picture out: at the 30th percentile a full-scale ramp came
     /// back peaking at 61%.
     fn prime(&mut self) {
-        let mut v = self.hist.clone();
+        let Some((tip, black)) = Self::levels_of(&self.hist) else { return };
+        self.sync_level = tip;
+        self.black_level = black;
+        self.primed = self.black_level > self.sync_level;
+    }
+
+    /// The sync tip and blanking level of a stretch of baseband, as
+    /// percentiles: sync is the bottom 2% of every line and blanking the
+    /// bottom 13%, which is what the shape of composite video makes them.
+    fn levels_of(samples: &[f32]) -> Option<(f32, f32)> {
+        if samples.len() < 100 {
+            return None;
+        }
+        let mut v = samples.to_vec();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if v.len() < 100 {
+        Some((v[v.len() / 50], v[v.len() * 13 / 100]))
+    }
+
+    /// Measure the levels again when the picture has stopped arriving.
+    ///
+    /// They are measured once, and on the air they go stale: a transmitter
+    /// fades, the receiver's gain moves, the tuner drifts, and the whole
+    /// baseband shifts with them. The threshold then sits above blanking or
+    /// below the sync tip, no run is long enough to be a pulse, and the
+    /// picture stops for good with the separator still believing it is
+    /// primed. Three field periods of nothing is that, and nothing else: a
+    /// camera sends one every twenty milliseconds, and a link too weak to
+    /// hold sync gets the same treatment, which costs a re-measurement it
+    /// was not going to use anyway.
+    ///
+    /// Re-measured rather than tracked continuously. The percentiles that
+    /// find blanking hold over a field and a half of anything; over a
+    /// shorter window of a bright picture they land inside the picture
+    /// instead, and following them there washes the whole thing white.
+    fn relevel(&mut self, seen: usize) {
+        self.since_field += seen;
+        let field_s = self.standard.line_s() * (self.standard.lines() / 2) as f64;
+        if (self.since_field as f64) < 3.0 * field_s * self.rate {
             return;
         }
-        self.sync_level = v[v.len() / 50];
-        self.black_level = v[v.len() * 13 / 100];
-        self.primed = self.black_level > self.sync_level;
+        self.since_field = 0;
+        self.primed = false;
+        self.hist.clear();
+        self.lines.clear();
+        self.chroma.clear();
+        self.lines_seen = 0;
+        self.last_axis = None;
     }
 
     fn threshold(&self) -> f32 {
@@ -428,6 +471,7 @@ impl SyncSeparator {
 
     /// Feed demodulated baseband. Whole fields come back as they complete.
     pub fn process(&mut self, baseband: &[f32], out: &mut Vec<Field>) {
+        let before = out.len();
         let mut filtered: Vec<f32> = Vec::with_capacity(baseband.len());
         for &x in baseband {
             let v = self.smoothed(x);
@@ -436,6 +480,7 @@ impl SyncSeparator {
         let raw = baseband;
         let baseband = &filtered[..];
         if !self.primed {
+            self.since_field = 0;
             self.hist.extend_from_slice(baseband);
             // A field and a half, so the sample includes sync, blanking and
             // picture whatever the phase.
@@ -485,6 +530,13 @@ impl SyncSeparator {
             self.line_start = self.sample;
             self.take_line(run, start);
             self.since_sync = 0;
+        }
+        // A picture that stopped arriving is a picture whose levels have
+        // gone stale; see `relevel`.
+        if out.len() > before {
+            self.since_field = 0;
+        } else {
+            self.relevel(baseband.len());
         }
     }
 
@@ -1011,5 +1063,32 @@ mod tests {
             f.width as f32 / (f.height as f32 * 2.0),
             "the sample grid decided the shape"
         );
+    }
+
+    /// The levels are measured again when the picture stops, or a receiver
+    /// whose gain moves slices at the wrong height and the picture is gone
+    /// for good with the separator still believing it is primed.
+    #[test]
+    fn a_picture_comes_back_after_the_level_moves_under_it() {
+        let rate = 20e6;
+        let mut base = synth(Standard::Pal, rate, 24, true);
+        // Half way through, the whole baseband shifts and shrinks: a fade, a
+        // gain step, or a tuner that drifted.
+        let half = base.len() / 2;
+        for x in &mut base[half..] {
+            *x = *x * 0.6 - 0.25;
+        }
+        let mut sep = SyncSeparator::new(rate, Standard::Pal, 640);
+        let mut fields = Vec::new();
+        // In blocks, the way the graph feeds it.
+        for block in base.chunks(16_384) {
+            sep.process(block, &mut fields);
+        }
+        // Half the fields are before the step. What matters is that they
+        // start again after it: without the re-measurement the separator
+        // produced the first eleven and then nothing at all, for good.
+        assert!(fields.len() > 13, "only {} fields, so the level step lost it", fields.len());
+        let last = fields.last().expect("a field after the step");
+        assert!(last.lines_seen > 200, "{} lines after the step", last.lines_seen);
     }
 }

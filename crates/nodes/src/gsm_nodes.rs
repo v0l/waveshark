@@ -119,10 +119,10 @@ impl Simple for GsmNode {
             // common control channels carry. Both are bytes on the bus and
             // the length is what tells them apart, which is the same job the
             // band does for everything else on it.
-            let (bytes, start, len) = match hit {
+            let (bytes, start, len, quality) = match hit {
                 Hit::Sync(s) => {
                     let Some(b) = sch::pack(&s.sch) else { continue };
-                    (b.to_vec(), s.start_sample, s.samples)
+                    (b.to_vec(), s.start_sample, s.samples, s.quality)
                 }
                 Hit::Block(b) => {
                     // A block off the beacon's own timeslot may be an
@@ -146,7 +146,7 @@ impl Simple for GsmNode {
                             self.det.follow(g.timeslot);
                         }
                     }
-                    (b.bytes.to_vec(), b.start_sample, b.samples)
+                    (b.bytes.to_vec(), b.start_sample, b.samples, b.quality)
                 }
             };
             self.accepted += 1;
@@ -154,7 +154,11 @@ impl Simple for GsmNode {
             // channel it arrived in, and without emptying the ring: a
             // synchronisation burst and the block it announced can both come
             // out of one block of samples.
-            out.push(self.meter.frame_at(bytes, start, len).at(self.channel_hz as u64));
+            out.push(
+                self.meter
+                    .frame_measured(bytes, start, len, snr_of(quality))
+                    .at(self.channel_hz as u64),
+            );
         }
         Ok(())
     }
@@ -194,6 +198,19 @@ impl Simple for GsmNode {
 /// this is comes from the length, because that is what the front end put on
 /// the bus: four bytes is the synchronisation field, 23 is a control channel
 /// block.
+/// What a training sequence fit says about the signal to noise ratio.
+///
+/// `quality` is the fraction of the burst's power the channel estimate
+/// explains, so the rest is noise, interference and whatever the five taps
+/// could not model: the ratio is `q / (1 - q)`. Measured rather than
+/// inferred from a level, which on a carrier that transmits continuously has
+/// no quiet part to be measured against. Capped at 40 dB because a perfect
+/// fit is a short burst that happened to agree, not a perfect channel.
+fn snr_of(quality: f32) -> f32 {
+    let q = quality.clamp(0.0, 0.999);
+    (10.0 * (q / (1.0 - q)).max(1e-3).log10()).clamp(-10.0, 40.0)
+}
+
 pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     match bytes.len() {
         4 => sync_decoded(bytes, center),
@@ -464,12 +481,18 @@ mod tests {
         }
 
         assert_eq!(frames.len(), 2, "expected both bursts off the air");
+        // Every burst carries what it was heard at, measured where it sat
+        // rather than over the block it arrived in. Both of these, not just
+        // the first: the level used to be taken from the block and then
+        // cleared, so a second burst out of one block reported -200 dBFS,
+        // and the ratio came from a noise floor that on a carrier which
+        // never stops is the carrier itself, so it read nought.
+        for f in &frames {
+            assert!(f.rssi_dbfs.is_finite() && f.rssi_dbfs > -100.0, "level {}", f.rssi_dbfs);
+            assert!(f.snr_db.is_finite() && f.snr_db > 0.0, "snr {}", f.snr_db);
+            assert!(f.iq.is_some(), "a burst with no samples behind it");
+        }
         let f = &frames[0];
-        // Every packet carries what it was heard at, measured on the channel
-        // rather than on the span.
-        assert!(f.rssi_dbfs.is_finite(), "level {}", f.rssi_dbfs);
-        assert!(f.snr_db.is_finite() && f.snr_db > 0.0, "snr {}", f.snr_db);
-        assert!(f.iq.is_some(), "a burst with no samples behind it");
 
         let d = gsm_decoded(&f.bytes, Hz(f.center_hz)).expect("a row");
         assert_eq!(d.detail.as_deref(), Some("ARFCN 62 BSIC 26 frame 11965"));
