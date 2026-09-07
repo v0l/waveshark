@@ -9,7 +9,7 @@ the [README](../README.md).
 | crate | what it does |
 |---|---|
 | `common` | sample buffers, `Device`/`RxStream`/`TxStream` traits, `Hz`/`Sps` units |
-| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM/SSB demod, FM stereo, RDS, DC blocker, burst detector and classifier, source detector and extractor, OOK/ASK/FSK pulse extraction, C4FM, GMSK, HDLC, Mode S |
+| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM/SSB demod, FM stereo, RDS, DC blocker, burst detector and classifier, source detector and extractor, OOK/ASK/FSK pulse extraction, C4FM, GMSK, HDLC, Mode S, GSM tone search and synchronisation burst |
 | `pipeline` | the flow graph: typed DAG, rate negotiation, stream tags, events |
 | `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders, and the frame layers of ADS-B, AIS, APRS, POCSAG, DMR, TETRA, M17, LoRa and the mesh protocols |
 | `nodes` | DSP and decoders as graph nodes, the registry, the auto node, the wideband channel bank, the modulators and the transmit sinks |

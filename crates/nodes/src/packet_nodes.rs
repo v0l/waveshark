@@ -293,6 +293,15 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
         }
         return;
     }
+    // A GSM synchronisation burst arrives from a downlink band, and what it
+    // carries is a field of 25 bits that had to pass the standard's parity to
+    // reach the bus at all.
+    if dsp::gsm::is_downlink_band(p.center_hz() as f64) {
+        if let Some(d) = crate::gsm_nodes::gsm_decoded(bytes, center) {
+            hits.push(d);
+        }
+        return;
+    }
     if dsp::ais::is_ais_band(p.center_hz() as f64) {
         let Ok(frame) = decode::ais::parse(bytes) else { return };
         hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
