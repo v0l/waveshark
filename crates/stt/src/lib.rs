@@ -12,9 +12,7 @@
 mod model;
 mod whisper;
 
-#[cfg(feature = "hub")]
-pub use model::fetch;
-pub use model::{Files, Flavour};
+pub use model::{ensure, fetch, Files, Flavour, DEFAULT_REPO};
 pub use whisper::{Segment, Transcript, Whisper};
 
 /// What Whisper wants, and what the codecs give us.
@@ -35,6 +33,45 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_default()
+}
+
+/// The fastest device candle was built for and can actually run on.
+///
+/// CUDA where the build asked for it, Metal on a Mac, and the CPU otherwise.
+/// A GPU that fails is not an error worth stopping for: Whisper runs on the
+/// CPU, slower, and a slow transcript beats none.
+///
+/// Opening the device is not the test. A driver older than the toolkit the
+/// kernels were built with opens happily and then fails on the first launch
+/// with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, which measured here is what a
+/// current card and a candle built against CUDA 13 do, so the check is a real
+/// multiplication.
+pub fn best_device() -> candle_core::Device {
+    #[cfg(feature = "cuda")]
+    if let Ok(d) = candle_core::Device::new_cuda(0) {
+        if runs(&d) {
+            return d;
+        }
+        tracing::warn!("CUDA opened but cannot run kernels; transcribing on the CPU");
+    }
+    #[cfg(target_vendor = "apple")]
+    if let Ok(d) = candle_core::Device::new_metal(0) {
+        if runs(&d) {
+            return d;
+        }
+        tracing::warn!("Metal opened but cannot run kernels; transcribing on the CPU");
+    }
+    candle_core::Device::Cpu
+}
+
+/// Whether a device can do the smallest thing the model will ask of it.
+#[allow(dead_code)]
+fn runs(d: &candle_core::Device) -> bool {
+    let go = || -> candle_core::Result<f32> {
+        let a = candle_core::Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], d)?;
+        a.matmul(&a)?.sum_all()?.to_scalar::<f32>()
+    };
+    go().is_ok()
 }
 
 /// Resample to [`RATE`], which is what every entry point here expects.

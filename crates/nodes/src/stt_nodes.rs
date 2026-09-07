@@ -42,6 +42,8 @@ struct Pending {
 
 pub struct TranscribeNode {
     dir: PathBuf,
+    /// Which model to fetch when the directory is empty.
+    repo: String,
     language: Option<String>,
     enabled: bool,
     /// Shorter than this and there is nothing for a model to read: a 200 ms
@@ -67,6 +69,7 @@ impl TranscribeNode {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
+            repo: stt::DEFAULT_REPO.to_string(),
             language: Some("en".into()),
             enabled: true,
             min_speech_s: 0.4,
@@ -76,6 +79,12 @@ impl TranscribeNode {
             next_id: 0,
             reported: false,
         }
+    }
+
+    /// Which model to fetch when the directory holds none.
+    pub fn model(mut self, repo: &str) -> Self {
+        self.repo = repo.to_string();
+        self
     }
 
     pub fn language(mut self, l: Option<&str>) -> Self {
@@ -88,10 +97,11 @@ impl TranscribeNode {
             let (jobs_tx, jobs_rx) = bounded::<Job>(64);
             let (done_tx, done_rx) = bounded::<Done>(64);
             let dir = self.dir.clone();
+            let repo = self.repo.clone();
             let language = self.language.clone();
             std::thread::Builder::new()
                 .name("whisper".into())
-                .spawn(move || run_worker(dir, language, jobs_rx, done_tx))
+                .spawn(move || run_worker(dir, repo, language, jobs_rx, done_tx))
                 .ok()?;
             self.worker = Some(Worker {
                 jobs: jobs_tx,
@@ -223,6 +233,17 @@ impl Simple for TranscribeNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
             "enabled" => self.enabled = v.as_bool().unwrap_or(self.enabled),
+            "model" => {
+                if let Some(t) = v.as_str() {
+                    if t != self.repo {
+                        self.repo = t.to_string();
+                        // The worker holds the old weights, so it goes and
+                        // the next call starts a new one.
+                        self.worker = None;
+                        self.reported = false;
+                    }
+                }
+            }
             "min_speech_s" => self.min_speech_s = v.as_f64().unwrap_or(self.min_speech_s),
             "max_wait_s" => self.max_wait_s = v.as_f64().unwrap_or(self.max_wait_s),
             _ => {
@@ -264,9 +285,18 @@ fn attach(p: &mut Packet, t: &stt::Transcript) {
     p.decodes.push(d);
 }
 
-fn run_worker(dir: PathBuf, language: Option<String>, jobs: Receiver<Job>, done: Sender<Done>) {
-    let loaded = stt::Files::in_dir(&dir)
-        .and_then(|f| stt::Whisper::load(&f, candle_core::Device::Cpu, language.as_deref()));
+fn run_worker(
+    dir: PathBuf,
+    repo: String,
+    language: Option<String>,
+    jobs: Receiver<Job>,
+    done: Sender<Done>,
+) {
+    // Fetched here rather than at startup: the thread is spawned by the first
+    // call long enough to read, so a receiver that hears no speech never
+    // reaches the network, and one that does waits for a download once.
+    let loaded = stt::ensure(&repo, &dir)
+        .and_then(|f| stt::Whisper::load(&f, stt::best_device(), language.as_deref()));
     let mut model = match loaded {
         Ok(m) => m,
         Err(e) => {
