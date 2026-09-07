@@ -53,6 +53,10 @@ tea = ["nodes/tea", "decode/tea"]
 # DMR speech decode through the AMBE vocoder (patent-encumbered, off by
 # default). Turns on `nodes/ambe`.
 ambe = ["nodes/ambe"]
+# Transcribe decoded speech with a local Whisper model. Off by default: it
+# pulls candle and a tokenizer into the build, and the receiver needs a model
+# directory before it does anything.
+stt = ["nodes/stt"]
 
 [[example]]
 name = "lime"

@@ -672,6 +672,15 @@ pub struct ChannelSpec {
     /// None leaves the mode's own default.
     pub squelch_db: Option<f32>,
     pub agc: bool,
+    /// Treat what is heard here as speech: end an over on the squelch, put
+    /// the transmission on the packet bus with its audio, and list it as a
+    /// call.
+    ///
+    /// A property of the channel rather than of the mode, because the mode
+    /// cannot know: NFM carries a repeater, a telemetry link and a paging
+    /// tone alike, and only whoever tuned it knows which. What it costs when
+    /// it is wrong is rows in the call list for something nobody said.
+    pub voice: bool,
     /// What this channel does when it is keyed, or `None` for a channel that
     /// only listens, which is every channel until somebody says otherwise.
     ///
@@ -1849,6 +1858,7 @@ impl Audio {
             volume: 1.0,
             muted: false,
             squelch_db: None,
+            voice: false,
             agc: true,
             tx: None,
         };
@@ -3002,6 +3012,7 @@ pub(crate) mod tests {
             volume: 1.0,
             muted: false,
             squelch_db: None,
+            voice: false,
             agc: true,
             tx: None,
         };
@@ -3695,6 +3706,7 @@ pub(crate) mod tests {
             volume: 1.0,
             muted: false,
             squelch_db: None,
+            voice: false,
             agc: true,
             tx: None,
         }];
@@ -3734,6 +3746,7 @@ pub(crate) mod tests {
             volume: 1.0,
             muted: false,
             squelch_db: None,
+            voice: false,
             agc: true,
             tx: None,
         }];
@@ -4360,6 +4373,7 @@ mod zoom_tests {
             muted: false,
             squelch_db: Some(-200.0),
             agc: false,
+            voice: false,
             tx: None,
         }];
         let mut rx =
