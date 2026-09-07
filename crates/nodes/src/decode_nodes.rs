@@ -816,7 +816,10 @@ impl Simple for BurstRouteNode {
             // chirp swept at 30 MHz per second is a more useful log line than
             // silence, and it is the line somebody starts from when they go
             // looking for a decoder to write.
-            if b.routed_to == "none" && b.class.confidence >= self.report_min_confidence {
+            if b.routed_to == "none"
+                && b.class.confidence >= self.report_min_confidence
+                && b.class.modulation.is_named()
+            {
                 let f = &b.class.features;
                 let mut fields: Vec<(String, common::Value)> = Vec::new();
                 if f.baud > 0.0 {
