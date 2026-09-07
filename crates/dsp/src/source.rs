@@ -565,6 +565,11 @@ struct Track {
     /// Width the source opened at, in hertz, which is what its extraction
     /// was designed for.
     opened_hz: f64,
+    /// Centre the source opened at, in hertz. A transmitter that outgrew
+    /// its extraction leaves that extent; two-level keying does not.
+    opened_center_hz: f64,
+    /// Power-weighted centre of the strongest run matching this frame.
+    frame_centroid: f64,
     /// Centre of the occupied bins at each of the last [`GROWTH_FRAMES`]
     /// matched frames, as a ring. A sweep's centre moves across the band; a
     /// keyed carrier's stays put while its edges flicker as sidebands cross
@@ -1353,6 +1358,10 @@ impl SourceDetector {
                     t.hi_bin = s.hi;
                     t.occ_lo = s.occ_lo;
                     t.occ_hi = s.occ_hi;
+                    // Runs were sorted by peak, so this is the strongest
+                    // this frame: where the signal is, rather than the
+                    // middle of everything it lit up.
+                    t.frame_centroid = s.centroid;
                     t.matched = true;
                     t.faint = s.peak_db < t.src.peak_snr_db - self.cfg.extent_db;
                     t.hits += 1;
@@ -1443,6 +1452,8 @@ impl SourceDetector {
                 born: self.frame,
                 last_frame: self.frame,
                 opened_hz: 0.0,
+                opened_center_hz: 0.0,
+                frame_centroid: s.centroid,
                 centres: [0.0; GROWTH_FRAMES],
                 seen_frames: 0,
                 centroid_sum: s.centroid,
@@ -1517,7 +1528,7 @@ impl SourceDetector {
                         t.src.hi_hz = t.src.hi_hz.max(hi_hz);
                     }
                     let width = t.src.bandwidth_hz();
-                    let centre = (t.occ_lo + t.occ_hi) as f64 / 2.0;
+                    let centre = t.frame_centroid;
                     // Recorded only once the smoother has settled after
                     // opening, when the extent has filled in.
                     let settle = 2 * integrate;
@@ -1533,13 +1544,23 @@ impl SourceDetector {
                     // turned out to have and from where it began.
                     let sweeping =
                         t.seen_frames > settle + GROWTH_FRAMES && (centre - before).abs() >= 4.0;
-                    if sweeping && width > t.opened_hz * regrow + 2.0 * bin_hz {
+                    // Moving inside the extent it opened with is what a
+                    // two-level keyed carrier does: the centroid sits on
+                    // whichever tone is being sent, and on a wM-Bus meter
+                    // those are 100 kHz apart, which read as a sweep and
+                    // reopened the meter as a source three times its width,
+                    // centred between the tones and off the signal, with
+                    // every front end placed for the narrow one dropped.
+                    let centre_hz = (centre + 0.5 - (n / 2) as f64) * bin_hz;
+                    let left = (centre_hz - t.opened_center_hz).abs() > t.opened_hz / 2.0;
+                    if sweeping && left && width > t.opened_hz * regrow + 2.0 * bin_hz {
                         t.seen_frames = 0;
                         events.push(SourceEvent::Superseded(t.src));
                         t.src.id = SourceId(*next_id);
                         *next_id += 1;
                         t.src.center_hz = (t.src.lo_hz + t.src.hi_hz) / 2.0;
                         t.opened_hz = t.src.bandwidth_hz();
+                        t.opened_center_hz = t.src.center_hz;
                         events.push(SourceEvent::Opened(t.src));
                     }
                 } else {
@@ -1556,6 +1577,7 @@ impl SourceDetector {
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = (c + 0.5 - (n / 2) as f64) * bin_hz;
                         t.opened_hz = t.src.bandwidth_hz();
+                        t.opened_center_hz = t.src.center_hz;
                         events.push(SourceEvent::Opened(t.src));
                     }
                 }
@@ -2800,6 +2822,48 @@ mod tests {
         assert!(s.lo_hz < f0 && s.hi_hz > f1, "extent {}..{} misses a tone", s.lo_hz, s.hi_hz);
         let mid = (f0 + f1) / 2.0;
         assert!((s.center_hz - mid).abs() < 4.0 * d.bin_hz(), "centre {} for tones at {f0} and {f1}", s.center_hz);
+    }
+
+    #[test]
+    fn a_long_keyed_burst_is_not_reopened_around_its_splatter() {
+        // A wM-Bus meter: 100 kchip/s keyed 50 kHz either way, held for 16
+        // ms, loud. Its skirts light up most of the span, and the centre of
+        // everything lit wanders as they come and go, which read as a
+        // transmitter that had outgrown its extraction: the source was
+        // reopened three times as wide, centred off the signal, and every
+        // front end placed on the narrow one went with it. rtl_433's mode C
+        // captures decoded only once this stopped.
+        let mut d = SourceDetector::new(RATE, RATE, cfg());
+        let mut x = noise(1_000_000, 0.02, 37);
+        let mut ph = 0.0f64;
+        for i in 0..16_000usize {
+            let f = if (i / 10) % 2 == 0 { 50_000.0 } else { -50_000.0 };
+            ph += std::f64::consts::TAU * f / RATE;
+            x[300_000 + i] += C32::new(0.9 * ph.cos() as f32, 0.9 * ph.sin() as f32);
+        }
+        let mut events = Vec::new();
+        for chunk in x.chunks(8192) {
+            events.extend(d.process(chunk).iter().copied());
+        }
+        let opened: Vec<Source> = events
+            .iter()
+            .filter_map(|e| match e {
+                SourceEvent::Opened(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        // The sidebands of keying this hard open sources of their own,
+        // which is the detector reporting what is there; what must not
+        // happen is the carrier being reopened around them.
+        assert!(
+            !events.iter().any(|e| matches!(e, SourceEvent::Superseded(_))),
+            "superseded: {events:?}"
+        );
+        let carrier = opened
+            .iter()
+            .find(|s| s.lo_hz <= -50_000.0 && s.hi_hz >= 50_000.0)
+            .unwrap_or_else(|| panic!("no source holds both tones: {opened:?}"));
+        assert!(carrier.bandwidth_hz() < 300_000.0, "width {}", carrier.bandwidth_hz());
     }
 
     #[test]
