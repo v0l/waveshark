@@ -690,7 +690,8 @@ impl SchDetector {
         let mut coded = [0.0f32; sch::CODED_BITS];
         coded[..39].copy_from_slice(&soft[3..42]);
         coded[39..].copy_from_slice(&soft[106..145]);
-        let sch = sch::decode(&coded)?;
+        let d = sch::decode(&coded);
+        let sch = d?;
         Some((SchHit {
             sch,
             freq_offset_hz: p.freq_offset_hz,
@@ -740,6 +741,12 @@ impl SchDetector {
         // separately; what it adds beyond the phase is the spreading, which
         // GMSK has by construction and a reflection adds to.
         let known: Vec<f32> = tsc.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
+        // What the tone left behind. Measured on the burst itself, because
+        // the tone is a frame old by now and a couple of kilohertz out is
+        // enough to turn the far ends of the burst past reading.
+        if let Some(res) = equalise::residual(&sym, &known, tsc_at) {
+            equalise::derotate(&mut sym, res);
+        }
         let h = equalise::estimate(&sym, &known, tsc_at)?;
         let quality = equalise::fit(&sym, &known, tsc_at, &h);
         let mut soft = [0.0f32; BURST_BITS];
