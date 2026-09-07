@@ -8,7 +8,7 @@
 
 pub mod ais_nodes;
 pub mod ble_nodes;
-pub mod auto_node;
+pub mod auto;
 pub mod aprs_nodes;
 pub mod bank;
 pub mod video_nodes;
@@ -58,7 +58,7 @@ pub use pocsag_nodes::PocsagNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use packet_nodes::PacketDecodeNode;
-pub use auto_node::{AutoNode, AUTO_OPEN_DB};
+pub use auto::{AutoNode, AUTO_OPEN_DB};
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use lora_nodes::LoraNode;
 pub use wmbus_nodes::WmbusNode;
