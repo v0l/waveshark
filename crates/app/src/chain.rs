@@ -1699,12 +1699,17 @@ impl Receiver {
     /// One place, because there is one decoder: whatever the front end, a
     /// packet went onto the bus and came off it as a row.
     pub fn decodes(&self, at: std::time::Instant) -> Vec<DecodeRecord> {
-        let Some(n) =
-            self.decode.and_then(|id| downcast::<nodes::PacketDecodeNode>(&self.graph, id))
-        else {
+        // Read off the bus rather than out of the node: the packets leaving
+        // the protocols carry what they decoded to, so the list sees exactly
+        // what the map and the device database see.
+        let Some(out) = self.decode.and_then(|id| self.graph.buf(id.o())) else {
             return Vec::new();
         };
-        n.hits().iter().map(|d| record(at, d)).collect()
+        out.as_packets()
+            .unwrap_or(&[])
+            .iter()
+            .flat_map(|p| p.decodes.iter().map(|d| record(at, d)))
+            .collect()
     }
 
     /// Point the log at a directory, or stop writing one.
