@@ -116,6 +116,15 @@ impl Simple for VideoNode {
         "video"
     }
 
+    /// The whole of what it is reading, which for composite video is the
+    /// whole span: an FM camera carrier at 5.8 GHz occupies the best part of
+    /// twenty megahertz, and every run a detector finds inside it is a piece
+    /// of the picture rather than a signal of its own.
+    fn claimed_hz(&self) -> Option<(f64, f64)> {
+        let locked = self.sep.is_some() && self.lock.is_some();
+        locked.then(|| (self.center_hz - self.rate / 2.0, self.center_hz + self.rate / 2.0))
+    }
+
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("video reads complex baseband"));

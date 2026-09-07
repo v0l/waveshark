@@ -192,6 +192,16 @@ impl Member {
         })
     }
 
+    /// The band the front end inside says it is reading, if it has taken
+    /// one. Asked of every node in the chain, so a claim can come from the
+    /// demodulator or from a decoder behind it.
+    fn claimed(&self) -> Option<(f64, f64)> {
+        self.graph
+            .order()
+            .filter_map(|(id, _)| self.graph.node(id))
+            .find_map(|n| n.claimed_hz())
+    }
+
     /// Run one block through and collect what came out as packets.
     fn run(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
         let rate = self.graph.input_spec().rate;
@@ -792,45 +802,59 @@ impl AutoNode {
         }
     }
 
-    /// Give the span to the video front end while it is reading a picture,
-    /// and take it back when the picture stops.
+    /// Take whatever the front ends say they are reading, and keep it.
     ///
-    /// A camera owns its channel the way every other front end owns one, and
-    /// its channel is the span: FM composite video at 5.8 GHz occupies the
-    /// best part of twenty megahertz. What a detector finds inside that is
-    /// pieces of the picture, and opening each as a source costs an
-    /// extraction and a set of front ends that report sensors nobody
-    /// transmitted. It is claimed on the lock rather than at build time,
-    /// because claiming it beforehand would turn the band off for everything
-    /// else on the chance that a camera turns up.
+    /// A front end that has locked onto a transmission returns its extent
+    /// from `Node::claimed_hz`, and that band becomes its own: the detector
+    /// is closed out of it and the spectrum draws it, the way a channel
+    /// something decoded on is remembered. Asked of every front end and
+    /// keyed on nothing: a front end written later joins in by answering the
+    /// same question.
     ///
-    /// Returns whether the span is the camera's, which is also when there is
-    /// nothing left for the detector to do.
-    fn claim_span_for_video(&mut self) -> bool {
-        let span = (
-            self.center.as_f64() - self.input_bw / 2.0,
-            self.center.as_f64() + self.input_bw / 2.0,
-        );
+    /// Kept once taken, for the session, rather than followed block by
+    /// block. A picture fades and comes back, a call ends and the next one
+    /// starts on the same channel, and a claim that flapped with the signal
+    /// would hand the band back to the detector every time and take it again
+    /// a moment later.
+    ///
+    /// Returns whether what is claimed covers the whole span, since then
+    /// there is nothing left for the detector to look at.
+    fn take_claims(&mut self, out: &mut Vec<Event>) -> bool {
         let mut changed = false;
-        let mut claimed = false;
-        for m in self.wide.iter_mut().filter(|m| m.name == "video") {
-            let locked = m
-                .graph
-                .order()
-                .find(|(_, n)| *n == "video")
-                .and_then(|(id, _)| m.graph.node(id))
-                .and_then(|n| n.as_any())
-                .and_then(|a| a.downcast_ref::<crate::video_nodes::VideoNode>())
-                .is_some_and(|v| v.locked());
-            let want = locked.then_some(span);
-            changed |= m.band != want;
-            m.band = want;
-            claimed |= locked;
+        for m in self.wide.iter_mut() {
+            if m.band.is_some() {
+                continue;
+            }
+            if let Some(band) = m.claimed() {
+                m.band = Some(band);
+                changed = true;
+            }
+        }
+        // A front end placed on a source claims through the same door, and
+        // what it claims is remembered: the channel is cut out for it from
+        // then on, which is what happens when one decodes there.
+        let taken: Vec<(&'static str, f64, f64)> = self
+            .slots
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .filter_map(|m| m.claimed().map(|(lo, hi)| (m.name, (lo + hi) / 2.0, hi - lo)))
+            .collect();
+        for (name, hz, w) in taken {
+            if let Some(e) = self.remember(name, hz, w) {
+                out.push(e);
+            }
         }
         if changed {
             self.apply_locked();
         }
-        claimed
+        let (lo, hi) = (
+            self.center.as_f64() - self.input_bw / 2.0,
+            self.center.as_f64() + self.input_bw / 2.0,
+        );
+        self.wide
+            .iter()
+            .filter_map(|m| m.band)
+            .any(|(a, b)| a <= lo && hi <= b)
     }
 
     fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
@@ -1301,7 +1325,11 @@ impl Node for AutoNode {
         // ends together ran at nearly four times real time on them, which is
         // a receiver that cannot keep up rather than one that reads more. The
         // picture going away puts all of it back.
-        let watching = self.claim_span_for_video();
+        let mut claimed_events: Vec<Event> = Vec::new();
+        let watching = self.take_claims(&mut claimed_events);
+        for e in claimed_events {
+            c.emit(e);
+        }
         let excluded: Vec<(f64, f64)> = self.wide.iter().filter_map(|m| m.band).collect();
         let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
             return Ok(());
@@ -2010,30 +2038,34 @@ mod tests {
     /// pieces of the carrier as sources and every front end ran on each of
     /// them, which cost more than the camera did.
     #[test]
-    fn a_locked_camera_owns_the_span_and_lets_it_go_again() {
+    fn a_front_end_that_claims_a_band_keeps_it() {
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(5865))]).unwrap();
         assert!(
             n.locked_channels().iter().all(|(name, ..)| *name != "video"),
-            "the span was claimed before there was a picture"
+            "the span was claimed before anything was being read"
         );
-        // The front end says it has one; the node claims the span for it.
+        // Nothing is claimed until a front end says it is reading something,
+        // and what it says is taken as it comes: the auto node asks every
+        // front end the same question and knows nothing about video.
+        let mut events = Vec::new();
+        assert!(!n.take_claims(&mut events));
+        let claim = (5_855_000_000.0, 5_875_000_000.0);
         for m in n.wide.iter_mut().filter(|m| m.name == "video") {
-            m.band = Some((5_855_000_000.0, 5_875_000_000.0));
+            m.band = Some(claim);
         }
         let owned = n.locked_channels();
         let (_, hz, w) = owned
             .iter()
             .find(|(name, ..)| *name == "video")
-            .expect("the camera owns nothing");
+            .expect("the claim was not taken");
         assert!((hz - 5_865_000_000.0).abs() < 1.0, "{hz}");
         assert!((w - 20e6).abs() < 1.0, "{w}");
-        // And it is given back, since the claim follows the lock rather than
-        // being made once at build time.
-        for m in n.wide.iter_mut().filter(|m| m.name == "video") {
-            m.band = None;
-        }
-        assert!(n.locked_channels().iter().all(|(name, ..)| *name != "video"));
+        // And it is kept: a picture fades and comes back, and a claim that
+        // followed the signal would hand the band to the detector between
+        // every field.
+        assert!(n.take_claims(&mut events), "a claim over the span leaves nothing to detect");
+        assert!(n.locked_channels().iter().any(|(name, ..)| *name == "video"));
     }
 
 }
