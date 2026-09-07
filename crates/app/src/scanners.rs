@@ -319,7 +319,7 @@ impl Scanner {
 /// block up. Without it the file is written once, on the first run, and a
 /// front end added later never runs for anybody who already had one: BLE
 /// shipped, and every existing installation quietly had no Bluetooth.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
@@ -768,15 +768,47 @@ margin   = 12.5 kHz
 #
 # Off by default, and pointed at nothing in particular, because a beacon has
 # no frequency worth shipping: carriers are licensed per operator and per
-# country, and this front end reads one at a time. Find a carrier first, with
-# `front = auto` over 925 to 960 MHz or a phone's engineering screen, then put
-# its frequency here. The 900 downlink raster starts at 935.2 MHz and steps
-# 200 kHz; E-GSM starts at 925.2.
+# country, and this front end reads one at a time. The blocks below find them
+# instead; this is where to pin one carrier and watch only it. The 900
+# downlink raster starts at 935.2 MHz and steps 200 kHz; E-GSM starts at
+# 925.2.
 range    = 925 - 960 MHz
 span     = 2 MHz
 front    = gsm
 channels = 947.4 MHz
 enabled  = false
+
+# The GSM downlinks, one block per allocation. `auto` finds the carriers and
+# puts the front end above on each one that measures 200 kHz, so a cell
+# decodes without anybody naming its channel. Only the base station halves
+# are here: a handset transmits in bursts on the uplink and broadcasts no
+# identity, so there is nothing on that half to read.
+#
+# These are dense allocations and a span over one opens a source per carrier,
+# so turn off the ones your region does not use.
+
+[GSM 850]
+# The Americas, ARFCN 128 up from 869.2 MHz.
+range = 869 - 894 MHz
+span  = 1 MHz
+front = auto
+
+[GSM 900]
+# Europe and most of the world: GSM-R from 921, then E-GSM and P-GSM to 960.
+range = 921 - 960 MHz
+span  = 1 MHz
+front = auto
+
+[DCS 1800]
+range = 1805 - 1880 MHz
+span  = 1 MHz
+front = auto
+
+[PCS 1900]
+# The American 1900 downlink, which reuses the DCS channel numbers.
+range = 1930 - 1990 MHz
+span  = 1 MHz
+front = auto
 
 [TETRA]
 # Base station downlinks, which is the half of a TETRA network a listener
@@ -961,9 +993,10 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "TETRA", "ISM 27", "ISM 40",
-                "ISM 169", "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915",
-                "ISM 920", "ISM 2.4", "ISM 5.8"
+                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "GSM 850", "GSM 900",
+                "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169",
+                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920",
+                "ISM 2.4", "ISM 5.8"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from
@@ -1011,6 +1044,30 @@ mod tests {
         // 920 sits inside 902-928, and two auto blocks over bands that meet
         // are one front end rather than the same sources decoded twice.
         assert_eq!(kinds(&s.fronts(923_000_000.0, 2_400_000.0)), [Front::Auto]);
+    }
+
+    /// Every GSM downlink is scanned, and no uplink is.
+    ///
+    /// A carrier is found rather than named: the operator's channels are not
+    /// knowable from here, so a block per allocation and the detector is the
+    /// only arrangement that decodes a cell nobody typed in.
+    #[test]
+    fn the_gsm_downlinks_are_scanned_and_the_uplinks_are_not() {
+        let s = Scanners::default();
+        for hz in [
+            881_000_000.0,  // GSM 850, ARFCN 190 or so
+            923_000_000.0,  // GSM-R
+            947_400_000.0,  // E-GSM / P-GSM 900
+            1_842_000_000.0, // DCS 1800
+            1_960_000_000.0, // PCS 1900
+        ] {
+            assert_eq!(kinds(&s.fronts(hz, 2_400_000.0)), [Front::Auto], "nothing runs at {hz}");
+        }
+        // The halves the handsets transmit in, where there is no beacon.
+        assert!(s.fronts(897_000_000.0, 2_400_000.0).is_empty(), "GSM 900 uplink");
+        assert!(s.fronts(1_750_000_000.0, 2_400_000.0).is_empty(), "DCS 1800 uplink");
+        // And a span too narrow for the carrier's own rate does not match.
+        assert!(s.fronts(947_400_000.0, 500_000.0).is_empty());
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
