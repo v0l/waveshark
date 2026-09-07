@@ -1,0 +1,111 @@
+//! Run the BLE front end over a capture and print what Open Drone ID is in it.
+//!     odid_probe <file.cs8|cu8> <rate> <center_hz> [out.cs8]
+//!
+//! With an output path, the samples every Open Drone ID packet was read from
+//! are written out in the input's own format, each burst with a little
+//! silence either side so a detector still has a floor to measure against.
+//! What comes back through the same front end is what went in: the point of
+//! the cut is a fixture small enough to commit to a manifest, not a different
+//! recording.
+use common::C32;
+use dsp::{BleConfig, BleDetector};
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let path = &a[1];
+    let rate: f64 = a[2].parse().unwrap();
+    let center: f64 = a[3].parse().unwrap();
+    let signed = !path.ends_with(".cu8");
+    let bytes = std::fs::read(path).unwrap();
+    let iq: Vec<C32> = bytes
+        .chunks_exact(2)
+        .map(|c| {
+            if signed {
+                C32::new(c[0] as i8 as f32 / 128.0, c[1] as i8 as f32 / 128.0)
+            } else {
+                C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
+            }
+        })
+        .collect();
+    eprintln!(
+        "{:.2} s at {rate} S/s, centre {center}",
+        iq.len() as f64 / rate
+    );
+
+    let mut det = BleDetector::new(rate, center, BleConfig::default());
+    eprintln!("channels in span: {:?}", det.channels());
+    let mut frames = Vec::new();
+    for chunk in iq.chunks(1 << 20) {
+        det.process(chunk, &mut frames);
+    }
+    eprintln!("{} packets passed CRC", frames.len());
+
+    let mut drones = 0usize;
+    let mut keep: Vec<(u64, u64)> = Vec::new();
+    for f in &frames {
+        let Some(adv) = decode::ble::parse(&f.pdu) else {
+            continue;
+        };
+        let msgs: Vec<_> = adv
+            .data
+            .iter()
+            .filter(|s| s.kind == 0x16)
+            .filter_map(|s| decode::odid::from_service_data(&s.value))
+            .flatten()
+            .collect();
+        if msgs.is_empty() {
+            continue;
+        }
+        drones += 1;
+        // A legacy advertisement is at most 47 bytes at a microsecond a bit,
+        // so 400 us covers the longest one; 2 ms of margin either side is the
+        // floor the detector takes its noise estimate from.
+        let margin = (0.002 * rate) as u64;
+        let len = (0.0004 * rate) as u64;
+        keep.push((
+            f.start_sample.saturating_sub(margin),
+            f.start_sample + len + margin,
+        ));
+        let fields = decode::odid::fields(&msgs)
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "ch{} {:.0} dBFS {} {}",
+            f.channel, f.rssi_dbfs, adv.address, fields
+        );
+    }
+    eprintln!("{drones} of {} packets are Open Drone ID", frames.len());
+
+    let Some(out) = a.get(4) else { return };
+    // Overlapping windows become one, so two packets 3 ms apart stay one
+    // burst with the gap they actually had rather than being cut and butted
+    // back together at a discontinuity.
+    keep.sort();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in keep {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    let mut bytes_out: Vec<u8> = Vec::new();
+    let mut total = 0u64;
+    for (s, e) in &merged {
+        let (s, e) = (*s as usize * 2, (*e as usize * 2).min(bytes.len()));
+        if s >= e {
+            continue;
+        }
+        total += (e - s) as u64 / 2;
+        bytes_out.extend_from_slice(&bytes[s..e]);
+    }
+    std::fs::write(out, &bytes_out).unwrap();
+    eprintln!(
+        "wrote {out}: {} bursts, {:.3} s, {:.1} MB, {:.0}x smaller",
+        merged.len(),
+        total as f64 / rate,
+        bytes_out.len() as f64 / 1e6,
+        bytes.len() as f64 / bytes_out.len() as f64
+    );
+}

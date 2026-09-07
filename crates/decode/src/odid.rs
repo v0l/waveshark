@@ -141,6 +141,20 @@ pub enum Message {
     Unknown { kind: u8, body: Vec<u8> },
 }
 
+impl Message {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::BasicId { .. } => "basic id",
+            Self::Location(_) => "location",
+            Self::Authentication { .. } => "authentication",
+            Self::SelfId { .. } => "self id",
+            Self::System(_) => "system",
+            Self::OperatorId { .. } => "operator id",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
     pub status: u8,
@@ -244,7 +258,9 @@ pub fn parse_message(m: &[u8]) -> Option<Parsed> {
                     f64::from(b[2]) * 0.25
                 }
             });
-            let vspeed = (b[3] != 0x7f).then(|| f64::from(b[3] as i8) * 0.5);
+            // 63 m/s is the reference library's INV_SPEED_V, not a climb
+            // rate: a module with no flight controller sends it constantly.
+            let vspeed = (b[3] != 126 && b[3] != 0x7f).then(|| f64::from(b[3] as i8) * 0.5);
             let lat = i32::from_le_bytes([b[4], b[5], b[6], b[7]]);
             let lon = i32::from_le_bytes([b[8], b[9], b[10], b[11]]);
             let ts = u16::from_le_bytes([b[20], b[21]]);
@@ -340,6 +356,10 @@ pub fn from_service_data(value: &[u8]) -> Option<Vec<Parsed>> {
 pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
     let mut f: Vec<(String, Value)> = Vec::new();
     for p in messages {
+        // A message whose fields are all unset is still evidence that an
+        // aircraft is transmitting, so every message names itself and a row
+        // is never blank.
+        f.push(("message".into(), Value::Text(p.message.name().into())));
         match &p.message {
             Message::BasicId {
                 id_type,
