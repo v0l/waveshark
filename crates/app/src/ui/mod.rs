@@ -882,6 +882,23 @@ impl App {
         if self.view == View::Map || !self.map.tracks.is_empty() {
             self.map.tracks = radio.status.track_list.lock().clone();
         }
+        // A fix moves the station. The receiver already has it, since the
+        // survey node is told directly on the radio thread; this is the
+        // interface following the same position, so the map, the range rings
+        // and anything that resolves a position against the station are where
+        // the receiver actually is rather than where it was parked this
+        // morning.
+        if let Some(f) = *radio.status.gps_fix.lock() {
+            let moved = self
+                .location
+                .is_none_or(|(lat, lon)| (lat - f.lat).abs() > 1e-5 || (lon - f.lon).abs() > 1e-5);
+            if moved {
+                self.location = Some((f.lat, f.lon));
+                // The box in settings shows the position; a stale string in
+                // it would sit there claiming the receiver had not moved.
+                self.station_edit = None;
+            }
+        }
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
             self.err_at = Some(std::time::Instant::now());
