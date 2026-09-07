@@ -375,6 +375,16 @@ symbol width split or the whitening carries across without measuring it.
 measurement itself: the offset and, for every payload bit, the coded positions
 it reaches.
 
+It is confirmed against a real link, which is a different claim from the bench
+measurement and the one that matters. Decoding a TX16S capture at 100 Hz Full
+with this map and solving each packet for the CRC seed that would make it
+valid gives 0x6b37 on all 170 packets, where chance alone would put the high
+byte anywhere in 256. The seed does not step with the packet counter, so that
+transmitter is OTA v3, whose initialiser is the UID alone, and the two UID
+bytes a listener can have follow: uid[4] = 0x68, uid[5] = 0x37. The payloads
+under it are stable RC data with the type bits reading rc, which is a handset
+with its sticks at rest.
+
 #### How it was measured
 
 Everything between payload bits and symbol bits is linear over GF(2), so the
@@ -435,9 +445,8 @@ The way it was settled was to make an SX1280 encode payloads we chose:
    layout, read off rather than searched for.
 5. Record with the HackRF at 2.4 GHz and dechirp with
    `crates/nodes/examples/lora_symbols.rs`. Check the answer against the oracle
-   above on real link traffic before believing it: that check has not been run
-   yet, and until it has, what is established is how an SX1280 encodes and not
-   yet that an ExpressLRS transmitter agrees.
+   above on real link traffic before believing it, which is what turned a
+   bench measurement into a decode of somebody's transmitter.
 
 ### What we can verify here
 
