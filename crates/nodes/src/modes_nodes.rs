@@ -112,7 +112,9 @@ impl Simple for ModeSNode {
             "preamble_ratio" => self.cfg.preamble_ratio = f.max(1.0) as f32,
             "min_level" => self.cfg.min_level = f.max(0.0) as f32,
             _ => {
-                return Err(common::Error::other(format!("mode_s: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "mode_s: unknown parameter {name:?}"
+                )))
             }
         }
         // The detector holds its config by value, and its buffered tail is
@@ -126,9 +128,10 @@ impl Simple for ModeSNode {
         self.meter.feed(iq);
         self.frames.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
-        self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
-        });
+        self.det
+            .process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
+                book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
+            });
         self.book = book.into_inner();
 
         let center = c.inputs[0].spec.center;
@@ -140,7 +143,9 @@ impl Simple for ModeSNode {
                 17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
                 _ => f.bytes.clone(),
             };
-            let Ok(frame) = adsb::parse(&bytes) else { continue };
+            let Ok(frame) = adsb::parse(&bytes) else {
+                continue;
+            };
             self.accepted += 1;
             // 8 us of preamble and 56 or 112 us of data at 1 Mbit/s, with a
             // little either side.
@@ -174,7 +179,12 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
             fields.push(("category".into(), Value::Int(*category as i64)));
             "ADSB-Identification"
         }
-        Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
+        Message::AirbornePosition {
+            altitude_ft,
+            odd,
+            lat_cpr,
+            lon_cpr,
+        } => {
             if let Some(alt) = altitude_ft {
                 fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
             }
@@ -186,16 +196,30 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
             fields.push(("lon_cpr".into(), Value::Int(*lon_cpr as i64)));
             "ADSB-Position"
         }
-        Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
+        Message::SurfacePosition {
+            odd,
+            lat_cpr,
+            lon_cpr,
+        } => {
             fields.push(("cpr_odd".into(), Value::Bool(*odd)));
             fields.push(("lat_cpr".into(), Value::Int(*lat_cpr as i64)));
             fields.push(("lon_cpr".into(), Value::Int(*lon_cpr as i64)));
             "ADSB-Surface"
         }
-        Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
-            fields.push(("ground_speed_kt".into(), Value::Float(round1(*ground_speed_kt))));
+        Message::Velocity {
+            ground_speed_kt,
+            track_deg,
+            vertical_rate_fpm,
+        } => {
+            fields.push((
+                "ground_speed_kt".into(),
+                Value::Float(round1(*ground_speed_kt)),
+            ));
             fields.push(("track_deg".into(), Value::Float(round1(*track_deg))));
-            fields.push(("vertical_rate_fpm".into(), Value::Int(*vertical_rate_fpm as i64)));
+            fields.push((
+                "vertical_rate_fpm".into(),
+                Value::Int(*vertical_rate_fpm as i64),
+            ));
             "ADSB-Velocity"
         }
         Message::Unsupported { type_code } => {
@@ -205,7 +229,11 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
         // A reply to a radar, which is where the weather is: an aircraft's
         // wind and temperature go out in answer to an interrogation and never
         // in a broadcast.
-        Message::CommB { altitude_ft, squawk, report } => {
+        Message::CommB {
+            altitude_ft,
+            squawk,
+            report,
+        } => {
             if let Some(alt) = altitude_ft {
                 fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
             }
@@ -236,8 +264,11 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
         // its address is the only identity it gives.
         Message::ShortReply => "ModeS-Reply",
     };
-    let detail =
-        fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
@@ -312,10 +343,15 @@ fn commb_fields(r: &bds::Report, fields: &mut Vec<(String, common::Value)>) {
                 }
             }
         }
-        bds::Report::VerticalIntent { selected_altitude_ft, fms_altitude_ft, qnh_mb } => {
-            for (k, v) in
-                [("selected_altitude_ft", selected_altitude_ft), ("fms_altitude_ft", fms_altitude_ft)]
-            {
+        bds::Report::VerticalIntent {
+            selected_altitude_ft,
+            fms_altitude_ft,
+            qnh_mb,
+        } => {
+            for (k, v) in [
+                ("selected_altitude_ft", selected_altitude_ft),
+                ("fms_altitude_ft", fms_altitude_ft),
+            ] {
                 if let Some(v) = v {
                     fields.push((k.to_string(), Value::Int(*v as i64)));
                 }
@@ -334,7 +370,10 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(1_090_000_000)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(1_090_000_000)),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -360,7 +399,12 @@ mod tests {
         let d = adsb_decoded(&frame, &bytes, Hz(1_090_000_000));
         assert_eq!(d.protocol, "ADSB-Position");
         assert_eq!(d.crc_ok, Some(true));
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("icao"), Some(Value::Text("40621d".into())));
         assert_eq!(get("altitude_ft"), Some(Value::Int(38_000)));
     }
@@ -371,10 +415,15 @@ mod tests {
         let frame = adsb::parse(&bytes).unwrap();
         let d = adsb_decoded(&frame, &bytes, Hz(1_090_000_000));
         assert_eq!(d.protocol, "ModeS-Reply");
-        assert_eq!(d.crc_ok, None, "a reply's parity is an address, not a check");
+        assert_eq!(
+            d.crc_ok, None,
+            "a reply's parity is an address, not a check"
+        );
     }
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap()).collect()
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
     }
 }

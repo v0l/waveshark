@@ -72,7 +72,10 @@ fn wideband(base: &[C32]) -> Vec<C32> {
 }
 
 fn chain() -> Vec<NodeSpec> {
-    vec![NodeSpec::new("source_detect"), NodeSpec::new("source_decode")]
+    vec![
+        NodeSpec::new("source_detect"),
+        NodeSpec::new("source_decode"),
+    ]
 }
 
 /// Run the stream through in blocks the size a radio delivers, so sources
@@ -105,18 +108,28 @@ fn every_transmitter_is_found_where_it_is() {
     let mut found: Vec<(f64, f64)> = events
         .iter()
         .filter_map(|e| match e {
-            Event::Detection { center, bandwidth, .. } => {
-                Some((center.as_f64() - CENTER.as_f64(), *bandwidth))
-            }
+            Event::Detection {
+                center, bandwidth, ..
+            } => Some((center.as_f64() - CENTER.as_f64(), *bandwidth)),
             _ => None,
         })
         .collect();
     found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    assert_eq!(found.len(), OFFSETS.len(), "one source per transmitter, got {found:?}");
+    assert_eq!(
+        found.len(),
+        OFFSETS.len(),
+        "one source per transmitter, got {found:?}"
+    );
     for (want, (got, bw)) in OFFSETS.iter().zip(&found) {
         let want = want + CARRIER_OFFSET;
-        assert!((got - want).abs() < 4_000.0, "wanted {want}, found {got} ({bw} Hz wide); all {found:?}");
-        assert!(*bw < 40_000.0, "a 4 kHz sensor measured {bw} Hz wide at {got}");
+        assert!(
+            (got - want).abs() < 4_000.0,
+            "wanted {want}, found {got} ({bw} Hz wide); all {found:?}"
+        );
+        assert!(
+            *bw < 40_000.0,
+            "a 4 kHz sensor measured {bw} Hz wide at {got}"
+        );
     }
 }
 
@@ -126,8 +139,17 @@ fn every_transmitter_decodes_through_its_own_stream() {
     let wide = wideband(&buf.samples);
     let (events, packages) = run(&wide);
     for e in &events {
-        if let Event::Detection { center, bandwidth, snr_db, at } = e {
-            eprintln!("opened {:+.0} Hz {bandwidth:.0} wide {snr_db:.1} dB at {at:.3} s", center.as_f64() - CENTER.as_f64());
+        if let Event::Detection {
+            center,
+            bandwidth,
+            snr_db,
+            at,
+        } = e
+        {
+            eprintln!(
+                "opened {:+.0} Hz {bandwidth:.0} wide {snr_db:.1} dB at {at:.3} s",
+                center.as_f64() - CENTER.as_f64()
+            );
         }
     }
     assert!(!packages.is_empty(), "no bursts reached the pulse port");
@@ -142,7 +164,11 @@ fn every_transmitter_decodes_through_its_own_stream() {
             p.snr_db,
             p.modulation
         );
-        let t: Vec<String> = p.pulses.iter().map(|q| format!("{}/{}", q.mark, q.gap)).collect();
+        let t: Vec<String> = p
+            .pulses
+            .iter()
+            .map(|q| format!("{}/{}", q.mark, q.gap))
+            .collect();
         eprintln!("  start {} pulses {}", p.start_sample, t.join(" "));
         for r in protocols.decode_all(p) {
             if r.model.contains("WHx080") && r.crc_valid == Some(true) {
@@ -159,7 +185,10 @@ fn every_transmitter_decodes_through_its_own_stream() {
     );
     for (want, (got, text)) in OFFSETS.iter().zip(&decoded) {
         let want = want + CARRIER_OFFSET;
-        assert!((got - want).abs() < 4_000.0, "wanted {want}, decoded at {got}: {text}");
+        assert!(
+            (got - want).abs() < 4_000.0,
+            "wanted {want}, decoded at {got}: {text}"
+        );
         assert!(text.contains("station_id=196"), "{text}");
         assert!(text.contains("temperature_c=16.2"), "{text}");
     }
@@ -183,7 +212,14 @@ fn noise_alone_opens_nothing() {
         })
         .collect();
     let (events, packages) = run(&noise);
-    let opened = events.iter().filter(|e| matches!(e, Event::Detection { .. })).count();
+    let opened = events
+        .iter()
+        .filter(|e| matches!(e, Event::Detection { .. }))
+        .count();
     assert_eq!(opened, 0, "noise opened {opened} sources");
-    assert!(packages.is_empty(), "noise produced {} bursts", packages.len());
+    assert!(
+        packages.is_empty(),
+        "noise produced {} bursts",
+        packages.len()
+    );
 }

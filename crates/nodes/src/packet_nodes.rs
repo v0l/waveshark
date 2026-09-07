@@ -43,7 +43,12 @@ impl Default for PacketDecodeNode {
 
 impl PacketDecodeNode {
     pub fn new(protocols: Protocols) -> Self {
-        Self { protocols, report_all: true, report_unknown: true, hits: Vec::new() }
+        Self {
+            protocols,
+            report_all: true,
+            report_unknown: true,
+            hits: Vec::new(),
+        }
     }
 
     pub fn hits(&self) -> &[Decoded] {
@@ -180,8 +185,11 @@ impl PacketDecodeNode {
             return;
         }
         if dsp::ais::is_ais_band(p.center_hz as f64) {
-            let Ok(frame) = decode::ais::parse(bytes) else { return };
-            self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
+            let Ok(frame) = decode::ais::parse(bytes) else {
+                return;
+            };
+            self.hits
+                .push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
             return;
         }
         // The 2 m packet channels. Wherever the scanner put APRS, a frame
@@ -191,14 +199,18 @@ impl PacketDecodeNode {
         // VHF paging allocation. Two protocols really do share that spectrum,
         // and the narrower window is the more specific claim.
         if dsp::afsk::is_packet_band(p.center_hz as f64) {
-            let Ok(frame) = decode::ax25::parse(bytes) else { return };
-            self.hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
+            let Ok(frame) = decode::ax25::parse(bytes) else {
+                return;
+            };
+            self.hits
+                .push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
             return;
         }
         // A pager transmission is codewords rather than one frame, so it can
         // become several rows: a transmitter empties its queue in one go.
         if dsp::pocsag::is_pager_band(p.center_hz as f64) {
-            self.hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
+            self.hits
+                .extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
             return;
         }
         // Meters: the 868.95 MHz uplink and the older 868.3 MHz mode.
@@ -208,7 +220,9 @@ impl PacketDecodeNode {
             }
             return;
         }
-        let Ok(frame) = adsb::parse(bytes) else { return };
+        let Ok(frame) = adsb::parse(bytes) else {
+            return;
+        };
         let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
         // A local demodulator reports no level for a frame it has already
         // accepted, but a Beast feed carries one, and dropping it would make
@@ -272,8 +286,7 @@ impl Simple for PacketDecodeNode {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool("report_all", self.report_all).label("Report every matching protocol"),
-            Param::bool("report_unknown", self.report_unknown)
-                .label("Report unrecognised bursts"),
+            Param::bool("report_unknown", self.report_unknown).label("Report unrecognised bursts"),
         ]
     }
 
@@ -299,7 +312,10 @@ mod tests {
     fn spec() -> PortSpec {
         let mut s = StreamSpec::iq(0.0, Hz::mhz(433)).with_kind(PortKind::Packets);
         s.bandwidth = 31_250.0;
-        PortSpec { spec: s, latency: 0 }
+        PortSpec {
+            spec: s,
+            latency: 0,
+        }
     }
 
     fn run(node: &mut PacketDecodeNode, packets: Vec<Packet>) -> Vec<Decoded> {
@@ -334,7 +350,12 @@ mod tests {
         // scanner should surface, and silence looks the same as a broken
         // chain.
         let mut n = PacketDecodeNode::default();
-        let pulses: Vec<Pulse> = (0..24).map(|_| Pulse { mark: 500, gap: 1500 }).collect();
+        let pulses: Vec<Pulse> = (0..24)
+            .map(|_| Pulse {
+                mark: 500,
+                gap: 1500,
+            })
+            .collect();
         let hits = run(&mut n, vec![burst(433_920_000, 31_250, pulses)]);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].protocol, "unknown");
@@ -369,7 +390,11 @@ mod tests {
         );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].protocol, "ADSB-Identification");
-        assert!(hits[0].detail.as_deref().unwrap_or_default().contains("KLM1023"));
+        assert!(hits[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("KLM1023"));
     }
 
     #[test]
@@ -377,7 +402,12 @@ mod tests {
         // The packet list has a column for it, and the protocols cannot say:
         // plenty of devices exist in both an OOK and an FSK variant.
         let mut n = PacketDecodeNode::default();
-        let pulses: Vec<Pulse> = (0..24).map(|_| Pulse { mark: 500, gap: 1500 }).collect();
+        let pulses: Vec<Pulse> = (0..24)
+            .map(|_| Pulse {
+                mark: 500,
+                gap: 1500,
+            })
+            .collect();
         let ook = run(&mut n, vec![burst(433_920_000, 31_250, pulses.clone())]);
         assert_eq!(ook[0].modulation, Some("OOK"));
         let fsk = run(&mut n, vec![burst(868_300_000, 125_000, pulses)]);
@@ -392,7 +422,11 @@ mod tests {
     fn a_pager_transmission_becomes_a_row_for_each_page() {
         use decode::pocsag::Body;
         let mut contents = decode::pocsag::encode(1_000_001, 3, &Body::Alpha("ON CALL".into()));
-        contents.extend(decode::pocsag::encode(2_000_002, 0, &Body::Numeric("999".into())));
+        contents.extend(decode::pocsag::encode(
+            2_000_002,
+            0,
+            &Body::Numeric("999".into()),
+        ));
         let bytes: Vec<u8> = contents
             .into_iter()
             .flat_map(|c| dsp::pocsag::encode_codeword(c).to_be_bytes())

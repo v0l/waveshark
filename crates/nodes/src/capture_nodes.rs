@@ -155,7 +155,9 @@ impl IqCaptureNode {
     /// only the ones this node named: what the setting promises is a limit on
     /// the folder, and a `.cs16` from last month takes the same disk.
     fn measure(&self) -> u64 {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
         entries
             .flatten()
             .filter(|e| e.path().is_file())
@@ -261,7 +263,9 @@ impl IqCaptureNode {
     fn write(&mut self, iq: &[C32]) -> Result<()> {
         self.buf.clear();
         self.format.encode(iq, &mut self.buf);
-        let Some(s) = &mut self.sink else { return Ok(()) };
+        let Some(s) = &mut self.sink else {
+            return Ok(());
+        };
         s.file.write_all(&self.buf)?;
         s.bytes += self.buf.len() as u64;
         s.samples += iq.len() as u64;
@@ -307,12 +311,18 @@ impl Simple for IqCaptureNode {
         // that is built and thrown away leaves no empty file behind.
         if self.sink.is_none() {
             if let Err(e) = self.open(now_us()) {
-                self.fail(format!("cannot open a capture in {}: {e}", self.dir.display()), c);
+                self.fail(
+                    format!("cannot open a capture in {}: {e}", self.dir.display()),
+                    c,
+                );
                 return Ok(());
             }
         }
         if let Err(e) = self.write(iq) {
-            let path = self.path().map(|p| p.display().to_string()).unwrap_or_default();
+            let path = self
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             self.fail(format!("cannot write {path}: {e}"), c);
             self.close();
         }
@@ -326,10 +336,14 @@ impl Simple for IqCaptureNode {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool("enabled", self.enabled).label("Write the span to disk"),
-            Param::float("budget_mb", self.budget as f64 / (1 << 20) as f64, 16.0..=65_536.0)
-                .unit("MB")
-                .label("Stop when the folder reaches")
-                .log(),
+            Param::float(
+                "budget_mb",
+                self.budget as f64 / (1 << 20) as f64,
+                16.0..=65_536.0,
+            )
+            .unit("MB")
+            .label("Stop when the folder reaches")
+            .log(),
         ]
     }
 
@@ -343,7 +357,9 @@ impl Simple for IqCaptureNode {
                 self.budget = (v.as_f64().unwrap_or(0.0).max(0.0) * (1 << 20) as f64) as u64;
                 Ok(())
             }
-            _ => Err(Error::other(format!("iq_capture: unknown parameter {name:?}"))),
+            _ => Err(Error::other(format!(
+                "iq_capture: unknown parameter {name:?}"
+            ))),
         }
     }
 }
@@ -354,7 +370,10 @@ impl IqCaptureNode {
     fn fail(&mut self, message: String, c: &mut NodeCtx<'_>) {
         if !self.reported {
             self.reported = true;
-            c.emit(pipeline::event::Event::Warning { stage: "iq_capture".into(), message: message.clone() });
+            c.emit(pipeline::event::Event::Warning {
+                stage: "iq_capture".into(),
+                message: message.clone(),
+            });
         }
         self.error = Some(message);
         self.full = true;
@@ -381,7 +400,12 @@ fn stamp(at_us: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem / 60 % 60, rem % 60)
+    format!(
+        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 fn now_us() -> u64 {
@@ -397,7 +421,11 @@ fn sanitise(s: &str) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
-    if s.is_empty() { "capture".into() } else { s }
+    if s.is_empty() {
+        "capture".into()
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]
@@ -412,7 +440,10 @@ mod tests {
     }
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, center), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, center),
+            latency: 0,
+        }
     }
 
     fn feed(n: &mut IqCaptureNode, iq: &[C32], ins: &[PortSpec]) {
@@ -447,7 +478,10 @@ mod tests {
         let path = n.path().unwrap().to_path_buf();
         Simple::reset(&mut n);
 
-        let buf = sources::FileSource::open(&path).unwrap().read_all().unwrap();
+        let buf = sources::FileSource::open(&path)
+            .unwrap()
+            .read_all()
+            .unwrap();
         assert_eq!(buf.rate.0, rate as u64);
         assert_eq!(buf.center.0, center.0);
         assert_eq!(buf.samples.len(), iq.len());

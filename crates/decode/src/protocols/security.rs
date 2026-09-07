@@ -57,7 +57,10 @@ impl Protocol for HoneywellSecurity {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         if bits.len() < 120 {
-            return Err(DecodeError::WrongLength { got: bits.len(), want: 120 });
+            return Err(DecodeError::WrongLength {
+                got: bits.len(),
+                want: 120,
+            });
         }
         let mut best = Err(DecodeError::NotThisProtocol);
         for at in 0..bits.len() - PREAMBLE_BITS {
@@ -75,7 +78,10 @@ impl Protocol for HoneywellSecurity {
 
 fn frame(decoded: &BitBuffer) -> Result<Report, DecodeError> {
     if decoded.len() < MSG_BYTES * 8 {
-        return Err(DecodeError::WrongLength { got: decoded.len(), want: MSG_BYTES * 8 });
+        return Err(DecodeError::WrongLength {
+            got: decoded.len(),
+            want: MSG_BYTES * 8,
+        });
     }
     let b = decoded.as_padded_bytes();
     let channel = b[0] >> 4;
@@ -100,8 +106,7 @@ fn frame(decoded: &BitBuffer) -> Result<Report, DecodeError> {
     let mut r = Report::new("Honeywell-Security");
     r.crc_valid = Some(true);
     r.raw = b[..MSG_BYTES].to_vec();
-    Ok(r
-        .int("id", id as i64)
+    Ok(r.int("id", id as i64)
         .int("channel", channel as i64)
         .int("event", event as i64)
         .text("state", if event & 0x80 != 0 { "open" } else { "closed" })
@@ -175,7 +180,10 @@ mod tests {
     fn a_corrupt_frame_fails_its_crc() {
         let mut m = frame_5816();
         m[2] ^= 0x08;
-        assert_eq!(HoneywellSecurity.decode(&burst(&m)), Err(DecodeError::CrcFailed));
+        assert_eq!(
+            HoneywellSecurity.decode(&burst(&m)),
+            Err(DecodeError::CrcFailed)
+        );
     }
 
     #[test]

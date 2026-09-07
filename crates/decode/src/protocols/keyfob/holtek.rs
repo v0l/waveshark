@@ -60,7 +60,11 @@ impl Protocol for Holtek {
             let mut r = Report::new("Holtek");
             r.crc_valid = None;
             r.raw = b.to_vec();
-            Some(r.int("code", data as i64).int("serial", serial as i64).int("btn", btn))
+            Some(
+                r.int("code", data as i64)
+                    .int("serial", serial as i64)
+                    .int("btn", btn),
+            )
         })
     }
 }
@@ -104,13 +108,19 @@ mod tests {
 
     #[test]
     fn a_wrong_header_is_not_this_protocol() {
-        assert_eq!(Holtek.decode(&input(on_air(0x7, 0x12345, 0x1))), Err(DecodeError::NotThisProtocol));
+        assert_eq!(
+            Holtek.decode(&input(on_air(0x7, 0x12345, 0x1))),
+            Err(DecodeError::NotThisProtocol)
+        );
     }
 
     #[test]
     fn no_button_nibble_means_reject() {
         // All four nibbles 0xa: no button pressed, so no valid frame.
         let data = 0x5000_0000_00 | (0x12345u64 << 16) | 0xaaaa;
-        assert_eq!(Holtek.decode(&input(data)), Err(DecodeError::NotThisProtocol));
+        assert_eq!(
+            Holtek.decode(&input(data)),
+            Err(DecodeError::NotThisProtocol)
+        );
     }
 }

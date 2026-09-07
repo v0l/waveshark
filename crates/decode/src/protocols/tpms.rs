@@ -59,13 +59,15 @@ impl Protocol for SchraderTpms {
             b[0] >> 4 == 0x0f && b[7] == crc8(&b[..7], 0x07, 0xf0)
         })
         .ok_or(match bits.len() {
-            n if n < FRAME_BYTES * 8 => {
-                DecodeError::WrongLength { got: n, want: FRAME_BYTES * 8 }
-            }
+            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength {
+                got: n,
+                want: FRAME_BYTES * 8,
+            },
             _ => DecodeError::CrcFailed,
         })?;
 
-        let id = ((b[1] as u32 & 0x0f) << 24) | (b[2] as u32) << 16 | (b[3] as u32) << 8 | b[4] as u32;
+        let id =
+            ((b[1] as u32 & 0x0f) << 24) | (b[2] as u32) << 16 | (b[3] as u32) << 8 | b[4] as u32;
         let flags = ((b[0] & 0x0f) << 4) | (b[1] >> 4);
         let temperature = b[6] as i32 - 50;
         if !(-50..=100).contains(&temperature) {
@@ -75,8 +77,7 @@ impl Protocol for SchraderTpms {
         let mut r = Report::new(self.name());
         r.crc_valid = Some(true);
         r.raw = b.clone();
-        Ok(r
-            .text("id", format!("{id:07X}"))
+        Ok(r.text("id", format!("{id:07X}"))
             .text("flags", format!("{flags:02x}"))
             // 25 mbar a count, which is 2.5 kPa.
             .float("pressure_kpa", b[5] as f64 * 2.5)
@@ -150,7 +151,10 @@ impl Protocol for ToyotaTpms {
 fn toyota_frame(bits: &BitBuffer, start: usize) -> Result<Report, DecodeError> {
     let payload = differential_manchester_decode(bits, start, 80);
     if payload.len() < TOYOTA_BITS {
-        return Err(DecodeError::WrongLength { got: payload.len(), want: TOYOTA_BITS });
+        return Err(DecodeError::WrongLength {
+            got: payload.len(),
+            want: TOYOTA_BITS,
+        });
     }
     let b = payload.as_padded_bytes();
     if b[8] != crc8(&b[..8], 0x07, 0x80) {
@@ -168,8 +172,7 @@ fn toyota_frame(bits: &BitBuffer, start: usize) -> Result<Report, DecodeError> {
     let mut r = Report::new("Toyota");
     r.crc_valid = Some(true);
     r.raw = b[..9].to_vec();
-    Ok(r
-        .text("id", format!("{id:08x}"))
+    Ok(r.text("id", format!("{id:08x}"))
         .int("status", ((b[4] & 0x80) | (b[6] & 0x7f)) as i64)
         .float("pressure_psi", pressure as f64 * 0.25 - 7.0)
         .float("temperature_c", temperature as f64))
@@ -291,7 +294,10 @@ mod tests {
     fn a_corrupt_toyota_frame_fails_its_crc() {
         let mut f = toyota_frame();
         f[2] ^= 0x08;
-        assert_eq!(ToyotaTpms.decode(&toyota_burst(&f)), Err(DecodeError::CrcFailed));
+        assert_eq!(
+            ToyotaTpms.decode(&toyota_burst(&f)),
+            Err(DecodeError::CrcFailed)
+        );
     }
 
     #[test]

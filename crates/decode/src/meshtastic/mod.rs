@@ -26,7 +26,6 @@
 //! exists. Random bytes clear that bar rarely, and a wrong key gives random
 //! bytes; [`Decoded::of`] is where that judgement is made.
 
-
 mod protobuf;
 
 use crate::crypto;
@@ -244,7 +243,9 @@ impl Position {
         }
         // A position with neither coordinate is not one; that is what a wrong
         // key's bytes look like when they happen to parse.
-        f.finished().then_some(p).filter(|p| p.latitude.is_some() || p.longitude.is_some())
+        f.finished()
+            .then_some(p)
+            .filter(|p| p.latitude.is_some() || p.longitude.is_some())
     }
 }
 
@@ -281,7 +282,9 @@ impl User {
             }
         }
         // Every node sets a short name, so an empty one is noise.
-        f.finished().then_some(u).filter(|u| !u.short_name.is_empty() || !u.long_name.is_empty())
+        f.finished()
+            .then_some(u)
+            .filter(|u| !u.short_name.is_empty() || !u.long_name.is_empty())
     }
 }
 
@@ -430,10 +433,16 @@ mod tests {
     #[test]
     fn a_channel_hashes_as_the_firmware_does() {
         // LongFast on the default key is 0x08 on the air.
-        let c = Channel { name: "LongFast".into(), psk: vec![1] };
+        let c = Channel {
+            name: "LongFast".into(),
+            psk: vec![1],
+        };
         assert_eq!(c.hash(), Some(0x08));
         // A short key is padded with zeros, which the xor does not see.
-        let c = Channel { name: "waveshark".into(), psk: vec![0xd7, 0xca, 0x0c, 0xe2, 0xd3, 0xc7, 0x89, 0x53] };
+        let c = Channel {
+            name: "waveshark".into(),
+            psk: vec![0xd7, 0xca, 0x0c, 0xe2, 0xd3, 0xc7, 0x89, 0x53],
+        };
         let mut k = [0u8; 16];
         k[..8].copy_from_slice(&c.psk);
         assert_eq!(c.key(), Some(Key::Aes128(k)));
@@ -517,12 +526,17 @@ mod tests {
         let source = u32::from_le_bytes(raw[4..8].try_into().unwrap());
         let packet_id = u32::from_le_bytes(raw[8..12].try_into().unwrap());
         assert_eq!((source, packet_id), (0x1de7_f958, 0xdcbc_2f9e));
-        assert_eq!(raw[13], 0x08, "the channel hash LongFast on the default key gives");
+        assert_eq!(
+            raw[13], 0x08,
+            "the channel hash LongFast on the default key gives"
+        );
 
         let got = Decoded::of(&raw[16..], source, packet_id, &DEFAULT_KEY)
             .expect("the default key opens a default channel packet");
         assert_eq!(got.port(), "position");
-        let Message::Position(p) = got.message else { panic!("{:?}", got.message) };
+        let Message::Position(p) = got.message else {
+            panic!("{:?}", got.message)
+        };
         assert!((p.latitude.unwrap() - 53.608448).abs() < 1e-9, "{p:?}");
         assert!((p.longitude.unwrap() + 6.684672).abs() < 1e-9, "{p:?}");
         assert_eq!(p.altitude, Some(150));

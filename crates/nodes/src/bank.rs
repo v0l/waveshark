@@ -160,7 +160,8 @@ impl ChannelBank {
 
     /// The channel nearest a given RF frequency.
     pub fn channel_for(&self, f: Hz) -> usize {
-        self.ch.channel_for_offset(f.as_f64() - self.center.as_f64(), self.input_rate)
+        self.ch
+            .channel_for_offset(f.as_f64() - self.center.as_f64(), self.input_rate)
     }
 
     /// Retune the bank, keeping its graphs.
@@ -235,10 +236,7 @@ impl ChannelBank {
     /// `make` is called once per channel with that channel's spec, and must
     /// return a fresh graph each time for the same reason
     /// [`Self::set_all_chains`] does.
-    pub fn set_all_graphs(
-        &mut self,
-        make: impl Fn(StreamSpec) -> Result<Graph>,
-    ) -> Result<()> {
+    pub fn set_all_graphs(&mut self, make: impl Fn(StreamSpec) -> Result<Graph>) -> Result<()> {
         for ch in 0..self.channels {
             let g = make(self.channel_spec(ch))
                 .map_err(|e| Error::other(format!("channel {ch}: {e}")))?;
@@ -301,24 +299,27 @@ impl ChannelBank {
         const TILE: usize = 32;
         const FBLOCK: usize = 64;
         let frames = &self.frames;
-        self.lanes.par_chunks_mut(TILE).enumerate().for_each(|(gi, group)| {
-            let c0 = gi * TILE;
-            for lane in group.iter_mut() {
-                lane.clear();
-                lane.reserve(count);
-            }
-            let mut f0 = 0;
-            while f0 < count {
-                let fe = (f0 + FBLOCK).min(count);
-                for f in f0..fe {
-                    let row = &frames[f * n..(f + 1) * n];
-                    for (j, lane) in group.iter_mut().enumerate() {
-                        lane.push(row[c0 + j]);
-                    }
+        self.lanes
+            .par_chunks_mut(TILE)
+            .enumerate()
+            .for_each(|(gi, group)| {
+                let c0 = gi * TILE;
+                for lane in group.iter_mut() {
+                    lane.clear();
+                    lane.reserve(count);
                 }
-                f0 = fe;
-            }
-        });
+                let mut f0 = 0;
+                while f0 < count {
+                    let fe = (f0 + FBLOCK).min(count);
+                    for f in f0..fe {
+                        let row = &frames[f * n..(f + 1) * n];
+                        for (j, lane) in group.iter_mut().enumerate() {
+                            lane.push(row[c0 + j]);
+                        }
+                    }
+                    f0 = fe;
+                }
+            });
 
         // 3. Update the burst detector, in parallel over the now channel-major
         //    lanes. Doing this frame by frame instead is single-threaded and
@@ -386,7 +387,11 @@ impl ChannelBank {
         for (c, evs, pkgs) in results {
             let center = self.channel_center(c);
             for e in evs {
-                self.out.push(ChannelEvent { channel: c, center, event: e });
+                self.out.push(ChannelEvent {
+                    channel: c,
+                    center,
+                    event: e,
+                });
             }
             self.packages.extend(pkgs);
         }
@@ -414,8 +419,11 @@ fn pulse_taps(g: &Graph) -> Vec<Out> {
     g.order()
         .filter_map(|(id, _)| {
             let out = id.o();
-            matches!(g.spec_of(out).map(|s| s.kind), Some(pipeline::PortKind::Pulses))
-                .then_some(out)
+            matches!(
+                g.spec_of(out).map(|s| s.kind),
+                Some(pipeline::PortKind::Pulses)
+            )
+            .then_some(out)
         })
         .collect()
 }

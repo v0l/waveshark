@@ -134,7 +134,10 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
                 fields.push(("heading_deg".into(), Value::Float(v)));
             }
             if let Some(v) = p.nav_status {
-                fields.push(("nav_status".into(), Value::Text(ais::nav_status_name(v).into())));
+                fields.push((
+                    "nav_status".into(),
+                    Value::Text(ais::nav_status_name(v).into()),
+                ));
             }
             if p.class_b {
                 "AIS-PositionB"
@@ -150,7 +153,10 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
                 fields.push(("callsign".into(), Value::Text(c.clone())));
             }
             if let Some(t) = s.ship_type {
-                fields.push(("ship_type".into(), Value::Text(ais::ship_type_name(t).into())));
+                fields.push((
+                    "ship_type".into(),
+                    Value::Text(ais::ship_type_name(t).into()),
+                ));
             }
             if let Some(d) = &s.destination {
                 fields.push(("destination".into(), Value::Text(d.clone())));
@@ -183,7 +189,11 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
         }
     };
 
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
@@ -205,7 +215,10 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(center as u64)),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -240,8 +253,17 @@ mod tests {
         let frame = ais::parse(&bytes).unwrap();
         let d = ais_decoded(&frame, &bytes, Hz(BAND_CENTER_HZ as u64));
         assert_eq!(d.protocol, "AIS-Position");
-        assert_eq!(d.crc_ok, Some(true), "it passed the check sequence to get here");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            d.crc_ok,
+            Some(true),
+            "it passed the check sequence to get here"
+        );
+        let get = |k: &str| {
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("mmsi"), Some(Value::Int(227_006_760)));
         assert_eq!(get("lat"), Some(Value::Float(49.47558)));
         assert_eq!(get("lon"), Some(Value::Float(0.13138)));
@@ -281,7 +303,11 @@ mod tests {
             0x21, 0x6f, 0xff, 0x9c, 0x00, 0x56, 0x78,
         ];
         let (rate, center) = (2_400_000.0, 162_000_000.0);
-        let iq = modulate(&dsp::ais::encode_slot(&payload, 168), rate, CHANNEL_HZ[0] - center);
+        let iq = modulate(
+            &dsp::ais::encode_slot(&payload, 168),
+            rate,
+            CHANNEL_HZ[0] - center,
+        );
 
         let mut node = AisNode::default();
         node.negotiate(&spec(rate, center)).unwrap();
@@ -307,7 +333,9 @@ mod tests {
         assert_eq!(frames.len(), 1, "expected one frame off the air");
         let parsed = ais::parse(&frames[0]).expect("a message");
         assert_eq!(parsed.mmsi, 227_006_760);
-        let Message::Position(p) = parsed.kind.clone() else { panic!("{parsed:?}") };
+        let Message::Position(p) = parsed.kind.clone() else {
+            panic!("{parsed:?}")
+        };
         let (lat, lon) = p.position.expect("a fix");
         assert!((lat - 49.475_576).abs() < 1e-5, "latitude {lat}");
         assert!((lon - 0.131_38).abs() < 1e-5, "longitude {lon}");

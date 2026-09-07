@@ -71,7 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = StreamSpec::iq(buf.rate.as_f64(), buf.center);
     let mut g = build_chain(spec, &specs, &reg)?;
 
-    println!("input:  {} samples @ {} centred {}", buf.len(), buf.rate, buf.center);
+    println!(
+        "input:  {} samples @ {} centred {}",
+        buf.len(),
+        buf.rate,
+        buf.center
+    );
     print!("chain: ");
     for (i, (id, name)) in g.order().enumerate() {
         if i > 0 {
@@ -80,8 +85,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("{name}");
         let _ = id;
     }
-    println!("\noutput: {:?} @ {:.0} S/s, latency {} samples\n",
-        g.output_spec().kind, g.output_spec().rate, g.output_latency());
+    println!(
+        "\noutput: {:?} @ {:.0} S/s, latency {} samples\n",
+        g.output_spec().kind,
+        g.output_spec().rate,
+        g.output_latency()
+    );
 
     // Show each node's live parameters, which is what a UI would render.
     for (id, name) in g.order().collect::<Vec<_>>() {
@@ -99,10 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- {} event(s) ---", events.len());
     for e in &events {
         match e {
-            Event::Decoded(d) => println!(
-                "DECODE  {}",
-                d.text.as_deref().unwrap_or(d.protocol)
-            ),
+            Event::Decoded(d) => println!("DECODE  {}", d.text.as_deref().unwrap_or(d.protocol)),
             Event::Warning { stage, message } => println!("warn    [{stage}] {message}"),
             Event::Detection { center, snr_db, .. } => {
                 println!("detect  {center} {snr_db:.1} dB")

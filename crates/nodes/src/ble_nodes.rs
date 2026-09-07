@@ -142,7 +142,8 @@ impl Simple for BleNode {
                 .find(|(c, _)| *c == f.channel)
                 .map(|(_, hz)| *hz as u64)
                 .unwrap_or(BAND_CENTER_HZ as u64);
-            let mut out_frame = common::Frame::measured(f.pdu.clone(), f.rssi_dbfs, f.snr_db).at(hz);
+            let mut out_frame =
+                common::Frame::measured(f.pdu.clone(), f.rssi_dbfs, f.snr_db).at(hz);
             // A frame is 8 preamble bits plus the PDU at one bit a
             // microsecond, with room either side for the ramp.
             let len = ((f.pdu.len() + 12) * 8) as f64 * 1e-6 * self.meter_rate();
@@ -166,6 +167,26 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
     let adv = pdu::parse(bytes)?;
     let mut fields = adv.fields();
+    // An aircraft's broadcast is not a row about a Bluetooth device that
+    // happens to carry some bytes, so it is named for what it is and its own
+    // fields go in front of the link layer's.
+    let odid: Vec<decode::odid::Parsed> = adv
+        .data
+        .iter()
+        .filter(|s| s.kind == 0x16)
+        .filter_map(|s| decode::odid::from_service_data(&s.value))
+        .flatten()
+        .collect();
+    let protocol = if odid.is_empty() {
+        "BLE-Adv"
+    } else {
+        "OpenDroneID"
+    };
+    if !odid.is_empty() {
+        let mut f = decode::odid::fields(&odid);
+        f.append(&mut fields);
+        fields = f;
+    }
     if let Some(ch) = channel_of(center.as_f64()) {
         fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
     }
@@ -175,7 +196,7 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(
-        Decoded::bytes("BLE-Adv", center, 0.0, bytes.to_vec())
+        Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
             .with_detail(detail)
             .with_fields(fields)
             .with_modulation("GFSK")
@@ -234,5 +255,35 @@ mod tests {
         assert_eq!(d.crc_ok, Some(true));
         assert!(d.detail.as_deref().unwrap().contains("6C:70:CB:EF:72:4D"));
         assert!(d.detail.as_deref().unwrap().contains("channel=38"));
+    }
+
+    /// An aircraft's broadcast is the same link layer carrying service data,
+    /// and what makes it another row is what is inside. The serial leads and
+    /// the Bluetooth address stays behind it, because a drone's address
+    /// rotates and the serial is the airframe.
+    #[test]
+    fn an_advertisement_carrying_open_drone_id_becomes_an_aircraft_row() {
+        let mut msg = vec![0x02, (1 << 4) | 2];
+        let mut id = b"1596F3AAAAAAAAAAAAAA".to_vec();
+        id.resize(20, 0);
+        msg.extend_from_slice(&id);
+        msg.resize(25, 0);
+
+        let mut sd = vec![0xfa, 0xff, 0x0d, 3];
+        sd.extend_from_slice(&msg);
+
+        let mut pdu = vec![0x02, 0];
+        pdu.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        pdu.push((sd.len() + 1) as u8);
+        pdu.push(0x16);
+        pdu.extend_from_slice(&sd);
+        pdu[1] = (pdu.len() - 2) as u8;
+
+        let d = ble_decoded(&pdu, Hz(2_402_000_000)).expect("a decode");
+        assert_eq!(d.protocol, "OpenDroneID");
+        let detail = d.detail.as_deref().unwrap();
+        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
+        assert!(detail.contains("ua_type=multirotor"), "{detail}");
+        assert!(detail.contains("66:55:44:33:22:11"), "{detail}");
     }
 }

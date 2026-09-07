@@ -19,17 +19,18 @@ fn main() {
     let raw = std::fs::read(&path).expect("read capture");
     let iq: Vec<common::C32> = raw
         .chunks_exact(2)
-        .map(|c| {
-            common::C32::new(
-                (c[0] as f32 - 127.5) / 127.5,
-                (c[1] as f32 - 127.5) / 127.5,
-            )
-        })
+        .map(|c| common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
         .collect();
 
     let cfg = ModeSConfig {
-        preamble_ratio: std::env::var("MODES_RATIO").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0),
-        min_level: std::env::var("MODES_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.004),
+        preamble_ratio: std::env::var("MODES_RATIO")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3.0),
+        min_level: std::env::var("MODES_LEVEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.004),
     };
     let mut d = ModeSDetector::new(rate, cfg);
     let mut frames = Vec::new();

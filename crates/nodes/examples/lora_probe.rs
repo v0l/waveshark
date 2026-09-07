@@ -37,9 +37,18 @@ fn main() {
         out.push(d[i] * (1.0 - f) + d[i + 1] * f);
         pos += step;
     }
-    eprintln!("{} samples at {} S/s after decim {} and resample {:.4}", out.len(), want, factor, step);
+    eprintln!(
+        "{} samples at {} S/s after decim {} and resample {:.4}",
+        out.len(),
+        want,
+        factor,
+        step
+    );
     for sf in dsp::lora::SPREADING_FACTORS {
-        let mut demod = dsp::lora::Demod::new(dsp::lora::Config { sf, ..Default::default() });
+        let mut demod = dsp::lora::Demod::new(dsp::lora::Config {
+            sf,
+            ..Default::default()
+        });
         match demod.detect(&out, 0) {
             None => eprintln!("SF{sf}: nothing (resume {})", demod.resume()),
             Some(p) => {

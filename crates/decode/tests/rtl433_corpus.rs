@@ -30,7 +30,11 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
          only the first number is reported. The reading itself is the same in \
          all three",
     ),
-    ("acurite_5n1", "sequence_num:2", "as above, the third repeat of the same reading"),
+    (
+        "acurite_5n1",
+        "sequence_num:2",
+        "as above, the third repeat of the same reading",
+    ),
     (
         "honeywell_5816",
         "id:231303",

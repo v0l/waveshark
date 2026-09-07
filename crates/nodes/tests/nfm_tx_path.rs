@@ -73,7 +73,10 @@ fn a_tone_transmitted_as_nfm_comes_back_off_the_capture() {
     let seg = &audio[1_000..];
     let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
     let hz = crossings as f64 * RATE / seg.len() as f64;
-    assert!((hz - TONE_HZ).abs() < 5.0, "recovered a {hz:.0} Hz tone, sent {TONE_HZ}");
+    assert!(
+        (hz - TONE_HZ).abs() < 5.0,
+        "recovered a {hz:.0} Hz tone, sent {TONE_HZ}"
+    );
 
     // And at the level it was sent at: 0.8 of full scale into a 2.5 kHz
     // deviation is 2 kHz, which the discriminator scales back to 0.8.
@@ -84,7 +87,10 @@ fn a_tone_transmitted_as_nfm_comes_back_off_the_capture() {
     // past the peak, while the tone's power is unaffected.
     let rms = (seg.iter().map(|v| (v * v) as f64).sum::<f64>() / seg.len() as f64).sqrt();
     let want = 0.8 / 2f64.sqrt();
-    assert!((rms - want).abs() < 0.02, "recovered {rms:.3} rms, sent {want:.3}");
+    assert!(
+        (rms - want).abs() < 0.02,
+        "recovered {rms:.3} rms, sent {want:.3}"
+    );
 }
 
 #[test]
@@ -109,9 +115,12 @@ fn a_receive_stream_cannot_be_handed_to_the_radio() {
     let (mut sink, _c) = sources::FileSink::in_memory(Sps(RATE as u64), SampleFormat::Cs8);
     let input = StreamSpec::iq(RATE, Hz(433_920_000));
     assert!(!input.is_tx());
-    let err = chain(input, vec![Box::new(TxSinkNode::new(sink.start_tx().unwrap()))])
-        .unwrap_err()
-        .to_string();
+    let err = chain(
+        input,
+        vec![Box::new(TxSinkNode::new(sink.start_tx().unwrap()))],
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("receive stream"), "unhelpful: {err}");
 }
 
@@ -131,7 +140,11 @@ fn the_transmission_is_the_shape_the_graph_says_it_is() {
     assert_eq!(modulated.kind, PortKind::Iq);
     assert!(modulated.is_tx());
     // Carson: 2 x (2.5 kHz deviation + 3 kHz of audio).
-    assert!((modulated.bandwidth - 11_000.0).abs() < 1.0, "{}", modulated.bandwidth);
+    assert!(
+        (modulated.bandwidth - 11_000.0).abs() < 1.0,
+        "{}",
+        modulated.bandwidth
+    );
 }
 
 #[test]

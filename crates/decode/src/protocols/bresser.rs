@@ -49,9 +49,10 @@ impl Protocol for Bresser3Ch {
                     == 0
         })
         .ok_or(match bits.len() {
-            n if n < FRAME_BYTES * 8 => {
-                DecodeError::WrongLength { got: n, want: FRAME_BYTES * 8 }
-            }
+            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength {
+                got: n,
+                want: FRAME_BYTES * 8,
+            },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -71,10 +72,12 @@ impl Protocol for Bresser3Ch {
         let mut r = Report::new(self.name());
         r.crc_valid = Some(true);
         r.raw = b.clone();
-        Ok(r
-            .int("id", b[0] as i64)
+        Ok(r.int("id", b[0] as i64)
             .int("channel", channel as i64)
-            .float("temperature_c", (((fahrenheit - 32.0) / 1.8) * 10.0).round() / 10.0)
+            .float(
+                "temperature_c",
+                (((fahrenheit - 32.0) / 1.8) * 10.0).round() / 10.0,
+            )
             .int("humidity_pct", humidity as i64)
             .bool("battery_ok", b[1] & 0x80 == 0))
     }
@@ -92,7 +95,10 @@ mod tests {
         b[1] = (if battery_low { 0x80 } else { 0 }) | (channel << 4) | (raw >> 8) as u8;
         b[2] = raw as u8;
         b[3] = humidity;
-        b[4] = b[0].wrapping_add(b[1]).wrapping_add(b[2]).wrapping_add(b[3]);
+        b[4] = b[0]
+            .wrapping_add(b[1])
+            .wrapping_add(b[2])
+            .wrapping_add(b[3]);
         // The frame travels inverted.
         BitBuffer::from_bytes(&b).inverted()
     }
@@ -122,7 +128,11 @@ mod tests {
         let f = frame(0x3d, 2, 68.0, 51, false);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 30 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
+            broken.push(if i == 30 {
+                !f.get(i).unwrap()
+            } else {
+                f.get(i).unwrap()
+            });
         }
         assert_eq!(Bresser3Ch.decode(&broken), Err(DecodeError::CrcFailed));
     }

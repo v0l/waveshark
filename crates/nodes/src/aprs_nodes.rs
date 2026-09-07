@@ -94,7 +94,9 @@ impl Simple for AprsNode {
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other("aprs needs its channel inside the span"));
+            return Err(common::Error::other(
+                "aprs needs its channel inside the span",
+            ));
         }
         // Decimate to an audio rate the tone correlators can work at. The
         // exact rate follows from the span, so the AFSK side is built from
@@ -201,7 +203,11 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         None => "AX25",
     };
 
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
@@ -222,7 +228,10 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(center as u64)),
+            latency: 0,
+        }
     }
 
     /// A UI frame with an uncompressed position, as a tracker would send.
@@ -297,7 +306,12 @@ mod tests {
         assert_eq!(parsed.source.to_string(), "EI2ABC-9");
         let d = aprs_decoded(&parsed, &frames[0], Hz(144_800_000));
         assert_eq!(d.protocol, "APRS-Position");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
         assert_eq!(get("lon"), Some(common::Value::Float(-6.25)));
         assert_eq!(get("from"), Some(common::Value::Text("EI2ABC-9".into())));

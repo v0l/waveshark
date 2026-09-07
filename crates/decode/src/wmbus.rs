@@ -58,13 +58,17 @@ pub fn device_type(t: u8) -> &'static str {
 /// The manufacturer field as its three letters: five bits each, A being 1.
 pub fn manufacturer(m: u16) -> String {
     let letter = |v: u16| char::from(((v & 0x1f) as u8).wrapping_add(64));
-    [letter(m >> 10), letter(m >> 5), letter(m)].into_iter().collect()
+    [letter(m >> 10), letter(m >> 5), letter(m)]
+        .into_iter()
+        .collect()
 }
 
 /// Binary-coded decimal, least significant byte first, as the number
 /// printed on the meter.
 pub fn bcd_id(a: &[u8]) -> u64 {
-    a.iter().rev().fold(0u64, |acc, b| acc * 100 + ((b >> 4) as u64) * 10 + (b & 0xf) as u64)
+    a.iter().rev().fold(0u64, |acc, b| {
+        acc * 100 + ((b >> 4) as u64) * 10 + (b & 0xf) as u64
+    })
 }
 
 /// Parse a frame's bytes from the length field onward, CRCs removed, as the
@@ -98,7 +102,9 @@ pub fn parse(bytes: &[u8], mode: Option<&str>) -> Option<Report> {
 
     // Past the address: the control information byte and its header.
     let mut at = 10usize;
-    let Some(&ci) = bytes.get(at) else { return Some(r) };
+    let Some(&ci) = bytes.get(at) else {
+        return Some(r);
+    };
     at += 1;
     // An extended link layer wraps the rest: CC and ACC, and for 0x8D a
     // session number and a payload CRC, then the real CI.
@@ -111,7 +117,10 @@ pub fn parse(bytes: &[u8], mode: Option<&str>) -> Option<Report> {
         at += 2;
         if ci == 0x8D {
             if let Some(sn) = bytes.get(at..at + 4) {
-                r = r.int("ell_sn", u32::from_le_bytes([sn[0], sn[1], sn[2], sn[3]]) as i64);
+                r = r.int(
+                    "ell_sn",
+                    u32::from_le_bytes([sn[0], sn[1], sn[2], sn[3]]) as i64,
+                );
             }
             at += 6;
         }
@@ -135,13 +144,18 @@ pub fn parse(bytes: &[u8], mode: Option<&str>) -> Option<Report> {
         let h = at + skip;
         if let Some(hdr) = bytes.get(h..h + 4) {
             let cw = u16::from_le_bytes([hdr[2], hdr[3]]);
-            r = r.int("AC", hdr[0] as i64).int("ST", hdr[1] as i64).int("CW", cw as i64);
+            r = r
+                .int("AC", hdr[0] as i64)
+                .int("ST", hdr[1] as i64)
+                .int("CW", cw as i64);
             // Bits 8 to 12 of the configuration word are the encryption
             // mode; zero is none, and five is the AES-128 CBC a utility's
             // meters use.
             let enc_mode = (cw >> 8) & 0x1f;
             if enc_mode != 0 {
-                r = r.int("payload_encrypted", 1).int("encryption_mode", enc_mode as i64);
+                r = r
+                    .int("payload_encrypted", 1)
+                    .int("encryption_mode", enc_mode as i64);
             }
         }
     }
@@ -158,7 +172,10 @@ mod tests {
     use crate::protocol::Value;
 
     fn unhex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
@@ -184,7 +201,10 @@ mod tests {
         let r = parse(&f, Some("T")).unwrap();
         assert_eq!(r.get("M"), Some(&Value::Text("IMT".into())));
         assert_eq!(r.get("id"), Some(&Value::Int(10025571)));
-        assert_eq!(r.get("type_string"), Some(&Value::Text("Bus/System component".into())));
+        assert_eq!(
+            r.get("type_string"),
+            Some(&Value::Text("Bus/System component".into()))
+        );
         assert_eq!(r.get("CI"), Some(&Value::Int(114)));
         assert_eq!(r.get("AC"), Some(&Value::Int(154)));
         assert_eq!(r.get("ST"), Some(&Value::Int(0)));

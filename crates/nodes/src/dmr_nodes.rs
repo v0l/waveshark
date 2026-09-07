@@ -73,11 +73,16 @@ const OVER_TAG: [u8; 2] = *b"DV";
 const OVER_LEN: usize = 2 + 4 + 1 + 4 + 4;
 
 fn pack_bits(bits: &[u8]) -> Vec<u8> {
-    bits.chunks(8).map(|c| c.iter().fold(0u8, |v, &b| (v << 1) | (b & 1))).collect()
+    bits.chunks(8)
+        .map(|c| c.iter().fold(0u8, |v, &b| (v << 1) | (b & 1)))
+        .collect()
 }
 
 fn unpack_bits(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1)).collect()
+    bytes
+        .iter()
+        .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
+        .collect()
 }
 
 fn lc_flags(lc: Option<&LinkControl>) -> u8 {
@@ -213,12 +218,19 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     } else {
         // One burst is one 60 ms slot on this logical channel.
         fields.push(("seconds".to_string(), Value::Float(0.06)));
-        fields.push(("burst".to_string(), Value::Text(((b'A' + pos.min(5)) as char).to_string())));
+        fields.push((
+            "burst".to_string(),
+            Value::Text(((b'A' + pos.min(5)) as char).to_string()),
+        ));
         lc_fields(flags, dst, src, &mut fields);
         fields.push(("live".to_string(), Value::Bool(true)));
         "DMR-Voice"
     };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(
         Decoded::bytes(model, center, 0.0, bytes.to_vec())
             .with_detail(detail)
@@ -235,11 +247,18 @@ fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let dst = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
     let src = u32::from_be_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]);
     let mut fields = vec![
-        ("seconds".to_string(), Value::Float(f64::from(bursts) * 0.06)),
+        (
+            "seconds".to_string(),
+            Value::Float(f64::from(bursts) * 0.06),
+        ),
         ("bursts".to_string(), Value::Int(i64::from(bursts))),
     ];
     lc_fields(flags, dst, src, &mut fields);
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(
         Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
             .with_detail(detail)
@@ -352,7 +371,15 @@ struct SymbolSync {
 impl SymbolSync {
     fn new(rate: f64) -> Self {
         let sps = rate / BAUD;
-        Self { sps, period: sps, pos: sps, prev: 0.0, buf: Vec::new(), power: 1e-6, loop_gain: 0.003 }
+        Self {
+            sps,
+            period: sps,
+            pos: sps,
+            prev: 0.0,
+            buf: Vec::new(),
+            power: 1e-6,
+            loop_gain: 0.003,
+        }
     }
 
     fn reset(&mut self) {
@@ -440,12 +467,21 @@ struct Framer {
 pub enum DmrEvent {
     /// A voice burst: three 72-bit AMBE frames, 9 bytes each. `pos` is its
     /// place in the superframe, 0 for burst A, the one carrying the sync.
-    Voice { at: usize, bits: Vec<u8>, frames: [[u8; 9]; 3], pos: u8 },
+    Voice {
+        at: usize,
+        bits: Vec<u8>,
+        frames: [[u8; 9]; 3],
+        pos: u8,
+    },
     /// Who is talking, from a header, a terminator or an embedded LC.
     Lc(LinkControl),
     /// A data/signalling burst, by its slot type (`dmr::DT_*`), or `None`
     /// when the slot type would not decode.
-    Data { at: usize, bits: Vec<u8>, data_type: Option<u8> },
+    Data {
+        at: usize,
+        bits: Vec<u8>,
+        data_type: Option<u8>,
+    },
 }
 
 impl Framer {
@@ -623,7 +659,12 @@ impl Framer {
                 }
                 _ => None,
             };
-            return Some(Burst::Data { colour: Some(cc), data_type: Some(dt), lc, bits });
+            return Some(Burst::Data {
+                colour: Some(cc),
+                data_type: Some(dt),
+                lc,
+                bits,
+            });
         }
         if hunting {
             return None;
@@ -757,8 +798,10 @@ impl Framer {
             }
         }
         // Drain marks behind whatever is still to be read.
-        let keep =
-            self.next.map_or(self.scan, |n| n.saturating_sub(REANCHOR)).min(self.scan.max(self.base));
+        let keep = self
+            .next
+            .map_or(self.scan, |n| n.saturating_sub(REANCHOR))
+            .min(self.scan.max(self.base));
         if keep > self.base {
             let drop = (keep - self.base).min(self.marks.len());
             self.marks.drain(..drop);
@@ -770,7 +813,13 @@ impl Framer {
     /// embedded link control as the fragments arrive.
     fn emit(&mut self, at: usize, burst: Burst, out: &mut Vec<DmrEvent>) {
         match burst {
-            Burst::Voice { frames, start, lcss, embedded, bits } => {
+            Burst::Voice {
+                frames,
+                start,
+                lcss,
+                embedded,
+                bits,
+            } => {
                 if start {
                     self.since_sync = 0;
                     self.embedded.reset();
@@ -781,9 +830,19 @@ impl Framer {
                     }
                 }
                 let pos = self.since_sync.min(5) as u8;
-                out.push(DmrEvent::Voice { at, bits, frames, pos });
+                out.push(DmrEvent::Voice {
+                    at,
+                    bits,
+                    frames,
+                    pos,
+                });
             }
-            Burst::Data { colour, data_type, lc, bits } => {
+            Burst::Data {
+                colour,
+                data_type,
+                lc,
+                bits,
+            } => {
                 self.since_sync = usize::MAX;
                 if let Some(cc) = colour {
                     self.colour = Some(cc);
@@ -791,7 +850,11 @@ impl Framer {
                 if let Some(lc) = lc {
                     out.push(DmrEvent::Lc(lc));
                 }
-                out.push(DmrEvent::Data { at, bits, data_type });
+                out.push(DmrEvent::Data {
+                    at,
+                    bits,
+                    data_type,
+                });
             }
         }
     }
@@ -799,8 +862,19 @@ impl Framer {
 
 /// What one burst turned out to be, before the framer folds it into events.
 enum Burst {
-    Voice { frames: [[u8; 9]; 3], start: bool, lcss: u8, embedded: Vec<u8>, bits: Vec<u8> },
-    Data { colour: Option<u8>, data_type: Option<u8>, lc: Option<LinkControl>, bits: Vec<u8> },
+    Voice {
+        frames: [[u8; 9]; 3],
+        start: bool,
+        lcss: u8,
+        embedded: Vec<u8>,
+        bits: Vec<u8>,
+    },
+    Data {
+        colour: Option<u8>,
+        data_type: Option<u8>,
+        lc: Option<LinkControl>,
+        bits: Vec<u8>,
+    },
 }
 
 pub struct DmrNode {
@@ -902,7 +976,10 @@ impl DmrNode {
             return None;
         }
         self.voice_now.extend_from_slice(&pcm);
-        Some(std::sync::Arc::new(common::Speech { pcm, rate: VOICE_HZ }))
+        Some(std::sync::Arc::new(common::Speech {
+            pcm,
+            rate: VOICE_HZ,
+        }))
     }
 
     /// The channel samples a burst was read from, by its symbol index. The
@@ -925,7 +1002,13 @@ impl DmrNode {
 
     /// One burst as a packet: its bits, the framer's context, its speech
     /// and the samples it came from.
-    fn packet(&mut self, at: usize, pos: u8, bits: &[u8], audio: Option<std::sync::Arc<common::Speech>>) -> common::Packet {
+    fn packet(
+        &mut self,
+        at: usize,
+        pos: u8,
+        bits: &[u8],
+        audio: Option<std::sync::Arc<common::Speech>>,
+    ) -> common::Packet {
         let at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
@@ -938,7 +1021,12 @@ impl DmrNode {
             rssi_dbfs: f32::NAN,
             snr_db: f32::NAN,
             modulation: Some("4FSK"),
-            body: common::PacketBody::Frame(encode_burst(pos, self.framer.colour, self.lc.as_ref(), bits)),
+            body: common::PacketBody::Frame(encode_burst(
+                pos,
+                self.framer.colour,
+                self.lc.as_ref(),
+                bits,
+            )),
             iq: self.burst_iq(at),
             audio,
             measure: None,
@@ -954,7 +1042,10 @@ mod tests {
     use pipeline::port::StreamSpec;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(center as u64)),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -971,9 +1062,23 @@ mod tests {
         let d = dmr_decoded(&body, common::Hz(433_450_000)).expect("a DMR row");
         assert_eq!(d.protocol, "DMR-Voice");
         // One burst is 60 ms of the channel, and the over is still running.
-        assert!(d.detail.as_deref().unwrap_or_default().contains("seconds=0.06"), "{:?}", d.detail);
-        assert!(d.detail.as_deref().unwrap_or_default().contains("burst=C"), "{:?}", d.detail);
-        assert!(d.fields.iter().any(|(k, v)| k == "live" && *v == common::Value::Bool(true)));
+        assert!(
+            d.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("seconds=0.06"),
+            "{:?}",
+            d.detail
+        );
+        assert!(
+            d.detail.as_deref().unwrap_or_default().contains("burst=C"),
+            "{:?}",
+            d.detail
+        );
+        assert!(d
+            .fields
+            .iter()
+            .any(|(k, v)| k == "live" && *v == common::Value::Bool(true)));
         // Without a link control there is nobody to put in the call list.
         assert!(!d.fields.iter().any(|(k, _)| k == "to"));
         // The bits come back out as they went in.
@@ -981,10 +1086,24 @@ mod tests {
 
         // With one, the row names the talkgroup and the radio, and says it
         // is voice, which is what the call table needs to keep it.
-        let lc = LinkControl { flco: dmr::FLCO_GROUP, fid: 0, options: 0, dst: 91, src: 2_345_678 };
-        let d = dmr_decoded(&encode_burst(0, None, Some(&lc), &bits), common::Hz(433_450_000)).expect("a row");
+        let lc = LinkControl {
+            flco: dmr::FLCO_GROUP,
+            fid: 0,
+            options: 0,
+            dst: 91,
+            src: 2_345_678,
+        };
+        let d = dmr_decoded(
+            &encode_burst(0, None, Some(&lc), &bits),
+            common::Hz(433_450_000),
+        )
+        .expect("a row");
         let get = |k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_default()
         };
         assert_eq!(get("to"), "91");
         assert_eq!(get("from"), "2345678");
@@ -1029,7 +1148,10 @@ mod tests {
     #[test]
     fn reads_one_over_and_its_link_control_off_air() {
         const NAME: &str = "dmr_tg9_433.45M_2048k.cu8";
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/dmr_tg9_433.45M_2048k.cu8"
+        );
         if !std::path::Path::new(path).exists() {
             eprintln!("skipping: {NAME} absent, run testdata/fetch.sh");
             return;
@@ -1047,21 +1169,49 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), packets.len(), "every packet labels as DMR");
         let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_default()
         };
         let voice: Vec<&Decoded> = rows.iter().filter(|d| d.protocol == "DMR-Voice").collect();
-        let seconds: f64 = voice.iter().map(|d| get(d, "seconds").parse::<f64>().unwrap_or(0.0)).sum();
-        assert!(seconds > 3.0, "the over ran {seconds:.2} s of voice bursts, expected the whole 3.6");
+        let seconds: f64 = voice
+            .iter()
+            .map(|d| get(d, "seconds").parse::<f64>().unwrap_or(0.0))
+            .sum();
+        assert!(
+            seconds > 3.0,
+            "the over ran {seconds:.2} s of voice bursts, expected the whole 3.6"
+        );
         // Every voice burst after the header names the call, so the call list
         // has it from the first burst and not from the terminator.
-        let named = voice.iter().filter(|d| get(d, "to") == "9" && get(d, "from") == "1234567").count();
-        assert!(named * 10 > voice.len() * 9, "{named} of {} voice bursts carried the link control", voice.len());
+        let named = voice
+            .iter()
+            .filter(|d| get(d, "to") == "9" && get(d, "from") == "1234567")
+            .count();
+        assert!(
+            named * 10 > voice.len() * 9,
+            "{named} of {} voice bursts carried the link control",
+            voice.len()
+        );
         assert!(voice.iter().all(|d| get(d, "live") == "true"));
-        assert!(rows.iter().any(|d| d.protocol == "DMR-Header"), "no header row");
-        assert!(rows.iter().any(|d| d.protocol == "DMR-Terminator"), "no terminator row");
+        assert!(
+            rows.iter().any(|d| d.protocol == "DMR-Header"),
+            "no header row"
+        );
+        assert!(
+            rows.iter().any(|d| d.protocol == "DMR-Terminator"),
+            "no terminator row"
+        );
         // Each burst carries the samples it was read from, and its bits read
         // back as AMBE frames.
-        assert!(packets.iter().all(|p| p.iq.as_ref().is_some_and(|q| !q.samples.is_empty())), "a burst without its samples");
+        assert!(
+            packets
+                .iter()
+                .all(|p| p.iq.as_ref().is_some_and(|q| !q.samples.is_empty())),
+            "a burst without its samples"
+        );
         let frames = packets
             .iter()
             .filter_map(|p| match &p.body {
@@ -1075,7 +1225,10 @@ mod tests {
         // is only asserted where it is built in. Ten superframes of it.
         if cfg!(feature = "ambe") {
             let secs = live as f64 / VOICE_HZ;
-            assert!(secs > 3.0, "decoded {secs:.2} s of speech, expected the whole over");
+            assert!(
+                secs > 3.0,
+                "decoded {secs:.2} s of speech, expected the whole over"
+            );
         }
     }
 }
@@ -1112,7 +1265,9 @@ impl Node for DmrNode {
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other("dmr needs its channel inside the span"));
+            return Err(common::Error::other(
+                "dmr needs its channel inside the span",
+            ));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         let audio_rate = rate / factor as f64;
@@ -1153,7 +1308,8 @@ impl Node for DmrNode {
         // burst and its re-anchoring, plus the filters' delay, in samples.
         self.ring.extend_from_slice(&self.narrow);
         let sps = self.audio_rate / BAUD;
-        let keep = ((SYM_BURST + SLOT_STRIDE + MAX_MISSES as usize * SLOT_STRIDE) as f64 * sps) as usize;
+        let keep =
+            ((SYM_BURST + SLOT_STRIDE + MAX_MISSES as usize * SLOT_STRIDE) as f64 * sps) as usize;
         if self.ring.len() > keep * 2 {
             let drop = self.ring.len() - keep;
             self.ring.drain(..drop);
@@ -1181,7 +1337,12 @@ impl Node for DmrNode {
         let mut packets = Vec::new();
         for e in events {
             match e {
-                DmrEvent::Voice { at, bits, frames, pos } => {
+                DmrEvent::Voice {
+                    at,
+                    bits,
+                    frames,
+                    pos,
+                } => {
                     if !self.talking {
                         self.lc = None;
                         self.talking = true;
@@ -1191,7 +1352,11 @@ impl Node for DmrNode {
                     packets.push(self.packet(at, pos, &bits, audio));
                 }
                 DmrEvent::Lc(lc) => self.lc = Some(lc),
-                DmrEvent::Data { at, bits, data_type } => {
+                DmrEvent::Data {
+                    at,
+                    bits,
+                    data_type,
+                } => {
                     // The link control a header or terminator carries is in
                     // the event before this one, so the packet has it.
                     packets.push(self.packet(at, POS_DATA, &bits, None));

@@ -43,7 +43,10 @@ impl Protocol for Ev1527 {
         // check whatsoever, the frame's own length is the only evidence that
         // this is what it claims to be.
         if bits.len() < FRAME_BITS || bits.len() > FRAME_BITS + 1 {
-            return Err(DecodeError::WrongLength { got: bits.len(), want: FRAME_BITS });
+            return Err(DecodeError::WrongLength {
+                got: bits.len(),
+                want: FRAME_BITS,
+            });
         }
         // The 25th bit is the sync mark, always short and so always a 1. The
         // data bits are documented with the opposite polarity, which is why
@@ -64,8 +67,7 @@ impl Protocol for Ev1527 {
         let mut r = Report::new(self.name());
         r.crc_valid = None;
         r.raw = b.clone();
-        Ok(r
-            .int("id", ((b[0] as i64) << 8) | b[1] as i64)
+        Ok(r.int("id", ((b[0] as i64) << 8) | b[1] as i64)
             .int("cmd", b[2] as i64)
             .text("tristate", tristate(full)))
     }
@@ -136,7 +138,10 @@ mod tests {
                 long.push(f.get(i).unwrap());
             }
         }
-        assert!(matches!(Ev1527.decode(&long), Err(DecodeError::WrongLength { .. })));
+        assert!(matches!(
+            Ev1527.decode(&long),
+            Err(DecodeError::WrongLength { .. })
+        ));
     }
 
     #[test]

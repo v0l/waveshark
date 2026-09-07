@@ -19,7 +19,9 @@ fn fsk_burst(bits: &[u8]) -> Vec<C32> {
     let sp = (SYMBOL_US as f64 * RATE / 1e6).round() as usize;
     let mut seed = 99u64;
     let mut rng = move || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) as f32 / (1u64 << 30) as f32 - 1.0) * 0.02
     };
     let mut v: Vec<C32> = (0..25_000).map(|_| C32::new(rng(), rng())).collect();
@@ -28,7 +30,10 @@ fn fsk_burst(bits: &[u8]) -> Vec<C32> {
         let f = if *b != 0 { DEVIATION_HZ } else { -DEVIATION_HZ };
         for _ in 0..sp {
             phase = (phase + std::f64::consts::TAU * f / RATE).rem_euclid(std::f64::consts::TAU);
-            v.push(C32::new(phase.cos() as f32 + rng(), phase.sin() as f32 + rng()));
+            v.push(C32::new(
+                phase.cos() as f32 + rng(),
+                phase.sin() as f32 + rng(),
+            ));
         }
     }
     v.extend((0..25_000).map(|_| C32::new(rng(), rng())));
@@ -92,16 +97,24 @@ fn the_fsk_chain_recovers_the_transmitted_bits() {
 fn the_ook_chain_sees_the_same_burst_as_one_flat_mark() {
     let pkgs = pulses("ook", &fsk_burst(&test_bits()));
     let marks: usize = pkgs.iter().map(|p| p.pulses.len()).sum();
-    assert!(marks <= 1, "constant envelope produced {marks} pulses: {pkgs:?}");
+    assert!(
+        marks <= 1,
+        "constant envelope produced {marks} pulses: {pkgs:?}"
+    );
 }
 
 #[test]
 fn fsk_detect_rejects_a_chain_that_has_already_thrown_away_the_phase() {
     let specs = vec![NodeSpec::new("envelope"), NodeSpec::new("fsk_detect")];
     let spec = StreamSpec::iq(RATE, Hz::mhz(868));
-    let err = build_chain(spec, &specs, &registry()).unwrap_err().to_string();
+    let err = build_chain(spec, &specs, &registry())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("fsk_detect"), "{err}");
-    assert!(err.contains("envelope"), "the error should say how to fix it: {err}");
+    assert!(
+        err.contains("envelope"),
+        "the error should say how to fix it: {err}"
+    );
 }
 
 #[test]
