@@ -1083,11 +1083,15 @@ impl Node for AutoNode {
             .live()
             .filter(|s| !spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&(c0 + s.center_hz))))
             .count();
+        // A channel a front end has read on is that front end's, and nothing
+        // else runs in it: no detection, no burst router, no second decoder
+        // on the same signal. Whatever width the detector measures inside a
+        // remembered channel, it is the same transmitter the front end there
+        // is already reading, and opening a source for it spends a stream and
+        // an extraction to log the same burst twice.
         let sticky = &self.sticky;
-        let covered = |hz: f64, w: f64| {
-            sticky.iter().any(|s| {
-                (s.center_hz - hz).abs() <= s.width_hz / 2.0 && w <= s.width_hz * CHANNEL_WIDTH_TOLERANCE
-            })
+        let covered = |hz: f64, _w: f64| {
+            sticky.iter().any(|s| (s.center_hz - hz).abs() <= s.width_hz / 2.0)
         };
         self.events.extend(raw.iter().filter(|ev| {
             let SourceEvent::Opened(s) = ev else { return true };
@@ -1627,6 +1631,36 @@ mod tests {
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
         assert!(names.contains(&"m17"), "{names:?}");
         assert!(names.contains(&"pocsag"), "{names:?}");
+    }
+
+    #[test]
+    fn a_remembered_channel_belongs_to_its_front_end_alone() {
+        // Once a front end has read a channel, that channel is its: the
+        // detector's openings inside it are dropped, whatever width they
+        // measure, so nothing else is built there and the same burst is not
+        // logged twice by two decoders. A wide measurement of the same
+        // transmitter used to slip past the width tolerance and bring the
+        // burst router and every narrowband decoder with it.
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
+        assert!(n.remembered().is_empty());
+        n.remember("pocsag", 433_475_000.0, 25_000.0);
+        assert_eq!(n.remembered(), [("pocsag", 433_475_000.0, 25_000.0)]);
+        // And the slot built for it holds that front end and nothing else.
+        let b = SourceBlock {
+            id: n.sticky[0].id,
+            state: SourceState::Opened,
+            center_hz: 433_475_000,
+            bandwidth_hz: 25_000.0,
+            signal_hz: 25_000.0,
+            rate: n.cfg.min_rate_hz,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b).unwrap();
+        let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
+        assert_eq!(names, ["pocsag"], "a locked channel runs one front end");
     }
 
     #[test]

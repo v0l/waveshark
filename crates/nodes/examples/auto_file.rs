@@ -57,6 +57,15 @@ fn main() {
                 }
             }
         }
+        if std::env::var_os("STICKY").is_some() && i % 2000 == 0 {
+            if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+                .and_then(|(id, _)| g.node(id))
+                .and_then(|n| n.as_any())
+                .and_then(|x| x.downcast_ref::<nodes::AutoNode>())
+            {
+                eprintln!("t {:6.2}s sticky {:?} open {}", i as f64 * block as f64 / rate, a.remembered(), a.active());
+            }
+        }
         if std::env::var_os("SOURCES").is_some() && i % 200 == 0 {
             if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
