@@ -82,6 +82,14 @@ claims what it can render.
   traffic arrived under a blank header. Nothing errors, and the view looks
   like it works.
 
+- **Devices**: one row per transmitter that identified itself, rather than one
+  per transmission, with what it called itself, who made it, the strongest
+  level it was ever heard at and when it was last heard. This is the survey
+  view: the packet list is unreadable from a moving car, where a hundred rows
+  a second arrive and most of them are the same beacon. Selecting a row draws
+  that device's sightings on the map. `crates/app/src/ui/devices_pane.rs`,
+  over `crates/survey`.
+
 - **Keys**: a row per enciphered channel a front end reports, and what is known
   about the key for it. The view is always there as an encryption monitor; the
   key store, key entry and the TETRA decryption behind it need the `tea`
@@ -205,6 +213,48 @@ Because the tracker is a consumer of the bus, a feed brings aircraft with it on
 a band where this receiver demodulates nothing of the sort. Tuned to 433.92 MHz
 for weather sensors, with a Beast feed attached, the map fills from the rooftop
 receiver while the ISM decoders run locally.
+
+## The device database
+
+A second thing to do with the same bus: record the transmitters rather than
+the transmissions. `SurveyNode` (`crates/nodes/src/survey_nodes.rs`) is a sink
+on the bus like the tracker, and `crates/survey` is the store behind it, a
+SQLite file with a table of devices and a table of sightings.
+
+Three rules shape it.
+
+**Identity is a pair.** `(protocol, ident)`, the way `tracks` learned to key
+identity when AIS arrived beside ADS-B: an ICAO address and an MMSI are both
+integers and are not comparable. The identifier is kept as text a person would
+recognise. Which field carries it is a table in the node, one row per
+protocol, and it is always a field the decoder chose as the transmitter's own
+identifier rather than anything named `id`. An ISM sensor's id is eight bits
+picked when the batteries go in, so for those the model is part of the
+identity: an Acurite and a Nexus sharing id 163 are two devices.
+
+**A sighting is where the receiver was, not where the device is.** It carries
+the time, the position from the GPS, the level and the frequency. A survey
+driving past a beacon is a line of positions along a road with a level at
+each; the strongest of them is the closest approach, and that is the most this
+claims. Nothing trilaterates, and the map draws the trail rather than a pin.
+
+**Sightings are thinned, devices are not.** A beacon advertising ten times a
+second for an hour is thirty-six thousand rows that all say the same thing, so
+a new sighting is written when the receiver has moved 25 metres, when the
+level has changed by 6 dB, or after a minute. What is never thinned is the
+device row: first heard, last heard, every reception counted, the best level
+and where it was heard from.
+
+The position comes from `crates/gps`: NMEA from a serial port, or gpsd on TCP,
+one parser behind both. A fix goes stale after ten seconds, so a receiver that
+loses the sky records sightings with no position rather than attributing an
+afternoon to the last place it saw a satellite. Without a GPS the survey still
+runs and the position column is empty, which is the indoor case.
+
+`--survey FILE` points it somewhere, `--no-survey` turns it off, and
+`--gps /dev/ttyACM0` or `--gps gpsd:localhost` gives it a position. The pane
+exports WiGLE CSV, which is what wardriving tools read; the survey file itself
+is the record, and the CSV is a copy shaped for other people's tools.
 
 ## Views not built yet
 

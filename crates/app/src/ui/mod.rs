@@ -28,6 +28,7 @@ mod burst;
 mod calls_pane;
 mod chain_pane;
 mod head;
+mod devices_pane;
 mod keys_pane;
 mod map_pane;
 mod mapview;
@@ -62,6 +63,7 @@ pub struct App {
     scope: state::ScopeState,
     chain: state::ChainState,
     log: state::LogState,
+    survey: state::SurveyState,
     map: map_pane::MapState,
     calls: state::CallsState,
     messages: state::MessagesState,
@@ -211,6 +213,7 @@ enum View {
     Map,
     Calls,
     Messages,
+    Devices,
     Keys,
 }
 
@@ -222,6 +225,7 @@ impl View {
             View::Map => "Map",
             View::Calls => "Calls",
             View::Messages => "Messages",
+            View::Devices => "Devices",
             View::Keys => "Keys",
         }
     }
@@ -355,6 +359,7 @@ impl Default for App {
             scope: state::ScopeState::default(),
             chain: state::ChainState::default(),
             log: state::LogState::default(),
+            survey: state::SurveyState::default(),
             map: map_pane::MapState::default(),
             rt: background_runtime(),
             calls: state::CallsState::default(),
@@ -460,6 +465,10 @@ impl App {
         app.scope.wf_center = s.center;
         app.audio.volume = s.volume;
         app.log.path = crate::packetlog::PacketLog::default_dir();
+        // A GPS named once stays named: a survey is usually the same drive
+        // with the same receiver, and typing the port again every start is
+        // the difference between a tool and a demonstration.
+        app.survey.gps = gps::Transport::parse(&s.gps);
         app.radio_dirty = true;
         // What was changed about the graph, if anything was. Applied
         // whether or not manual mode is on: the mode only says whether the
@@ -509,6 +518,7 @@ impl App {
             decode_on: self.decode_on,
             volume: self.audio.volume,
             log_cap_mb: self.log_cap_mb,
+            gps: self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default(),
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
             map_layers: self.map.map.layers.saved(),
@@ -612,6 +622,25 @@ impl App {
     pub fn set_location(&mut self, lat: f64, lon: f64) {
         self.location = Some((lat, lon));
         self.send(Cmd::Location(lat, lon));
+    }
+
+    /// Start or stop recording the survey, or point it at another file.
+    pub fn set_survey(&mut self, off: bool, path: Option<std::path::PathBuf>) {
+        self.survey.path =
+            if off { None } else { path.or_else(crate::packetlog::PacketLog::default_survey_path) };
+        let p = self.survey.path.clone();
+        self.send(Cmd::Survey(p));
+        // The pane reads the same file through a connection of its own. It
+        // does not exist until the radio thread has created it, so opening
+        // here is allowed to fail and is retried while the pane is drawn.
+        self.survey.db = None;
+        self.survey.refreshed = None;
+    }
+
+    /// Read the receiver's own position from a GPS, or stop.
+    pub fn set_gps(&mut self, transport: Option<gps::Transport>) {
+        self.survey.gps = transport.clone();
+        self.send(Cmd::Gps(transport));
     }
 
     /// Turn the packet log off, or point it somewhere other than the default.
@@ -760,6 +789,14 @@ impl App {
         // graph and it has to be told where to write again.
         if let Some(d) = self.log.path.clone() {
             self.send(Cmd::PacketLog(Some(d)));
+        }
+        // The survey and the GPS are the same: both belong to the graph and
+        // the thread that had them is gone.
+        if let Some(p) = self.survey.path.clone() {
+            self.send(Cmd::Survey(Some(p)));
+        }
+        if let Some(t) = self.survey.gps.clone() {
+            self.send(Cmd::Gps(Some(t)));
         }
         // Same for the feeds and the station position: they belong to the
         // graph, and a new radio thread has built a new one.
@@ -1120,8 +1157,23 @@ impl App {
         // Cloned rather than borrowed, so holding the runtime does not hold
         // the application while the pane borrows its own state out of it.
         let rt = self.rt.handle().clone();
-        let place = map_pane::Map { st: &mut self.map, home: self.location, edit: &mut edit, rt }
-            .show(ui);
+        // The trail is whatever the device list has selected, so choosing a
+        // device in one view and looking at the map in the other shows the
+        // same device.
+        let ident = self
+            .survey
+            .selected
+            .and_then(|id| self.survey.rows.iter().find(|d| d.id == id))
+            .map(|d| d.ident.clone());
+        let trail = map_pane::Trail { points: &self.survey.trail, ident: ident.as_deref() };
+        let place = map_pane::Map {
+            st: &mut self.map,
+            home: self.location,
+            edit: &mut edit,
+            trail,
+            rt,
+        }
+        .show(ui);
         self.station_edit = edit;
         if let Some((lat, lon)) = place {
             self.set_location(lat, lon);
@@ -1196,6 +1248,97 @@ impl App {
             Some(messages_pane::Action::Clear) => self.messages.list.clear(),
             None => {}
         }
+    }
+
+    /// Draw the device database, then do what a click asked for.
+    fn devices_view(&mut self, ui: &mut egui::Ui) {
+        let (counts, fix, connected) = match self.radio.as_ref() {
+            Some(r) => (
+                (
+                    r.status.survey_devices.load(std::sync::atomic::Ordering::Relaxed),
+                    r.status.survey_sightings.load(std::sync::atomic::Ordering::Relaxed),
+                    r.status.survey_heard.load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                *r.status.gps_fix.lock(),
+                r.status.gps_connected.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            None => ((0, 0, 0), None, false),
+        };
+        self.refresh_survey();
+        let act = devices_pane::Devices {
+            st: &mut self.survey,
+            counts,
+            fix,
+            gps_connected: connected,
+        }
+        .show(ui);
+        match act {
+            Some(devices_pane::Action::Select(id)) => {
+                self.survey.selected = id;
+                // The trail is fetched on the change rather than per frame:
+                // a device heard all afternoon has thousands of sightings and
+                // the map only redraws when one of them moves.
+                self.survey.trail = match (id, self.survey.db.as_ref()) {
+                    (Some(id), Some(db)) => db.sightings(id).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+            }
+            Some(devices_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
+            Some(devices_pane::Action::Export) => self.export_survey(),
+            None => {}
+        }
+    }
+
+    /// Read the survey's rows again, at most once a second.
+    ///
+    /// The radio thread owns the file and appends to it continuously; this is
+    /// a second connection reading the same one. Whatever it last read is
+    /// what the pane and the map draw, so a survey being written while it is
+    /// being looked at lags by up to a second and never blocks the writer.
+    fn refresh_survey(&mut self) {
+        let Some(path) = self.survey.path.clone() else {
+            self.survey.rows.clear();
+            return;
+        };
+        if self.survey.db.is_none() {
+            self.survey.db = survey::Db::open_read(&path).ok();
+        }
+        let due = self
+            .survey
+            .refreshed
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+        if !due {
+            return;
+        }
+        if let Some(db) = self.survey.db.as_ref() {
+            if let Ok(rows) = db.devices(survey::Query::default()) {
+                self.survey.rows = rows;
+            }
+            if let Some(id) = self.survey.selected {
+                self.survey.trail = db.sightings(id).unwrap_or_default();
+            }
+        }
+        self.survey.refreshed = Some(std::time::Instant::now());
+    }
+
+    /// Write the survey out as WiGLE CSV, beside the survey file.
+    fn export_survey(&mut self) {
+        let (Some(path), Some(db)) = (self.survey.path.clone(), self.survey.db.as_ref()) else {
+            return;
+        };
+        let out = path.with_extension("wigle.csv");
+        let written = std::fs::File::create(&out)
+            .map_err(|e| e.to_string())
+            .and_then(|mut f| {
+                survey::write_wigle(db, survey::Query::default(), &mut f).map_err(|e| e.to_string())
+            });
+        // The same banner a radio fault uses: an export is a thing that
+        // happened once, and it should say so and then get out of the way.
+        self.err = Some(match written {
+            Ok(n) => format!("wrote {n} rows to {}", out.display()),
+            Err(e) => format!("survey export failed: {e}"),
+        });
+        self.err_at = Some(std::time::Instant::now());
     }
 
     /// Draw the key manager.
@@ -1435,6 +1578,7 @@ impl eframe::App for App {
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
                     View::Messages => self.message_view(ui),
+                    View::Devices => self.devices_view(ui),
                     View::Keys => self.keys_view(ui),
                 });
         }
@@ -1551,6 +1695,10 @@ impl App {
 
     pub fn show_messages(&mut self) {
         self.view = View::Messages;
+    }
+
+    pub fn show_devices(&mut self) {
+        self.view = View::Devices;
     }
 
     /// Point the receiver at a frequency without opening a channel on it.

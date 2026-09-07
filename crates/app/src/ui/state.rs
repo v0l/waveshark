@@ -356,6 +356,51 @@ pub(super) struct LogState {
     pub sigid: Option<DecodeRecord>,
 }
 
+/// The device database, as the interface holds it.
+///
+/// The survey itself is a node on the radio thread; what lives here is where
+/// it writes, where the position comes from, and what the pane is showing.
+pub struct SurveyState {
+    /// Where the survey file is, or `None` when nothing is being recorded.
+    pub path: Option<std::path::PathBuf>,
+    /// How the receiver's own position is read, if it is.
+    pub gps: Option<gps::Transport>,
+    pub open: bool,
+    /// The row the pane is expanded on, which is the device whose sightings
+    /// are drawn on the map.
+    pub selected: Option<i64>,
+    /// Rows as the radio thread last published them.
+    pub rows: Vec<survey::Device>,
+    /// Sightings of the selected device, fetched when the selection changes
+    /// rather than every frame: a device heard all afternoon has thousands.
+    pub trail: Vec<survey::Sighting>,
+    /// Free text the list is filtered by: an address, a name, a protocol.
+    pub filter: String,
+    /// A read-only handle on the same file the radio thread is writing, which
+    /// is how the pane draws a survey without the rows travelling through the
+    /// status block every frame.
+    pub db: Option<survey::Db>,
+    /// When the rows were last read, so a pane open on a busy band is not a
+    /// query per frame.
+    pub refreshed: Option<Instant>,
+}
+
+impl Default for SurveyState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            gps: None,
+            open: false,
+            selected: None,
+            rows: Vec::new(),
+            trail: Vec::new(),
+            filter: String::new(),
+            db: None,
+            refreshed: None,
+        }
+    }
+}
+
 impl Default for LogState {
     fn default() -> Self {
         Self {
