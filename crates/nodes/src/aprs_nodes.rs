@@ -203,6 +203,13 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        // The AX.25 addresses. A destination on APRS is usually a software
+        // identifier rather than a station, which is why it is a group: it
+        // is a label many senders share, not somebody listening.
+        .with_link(pipeline::event::Link::between(
+            pipeline::event::Party::unit(frame.source.to_string()),
+            pipeline::event::Party::group(frame.destination.to_string()),
+        ))
         .with_detail(detail)
         .with_fields(fields)
         .with_modulation("AFSK")

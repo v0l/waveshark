@@ -137,6 +137,20 @@ pub fn burst_voice_frames(bytes: &[u8]) -> Option<[[u8; 9]; 3]> {
     Some(Framer::voice_frames(&unpack_bits(&bytes[13..])))
 }
 
+/// Who an over was between, from the same link control the fields come from.
+fn lc_link(flags: u8, dst: u32, src: u32) -> Option<pipeline::event::Link> {
+    use pipeline::event::Party;
+    if flags & FLAG_HAVE_LC == 0 {
+        return None;
+    }
+    let to = if flags & FLAG_GROUP != 0 {
+        Party::group(dst.to_string())
+    } else {
+        Party::unit(dst.to_string())
+    };
+    Some(pipeline::event::Link::between(Party::unit(src.to_string()), to))
+}
+
 fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Value)>) {
     use common::Value;
     if flags & FLAG_HAVE_LC == 0 {
@@ -219,12 +233,12 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         "DMR-Voice"
     };
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Some(
-        Decoded::bytes(model, center, 0.0, bytes.to_vec())
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation("4FSK"),
-    )
+    let mut d = Decoded::bytes(model, center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation("4FSK");
+    d.link = lc_link(flags, dst, src);
+    Some(d)
 }
 
 /// The old one-row-per-over body, for logs written before bursts were logged.
@@ -240,12 +254,12 @@ fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     ];
     lc_fields(flags, dst, src, &mut fields);
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Some(
-        Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation("4FSK"),
-    )
+    let mut d = Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation("4FSK");
+    d.link = lc_link(flags, dst, src);
+    Some(d)
 }
 
 /// A common DMR simplex frequency in Region 1, and only the default before the

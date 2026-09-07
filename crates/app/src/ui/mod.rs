@@ -53,7 +53,10 @@ use burst::*;
 use settings::RemoteEdit;
 use settings_rows::{mhz_field, ScannerRow};
 use state::{Channel, Logged};
-use widgets::{bin_hint, cog, cog_rect, hint, modal_title, reading, row, Fader, Squelch, Vu};
+use widgets::{
+    bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title, reading, row,
+    row_help, Fader, Squelch, Vu,
+};
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
 use egui::{Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Vec2};
@@ -1903,6 +1906,7 @@ mod tests {
             snr_db: 21.5,
             bytes: vec![0xab, 0xcd],
             crc,
+            link: None,
             iq: None,
             audio: None,
         }

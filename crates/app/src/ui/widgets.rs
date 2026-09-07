@@ -63,7 +63,12 @@ impl Vu {
         // looks silent rather than looking like a control that failed to
         // appear.
         p.rect_filled(r, 1.0, theme::WELL);
-        p.rect_stroke(r, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            r,
+            1.0,
+            Stroke::new(1.0, theme::ETCH),
+            egui::StrokeKind::Inside,
+        );
 
         let at = |v: f32| r.left() + v.clamp(0.0, 1.0).sqrt() * r.width();
         for (v, c) in [(WARN, AMBER), (PEAK, theme::FAULT)] {
@@ -126,7 +131,11 @@ pub struct Fader<'a> {
 
 impl<'a> Fader<'a> {
     pub fn new(value: &'a mut f32, peak: f32) -> Self {
-        Self { value, peak, width: 130.0 }
+        Self {
+            value,
+            peak,
+            width: 130.0,
+        }
     }
 
     pub fn width(mut self, w: f32) -> Self {
@@ -156,7 +165,11 @@ impl Widget for Fader<'_> {
         }
 
         let p = ui.painter();
-        Vu::paint(p, Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)), self.peak);
+        Vu::paint(
+            p,
+            Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)),
+            self.peak,
+        );
 
         // Amber, because the handle is the one part of this the operator set,
         // and outlined so it stays legible crossing a lit bar of any colour.
@@ -169,7 +182,11 @@ impl Widget for Fader<'_> {
         p.rect_filled(
             handle.shrink(1.0),
             1.0,
-            if resp.hovered() || resp.dragged() { theme::VALUE } else { theme::READOUT },
+            if resp.hovered() || resp.dragged() {
+                theme::VALUE
+            } else {
+                theme::READOUT
+            },
         );
         resp
     }
@@ -190,7 +207,12 @@ pub struct Squelch<'a> {
 
 impl<'a> Squelch<'a> {
     pub fn new(threshold: &'a mut f32, lo: f32, hi: f32, measured: f32, open: bool) -> Self {
-        Self { threshold, range: (lo, hi), measured, open }
+        Self {
+            threshold,
+            range: (lo, hi),
+            measured,
+            open,
+        }
     }
 }
 
@@ -224,7 +246,12 @@ impl Widget for Squelch<'_> {
         let p = ui.painter();
         let well = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H));
         p.rect_filled(well, 1.0, theme::WELL);
-        p.rect_stroke(well, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+        p.rect_stroke(
+            well,
+            1.0,
+            Stroke::new(1.0, theme::ETCH),
+            egui::StrokeKind::Inside,
+        );
         // The bar is what the squelch is measuring now, coloured by what it
         // decided: a glance says whether audio is getting through.
         let end = at(self.measured);
@@ -235,7 +262,11 @@ impl Widget for Squelch<'_> {
                     Pos2::new(end, well.bottom() - 1.0),
                 ),
                 0.0,
-                if self.open { theme::TRACE } else { theme::LEGEND },
+                if self.open {
+                    theme::TRACE
+                } else {
+                    theme::LEGEND
+                },
             );
         }
         let x = at(*self.threshold);
@@ -247,7 +278,11 @@ impl Widget for Squelch<'_> {
         p.rect_filled(
             handle.shrink(1.0),
             1.0,
-            if resp.hovered() || resp.dragged() { theme::VALUE } else { theme::READOUT },
+            if resp.hovered() || resp.dragged() {
+                theme::VALUE
+            } else {
+                theme::READOUT
+            },
         );
         resp
     }
@@ -263,7 +298,10 @@ pub const ROW_H: f32 = 16.0;
 /// One cell of text, clipped to its column so a long field cannot push the
 /// ones after it sideways.
 pub fn cell(p: &egui::Painter, row: Rect, x: f32, w: f32, text: &str, col: Color32) {
-    let r = Rect::from_min_max(Pos2::new(x, row.top()), Pos2::new(x + w - 6.0, row.bottom()));
+    let r = Rect::from_min_max(
+        Pos2::new(x, row.top()),
+        Pos2::new(x + w - 6.0, row.bottom()),
+    );
     p.with_clip_rect(r.intersect(p.clip_rect())).text(
         Pos2::new(r.left(), r.center().y),
         egui::Align2::LEFT_CENTER,
@@ -305,18 +343,31 @@ pub fn card<R>(
         ui.spacing_mut().item_spacing.y = 0.0;
         let head = egui::Frame::NONE
             .fill(theme::WELL)
-            .inner_margin(egui::Margin { left: 10, right: 10, top: 4, bottom: 4 });
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 4,
+                bottom: 4,
+            });
         let h = head.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| header(ui));
         });
         let r = h.response.rect;
         ui.painter().line_segment(
-            [Pos2::new(r.left(), r.bottom()), Pos2::new(r.right(), r.bottom())],
+            [
+                Pos2::new(r.left(), r.bottom()),
+                Pos2::new(r.right(), r.bottom()),
+            ],
             Stroke::new(1.0, theme::ETCH),
         );
         egui::Frame::NONE
-            .inner_margin(egui::Margin { left: 10, right: 10, top: 6, bottom: 8 })
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 10,
+                top: 6,
+                bottom: 8,
+            })
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.set_width(ui.available_width());
@@ -344,6 +395,52 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
 }
 
+/// A "?" carrying, on hover, the explanation that would otherwise sit under
+/// a control as a line of prose.
+///
+/// A settings modal reads as a column of settings only while the settings are
+/// what is on it. Paragraphs between them push the next control off the
+/// screen and are read once, so the explanation is kept where somebody who
+/// wants it will look and out of the way of somebody who does not.
+pub fn help(ui: &mut egui::Ui, text: &str) -> Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+    let col = if r.hovered() {
+        theme::READOUT
+    } else {
+        theme::LEGEND
+    };
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        p.circle_stroke(rect.center(), 6.0, Stroke::new(1.0, col));
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "?",
+            egui::FontId::new(10.0, egui::FontFamily::Name(theme::LEGEND_FONT.into())),
+            col,
+        );
+    }
+    r.on_hover_text(text)
+}
+
+/// A section legend with its explanation on a "?" beside it.
+pub fn legend_help(ui: &mut egui::Ui, label: &str, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(legend(label));
+        help(ui, text);
+    });
+}
+
+/// A checkbox with its explanation on a "?" beside it.
+pub fn check_help(ui: &mut egui::Ui, on: &mut bool, label: &str, text: &str) -> Response {
+    ui.horizontal(|ui| {
+        let r = ui.checkbox(on, label);
+        help(ui, text);
+        r
+    })
+    .inner
+}
+
 /// The heading every modal wears, so one dialog does not announce itself in a
 /// different voice from the next.
 pub fn modal_title(ui: &mut egui::Ui, text: &str) {
@@ -361,6 +458,18 @@ const LABEL_GAP: f32 = 8.0;
 pub fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_W, 18.0], egui::Label::new(legend(label)));
+        add(ui);
+    });
+}
+
+/// A settings row whose legend carries a "?".
+///
+/// The icon is inside the legend column, so the controls of a help-carrying
+/// row still line up with those of a row that needs none.
+pub fn row_help(ui: &mut egui::Ui, label: &str, text: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized([LABEL_W - 18.0, 18.0], egui::Label::new(legend(label)));
+        help(ui, text);
         add(ui);
     });
 }
@@ -393,10 +502,17 @@ pub fn bin_hint(rate: f64, bins: usize) -> String {
 /// Settings affordance in a pane corner.
 pub fn cog_rect(pane: &Rect) -> Rect {
     let s = 18.0;
-    Rect::from_min_size(Pos2::new(pane.right() - s - 6.0, pane.top() + 6.0), Vec2::splat(s))
+    Rect::from_min_size(
+        Pos2::new(pane.right() - s - 6.0, pane.top() + 6.0),
+        Vec2::splat(s),
+    )
 }
 
 pub fn cog(p: &egui::Painter, r: &Rect, hot: bool) {
-    let col = if hot { theme::READOUT } else { Color32::from_rgb(0x6A, 0x72, 0x7C) };
+    let col = if hot {
+        theme::READOUT
+    } else {
+        Color32::from_rgb(0x6A, 0x72, 0x7C)
+    };
     crate::icons::Icon::Setup.paint(p, *r, col);
 }

@@ -167,7 +167,6 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
     let mut fields: Vec<(String, Value)> = Vec::new();
     if let Some(icao) = frame.icao {
         fields.push(("icao".into(), Value::Text(format!("{icao:06x}"))));
-        fields.push(("from".into(), Value::Text(format!("{icao:06x}"))));
     }
     let protocol = match &frame.kind {
         Message::Identification { callsign, category } => {
@@ -239,14 +238,20 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
     };
     let detail =
         fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
         .with_modulation("PPM")
         // Only the extended squitters carry a CRC of their own. A short reply
         // is believed because its address is one an ADS-B frame proved, which
         // is corroboration rather than an integrity check.
-        .with_crc(matches!(frame.df, 17 | 18).then_some(true))
+        .with_crc(matches!(frame.df, 17 | 18).then_some(true));
+    if let Some(icao) = frame.icao {
+        d.link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
+            "{icao:06x}"
+        ))));
+    }
+    d
 }
 
 fn round1(v: f64) -> f64 {

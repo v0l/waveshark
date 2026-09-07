@@ -174,11 +174,11 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
         |ui| {
             theme::Line::new()
                 .legend(&l.system)
-                .value(l.from.label().to_string())
+                .value(crate::links::end_label(&l.from).to_string())
                 .tint(theme::READOUT)
                 .size(11.0)
                 .legend("->")
-                .value(l.to.label().to_string())
+                .value(crate::links::end_label(&l.to).to_string())
                 .size(11.0)
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

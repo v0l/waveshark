@@ -27,26 +27,32 @@ impl ScopeSettings<'_> {
     /// The spectrum panel: what the transform is doing, and the scale it is
     /// drawn against.
     pub(super) fn spectrum(&mut self, ui: &mut egui::Ui) {
-        row(ui, "FFT bins", |ui| {
-            let mut n = self.st.fft_size;
-            egui::ComboBox::from_id_salt("fft")
-                .selected_text(n.to_string())
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for v in FFTS {
-                        ui.selectable_value(&mut n, v, v.to_string());
-                    }
-                });
-            if n != self.st.fft_size {
-                self.st.fft_size = n;
-                // The same value the session saves and the radio starts with,
-                // so a chosen FFT size survives a restart rather than only
-                // living in the running spectrum.
-                self.st.fft = n;
-                self.cmds.push(Cmd::Fft(n));
-                self.acts.push(Action::ResetWaterfall);
-            }
-        });
+        row_help(
+            ui,
+            "FFT bins",
+            "How finely the span is divided. More bins resolve closer signals apart and cost \
+             time to transform.",
+            |ui| {
+                let mut n = self.st.fft_size;
+                egui::ComboBox::from_id_salt("fft")
+                    .selected_text(n.to_string())
+                    .width(120.0)
+                    .show_ui(ui, |ui| {
+                        for v in FFTS {
+                            ui.selectable_value(&mut n, v, v.to_string());
+                        }
+                    });
+                if n != self.st.fft_size {
+                    self.st.fft_size = n;
+                    // The same value the session saves and the radio starts with,
+                    // so a chosen FFT size survives a restart rather than only
+                    // living in the running spectrum.
+                    self.st.fft = n;
+                    self.cmds.push(Cmd::Fft(n));
+                    self.acts.push(Action::ResetWaterfall);
+                }
+            },
+        );
         ui.label(
             egui::RichText::new(bin_hint(self.rate, self.st.fft_size))
                 .small()
@@ -86,16 +92,16 @@ impl ScopeSettings<'_> {
         });
         ui.add_space(8.0);
 
-        row(ui, "Centre spur", |ui| {
-            if ui.checkbox(&mut *self.dc_block, "Remove").changed() {
-                self.cmds.push(Cmd::DcBlock(*self.dc_block));
-            }
-            ui.label(
-                egui::RichText::new("LO leakage at the tuned frequency")
-                    .color(theme::LEGEND)
-                    .size(10.0),
-            );
-        });
+        row_help(
+            ui,
+            "Centre spur",
+            "LO leakage at the tuned frequency.",
+            |ui| {
+                if ui.checkbox(&mut *self.dc_block, "Remove").changed() {
+                    self.cmds.push(Cmd::DcBlock(*self.dc_block));
+                }
+            },
+        );
         ui.add_space(8.0);
         self.scale(ui);
     }
@@ -142,14 +148,14 @@ impl ScopeSettings<'_> {
         );
         ui.add_space(8.0);
 
-        row(ui, "Contrast", |ui| {
-            ui.add(egui::Slider::new(&mut self.st.wf_top_offset, 0.0..=20.0).show_value(false));
-            ui.label(value(format!("{:.0} dB", self.st.wf_top_offset)));
-        });
-        ui.label(
-            egui::RichText::new("How far below the trace ceiling the hottest colour sits.")
-                .small()
-                .color(theme::LEGEND),
+        row_help(
+            ui,
+            "Contrast",
+            "How far below the trace ceiling the hottest colour sits.",
+            |ui| {
+                ui.add(egui::Slider::new(&mut self.st.wf_top_offset, 0.0..=20.0).show_value(false));
+                ui.label(value(format!("{:.0} dB", self.st.wf_top_offset)));
+            },
         );
         ui.add_space(8.0);
         self.scale(ui);

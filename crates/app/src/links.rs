@@ -6,16 +6,26 @@
 //! carried in the order it arrived, with the payload where the protocol gives
 //! one in the clear.
 //!
-//! # Fed from the fields, not from the protocols
+//! # Fed from what the decoder said, not from its display fields
 //!
-//! Nothing here knows what BLE or DMR is. A link is assembled from `from` and
-//! `to`, which every decode that names its parties now carries: a decoder
-//! added later joins the directory by naming its fields the same way, which
-//! is the bargain the map makes with positions and the call list makes with
-//! `seconds`. A transmission that names only one end, which is most
-//! telemetry, is a link from that end to nobody, and that is worth a row: a
-//! meter, a beacon and an advertiser are all things somebody wants to see the
-//! history of.
+//! Nothing here knows what BLE or DMR is. A link is [`pipeline::event::Link`],
+//! which the decoder that recovered the frame fills in because it is the only
+//! thing that knows: DMR reads it off the link control, including whether the
+//! call is to a talkgroup; BLE off the advertiser and any directed target;
+//! Meshtastic off the mesh header. A decoder added later joins the directory
+//! by saying who the frame was between, which is the bargain the map makes
+//! with positions and the call list makes with `seconds`.
+//!
+//! Reading `from` and `to` out of the display fields was the first version of
+//! this and it was wrong in a way worth recording: the fields are strings for
+//! a person to read, so a talkgroup, a callsign and a MAC were all "text",
+//! and `9` on DMR could merge with `9` anywhere else. A party is a kind and
+//! an identifier now, and `broadcast` is a kind rather than a word a device
+//! could be called.
+//!
+//! A transmission that names only one end, which is most telemetry, is a link
+//! from that end to whoever is listening, and that is worth a row: a meter, a
+//! beacon and an advertiser are all things somebody wants the history of.
 //!
 //! # Not a byte stream, usually
 //!
@@ -36,6 +46,7 @@
 
 use crate::radio::DecodeRecord;
 use common::Value;
+use pipeline::event::{Party, PartyKind};
 use std::time::{Duration, Instant};
 
 /// How long after its last packet a link is still counted as live.
@@ -55,45 +66,18 @@ const MAX_LINKS: usize = 4096;
 /// the log. The log has all of them.
 const MAX_PACKETS: usize = 512;
 
-/// What a link is between: an end that named itself, or nobody.
+/// What a link is between: a party the protocol named, or nobody.
 ///
-/// A broadcast is not a party. Keeping it as its own variant rather than as
-/// the string "broadcast" means a device that really is called that cannot
-/// merge with every beacon on the band.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum End {
-    Named(String),
-    Broadcast,
-    Unknown,
-}
+/// The kind travels with it so a directory can say what it is looking at
+/// without knowing the protocol: a talkgroup is not a radio, and a receiver
+/// that shows both in one column should still be able to tell them apart.
+pub type End = Option<Party>;
 
-impl End {
-    fn parse(s: Option<String>) -> Self {
-        match s.as_deref().map(str::trim) {
-            None | Some("") => End::Unknown,
-            Some(t)
-                if t.eq_ignore_ascii_case("broadcast")
-                    || t.eq_ignore_ascii_case("everyone")
-                    || t.eq_ignore_ascii_case("all")
-                    || t == "^all"
-                    || t == "ffffffff" =>
-            {
-                End::Broadcast
-            }
-            Some(t) => End::Named(t.to_string()),
-        }
-    }
-
-    pub fn label(&self) -> &str {
-        match self {
-            End::Named(s) => s,
-            End::Broadcast => "broadcast",
-            End::Unknown => "-",
-        }
-    }
-
-    pub fn is_named(&self) -> bool {
-        matches!(self, End::Named(_))
+/// How an end reads in a row.
+pub fn end_label(e: &End) -> &str {
+    match e {
+        Some(p) => p.label(),
+        None => "-",
     }
 }
 
@@ -158,7 +142,12 @@ impl Link {
     /// `BLE  E8:31:CD:0A:F5:3A -> broadcast`, which is what a row and a
     /// window title both want.
     pub fn title(&self) -> String {
-        format!("{} {} -> {}", self.system, self.from.label(), self.to.label())
+        format!("{} {} -> {}", self.system, end_label(&self.from), end_label(&self.to))
+    }
+
+    /// Whether the party called is many listeners rather than one radio.
+    pub fn to_group(&self) -> bool {
+        matches!(&self.to, Some(p) if p.kind == PartyKind::Group)
     }
 }
 
@@ -177,9 +166,13 @@ impl Links {
     /// A decode with neither end named is not a link: an unknown burst has a
     /// frequency and a shape and nobody to attribute it to.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let from = End::parse(text(rec, &["from", "src", "source", "radio_id", "sender"]));
-        let to = End::parse(text(rec, &["to", "dst", "destination", "talkgroup", "addressee"]));
-        if !from.is_named() && !to.is_named() {
+        let Some(link) = rec.link.clone() else { return false };
+        let (from, to) = (link.from, link.to);
+        // A frame that named nobody is not a link. A broadcast on its own is
+        // not either: "somebody transmitted to everybody" is a burst, and the
+        // packet list already has it.
+        let named = |e: &End| matches!(e, Some(p) if p.kind != PartyKind::Broadcast);
+        if !named(&from) && !named(&to) {
             return false;
         }
         let system = rec.model.split('-').next().unwrap_or(&rec.model).to_string();
@@ -260,7 +253,7 @@ impl Links {
     pub fn involving<'a>(&'a self, who: &str, now: Instant) -> Vec<&'a Link> {
         self.active(now)
             .into_iter()
-            .filter(|l| l.from.label() == who || l.to.label() == who)
+            .filter(|l| end_label(&l.from) == who || end_label(&l.to) == who)
             .collect()
     }
 
@@ -372,14 +365,23 @@ fn text(rec: &DecodeRecord, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pipeline::event::Link as EventLink;
 
-    fn rec(model: &str, hz: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+    /// A decode as a front end makes one: the parties are the decoder's own
+    /// statement, which is the whole point of the typed link.
+    fn rec(model: &str, hz: f64, link: Option<EventLink>) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(hz, model);
         r.rssi_dbfs = -40.0;
         r.snr_db = 20.0;
         r.bytes = vec![0; 10];
         r.crc = Some(true);
-        r.fields = fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        r.link = link;
+        r
+    }
+
+    fn said(model: &str, hz: f64, link: EventLink, text: &str) -> DecodeRecord {
+        let mut r = rec(model, hz, Some(link));
+        r.fields = vec![("text".into(), Value::Text(text.into()))];
         r
     }
 
@@ -390,14 +392,16 @@ mod tests {
     #[test]
     fn two_ends_on_one_system_are_one_link() {
         let mut l = Links::new();
-        let f = [("from", Value::Text("1234567".into())), ("to", Value::Text("9".into()))];
-        assert!(l.update(&rec("DMR-Header", 446.1e6, &f), t(0)));
-        assert!(l.update(&rec("DMR-Voice", 446.1e6, &f), t(1)));
+        let link = EventLink::between(Party::unit("1234567"), Party::group("9"));
+        assert!(l.update(&rec("DMR-Header", 446.1e6, Some(link.clone())), t(0)));
+        assert!(l.update(&rec("DMR-Voice", 446.1e6, Some(link)), t(1)));
         let links = l.active(t(2));
         assert_eq!(links.len(), 1, "{:?}", links.iter().map(|x| x.title()).collect::<Vec<_>>());
         assert_eq!(links[0].packets, 2);
         assert_eq!(links[0].title(), "DMR 1234567 -> 9");
-        // Both packets are there to follow, in the order they arrived.
+        // The kind travels with the party, so the directory knows this is a
+        // talkgroup without knowing what DMR is.
+        assert!(links[0].to_group());
         let seen: Vec<&str> = links[0].moments.iter().map(|m| m.protocol.as_str()).collect();
         assert_eq!(seen, ["DMR-Header", "DMR-Voice"]);
     }
@@ -408,28 +412,50 @@ mod tests {
         // those would have nothing on 433 or 868 MHz at all.
         let mut l = Links::new();
         assert!(l.update(
-            &rec("BLE-Adv", 2426e6, &[("from", Value::Text("6C:70:CB:EF:72:4D".into())),
-                                      ("to", Value::Text("broadcast".into()))]),
+            &rec("BLE-Adv", 2426e6, Some(EventLink::beacon(Party::unit("6C:70:CB:EF:72:4D")))),
             t(0)
         ));
         let links = l.active(t(1));
         assert_eq!(links[0].title(), "BLE 6C:70:CB:EF:72:4D -> broadcast");
-        assert_eq!(links[0].to, End::Broadcast);
+        assert_eq!(links[0].to.as_ref().map(|p| p.kind), Some(PartyKind::Broadcast));
+        assert!(!links[0].to_group(), "broadcast is not a talkgroup");
     }
 
     #[test]
     fn a_burst_nobody_owns_is_not_a_link() {
         let mut l = Links::new();
-        assert!(!l.update(&rec("unknown", 433.92e6, &[("baud", Value::Float(1500.0))]), t(0)));
+        assert!(!l.update(&rec("unknown", 433.92e6, None), t(0)));
+        // Nor is a transmission addressed to everybody by nobody: that is a
+        // burst, and the packet list already has it.
+        assert!(!l.update(
+            &rec("unknown", 433.92e6, Some(EventLink { from: None, to: Some(Party::broadcast()) })),
+            t(0)
+        ));
         assert!(l.is_empty());
+    }
+
+    #[test]
+    fn a_party_is_not_just_its_text() {
+        // `9` as a DMR talkgroup and `9` as somebody's callsign are not the
+        // same end, which reading the display fields could not tell.
+        let mut l = Links::new();
+        l.update(
+            &rec("DMR-Voice", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::group("9")))),
+            t(0),
+        );
+        l.update(
+            &rec("DMR-Voice", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::unit("9")))),
+            t(1),
+        );
+        assert_eq!(l.active(t(2)).len(), 2, "a group call and a private call are one link");
     }
 
     #[test]
     fn the_same_ends_on_different_systems_are_different_links() {
         let mut l = Links::new();
-        let f = [("from", Value::Text("2001".into())), ("to", Value::Text("2002".into()))];
-        l.update(&rec("TETRA-SDS", 391.1e6, &f), t(0));
-        l.update(&rec("M17-Packet", 433.475e6, &f), t(1));
+        let link = EventLink::between(Party::unit("2001"), Party::unit("2002"));
+        l.update(&rec("TETRA-SDS", 391.1e6, Some(link.clone())), t(0));
+        l.update(&rec("M17-Packet", 433.475e6, Some(link)), t(1));
         assert_eq!(l.active(t(2)).len(), 2);
     }
 
@@ -437,14 +463,11 @@ mod tests {
     fn a_link_carries_what_was_said() {
         let mut l = Links::new();
         l.update(
-            &rec(
+            &said(
                 "TETRA-SDS",
                 391.1e6,
-                &[
-                    ("from", Value::Text("2001".into())),
-                    ("to", Value::Text("2002".into())),
-                    ("text", Value::Text("on my way".into())),
-                ],
+                EventLink::between(Party::unit("2001"), Party::unit("2002")),
+                "on my way",
             ),
             t(0),
         );
@@ -456,12 +479,12 @@ mod tests {
     fn a_loaded_directory_merges_into_the_live_one() {
         // The same advertiser heard live and again from the log is one link
         // with both sets of packets, in the order they happened.
-        let f = [("from", Value::Text("aa:bb".into())), ("to", Value::Text("broadcast".into()))];
+        let link = EventLink::beacon(Party::unit("aa:bb"));
         let mut live = Links::new();
-        live.update(&rec("BLE-Adv", 2426e6, &f), t(10));
+        live.update(&rec("BLE-Adv", 2426e6, Some(link.clone())), t(10));
         let mut loaded = Links::new();
-        loaded.update(&rec("BLE-Adv", 2426e6, &f), t(0));
-        loaded.update(&rec("BLE-Adv", 2426e6, &f), t(5));
+        loaded.update(&rec("BLE-Adv", 2426e6, Some(link.clone())), t(0));
+        loaded.update(&rec("BLE-Adv", 2426e6, Some(link)), t(5));
         live.absorb(loaded);
         let links = live.active(t(11));
         assert_eq!(links.len(), 1);
@@ -474,13 +497,11 @@ mod tests {
     fn one_end_can_be_looked_up_whichever_side_it_is_on() {
         let mut l = Links::new();
         l.update(
-            &rec("M17-Packet", 433.475e6, &[("from", Value::Text("M0ABC".into())),
-                                            ("to", Value::Text("M0XYZ".into()))]),
+            &rec("M17-Packet", 433.475e6, Some(EventLink::between(Party::unit("M0ABC"), Party::unit("M0XYZ")))),
             t(0),
         );
         l.update(
-            &rec("M17-Packet", 433.475e6, &[("from", Value::Text("M0XYZ".into())),
-                                            ("to", Value::Text("M0ABC".into()))]),
+            &rec("M17-Packet", 433.475e6, Some(EventLink::between(Party::unit("M0XYZ"), Party::unit("M0ABC")))),
             t(1),
         );
         // Two links, because a direction is worth keeping; both involve M0ABC.

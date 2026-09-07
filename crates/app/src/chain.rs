@@ -3562,6 +3562,7 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         snr_db: d.snr_db.unwrap_or(f32::NAN),
         bytes: d.payload.clone(),
         crc: d.crc_ok,
+        link: d.link.clone(),
         iq: d.iq.clone(),
         audio: d.audio.clone(),
     }

@@ -1013,6 +1013,18 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         snr_db: None,
         iq: None,
         audio: None,
+        // A traffic burst says which usage marker it is on and, once the
+        // network has granted the channel, who was granted it. The party
+        // called is the marker's own until then, which is what the call list
+        // shows too.
+        link: Some(pipeline::event::Link {
+            from: (from != 0).then(|| pipeline::event::Party::unit(from.to_string())),
+            to: Some(if to != 0 {
+                pipeline::event::Party::group(to.to_string())
+            } else {
+                pipeline::event::Party::group(format!("marker {marker}"))
+            }),
+        }),
     })
 }
 

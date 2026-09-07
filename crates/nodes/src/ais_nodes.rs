@@ -117,7 +117,6 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
     // The identity every message carries, and the field that turns a stream of
     // them into tracks.
     fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
-    fields.push(("from".into(), Value::Text(frame.mmsi.to_string())));
 
     let protocol = match &frame.kind {
         Message::Position(p) => {
@@ -186,6 +185,9 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
 
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(
+            frame.mmsi.to_string(),
+        )))
         .with_detail(detail)
         .with_fields(fields)
         .with_modulation("GMSK")
