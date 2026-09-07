@@ -247,9 +247,15 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
         // is corroboration rather than an integrity check.
         .with_crc(matches!(frame.df, 17 | 18).then_some(true));
     if let Some(icao) = frame.icao {
-        d.link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
-            "{icao:06x}"
-        ))));
+        let id = format!("{icao:06x}");
+        d.link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(id.clone())));
+        let mut who = common::Identity::new("adsb", id);
+        // The callsign is the aircraft naming itself, which is what a device
+        // list shows next to the address nobody can read.
+        if let Message::Identification { callsign, .. } = &frame.kind {
+            who.name = Some(callsign.clone());
+        }
+        d.identity = Some(who);
     }
     d
 }

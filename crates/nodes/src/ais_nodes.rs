@@ -118,8 +118,19 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
     // them into tracks.
     fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
 
+    let mut position = None;
+    let mut name = None;
     let protocol = match &frame.kind {
         Message::Position(p) => {
+            if let Some((lat, lon)) = p.position {
+                position = Some(common::Position {
+                    lat,
+                    lon,
+                    altitude_m: None,
+                    speed_kt: p.sog_kt,
+                    course_deg: p.cog_deg,
+                });
+            }
             if let Some((lat, lon)) = p.position {
                 fields.push(("lat".into(), Value::Float(round(lat, 5))));
                 fields.push(("lon".into(), Value::Float(round(lon, 5))));
@@ -144,6 +155,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
         }
         Message::Static(s) => {
             if let Some(n) = &s.name {
+                name = Some(n.clone());
                 fields.push(("name".into(), Value::Text(n.clone())));
             }
             if let Some(c) = &s.callsign {
@@ -184,17 +196,22 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
     };
 
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+    let mut who = common::Identity::new("ais", frame.mmsi.to_string());
+    who.name = name;
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(
             frame.mmsi.to_string(),
         )))
+        .by(who)
         .with_detail(detail)
         .with_fields(fields)
         .with_modulation("GMSK")
         // Every frame that reaches here passed the X.25 frame check sequence
         // in the demodulator, which is a real integrity check and not a
         // plausibility argument.
-        .with_crc(Some(true))
+        .with_crc(Some(true));
+    d.position = position;
+    d
 }
 
 fn round(v: f64, places: i32) -> f64 {

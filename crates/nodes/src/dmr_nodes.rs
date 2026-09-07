@@ -238,6 +238,10 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_fields(fields)
         .with_modulation("4FSK");
     d.link = lc_link(flags, dst, src);
+    if flags & FLAG_HAVE_LC != 0 {
+        d.identity = Some(common::Identity::new("dmr", src.to_string()));
+        d.airtime = Some(common::Airtime { seconds: 0.06, voice: true, live: true });
+    }
     Some(d)
 }
 
@@ -259,6 +263,11 @@ fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_fields(fields)
         .with_modulation("4FSK");
     d.link = lc_link(flags, dst, src);
+    if flags & FLAG_HAVE_LC != 0 {
+        d.identity = Some(common::Identity::new("dmr", src.to_string()));
+        d.airtime =
+            Some(common::Airtime { seconds: f64::from(bursts) * 0.06, voice: true, live: false });
+    }
     Some(d)
 }
 

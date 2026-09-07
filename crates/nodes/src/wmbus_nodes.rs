@@ -94,7 +94,7 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_modulation("2-FSK")
         .with_crc(Some(true))
         .with_bandwidth(CHANNEL_WIDTH_HZ);
-    let mut fields: Vec<(String, common::Value)> =
+    let fields: Vec<(String, common::Value)> =
         r.fields.iter().filter(|(k, _)| k.as_str() != "data").map(|(k, v)| (k.clone(), v.clone())).collect();
     let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
     let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
@@ -106,9 +106,11 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     );
     d = d.with_text(text.clone()).with_detail(r.fields_line()).with_fields(fields);
     if !id.is_empty() {
-        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
-            "{m}-{id}"
-        ))));
+        d = d
+            .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
+                "{m}-{id}"
+            ))))
+            .by(common::Identity::new("wmbus", format!("{m}-{id}")).made_by(m.clone()));
     }
     Some(d)
 }

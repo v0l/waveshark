@@ -1000,6 +1000,11 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         snr_db: None,
         iq: None,
         audio: None,
+        position: None,
+        identity: None,
+        // A traffic burst is 60 ms of one timeslot, and it says whether the
+        // network had granted the channel for speech.
+        airtime: Some(common::Airtime { seconds: 0.06, voice: true, live: true }),
         // A traffic burst says which usage marker it is on and, once the
         // network has granted the channel, who was granted it. The party
         // called is the marker's own until then, which is what the call list
