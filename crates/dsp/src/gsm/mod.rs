@@ -131,8 +131,10 @@ pub struct SchHit {
     /// How well the training sequence matched, from zero to one. Not an
     /// acceptance test; the parity is.
     pub quality: f32,
-    /// Where the burst started in the stream fed to the detector, counted in
-    /// input samples, and how many it occupied.
+    /// Where the burst started and how long it was, counted in the channel
+    /// stream [`SchDetector::channel`] hands back rather than in the span fed
+    /// in. That is the stream a caller measures the burst from, so it is the
+    /// one the position has to be in.
     pub start_sample: u64,
     pub samples: usize,
 }
@@ -141,9 +143,6 @@ pub struct SchHit {
 /// synchronisation burst that follows it.
 pub struct SchDetector {
     cfg: GsmConfig,
-    /// Input samples per decimated sample, for reporting positions in the
-    /// stream the caller fed rather than the one this works in.
-    factor: usize,
     /// Decimated rate and samples per symbol at it.
     work: f64,
     sps: f64,
@@ -243,7 +242,6 @@ impl SchDetector {
         let window = (sps * 64.0) as usize;
         Self {
             cfg,
-            factor,
             work,
             sps,
             mixer: Mixer::new(center_hz - channel_hz, rate),
@@ -430,16 +428,12 @@ impl SchDetector {
             return None;
         }
         let sch = sch::decode(&coded)?;
-        // Back to the rate the caller counts in. The decimator's own delay is
-        // not taken off: a few samples either way is nothing against a burst
-        // 156 symbols long, and a caller wanting these samples wants the
-        // burst rather than an exact edge.
         Some(SchHit {
             sch,
             freq_offset_hz: p.freq_offset_hz,
             quality,
-            start_sample: at as u64 * self.factor as u64,
-            samples: (BURST_SYMBOLS * self.sps) as usize * self.factor,
+            start_sample: at as u64,
+            samples: (BURST_SYMBOLS * self.sps) as usize,
         })
     }
 

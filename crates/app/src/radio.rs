@@ -3301,6 +3301,73 @@ pub(crate) mod tests {
     /// the bytes are wrong. Frames used to lose all three at the port
     /// boundary, which carried bytes and nothing else, so every front end
     /// that produces frames rather than pulses reported NaN.
+    /// A GSM beacon through the whole receiver: the scanner table puts the
+    /// GSM front end on the carrier, the front end finds the tone, reads the
+    /// burst a frame later, and the row that reaches the list names the cell.
+    ///
+    /// Synthetic, and that is the weakness worth writing down: the modulator
+    /// here and the demodulator under test share every assumption either of
+    /// them makes about GSM. What it does prove is the wiring, which is where
+    /// a front end usually breaks: that the table's channel reaches the node,
+    /// that the extraction leaves the carrier inside the span it hands over,
+    /// and that what the node puts on the bus comes back out of the packet
+    /// list as a cell rather than as four unexplained bytes.
+    #[test]
+    fn a_gsm_beacon_is_read_through_the_receiver() {
+        let center = Hz(947_400_000);
+        let rate = 2_400_000.0;
+        let want = dsp::gsm::Sch { ncc: 5, bcc: 3, frame_number: 51 * 26 * 42 + 21 };
+        let buf = common::IqBuf::new(gsm_beacon(&want), center, common::Sps(rate as u64), 0);
+
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = vec![crate::scanners::FrontAt {
+            front: crate::scanners::Front::Gsm(center.as_f64()),
+            band: (center.as_f64() - 200_000.0, center.as_f64() + 200_000.0),
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+
+        let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SCH").collect();
+        assert_eq!(cells.len(), 1, "expected one cell, got {out:?}");
+        let r = cells[0];
+        assert_eq!(r.crc, Some(true), "the parity is what makes a burst a burst");
+        assert!(r.detail.contains("ARFCN 62"), "read as {}", r.detail);
+        assert!(r.detail.contains("BSIC 53"), "read as {}", r.detail);
+        assert!(r.detail.contains("frame 55713"), "read as {}", r.detail);
+        every_row_carries_its_measurements(&cells);
+    }
+
+    /// A frequency correction burst and the synchronisation burst one TDMA
+    /// frame after it, at the receiver's rate, with a little noise so the
+    /// floor a level is measured against is a floor.
+    fn gsm_beacon(sch: &dsp::gsm::Sch) -> Vec<common::C32> {
+        use dsp::gsm;
+        let sps = 8;
+        let work = gsm::SYMBOL_RATE * sps as f64;
+        let lead = 200.0;
+        let fcch = gsm::modulate(&[0u8; gsm::BURST_BITS], sps);
+        let sync = gsm::modulate(&gsm::sch_burst_bits(sch).unwrap(), sps);
+        let total =
+            ((lead * 2.0 + gsm::FRAME_SYMBOLS + gsm::BURST_SYMBOLS) * sps as f64) as usize;
+        let mut base = vec![common::C32::new(0.0, 0.0); total];
+        base[(lead * sps as f64) as usize..][..fcch.len()].copy_from_slice(&fcch);
+        let at = ((lead + gsm::FRAME_SYMBOLS) * sps as f64) as usize;
+        base[at..][..sync.len()].copy_from_slice(&sync);
+
+        let ratio = work / 2_400_000.0;
+        let n = (base.len() as f64 / ratio) as usize - 1;
+        let mut seed = 0x1357_9BDFu32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f32 / u32::MAX as f32) - 0.5
+        };
+        (0..n)
+            .map(|i| base[(i as f64 * ratio) as usize] + common::C32::new(rand(), rand()) * 0.05)
+            .collect()
+    }
+
     fn every_row_carries_its_measurements(rows: &[&DecodeRecord]) {
         assert!(!rows.is_empty(), "nothing to check");
         for r in rows {

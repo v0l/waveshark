@@ -4,11 +4,16 @@
 //! coding are `dsp::gsm`, and the row a decode becomes is at the bottom of
 //! this file; neither knows about pipelines.
 //!
-//! One node watches one carrier, given as an offset from the span's centre,
-//! because that is what a GSM beacon is: cells are 200 kHz apart and a
-//! receiver reads one of them at a time. Watching a whole band means placing
-//! one of these per carrier, which is the scanner table's job and not a loop
-//! hidden in here.
+//! One node watches one carrier, named by its own frequency the way the APRS
+//! and pager front ends name theirs, because that is what a GSM beacon is:
+//! cells are 200 kHz apart and a receiver reads one of them at a time.
+//! Watching a whole band means placing one of these per carrier, which is the
+//! scanner table's job and not a loop hidden in here.
+//!
+//! The channel is absolute rather than an offset from the span. An offset
+//! saved in a patch means a different carrier as soon as the dial moves, and
+//! a front end that quietly follows the tuning is one that says it heard a
+//! cell where there is none.
 
 use common::Result;
 use dsp::gsm::{self, sch, GsmConfig, SchDetector, SchHit};
@@ -20,10 +25,15 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 /// What one carrier occupies, and the width a burst was heard through.
 pub const CHANNEL_WIDTH_HZ: f64 = gsm::CHANNEL_SPACING_HZ;
 
+/// Where to look when nothing says otherwise: the middle of the E-GSM 900
+/// downlink, which is the band most likely to hold a beacon in Europe. There
+/// is no frequency worth compiling in beyond that, so the scanner table
+/// carries the channel and this is only what an unconfigured node opens on.
+pub const DEFAULT_HZ: f64 = 947_400_000.0;
+
 pub struct GsmNode {
     cfg: GsmConfig,
-    /// Which carrier to watch, as an offset from the centre of the span.
-    offset_hz: f64,
+    /// Which carrier to watch, as a frequency.
     channel_hz: f64,
     det: SchDetector,
     meter: crate::FrameMeter,
@@ -33,20 +43,19 @@ pub struct GsmNode {
 
 impl Default for GsmNode {
     fn default() -> Self {
-        Self::new(0.0, GsmConfig::default())
+        Self::new(DEFAULT_HZ, GsmConfig::default())
     }
 }
 
 impl GsmNode {
-    pub fn new(offset_hz: f64, cfg: GsmConfig) -> Self {
+    pub fn new(channel_hz: f64, cfg: GsmConfig) -> Self {
         // Replaced at negotiation, when the real rate and centre are known.
         let rate = 2_400_000.0;
         Self {
             cfg,
-            offset_hz,
-            channel_hz: 0.0,
-            det: SchDetector::new(rate, 0.0, 0.0, cfg),
-            meter: crate::FrameMeter::new(rate, 0, 0.25),
+            channel_hz,
+            det: SchDetector::new(rate, channel_hz, channel_hz, cfg),
+            meter: crate::FrameMeter::new(rate, channel_hz as u64, 0.25),
             hits: Vec::new(),
             accepted: 0,
         }
@@ -76,10 +85,9 @@ impl Simple for GsmNode {
         // The carrier and its skirts, not just its centre: a channel sitting
         // on the edge of the span is one being read through the anti-alias
         // filter, which is a channel that decodes nothing.
-        if self.offset_hz.abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other("gsm: the carrier is outside the span"));
+        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
+            return Err(common::Error::other("gsm needs its carrier inside the span"));
         }
-        self.channel_hz = center + self.offset_hz;
         self.det = SchDetector::new(rate, center, self.channel_hz, self.cfg);
         self.meter =
             crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
@@ -103,9 +111,24 @@ impl Simple for GsmNode {
         for hit in &self.hits {
             let Some(bytes) = sch::pack(&hit.sch) else { continue };
             self.accepted += 1;
-            out.push(self.meter.frame(bytes.to_vec()).at(self.channel_hz as u64));
+            // The samples first: taking the frame empties the ring, and what
+            // belongs on the row is the burst rather than the quarter second
+            // of channel it arrived in.
+            let iq = self.meter.iq_at(hit.start_sample, hit.samples);
+            let mut frame = self.meter.frame(bytes.to_vec()).at(self.channel_hz as u64);
+            if iq.is_some() {
+                frame.iq = iq;
+            }
+            out.push(frame);
         }
         Ok(())
+    }
+
+    /// One 200 kHz carrier, which is what makes this a front end something
+    /// can place rather than one that has to be named here: the auto node
+    /// asks a source's width and puts this on the ones that match.
+    fn channels(&self) -> &'static [f64] {
+        &[CHANNEL_WIDTH_HZ]
     }
 
     fn reset(&mut self) {
@@ -114,14 +137,14 @@ impl Simple for GsmNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float("offset_hz", self.offset_hz, -30e6..=30e6)
+        vec![Param::float("channel_hz", self.channel_hz, 100e6..=2_000e6)
             .unit("Hz")
-            .label("Carrier offset from the span centre")]
+            .label("Which carrier to watch")]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "offset_hz" => self.offset_hz = v.as_f64().unwrap_or(0.0),
+            "channel_hz" => self.channel_hz = v.as_f64().unwrap_or(DEFAULT_HZ),
             _ => return Err(common::Error::other(format!("gsm: unknown parameter {name:?}"))),
         }
         Ok(())
@@ -180,17 +203,17 @@ mod tests {
     #[test]
     fn the_node_refuses_a_span_it_cannot_read() {
         let mut n = GsmNode::default();
-        assert!(n.negotiate(&spec(2_400_000.0, 947_400_000.0)).is_ok());
+        assert!(n.negotiate(&spec(2_400_000.0, DEFAULT_HZ)).is_ok());
         // Under three samples a symbol there is nothing to interpolate.
-        assert!(n.negotiate(&spec(400_000.0, 947_400_000.0)).is_err());
+        assert!(n.negotiate(&spec(400_000.0, DEFAULT_HZ)).is_err());
         // A carrier outside the span is not a carrier.
-        n.set_param("offset_hz", ParamValue::Float(1_400_000.0)).unwrap();
-        assert!(n.negotiate(&spec(2_400_000.0, 947_400_000.0)).is_err());
+        n.set_param("channel_hz", ParamValue::Float(DEFAULT_HZ + 1_400_000.0)).unwrap();
+        assert!(n.negotiate(&spec(2_400_000.0, DEFAULT_HZ)).is_err());
     }
 
     #[test]
     fn the_node_outputs_frames_tagged_with_the_carrier() {
-        let mut n = GsmNode::new(600_000.0, GsmConfig::default());
+        let mut n = GsmNode::new(948_000_000.0, GsmConfig::default());
         let out = n.negotiate(&spec(2_400_000.0, 947_400_000.0)).unwrap();
         assert_eq!(out.kind, PortKind::Frames);
         assert_eq!(out.center, Hz(948_000_000));
