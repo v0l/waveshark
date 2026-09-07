@@ -71,7 +71,8 @@ impl Strip<'_> {
         // channel holds a repeater, a telemetry link and a paging tone. Told
         // that it is speech, the channel puts each over on the packet bus
         // with its audio, so it appears in the call list, is recorded, and is
-        // transcribed where a model is installed.
+        // transcribed. On by default for the modes people talk on, so this is
+        // a switch for turning off a channel that turned out to be data.
         ui.horizontal(|ui| {
             theme::Line::new().legend("voice").show(ui);
             let label = if ch.voice { "ON" } else { "OFF" };

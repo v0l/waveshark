@@ -779,7 +779,7 @@ impl App {
             muted: false,
             squelch_db: None,
             agc: true,
-            voice: false,
+            voice: speaks(&ChanMode::Audio(demod)),
             tx: None,
         });
         self.audio.next_id += 1;
@@ -1514,6 +1514,7 @@ impl App {
         self.audio.channels.push(Channel {
             id: id as u64,
             freq,
+            voice: speaks(&mode),
             mode,
             bandwidth_hz: None,
             label: label.unwrap_or_else(|| format!("CH{id}")),
@@ -1522,7 +1523,6 @@ impl App {
             muted: false,
             squelch_db: None,
             agc: true,
-            voice: false,
             tx: None,
         });
         self.audio.listening = Some(self.audio.channels.len() - 1);
@@ -1615,6 +1615,20 @@ fn apply_locale(s: &mut crate::session::Session) {
 /// protocol names, so a decoder added to the registry is pinnable the day it
 /// arrives. AX.25 is the exception: it is the frame format APRS carries
 /// rather than a front end of its own.
+/// Whether a new channel in this mode is speech somebody wants a record of.
+///
+/// On for the modes people talk on, so a channel added to listen to a
+/// repeater is in the call list and transcribed without a second switch being
+/// found first. Off for broadcast FM, which would otherwise transcribe a
+/// music station for as long as the receiver is on, and off for anything that
+/// is not audio: a decoder's channel produces its own calls.
+fn speaks(mode: &ChanMode) -> bool {
+    matches!(
+        mode,
+        ChanMode::Audio(Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb)
+    )
+}
+
 fn front_for(model: &str) -> Option<&'static str> {
     let system = model.split('-').next().unwrap_or(model).to_ascii_lowercase();
     let system = if system == "ax25" { "aprs" } else { system.as_str() };
