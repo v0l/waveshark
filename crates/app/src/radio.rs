@@ -3335,24 +3335,45 @@ pub(crate) mod tests {
         assert!(r.detail.contains("BSIC 53"), "read as {}", r.detail);
         assert!(r.detail.contains("frame 55713"), "read as {}", r.detail);
         every_row_carries_its_measurements(&cells);
+
+        // And the block the broadcast channel carried in the four frames
+        // after it, which is the row that says whose cell this is.
+        let si: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SI").collect();
+        assert_eq!(si.len(), 1, "expected one system information block, got {out:?}");
+        assert_eq!(si[0].detail, "SI3 262-01 LAC 100 CI 4660");
+        every_row_carries_its_measurements(&si);
     }
 
-    /// A frequency correction burst and the synchronisation burst one TDMA
-    /// frame after it, at the receiver's rate, with a little noise so the
-    /// floor a level is measured against is a floor.
+    /// A frequency correction burst, the synchronisation burst one TDMA
+    /// frame after it, and the four bursts of broadcast channel the
+    /// multiframe puts after that, at the receiver's rate and with a little
+    /// noise so the floor a level is measured against is a floor.
     fn gsm_beacon(sch: &dsp::gsm::Sch) -> Vec<common::C32> {
         use dsp::gsm;
         let sps = 8;
         let work = gsm::SYMBOL_RATE * sps as f64;
         let lead = 200.0;
-        let fcch = gsm::modulate(&[0u8; gsm::BURST_BITS], sps);
-        let sync = gsm::modulate(&gsm::sch_burst_bits(sch).unwrap(), sps);
-        let total =
-            ((lead * 2.0 + gsm::FRAME_SYMBOLS + gsm::BURST_SYMBOLS) * sps as f64) as usize;
+        let total = ((lead * 2.0 + 6.0 * gsm::FRAME_SYMBOLS) * sps as f64) as usize;
         let mut base = vec![common::C32::new(0.0, 0.0); total];
-        base[(lead * sps as f64) as usize..][..fcch.len()].copy_from_slice(&fcch);
-        let at = ((lead + gsm::FRAME_SYMBOLS) * sps as f64) as usize;
-        base[at..][..sync.len()].copy_from_slice(&sync);
+        let mut place = |at: f64, wave: &[common::C32]| {
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(wave);
+        };
+        place(lead, &gsm::modulate(&[0u8; gsm::BURST_BITS], sps));
+        place(
+            lead + gsm::FRAME_SYMBOLS,
+            &gsm::modulate(&gsm::sch_burst_bits(sch).unwrap(), sps),
+        );
+        // A system information type 3: the cell identity and the location
+        // area, which is what a receiver is here for.
+        let mut block = [0x2Bu8; 23];
+        block[..10].copy_from_slice(&[
+            0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10, 0x00, 0x64,
+        ]);
+        for (n, data) in gsm::bcch::encode(&block).unwrap().iter().enumerate() {
+            let bits = gsm::normal_burst_bits(data, usize::from(sch.bcc));
+            place(lead + (2.0 + n as f64) * gsm::FRAME_SYMBOLS, &gsm::modulate(&bits, sps));
+        }
 
         let ratio = work / 2_400_000.0;
         let n = (base.len() as f64 / ratio) as usize - 1;

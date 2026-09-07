@@ -26,6 +26,7 @@ pub mod channel_keys;
 pub mod dmr;
 pub mod dmr_bp;
 pub mod framing;
+pub mod gsm;
 pub mod m17;
 #[cfg(feature = "tea")]
 pub mod gpu;

@@ -9,9 +9,9 @@ the [README](../README.md).
 | crate | what it does |
 |---|---|
 | `common` | sample buffers, `Device`/`RxStream`/`TxStream` traits, `Hz`/`Sps` units |
-| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM/SSB demod, FM stereo, RDS, DC blocker, burst detector and classifier, source detector and extractor, OOK/ASK/FSK pulse extraction, C4FM, GMSK, HDLC, Mode S, GSM tone search and synchronisation burst |
+| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM/SSB demod, FM stereo, RDS, DC blocker, burst detector and classifier, source detector and extractor, OOK/ASK/FSK pulse extraction, C4FM, GMSK, HDLC, Mode S, GSM tone search and burst demodulation |
 | `pipeline` | the flow graph: typed DAG, rate negotiation, stream tags, events |
-| `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders, and the frame layers of ADS-B, AIS, APRS, POCSAG, DMR, TETRA, M17, LoRa and the mesh protocols |
+| `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders, and the frame layers of ADS-B, AIS, APRS, POCSAG, DMR, TETRA, M17, LoRa, GSM system information and the mesh protocols |
 | `nodes` | DSP and decoders as graph nodes, the registry, the auto node, the wideband channel bank, the modulators and the transmit sinks |
 | `sources` | file replay with rtl_433-style filename metadata, and the file sink that transmit is tested into |
 | `datasets` | cached third party data: airports and their frequencies, DMR and NXDN registries, repeater and reflector lists, the Artemis signal database |
