@@ -154,7 +154,7 @@ impl App {
 
         let live: Vec<crate::scanners::Scanner> =
             rows.iter().filter_map(ScannerRow::to_scanner).collect();
-        let table = crate::scanners::Scanners { list: live };
+        let table = crate::scanners::Scanners { list: live, version: crate::scanners::VERSION };
         let active: Vec<String> =
             table.active(center, rate).into_iter().map(|s| s.name.clone()).collect();
 

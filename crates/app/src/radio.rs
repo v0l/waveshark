@@ -3197,10 +3197,10 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
-    /// Bluetooth advertising, through the whole receiver: the scanner table
-    /// puts a BLE front end on channel 38 because the span covers it, the
-    /// front end finds the packets, and what comes back is what the devices
-    /// in the room were saying.
+    /// Bluetooth advertising, through the whole receiver: the 2.4 GHz block
+    /// puts `auto` on the span, `auto` runs the BLE front end across it
+    /// because channel 38 is inside it, and what comes back is what the
+    /// devices in the room were saying.
     ///
     /// Every packet counted here passed the link layer's CRC-24, so a run
     /// that produces the wrong number is a demodulator that got worse rather
@@ -3216,8 +3216,8 @@ pub(crate) mod tests {
         let fronts =
             crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
         assert!(
-            fronts.iter().any(|f| f.front == crate::scanners::Front::Ble(2_426_000_000.0)),
-            "the table put no BLE front end on a span covering channel 38: {fronts:?}"
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
+            "the table put nothing on a span covering channel 38: {fronts:?}"
         );
         let mut plan = replay_plan(&buf, false);
         plan.fronts = fronts;
