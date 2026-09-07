@@ -1313,7 +1313,7 @@ impl Receiver {
                 });
             }
             if let Some(n) = downcast::<nodes::AutoNode>(&self.graph, id) {
-                for (name, center_hz, width_hz) in n.remembered() {
+                for (name, center_hz, width_hz) in n.locked_channels() {
                     out.push(LiveSource {
                         center_hz,
                         bandwidth_hz: width_hz,
