@@ -114,11 +114,13 @@ claims what it can render.
   the clear. A link is a pair of ends on one protocol, filled in by the
   decoder that recovered the frame, because it is the only thing that knows:
   DMR reads it off the link control, BLE off the advertiser and any directed
-  target, Meshtastic off the mesh header. A transmission that names one end,
-  which is most telemetry, is a link from that end to whoever is listening,
-  and that is a row worth having. Radio is mostly not a byte stream, so
+  target, Meshtastic off the mesh header. A transmission addressed to everybody is not a
+  link: a meter, a beacon and an advertiser talk to the air, which is a
+  reception the packet list already has and a transmitter the device list
+  already has. Both ends have to be named, and a group counts as one. Radio is mostly not a byte stream, so
   following a link is the packets and their fields rather than a
-  concatenation. The directory is built from records, so the same code fills
+  concatenation, and those packets are the packet log filtered by the pair
+  rather than a second copy kept beside it. The directory is built from records, so the same code fills
   it from the bus or from the packet log, and the pane can read the log back
   to show what was heard before the receiver was started.
   `crates/app/src/links.rs`, `crates/app/src/ui/links_pane.rs`.

@@ -23,9 +23,23 @@
 //! an identifier now, and `broadcast` is a kind rather than a word a device
 //! could be called.
 //!
-//! A transmission that names only one end, which is most telemetry, is a link
-//! from that end to whoever is listening, and that is worth a row: a meter, a
-//! beacon and an advertiser are all things somebody wants the history of.
+//! # Two ends, or it is not a link
+//!
+//! A transmission addressed to everybody is not a conversation. A meter, a
+//! beacon and an advertiser name themselves and talk to the air; that is a
+//! reception, the packet list has it and the device list has the
+//! transmitter. A directory whose second column is mostly the word
+//! `broadcast` is a directory nobody can read, and the pairs worth having
+//! are lost in it. A group counts as an end: a talkgroup, a reflector and a
+//! mesh channel are somebody in particular.
+//!
+//! # Following a link is the packet log, filtered
+//!
+//! The directory counts and remembers pairs; it keeps no packets. Following
+//! one filters the packet list by its two ends, so there is one list of what
+//! arrived read two ways, a row here and a row there cannot disagree about
+//! the same packet, and a link reaches as far back as the log does rather
+//! than as far as a buffer somebody sized.
 //!
 //! # Not a byte stream, usually
 //!
@@ -45,7 +59,6 @@
 //! packets in memory.
 
 use crate::radio::DecodeRecord;
-use common::Value;
 use pipeline::event::{Party, PartyKind};
 use std::time::{Duration, Instant};
 
@@ -58,13 +71,6 @@ const FORGET: Duration = Duration::from_secs(6 * 60 * 60);
 /// Beyond this many links the least recently heard are dropped. A busy
 /// 2.4 GHz band produces a link per advertiser, and a flat has hundreds.
 const MAX_LINKS: usize = 4096;
-
-/// Packets kept per link for the follow view.
-///
-/// Enough to read a conversation back, bounded because a beacon every two
-/// seconds is forty thousand packets a day and the directory is a view, not
-/// the log. The log has all of them.
-const MAX_PACKETS: usize = 512;
 
 /// What a link is between: a party the protocol named, or nobody.
 ///
@@ -79,24 +85,6 @@ pub fn end_label(e: &End) -> &str {
         Some(p) => p.label(),
         None => "-",
     }
-}
-
-/// One packet as the follow view shows it.
-#[derive(Clone, Debug)]
-pub struct Moment {
-    pub at: Instant,
-    /// The protocol as the decode named it, which is finer than the link's
-    /// system: `DMR-Voice` and `DMR-Header` share a link.
-    pub protocol: String,
-    pub channel_hz: f64,
-    pub rssi_dbfs: f32,
-    pub snr_db: f32,
-    /// The decode's own summary line, which is what the packet list shows.
-    pub detail: String,
-    /// What the protocol carried in the clear, when it carried anything.
-    pub text: Option<String>,
-    pub bytes: usize,
-    pub crc: Option<bool>,
 }
 
 /// One link: two ends on one system, and everything heard between them.
@@ -121,8 +109,6 @@ pub struct Link {
     /// Whether anything on this link failed its integrity check, which a
     /// directory has to show: a link built from bad frames is not a link.
     pub crc_failures: u64,
-    /// The recent packets, oldest first.
-    pub moments: std::collections::VecDeque<Moment>,
 }
 
 impl Link {
@@ -143,6 +129,19 @@ impl Link {
     /// window title both want.
     pub fn title(&self) -> String {
         format!("{} {} -> {}", self.system, end_label(&self.from), end_label(&self.to))
+    }
+
+    /// Whether a record belongs to this link.
+    ///
+    /// How the follow view finds a link's packets: it filters the packet log
+    /// rather than the directory keeping a copy of them. One list of what
+    /// arrived, read two ways, so a row in the log and a row in the follow
+    /// view cannot disagree about the same packet, and following a link
+    /// reaches as far back as the log does rather than as far as a buffer.
+    pub fn holds(&self, rec: &DecodeRecord) -> bool {
+        let Some(link) = &rec.link else { return false };
+        let system = rec.model.split('-').next().unwrap_or(&rec.model);
+        system == self.system && link.from == self.from && link.to == self.to
     }
 
     /// Whether the party called is many listeners rather than one radio.
@@ -168,25 +167,18 @@ impl Links {
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
         let Some(link) = rec.link.clone() else { return false };
         let (from, to) = (link.from, link.to);
-        // A frame that named nobody is not a link. A broadcast on its own is
-        // not either: "somebody transmitted to everybody" is a burst, and the
-        // packet list already has it.
+        // Both ends, or it is not a link. A beacon names one end and
+        // addresses everybody, and "somebody transmitted" is a reception
+        // rather than a conversation: the packet list has it, the device
+        // list has the transmitter, and a directory of pairs that is mostly
+        // advertisers with `broadcast` in the second column is a directory
+        // nobody can read. A group is a named end: a talkgroup, a reflector
+        // and a mesh channel are all somebody in particular.
         let named = |e: &End| matches!(e, Some(p) if p.kind != PartyKind::Broadcast);
-        if !named(&from) && !named(&to) {
+        if !named(&from) || !named(&to) {
             return false;
         }
         let system = rec.model.split('-').next().unwrap_or(&rec.model).to_string();
-        let moment = Moment {
-            at,
-            protocol: rec.model.clone(),
-            channel_hz: rec.freq,
-            rssi_dbfs: rec.rssi_dbfs,
-            snr_db: rec.snr_db,
-            detail: rec.detail.clone(),
-            text: text(rec, &["text", "message", "sms", "name"]).filter(|t| !t.trim().is_empty()),
-            bytes: rec.bytes.len(),
-            crc: rec.crc,
-        };
         let found = self
             .seen
             .iter_mut()
@@ -204,14 +196,8 @@ impl Links {
                 if rec.crc == Some(false) {
                     l.crc_failures += 1;
                 }
-                l.moments.push_back(moment);
-                while l.moments.len() > MAX_PACKETS {
-                    l.moments.pop_front();
-                }
             }
             None => {
-                let mut moments = std::collections::VecDeque::with_capacity(8);
-                moments.push_back(moment);
                 self.seen.push(Link {
                     system,
                     from,
@@ -224,7 +210,6 @@ impl Links {
                     best_rssi_dbfs: rec.rssi_dbfs,
                     last_rssi_dbfs: rec.rssi_dbfs,
                     crc_failures: u64::from(rec.crc == Some(false)),
-                    moments,
                 });
             }
         }
@@ -286,11 +271,6 @@ impl Links {
                     if l.best_rssi_dbfs > m.best_rssi_dbfs || m.best_rssi_dbfs.is_nan() {
                         m.best_rssi_dbfs = l.best_rssi_dbfs;
                     }
-                    let mut all: Vec<Moment> =
-                        m.moments.iter().cloned().chain(l.moments).collect();
-                    all.sort_by_key(|x| x.at);
-                    let from = all.len().saturating_sub(MAX_PACKETS);
-                    m.moments = all[from..].iter().cloned().collect();
                 }
                 None => self.seen.push(l),
             }
@@ -349,19 +329,6 @@ pub fn segments(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     v
 }
 
-/// The first of these fields the decode carries, as text.
-fn text(rec: &DecodeRecord, keys: &[&str]) -> Option<String> {
-    for k in keys {
-        if let Some((_, v)) = rec.fields.iter().find(|(name, _)| name == k) {
-            return Some(match v {
-                Value::Text(t) => t.clone(),
-                other => other.to_string(),
-            });
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,7 +348,7 @@ mod tests {
 
     fn said(model: &str, hz: f64, link: EventLink, text: &str) -> DecodeRecord {
         let mut r = rec(model, hz, Some(link));
-        r.fields = vec![("text".into(), Value::Text(text.into()))];
+        r.fields = vec![("text".into(), common::Value::Text(text.into()))];
         r
     }
 
@@ -393,6 +360,7 @@ mod tests {
     fn two_ends_on_one_system_are_one_link() {
         let mut l = Links::new();
         let link = EventLink::between(Party::unit("1234567"), Party::group("9"));
+        let link2 = link.clone();
         assert!(l.update(&rec("DMR-Header", 446.1e6, Some(link.clone())), t(0)));
         assert!(l.update(&rec("DMR-Voice", 446.1e6, Some(link)), t(1)));
         let links = l.active(t(2));
@@ -402,23 +370,60 @@ mod tests {
         // The kind travels with the party, so the directory knows this is a
         // talkgroup without knowing what DMR is.
         assert!(links[0].to_group());
-        let seen: Vec<&str> = links[0].moments.iter().map(|m| m.protocol.as_str()).collect();
-        assert_eq!(seen, ["DMR-Header", "DMR-Voice"]);
+        // And the packets of a link are the log's, filtered: `holds` is
+        // what the follow view asks with.
+        let header = rec("DMR-Header", 446.1e6, Some(link2.clone()));
+        assert!(links[0].holds(&header));
+        let other = rec(
+            "DMR-Voice",
+            446.1e6,
+            Some(EventLink::between(Party::unit("7654321"), Party::group("9"))),
+        );
+        assert!(!links[0].holds(&other), "another radio's call is not this link");
     }
 
+    /// A beacon is not a link. It names itself and addresses everybody,
+    /// which is a reception: the packet list has it and the device list has
+    /// the transmitter. A directory of pairs whose second column is mostly
+    /// the word `broadcast` is a directory nobody can read.
     #[test]
-    fn a_beacon_is_a_link_from_one_end() {
-        // Most telemetry names only itself, and a directory that refused
-        // those would have nothing on 433 or 868 MHz at all.
+    fn a_beacon_addressed_to_everybody_is_not_a_link() {
         let mut l = Links::new();
-        assert!(l.update(
+        assert!(!l.update(
             &rec("BLE-Adv", 2426e6, Some(EventLink::beacon(Party::unit("6C:70:CB:EF:72:4D")))),
             t(0)
         ));
-        let links = l.active(t(1));
-        assert_eq!(links[0].title(), "BLE 6C:70:CB:EF:72:4D -> broadcast");
-        assert_eq!(links[0].to.as_ref().map(|p| p.kind), Some(PartyKind::Broadcast));
-        assert!(!links[0].to_group(), "broadcast is not a talkgroup");
+        assert!(l.active(t(1)).is_empty());
+        // A directed advertisement is: it names the advertiser and the
+        // device it is for.
+        assert!(l.update(
+            &rec(
+                "BLE-Adv",
+                2426e6,
+                Some(EventLink::between(
+                    Party::unit("6C:70:CB:EF:72:4D"),
+                    Party::unit("E8:31:CD:0A:F5:3A"),
+                )),
+            ),
+            t(0)
+        ));
+        assert_eq!(l.active(t(1)).len(), 1);
+    }
+
+    /// A group is a named end. A talkgroup, a reflector and a mesh channel
+    /// are somebody in particular, unlike everybody in range.
+    #[test]
+    fn a_call_to_a_group_is_a_link() {
+        let mut l = Links::new();
+        assert!(l.update(
+            &rec(
+                "DMR-Voice",
+                446.1e6,
+                Some(EventLink::between(Party::unit("1234567"), Party::group("9"))),
+            ),
+            t(0)
+        ));
+        assert!(l.active(t(1))[0].to_group());
     }
 
     #[test]
@@ -459,8 +464,10 @@ mod tests {
         assert_eq!(l.active(t(2)).len(), 2);
     }
 
+    /// What was said is on the packet, and the follow view reads it off the
+    /// log; the directory counts.
     #[test]
-    fn a_link_carries_what_was_said() {
+    fn a_link_counts_what_passed_between_its_ends() {
         let mut l = Links::new();
         l.update(
             &said(
@@ -472,14 +479,14 @@ mod tests {
             t(0),
         );
         let links = l.active(t(1));
-        assert_eq!(links[0].moments[0].text.as_deref(), Some("on my way"));
+        assert_eq!(links[0].packets, 1);
     }
 
     #[test]
     fn a_loaded_directory_merges_into_the_live_one() {
-        // The same advertiser heard live and again from the log is one link
-        // with both sets of packets, in the order they happened.
-        let link = EventLink::beacon(Party::unit("aa:bb"));
+        // The same pair heard live and again from the log is one link, with
+        // the counts added and the first and last stretched to cover both.
+        let link = EventLink::between(Party::unit("aa:bb"), Party::unit("cc:dd"));
         let mut live = Links::new();
         live.update(&rec("BLE-Adv", 2426e6, Some(link.clone())), t(10));
         let mut loaded = Links::new();
@@ -489,8 +496,9 @@ mod tests {
         let links = live.active(t(11));
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].packets, 3);
-        let order: Vec<Instant> = links[0].moments.iter().map(|m| m.at).collect();
-        assert!(order.windows(2).all(|w| w[0] <= w[1]), "packets are out of order");
+        // `t` is relative to a fresh `Instant::now()` on each call, so this
+        // compares the span rather than the stamps.
+        assert!(links[0].duration().as_secs() >= 9, "{:?}", links[0].duration());
     }
 
     #[test]
