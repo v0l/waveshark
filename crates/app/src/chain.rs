@@ -1878,6 +1878,14 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             let w = nodes::m17_nodes::CHANNEL_WIDTH_HZ;
             Some(((hz - w, hz + w), 192_000.0))
         }
+        Front::Ble(hz) => {
+            let w = nodes::ble_nodes::CHANNEL_WIDTH_HZ;
+            // The demodulator refuses anything under 4 MS/s: at 1 Mbit/s the
+            // bit centres have to be found in the samples themselves, and
+            // four of them a symbol is where the ch38 capture stops losing
+            // packets.
+            Some(((hz - w, hz + w), 8_000_000.0))
+        }
         Front::Banks(widths) => {
             let band = at.band;
             // Two channels is the least a channelizer will build, so the band
@@ -1893,7 +1901,7 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 
 
 /// Patch stages whose output the packet bus accepts.
-const BUS_TAILS: [&str; 11] = [
+const BUS_TAILS: [&str; 12] = [
     "pulse_detect",
     "ask_detect",
     "fsk_detect",
@@ -1905,6 +1913,7 @@ const BUS_TAILS: [&str; 11] = [
     "aprs",
     "pocsag",
     "m17",
+    "ble",
 ];
 
 /// Stages that carry speech, and the output port it leaves on.
@@ -2204,7 +2213,17 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 let id = p.add_derived(derived::at("m17", *hz as u64, 0), "m17", s);
                 p.connect(src, (id, 0));
             }
-            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) => {}
+            Front::Ble(hz) if fits(*hz, nodes::ble_nodes::CHANNEL_WIDTH_HZ) => {
+                let mut s = Settings::new();
+                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
+                s.insert(
+                    "label".into(),
+                    pipeline::ParamValue::Text(format!("{:.0} BLE", hz / 1e6)),
+                );
+                let id = p.add_derived(derived::at("ble", *hz as u64, 0), "ble", s);
+                p.connect(src, (id, 0));
+            }
+            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_) => {}
             Front::Auto => {
                 // One node over the band, whatever the band holds. The band
                 // is passed on so it ignores the margin the power-of-two
@@ -3316,6 +3335,14 @@ pub fn scan_marks(
                 hz: *hz,
                 width: nodes::aprs_nodes::CHANNEL_WIDTH_HZ,
                 label: "APRS".into(),
+            }),
+            Front::Ble(hz) => out.push(ScanMark::Channel {
+                hz: *hz,
+                width: nodes::ble_nodes::CHANNEL_WIDTH_HZ,
+                label: match nodes::ble_nodes::channel_of(*hz) {
+                    Some(ch) => format!("BLE {ch}"),
+                    None => "BLE".into(),
+                },
             }),
             Front::Pocsag(hz) => out.push(ScanMark::Channel {
                 hz: *hz,

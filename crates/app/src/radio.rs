@@ -3186,6 +3186,78 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    /// The BLE capture: 1.2 s of advertising channel 38, recorded 4 MHz off
+    /// centre on a HackRF so the DC spike sits outside the channel.
+    fn ble_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/ble_adv_ch38_2430.0M_16000k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// Bluetooth advertising, through the whole receiver: the scanner table
+    /// puts a BLE front end on channel 38 because the span covers it, the
+    /// front end finds the packets, and what comes back is what the devices
+    /// in the room were saying.
+    ///
+    /// The assertions are the transmitters' own: an address a device put on
+    /// the air and the company identifier the SIG assigned to its maker.
+    /// Every packet counted here passed the link layer's CRC-24, so a run
+    /// that produces the wrong number is a demodulator that got worse rather
+    /// than a threshold that moved.
+    #[test]
+    fn bluetooth_advertising_is_found_and_read() {
+        let Some(buf) = ble_fixture() else {
+            eprintln!("skipping: ble_adv_ch38_2430.0M_16000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        // The shipped table rather than whatever is in this machine's config:
+        // a block the operator deleted should not fail the corpus.
+        let fronts =
+            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        assert!(
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Ble(2_426_000_000.0)),
+            "the table put no BLE front end on a span covering channel 38: {fronts:?}"
+        );
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = fronts;
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "BLE-Adv").collect();
+        // 31 packets pass CRC in this capture, through the receiver at the
+        // 8 MS/s the front end extracts and standalone at the recorded
+        // 16 MS/s alike. The floor is under that rather than at it: what this
+        // guards is a demodulator that stopped working.
+        assert!(
+            ble.len() >= 25,
+            "read {} advertisements, expected at least 25 of the 31 in the capture",
+            ble.len()
+        );
+        for r in &ble {
+            assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
+            assert!(
+                (r.freq - 2_426_000_000.0).abs() < 1e6,
+                "reported at {} Hz rather than on channel 38",
+                r.freq
+            );
+            assert!(r.detail.contains("channel=38"), "read as {}", r.detail);
+        }
+        let rows: Vec<&str> = ble.iter().map(|r| r.detail.as_str()).collect();
+        // A Samsung monitor advertising.
+        assert!(
+            rows.iter().any(|d| d.contains("6C:70:CB:EF:72:4D") && d.contains("company=0x0075")),
+            "the Samsung advertiser is missing: {rows:?}"
+        );
+        // A Victron EV charger, the weakest of the five and the one a channel
+        // filter designed against the decimation rather than the signal loses.
+        assert!(
+            rows.iter().any(|d| d.contains("E8:31:CD:0A:F5:3A") && d.contains("Victron")),
+            "the Victron advertiser is missing: {rows:?}"
+        );
+    }
+
     fn tetra_fixture() -> Option<common::IqBuf> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/tetra_downlink_391.5M_2400k.cu8");

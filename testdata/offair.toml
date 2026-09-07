@@ -319,3 +319,54 @@ Two seconds of the 869 MHz band with nothing transmitting, from the same
 session and the same gain setting as the LoRa captures. The receiver's own
 noise floor and spurs, which is what a burst detector has to not fire on.
 """
+
+[[capture]]
+name = "ble_adv_ch38_2430.0M_16000k.cs8"
+sha256 = "499e3e68046a84e3d32ee4f82451f722851a32a81468de97d0148a61df4442b9"
+url = "https://nostr.download/499e3e68046a84e3d32ee4f82451f722851a32a81468de97d0148a61df4442b9.xz"
+compression = "xz"
+center_hz = 2_430_000_000
+rate_sps = 16_000_000
+format = "cs8"
+family = "msk_gmsk"
+burst_us = [80, 400]
+receiver = "HackRF One, 2.4 GHz whip"
+description = """
+Bluetooth Low Energy advertising on channel 38, 1.2 s at sixteen megasamples,
+cut from an eight second stretch of a flat's own devices. Tuned to 2430 MHz
+rather than to the channel, so the tuner's DC spike sits 4 MHz away from the
+signal instead of in the middle of it.
+
+Thirty-one packets pass the link layer's CRC-24, from five advertisers. Two of
+them identify their maker: a Samsung monitor at 6C:70:CB:EF:72:4D, company
+identifier 0x0075, and a Victron EV charger at E8:31:CD:0A:F5:3A, 0x02E1,
+which also puts its name in the advertisement as EVCS-HQ2241GV9C9. Nothing
+scanned the monitor during this window, so its name is not here; the wider
+recording this was cut from has the scan response. The expectation is
+therefore what the devices said about themselves, checked by a CRC this code
+did not choose.
+
+Kept because it is evidence about the channel filter rather than about the
+demodulator. The Victron is the weakest of the five at about 18 dB, and with
+the decimator's own stopband (`FirDecim::design_hz` puts the passband edge at
+2 MHz for a factor of four) every one of its packets fails CRC while the
+strong advertisers still read: the front end looked like it worked, and was
+quietly deaf to half the room. With the filter designed against the
+modulation instead, at 700 kHz, all five read.
+
+Also the capture that measures the cost of the pulse path. Read as bit
+centres it gives 89 packets over the first six seconds; read as
+`common::Pulse` microsecond run lengths, which is how every other two-level
+front end here talks to `decode::slicer`, it gives 51. One bit is one
+microsecond at this rate, so the run lengths quantise to whole bits.
+"""
+
+[capture.expect]
+channel = 38
+packets = 31
+advertisers = 5
+address = "6C:70:CB:EF:72:4D"
+company = 0x0075
+advertised_name = "EVCS-HQ2241GV9C9"
+weakest_address = "E8:31:CD:0A:F5:3A"
+weakest_company = 0x02E1
