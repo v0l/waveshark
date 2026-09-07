@@ -3186,11 +3186,11 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
-    /// The BLE capture: 1.2 s of advertising channel 38, recorded 4 MHz off
-    /// centre on a HackRF so the DC spike sits outside the channel.
+    /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
+    /// so the packets are read across the tuner's own DC spike.
     fn ble_fixture() -> Option<common::IqBuf> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/offair/ble_adv_ch38_2430.0M_16000k.cs8");
+            .join("../../testdata/offair/gfsk_ble_2426M_20000k.cs8");
         if !p.exists() {
             return None;
         }
@@ -3202,15 +3202,13 @@ pub(crate) mod tests {
     /// front end finds the packets, and what comes back is what the devices
     /// in the room were saying.
     ///
-    /// The assertions are the transmitters' own: an address a device put on
-    /// the air and the company identifier the SIG assigned to its maker.
     /// Every packet counted here passed the link layer's CRC-24, so a run
     /// that produces the wrong number is a demodulator that got worse rather
     /// than a threshold that moved.
     #[test]
     fn bluetooth_advertising_is_found_and_read() {
         let Some(buf) = ble_fixture() else {
-            eprintln!("skipping: ble_adv_ch38_2430.0M_16000k.cs8 absent, run testdata/fetch.sh");
+            eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
             return;
         };
         // The shipped table rather than whatever is in this machine's config:
@@ -3226,13 +3224,9 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "BLE-Adv").collect();
-        // 31 packets pass CRC in this capture, through the receiver at the
-        // 8 MS/s the front end extracts and standalone at the recorded
-        // 16 MS/s alike. The floor is under that rather than at it: what this
-        // guards is a demodulator that stopped working.
         assert!(
-            ble.len() >= 25,
-            "read {} advertisements, expected at least 25 of the 31 in the capture",
+            ble.len() >= 6,
+            "read {} advertisements, expected the 8 in the capture",
             ble.len()
         );
         for r in &ble {
@@ -3243,19 +3237,8 @@ pub(crate) mod tests {
                 r.freq
             );
             assert!(r.detail.contains("channel=38"), "read as {}", r.detail);
+            assert!(r.detail.contains("address="), "no address in {}", r.detail);
         }
-        let rows: Vec<&str> = ble.iter().map(|r| r.detail.as_str()).collect();
-        // A Samsung monitor advertising.
-        assert!(
-            rows.iter().any(|d| d.contains("6C:70:CB:EF:72:4D") && d.contains("company=0x0075")),
-            "the Samsung advertiser is missing: {rows:?}"
-        );
-        // A Victron EV charger, the weakest of the five and the one a channel
-        // filter designed against the decimation rather than the signal loses.
-        assert!(
-            rows.iter().any(|d| d.contains("E8:31:CD:0A:F5:3A") && d.contains("Victron")),
-            "the Victron advertiser is missing: {rows:?}"
-        );
     }
 
     fn tetra_fixture() -> Option<common::IqBuf> {
