@@ -232,6 +232,22 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if !msg.channels.is_empty() {
         fields.push((list_name.into(), Value::Text(list.clone())));
     }
+    if !msg.pages.is_empty() {
+        let who =
+            msg.pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
+        fields.push(("paging".into(), Value::Text(who)));
+        // A network pages by temporary identity, which it reallocates. One
+        // that pages by permanent identity has given that up, and a row that
+        // does not separate the two hides it.
+        let permanent = msg
+            .pages
+            .iter()
+            .filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_)))
+            .count();
+        if permanent > 0 {
+            fields.push(("paged_by_identity".into(), Value::Int(permanent as i64)));
+        }
+    }
     if let Some(lai) = msg.lai {
         fields.push(("mcc".into(), Value::Int(i64::from(lai.mcc))));
         fields.push(("mnc".into(), Value::Int(i64::from(lai.mnc))));
@@ -252,6 +268,9 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     }
     if !msg.channels.is_empty() {
         detail.push_str(&format!(" {list_name} {list}"));
+    }
+    for p in &msg.pages {
+        detail.push_str(&format!(" {p}"));
     }
     if party.is_none() {
         party = arfcn.map(|n| format!("ARFCN {n}"));

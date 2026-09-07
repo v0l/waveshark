@@ -81,6 +81,142 @@ fn channels(ie: &[u8]) -> Option<Vec<u16>> {
     Some(out)
 }
 
+/// Who a paging request is calling.
+///
+/// A network pages by temporary identity almost always, which is the point
+/// of the temporary identity: it is reallocated, so a run of them says how
+/// busy a cell is without saying whose phones they are. A network that pages
+/// by permanent identity has given that up, and reading it is how anyone
+/// knows that is happening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Identity {
+    /// Temporary subscriber identity, four octets, reallocated by the
+    /// network whenever it chooses.
+    Tmsi(u32),
+    /// The permanent subscriber identity, as digits.
+    Imsi(String),
+    /// The equipment's identity, with or without its software version.
+    Imei(String),
+    /// A type this does not read, kept so a row still says a page happened.
+    Other(u8),
+}
+
+impl std::fmt::Display for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Identity::Tmsi(v) => write!(f, "TMSI {v:08X}"),
+            Identity::Imsi(s) => write!(f, "IMSI {s}"),
+            Identity::Imei(s) => write!(f, "IMEI {s}"),
+            Identity::Other(t) => write!(f, "identity type {t}"),
+        }
+    }
+}
+
+/// Read a mobile identity, 3GPP TS 24.008 section 10.5.1.4.
+///
+/// The low three bits of the first octet are the type and the fourth says
+/// whether the digit count is odd; the digits follow as nibbles, low nibble
+/// of each octet first. A temporary identity is not digits at all: it is
+/// four octets after a first octet of 0xF4.
+fn identity(b: &[u8]) -> Option<Identity> {
+    let first = *b.first()?;
+    let odd = first & 0x08 != 0;
+    Some(match first & 0x07 {
+        // Type zero is "no identity", which a network sends to keep the
+        // channel occupied when it has nobody to call. Counting those as
+        // pages made a quiet cell look busy: a third of the pages in a
+        // recording were this.
+        0 => return None,
+        4 => Identity::Tmsi(u32::from_be_bytes(b.get(1..5)?.try_into().ok()?)),
+        t @ (1 | 2 | 3) => {
+            let mut digits = String::new();
+            digits.push(char::from(b'0' + (first >> 4)));
+            for &octet in &b[1..] {
+                digits.push(char::from(b'0' + (octet & 0x0F)));
+                digits.push(char::from(b'0' + (octet >> 4)));
+            }
+            // An even count of digits leaves a filler nibble at the end.
+            if !odd {
+                digits.pop();
+            }
+            let plausible = match t {
+                1 => (6..=15).contains(&digits.len()),
+                _ => (14..=16).contains(&digits.len()),
+            };
+            if !plausible || digits.bytes().any(|c| !c.is_ascii_digit()) {
+                return None;
+            }
+            if t == 1 {
+                Identity::Imsi(digits)
+            } else {
+                Identity::Imei(digits)
+            }
+        }
+        t => Identity::Other(t),
+    })
+}
+
+/// The identities a paging request carries.
+///
+/// Three shapes, from 3GPP TS 44.018 sections 9.1.22 to 9.1.24. The first
+/// carries one or two identities of any kind as length-prefixed fields; the
+/// second carries two temporary identities as bare octets and may add a
+/// third of any kind; the third carries four temporary identities.
+fn pages(type_id: u8, body: &[u8]) -> Vec<Identity> {
+    let mut out = Vec::new();
+    // The first octet is the page mode and which channel the phones should
+    // answer on, neither of which says who is being called.
+    let Some(rest) = body.get(1..) else { return out };
+    match type_id {
+        0x21 => {
+            let mut at = 0usize;
+            // Two identities at most: the first is always there as a length
+            // and a value, the second arrives behind the tag 0x17.
+            for _ in 0..2 {
+                let Some(&len) = rest.get(at) else { break };
+                let len = usize::from(len);
+                if len == 0 || at + 1 + len > rest.len() {
+                    break;
+                }
+                if let Some(id) = identity(&rest[at + 1..at + 1 + len]) {
+                    out.push(id);
+                }
+                at += 1 + len;
+                if rest.get(at) != Some(&0x17) {
+                    break;
+                }
+                at += 1;
+            }
+        }
+        0x22 | 0x24 => {
+            // Bare temporary identities, four octets each: two in a type 2
+            // and four in a type 3.
+            let count = if type_id == 0x22 { 2 } else { 4 };
+            for n in 0..count {
+                let Some(v) = rest.get(n * 4..n * 4 + 4) else { break };
+                let tmsi = u32::from_be_bytes(v.try_into().unwrap());
+                // A network with nothing to page fills the field with ones.
+                if tmsi != u32::MAX {
+                    out.push(Identity::Tmsi(tmsi));
+                }
+            }
+            // A type 2 may add one identity of any kind behind the tag.
+            if type_id == 0x22 {
+                if let Some(at) = rest.get(8).and_then(|&t| (t == 0x17).then_some(9)) {
+                    let len = usize::from(*rest.get(at).unwrap_or(&0));
+                    if len > 0 && at + 1 + len <= rest.len() {
+                        if let Some(id) = identity(&rest[at + 1..at + 1 + len]) {
+                            out.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// A message off the broadcast channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -102,6 +238,8 @@ pub struct Message {
     /// network is. Confusing the two would put a scanner on the serving
     /// cell's own hopping set and call it the neighbourhood.
     pub channels_are_neighbours: bool,
+    /// Who a paging request is calling, where the message is one.
+    pub pages: Vec<Identity>,
 }
 
 /// Read a block off the broadcast or common control channel.
@@ -168,6 +306,11 @@ pub fn parse(block: &[u8]) -> Option<Message> {
         lai,
         channels: list,
         channels_are_neighbours: type_id != 0x19,
+        // The whole block rather than what the pseudo length covers: a
+        // request that understates its own length would otherwise drop the
+        // identity it was sent to carry, and the padding after one cannot be
+        // mistaken for another, since a second has to arrive behind its tag.
+        pages: pages(type_id, &block[3..]),
     })
 }
 
@@ -295,6 +438,51 @@ mod tests {
     fn a_type_three_lists_no_channels() {
         let m = parse(&si3(0x1234, [0x62, 0xF2, 0x10, 0x11, 0x22])).unwrap();
         assert!(m.channels.is_empty());
+    }
+
+    /// A paging request by temporary identity, which is nearly all of them.
+    #[test]
+    fn a_paging_request_says_who_is_called() {
+        // Page mode and channels needed, then a length, then the temporary
+        // identity's own first octet and its four.
+        let mut b = vec![0x15, 0x06, 0x21, 0x00, 0x05, 0xF4, 0x12, 0x34, 0xAB, 0xCD];
+        b.resize(23, 0x2B);
+        let m = parse(&b).unwrap();
+        assert_eq!(m.name, "Paging1");
+        assert_eq!(m.pages, vec![Identity::Tmsi(0x1234_ABCD)]);
+        assert_eq!(m.pages[0].to_string(), "TMSI 1234ABCD");
+    }
+
+    /// Two identities in one request, the second behind its tag, and the
+    /// second a permanent identity: a network that pages this way has given
+    /// up the point of the temporary one, and the row should say so.
+    #[test]
+    fn a_request_can_carry_two_and_can_name_a_subscriber() {
+        let mut b = vec![0x2D, 0x06, 0x21, 0x00];
+        b.extend_from_slice(&[0x05, 0xF4, 0x00, 0x00, 0x00, 0x01]);
+        // Tag, length, then an odd count of digits: 272013456789012.
+        b.extend_from_slice(&[
+            0x17, 0x08, 0x29, 0x27, 0x10, 0x43, 0x65, 0x87, 0x09, 0x21,
+        ]);
+        b.resize(23, 0x2B);
+        let m = parse(&b).unwrap();
+        assert_eq!(m.pages.len(), 2);
+        assert_eq!(m.pages[0], Identity::Tmsi(1));
+        assert_eq!(m.pages[1], Identity::Imsi("272013456789012".into()));
+    }
+
+    /// A type 3 carries four temporary identities, and a network with fewer
+    /// to page fills the rest with ones rather than leaving them out.
+    #[test]
+    fn a_type_three_carries_four_and_drops_the_filler() {
+        let mut b = vec![0x21, 0x06, 0x24, 0x00];
+        b.extend_from_slice(&0xAAAA_AAAAu32.to_be_bytes());
+        b.extend_from_slice(&0xBBBB_BBBBu32.to_be_bytes());
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        b.resize(23, 0x2B);
+        let m = parse(&b).unwrap();
+        assert_eq!(m.pages, vec![Identity::Tmsi(0xAAAA_AAAA), Identity::Tmsi(0xBBBB_BBBB)]);
     }
 
     #[test]
