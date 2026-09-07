@@ -44,6 +44,7 @@
 
 pub mod bcch;
 pub mod coding;
+pub mod equalise;
 pub mod sch;
 
 pub use sch::Sch;
@@ -116,10 +117,15 @@ pub struct GsmConfig {
     /// be taken for an FCCH. This is the tuner's error plus the base
     /// station's, and a cheap receiver is tens of kHz out at 950 MHz.
     pub tone_tolerance_hz: f64,
-    /// Variance of the per-sample phase advance, in radians squared, below
-    /// which a window is unmodulated. Noise sits near the variance of a
-    /// uniform angle, which is about 3.3.
-    pub max_tone_variance: f32,
+    /// How coherent the phase advance across a window has to be before it
+    /// counts as a tone, from zero to one.
+    ///
+    /// This is the mean of `x[n] conj(x[n-1])` over the window against the
+    /// mean power, which for a tone in noise settles at `snr / (1 + snr)`:
+    /// a half is 0 dB and two thirds is 3 dB. Modulated data cannot reach it
+    /// however strong, because its phase advances are half a turn apart and
+    /// average to nothing, and noise cannot either.
+    pub min_tone_coherence: f32,
     /// Symbols of tone required before a run counts as a burst. The burst is
     /// 148, and demanding most of them keeps a quiet stretch of a carrier
     /// from passing.
@@ -135,7 +141,7 @@ impl Default for GsmConfig {
     fn default() -> Self {
         Self {
             tone_tolerance_hz: 30_000.0,
-            max_tone_variance: 0.02,
+            min_tone_coherence: 0.6,
             min_tone_symbols: 80.0,
             min_quality: 0.35,
         }
@@ -203,22 +209,29 @@ pub struct SchDetector {
     mixer: Mixer,
     decim: FirDecim,
     mixed: Vec<C32>,
-    /// The channel, and the per-sample phase advance through it, kept
-    /// together because the tone search reads the second and the demodulator
-    /// reads the first, a whole TDMA frame later.
+    /// The channel, and the product of each sample with the one before it,
+    /// kept together because the tone search reads the second and the
+    /// demodulator reads the first, a whole TDMA frame later. That product
+    /// carries the phase advance and its strength in one number, which is
+    /// what makes the tone measurable at a signal to noise ratio where the
+    /// advance on its own is not.
     buf: Vec<C32>,
-    dphi: Vec<f32>,
+    prod: Vec<C32>,
     /// Absolute index of `buf[0]` in the decimated stream.
     base: u64,
     /// How far the tone search has run, absolute.
     scanned: u64,
     /// Windowed sums for the tone search, carried between blocks.
-    win: WindowStats,
+    win: ToneWindow,
     run: Option<Run>,
     /// FCCH bursts whose SCH has not arrived yet.
     pending: Vec<Pending>,
     /// Control channel blocks the frame numbers say are coming.
     blocks: Vec<PendingBlock>,
+    /// The last synchronisation burst decoded but not yet reported, and where
+    /// it sat. Held back until a second one agrees with it about what time it
+    /// is; see `corroborate`.
+    held: Option<(SchHit, f64)>,
     /// Where the samples added by the last call sit in `buf`, so a caller can
     /// measure the channel this cut out rather than the span it came from.
     last: std::ops::Range<usize>,
@@ -250,26 +263,49 @@ struct PendingBlock {
     frame_number: u32,
 }
 
-/// Running mean and variance over a sliding window of phase advances.
-struct WindowStats {
+/// A sliding window over those products: their sum, which is a vector whose
+/// angle is the average phase advance and whose length says how much of the
+/// window agreed about it, and the power that went into it.
+struct ToneWindow {
     len: usize,
-    sum: f64,
-    sumsq: f64,
+    sum: C64,
+    power: f64,
     n: usize,
 }
 
-impl WindowStats {
-    fn new(len: usize) -> Self {
-        Self { len, sum: 0.0, sumsq: 0.0, n: 0 }
+/// A complex accumulator at double precision. The window holds a few hundred
+/// terms and runs for the length of a capture, so the sum is kept where
+/// rounding cannot walk.
+#[derive(Clone, Copy)]
+struct C64 {
+    re: f64,
+    im: f64,
+}
+
+impl C64 {
+    fn norm(&self) -> f64 {
+        self.re.hypot(self.im)
     }
 
-    fn push(&mut self, add: f32, drop: Option<f32>) {
-        self.sum += f64::from(add);
-        self.sumsq += f64::from(add) * f64::from(add);
+    fn arg(&self) -> f64 {
+        self.im.atan2(self.re)
+    }
+}
+
+impl ToneWindow {
+    fn new(len: usize) -> Self {
+        Self { len, sum: C64 { re: 0.0, im: 0.0 }, power: 0.0, n: 0 }
+    }
+
+    fn push(&mut self, add: C32, drop: Option<C32>) {
+        self.sum.re += f64::from(add.re);
+        self.sum.im += f64::from(add.im);
+        self.power += f64::from(add.norm());
         self.n += 1;
         if let Some(d) = drop {
-            self.sum -= f64::from(d);
-            self.sumsq -= f64::from(d) * f64::from(d);
+            self.sum.re -= f64::from(d.re);
+            self.sum.im -= f64::from(d.im);
+            self.power -= f64::from(d.norm());
             self.n -= 1;
         }
     }
@@ -278,17 +314,24 @@ impl WindowStats {
         self.n >= self.len
     }
 
-    fn mean(&self) -> f64 {
-        self.sum / self.n.max(1) as f64
+    /// How much of the window agreed about the phase advance, from zero to
+    /// one. The product's magnitude is the power, so dividing by the summed
+    /// magnitudes leaves a number that does not depend on the level.
+    fn coherence(&self) -> f64 {
+        if self.power <= 0.0 {
+            return 0.0;
+        }
+        self.sum.norm() / self.power
     }
 
-    fn variance(&self) -> f64 {
-        (self.sumsq / self.n.max(1) as f64 - self.mean() * self.mean()).max(0.0)
+    /// The average phase advance, in radians a sample.
+    fn advance(&self) -> f64 {
+        self.sum.arg()
     }
 
     fn reset(&mut self) {
-        self.sum = 0.0;
-        self.sumsq = 0.0;
+        self.sum = C64 { re: 0.0, im: 0.0 };
+        self.power = 0.0;
         self.n = 0;
     }
 }
@@ -316,13 +359,14 @@ impl SchDetector {
             decim,
             mixed: Vec::new(),
             buf: Vec::new(),
-            dphi: Vec::new(),
+            prod: Vec::new(),
             base: 0,
             scanned: 0,
-            win: WindowStats::new(window.max(8)),
+            win: ToneWindow::new(window.max(8)),
             run: None,
             pending: Vec::new(),
             blocks: Vec::new(),
+            held: None,
             last: 0..0,
         }
     }
@@ -336,13 +380,14 @@ impl SchDetector {
         self.mixer.reset();
         self.decim.reset();
         self.buf.clear();
-        self.dphi.clear();
+        self.prod.clear();
         self.base = 0;
         self.scanned = 0;
         self.win.reset();
         self.run = None;
         self.pending.clear();
         self.blocks.clear();
+        self.held = None;
         self.last = 0..0;
     }
 
@@ -370,24 +415,21 @@ impl SchDetector {
         let before = self.buf.len();
         self.decim.process(&self.mixed, &mut self.buf);
         self.last = before..self.buf.len();
-        self.extend_dphi(before);
+        self.extend_products(before);
         self.search_tone();
         self.decode_pending(out);
         self.decode_blocks(out);
         self.trim();
     }
 
-    /// Phase advance for the samples just appended. The first sample of a
-    /// block reaches back to the last of the previous one, so a burst that
-    /// straddles a block boundary is not cut in half.
-    fn extend_dphi(&mut self, from: usize) {
-        self.dphi.resize(self.buf.len(), 0.0);
+    /// The product of each new sample with the one before it. The first
+    /// sample of a block reaches back to the last of the previous one, so a
+    /// burst that straddles a block boundary is not cut in half.
+    fn extend_products(&mut self, from: usize) {
+        self.prod.resize(self.buf.len(), C32::new(0.0, 0.0));
         for i in from..self.buf.len() {
-            self.dphi[i] = if i == 0 {
-                0.0
-            } else {
-                (self.buf[i] * self.buf[i - 1].conj()).arg()
-            };
+            self.prod[i] =
+                if i == 0 { C32::new(0.0, 0.0) } else { self.buf[i] * self.buf[i - 1].conj() };
         }
     }
 
@@ -401,13 +443,13 @@ impl SchDetector {
             let i = (abs - self.base) as usize;
             // The window covers `[i - window + 1, i]`, and the first phase
             // advance in the buffer is at index one rather than zero.
-            let drop = (i > window).then(|| self.dphi[i - window]);
-            self.win.push(self.dphi[i], drop);
+            let drop = (i > window).then(|| self.prod[i - window]);
+            self.win.push(self.prod[i], drop);
             if !self.win.full() {
                 continue;
             }
-            let quiet = self.win.variance() < f64::from(self.cfg.max_tone_variance)
-                && (self.win.mean() - want).abs() < tol;
+            let quiet = self.win.coherence() > f64::from(self.cfg.min_tone_coherence)
+                && (self.win.advance() - want).abs() < tol;
             match (&mut self.run, quiet) {
                 (None, true) => {
                     // The window is what was quiet, so the tone reaches back
@@ -418,7 +460,12 @@ impl SchDetector {
                 (Some(r), false) => {
                     let r = *r;
                     self.run = None;
-                    self.close_run(r);
+                    // A trigger shorter than a fraction of a burst is not
+                    // worth searching around: something briefly coherent is
+                    // a carrier turning on, not 148 bits of tone.
+                    if (r.last - r.first) as f64 / self.sps >= self.cfg.min_tone_symbols {
+                        self.close_run(r);
+                    }
                 }
                 (None, false) => {}
             }
@@ -426,34 +473,90 @@ impl SchDetector {
         self.scanned = end;
     }
 
-    /// A run of tone ended: if it is the right length for a frequency
-    /// correction burst, remember where the synchronisation burst will be.
+    /// A run of tone ended: find the burst inside it and remember where the
+    /// synchronisation burst after it will be.
+    ///
+    /// The run only says roughly where the tone is. Its edges are not the
+    /// burst's: the test fires as soon as a sliding window holds enough tone
+    /// to be coherent, which on a carrier whose neighbouring timeslots are
+    /// idle happens a whole window early, and on one carrying traffic
+    /// happens half a window late. So the run is a trigger, and the position
+    /// comes from sliding a window exactly one burst long across the
+    /// neighbourhood and taking the place where it agrees with itself most.
+    /// That measure peaks on the burst wherever the trigger fired.
     fn close_run(&mut self, run: Run) {
-        let symbols = (run.last - run.first) as f64 / self.sps;
-        if symbols < self.cfg.min_tone_symbols || symbols > BURST_BITS as f64 * 1.4 {
+        let len = (BURST_BITS as f64 * self.sps) as usize;
+        let pad = self.win.len as u64 + len as u64;
+        let lo = run.first.saturating_sub(pad).max(self.base + 1);
+        let hi = (run.last + pad).min(self.base + self.buf.len() as u64);
+        if hi <= lo + len as u64 {
             return;
         }
-        // The middle half of the run, not all of it. The variance test is
-        // loose enough to accept a window holding a little of the ramp at
-        // either end of the burst, and the ramp is at a lower frequency than
-        // the tone: averaging the whole run put the estimate 2.5 kHz low,
-        // which is a phase turn and a half across the burst a frame later and
-        // cost half the correlation with its training sequence.
-        let from = (run.first - self.base) as usize;
-        let to = (run.last - self.base) as usize;
-        let cut = (to - from) / 4;
-        let mid = &self.dphi[from + cut..to - cut];
-        let mean: f64 = mid.iter().map(|&v| f64::from(v)).sum::<f64>() / mid.len() as f64;
-        let freq_offset_hz = mean * self.work / TAU - FCCH_TONE_HZ;
 
-        // The middle of the run rather than its start. A window only counts
-        // as quiet once it lies wholly inside the tone, so the run is short
-        // of the burst by the ramp at each end; those two errors are the same
-        // size, so their midpoint is where the burst's midpoint is. The
-        // synchronisation burst is one TDMA frame on from there.
-        let middle = (run.first + run.last) as f64 / 2.0;
-        let sch_start =
-            middle - BURST_BITS as f64 / 2.0 * self.sps + FRAME_SYMBOLS * self.sps;
+        let (from, to) = ((lo - self.base) as usize, (hi - self.base) as usize);
+        let mut sum = C64 { re: 0.0, im: 0.0 };
+        let mut power = 0.0f64;
+        let mut best: Option<(f64, usize, (C64, f64))> = None;
+        for i in from..to {
+            let p = self.prod[i];
+            sum.re += f64::from(p.re);
+            sum.im += f64::from(p.im);
+            power += f64::from(p.norm());
+            if i >= from + len {
+                let d = self.prod[i - len];
+                sum.re -= f64::from(d.re);
+                sum.im -= f64::from(d.im);
+                power -= f64::from(d.norm());
+            } else {
+                continue;
+            }
+            // The size of the sum, not the coherence. Silence adds nothing
+            // to either the sum or the power, so a window holding one tone
+            // sample and 655 of nothing is perfectly coherent and means
+            // nothing; the sum instead grows with every symbol of tone the
+            // window covers, and so peaks where the burst is.
+            //
+            // Only among windows that are coherent about the tone's own
+            // frequency, though. A carrier's residual offset and a
+            // receiver's own leakage are both perfectly coherent at zero,
+            // and on a real capture that leakage is stronger than the burst:
+            // without this the search walked off the frequency correction
+            // burst and onto the direct current at the middle of the span,
+            // reported a 70 kHz error, and threw every burst away.
+            let want = TAU * FCCH_TONE_HZ / self.work;
+            let tol = TAU * self.cfg.tone_tolerance_hz / self.work;
+            if (sum.arg() - want).abs() > tol {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(b, _, _)| sum.norm() > *b) {
+                best = Some((sum.norm(), i + 1 - len, (sum, power)));
+            }
+        }
+        let Some((_, start, (sum, power))) = best else { return };
+        // Now that the window is on the burst, how much of it agreed is a
+        // signal to noise ratio rather than an artefact of where it sat.
+        let coherence = if power > 0.0 { sum.norm() / power } else { 0.0 };
+        if coherence < f64::from(self.cfg.min_tone_coherence) {
+            return;
+        }
+        // The frequency from the middle half of the burst rather than all of
+        // it: a transmitter ramps its power up and down at the edges, and
+        // those ramps are not at the tone's frequency. Measured across the
+        // whole burst the estimate came out 600 Hz low, which is a fifth of
+        // a turn across the burst a frame later.
+        let mut mid = C64 { re: 0.0, im: 0.0 };
+        for p in &self.prod[start + len / 4..start + len - len / 4] {
+            mid.re += f64::from(p.re);
+            mid.im += f64::from(p.im);
+        }
+        let freq_offset_hz = mid.arg() * self.work / TAU - FCCH_TONE_HZ;
+        if freq_offset_hz.abs() > self.cfg.tone_tolerance_hz {
+            return;
+        }
+
+        // The synchronisation burst is one TDMA frame on from the frequency
+        // correction burst, both being timeslot zero.
+        let sch_start = (self.base + start as u64) as f64 + FRAME_SYMBOLS * self.sps;
         self.pending.push(Pending { sch_start, freq_offset_hz });
     }
 
@@ -470,9 +573,37 @@ impl SchDetector {
             }
             let Some((hit, at)) = self.demod(&p) else { continue };
             self.schedule_blocks(&hit, at, p.freq_offset_hz);
-            out.push(Hit::Sync(hit));
+            self.corroborate(hit, at, out);
         }
         self.pending = keep;
+    }
+
+    /// Report a synchronisation burst once a second one agrees with it.
+    ///
+    /// Ten bits of parity is a real check but a small one: it lets through
+    /// one burst in a thousand, and a receiver scanning a band tries
+    /// thousands. A capture with no cell in it produced a plausible looking
+    /// base station identity that way, which is exactly the kind of decode
+    /// nobody can tell from a real one afterwards.
+    ///
+    /// So a burst is held until the next one says the same thing about the
+    /// time: frame numbers count TDMA frames, the samples between the two
+    /// bursts say how many frames passed, and the two have to agree. Noise
+    /// cannot do that twice in a row.
+    fn corroborate(&mut self, hit: SchHit, at: f64, out: &mut Vec<Hit>) {
+        const HYPERFRAME: u32 = 51 * 26 * 2048;
+        let frame = FRAME_SYMBOLS * self.sps;
+        if let Some((prev, prev_at)) = self.held.take() {
+            let elapsed = ((at - prev_at) / frame).round();
+            let want = (prev.sch.frame_number + elapsed as u32) % HYPERFRAME;
+            if elapsed > 0.0 && want == hit.sch.frame_number {
+                out.push(Hit::Sync(prev));
+                out.push(Hit::Sync(hit.clone()));
+                self.held = Some((hit, at));
+                return;
+            }
+        }
+        self.held = Some((hit, at));
     }
 
     /// The control channel blocks the frame number says are next.
@@ -603,26 +734,16 @@ impl SchDetector {
             *s = x * C32::new(phase.cos() as f32, phase.sin() as f32);
         }
 
-        // The training sequence resolves the one phase left, and its
-        // magnitude says how much of the burst is really there.
-        let mut corr = C32::new(0.0, 0.0);
-        let mut power = 0.0f32;
-        for (i, &b) in tsc.iter().enumerate() {
-            let v = sym[tsc_at + i];
-            corr += if b == 0 { v } else { -v };
-            power += v.norm();
-        }
-        if power <= 0.0 {
-            return None;
-        }
-        let quality = corr.norm() / power;
-        let rot = corr.conj() / corr.norm();
-        let scale = tsc.len() as f32 / power;
+        // The training sequence measures the channel the burst arrived over,
+        // and the burst is then read through it. That measurement absorbs
+        // the phase the burst arrived at, so nothing here has to resolve it
+        // separately; what it adds beyond the phase is the spreading, which
+        // GMSK has by construction and a reflection adds to.
+        let known: Vec<f32> = tsc.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
+        let h = equalise::estimate(&sym, &known, tsc_at)?;
+        let quality = equalise::fit(&sym, &known, tsc_at, &h);
         let mut soft = [0.0f32; BURST_BITS];
-        for (k, s) in soft.iter_mut().enumerate() {
-            // A one is a negative symbol: the modulating value is 1-2d.
-            *s = -(sym[k] * rot).re * scale;
-        }
+        equalise::soft_bits(&sym, &h, &mut soft);
         Some((quality, soft))
     }
 
@@ -675,7 +796,7 @@ impl SchDetector {
             return;
         }
         self.buf.drain(..drop);
-        self.dphi.drain(..drop);
+        self.prod.drain(..drop);
         self.base += drop as u64;
         self.last = self.last.start.saturating_sub(drop)..self.last.end.saturating_sub(drop);
     }
@@ -881,11 +1002,17 @@ mod tests {
         }
     }
 
-    /// Build a stretch of carrier holding an FCCH and, one TDMA frame later,
-    /// the synchronisation burst for `sch`. `offset_hz` is a tuner error
-    /// applied to the lot.
+    /// Build a stretch of carrier holding two beacons: a frequency
+    /// correction burst, the synchronisation burst one TDMA frame after it,
+    /// and the same pair again ten frames later, which is where the control
+    /// multiframe puts the next one. `offset_hz` is a tuner error applied to
+    /// the lot.
     ///
-    /// The two bursts are placed at exact sample positions rather than
+    /// Two rather than one because the receiver reports a synchronisation
+    /// burst only once a second agrees with it about the time, and because a
+    /// cell with only one is not a cell.
+    ///
+    /// The bursts are placed at exact sample positions rather than
     /// concatenated with padding between them. The modulator returns a
     /// waveform longer than the bits it was given, because a Gaussian filter
     /// has a length, and adding that difference to the gap once put the
@@ -896,19 +1023,26 @@ mod tests {
         let sps = 8;
         let work = SYMBOL_RATE * sps as f64;
         let lead = 200.0;
-        let fcch = modulate(&[0u8; BURST_BITS], sps);
-        let sync = modulate(&sch_burst_bits(sch).unwrap(), sps);
-        let total = ((lead * 2.0 + FRAME_SYMBOLS + BURST_SYMBOLS) * sps as f64) as usize;
+        let total = ((lead * 2.0 + 12.0 * FRAME_SYMBOLS) * sps as f64) as usize;
         let mut base = vec![C32::new(0.0, 0.0); total];
         let mut place = |at: f64, wave: &[C32]| {
             let at = (at * sps as f64) as usize;
             base[at..at + wave.len()].copy_from_slice(wave);
         };
-        place(lead, &fcch);
-        place(lead + FRAME_SYMBOLS, &sync);
+        for (n, sch) in [*sch, Sch { frame_number: sch.frame_number + 10, ..*sch }]
+            .iter()
+            .enumerate()
+        {
+            let at = lead + 10.0 * n as f64 * FRAME_SYMBOLS;
+            place(at, &modulate(&[0u8; BURST_BITS], sps));
+            place(at + FRAME_SYMBOLS, &modulate(&sch_burst_bits(sch).unwrap(), sps));
+        }
+        resample(&base, work, rate, offset_hz, noise)
+    }
 
-        // Resample to the receiver's rate by nearest neighbour, then apply
-        // the tuner error and the noise.
+    /// To the receiver's rate by nearest neighbour, with a tuner error and
+    /// noise applied.
+    fn resample(base: &[C32], work: f64, rate: f64, offset_hz: f64, noise: f32) -> Vec<C32> {
         let ratio = work / rate;
         let n = (base.len() as f64 / ratio) as usize - 1;
         let mut seed = 0x2545_F491u32;
@@ -963,8 +1097,9 @@ mod tests {
         let (rate, center, channel) = (2_400_000.0, 947_400_000.0, 947_400_000.0);
         let iq = beacon(&want, rate, 0.0, 0.0);
         let hits = run(&iq, rate, center, channel);
-        assert_eq!(hits.len(), 1, "expected one burst, got {hits:?}");
+        assert_eq!(hits.len(), 2, "expected both bursts, got {hits:?}");
         assert_eq!(hits[0].sch, want);
+        assert_eq!(hits[1].sch.frame_number, want.frame_number + 10);
         assert!(hits[0].quality > 0.8, "quality {}", hits[0].quality);
     }
 
@@ -978,7 +1113,7 @@ mod tests {
         // Modulated at baseband and then shifted to where the channel is.
         let iq = beacon(&want, rate, 600_000.0, 0.0);
         let hits = run(&iq, rate, center, channel);
-        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].sch, want);
     }
 
@@ -994,7 +1129,7 @@ mod tests {
         let rate = 2_400_000.0;
         let iq = beacon(&want, rate, 9_500.0, 0.0);
         let hits = run(&iq, rate, 0.0, 0.0);
-        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].sch, want);
         let err = hits[0].freq_offset_hz;
         assert!((err - 9_500.0).abs() < 200.0, "measured {err} Hz");
@@ -1005,11 +1140,11 @@ mod tests {
     /// detector is rather than that it works.
     #[test]
     fn a_burst_survives_noise() {
-        let want = Sch { ncc: 4, bcc: 6, frame_number: 51 * 26 * 3 + 41 };
+        let want = Sch { ncc: 4, bcc: 6, frame_number: 51 * 26 * 3 + 31 };
         let rate = 2_400_000.0;
         let iq = beacon(&want, rate, 1_200.0, 0.35);
         let hits = run(&iq, rate, 0.0, 0.0);
-        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].sch, want);
     }
 
@@ -1048,7 +1183,7 @@ mod tests {
         for chunk in iq.chunks(8192) {
             det.process(chunk, &mut out);
         }
-        assert_eq!(syncs(&out).len(), 1, "the synchronisation burst");
+        assert_eq!(syncs(&out).len(), 2, "both synchronisation bursts");
         let got = blocks(&out);
         assert_eq!(got.len(), 1, "expected one block, got {got:?}");
         assert_eq!(got[0].bytes, block);
@@ -1057,28 +1192,30 @@ mod tests {
     }
 
     /// A beacon with a broadcast block in the four frames after the
-    /// synchronisation burst, which is where the multiframe puts it.
+    /// synchronisation burst, which is where the multiframe puts it, and a
+    /// second beacon ten frames on so the first is corroborated.
     fn beacon_with_block(sch: &Sch, block: &[u8; 23], rate: f64) -> Vec<C32> {
         let sps = 8;
         let work = SYMBOL_RATE * sps as f64;
         let lead = 200.0;
-        let total = ((lead * 2.0 + 6.0 * FRAME_SYMBOLS) * sps as f64) as usize;
+        let total = ((lead * 2.0 + 13.0 * FRAME_SYMBOLS) * sps as f64) as usize;
         let mut base = vec![C32::new(0.0, 0.0); total];
         let mut place = |at: f64, wave: &[C32]| {
             let at = (at * sps as f64) as usize;
             base[at..at + wave.len()].copy_from_slice(wave);
         };
-        place(lead, &modulate(&[0u8; BURST_BITS], sps));
-        place(lead + FRAME_SYMBOLS, &modulate(&sch_burst_bits(sch).unwrap(), sps));
+        for n in 0..2u32 {
+            let at = lead + 10.0 * f64::from(n) * FRAME_SYMBOLS;
+            let this = Sch { frame_number: sch.frame_number + 10 * n, ..*sch };
+            place(at, &modulate(&[0u8; BURST_BITS], sps));
+            place(at + FRAME_SYMBOLS, &modulate(&sch_burst_bits(&this).unwrap(), sps));
+        }
         let bursts = bcch::encode(block).unwrap();
         for (n, data) in bursts.iter().enumerate() {
             let bits = normal_burst_bits(data, usize::from(sch.bcc));
             place(lead + (2.0 + n as f64) * FRAME_SYMBOLS, &modulate(&bits, sps));
         }
-
-        let ratio = work / rate;
-        let n = (base.len() as f64 / ratio) as usize - 1;
-        (0..n).map(|i| base[(i as f64 * ratio) as usize]).collect()
+        resample(&base, work, rate, 0.0, 0.0)
     }
 
     /// Channel numbers as they are configured and logged. The values are
@@ -1119,7 +1256,7 @@ mod tests {
             det.process(block, &mut out);
         }
         let out = syncs(&out);
-        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out.len(), 2, "{out:?}");
         assert_eq!(out[0].sch, want);
     }
 }
