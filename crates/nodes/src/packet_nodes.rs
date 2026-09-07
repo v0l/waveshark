@@ -177,7 +177,7 @@ fn decode_burst_into(
             hits.push(
                 decoded_event(&report, pkg, center, modulation)
                     .with_bandwidth(p.bandwidth_hz as f64)
-                    .with_iq(p.iq.clone()),
+                    .with_iq(p.samples().cloned()),
             );
             if !opts.report_all {
                 break;
@@ -196,7 +196,7 @@ fn decode_burst_into(
         hits.push(
             unmatched_event(pkg, center, label, p.measure.as_ref())
                 .with_bandwidth(p.bandwidth_hz as f64)
-                .with_iq(p.iq.clone()),
+                .with_iq(p.samples().cloned()),
         );
     }
 }
@@ -234,7 +234,7 @@ fn decode_frame_into(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
             d.rssi_dbfs = Some(p.rssi_dbfs());
         }
         if d.iq.is_none() {
-            d.iq = p.iq.clone();
+            d.iq = p.samples().cloned();
         }
         if d.audio.is_none() {
             d.audio = p.audio.clone();
@@ -468,6 +468,32 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].protocol, "ADSB-Identification");
         assert!(hits[0].detail.as_deref().unwrap_or_default().contains("KLM1023"));
+    }
+
+    /// The samples a front end attached to its frame reach the row.
+    ///
+    /// A frame carries its own samples, because the demodulator is what knows
+    /// which of them the frame was read from; a burst carries them on the
+    /// packet. This node read the packet's field either way, so every front
+    /// end that produces frames had its evidence dropped here, and no test
+    /// noticed because the ones that would have need a capture to run.
+    #[test]
+    fn the_samples_a_frame_carries_reach_the_row() {
+        let mut n = PacketDecodeNode::default();
+        let bytes: Vec<u8> = (0..14)
+            .map(|i| {
+                u8::from_str_radix(&"8D4840D6202CC371C32CE0576098"[i * 2..i * 2 + 2], 16).unwrap()
+            })
+            .collect();
+        let mut frame = common::Frame::unmeasured(bytes).at(1_090_000_000);
+        frame.iq = Some(std::sync::Arc::new(common::IqBurst {
+            rate: 2_400_000.0,
+            center_hz: 1_090_000_000,
+            samples: vec![common::C32::new(0.5, -0.5); 32],
+        }));
+        let hits = run(&mut n, vec![Packet::of_frame(0, 2_000_000, frame)]);
+        let iq = hits[0].iq.as_ref().expect("the row kept the frame's samples");
+        assert_eq!(iq.samples.len(), 32);
     }
 
     #[test]
