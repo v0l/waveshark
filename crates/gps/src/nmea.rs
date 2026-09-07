@@ -44,6 +44,21 @@ pub struct Fix {
     pub utc: Option<u64>,
 }
 
+impl Fix {
+    /// The receiver's own ranging error, in metres, that a consumer GPS
+    /// quotes for itself. HDOP multiplies it.
+    pub const UERE_M: f64 = 5.0;
+
+    /// How far out the position may be, in metres, or `None` when nothing
+    /// said. HDOP is a multiplier on the ranging error rather than a
+    /// distance, so the product is what can be drawn or written in a column;
+    /// it is an estimate honest enough to say how much to trust the fix and
+    /// no better than that.
+    pub fn accuracy_m(&self) -> Option<f64> {
+        self.hdop.map(|h| h * Self::UERE_M)
+    }
+}
+
 /// What a line turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sentence {

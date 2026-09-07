@@ -58,6 +58,11 @@ impl Layer for RingLayer {
 /// for where you are hearing it is a map of nothing in particular.
 pub(super) struct StationLayer {
     pub home: Option<(f64, f64)>,
+    /// How far out the position may be, in metres, when a fix said so. Drawn
+    /// as the circle the receiver is somewhere inside, which is the honest
+    /// shape of a GPS position: a mark alone claims a metre it does not have,
+    /// and a bad fix looks exactly like a good one.
+    pub accuracy_m: Option<f64>,
 }
 
 impl Layer for StationLayer {
@@ -72,6 +77,16 @@ impl Layer for StationLayer {
     fn draw(&mut self, c: &Canvas) {
         let Some((lat, lon)) = self.home else { return };
         let at = c.at(lat, lon);
+        // Under the mark, and only once it is larger than the mark: a
+        // five metre circle at 50 nm to the screen is a ring inside the dot,
+        // which reads as a decoration rather than as an error bar.
+        if let Some(m) = self.accuracy_m {
+            let r = (m / 1852.0 * c.nm_px_at(lat)) as f32;
+            if r > 6.0 {
+                c.p.circle_filled(at, r, theme::READOUT.gamma_multiply(0.08));
+                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::READOUT.gamma_multiply(0.35)));
+            }
+        }
         c.p.circle_stroke(at, 5.0, Stroke::new(1.5, theme::READOUT));
         c.p.circle_filled(at, 1.5, theme::READOUT);
     }

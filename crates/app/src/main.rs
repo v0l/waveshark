@@ -29,6 +29,7 @@ mod record;
 mod scanners;
 mod memory;
 mod session;
+mod station;
 mod shutdown;
 mod ui;
 mod waterfall;
@@ -718,8 +719,9 @@ struct Args {
     #[arg(long)]
     no_survey: bool,
 
-    /// Read the receiver's own position from a GPS, as a serial port
-    /// (/dev/ttyACM0, or /dev/ttyUSB0@4800) or a gpsd address (gpsd:host:port)
+    /// Read the receiver's own position from a GPS other than the local gpsd,
+    /// which is looked for anyway: a serial port (/dev/ttyACM0, or
+    /// /dev/ttyUSB0@4800) or a gpsd address (gpsd:host:port)
     #[arg(long, value_name = "SOURCE", value_parser = parse_gps)]
     gps: Option<gps::Transport>,
 

@@ -245,18 +245,29 @@ level has changed by 6 dB, or after a minute. What is never thinned is the
 device row: first heard, last heard, every reception counted, the best level
 and where it was heard from.
 
-The position comes from `crates/gps`: NMEA from a serial port, or gpsd on TCP,
-one parser behind both. A fix goes stale after ten seconds, so a receiver that
-loses the sky records sightings with no position rather than attributing an
-afternoon to the last place it saw a satellite. Without a GPS the survey still
-runs and the position column is empty, which is the indoor case.
+The position a sighting carries is the station position, which is the one
+position the whole receiver works from: typed into settings, taken from the
+country the first time, or moved by a fix. There is no second position for the
+survey, which is what a survey used to have, so a receiver whose position was
+entered by hand wrote every row blind while the map drew it on its aerial.
 
-`--survey FILE` points it somewhere, `--no-survey` turns it off, and
-`--gps /dev/ttyACM0` or `--gps gpsd:localhost` gives it a position. Both are
-in settings under the station position, which is where they belong: a GPS is
-the other way of answering the question that box asks, and while one is
-running the station is wherever the last fix put it, so the range rings, the
-map and anything resolving a position against the receiver follow the car. The pane
+Fixes come from `crates/gps`: NMEA from a serial port, or gpsd on TCP, one
+parser behind both. The reader is `crate::station`, one per process rather
+than one per radio: it used to belong to the radio thread, so there were no
+fixes until a device was chosen and none while one was being swapped. It runs
+for as long as the program does and looks for a gpsd on the
+loopback, so a machine that has one needs nothing set; a refused connection is
+retried every five seconds, which is also how a daemon started later is picked
+up. A fix goes stale after ten seconds, and the station then stays where the
+last fix left it rather than following a receiver that has lost the sky.
+
+`--survey FILE` points the file somewhere, `--no-survey` turns it off, and
+`--gps /dev/ttyACM0` or `--gps gpsd:host` names a GPS that is not the local
+daemon. Both are in settings under the station position, which is where they
+belong: a GPS is the other way of answering the question that box asks, and
+while one is producing fixes the station is wherever the last one put it, so
+the range rings, the map and anything resolving a position against the
+receiver follow the car. The pane
 exports WiGLE CSV, which is what wardriving tools read; the survey file itself
 is the record, and the CSV is a copy shaped for other people's tools.
 

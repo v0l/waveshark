@@ -698,35 +698,38 @@ impl App {
         // What the link is doing, which is three different states an operator
         // has to be able to tell apart: nothing listening on the other end, a
         // receiver talking but with no sky, and a real fix.
-        let line = match self.radio.as_ref() {
-            None => "no radio running".to_string(),
-            Some(r) => {
-                use std::sync::atomic::Ordering;
-                let fix = *r.status.gps_fix.lock();
-                let sky = *r.status.gps_sky.lock();
-                let connected = r.status.gps_connected.load(Ordering::Relaxed);
-                let fixes = r.status.gps_fixes.load(Ordering::Relaxed);
-                match (connected, fix) {
-                    (_, Some(f)) => {
-                        let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
-                        format!("{:.5}, {:.5}{sats}, {fixes} fixes", f.lat, f.lon)
-                    }
-                    // Waiting says nothing on its own: an antenna indoors and
-                    // an antenna unplugged look the same for the first
-                    // minute, and the satellite counts tell them apart.
-                    (true, None) => match sky {
-                        Some(s) => {
-                            format!("connected, no fix yet: {} of {} satellites used", s.used, s.seen)
-                        }
-                        None => "connected, waiting for a fix".into(),
-                    },
-                    (false, None) => {
-                        "nothing answering: the station position is whatever is set above".into()
-                    }
+        let line = match (crate::station::connected(), crate::station::fix()) {
+            (_, Some(f)) => {
+                let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
+                let how = f
+                    .accuracy_m()
+                    .map(|m| format!(", ±{m:.0} m"))
+                    .unwrap_or_default();
+                format!(
+                    "{:.5}, {:.5}{sats}{how}, {} fixes",
+                    f.lat,
+                    f.lon,
+                    crate::station::fixes()
+                )
+            }
+            // Waiting says nothing on its own: an antenna indoors and an
+            // antenna unplugged look the same for the first minute, and the
+            // satellite counts tell them apart.
+            (true, None) => match crate::station::sky() {
+                Some(s) => {
+                    format!("connected, no fix yet: {} of {} satellites used", s.used, s.seen)
                 }
+                None => "connected, waiting for a fix".into(),
+            },
+            (false, None) => {
+                "nothing answering: the station position is whatever is set above".to_string()
             }
         };
         hint(ui, &line);
+        // The reader is not the radio's, so this pane keeps its own clock:
+        // without it a fix arriving while nothing else is moving would sit
+        // unshown until the pointer did.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         ui.add_space(6.0);
 
         // The survey is what a position is for, and the switch belongs beside
@@ -1008,8 +1011,8 @@ impl App {
             };
             ui.horizontal(|ui| {
                 ui.label(legend(&stage.label));
-                help(ui, &steps);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    help(ui, &steps);
                     if stage.auto {
                         let mut on = auto;
                         if ui.checkbox(&mut on, "Auto").changed() {
@@ -1047,12 +1050,12 @@ impl App {
             let mut db = self.radio_settings.tx_gain_db;
             ui.horizontal(|ui| {
                 ui.label(legend("Transmit gain"));
-                help(
-                    ui,
-                    "What every keyed channel transmits at, before its own trim. Start at the \
-                     bottom and into a dummy load.",
-                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    help(
+                        ui,
+                        "What every keyed channel transmits at, before its own trim. Start at \
+                         the bottom and into a dummy load.",
+                    );
                     ui.label(value(format!("{db:.0} dB")).size(11.0));
                 });
             });

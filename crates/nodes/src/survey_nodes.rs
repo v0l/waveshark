@@ -200,11 +200,7 @@ impl SurveyNode {
             lat: fix.map(|f| f.lat),
             lon: fix.map(|f| f.lon),
             alt_m: fix.and_then(|f| f.alt_m),
-            // HDOP is a multiplier on the receiver's own ranging error, not a
-            // distance. Five metres is the figure a consumer GPS quotes for
-            // itself, so the product is a metre estimate honest enough for a
-            // column that says how much to trust a row.
-            accuracy_m: fix.and_then(|f| f.hdop).map(|h| h * 5.0),
+            accuracy_m: fix.and_then(|f| f.accuracy_m()),
             rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs())),
             snr_db: d.snr_db.or(p.snr_db().is_finite().then_some(p.snr_db())),
             center_hz: d.center.0,

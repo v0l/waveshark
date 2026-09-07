@@ -33,6 +33,8 @@ pub(super) struct Map<'a> {
     pub st: &'a mut MapState,
     /// Where the receiver is, when it has been told.
     pub home: Option<(f64, f64)>,
+    /// How far out that is, in metres, when the fix that set it said.
+    pub accuracy_m: Option<f64>,
     /// The position being typed, while it is being typed. Kept apart from the
     /// real one so a half-finished latitude does not move the map.
     pub edit: &'a mut Option<String>,
@@ -65,6 +67,7 @@ impl Map<'_> {
             let map = &mut self.st.map;
             let active: Vec<&crate::tracks::Track> = self.st.tracks.iter().collect();
             let home = self.home;
+            let accuracy_m = self.accuracy_m;
             let rt = &self.rt;
             let body = |ui: &mut egui::Ui| {
                 place = Self::station_row(ui, home, &mut edit);
@@ -77,7 +80,7 @@ impl Map<'_> {
                 // of what is in the air stays the brightest thing on screen.
                 let mut rings = RingLayer { home };
                 let mut airports = AirportLayer::default();
-                let mut station = StationLayer { home };
+                let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now };
                 let mut sightings =
                     SightingLayer { trail: self.trail.points, ident: self.trail.ident };
