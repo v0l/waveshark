@@ -548,6 +548,22 @@ impl AutoNode {
         ring.push(us.min(u32::MAX as u64) as u32, block_s);
     }
 
+    /// Every channel a front end owns: the ones remembered because
+    /// something decoded there, and the span-wide fronts, which own the
+    /// frequency the standard put them on from the moment the span reaches
+    /// it. Both are places the receiver has decided to listen, both are
+    /// closed to the detector, and the spectrum draws them the same way.
+    pub fn locked_channels(&self) -> Vec<(&'static str, f64, f64)> {
+        let mut out: Vec<(&'static str, f64, f64)> = self
+            .wide
+            .iter()
+            .zip(self.exclude.iter())
+            .map(|(m, (lo, hi))| (m.name, (lo + hi) / 2.0, hi - lo))
+            .collect();
+        out.extend(self.remembered());
+        out
+    }
+
     /// Channels front ends have read something on this session, as
     /// (front end, centre, width) in hertz.
     pub fn remembered(&self) -> Vec<(&'static str, f64, f64)> {
@@ -731,6 +747,9 @@ impl AutoNode {
         spec.bandwidth = self.input_bw;
         let c = self.center.as_f64();
         let half = self.input_bw / 2.0;
+        // Kept in step: every span-wide front end pushes the band it owns
+        // onto `exclude` as it is built, and `locked_channels` reads them as
+        // pairs.
         self.wide.clear();
         self.exclude.clear();
         let covers = |lo: f64, hi: f64| c - half <= lo && hi <= c + half;
@@ -1677,6 +1696,13 @@ mod tests {
         // the only thing that places the front end on them.
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2426))]).unwrap();
         assert_eq!(n.wide(), ["ble"]);
+        // And it owns its channel from the moment the span reaches it,
+        // rather than after something decodes there: the spectrum draws it
+        // as a locked channel and the detector stays out of it.
+        let locked = n.locked_channels();
+        assert_eq!(locked.len(), 1, "{locked:?}");
+        assert_eq!(locked[0].0, "ble");
+        assert!((locked[0].1 - 2_426_000_000.0).abs() < 1.0, "{locked:?}");
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2450))]).unwrap();
         assert!(n.wide().is_empty(), "no advertising channel inside that span");
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
