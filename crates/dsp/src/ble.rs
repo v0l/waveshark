@@ -216,7 +216,8 @@ pub struct BleFrame {
     pub channel: u8,
     /// Header and payload, dewhitened, without the CRC.
     pub pdu: Vec<u8>,
-    /// Where the burst started in the stream fed to the detector.
+    /// Where the burst started in the stream fed to the detector, counted in
+    /// that stream's own samples rather than in the decimated channel's.
     pub start_sample: u64,
     /// Transmitter's offset from the channel centre as this receiver sees it:
     /// its crystal error and the tuner's together.
@@ -230,6 +231,9 @@ struct ChannelRx {
     channel: u8,
     rate: f64,
     sps: f64,
+    /// Input samples per channel sample, so a burst is reported at the index
+    /// the caller's own stream has for it.
+    factor: usize,
     mixer: Mixer,
     decim: FirDecim,
     gate: LevelGate,
@@ -258,6 +262,7 @@ impl ChannelRx {
             channel,
             rate: work,
             sps: work / BAUD,
+            factor,
             mixer: Mixer::new(center_hz - channel_hz, rate),
             decim: FirDecim::new(channel_filter(rate, factor), factor),
             gate: LevelGate::new(
@@ -395,7 +400,7 @@ impl ChannelRx {
                     out.push(BleFrame {
                         channel: self.channel,
                         pdu,
-                        start_sample: self.burst_start,
+                        start_sample: self.burst_start * self.factor as u64,
                         freq_off_hz,
                         rssi_dbfs,
                         snr_db,
@@ -633,6 +638,29 @@ mod tests {
             run(&iq, CENTER).is_empty(),
             "a corrupted packet was accepted"
         );
+    }
+
+    /// The index a frame reports is into the caller's own stream, not into
+    /// the decimated channel it was read on. A caller cutting the burst out
+    /// of a capture holds the undecimated samples, and at 8 MS/s the two
+    /// differ by a factor of two, which puts the cut somewhere else entirely.
+    #[test]
+    fn the_reported_index_is_into_the_stream_that_was_fed_in() {
+        let lead = 400_000usize;
+        let mut iq = noise(lead, 0.01);
+        iq.extend_from_slice(&modulate(
+            &encode_packet(38, &adv_ind()),
+            2_426_000_000.0,
+            CENTER,
+            0.0,
+        ));
+        let got = run(&iq, CENTER);
+        assert_eq!(got.len(), 1);
+        // `run` feeds 20000 samples of noise first, and the detector opens
+        // its window ahead of the burst for the level estimate, so the
+        // tolerance is that margin rather than a fudge.
+        let at = got[0].start_sample as i64 - 20_000 - lead as i64;
+        assert!(at.abs() < 2_000, "reported {at} samples from where the packet was put");
     }
 
     #[test]
