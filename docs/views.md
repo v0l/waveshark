@@ -112,6 +112,13 @@ claims what it can render.
   party is a kind and an identifier, and `broadcast` is a kind rather than a
   word a device could be called.
 
+- **Calls**, continued: the text beside a call comes from the transcriber on
+  the audio bus tap, matched by the key
+  `{proto}:{freq}:{chan}:{speaker}` rather than by a wire between the two.
+  Neither knows the other exists, which is what lets a view added later ask
+  the same log for the whole of a conversation instead of the last line of
+  it. See `crates/app/src/transcripts.rs`.
+
 - **Keys**: a row per enciphered channel a front end reports, and what is known
   about the key for it. The view is always there as an encryption monitor; the
   key store, key entry and the TETRA decryption behind it need the `tea`

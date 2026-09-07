@@ -511,6 +511,11 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Utterances republished for the interface. Enough for a pane showing what
+/// has been said this hour; the whole log stays in the node.
+#[cfg(feature = "stt")]
+const SAID_WINDOW: usize = 200;
+
 /// Largest sample in a buffer, which is what a meter reads.
 fn peak_of(pcm: &[f32]) -> f32 {
     pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
@@ -1305,6 +1310,12 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub track_list: parking_lot::Mutex<Vec<crate::tracks::Track>>,
+    /// What has been said lately, from the transcriber on the audio bus tap,
+    /// newest last. A window rather than the whole log: the log is in the
+    /// node, keyed by conversation, and a view that wants the history of one
+    /// asks for that key.
+    #[cfg(feature = "stt")]
+    pub said: parking_lot::Mutex<Vec<crate::transcripts::Utterance>>,
     /// What the raw span capture has written, and where. Off unless somebody
     /// switched it on, which is the usual state.
     pub capture_on: AtomicBool,
@@ -1540,6 +1551,8 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
+            #[cfg(feature = "stt")]
+            said: parking_lot::Mutex::new(Vec::new()),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
             capture_folder: AtomicU64::new(0),
@@ -2684,6 +2697,13 @@ fn run(
                 let rows = rx.tracks(std::time::Instant::now());
                 status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
                 *status.track_list.lock() = rows;
+            }
+            #[cfg(feature = "stt")]
+            {
+                let said = rx.said(SAID_WINDOW);
+                if !said.is_empty() || !status.said.lock().is_empty() {
+                    *status.said.lock() = said;
+                }
             }
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();

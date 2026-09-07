@@ -27,6 +27,7 @@ decode.workspace = true
 datasets.workspace = true
 pipeline.workspace = true
 crossbeam-channel.workspace = true
+stt = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
@@ -38,6 +39,9 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+hound = "3"
 
 [features]
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
@@ -58,7 +62,7 @@ ambe = ["nodes/ambe"]
 # channel. The stage is switched off until a model directory exists, so a
 # build with no model costs a node that copies packets. Turn it off with
 # --no-default-features to keep candle and the tokenizer out of the build.
-stt = ["nodes/stt"]
+stt = ["nodes/stt", "dep:stt"]
 
 [[example]]
 name = "lime"

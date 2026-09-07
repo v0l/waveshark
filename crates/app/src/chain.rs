@@ -262,6 +262,7 @@ pub struct Receiver {
     bus: Option<NodeId>,
     decode: Option<NodeId>,
     tracks: Option<NodeId>,
+    transcripts: Option<NodeId>,
     survey: Option<NodeId>,
     /// Where the survey is written, if it is. Held as a path rather than an
     /// open database for the same reason the packet log holds a directory: a
@@ -467,6 +468,7 @@ impl Receiver {
             bus: None,
             decode: None,
             tracks: None,
+            transcripts: None,
             survey: None,
             survey_path: None,
             station: None,
@@ -870,11 +872,9 @@ impl Receiver {
         // is a matter of finding them: the parts of the receiver that talk to
         // them need a node id, not a construction.
         let bus = of_kind("packet_bus").first().copied();
-        // The tail of the decode chain, which is what the packet list reads:
-        // with transcription in the graph the text is on the packet by the
-        // time a row is made from it.
-        let decode = of_kind("transcribe").first().or(of_kind("protocols").first()).copied();
+        let decode = of_kind("protocols").first().copied();
         let tracks = of_kind("tracks").first().copied();
+        let transcripts = of_kind("transcribe_live").first().copied();
         let survey = of_kind("survey").first().copied();
 
         // The bus is the output: everything that is heard leaves through it.
@@ -993,6 +993,7 @@ impl Receiver {
         self.pocsag = pocsag;
         self.m17 = m17;
         self.tracks = tracks;
+        self.transcripts = transcripts;
         self.survey = survey;
         // A survey built fresh has to be reopened, and both it and a fresh
         // tracker have to be told where the receiver is: the tracker resolves
@@ -1798,6 +1799,29 @@ impl Receiver {
             .unwrap_or_default()
     }
 
+    /// What has been said lately, newest last.
+    ///
+    /// Read off the node rather than published on the status, because the
+    /// text of a busy afternoon is larger than anything else the interface
+    /// polls and a view wants a window of it rather than all of it.
+    #[cfg(feature = "stt")]
+    pub fn said(&self, n: usize) -> Vec<crate::transcripts::Utterance> {
+        self.transcripts
+            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
+            .map(|t| t.log().recent(n).into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// What was said on one conversation, oldest first. The key is
+    /// `{proto}:{freq}:{chan}:{speaker}`; see `crate::transcripts`.
+    #[cfg(feature = "stt")]
+    pub fn said_on(&self, key: &str) -> Vec<crate::transcripts::Utterance> {
+        self.transcripts
+            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
+            .map(|t| t.log().of(key).to_vec())
+            .unwrap_or_default()
+    }
+
     /// Tell the tracker roughly where the receiver is.
     /// Start or stop recording a survey. The node stays in the graph either
     /// way; what changes is whether it has a file.
@@ -2478,28 +2502,8 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // to run inside every channel of every bank, which meant a hundred
         // copies of the same tables and no decoding at all for a packet that
         // arrived by any other route.
-        #[cfg_attr(not(feature = "stt"), allow(unused_mut))]
-        let mut decode = p.add_derived(derived::PROTOCOLS, "protocols", Settings::new());
+        let decode = p.add_derived(derived::PROTOCOLS, "protocols", Settings::new());
         p.connect(Source::Stage(bus, 0), (decode, 0));
-
-        // Transcription is a consumer of the bus like the protocols, and
-        // upstream of everything that reads a decode: the call list, the map
-        // and the device database all see the text because they read what
-        // comes out of here rather than what went in.
-        #[cfg(feature = "stt")]
-        {
-            let mut s = Settings::new();
-            let dir = default_model_dir();
-            s.insert("dir".into(), pipeline::ParamValue::Text(dir.display().to_string()));
-            // On whether or not a model is installed: the worker fetches one
-            // the first time a call is worth reading, so the alternative is a
-            // receiver that stays silent about speech until somebody knows to
-            // go and find the weights.
-            s.insert("enabled".into(), pipeline::ParamValue::Bool(true));
-            let t = p.add_derived(derived::TRANSCRIBE, "transcribe", s);
-            p.connect(Source::Stage(decode, 0), (t, 0));
-            decode = t;
-        }
 
         // The tracker is a consumer of the bus like any other, which is what
         // stops every view being wired to the demodulator it happens to care
@@ -2732,6 +2736,20 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     }
     s.insert("inputs".into(), V::Int(wired.len() as i64 + 1));
     p.add_derived(bus, "audio_bus", s);
+
+    // The transcriber hangs off the bus's tap, which carries every strip
+    // before the faders and the subscriptions: what the receiver heard, not
+    // what the operator chose to listen to. On the audio and not on the
+    // packets because speech is not a packet, and because a partial reading
+    // of a transmission still in progress has nowhere to live on one.
+    #[cfg(feature = "stt")]
+    {
+        let mut t = Settings::new();
+        t.insert("dir".into(), V::Text(default_model_dir().display().to_string()));
+        t.insert("enabled".into(), V::Bool(true));
+        let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
+        p.connect(Source::Stage(bus, 1), (id, 0));
+    }
 }
 
 /// One strip's settings on the bus, as the patch carries them.
@@ -3201,7 +3219,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "high_blend" => "High blend".into(),
         "protocols" => "Protocols".into(),
         "tracks" => "Tracks".into(),
-        "transcribe" => "Transcribe".into(),
+        "transcribe_live" => "Transcribe".into(),
         "survey" => "Devices".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
@@ -3240,6 +3258,32 @@ pub fn registry() -> pipeline::registry::Registry {
             category: "sink",
         },
         |_s| Ok(Box::new(crate::tracks::TracksNode::new()) as Box<dyn pipeline::node::Node>),
+    );
+    #[cfg(feature = "stt")]
+    r.register(
+        StageDesc {
+            name: "transcribe_live",
+            summary: "Read what is being said on everything the receiver hears, \
+                      as it is said, with a local Whisper model",
+            category: "sink",
+        },
+        |s: &pipeline::registry::Settings| {
+            use pipeline::SettingsExt;
+            let mut n = crate::transcripts::LiveTranscribeNode::new()
+                .in_dir(s.str_or("dir", ""))
+                .model(s.str_or("model", stt::DEFAULT_REPO));
+            pipeline::node::Node::set_param(
+                &mut n,
+                "enabled",
+                pipeline::ParamValue::Bool(s.bool_or("enabled", true)),
+            )?;
+            pipeline::node::Node::set_param(
+                &mut n,
+                "min_speech_s",
+                pipeline::ParamValue::Float(s.f64_or("min_speech_s", 0.6)),
+            )?;
+            Ok(Box::new(n) as Box<dyn pipeline::node::Node>)
+        },
     );
     r.register(
         StageDesc {
@@ -3963,21 +4007,6 @@ mod tests {
         );
     }
 
-    /// The far end of the decode chain, which is the protocols unless
-    /// transcription is in the build and reading their output.
-    fn decode_tail<'a>(
-        topo: &'a pipeline::graph::Topology,
-        decode: &'a pipeline::graph::TopoNode,
-    ) -> &'a pipeline::graph::TopoNode {
-        topo.nodes
-            .iter()
-            .find(|n| {
-                n.kind == "transcribe"
-                    && n.inputs.iter().any(|(s, _)| decode.outputs.iter().any(|(o, _)| o == s))
-            })
-            .unwrap_or(decode)
-    }
-
     fn chan(id: u64, offset: f64, demod: Demod) -> ChannelSpec {
         ChannelSpec {
             id,
@@ -4511,8 +4540,7 @@ mod tests {
             .iter()
             .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
         assert!(bus_to_decode, "the protocols are not fed by the bus");
-        let tail = decode_tail(&topo, decode);
-        let from_decode = tail
+        let from_decode = decode
             .outputs
             .iter()
             .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
@@ -4549,8 +4577,7 @@ mod tests {
             .iter()
             .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
         assert!(bus_to_decode, "the protocols are not fed by the bus");
-        let tail = decode_tail(&topo, decode);
-        let from_decode = tail
+        let from_decode = decode
             .outputs
             .iter()
             .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));

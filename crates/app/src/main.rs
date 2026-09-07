@@ -17,6 +17,7 @@ mod meshnode;
 mod locale;
 mod dial;
 mod tracks;
+mod transcripts;
 mod map;
 mod messages;
 mod data;

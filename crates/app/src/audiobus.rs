@@ -38,6 +38,11 @@ use std::sync::Arc;
 /// The rate the speaker is fed at, and every strip is brought to.
 pub const OUT_HZ: f64 = 48_000.0;
 
+/// What an analogue channel is called on the tap. Not a modulation: the bus
+/// is handed audio and does not know how it was demodulated, and what matters
+/// downstream is that nothing named the speaker or the talkgroup.
+pub const ANALOGUE: &str = "Audio";
+
 /// Most the gain control will lift a transmission, in decibels.
 ///
 /// A vocoder's output level is whatever the transmitting radio's microphone
@@ -150,12 +155,26 @@ pub struct Strip {
     pub muted: bool,
     /// Peak this block after the fader, for the meter beside it.
     pub peak: f32,
+    /// Where what arrives here was received, from the chain that feeds it.
+    /// Carried so the tap can say which channel it is listening to; the
+    /// speaker has no use for it.
+    pub center_hz: f64,
+    /// The rate it arrives at, which is not the rate it is mixed at.
+    in_rate: f64,
     feed: Feed,
 }
 
 impl Strip {
     fn new() -> Self {
-        Self { label: String::new(), volume: 0.8, muted: false, peak: 0.0, feed: Feed::Silent }
+        Self {
+            label: String::new(),
+            volume: 0.8,
+            muted: false,
+            peak: 0.0,
+            center_hz: 0.0,
+            in_rate: OUT_HZ,
+            feed: Feed::Silent,
+        }
     }
 
     fn gain(&self) -> f32 {
@@ -404,6 +423,30 @@ impl AudioBus {
     /// receiver does with a mono station anyway, and it means a broadcast in
     /// stereo can share the output with a narrowband channel that has no
     /// such thing.
+    /// What arrived on an analogue strip, labelled for the tap.
+    ///
+    /// Mono, because a transcriber wants one voice and not a stereo image,
+    /// and at the strip's own rate: whoever reads the tap resamples, and
+    /// resampling here would resample twice for the ones that never do.
+    pub fn tap_of(&self, k: usize, pcm: &[f32]) -> Option<common::Voice> {
+        let strip = self.strips.get(k)?;
+        let Feed::Audio { channels, .. } = &strip.feed else { return None };
+        let ch = (*channels).max(1);
+        let mono: Vec<f32> = if ch == 1 {
+            pcm.to_vec()
+        } else {
+            pcm.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect()
+        };
+        Some(common::Voice {
+            system: ANALOGUE,
+            channel_hz: strip.center_hz,
+            to: None,
+            from: None,
+            rate: strip.in_rate,
+            pcm: mono,
+        })
+    }
+
     pub fn feed(&mut self, k: usize, pcm: &[f32]) {
         let Some(strip) = self.strips.get_mut(k) else { return };
         let gain = strip.gain();
@@ -661,6 +704,11 @@ impl pipeline::node::Node for AudioBusNode {
         self.bus.strips.len().max(1)
     }
 
+    /// The speaker, and the tap beside it.
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
     /// A mixer has a spare input by nature.
     fn optional_inputs(&self) -> bool {
         true
@@ -690,16 +738,33 @@ impl pipeline::node::Node for AudioBusNode {
             };
             if let Some(s) = self.bus.strips.get_mut(k) {
                 s.feed = feed;
+                s.center_hz = i.spec.center.as_f64();
+                s.in_rate = i.spec.frame_rate();
             }
         }
-        Ok(vec![StreamSpec {
-            kind: PortKind::Real,
-            rate: out_rate * 2.0,
-            center: common::Hz(0),
-            bandwidth: 0.0,
-            channels: 2,
-            ..Default::default()
-        }])
+        Ok(vec![
+            StreamSpec {
+                kind: PortKind::Real,
+                rate: out_rate * 2.0,
+                center: common::Hz(0),
+                bandwidth: 0.0,
+                channels: 2,
+                ..Default::default()
+            },
+            // The tap: everything that arrived, labelled, before any of the
+            // deciding happens. A transcriber wired here reads what the
+            // receiver is hearing rather than what the operator chose to
+            // listen to, so a muted strip and an unsubscribed talkgroup are
+            // still written down.
+            StreamSpec {
+                kind: PortKind::Voice,
+                rate: out_rate,
+                center: common::Hz(0),
+                bandwidth: 0.0,
+                channels: 1,
+                ..Default::default()
+            },
+        ])
     }
 
     fn process(
@@ -708,10 +773,14 @@ impl pipeline::node::Node for AudioBusNode {
         outputs: &mut [Payload],
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        let mut tapped: Vec<common::Voice> = Vec::new();
         for (k, p) in inputs.iter().enumerate() {
             match p {
                 Payload::Voice(voices) => {
                     for v in voices {
+                        if !v.pcm.is_empty() {
+                            tapped.push(v.clone());
+                        }
                         let Some(to) = v.to.as_deref() else { continue };
                         if v.pcm.is_empty() {
                             continue;
@@ -726,7 +795,14 @@ impl pipeline::node::Node for AudioBusNode {
                         });
                     }
                 }
-                Payload::Real(pcm) => self.bus.feed(k, pcm),
+                Payload::Real(pcm) => {
+                    if !pcm.is_empty() {
+                        if let Some(v) = self.bus.tap_of(k, pcm) {
+                            tapped.push(v);
+                        }
+                    }
+                    self.bus.feed(k, pcm)
+                }
                 _ => {}
             }
         }
@@ -735,6 +811,9 @@ impl pipeline::node::Node for AudioBusNode {
         let out = outputs[0].real_mut();
         out.extend_from_slice(self.bus.render(frames));
         self.bus.clear();
+        if let Some(o) = outputs.get_mut(1) {
+            o.voice_mut().extend(tapped);
+        }
         Ok(())
     }
 

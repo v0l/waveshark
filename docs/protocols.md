@@ -327,7 +327,20 @@ in the IF: a level read off a demodulator's output is a level of the
 demodulator.
 
 What was said is read by `crates/stt`, a local Whisper model through candle,
-as `nodes::TranscribeNode` on the far side of the protocol decoder. It is on by default and fetches its
+as `app::transcripts::LiveTranscribeNode` on the audio bus rather than on the
+packet bus. The bus has a second output, a tap carrying every strip's audio
+and every decoded voice port before the faders and the subscriptions, so what
+is written down is what the receiver heard and not what the operator chose to
+listen to. Whisper reads a window rather than a stream, so streaming here is a
+window re-read as it grows: while somebody is talking the audio so far goes to
+the model every two seconds and the running line gets longer, and when the
+speech stops the whole utterance goes once more and that reading is the one
+kept. A conversation is keyed `{proto}:{freq}:{chan}:{speaker}`, with the
+parts the receiver does not know left empty, so an FM channel is
+`Audio:145500000::` and a DMR call is `DMR:435000000:9:1234567`; the calls
+view finds a call's text by building that key rather than by being wired to
+the transcriber. The log is in memory and bounded, 512 conversations of 64
+utterances. It is on by default and fetches its
 own weights: the worker thread downloads `openai/whisper-base.en`, 74 MB, into
 `~/.local/share/waveshark/models/whisper` the first time a call is long enough
 to be worth reading, so a receiver that hears no speech never reaches the
