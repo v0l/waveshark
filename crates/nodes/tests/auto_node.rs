@@ -8,7 +8,9 @@ use pipeline::StreamSpec;
 use sources::FileSource;
 
 fn fixture(name: &str) -> Option<common::IqBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata")
+        .join(name);
     if !p.exists() {
         eprintln!("skipping: {name} absent, run testdata/fetch.sh");
         return None;
@@ -22,24 +24,25 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
     let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
+    for block in iq
+        .chunks(16_384)
+        .chain(std::iter::repeat_n(&silence[..], 4))
+    {
         g.feed_iq(block).expect("run");
         match g.output() {
             pipeline::Payload::Packets(p) => out.extend_from_slice(p),
-            pipeline::Payload::Frames(f) => {
-                out.extend(f.iter().map(|f| common::Packet {
-                    at_us: 0,
-                    center_hz: center.0,
-                    bandwidth_hz: 0,
-                    rssi_dbfs: f32::NAN,
-                    snr_db: f32::NAN,
-                    modulation: None,
-                    body: PacketBody::Frame(f.bytes.clone()),
-                    measure: None,
-                    audio: None,
-                    iq: None,
-                }))
-            }
+            pipeline::Payload::Frames(f) => out.extend(f.iter().map(|f| common::Packet {
+                at_us: 0,
+                center_hz: center.0,
+                bandwidth_hz: 0,
+                rssi_dbfs: f32::NAN,
+                snr_db: f32::NAN,
+                modulation: None,
+                body: PacketBody::Frame(f.bytes.clone()),
+                measure: None,
+                audio: None,
+                iq: None,
+            })),
             _ => {}
         }
     }
@@ -62,7 +65,9 @@ fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
 
 #[test]
 fn four_sensors_placed_anywhere_all_decode() {
-    let Some(buf) = fixture("fineoffset_wh1080_433.92M_250k.cu8") else { return };
+    let Some(buf) = fixture("fineoffset_wh1080_433.92M_250k.cu8") else {
+        return;
+    };
     let rate = 250_000.0;
     let offsets = [-93_000.0, -37_000.0, 21_500.0, 78_000.0];
     let stagger = 1_250usize;
@@ -84,11 +89,17 @@ fn four_sensors_placed_anywhere_all_decode() {
         .iter()
         .filter_map(|p| p.iq.as_ref())
         .map(|iq| {
-            assert!(!iq.samples.is_empty() && iq.rate > 0.0, "a burst without samples or rate");
+            assert!(
+                !iq.samples.is_empty() && iq.rate > 0.0,
+                "a burst without samples or rate"
+            );
             iq.samples.len() as f64 / iq.rate
         })
         .fold(0.0f64, f64::max);
-    assert!(longest > 0.15, "the full transmission's samples are missing; longest {longest:.3}s");
+    assert!(
+        longest > 0.15,
+        "the full transmission's samples are missing; longest {longest:.3}s"
+    );
     let mut got = decodes(&pk, "WHx080");
     got.sort();
     got.dedup_by(|a, b| a.0.abs_diff(b.0) < 4_000);
@@ -97,21 +108,36 @@ fn four_sensors_placed_anywhere_all_decode() {
         assert!(text.contains("station_id=196"), "{text}");
         let off = *hz as f64 - buf.center.as_f64();
         // 4.6 kHz is where this recording's carrier sits relative to nominal.
-        assert!(offsets.iter().any(|o| (off - o - 4_600.0).abs() < 4_000.0), "decoded at {off:+.0} Hz");
+        assert!(
+            offsets.iter().any(|o| (off - o - 4_600.0).abs() < 4_000.0),
+            "decoded at {off:+.0} Hz"
+        );
     }
 }
 
 #[test]
 fn mode_s_replies_are_heard_without_being_asked_for() {
-    let Some(buf) = fixture("adsb_1090M_2400k.cu8") else { return };
+    let Some(buf) = fixture("adsb_1090M_2400k.cu8") else {
+        return;
+    };
     let rate = buf.rate.as_f64();
     let alone = packets(NodeSpec::new("mode_s"), rate, buf.center, &buf.samples);
     let auto = packets(NodeSpec::new("auto"), rate, buf.center, &buf.samples);
     let frames = |pk: &[common::Packet]| {
-        pk.iter().filter(|p| matches!(p.body, PacketBody::Frame(_))).count()
+        pk.iter()
+            .filter(|p| matches!(p.body, PacketBody::Frame(_)))
+            .count()
     };
-    assert!(frames(&alone) > 10, "the Mode S stage alone heard {} frames", frames(&alone));
-    assert_eq!(frames(&auto), frames(&alone), "the auto node hears what the Mode S stage does");
+    assert!(
+        frames(&alone) > 10,
+        "the Mode S stage alone heard {} frames",
+        frames(&alone)
+    );
+    assert_eq!(
+        frames(&auto),
+        frames(&alone),
+        "the auto node hears what the Mode S stage does"
+    );
 }
 
 #[test]
@@ -121,7 +147,11 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
     let rate = 2_400_000.0;
     let center = Hz::hz(439_800_000);
     let offset = 310_000.0;
-    let contents = decode::pocsag::encode(1_234_568, 3, &decode::pocsag::Body::Alpha("MOVE TO CHANNEL 2".into()));
+    let contents = decode::pocsag::encode(
+        1_234_568,
+        3,
+        &decode::pocsag::Body::Alpha("MOVE TO CHANNEL 2".into()),
+    );
     let bits = dsp::pocsag::encode_bits(&contents);
     let sps = (rate / 1200.0) as usize;
     let mut seed = 0x2545F4914F6CDD1Du64;
@@ -135,7 +165,10 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
         seed ^= seed << 17;
         let u2 = (seed >> 11) as f64 / (1u64 << 53) as f64;
         let r = (-2.0 * u1.ln()).sqrt();
-        C32::new((r * (std::f64::consts::TAU * u2).cos()) as f32 * 0.02, (r * (std::f64::consts::TAU * u2).sin()) as f32 * 0.02)
+        C32::new(
+            (r * (std::f64::consts::TAU * u2).cos()) as f32 * 0.02,
+            (r * (std::f64::consts::TAU * u2).sin()) as f32 * 0.02,
+        )
     };
     let lead = 600_000usize;
     let mut iq: Vec<C32> = (0..lead).map(|_| noise()).collect();
@@ -150,12 +183,24 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
     iq.extend((0..lead).map(|_| noise()));
 
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let frames: Vec<&common::Packet> =
-        pk.iter().filter(|p| matches!(p.body, PacketBody::Frame(_))).collect();
-    assert!(!frames.is_empty(), "no frame came out; packets: {}", pk.len());
+    let frames: Vec<&common::Packet> = pk
+        .iter()
+        .filter(|p| matches!(p.body, PacketBody::Frame(_)))
+        .collect();
+    assert!(
+        !frames.is_empty(),
+        "no frame came out; packets: {}",
+        pk.len()
+    );
     let f = frames[0];
-    assert!((f.center_hz as f64 - (center.as_f64() + offset)).abs() < 5_000.0, "page at {}", f.center_hz);
-    let PacketBody::Frame(bytes) = &f.body else { unreachable!() };
+    assert!(
+        (f.center_hz as f64 - (center.as_f64() + offset)).abs() < 5_000.0,
+        "page at {}",
+        f.center_hz
+    );
+    let PacketBody::Frame(bytes) = &f.body else {
+        unreachable!()
+    };
     let pages = nodes::pocsag_nodes::pocsag_decoded(bytes, Hz(f.center_hz));
     assert_eq!(pages.len(), 1, "{pages:?}");
     assert_eq!(pages[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
@@ -166,7 +211,10 @@ fn events(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<pipeline::e
     let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
+    for block in iq
+        .chunks(16_384)
+        .chain(std::iter::repeat_n(&silence[..], 8))
+    {
         out.extend_from_slice(g.feed_iq(block).expect("run"));
     }
     out
@@ -195,7 +243,10 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
         seed ^= seed << 17;
         let u2 = (seed >> 11) as f64 / (1u64 << 53) as f64;
         let r = (-2.0 * u1.ln()).sqrt();
-        C32::new((r * (std::f64::consts::TAU * u2).cos()) as f32 * 0.02, (r * (std::f64::consts::TAU * u2).sin()) as f32 * 0.02)
+        C32::new(
+            (r * (std::f64::consts::TAU * u2).cos()) as f32 * 0.02,
+            (r * (std::f64::consts::TAU * u2).sin()) as f32 * 0.02,
+        )
     };
     let lead = 800_000usize;
     let mut iq: Vec<C32> = (0..lead).map(|_| noise()).collect();
@@ -203,7 +254,11 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     for k in 0..38usize {
         // Payload symbols start their sweep partway through, as a modulated
         // chirp does; the preamble sweeps from the bottom.
-        let shift = if k < 8 { 0.0 } else { ((k * 97) % 512) as f64 / 512.0 };
+        let shift = if k < 8 {
+            0.0
+        } else {
+            ((k * 97) % 512) as f64 / 512.0
+        };
         for i in 0..symbol {
             let t = ((i as f64 / symbol as f64) + shift) % 1.0;
             let f = offset - bw / 2.0 + bw * t;
@@ -216,18 +271,29 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     // It leaves the node as a packet carrying its measurement, with no
     // timings, which is what a log or a list gets to show for it.
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let measured: Vec<(u64, &common::Measure)> =
-        pk.iter().filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz, m))).collect();
-    let (hz, chirp) = measured.iter().find(|(_, m)| m.modulation == "chirp").unwrap_or_else(|| {
-        panic!(
-            "no chirp measurement among {:?}",
-            measured.iter().map(|(_, m)| m.summary()).collect::<Vec<_>>()
-        )
-    });
+    let measured: Vec<(u64, &common::Measure)> = pk
+        .iter()
+        .filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz, m)))
+        .collect();
+    let (hz, chirp) = measured
+        .iter()
+        .find(|(_, m)| m.modulation == "chirp")
+        .unwrap_or_else(|| {
+            panic!(
+                "no chirp measurement among {:?}",
+                measured
+                    .iter()
+                    .map(|(_, m)| m.summary())
+                    .collect::<Vec<_>>()
+            )
+        });
     assert!(chirp.sweep_hz_s.abs() > 1e6, "{}", chirp.summary());
     assert!(chirp.bandwidth_hz > 60_000.0, "{}", chirp.summary());
     let at = *hz as f64 - center.as_f64();
-    assert!((at - offset).abs() < 20_000.0, "measured at {at:+.0} Hz, sent at {offset:+.0}");
+    assert!(
+        (at - offset).abs() < 20_000.0,
+        "measured at {at:+.0} Hz, sent at {offset:+.0}"
+    );
 }
 
 /// M17 has no home frequency: it runs wherever an amateur puts it, so being
@@ -327,7 +393,10 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
 #[test]
 #[ignore]
 fn auto_finds_dmr_in_a_real_capture() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/dmr_tg9_433.45M_2048k.cu8"
+    );
     if !std::path::Path::new(path).exists() {
         eprintln!("skipping: dmr_tg9_433.45M_2048k.cu8 absent, run testdata/fetch.sh");
         return;
@@ -348,16 +417,21 @@ fn auto_finds_dmr_in_a_real_capture() {
             _ => None,
         })
         .collect();
-    assert!(!dmr.is_empty(), "auto placed no DMR that decoded; {} packets", pk.len());
+    assert!(
+        !dmr.is_empty(),
+        "auto placed no DMR that decoded; {} packets",
+        pk.len()
+    );
     let d = &dmr[0];
     assert_eq!(d.protocol, "DMR-Voice");
     // The over carried audio, so a call-list row would be playable.
     let carried = pk.iter().any(|p| p.audio.is_some());
     assert!(carried, "the DMR over reached the packet with no audio");
-    eprintln!("auto decoded {} DMR row(s), audio present={carried}", dmr.len());
+    eprintln!(
+        "auto decoded {} DMR row(s), audio present={carried}",
+        dmr.len()
+    );
 }
-
-
 
 /// A real LoRa capture through the auto node: no frequency told, only a span.
 /// Proves the auto path detects the chirp source, places the lora front end,
@@ -368,26 +442,35 @@ fn auto_finds_dmr_in_a_real_capture() {
 fn auto_finds_lora_in_a_real_capture() {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/offair/lora_sf11_meshtastic_a_869.525M_2000k.cs16");
-    if !p.exists() { eprintln!("skipping: {p:?} absent"); return; }
+    if !p.exists() {
+        eprintln!("skipping: {p:?} absent");
+        return;
+    }
     let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
     let iq: Vec<C32> = buf.samples.clone();
     let rate = 2_000_000.0;
     let center = Hz(869_525_000);
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let lora: Vec<_> = pk.iter().filter_map(|p| match &p.body {
-        PacketBody::Frame(b) => nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)),
-        _ => None,
-    }).collect();
+    let lora: Vec<_> = pk
+        .iter()
+        .filter_map(|p| match &p.body {
+            PacketBody::Frame(b) => nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)),
+            _ => None,
+        })
+        .collect();
     let chirps = pk.iter().filter(|p| p.modulation == Some("chirp")).count();
-    eprintln!("auto: {} LoRa decoded, {} chirp rows, {} packets total", lora.len(), chirps, pk.len());
-    assert!(!lora.is_empty(), "auto placed no LoRa that decoded; {} packets, {chirps} chirps", pk.len());
+    eprintln!(
+        "auto: {} LoRa decoded, {} chirp rows, {} packets total",
+        lora.len(),
+        chirps,
+        pk.len()
+    );
+    assert!(
+        !lora.is_empty(),
+        "auto placed no LoRa that decoded; {} packets, {chirps} chirps",
+        pk.len()
+    );
 }
-
-
-
-
-
-
 
 /// A channel a front end has read is kept for the session. The Meshtastic
 /// capture decodes once through detection; afterwards the node must report
@@ -404,7 +487,12 @@ fn a_channel_that_decoded_is_remembered() {
     let buf = FileSource::open(&p).unwrap().read_all().unwrap();
     let rate = 2_400_000.0;
     let center = Hz(869_000_000);
-    let mut g = build_chain(StreamSpec::iq(rate, center), &[NodeSpec::new("auto")], &registry()).unwrap();
+    let mut g = build_chain(
+        StreamSpec::iq(rate, center),
+        &[NodeSpec::new("auto")],
+        &registry(),
+    )
+    .unwrap();
     let mut decoded = 0;
     for block in buf.samples.chunks(16_384) {
         g.feed_iq(block).unwrap();
@@ -422,7 +510,9 @@ fn a_channel_that_decoded_is_remembered() {
         .expect("the auto node");
     let kept = auto.remembered();
     let lora = kept.iter().find(|(name, _, _)| *name == "lora");
-    let Some((_, hz, width)) = lora else { panic!("no LoRa channel remembered: {kept:?}") };
+    let Some((_, hz, width)) = lora else {
+        panic!("no LoRa channel remembered: {kept:?}")
+    };
     assert!((hz - 869_525_000.0).abs() < 50_000.0, "remembered at {hz}");
     assert_eq!(*width, 250_000.0);
 }

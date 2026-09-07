@@ -83,7 +83,11 @@ pub struct FeedSpec {
 
 impl FeedSpec {
     pub fn new(host: impl Into<String>, port: u16, kind: &'static FeedKind) -> Self {
-        Self { host: host.into(), port, kind }
+        Self {
+            host: host.into(),
+            port,
+            kind,
+        }
     }
 
     pub fn address(&self) -> String {
@@ -142,7 +146,13 @@ impl FeedNode {
                 .spawn(move || run(spec, tx, state, stop))
                 .ok()
         };
-        Self { spec, rx, state, stop, thread }
+        Self {
+            spec,
+            rx,
+            state,
+            stop,
+            thread,
+        }
     }
 
     pub fn spec(&self) -> &FeedSpec {
@@ -448,7 +458,10 @@ pub fn parse_avr(buf: &mut Vec<u8>) -> Vec<WireFrame> {
         let Some(bytes) = from_hex(hex) else { continue };
         // Short reply, extended squitter, or nothing this cares about.
         if bytes.len() == 7 || bytes.len() == 14 {
-            out.push(WireFrame { bytes, rssi_dbfs: f32::NAN });
+            out.push(WireFrame {
+                bytes,
+                rssi_dbfs: f32::NAN,
+            });
         }
     }
     if consumed > 0 {
@@ -508,8 +521,15 @@ mod tests {
         let out = parse_beast(&mut buf);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].bytes, LONG);
-        assert!(out[0].rssi_dbfs < 0.0 && out[0].rssi_dbfs > -3.0, "{}", out[0].rssi_dbfs);
-        assert!(buf.is_empty(), "the whole message should have been consumed");
+        assert!(
+            out[0].rssi_dbfs < 0.0 && out[0].rssi_dbfs > -3.0,
+            "{}",
+            out[0].rssi_dbfs
+        );
+        assert!(
+            buf.is_empty(),
+            "the whole message should have been consumed"
+        );
     }
 
     /// The escape is the only hard part of the format: a `0x1a` in the frame
@@ -530,7 +550,10 @@ mod tests {
     fn a_message_split_across_two_reads_survives() {
         let msg = beast_message(&LONG, 100, 7).unwrap();
         let mut buf = msg[..8].to_vec();
-        assert!(parse_beast(&mut buf).is_empty(), "half a message is not a frame");
+        assert!(
+            parse_beast(&mut buf).is_empty(),
+            "half a message is not a frame"
+        );
         buf.extend_from_slice(&msg[8..]);
         let out = parse_beast(&mut buf);
         assert_eq!(out.len(), 1);
@@ -592,9 +615,16 @@ mod tests {
         for k in FEED_KINDS {
             assert!(feed_kind(k.name).is_some(), "{} is not resolvable", k.name);
             assert!(k.default_port > 0, "{} has no port to guess", k.name);
-            assert!(k.center_hz > 0 && k.bandwidth_hz > 0, "{} says nothing about its band", k.name);
+            assert!(
+                k.center_hz > 0 && k.bandwidth_hz > 0,
+                "{} says nothing about its band",
+                k.name
+            );
         }
-        assert!(feed_kind("basestation").is_none(), "conclusions are not a feed");
+        assert!(
+            feed_kind("basestation").is_none(),
+            "conclusions are not a feed"
+        );
     }
 
     #[test]

@@ -158,7 +158,6 @@ impl OokModNode {
             }
         }
     }
-
 }
 
 impl Simple for OokModNode {
@@ -171,7 +170,9 @@ impl Simple for OokModNode {
             return Err(common::Error::other("ook_mod takes pulse timings"));
         }
         if input.spec.rate <= 0.0 {
-            return Err(common::Error::other("ook_mod needs the rate it should key at"));
+            return Err(common::Error::other(
+                "ook_mod needs the rate it should key at",
+            ));
         }
         self.rate = input.spec.rate;
         Ok(StreamSpec {
@@ -193,7 +194,9 @@ impl Simple for OokModNode {
         output: &mut Payload,
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(pkgs) = input.as_pulses() else { return Ok(()) };
+        let Some(pkgs) = input.as_pulses() else {
+            return Ok(());
+        };
         let out = output.iq_mut();
         for pkg in pkgs {
             let pkg = pkg.clone();
@@ -235,12 +238,15 @@ impl Simple for OokModNode {
             "offset_hz" => self.offset_hz = v,
             "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
             "ramp_us" => self.ramp_us = v.max(0.0) as f32,
-            _ => return Err(common::Error::other(format!("ook_mod: unknown parameter {name:?}"))),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "ook_mod: unknown parameter {name:?}"
+                )))
+            }
         }
         Ok(())
     }
 }
-
 
 /// Timings in, two tones out.
 ///
@@ -317,7 +323,9 @@ impl Simple for FskModNode {
             return Err(common::Error::other("fsk_mod takes pulse timings"));
         }
         if input.spec.rate <= 0.0 {
-            return Err(common::Error::other("fsk_mod needs the rate it should key at"));
+            return Err(common::Error::other(
+                "fsk_mod needs the rate it should key at",
+            ));
         }
         if self.shift_hz >= input.spec.rate {
             return Err(common::Error::other(format!(
@@ -337,7 +345,9 @@ impl Simple for FskModNode {
         output: &mut Payload,
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(pkgs) = input.as_pulses() else { return Ok(()) };
+        let Some(pkgs) = input.as_pulses() else {
+            return Ok(());
+        };
         let out = output.iq_mut();
         for pkg in pkgs {
             let pkg = pkg.clone();
@@ -376,7 +386,11 @@ impl Simple for FskModNode {
             "offset_hz" => self.offset_hz = v,
             "shift_hz" => self.shift_hz = v.abs(),
             "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
-            _ => return Err(common::Error::other(format!("fsk_mod: unknown parameter {name:?}"))),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "fsk_mod: unknown parameter {name:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -437,7 +451,9 @@ impl Simple for AskModNode {
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
         if !matches!(input.spec.kind, PortKind::Soft | PortKind::Real) {
-            return Err(common::Error::other("ask_mod takes one amplitude per symbol"));
+            return Err(common::Error::other(
+                "ask_mod takes one amplitude per symbol",
+            ));
         }
         if input.spec.rate <= 0.0 {
             return Err(common::Error::other("ask_mod needs a symbol rate"));
@@ -453,7 +469,9 @@ impl Simple for AskModNode {
         output: &mut Payload,
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(sym) = input.as_real() else { return Ok(()) };
+        let Some(sym) = input.as_real() else {
+            return Ok(());
+        };
         let out = output.iq_mut();
         let tr = ((self.sps as f32 * self.transition).round() as usize).clamp(0, self.sps);
         for &s in sym {
@@ -486,8 +504,7 @@ impl Simple for AskModNode {
             Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
-            Param::int("sps", self.sps as i64, 1..=1024)
-                .label("Samples per symbol"),
+            Param::int("sps", self.sps as i64, 1..=1024).label("Samples per symbol"),
             Param::float("transition", self.transition as f64, 0.0..=1.0)
                 .label("Transition")
                 .unit("symbol"),
@@ -497,14 +514,14 @@ impl Simple for AskModNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
             "offset_hz" => self.offset_hz = value.as_f64().unwrap_or(0.0),
-            "amplitude" => {
-                self.amplitude = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32
-            }
+            "amplitude" => self.amplitude = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32,
             "sps" => self.sps = value.as_i64().unwrap_or(10).max(1) as usize,
-            "transition" => {
-                self.transition = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32
+            "transition" => self.transition = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32,
+            _ => {
+                return Err(common::Error::other(format!(
+                    "ask_mod: unknown parameter {name:?}"
+                )))
             }
-            _ => return Err(common::Error::other(format!("ask_mod: unknown parameter {name:?}"))),
         }
         Ok(())
     }
@@ -579,7 +596,9 @@ impl Simple for AmModNode {
         output: &mut Payload,
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(audio) = input.as_real() else { return Ok(()) };
+        let Some(audio) = input.as_real() else {
+            return Ok(());
+        };
         let out = output.iq_mut();
         for &a in audio {
             let env = (1.0 + self.depth * a.clamp(-1.0, 1.0)).max(0.0);
@@ -614,7 +633,11 @@ impl Simple for AmModNode {
             "offset_hz" => self.offset_hz = v,
             "depth" => self.depth = v.clamp(0.0, 1.0) as f32,
             "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
-            _ => return Err(common::Error::other(format!("am_mod: unknown parameter {name:?}"))),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "am_mod: unknown parameter {name:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -725,7 +748,9 @@ impl Simple for FmModNode {
         output: &mut Payload,
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(audio) = input.as_real() else { return Ok(()) };
+        let Some(audio) = input.as_real() else {
+            return Ok(());
+        };
         let out = output.iq_mut();
         for &a in audio {
             let hz = self.offset_hz + self.deviation_hz * a.clamp(-1.0, 1.0) as f64;
@@ -759,7 +784,11 @@ impl Simple for FmModNode {
             "offset_hz" => self.offset_hz = v,
             "deviation_hz" => self.deviation_hz = v.abs(),
             "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
-            _ => return Err(common::Error::other(format!("fm_mod: unknown parameter {name:?}"))),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "fm_mod: unknown parameter {name:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -781,7 +810,10 @@ mod tests {
     fn a_keyed_dot_is_as_long_as_it_was_asked_to_be() {
         let rate = 250_000.0;
         let pkg = Package {
-            pulses: vec![Pulse { mark: 60_000, gap: 60_000 }],
+            pulses: vec![Pulse {
+                mark: 60_000,
+                gap: 60_000,
+            }],
             ..Default::default()
         };
         let iq = modulate(&pkg, rate, 10_000.0, 0.0);
@@ -796,7 +828,10 @@ mod tests {
         let rate = 250_000.0;
         let offset = 12_500.0;
         let pkg = Package {
-            pulses: vec![Pulse { mark: 40_000, gap: 0 }],
+            pulses: vec![Pulse {
+                mark: 40_000,
+                gap: 0,
+            }],
             ..Default::default()
         };
         let iq = modulate(&pkg, rate, offset, 100.0);
@@ -807,7 +842,10 @@ mod tests {
             turns += (w[1] * w[0].conj()).arg() as f64;
         }
         let hz = turns / (mid.len() - 1) as f64 / std::f64::consts::TAU * rate;
-        assert!((hz - offset).abs() < 5.0, "carrier at {hz:.1} Hz, wanted {offset}");
+        assert!(
+            (hz - offset).abs() < 5.0,
+            "carrier at {hz:.1} Hz, wanted {offset}"
+        );
     }
 
     #[test]
@@ -817,7 +855,10 @@ mod tests {
         // by how much rather than an assertion that it does.
         let rate = 250_000.0;
         let pkg = Package {
-            pulses: vec![Pulse { mark: 20_000, gap: 20_000 }],
+            pulses: vec![Pulse {
+                mark: 20_000,
+                gap: 20_000,
+            }],
             ..Default::default()
         };
         let hard = modulate(&pkg, rate, 0.0, 0.0);
@@ -835,14 +876,21 @@ mod tests {
         };
         let (h, s) = (far(&hard), far(&soft));
         println!("hard {h:.1} dB, ramped {s:.1} dB, {:.1} dB bought", h - s);
-        assert!(s < h - 20.0, "ramping bought only {:.1} dB off channel", h - s);
+        assert!(
+            s < h - 20.0,
+            "ramping bought only {:.1} dB off channel",
+            h - s
+        );
     }
 
     #[test]
     fn phase_is_continuous_across_packages() {
         let rate = 250_000.0;
         let pkg = Package {
-            pulses: vec![Pulse { mark: 4_000, gap: 0 }],
+            pulses: vec![Pulse {
+                mark: 4_000,
+                gap: 0,
+            }],
             ..Default::default()
         };
         let mut n = OokModNode::new(10_000.0, 0.5, 0.0);
@@ -855,7 +903,10 @@ mod tests {
         // modulator that restarts its phase clicks at every package edge.
         let inside = (a[1] * a[0].conj()).arg();
         let across = (b[0] * a[a.len() - 1].conj()).arg();
-        assert!((inside - across).abs() < 1e-3, "phase jumped {across} against {inside}");
+        assert!(
+            (inside - across).abs() < 1e-3,
+            "phase jumped {across} against {inside}"
+        );
     }
 
     fn run<N: Simple>(node: &mut N, input: Payload, spec: StreamSpec) -> Vec<C32> {
@@ -903,7 +954,10 @@ mod tests {
         };
         n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
         let pkg = Package {
-            pulses: vec![Pulse { mark: 4_000, gap: 4_000 }],
+            pulses: vec![Pulse {
+                mark: 4_000,
+                gap: 4_000,
+            }],
             ..Default::default()
         };
         let iq = run(&mut n, Payload::Pulses(vec![pkg]), spec);
@@ -912,7 +966,11 @@ mod tests {
         assert!((mean_hz(&iq[1_100..1_900], rate) + 25_000.0).abs() < 200.0);
         // Constant envelope: an FSK transmitter has nothing to clip.
         for s in &iq {
-            assert!((s.norm() - 0.5).abs() < 1e-3, "envelope moved to {}", s.norm());
+            assert!(
+                (s.norm() - 0.5).abs() < 1e-3,
+                "envelope moved to {}",
+                s.norm()
+            );
         }
     }
 
@@ -932,7 +990,13 @@ mod tests {
             ..Default::default()
         };
         n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
-        let pkg = Package { pulses: vec![Pulse { mark: 4_000, gap: 4_000 }], ..Default::default() };
+        let pkg = Package {
+            pulses: vec![Pulse {
+                mark: 4_000,
+                gap: 4_000,
+            }],
+            ..Default::default()
+        };
         let iq = run(&mut n, Payload::Pulses(vec![pkg]), spec);
         // Step across the boundary, against the step either side of it.
         let at = 1_000;
@@ -974,7 +1038,10 @@ mod tests {
         for (k, want) in levels.iter().enumerate() {
             // The end of each symbol, past the transition into it.
             let got = iq[k * 20 + 19].norm();
-            assert!((got - want).abs() < 0.01, "symbol {k} came out at {got}, wanted {want}");
+            assert!(
+                (got - want).abs() < 0.01,
+                "symbol {k} came out at {got}, wanted {want}"
+            );
         }
     }
 
@@ -997,7 +1064,10 @@ mod tests {
             hi = hi.max(s.norm());
         }
         assert!(lo < 0.02, "envelope bottomed out at {lo}, not near zero");
-        assert!((hi - 1.0).abs() < 0.02, "envelope peaked at {hi}, not full scale");
+        assert!(
+            (hi - 1.0).abs() < 0.02,
+            "envelope peaked at {hi}, not full scale"
+        );
 
         // And an envelope detector reads the tone back.
         let mut det = dsp::demod::AmDemod::new(rate, 50.0);
@@ -1010,7 +1080,10 @@ mod tests {
             .map(|(a, b)| a * b)
             .sum::<f32>()
             / tail.len() as f32;
-        assert!(corr > 0.1, "the demodulated audio does not follow what was sent ({corr})");
+        assert!(
+            corr > 0.1,
+            "the demodulated audio does not follow what was sent ({corr})"
+        );
     }
 
     #[test]
@@ -1023,7 +1096,10 @@ mod tests {
             // Held at full scale, so the carrier sits at the deviation.
             let iq = run(&mut n, Payload::Real(vec![1.0; 4_000]), spec);
             let got = mean_hz(&iq, rate);
-            assert!((got - dev).abs() < 5.0, "asked {dev} Hz, deviated {got:.0} Hz");
+            assert!(
+                (got - dev).abs() < 5.0,
+                "asked {dev} Hz, deviated {got:.0} Hz"
+            );
             for s in &iq {
                 assert!((s.norm() - 0.5).abs() < 1e-3, "FM is constant envelope");
             }
@@ -1058,7 +1134,10 @@ mod tests {
             .sum::<f64>()
             / n as f64)
             .sqrt();
-        assert!(rms < 1e-3, "recovered audio is {rms:.4} rms away from what was modulated");
+        assert!(
+            rms < 1e-3,
+            "recovered audio is {rms:.4} rms away from what was modulated"
+        );
     }
 
     #[test]
@@ -1067,7 +1146,10 @@ mod tests {
         // Carson, so it would fold back on itself rather than transmit.
         let mut n = FmModNode::wideband(0.0);
         let spec = audio_spec(96_000.0);
-        let err = n.negotiate(&PortSpec { spec, latency: 0 }).unwrap_err().to_string();
+        let err = n
+            .negotiate(&PortSpec { spec, latency: 0 })
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("deviation"), "unhelpful: {err}");
     }
 }

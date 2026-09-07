@@ -54,21 +54,27 @@ impl Protocol for Ism868Link {
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let need = PREAMBLE_MIN + SYNC_BITS + MIN_BYTES * 8;
         if bits.len() < need {
-            return Err(DecodeError::WrongLength { got: bits.len(), want: need });
+            return Err(DecodeError::WrongLength {
+                got: bits.len(),
+                want: need,
+            });
         }
         for at in PREAMBLE_MIN..bits.len() - SYNC_BITS - MIN_BYTES * 8 {
             if bits.extract(at, SYNC_BITS) != Some(SYNC) {
                 continue;
             }
             let alternating = (1..=PREAMBLE_MIN).all(|k| bits.get(at - k) != bits.get(at - k + 1))
-                || (at > PREAMBLE_MIN && (1..=PREAMBLE_MIN).all(|k| bits.get(at - k - 1) != bits.get(at - k)));
+                || (at > PREAMBLE_MIN
+                    && (1..=PREAMBLE_MIN).all(|k| bits.get(at - k - 1) != bits.get(at - k)));
             if !alternating {
                 continue;
             }
             let n = ((bits.len() - at - SYNC_BITS) / 8).min(MAX_BYTES);
             let mut body = Vec::with_capacity(n);
             for i in 0..n {
-                let Some(v) = bits.extract(at + SYNC_BITS + i * 8, 8) else { break };
+                let Some(v) = bits.extract(at + SYNC_BITS + i * 8, 8) else {
+                    break;
+                };
                 body.push(v as u8);
             }
             // The air frame ends on a bit boundary rather than a byte one, so
@@ -77,7 +83,10 @@ impl Protocol for Ism868Link {
                 body.pop();
             }
             if body.len() < MIN_BYTES {
-                return Err(DecodeError::WrongLength { got: body.len(), want: MIN_BYTES });
+                return Err(DecodeError::WrongLength {
+                    got: body.len(),
+                    want: MIN_BYTES,
+                });
             }
             let id = u16::from_be_bytes([body[0], body[1]]);
             let mut r = Report::new(self.name());
@@ -87,7 +96,13 @@ impl Protocol for Ism868Link {
                 .text("node", format!("{:04x}", id >> 2))
                 .int("slot", i64::from(id & 3))
                 .int("length", body.len() as i64 - 2)
-                .text("body", body[2..].iter().map(|b| format!("{b:02x}")).collect::<String>())
+                .text(
+                    "body",
+                    body[2..]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>(),
+                )
                 .bool("encrypted", true));
         }
         Err(DecodeError::NotThisProtocol)
@@ -116,7 +131,13 @@ mod tests {
     #[test]
     fn a_logged_frame_reads_its_node_and_slot() {
         let frame: Vec<u8> = (0.."474fbbf729ad1fe85e2e03f8c34ba9fc5f9a21987ffa".len() / 2)
-            .map(|i| u8::from_str_radix(&"474fbbf729ad1fe85e2e03f8c34ba9fc5f9a21987ffa"[i * 2..i * 2 + 2], 16).unwrap())
+            .map(|i| {
+                u8::from_str_radix(
+                    &"474fbbf729ad1fe85e2e03f8c34ba9fc5f9a21987ffa"[i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
             .collect();
         let r = Ism868Link.decode(&bits_of(83, &frame)).expect("a frame");
         assert_eq!(r.fields["node"], Value::Text("2efd".into()));

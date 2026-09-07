@@ -105,7 +105,10 @@ pub fn recover_tea1(frames: &[Collision], range: core::ops::Range<u64>) -> Vec<u
 /// against the expected payload" check (TETRA:BURST section 5.2). Where a
 /// frame's cleartext follows from context, such as a call-setup PDU that
 /// precedes the traffic, 32 bits of it pin the register down.
-pub fn recover_tea1_known(frames: &[(Timestamp, Vec<u8>, Vec<u8>)], range: core::ops::Range<u64>) -> Vec<u32> {
+pub fn recover_tea1_known(
+    frames: &[(Timestamp, Vec<u8>, Vec<u8>)],
+    range: core::ops::Range<u64>,
+) -> Vec<u32> {
     let mut hits = Vec::new();
     'reg: for reg in range {
         let reg = reg as u32;
@@ -241,15 +244,12 @@ pub fn eck_from_kc(kc: &[u8; 10], carrier: u16, la: u16, colour: u8) -> [u8; 10]
     let m1 = (cn << 22) | (cc << 16) | (cn << 4) | (cc >> 2);
     let m2 = (cc << 30) | (cn << 18) | (cc << 12) | cn;
     let mut out = [0u8; 10];
-    out[..2].copy_from_slice(
-        &(u32::from(u16::from_be_bytes([kc[0], kc[1]])) ^ m0).to_be_bytes()[2..4],
-    );
-    out[2..6].copy_from_slice(
-        &(u32::from_be_bytes([kc[2], kc[3], kc[4], kc[5]]) ^ m1).to_be_bytes(),
-    );
-    out[6..10].copy_from_slice(
-        &(u32::from_be_bytes([kc[6], kc[7], kc[8], kc[9]]) ^ m2).to_be_bytes(),
-    );
+    out[..2]
+        .copy_from_slice(&(u32::from(u16::from_be_bytes([kc[0], kc[1]])) ^ m0).to_be_bytes()[2..4]);
+    out[2..6]
+        .copy_from_slice(&(u32::from_be_bytes([kc[2], kc[3], kc[4], kc[5]]) ^ m1).to_be_bytes());
+    out[6..10]
+        .copy_from_slice(&(u32::from_be_bytes([kc[6], kc[7], kc[8], kc[9]]) ^ m2).to_be_bytes());
     out
 }
 
@@ -317,7 +317,8 @@ fn tea2_state_byte(mut st0: u8, mut st1: u8, lut: &[u16; 8]) -> u8 {
     let mut out = 0u8;
     for (i, l) in lut.iter().enumerate() {
         // taps on bit 0,2 for st0 and bit 0,7 for st1
-        let dist = ((st0 >> 1) & 0x1) | ((st0 >> 1) & 0x2) | ((st1 >> 5) & 0x4) | ((st1 << 3) & 0x8);
+        let dist =
+            ((st0 >> 1) & 0x1) | ((st0 >> 1) & 0x2) | ((st1 >> 5) & 0x4) | ((st1 << 3) & 0x8);
         if l & (1 << dist) != 0 {
             out |= 1 << i;
         }
@@ -355,11 +356,8 @@ fn tea2(eck: &[u8; 10], iv: u32, n: usize) -> Vec<u8> {
             let deriv34 = tea2_state_byte(w24 as u8, (w24 >> 8) as u8, &TEA2_LUT_B);
             let reord5 = tea2_reorder(((iv_reg >> 40) & 0xff) as u8);
 
-            let new_byte = ((iv_reg >> 56) as u8)
-                ^ ((iv_reg >> 16) as u8)
-                ^ reord5
-                ^ deriv01
-                ^ sbox_out;
+            let new_byte =
+                ((iv_reg >> 56) as u8) ^ ((iv_reg >> 16) as u8) ^ reord5 ^ deriv01 ^ sbox_out;
             let mix_byte = deriv34;
             iv_reg = ((iv_reg << 8) ^ (u64::from(mix_byte) << 24)) | u64::from(new_byte);
         }
@@ -388,8 +386,12 @@ pub(crate) const TEA1_SBOX: [u8; 256] = [
     0x99, 0x43, 0x13, 0x0B, 0xE0, 0xA5, 0x12, 0x77, 0x5D, 0xB3, 0x38, 0xD9, 0xEF, 0x5A, 0x01, 0x70,
 ];
 
-pub(crate) const TEA1_LUT_A: [u16; 8] = [0xDA86, 0x85E9, 0x29B5, 0x2BC6, 0x8C6B, 0x974C, 0xC671, 0x93E2];
-pub(crate) const TEA1_LUT_B: [u16; 8] = [0x85D6, 0x791A, 0xE985, 0xC671, 0x2B9C, 0xEC92, 0xC62B, 0x9C47];
+pub(crate) const TEA1_LUT_A: [u16; 8] = [
+    0xDA86, 0x85E9, 0x29B5, 0x2BC6, 0x8C6B, 0x974C, 0xC671, 0x93E2,
+];
+pub(crate) const TEA1_LUT_B: [u16; 8] = [
+    0x85D6, 0x791A, 0xE985, 0xC671, 0x2B9C, 0xEC92, 0xC62B, 0x9C47,
+];
 
 const TEA2_SBOX: [u8; 256] = [
     0x62, 0xDA, 0xFD, 0xB6, 0xBB, 0x9C, 0xD8, 0x2A, 0xAB, 0x28, 0x6E, 0x42, 0xE7, 0x1C, 0x78, 0x9E,
@@ -410,15 +412,22 @@ const TEA2_SBOX: [u8; 256] = [
     0x0A, 0x88, 0xA9, 0x1A, 0x6C, 0x43, 0xEA, 0xAD, 0x30, 0x86, 0x36, 0x59, 0x08, 0x55, 0x01, 0x02,
 ];
 
-const TEA2_LUT_A: [u16; 8] = [0x2579, 0x86E5, 0xB6C8, 0x31D6, 0x7394, 0x934D, 0x638E, 0xC68B];
-const TEA2_LUT_B: [u16; 8] = [0xD68A, 0x97A1, 0xB2C9, 0x239E, 0x9C71, 0x36E8, 0xC9B2, 0x6CD1];
+const TEA2_LUT_A: [u16; 8] = [
+    0x2579, 0x86E5, 0xB6C8, 0x31D6, 0x7394, 0x934D, 0x638E, 0xC68B,
+];
+const TEA2_LUT_B: [u16; 8] = [
+    0xD68A, 0x97A1, 0xB2C9, 0x239E, 0x9C71, 0x36E8, 0xC9B2, 0x6CD1,
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     /// The reference implementation's own vectors (TETRA_crypto tests.c).
@@ -445,7 +454,11 @@ mod tests {
             hex("A79839E4BA88EE54A029")
         );
         assert_eq!(
-            keystream(&Key::Tea2(hex("112233445566778899AA").try_into().unwrap()), &ts2, 10),
+            keystream(
+                &Key::Tea2(hex("112233445566778899AA").try_into().unwrap()),
+                &ts2,
+                10
+            ),
             hex("64704EA9D7DC25608139")
         );
     }
@@ -454,10 +467,34 @@ mod tests {
     #[test]
     fn eck_derivation_matches_the_reference() {
         for (cn, la, cc, kc, eck) in [
-            ("02BC", "1DCC", "05", "0123456789ABCDEFAABB", "7613EA62A26A871FF807"),
-            ("0DE8", "3AF0", "16", "BDF8E8D47CA2EDAE0CFB", "563B92C2A2275A0F6113"),
-            ("0DF7", "29E2", "22", "8A41C56175BFBE356891", "2DCAB883AAC709EB4566"),
-            ("0757", "082E", "3F", "BA3E0696E83D16608989", "9A87D3699D42CB3F7EDE"),
+            (
+                "02BC",
+                "1DCC",
+                "05",
+                "0123456789ABCDEFAABB",
+                "7613EA62A26A871FF807",
+            ),
+            (
+                "0DE8",
+                "3AF0",
+                "16",
+                "BDF8E8D47CA2EDAE0CFB",
+                "563B92C2A2275A0F6113",
+            ),
+            (
+                "0DF7",
+                "29E2",
+                "22",
+                "8A41C56175BFBE356891",
+                "2DCAB883AAC709EB4566",
+            ),
+            (
+                "0757",
+                "082E",
+                "3F",
+                "BA3E0696E83D16608989",
+                "9A87D3699D42CB3F7EDE",
+            ),
         ] {
             let kc: [u8; 10] = hex(kc).try_into().unwrap();
             let got = eck_from_kc(
@@ -475,13 +512,28 @@ mod tests {
     /// the window keeps the test quick while running the real search.
     #[test]
     fn short_key_recovery_finds_the_reference_key() {
-        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
+        let ts = |frame| Timestamp {
+            tn: 1,
+            frame,
+            multiframe: 30,
+            hyperframe: 110,
+            uplink: false,
+        };
         let frames = vec![
-            Collision { ts: ts(6), ct: hex("151ef027") },
-            Collision { ts: ts(7), ct: hex("4d00159e") },
+            Collision {
+                ts: ts(6),
+                ct: hex("151ef027"),
+            },
+            Collision {
+                ts: ts(7),
+                ct: hex("4d00159e"),
+            },
         ];
         let hits = recover_tea1(&frames, 0x0000..0x1_0000);
-        assert!(hits.contains(&0x111), "the reference key is recovered: {hits:x?}");
+        assert!(
+            hits.contains(&0x111),
+            "the reference key is recovered: {hits:x?}"
+        );
         // A third frame with the same plaintext would leave only 0x111; over
         // this small window the pair alone already pins it.
         assert_eq!(hits, vec![0x111], "no other candidate in the window");
@@ -491,7 +543,13 @@ mod tests {
     /// register directly, no collision needed.
     #[test]
     fn known_plaintext_recovers_the_key() {
-        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 110, uplink: false };
+        let ts = Timestamp {
+            tn: 1,
+            frame: 6,
+            multiframe: 30,
+            hyperframe: 110,
+            uplink: false,
+        };
         // Encrypt a known 5-byte payload under key 0x00000111.
         let pt = hex("1122334455");
         let ks = tea1(0x111, ts.iv(), pt.len());
@@ -519,16 +577,19 @@ mod tests {
     #[test]
     fn full_key_recovery_from_three_cells() {
         let kc: [u8; 10] = hex("0123456789ABCDEFAABB").try_into().unwrap();
-        let cells = [(0x02bcu16, 0x1dccu16, 0x05u8), (0x0de8, 0x3af0, 0x16), (0x0df7, 0x29e2, 0x22)];
+        let cells = [
+            (0x02bcu16, 0x1dccu16, 0x05u8),
+            (0x0de8, 0x3af0, 0x16),
+            (0x0df7, 0x29e2, 0x22),
+        ];
         let obs: Vec<(u32, u16, u16, u8)> = cells
             .iter()
             .map(|&(cn, la, cc)| (tea1_key_reg(&eck_from_kc(&kc, cn, la, cc)), cn, la, cc))
             .collect();
         // The true free bytes are the first six of cell 0's ECK.
         let eck0 = eck_from_kc(&kc, cells[0].0, cells[0].1, cells[0].2);
-        let true_free = u64::from_le_bytes([
-            eck0[0], eck0[1], eck0[2], eck0[3], eck0[4], eck0[5], 0, 0,
-        ]);
+        let true_free =
+            u64::from_le_bytes([eck0[0], eck0[1], eck0[2], eck0[3], eck0[4], eck0[5], 0, 0]);
         let keys = recover_tea1_full_key(&obs, true_free - 3..true_free + 4);
         assert_eq!(keys, vec![kc], "the one key that fits all three cells");
     }
@@ -537,11 +598,21 @@ mod tests {
     #[test]
     fn the_iv_packs_the_timestamp() {
         // The reference's example: hn 110 mn 30 fn 6 tn 1 downlink.
-        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 110, uplink: false };
+        let ts = Timestamp {
+            tn: 1,
+            frame: 6,
+            multiframe: 30,
+            hyperframe: 110,
+            uplink: false,
+        };
         assert_eq!(ts.iv(), (110 << 13) | (30 << 7) | (6 << 2) | 0);
-        let ts = Timestamp { tn: 4, frame: 18, multiframe: 60, hyperframe: 0x7fff, uplink: true };
+        let ts = Timestamp {
+            tn: 4,
+            frame: 18,
+            multiframe: 60,
+            hyperframe: 0x7fff,
+            uplink: true,
+        };
         assert_eq!(ts.iv(), 0x1fff_fe4b);
     }
 }
-
-

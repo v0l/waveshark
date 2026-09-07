@@ -14,7 +14,9 @@
 use dsp::tetra::{Block, Lchan, TdmaTime};
 
 fn bits(b: &[u8], at: usize, n: usize) -> u32 {
-    b[at..at + n].iter().fold(0, |acc, &v| acc << 1 | u32::from(v & 1))
+    b[at..at + n]
+        .iter()
+        .fold(0, |acc, &v| acc << 1 | u32::from(v & 1))
 }
 
 /// The SYNC PDU: the identity a cell repeats on every sync burst.
@@ -217,7 +219,13 @@ pub struct Neighbour {
 
 impl Neighbour {
     pub fn hz(&self, cell_band: (u8, u8)) -> f64 {
-        ChanAlloc { timeslot: 0, ul_dl: 0, carrier: self.carrier, band: self.band }.hz(cell_band)
+        ChanAlloc {
+            timeslot: 0,
+            ul_dl: 0,
+            carrier: self.carrier,
+            band: self.band,
+        }
+        .hz(cell_band)
     }
 }
 
@@ -230,7 +238,9 @@ pub struct NetworkPdu {
 impl NetworkPdu {
     fn parse(b: &[u8], at: &mut usize) -> Option<Self> {
         *at += 16 + 2;
-        let mut out = Self { neighbours: Vec::new() };
+        let mut out = Self {
+            neighbours: Vec::new(),
+        };
         if take(b, at, 1)? == 0 {
             return Some(out);
         }
@@ -247,7 +257,14 @@ impl NetworkPdu {
             let cell_id = take(b, at, 5)? as u8;
             *at += 2 + 1 + 2;
             let carrier = take(b, at, 12)? as u16;
-            let mut nb = Neighbour { cell_id, carrier, band: None, mcc: None, mnc: None, la: None };
+            let mut nb = Neighbour {
+                cell_id,
+                carrier,
+                band: None,
+                mcc: None,
+                mnc: None,
+                la: None,
+            };
             if take(b, at, 1)? == 1 {
                 if take(b, at, 1)? == 1 {
                     let band = take(b, at, 4)? as u8;
@@ -431,9 +448,17 @@ impl CallPdu {
     }
 
     pub fn encryption(&self) -> String {
-        let mut s = if self.aie == 0 { "none".to_string() } else { format!("AIE-{}", self.aie) };
+        let mut s = if self.aie == 0 {
+            "none".to_string()
+        } else {
+            format!("AIE-{}", self.aie)
+        };
         if self.e2e == Some(true) {
-            s = if self.aie == 0 { "E2E".into() } else { format!("{s} E2E") };
+            s = if self.aie == 0 {
+                "E2E".into()
+            } else {
+                format!("{s} E2E")
+            };
         }
         s
     }
@@ -524,7 +549,12 @@ impl Mac {
             // An augmented allocation carries a tail whose length depends
             // on fields this does not read; the SDU behind it is left.
             augmented = ul_dl == 0;
-            alloc = Some(ChanAlloc { timeslot, ul_dl, carrier, band });
+            alloc = Some(ChanAlloc {
+                timeslot,
+                ul_dl,
+                carrier,
+                band,
+            });
         }
         let mut pdu = CallPdu {
             pdu: RESOURCE,
@@ -566,7 +596,11 @@ impl Mac {
             2 => {}
             1 => {
                 let mm = take(b, &mut at, 4)? as u8;
-                return Some(Mac::Mm(MmPdu { pdu: mm, address: pdu.address, time }));
+                return Some(Mac::Mm(MmPdu {
+                    pdu: mm,
+                    address: pdu.address,
+                    time,
+                }));
             }
             5 => {
                 return match take(b, &mut at, 3)? {
@@ -706,7 +740,12 @@ fn sds_text(b: &[u8], at: &mut usize) -> Option<String> {
             .collect(),
         _ => body
             .chunks(8)
-            .map(|c| format!("{:02x}", c.iter().fold(0u8, |a, v| a << 1 | (v & 1)) << (8 - c.len())))
+            .map(|c| {
+                format!(
+                    "{:02x}",
+                    c.iter().fold(0u8, |a, v| a << 1 | (v & 1)) << (8 - c.len())
+                )
+            })
             .collect::<Vec<_>>()
             .join(""),
     };
@@ -805,7 +844,9 @@ impl Event {
         };
         match block.lchan {
             Lchan::Bsch => SyncPdu::parse(&block.bits).map(Event::Sync),
-            Lchan::SchHd => SysinfoPdu::parse(&block.bits).map(Event::Sysinfo).or_else(|| mac(block)),
+            Lchan::SchHd => SysinfoPdu::parse(&block.bits)
+                .map(Event::Sysinfo)
+                .or_else(|| mac(block)),
             Lchan::SchF => mac(block),
             Lchan::Aach => AachPdu::parse(&block.bits, block.time).map(Event::Aach),
         }
@@ -814,7 +855,14 @@ impl Event {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Event::Sync(s) => {
-                let mut v = vec![1u8, s.system_code, s.colour, s.timeslot, s.frame, s.multiframe];
+                let mut v = vec![
+                    1u8,
+                    s.system_code,
+                    s.colour,
+                    s.timeslot,
+                    s.frame,
+                    s.multiframe,
+                ];
                 v.push(s.sharing_mode);
                 v.extend_from_slice(&s.mcc.to_be_bytes());
                 v.extend_from_slice(&s.mnc.to_be_bytes());
@@ -963,9 +1011,16 @@ impl Event {
                     5 => Address::UsageMarker(id as u8),
                     _ => return None,
                 };
-                let time = (r[6] != 0)
-                    .then(|| TdmaTime { tn: r[6], frame: r[7], multiframe: r[8] });
-                Some(Event::Mm(MmPdu { pdu: r[0], address, time }))
+                let time = (r[6] != 0).then(|| TdmaTime {
+                    tn: r[6],
+                    frame: r[7],
+                    multiframe: r[8],
+                });
+                Some(Event::Mm(MmPdu {
+                    pdu: r[0],
+                    address,
+                    time,
+                }))
             }
             (3, n) if n >= 34 => {
                 let id = u32::from_be_bytes([r[3], r[4], r[5], r[6]]);
@@ -1002,7 +1057,11 @@ impl Event {
                     call_id: (call_id != 0xffff).then_some(call_id),
                     from: (from != 0xffff_ffff).then_some(from),
                     group: flag(r[14]),
-                    time: (r[15] != 0).then_some(TdmaTime { tn: r[15], frame: r[16], multiframe: r[17] }),
+                    time: (r[15] != 0).then_some(TdmaTime {
+                        tn: r[15],
+                        frame: r[16],
+                        multiframe: r[17],
+                    }),
                     alloc,
                     marker: (r[26] == 1).then_some(r[27]),
                     seconds: f32::from_be_bytes([r[28], r[29], r[30], r[31]]),
@@ -1067,7 +1126,14 @@ mod tests {
     #[test]
     fn a_sync_pdu_reads_its_identity() {
         let b = pdu_bits(
-            &[(4, 6, 17), (10, 2, 2), (12, 5, 18), (17, 6, 41), (31, 10, 272), (41, 14, 91)],
+            &[
+                (4, 6, 17),
+                (10, 2, 2),
+                (12, 5, 18),
+                (17, 6, 41),
+                (31, 10, 272),
+                (41, 14, 91),
+            ],
             60,
         );
         let s = SyncPdu::parse(&b).unwrap();
@@ -1079,7 +1145,14 @@ mod tests {
     fn a_sysinfo_pdu_names_the_main_carrier() {
         // Band 3, carrier 3612, +6.25 kHz: 390.30625 MHz.
         let b = pdu_bits(
-            &[(0, 2, 0b10), (2, 2, 0b00), (4, 12, 3612), (16, 4, 3), (20, 2, 1), (82, 14, 0x1234)],
+            &[
+                (0, 2, 0b10),
+                (2, 2, 0b00),
+                (4, 12, 3612),
+                (16, 4, 3),
+                (20, 2, 1),
+                (82, 14, 0x1234),
+            ],
             124,
         );
         let s = SysinfoPdu::parse(&b).unwrap();
@@ -1095,36 +1168,36 @@ mod tests {
     /// and 14.7.1.12 give them.
     fn d_setup_block(group: u32, caller: u32, e2e: bool) -> Vec<u8> {
         let mut f: Vec<(usize, usize, u32)> = vec![
-            (0, 2, 0),        // MAC-RESOURCE
-            (2, 1, 0),        // fill bit indication
-            (3, 1, 0),        // position of grant
-            (4, 2, 0),        // encryption mode: clear
-            (6, 1, 0),        // random access flag
-            (7, 6, 33),       // length indication, octets
-            (13, 3, 1),       // address type: SSI
+            (0, 2, 0),  // MAC-RESOURCE
+            (2, 1, 0),  // fill bit indication
+            (3, 1, 0),  // position of grant
+            (4, 2, 0),  // encryption mode: clear
+            (6, 1, 0),  // random access flag
+            (7, 6, 33), // length indication, octets
+            (13, 3, 1), // address type: SSI
             (16, 24, group),
-            (40, 1, 0),       // power control flag
-            (41, 1, 0),       // slot granting flag
-            (42, 1, 0),       // channel allocation flag
-            (43, 4, 2),       // LLC: BL-UDATA
-            (47, 3, 2),       // MLE: CMCE
+            (40, 1, 0), // power control flag
+            (41, 1, 0), // slot granting flag
+            (42, 1, 0), // channel allocation flag
+            (43, 4, 2), // LLC: BL-UDATA
+            (47, 3, 2), // MLE: CMCE
             (50, 5, D_SETUP as u32),
-            (55, 14, 1234),   // call identifier
-            (69, 4, 3),       // call time-out
-            (73, 1, 0),       // hook method
-            (74, 1, 0),       // simplex
-            (75, 3, 0),       // circuit mode type: speech
+            (55, 14, 1234), // call identifier
+            (69, 4, 3),     // call time-out
+            (73, 1, 0),     // hook method
+            (74, 1, 0),     // simplex
+            (75, 3, 0),     // circuit mode type: speech
             (78, 1, u32::from(e2e)),
-            (79, 2, 1),       // communication type: point to multipoint
-            (81, 2, 0),       // slots per frame
-            (83, 2, 1),       // transmission grant
-            (85, 1, 1),       // transmission request permission
-            (86, 4, 0),       // call priority
-            (90, 1, 1),       // O-bit: type 2 elements follow
-            (91, 1, 0),       // no notification indicator
-            (92, 1, 0),       // no temporary address
-            (93, 1, 1),       // calling party present
-            (94, 2, 1),       // as an SSI
+            (79, 2, 1), // communication type: point to multipoint
+            (81, 2, 0), // slots per frame
+            (83, 2, 1), // transmission grant
+            (85, 1, 1), // transmission request permission
+            (86, 4, 0), // call priority
+            (90, 1, 1), // O-bit: type 2 elements follow
+            (91, 1, 0), // no notification indicator
+            (92, 1, 0), // no temporary address
+            (93, 1, 1), // calling party present
+            (94, 2, 1), // as an SSI
             (96, 24, caller),
         ];
         f.retain(|(_, n, _)| *n > 0);
@@ -1133,7 +1206,11 @@ mod tests {
 
     #[test]
     fn a_clear_setup_names_both_parties_and_the_call() {
-        let time = Some(TdmaTime { tn: 1, frame: 3, multiframe: 7 });
+        let time = Some(TdmaTime {
+            tn: 1,
+            frame: 3,
+            multiframe: 7,
+        });
         let c = CallPdu::parse(&d_setup_block(2001, 3_000_123, false), time).expect("a call");
         assert_eq!(c.pdu, D_SETUP);
         assert_eq!(c.address, Address::Ssi(2001));
@@ -1154,22 +1231,22 @@ mod tests {
         // and the element that says where the traffic goes.
         let f: Vec<(usize, usize, u32)> = vec![
             (0, 2, 0),
-            (4, 2, 3),        // enciphered, so nothing past the header
+            (4, 2, 3), // enciphered, so nothing past the header
             (7, 6, 33),
-            (13, 3, 6),       // SSI + usage marker
+            (13, 3, 6), // SSI + usage marker
             (16, 24, 2001),
-            (40, 6, 17),      // usage marker
+            (40, 6, 17), // usage marker
             (46, 1, 0),
             (47, 1, 0),
-            (48, 1, 1),       // channel allocation follows
-            (49, 2, 1),       // allocation type
-            (51, 4, 2),       // timeslot 2
-            (55, 2, 3),       // both directions
+            (48, 1, 1), // channel allocation follows
+            (49, 2, 1), // allocation type
+            (51, 4, 2), // timeslot 2
+            (55, 2, 3), // both directions
             (57, 1, 0),
             (58, 1, 0),
-            (59, 12, 3668),   // carrier
-            (71, 1, 0),       // no extended carrier
-            (72, 2, 1),       // monitoring pattern
+            (59, 12, 3668), // carrier
+            (71, 1, 0),     // no extended carrier
+            (72, 2, 1),     // monitoring pattern
         ];
         let b = pdu_bits(&f, 268);
         let c = CallPdu::parse(&b, None).expect("a resource");
@@ -1184,7 +1261,13 @@ mod tests {
 
     #[test]
     fn the_access_assign_field_says_what_a_slot_carries() {
-        let t = |frame: u8| Some(TdmaTime { tn: 2, frame, multiframe: 1 });
+        let t = |frame: u8| {
+            Some(TdmaTime {
+                tn: 2,
+                frame,
+                multiframe: 1,
+            })
+        };
         // Header 1: field 1 is the downlink usage.
         let b = pdu_bits(&[(0, 2, 1), (2, 6, 23), (8, 6, 5)], 14);
         let a = AachPdu::parse(&b, t(3)).unwrap();
@@ -1210,14 +1293,14 @@ mod tests {
             (7, 6, 33),
             (13, 3, 1),
             (16, 24, 0xff_ffff),
-            (43, 4, 2),       // BL-UDATA
-            (47, 3, 5),       // MLE
-            (50, 3, 2),       // D-NWRK BROADCAST
-            (53, 16, 0),      // cell re-select parameters
-            (69, 2, 1),       // cell service level
-            (71, 1, 1),       // O-bit
-            (72, 1, 0),       // no network time
-            (73, 1, 1),       // number of neighbours present
+            (43, 4, 2),  // BL-UDATA
+            (47, 3, 5),  // MLE
+            (50, 3, 2),  // D-NWRK BROADCAST
+            (53, 16, 0), // cell re-select parameters
+            (69, 2, 1),  // cell service level
+            (71, 1, 1),  // O-bit
+            (72, 1, 0),  // no network time
+            (73, 1, 1),  // number of neighbours present
             (74, 3, 2),
         ];
         let mut at = 77;
@@ -1245,7 +1328,9 @@ mod tests {
             at += 6;
         }
         let b = pdu_bits(&f, 268);
-        let Some(Mac::Network(n)) = Mac::parse(&b, None) else { panic!("not a network broadcast") };
+        let Some(Mac::Network(n)) = Mac::parse(&b, None) else {
+            panic!("not a network broadcast")
+        };
         assert_eq!(n.neighbours.len(), 2);
         assert_eq!(n.neighbours[0].cell_id, 3);
         assert_eq!(n.neighbours[0].hz((3, 0)), 391_500_000.0);
@@ -1268,12 +1353,12 @@ mod tests {
             (43, 4, 2),
             (47, 3, 2),
             (50, 5, D_SDS_DATA as u32),
-            (55, 2, 1),       // calling party: SSI
+            (55, 2, 1), // calling party: SSI
             (57, 24, 3_000_123),
-            (81, 2, 3),       // length indicated
+            (81, 2, 3), // length indicated
             (83, 11, 8 + 7 + text.len() as u32 * 8),
-            (94, 8, 0x02),    // simple text
-            (102, 7, 1),      // ISO 8859-1
+            (94, 8, 0x02), // simple text
+            (102, 7, 1),   // ISO 8859-1
         ];
         let mut at = 109;
         for &ch in text {
@@ -1345,7 +1430,11 @@ mod tests {
         let mm = Event::Mm(MmPdu {
             pdu: D_AUTHENTICATION,
             address: Address::Ssi(1_234_567),
-            time: Some(TdmaTime { tn: 2, frame: 5, multiframe: 9 }),
+            time: Some(TdmaTime {
+                tn: 2,
+                frame: 5,
+                multiframe: 9,
+            }),
         });
         for e in [sync, si, mm] {
             assert_eq!(Event::parse(&e.to_bytes()).as_ref(), Some(&e));
@@ -1359,8 +1448,17 @@ mod tests {
             call_id: Some(77),
             from: Some(3_000_123),
             group: None,
-            time: Some(TdmaTime { tn: 2, frame: 5, multiframe: 9 }),
-            alloc: Some(ChanAlloc { timeslot: 3, ul_dl: 3, carrier: 3668, band: Some((3, 2)) }),
+            time: Some(TdmaTime {
+                tn: 2,
+                frame: 5,
+                multiframe: 9,
+            }),
+            alloc: Some(ChanAlloc {
+                timeslot: 3,
+                ul_dl: 3,
+                carrier: 3668,
+                band: Some((3, 2)),
+            }),
             marker: Some(17),
             seconds: 0.0,
             text: None,

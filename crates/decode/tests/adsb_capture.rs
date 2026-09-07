@@ -25,7 +25,9 @@ const REFERENCE: &str = "adsb_1090M_2400k.dump1090.hex";
 const RATE: f64 = 2_400_000.0;
 
 fn testdata(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata")
+        .join(name)
 }
 
 /// Samples handed to the detector at a time, the way a radio delivers them,
@@ -97,8 +99,10 @@ macro_rules! skip_without_fixture {
 
 #[test]
 fn every_frame_we_report_is_one_dump1090_also_saw() {
-    let ours: HashSet<String> =
-        skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
+    let ours: HashSet<String> = skip_without_fixture!(FRAMES.as_ref())
+        .iter()
+        .cloned()
+        .collect();
     let theirs = reference();
     let invented: Vec<&String> = ours.difference(&theirs).collect();
     assert!(
@@ -111,8 +115,10 @@ fn every_frame_we_report_is_one_dump1090_also_saw() {
 
 #[test]
 fn most_of_what_dump1090_found_is_found_here_too() {
-    let ours: HashSet<String> =
-        skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
+    let ours: HashSet<String> = skip_without_fixture!(FRAMES.as_ref())
+        .iter()
+        .cloned()
+        .collect();
     let theirs = reference();
     let matched = ours.intersection(&theirs).count();
     // dump1090 recovers a few more through two-bit error correction and
@@ -142,7 +148,12 @@ fn the_aircraft_in_the_capture_decodes_to_a_position_and_a_callsign() {
             icaos.insert(icao);
         }
         match f.kind {
-            adsb::Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
+            adsb::Message::AirbornePosition {
+                altitude_ft,
+                odd,
+                lat_cpr,
+                lon_cpr,
+            } => {
                 altitude = altitude_ft.or(altitude);
                 position = Some((lat_cpr, lon_cpr, odd));
             }
@@ -151,11 +162,21 @@ fn the_aircraft_in_the_capture_decodes_to_a_position_and_a_callsign() {
         }
     }
 
-    assert!(icaos.contains(&0x4b1880), "expected the aircraft dump1090 saw, got {icaos:x?}");
+    assert!(
+        icaos.contains(&0x4b1880),
+        "expected the aircraft dump1090 saw, got {icaos:x?}"
+    );
     let alt = altitude.expect("an altitude");
-    assert!((30_000..=40_000).contains(&alt), "altitude {alt} ft is not a cruise level");
+    assert!(
+        (30_000..=40_000).contains(&alt),
+        "altitude {alt} ft is not a cruise level"
+    );
 
-    assert_eq!(callsign.as_deref(), Some("SWR14V"), "the flight dump1090 also identified");
+    assert_eq!(
+        callsign.as_deref(),
+        Some("SWR14V"),
+        "the flight dump1090 also identified"
+    );
 
     // Only odd-parity position frames survived in this window, in dump1090's
     // decode as well as ours, so there is no pair to resolve globally. That is
@@ -169,5 +190,8 @@ fn the_aircraft_in_the_capture_decodes_to_a_position_and_a_callsign() {
     // Within a couple of hundred kilometres, which is as far as an aircraft at
     // 36000 feet can be and still be heard on a telescopic antenna indoors.
     let km = ((dlat * 111.0).powi(2) + (dlon * 111.0 * HERE.0.to_radians().cos()).powi(2)).sqrt();
-    assert!(km < 250.0, "aircraft resolved to {lat:.4},{lon:.4}, {km:.0} km away");
+    assert!(
+        km < 250.0,
+        "aircraft resolved to {lat:.4},{lon:.4}, {km:.0} km away"
+    );
 }

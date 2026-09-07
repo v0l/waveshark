@@ -293,7 +293,10 @@ mod tests {
 
     fn pkg(pulses: &[(u32, u32)]) -> Package {
         Package {
-            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
+            pulses: pulses
+                .iter()
+                .map(|(m, g)| Pulse { mark: *m, gap: *g })
+                .collect(),
             snr_db: 20.0,
             rssi_dbfs: -12.0,
             start_sample: 0,
@@ -378,15 +381,50 @@ mod tests {
         // 52 us symbols. A 120 us bucket folded the ones and twos together
         // and called the symbol 63 us.
         let runs = [
-            (52, 52), (52, 52), (49, 52), (56, 49), (52, 52), (52, 49), (56, 52), (52, 105),
-            (56, 154), (154, 49), (59, 101), (255, 63), (150, 150), (56, 52), (52, 52),
-            (49, 108), (52, 49), (108, 49), (161, 154), (157, 52), (150, 210), (105, 311),
-            (210, 52), (49, 56), (101, 49), (266, 101), (105, 101), (49, 157), (210, 52),
-            (262, 154), (101, 157), (157, 49), (56, 52), (206, 157), (52, 308), (52, 10000),
+            (52, 52),
+            (52, 52),
+            (49, 52),
+            (56, 49),
+            (52, 52),
+            (52, 49),
+            (56, 52),
+            (52, 105),
+            (56, 154),
+            (154, 49),
+            (59, 101),
+            (255, 63),
+            (150, 150),
+            (56, 52),
+            (52, 52),
+            (49, 108),
+            (52, 49),
+            (108, 49),
+            (161, 154),
+            (157, 52),
+            (150, 210),
+            (105, 311),
+            (210, 52),
+            (49, 56),
+            (101, 49),
+            (266, 101),
+            (105, 101),
+            (49, 157),
+            (210, 52),
+            (262, 154),
+            (101, 157),
+            (157, 49),
+            (56, 52),
+            (206, 157),
+            (52, 308),
+            (52, 10000),
         ];
         let a = analyze(&pkg(&runs)).expect("an analysis");
         assert_eq!(a.coding, Coding::Nrz);
-        assert!((48..=56).contains(&a.short_us), "symbol read as {} us", a.short_us);
+        assert!(
+            (48..=56).contains(&a.short_us),
+            "symbol read as {} us",
+            a.short_us
+        );
     }
 
     /// An NRZ burst as the FSK detector hands one over: runs of like symbols
@@ -417,8 +455,20 @@ mod tests {
         let mut pulses: Vec<(u32, u32)> = Vec::new();
         let mut i = 0;
         while i < runs.len() {
-            let mark = if runs[i].0 { let w = runs[i].1; i += 1; w } else { 0 };
-            let gap = if i < runs.len() && !runs[i].0 { let w = runs[i].1; i += 1; w } else { 0 };
+            let mark = if runs[i].0 {
+                let w = runs[i].1;
+                i += 1;
+                w
+            } else {
+                0
+            };
+            let gap = if i < runs.len() && !runs[i].0 {
+                let w = runs[i].1;
+                i += 1;
+                w
+            } else {
+                0
+            };
             pulses.push((mark * sym_us, gap * sym_us));
         }
         // The silence that ended the burst. Without it the slicer has no reset
@@ -455,8 +505,16 @@ mod tests {
         let air = whitened_transmission(&[0xa5, 0x4d, 0xca, 0x18, 0x25, 0x30, 0xbb, 0x1d, 0x6d]);
         let a = analyze(&nrz_package(&air, 52, false)).expect("a");
         let b = analyze(&nrz_package(&air, 52, true)).expect("b");
-        assert_ne!(a.bits.as_bytes(), b.bits.as_bytes(), "the two phases were identical, so this test says nothing");
-        assert_eq!(a.frame_bytes(), b.frame_bytes(), "alignment did not survive a phase shift");
+        assert_ne!(
+            a.bits.as_bytes(),
+            b.bits.as_bytes(),
+            "the two phases were identical, so this test says nothing"
+        );
+        assert_eq!(
+            a.frame_bytes(),
+            b.frame_bytes(),
+            "alignment did not survive a phase shift"
+        );
     }
 
     #[test]
@@ -465,8 +523,16 @@ mod tests {
         let air = whitened_transmission(&payload);
         let a = analyze(&nrz_package(&air, 52, false)).expect("analysis");
         let f = a.framing.as_ref().expect("a preamble");
-        assert!(f.preamble_bits >= 32, "preamble read as {} bits", f.preamble_bits);
-        assert!(f.sync_hex().starts_with("2dd4"), "sync came out as {}", f.sync_hex());
+        assert!(
+            f.preamble_bits >= 32,
+            "preamble read as {} bits",
+            f.preamble_bits
+        );
+        assert!(
+            f.sync_hex().starts_with("2dd4"),
+            "sync came out as {}",
+            f.sync_hex()
+        );
         let framed = a.framed.as_ref().expect("a frame");
         assert!(framed.whitened);
         assert_eq!(framed.payload, payload);
@@ -501,4 +567,3 @@ mod tests {
         assert!(s.contains("bits"), "{s}");
     }
 }
-

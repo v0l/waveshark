@@ -34,13 +34,24 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn frames(path: &Path) -> Vec<(u64, Vec<u8>)> {
-    let buf = FileSource::open(path).expect("open").read_all().expect("read");
+    let buf = FileSource::open(path)
+        .expect("open")
+        .read_all()
+        .expect("read");
     let rate = buf.rate.as_f64();
-    let mut g = build_chain(StreamSpec::iq(rate, buf.center), &[NodeSpec::new("auto")], &registry())
-        .expect("build");
+    let mut g = build_chain(
+        StreamSpec::iq(rate, buf.center),
+        &[NodeSpec::new("auto")],
+        &registry(),
+    )
+    .expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
+    for block in buf
+        .samples
+        .chunks(16_384)
+        .chain(std::iter::repeat_n(&silence[..], 8))
+    {
         g.feed_iq(block).expect("run");
         for p in g.output().as_packets().unwrap_or(&[]) {
             if let PacketBody::Frame(f) = &p.body {
@@ -60,9 +71,12 @@ fn every_meter_rtl_433_read_is_read_here() {
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "cu8")
-            && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("wmbus_"))
-            && p.with_extension("json").exists())
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "cu8")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("wmbus_"))
+                && p.with_extension("json").exists()
+        })
         .collect();
     paths.sort();
     if paths.is_empty() {
@@ -100,9 +114,15 @@ fn every_meter_rtl_433_read_is_read_here() {
                 let r = decode::wmbus::parse(f, None).expect("a parse");
                 let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
                 let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
-                eprintln!("{name}: {m} {id} at {:.4} MHz, {} bytes", *hz as f64 / 1e6, f.len());
+                eprintln!(
+                    "{name}: {m} {id} at {:.4} MHz, {} bytes",
+                    *hz as f64 / 1e6,
+                    f.len()
+                );
                 if m != want_m || id != want_id {
-                    failures.push(format!("{name}: read {m} {id}, rtl_433 read {want_m} {want_id}"));
+                    failures.push(format!(
+                        "{name}: read {m} {id}, rtl_433 read {want_m} {want_id}"
+                    ));
                 }
             }
             None => {
@@ -128,6 +148,13 @@ fn a_meter_is_named_in_the_list() {
     let (hz, f) = got.first().expect("a frame");
     let d = nodes::wmbus_nodes::wmbus_decoded(f, Hz(*hz)).expect("a decode");
     assert_eq!(d.protocol, "Wireless-MBus");
-    assert!(d.text.as_deref().unwrap_or("").contains("DME Water 84850129"), "{:?}", d.text);
+    assert!(
+        d.text
+            .as_deref()
+            .unwrap_or("")
+            .contains("DME Water 84850129"),
+        "{:?}",
+        d.text
+    );
     assert_eq!(d.crc_ok, Some(true));
 }

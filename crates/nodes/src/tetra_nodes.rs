@@ -17,21 +17,24 @@
 //! reaches the call list.
 
 use common::Result;
-use decode::tetra::{Address, CallPdu, Event, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, RESOURCE, TRAFFIC, TRAFFIC_END};
+use decode::tetra::{
+    Address, CallPdu, Event, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, RESOURCE,
+    TRAFFIC, TRAFFIC_END,
+};
 use decode::voice::CallDecoder;
 use std::collections::HashMap;
 
 mod tetra_crypto;
-use tetra_crypto::Crypto;
 use dsp::tetra::speech;
 use dsp::tetra::{
-    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, BAUD, NDB_BB1, NDB_BLK1,
-    NDB_BLK2, OCCUPIED_HZ, SLOT_BITS, SLOT_SYMBOLS,
+    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, BAUD, NDB_BB1, NDB_BLK1, NDB_BLK2,
+    OCCUPIED_HZ, SLOT_BITS, SLOT_SYMBOLS,
 };
 use dsp::{FirDecim, Mixer};
 use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use tetra_crypto::Crypto;
 
 /// The raster TETRA carriers sit on.
 pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
@@ -93,7 +96,11 @@ pub enum Recovery {
     Idle,
     /// Gathering retransmissions of one message: `have` of the quorum a
     /// search needs, across `messages` distinct messages being watched.
-    Gathering { have: usize, need: usize, messages: usize },
+    Gathering {
+        have: usize,
+        need: usize,
+        messages: usize,
+    },
     /// A register search is running, on the GPU or across CPU threads.
     Searching { gpu: bool },
     /// The search swept the whole space and found nothing: not a TEA1 key,
@@ -189,7 +196,12 @@ impl LspWatch {
     const JUMPS: [u16; 3] = [128, 256, 256];
 
     fn new() -> Self {
-        LspWatch { last: [0; 3], frames: 0, jumped: 0, verdict: None }
+        LspWatch {
+            last: [0; 3],
+            frames: 0,
+            jumped: 0,
+            verdict: None,
+        }
     }
 
     fn observe(&mut self, lsp: [u16; 3]) {
@@ -393,11 +405,16 @@ impl TetraNode {
             return false;
         }
         // All ones is the address of nobody, which the idle filler carries.
-        let Some(ssi) = c.address.ssi().filter(|s| *s != 0 && *s != 0xff_ffff) else { return false };
+        let Some(ssi) = c.address.ssi().filter(|s| *s != 0 && *s != 0xff_ffff) else {
+            return false;
+        };
         // An allocation is news whenever it comes: it says where the
         // traffic is going.
         if c.alloc.is_none()
-            && self.resource_seen.get(&ssi).is_some_and(|last| slot.saturating_sub(*last) < RESOURCE_EVERY_SLOTS)
+            && self
+                .resource_seen
+                .get(&ssi)
+                .is_some_and(|last| slot.saturating_sub(*last) < RESOURCE_EVERY_SLOTS)
         {
             return false;
         }
@@ -411,7 +428,10 @@ impl TetraNode {
         let Some(ssi) = m.address.ssi().filter(|s| *s != 0 && *s != 0xff_ffff) else {
             return false;
         };
-        if self.mm_seen.get(&ssi).is_some_and(|last| slot.saturating_sub(*last) < RESOURCE_EVERY_SLOTS)
+        if self
+            .mm_seen
+            .get(&ssi)
+            .is_some_and(|last| slot.saturating_sub(*last) < RESOURCE_EVERY_SLOTS)
         {
             return false;
         }
@@ -421,7 +441,10 @@ impl TetraNode {
 
     /// Who was last granted transmission on the group a marker belongs to.
     fn talker(&self, marker: u8) -> Option<u32> {
-        self.markers.get(&marker).and_then(|ssi| self.talkers.get(ssi)).copied()
+        self.markers
+            .get(&marker)
+            .and_then(|ssi| self.talkers.get(ssi))
+            .copied()
     }
 
     /// A traffic event for a marker, addressed to the party it was given to
@@ -488,7 +511,13 @@ impl TetraNode {
                 self.lsp_by_tn.remove(&tn);
                 self.traffic.insert(
                     tn,
-                    Traffic { marker: m, since: slot, last: slot, frames: 1, reported: false },
+                    Traffic {
+                        marker: m,
+                        since: slot,
+                        last: slot,
+                        frames: 1,
+                        reported: false,
+                    },
                 );
             }
             (None, Some(_)) if a.dl_usage.is_some() => self.end_traffic(tn, slot, out),
@@ -499,7 +528,9 @@ impl TetraNode {
     /// Close the traffic on a timeslot, reporting it if it was ever
     /// reported as started.
     fn end_traffic(&mut self, tn: u8, slot: u64, out: &mut Vec<Event>) {
-        let Some(run) = self.traffic.remove(&tn) else { return };
+        let Some(run) = self.traffic.remove(&tn) else {
+            return;
+        };
         if !run.reported {
             return;
         }
@@ -552,8 +583,14 @@ impl TetraNode {
         }))
     }
 
-    fn decode_voice(&mut self, bursts: &[Burst], per_burst: &mut Vec<VoiceBurst>) -> Vec<common::Voice> {
-        let Some(cell) = self.rx.cell else { return Vec::new() };
+    fn decode_voice(
+        &mut self,
+        bursts: &[Burst],
+        per_burst: &mut Vec<VoiceBurst>,
+    ) -> Vec<common::Voice> {
+        let Some(cell) = self.rx.cell else {
+            return Vec::new();
+        };
         let keyed = self.crypto.can_decrypt(cell.colour);
         let mut pcm: HashMap<u8, Vec<f32>> = HashMap::new();
         let mut seen_tn: Vec<u8> = Vec::new();
@@ -562,7 +599,9 @@ impl TetraNode {
             if b.kind != BurstKind::Normal1 {
                 continue;
             }
-            let Some(time) = self.rx.time_at(b.slot) else { continue };
+            let Some(time) = self.rx.time_at(b.slot) else {
+                continue;
+            };
             let tn = time.tn;
             let Some(marker) = self.traffic.get(&tn).map(|t| t.marker) else {
                 continue;
@@ -624,7 +663,8 @@ impl TetraNode {
         }
 
         // Drop decoders for timeslots no longer carrying traffic.
-        self.voice_calls.retain(|tn, _| self.traffic.contains_key(tn));
+        self.voice_calls
+            .retain(|tn, _| self.traffic.contains_key(tn));
 
         seen_tn
             .into_iter()
@@ -685,7 +725,9 @@ impl Node for TetraNode {
             return Err(common::Error::other("tetra needs the width of its carrier"));
         }
         if (self.channel_hz - center).abs() > (rate - OCCUPIED_HZ) / 2.0 {
-            return Err(common::Error::other("tetra needs its carrier inside the span"));
+            return Err(common::Error::other(
+                "tetra needs its carrier inside the span",
+            ));
         }
         let factor = (rate / DEMOD_HZ).round().max(1.0) as usize;
         let demod_rate = rate / factor as f64;
@@ -713,7 +755,9 @@ impl Node for TetraNode {
         outputs: &mut [Payload],
         _c: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
+        let Some(iq) = inputs[0].as_iq() else {
+            return Ok(());
+        };
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
@@ -749,7 +793,9 @@ impl Node for TetraNode {
         let mut events: Vec<(Event, u64)> = Vec::new();
         for block in &blocks {
             self.slot_now = self.slot_now.max(block.slot);
-            let Some(event) = Event::from_block(block) else { continue };
+            let Some(event) = Event::from_block(block) else {
+                continue;
+            };
             match event {
                 Event::Aach(a) => {
                     let mut made = Vec::new();
@@ -889,8 +935,12 @@ impl Node for TetraNode {
                     self.last_aie != 0 || self.slot_enciphered(vb.tn),
                 )),
                 iq: self.burst_iq(b),
-                audio: (!vb.pcm.is_empty())
-                    .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ })),
+                audio: (!vb.pcm.is_empty()).then(|| {
+                    std::sync::Arc::new(common::Speech {
+                        pcm: vb.pcm,
+                        rate: VOICE_HZ,
+                    })
+                }),
                 measure: None,
             });
         }
@@ -940,7 +990,11 @@ fn encode_traffic_burst(vb: &VoiceBurst, b: &Burst, encrypted: bool) -> Vec<u8> 
     v.extend_from_slice(&b.slot.to_be_bytes());
     v.extend_from_slice(&vb.to.unwrap_or(0).to_be_bytes());
     v.extend_from_slice(&vb.from.unwrap_or(0).to_be_bytes());
-    v.extend(b.bits.chunks(8).map(|c| c.iter().fold(0u8, |acc, &bit| (acc << 1) | (bit & 1))));
+    v.extend(
+        b.bits
+            .chunks(8)
+            .map(|c| c.iter().fold(0u8, |acc, &bit| (acc << 1) | (bit & 1))),
+    );
     v
 }
 
@@ -973,13 +1027,24 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let (tn, marker, flags, frame) = (bytes[1], bytes[2], bytes[3], bytes[4]);
     let slot = u64::from_be_bytes(bytes[5..13].try_into().ok()?);
     let to = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
-    let from = if with_talker { u32::from_be_bytes(bytes[17..21].try_into().ok()?) } else { 0 };
+    let from = if with_talker {
+        u32::from_be_bytes(bytes[17..21].try_into().ok()?)
+    } else {
+        0
+    };
     let crc_ok = flags & TB_FLAG_CRC_OK != 0;
     let mut fields: Vec<(String, Value)> = vec![
         ("voice".into(), Value::Bool(true)),
         ("codec".into(), Value::Text(TETRA_CODEC.into())),
         ("live".into(), Value::Bool(true)),
-        ("to".into(), Value::Text(if to != 0 { to.to_string() } else { format!("marker {marker}") })),
+        (
+            "to".into(),
+            Value::Text(if to != 0 {
+                to.to_string()
+            } else {
+                format!("marker {marker}")
+            }),
+        ),
         ("timeslot".into(), Value::Int(tn.into())),
         ("marker".into(), Value::Int(marker.into())),
         ("frame".into(), Value::Int(frame.into())),
@@ -1006,7 +1071,11 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         bandwidth_hz: Some(CHANNEL_WIDTH_HZ),
         detail: Some(format!(
             "traffic burst TS{tn} marker {marker}{}",
-            if flags & TB_FLAG_ENCRYPTED != 0 { ", enciphered" } else { "" }
+            if flags & TB_FLAG_ENCRYPTED != 0 {
+                ", enciphered"
+            } else {
+                ""
+            }
         )),
         fields,
         rssi_dbfs: None,
@@ -1039,8 +1108,14 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         Event::Sysinfo(s) => {
             fields.push(("carrier_hz".into(), Value::Float(s.downlink_hz())));
             fields.push(("la".into(), Value::Int(s.la.into())));
-            fields.push(("subscriber_class".into(), Value::Int(s.subscriber_class.into())));
-            fields.push(("service_details".into(), Value::Int(s.bs_service_details.into())));
+            fields.push((
+                "subscriber_class".into(),
+                Value::Int(s.subscriber_class.into()),
+            ));
+            fields.push((
+                "service_details".into(),
+                Value::Int(s.bs_service_details.into()),
+            ));
             "TETRA-Sysinfo"
         }
         // Named the way the call list reads a decode: `to` and `from` are
@@ -1074,7 +1149,10 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("call_id".into(), Value::Int(id.into())));
             }
             if let Some(g) = c.group {
-                fields.push(("call_type".into(), Value::Text(if g { "group" } else { "private" }.into())));
+                fields.push((
+                    "call_type".into(),
+                    Value::Text(if g { "group" } else { "private" }.into()),
+                ));
             }
             fields.push(("encryption".into(), Value::Text(c.encryption())));
             if let Some(m) = c.marker {
@@ -1142,7 +1220,11 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
         Event::Aach(_) => return None,
     };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let detail = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(
         Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
             .with_detail(detail)
@@ -1161,7 +1243,10 @@ mod tests {
     use dsp::tetra::{coding, synth, SLOT_BITS};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+        PortSpec {
+            spec: StreamSpec::iq(rate, Hz(center as u64)),
+            latency: 0,
+        }
     }
 
     #[test]
@@ -1240,15 +1325,27 @@ mod tests {
         // Forty repeats of the same broadcast are two rows: one identity,
         // one system broadcast.
         assert_eq!(rows.len(), 2, "{rows:?}");
-        let sync = rows.iter().find(|r| r.protocol == "TETRA-Sync").expect("no sync row");
+        let sync = rows
+            .iter()
+            .find(|r| r.protocol == "TETRA-Sync")
+            .expect("no sync row");
         let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
         };
         assert_eq!(get(sync, "mcc"), Some(common::Value::Int(272)));
         assert_eq!(get(sync, "mnc"), Some(common::Value::Int(91)));
         assert_eq!(get(sync, "colour"), Some(common::Value::Int(7)));
-        let si = rows.iter().find(|r| r.protocol == "TETRA-Sysinfo").expect("no sysinfo row");
-        assert_eq!(get(si, "carrier_hz"), Some(common::Value::Float(390_006_250.0)));
+        let si = rows
+            .iter()
+            .find(|r| r.protocol == "TETRA-Sysinfo")
+            .expect("no sysinfo row");
+        assert_eq!(
+            get(si, "carrier_hz"),
+            Some(common::Value::Float(390_006_250.0))
+        );
         assert_eq!(get(si, "la"), Some(common::Value::Int(4321)));
         assert_eq!(node.cell().map(|c| (c.mcc, c.mnc)), Some((272, 91)));
     }
@@ -1296,7 +1393,12 @@ mod tests {
                 } else {
                     aach(scramb, 3, 0, 0)
                 };
-                bits.extend_from_slice(&synth::normal_burst(&full[..216], &bb, &full[216..], false));
+                bits.extend_from_slice(&synth::normal_burst(
+                    &full[..216],
+                    &bb,
+                    &full[216..],
+                    false,
+                ));
             }
         }
         let iq = synth::modulate(&bits, rate, 750.0);
@@ -1334,14 +1436,27 @@ mod tests {
             }
         }
         let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
         };
         // One packet per traffic burst on the slot, between the markers:
         // thirty frames carried the marker, and the first is what opens it.
-        let bursts: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
+        let bursts: Vec<&Decoded> = rows
+            .iter()
+            .filter(|r| r.protocol == "TETRA-Voice")
+            .collect();
         // Fewer than thirty: the demodulator locks a few frames in.
-        assert!((20..=30).contains(&bursts.len()), "{} traffic bursts", bursts.len());
-        assert!(bursts.iter().all(|b| get(b, "timeslot").as_deref() == Some("2") && get(b, "marker").as_deref() == Some("23")));
+        assert!(
+            (20..=30).contains(&bursts.len()),
+            "{} traffic bursts",
+            bursts.len()
+        );
+        assert!(bursts
+            .iter()
+            .all(|b| get(b, "timeslot").as_deref() == Some("2")
+                && get(b, "marker").as_deref() == Some("23")));
         let traffic: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
         let names: Vec<String> = traffic.iter().filter_map(|r| get(r, "pdu")).collect();
         assert_eq!(names, ["TRAFFIC", "TRAFFIC END"], "{rows:?}");
@@ -1352,7 +1467,10 @@ mod tests {
         // frame the marker was seen on.
         let secs: f64 = get(traffic[1], "seconds").unwrap().parse().unwrap();
         let want = 29.0 * 4.0 * 255.0 / 18_000.0;
-        assert!((secs - want).abs() < 0.2, "{secs} s of traffic, wanted about {want:.2}");
+        assert!(
+            (secs - want).abs() < 0.2,
+            "{secs} s of traffic, wanted about {want:.2}"
+        );
         // The speech is named as the row is. The network never said which
         // group marker 23 stands for, and speech with no name is dropped by
         // the bus, so a call that was listed and ticked was never heard.
@@ -1445,12 +1563,17 @@ mod tests {
                 }
             }
         }
-        let get =
-            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string());
-        let bursts: Vec<&Decoded> =
-            rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
-        let traffic: Vec<&Decoded> =
-            rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
+        let get = |d: &Decoded, k: &str| {
+            d.fields
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.to_string())
+        };
+        let bursts: Vec<&Decoded> = rows
+            .iter()
+            .filter(|r| r.protocol == "TETRA-Voice")
+            .collect();
+        let traffic: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
         assert!(!bursts.is_empty(), "no traffic was followed at all");
         // A verdict needs its sixteen frames, so the first bursts of a call
         // joined mid-stream do play before the slot is judged: that is the
@@ -1458,7 +1581,11 @@ mod tests {
         // be muted for it. What must never happen is static for the whole
         // call, and a burst row is only emitted while the slot is still
         // played, so rows and voices run out together.
-        assert!(voices.len() <= 8, "{} voices of static left the node", voices.len());
+        assert!(
+            voices.len() <= 8,
+            "{} voices of static left the node",
+            voices.len()
+        );
         assert!(
             bursts.len() == voices.len(),
             "burst rows outlive the speech they were played with"
@@ -1468,10 +1595,15 @@ mod tests {
         // row says what the frames proved, so a key found later has a row
         // to change.
         assert!(
-            traffic.last().map(|r| get(r, "encryption").as_deref() == Some("AIE-3"))
+            traffic
+                .last()
+                .map(|r| get(r, "encryption").as_deref() == Some("AIE-3"))
                 == Some(true),
             "{:?}",
-            traffic.iter().map(|r| get(r, "encryption")).collect::<Vec<_>>()
+            traffic
+                .iter()
+                .map(|r| get(r, "encryption"))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1486,8 +1618,21 @@ mod tests {
         use dsp::tetra::{Cell, TdmaTime};
 
         let mut node = TetraNode::new(390_000_000.0);
-        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
-        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        let cell = Cell {
+            mcc: 272,
+            mnc: 91,
+            colour: 5,
+            scramb: coding::scramb_init(272, 91, 5),
+        };
+        node.rx.seed(
+            cell,
+            TdmaTime {
+                tn: 1,
+                frame: 6,
+                multiframe: 30,
+            },
+            0,
+        );
         node.last_aie = 3;
         // Re-use is only judged once the hyperframe is known, as SYSINFO
         // would set it; seed it directly here.
@@ -1495,7 +1640,13 @@ mod tests {
 
         // Two calls at the same slot (hence same IV, hyperframe 110),
         // addressed to different parties, both TEA2 under one keystream.
-        let ts = Timestamp { tn: 1, frame: 6, multiframe: 30, hyperframe: 110, uplink: false };
+        let ts = Timestamp {
+            tn: 1,
+            frame: 6,
+            multiframe: 30,
+            hyperframe: 110,
+            uplink: false,
+        };
         let ks = keystream(&Key::Tea2([9u8; 10]), &ts, 10);
         let m1 = b"ABCDEFGHIJ";
         let m2 = b"0123456789";
@@ -1552,8 +1703,21 @@ mod tests {
     fn repeated_exhaustion_rules_out_tea1() {
         use dsp::tetra::{Cell, TdmaTime};
         let mut node = TetraNode::new(390_000_000.0);
-        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
-        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        let cell = Cell {
+            mcc: 272,
+            mnc: 91,
+            colour: 5,
+            scramb: coding::scramb_init(272, 91, 5),
+        };
+        node.rx.seed(
+            cell,
+            TdmaTime {
+                tn: 1,
+                frame: 6,
+                multiframe: 30,
+            },
+            0,
+        );
         node.last_aie = 3;
 
         node.crypto.exhausted = TEA1_RULED_OUT - 1;
@@ -1579,15 +1743,32 @@ mod tests {
         use dsp::tetra::{Cell, TdmaTime};
 
         let mut node = TetraNode::new(390_000_000.0);
-        let cell = Cell { mcc: 272, mnc: 91, colour: 5, scramb: coding::scramb_init(272, 91, 5) };
-        node.rx.seed(cell, TdmaTime { tn: 1, frame: 6, multiframe: 30 }, 0);
+        let cell = Cell {
+            mcc: 272,
+            mnc: 91,
+            colour: 5,
+            scramb: coding::scramb_init(272, 91, 5),
+        };
+        node.rx.seed(
+            cell,
+            TdmaTime {
+                tn: 1,
+                frame: 6,
+                multiframe: 30,
+            },
+            0,
+        );
         node.last_aie = 3;
 
         let c = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
         let ssis = [0x12_3456u32, 0x00_4321, 0xab_cdef];
 
         // Each registration (clear SSI) is followed by its encrypted call.
-        let mm = |ssi| MmPdu { pdu: 1, address: Address::Ssi(ssi), time: None };
+        let mm = |ssi| MmPdu {
+            pdu: 1,
+            address: Address::Ssi(ssi),
+            time: None,
+        };
         let enc_call = |esi| CallPdu {
             pdu: RESOURCE,
             address: Address::Ssi(esi),
@@ -1615,6 +1796,10 @@ mod tests {
         node.add_id_secret(5, c);
         let mut c1 = enc_call(encrypt_id(&c, 0x12_3456));
         node.deanonymize(&mut c1);
-        assert_eq!(c1.address, Address::Ssi(0x12_3456), "ESI de-anonymised to SSI");
+        assert_eq!(
+            c1.address,
+            Address::Ssi(0x12_3456),
+            "ESI de-anonymised to SSI"
+        );
     }
 }

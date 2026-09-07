@@ -21,7 +21,10 @@ pub struct PulseDetectNode {
 
 impl PulseDetectNode {
     pub fn new(cfg: PulseConfig) -> Self {
-        Self { cfg, det: OokDetector::new(1.0, cfg) }
+        Self {
+            cfg,
+            det: OokDetector::new(1.0, cfg),
+        }
     }
 
     pub fn default_ook() -> Self {
@@ -70,7 +73,11 @@ impl Simple for PulseDetectNode {
         for p in pkgs.iter() {
             // Tag the burst so anything downstream, or a waterfall, can point
             // at exactly where in the stream it happened.
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+            c.tag(Tag::new(
+                p.start_sample,
+                "burst",
+                TagValue::Float(p.snr_db as f64),
+            ));
         }
 
         // Report what was thrown away. Without this a mistuned chain produces
@@ -157,7 +164,10 @@ pub struct AskDetectNode {
 
 impl AskDetectNode {
     pub fn new(cfg: AskConfig) -> Self {
-        Self { cfg, det: AskDetector::new(1.0, cfg) }
+        Self {
+            cfg,
+            det: AskDetector::new(1.0, cfg),
+        }
     }
 
     pub fn default_ask() -> Self {
@@ -192,8 +202,16 @@ impl Simple for AskDetectNode {
         }
         let depth = self.det.depth_db() as f64;
         for p in pkgs.iter() {
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
-            c.tag(Tag::new(p.start_sample, "ask_depth_db", TagValue::Float(depth)));
+            c.tag(Tag::new(
+                p.start_sample,
+                "burst",
+                TagValue::Float(p.snr_db as f64),
+            ));
+            c.tag(Tag::new(
+                p.start_sample,
+                "ask_depth_db",
+                TagValue::Float(depth),
+            ));
         }
 
         let s = self.det.take_stats();
@@ -285,7 +303,10 @@ pub struct FskDetectNode {
 
 impl FskDetectNode {
     pub fn new(cfg: FskConfig) -> Self {
-        Self { cfg, det: FskDetector::new(1.0, cfg) }
+        Self {
+            cfg,
+            det: FskDetector::new(1.0, cfg),
+        }
     }
 
     pub fn default_fsk() -> Self {
@@ -321,10 +342,18 @@ impl Simple for FskDetectNode {
         }
         let sep = self.det.separation_hz() as f64;
         for p in pkgs.iter() {
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+            c.tag(Tag::new(
+                p.start_sample,
+                "burst",
+                TagValue::Float(p.snr_db as f64),
+            ));
             // The measured deviation names a device family before anything has
             // decoded, so it is worth carrying even when no protocol matches.
-            c.tag(Tag::new(p.start_sample, "fsk_separation_hz", TagValue::Float(sep)));
+            c.tag(Tag::new(
+                p.start_sample,
+                "fsk_separation_hz",
+                TagValue::Float(sep),
+            ));
         }
 
         let s = self.det.take_stats();
@@ -420,13 +449,24 @@ pub fn decoded_event(
     center: common::Hz,
     modulation: &'static str,
 ) -> Decoded {
-    Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
-        .with_text(report.to_string())
-        .with_detail(report.fields_line())
-        .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .with_modulation(modulation)
-        .with_level(pkg.rssi_dbfs, pkg.snr_db)
-        .with_crc(report.crc_valid)
+    Decoded::bytes(
+        report.model,
+        center,
+        pkg.start_sample as f64,
+        report.raw.clone(),
+    )
+    .with_text(report.to_string())
+    .with_detail(report.fields_line())
+    .with_fields(
+        report
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
+    .with_modulation(modulation)
+    .with_level(pkg.rssi_dbfs, pkg.snr_db)
+    .with_crc(report.crc_valid)
 }
 
 /// The event for a burst no protocol claimed, read under a guessed coding.
@@ -474,11 +514,17 @@ pub fn unmatched_event(
                 }
             }
             if let Some(f) = &a.framed {
-                framing_fields
-                    .push(("frame_len".into(), common::Value::Int(f.payload.len() as i64)));
+                framing_fields.push((
+                    "frame_len".into(),
+                    common::Value::Int(f.payload.len() as i64),
+                ));
                 framing_fields.push((
                     "whitening".into(),
-                    common::Value::Text(if f.whitened { "PN9".into() } else { "none".into() }),
+                    common::Value::Text(if f.whitened {
+                        "PN9".into()
+                    } else {
+                        "none".into()
+                    }),
                 ));
             }
             Decoded::bytes("unknown", center, at, a.frame_bytes().to_vec())
@@ -504,21 +550,35 @@ pub fn unmatched_event(
                 ),
             )),
     };
-    let mut ev = ev.with_modulation(modulation).with_level(pkg.rssi_dbfs, pkg.snr_db);
+    let mut ev = ev
+        .with_modulation(modulation)
+        .with_level(pkg.rssi_dbfs, pkg.snr_db);
     let mut fields: Vec<(String, common::Value)> = Vec::new();
     if let Some(m) = measure {
-        fields.push(("confidence".into(), common::Value::Float(m.confidence as f64)));
+        fields.push((
+            "confidence".into(),
+            common::Value::Float(m.confidence as f64),
+        ));
         if m.baud > 0.0 {
             fields.push(("baud".into(), common::Value::Float(m.baud as f64)));
         }
         if m.separation_hz > 0.0 {
-            fields.push(("separation_hz".into(), common::Value::Float(m.separation_hz as f64)));
+            fields.push((
+                "separation_hz".into(),
+                common::Value::Float(m.separation_hz as f64),
+            ));
         }
         if m.sweep_hz_s.abs() > 0.0 {
-            fields.push(("sweep_hz_per_s".into(), common::Value::Float(m.sweep_hz_s as f64)));
+            fields.push((
+                "sweep_hz_per_s".into(),
+                common::Value::Float(m.sweep_hz_s as f64),
+            ));
         }
         if m.symbol_period_us > 0.0 {
-            fields.push(("symbol_period_us".into(), common::Value::Float(m.symbol_period_us as f64)));
+            fields.push((
+                "symbol_period_us".into(),
+                common::Value::Float(m.symbol_period_us as f64),
+            ));
         }
         if let Some(mode) = &m.mode {
             fields.push(("mode".into(), common::Value::Text(mode.clone())));
@@ -577,7 +637,12 @@ impl ProtocolDecodeNode {
             return;
         }
         let center = c.inputs[0].spec.center;
-        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation, None)));
+        c.emit(Event::Decoded(unmatched_event(
+            pkg,
+            center,
+            self.modulation,
+            None,
+        )));
     }
 
     pub fn all() -> Self {
@@ -651,8 +716,7 @@ impl Simple for ProtocolDecodeNode {
             Param::bool("report_all", self.report_all).label("Report every matching protocol"),
             Param::bool("report_crc_failures", self.report_crc_failures)
                 .label("Warn on CRC failures"),
-            Param::bool("report_unknown", self.report_unknown)
-                .label("Report unrecognised bursts"),
+            Param::bool("report_unknown", self.report_unknown).label("Report unrecognised bursts"),
         ]
     }
 
@@ -738,8 +802,7 @@ impl BurstRouteNode {
 /// What a routed burst was measured to be, as evidence a packet carries.
 pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
     let f = &b.class.features;
-    let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz)
-        .map(|m| m.label());
+    let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz).map(|m| m.label());
     common::Measure {
         modulation: b.class.modulation.label(),
         confidence: b.class.confidence,
@@ -750,7 +813,11 @@ pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
         baud: f.baud,
         separation_hz: f.separation_hz,
         sweep_hz_s: f.chirp_rate,
-        symbol_period_us: if f.cyclic_period_s > 0.0 { f.cyclic_period_s * 1e6 } else { 0.0 },
+        symbol_period_us: if f.cyclic_period_s > 0.0 {
+            f.cyclic_period_s * 1e6
+        } else {
+            0.0
+        },
     }
 }
 
@@ -801,10 +868,18 @@ impl Simple for BurstRouteNode {
                 ));
             }
             if b.class.features.baud > 0.0 {
-                c.tag(Tag::new(b.start_sample, "baud", TagValue::Float(b.class.features.baud as f64)));
+                c.tag(Tag::new(
+                    b.start_sample,
+                    "baud",
+                    TagValue::Float(b.class.features.baud as f64),
+                ));
             }
             for p in &b.packages {
-                c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+                c.tag(Tag::new(
+                    p.start_sample,
+                    "burst",
+                    TagValue::Float(p.snr_db as f64),
+                ));
                 let mut p = p.clone();
                 p.center_hz = center;
                 pkgs.push(p);
@@ -865,10 +940,9 @@ impl Simple for BurstRouteNode {
                 }
                 d = match mode {
                     Some(m) => d.with_detail(m.label()),
-                    None => d.with_detail(format!(
-                        "no front end reads {}",
-                        b.class.modulation.label()
-                    )),
+                    None => {
+                        d.with_detail(format!("no front end reads {}", b.class.modulation.label()))
+                    }
                 };
                 c.emit(Event::Decoded(d));
             }
@@ -909,8 +983,12 @@ impl Simple for BurstRouteNode {
                 .label("Margin over the runner-up required"),
             // Past one on purpose: the top of the range means never, and a
             // busy wideband tier wants that available without a rebuild.
-            Param::float("report_confidence", self.report_min_confidence as f64, 0.0..=1.01)
-                .label("Confidence before an undecodable burst is logged"),
+            Param::float(
+                "report_confidence",
+                self.report_min_confidence as f64,
+                0.0..=1.01,
+            )
+            .label("Confidence before an undecodable burst is logged"),
         ]
     }
 

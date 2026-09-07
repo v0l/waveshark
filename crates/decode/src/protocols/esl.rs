@@ -63,12 +63,18 @@ pub struct Esl {
 impl Esl {
     /// OpenEPaperLink's own configuration: 38.3835 kbit/s, 26 us per bit.
     pub fn sub_ghz_38k() -> Self {
-        Self { name: "ESL-38k", bit_us: 26 }
+        Self {
+            name: "ESL-38k",
+            bit_us: 26,
+        }
     }
 
     /// The stock Chroma configuration: 249.939 kbit/s, 4 us per bit.
     pub fn sub_ghz_250k() -> Self {
-        Self { name: "ESL-250k", bit_us: 4 }
+        Self {
+            name: "ESL-250k",
+            bit_us: 4,
+        }
     }
 }
 

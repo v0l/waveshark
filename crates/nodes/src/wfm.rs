@@ -179,7 +179,11 @@ impl Node for WfmDemodNode {
         // Two interleaved channels. The port's sample rate is twice the frame
         // rate, which the channel count now says outright rather than leaving
         // downstream filters to infer it from a rate that looks too high.
-        Ok(vec![i.spec.with_kind(PortKind::Real).with_rate(rate).with_channels(2)])
+        Ok(vec![i
+            .spec
+            .with_kind(PortKind::Real)
+            .with_rate(rate)
+            .with_channels(2)])
     }
 
     fn process(
@@ -204,7 +208,8 @@ impl Node for WfmDemodNode {
         ));
 
         if self.stereo_enabled {
-            self.stereo.process(&self.mpx, &mut self.left, &mut self.right);
+            self.stereo
+                .process(&self.mpx, &mut self.left, &mut self.right);
         } else {
             self.stereo.process_mono(&self.mpx, &mut self.left);
             self.right.clear();
@@ -240,7 +245,10 @@ impl Node for WfmDemodNode {
         let blend = self.stereo.blend();
         if (blend - self.last_blend).abs() > 0.02 {
             self.last_blend = blend;
-            c.emit(Event::Metric { name: "stereo_blend", value: blend as f64 });
+            c.emit(Event::Metric {
+                name: "stereo_blend",
+                value: blend as f64,
+            });
         }
         self.samples += self.left.len() as u64;
         Ok(())
@@ -277,7 +285,9 @@ impl Node for WfmDemodNode {
                 self.rds_enabled = v.as_bool().unwrap_or(true);
                 Ok(())
             }
-            _ => Err(common::Error::other(format!("wfm_demod: unknown parameter {name:?}"))),
+            _ => Err(common::Error::other(format!(
+                "wfm_demod: unknown parameter {name:?}"
+            ))),
         }
     }
 }

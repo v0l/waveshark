@@ -41,8 +41,9 @@ use dsp::pocsag::{BATCH_WORDS, IDLE};
 ///
 /// Codes 0 to 9 are the digits; 10 is a spare, and 11 to 15 are the urgency
 /// mark, a space, a hyphen and the two brackets, per ITU-R M.584-2.
-const NUMERIC: [char; 16] =
-    ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', 'U', ' ', '-', ')', '('];
+const NUMERIC: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', 'U', ' ', '-', ')', '(',
+];
 
 /// What a page carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +123,11 @@ fn flush(out: &mut Vec<Message>, open: &mut Option<(u32, u8)>, bits: &mut Vec<bo
         Body::Numeric(numeric(bits))
     };
     bits.clear();
-    out.push(Message { address, function, body });
+    out.push(Message {
+        address,
+        function,
+        body,
+    });
 }
 
 /// Four bits per character, each reversed, five to a codeword.
@@ -130,7 +135,10 @@ fn numeric(bits: &[bool]) -> String {
     let mut s = String::with_capacity(bits.len() / 4);
     for c in bits.chunks_exact(4) {
         // Reversed: the character's least significant bit was sent first.
-        let code = c.iter().enumerate().fold(0usize, |a, (i, &b)| a | usize::from(b) << i);
+        let code = c
+            .iter()
+            .enumerate()
+            .fold(0usize, |a, (i, &b)| a | usize::from(b) << i);
         s.push(NUMERIC[code]);
     }
     // A message that does not fill its last codeword is padded with spaces,
@@ -142,7 +150,10 @@ fn numeric(bits: &[bool]) -> String {
 fn alpha(bits: &[bool]) -> String {
     let mut s = String::with_capacity(bits.len() / 7);
     for c in bits.chunks_exact(7) {
-        let code = c.iter().enumerate().fold(0u8, |a, (i, &b)| a | u8::from(b) << i);
+        let code = c
+            .iter()
+            .enumerate()
+            .fold(0u8, |a, (i, &b)| a | u8::from(b) << i);
         // The tail of a message is padded with nulls and end-of-text marks,
         // and a pager display shows neither. Anything else unprintable is
         // kept as a replacement so that a corrupted message looks corrupted
@@ -224,7 +235,10 @@ mod tests {
     /// go through it, which is also a check that the two layers agree about
     /// where the twenty-one bits sit.
     fn words(contents: Vec<u32>) -> Vec<u32> {
-        contents.into_iter().map(dsp::pocsag::encode_codeword).collect()
+        contents
+            .into_iter()
+            .map(dsp::pocsag::encode_codeword)
+            .collect()
     }
 
     /// A real off-air page, captured and decoded by somebody else's program.
@@ -244,7 +258,10 @@ mod tests {
         batch[3] = 0b1100_0111_0010_0001_0001_1110_0000_0010;
         let msgs = parse(&batch);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].address, 1_238_681, "the frame carries the low three bits");
+        assert_eq!(
+            msgs[0].address, 1_238_681,
+            "the frame carries the low three bits"
+        );
         assert_eq!(msgs[0].function, 0);
         assert_eq!(msgs[0].body, Body::Numeric("1724".into()));
     }
@@ -279,7 +296,11 @@ mod tests {
 
     #[test]
     fn a_numeric_page_round_trips_with_its_symbols() {
-        let msgs = parse(&words(encode(999_999, 0, &Body::Numeric("01-234U(56)".into()))));
+        let msgs = parse(&words(encode(
+            999_999,
+            0,
+            &Body::Numeric("01-234U(56)".into()),
+        )));
         assert_eq!(msgs[0].body, Body::Numeric("01-234U(56)".into()));
         assert_eq!(msgs[0].address, 999_999);
     }
@@ -306,7 +327,11 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].body, Body::Alpha("FIRST".into()));
         assert_eq!(msgs[1].body, Body::Numeric("112".into()));
-        assert_eq!(msgs[2].body, Body::Tone, "an address with nothing after it is a beep");
+        assert_eq!(
+            msgs[2].body,
+            Body::Tone,
+            "an address with nothing after it is a beep"
+        );
         assert_eq!(msgs[2].address, 1_500_003);
     }
 

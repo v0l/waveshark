@@ -6,7 +6,11 @@ use nodes::lora_nodes::lora_decoded;
 
 fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
     let frame = Frame {
-        header: Header { length: payload.len(), coding_rate: 1, has_crc: true },
+        header: Header {
+            length: payload.len(),
+            coding_rate: 1,
+            has_crc: true,
+        },
         payload,
         crc_ok: Some(true),
         bin_offset: 0,
@@ -17,7 +21,10 @@ fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
 }
 
 fn field(d: &pipeline::event::Decoded, k: &str) -> Option<String> {
-    d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+    d.fields
+        .iter()
+        .find(|(n, _)| n == k)
+        .map(|(_, v)| v.to_string())
 }
 
 /// An advert names the node, says what it is and where it is, with no key.
@@ -63,7 +70,11 @@ fn an_enciphered_packet_gives_its_routing_and_admits_the_doubt() {
     assert_eq!(field(&d, "hops").as_deref(), Some("2"));
     assert_eq!(field(&d, "encrypted").as_deref(), Some("true"));
     assert_eq!(field(&d, "verified").as_deref(), Some("false"));
-    assert!(d.detail.as_deref().unwrap_or_default().contains("header only"));
+    assert!(d
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .contains("header only"));
 }
 
 /// A Meshtastic packet is not claimed by MeshCore: the sync words differ, and
@@ -77,7 +88,11 @@ fn a_meshtastic_packet_is_not_claimed_as_meshcore() {
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
         .collect();
     let frame = Frame {
-        header: Header { length: payload.len(), coding_rate: 1, has_crc: true },
+        header: Header {
+            length: payload.len(),
+            coding_rate: 1,
+            has_crc: true,
+        },
         payload,
         crc_ok: Some(true),
         bin_offset: 0,
@@ -99,14 +114,17 @@ fn a_public_channel_message_from_openssl_becomes_a_readable_row() {
     let mut payload = vec![(0x05 << 2) | 0x01, 0x00]; // group text, flood, no path
     payload.push(0x11); // channel hash of the public key
     payload.extend_from_slice(&[0x8b, 0xea]); // first two bytes of the HMAC
-    payload.extend_from_slice(
-        &unhex("55c92ceb1ba78c899bd6407235ae24848868926b274a5c56cb2e467278d2fd31"),
-    );
+    payload.extend_from_slice(&unhex(
+        "55c92ceb1ba78c899bd6407235ae24848868926b274a5c56cb2e467278d2fd31",
+    ));
 
     let d = row(payload);
     assert_eq!(d.protocol, "MeshCore");
     assert_eq!(field(&d, "type").as_deref(), Some("group text"));
-    assert_eq!(field(&d, "channel").as_deref(), Some("Public (default key)"));
+    assert_eq!(
+        field(&d, "channel").as_deref(),
+        Some("Public (default key)")
+    );
     assert_eq!(field(&d, "from").as_deref(), Some("kieran"));
     assert_eq!(field(&d, "text").as_deref(), Some("on my way"));
     assert_eq!(field(&d, "verified").as_deref(), Some("true"));
@@ -115,5 +133,8 @@ fn a_public_channel_message_from_openssl_becomes_a_readable_row() {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }

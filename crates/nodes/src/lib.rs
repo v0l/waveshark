@@ -7,66 +7,70 @@
 //! reconfiguration rather than a recompile.
 
 pub mod ais_nodes;
-pub mod ble_nodes;
-pub mod auto_node;
 pub mod aprs_nodes;
+pub mod auto_node;
 pub mod bank;
+pub mod bank_node;
+pub mod ble_nodes;
 pub mod capture_nodes;
 pub mod decode_nodes;
-pub mod dsp_nodes;
 pub mod dmr_nodes;
-pub mod m17_nodes;
-pub mod tetra_nodes;
-pub mod modes_nodes;
+pub mod dsp_nodes;
 pub mod feed_nodes;
+pub mod filter_nodes;
+pub mod frame_meter;
+pub mod lora_nodes;
+pub mod m17_nodes;
+pub mod mod_nodes;
+pub mod modes_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod scope_nodes;
-pub mod bank_node;
-pub mod filter_nodes;
-pub mod frame_meter;
 pub mod sink_nodes;
 pub mod source_nodes;
-pub mod wfm;
-pub mod lora_nodes;
-pub mod mod_nodes;
+pub mod tetra_nodes;
 pub mod tx_nodes;
+pub mod wfm;
 pub mod wmbus_nodes;
 
+pub use ais_nodes::AisNode;
+pub use aprs_nodes::AprsNode;
+pub use auto_node::{AutoNode, AUTO_OPEN_DB};
 pub use bank::{ChannelBank, ChannelEvent, Gating};
+pub use bank_node::BankNode;
+pub use ble_nodes::BleNode;
 pub use capture_nodes::IqCaptureNode;
-pub use wfm::WfmDemodNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
 };
-pub use ais_nodes::AisNode;
-pub use frame_meter::FrameMeter;
-pub use ble_nodes::BleNode;
-pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
-pub use m17_nodes::M17Node;
-pub use tetra_nodes::TetraNode;
-pub use pocsag_nodes::PocsagNode;
-pub use modes_nodes::ModeSNode;
-pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
-pub use packet_nodes::PacketDecodeNode;
-pub use auto_node::{AutoNode, AUTO_OPEN_DB};
-pub use lora_nodes::LoraNode;
-pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX};
-pub use mod_nodes::{
-    AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
-    NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
-};
-pub use bank_node::BankNode;
-pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
-pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
-pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
-pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use dsp_nodes::{
     AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
     RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
 };
+pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
+pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
+pub use frame_meter::FrameMeter;
+pub use lora_nodes::LoraNode;
+pub use m17_nodes::M17Node;
+pub use mod_nodes::{
+    AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
+    NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
+};
+pub use modes_nodes::ModeSNode;
+pub use packet_nodes::PacketDecodeNode;
+pub use pocsag_nodes::PocsagNode;
+pub use scope_nodes::{ScopeFrame, ScopeNode};
+pub use sink_nodes::{
+    AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,
+};
+pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
+pub use tetra_nodes::TetraNode;
+pub use tx_nodes::{
+    MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX,
+};
+pub use wfm::WfmDemodNode;
+pub use wmbus_nodes::WmbusNode;
 
 use common::Result;
 use dsp::{AskConfig, FskConfig, PulseConfig};
@@ -77,7 +81,6 @@ use pipeline::{Graph, StreamSpec};
 /// Every node type compiled into this build.
 pub fn registry() -> Registry {
     let mut r = Registry::new();
-
 
     r.register(
         StageDesc {
@@ -96,8 +99,10 @@ pub fn registry() -> Registry {
             category: "transmit",
         },
         |s: &Settings| {
-            Ok(Box::new(ToneNode::new(s.f64_or("hz", 1_000.0), s.f64_or("level", 0.8) as f32))
-                as Box<dyn Node>)
+            Ok(Box::new(ToneNode::new(
+                s.f64_or("hz", 1_000.0),
+                s.f64_or("level", 0.8) as f32,
+            )) as Box<dyn Node>)
         },
     );
 
@@ -218,8 +223,7 @@ pub fn registry() -> Registry {
             category: "filter",
         },
         |s: &Settings| {
-            Ok(Box::new(DecimateNode::new(s.i64_or("factor", 1).max(1) as usize))
-                as Box<dyn Node>)
+            Ok(Box::new(DecimateNode::new(s.i64_or("factor", 1).max(1) as usize)) as Box<dyn Node>)
         },
     );
 
@@ -230,8 +234,10 @@ pub fn registry() -> Registry {
             category: "filter",
         },
         |s: &Settings| {
-            Ok(Box::new(RealDecimateNode::new(s.i64_or("factor", 1).max(1) as usize))
-                as Box<dyn Node>)
+            Ok(
+                Box::new(RealDecimateNode::new(s.i64_or("factor", 1).max(1) as usize))
+                    as Box<dyn Node>,
+            )
         },
     );
 
@@ -284,8 +290,10 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            Ok(Box::new(M17Node::new(s.f64_or("channel_hz", m17_nodes::DEFAULT_HZ)))
-                as Box<dyn Node>)
+            Ok(
+                Box::new(M17Node::new(s.f64_or("channel_hz", m17_nodes::DEFAULT_HZ)))
+                    as Box<dyn Node>,
+            )
         },
     );
 
@@ -307,7 +315,10 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            Ok(Box::new(DmrNode::new(s.f64_or("channel_hz", dmr_nodes::DEFAULT_HZ))) as Box<dyn Node>)
+            Ok(
+                Box::new(DmrNode::new(s.f64_or("channel_hz", dmr_nodes::DEFAULT_HZ)))
+                    as Box<dyn Node>,
+            )
         },
     );
 
@@ -383,13 +394,17 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            let mut cfg = dsp::SourceConfig { open_db: AUTO_OPEN_DB, ..Default::default() };
+            let mut cfg = dsp::SourceConfig {
+                open_db: AUTO_OPEN_DB,
+                ..Default::default()
+            };
             cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
             cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
             cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
             cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
             cfg.bank_channel_hz = s.f64_or("bank_channel_hz", cfg.bank_channel_hz);
-            cfg.bank_min_channels = s.f64_or("bank_min_channels", cfg.bank_min_channels as f64) as usize;
+            cfg.bank_min_channels =
+                s.f64_or("bank_min_channels", cfg.bank_min_channels as f64) as usize;
             if cfg.close_db >= cfg.open_db {
                 cfg.close_db = cfg.open_db - 1.0;
             }
@@ -458,8 +473,10 @@ pub fn registry() -> Registry {
             category: "sink",
         },
         |s: &Settings| {
-            Ok(Box::new(PacketBusNode::new(s.i64_or("inputs", 1).max(1) as usize))
-                as Box<dyn Node>)
+            Ok(
+                Box::new(PacketBusNode::new(s.i64_or("inputs", 1).max(1) as usize))
+                    as Box<dyn Node>,
+            )
         },
     );
 
@@ -509,7 +526,10 @@ pub fn registry() -> Registry {
         },
         |s: &Settings| {
             let mut n = ScopeNode::new(s.i64_or("fft_size", 1024).max(64) as usize);
-            let _ = n.set_param("refresh_hz", pipeline::ParamValue::Float(s.f64_or("refresh_hz", 30.0)));
+            let _ = n.set_param(
+                "refresh_hz",
+                pipeline::ParamValue::Float(s.f64_or("refresh_hz", 30.0)),
+            );
             Ok(Box::new(n) as Box<dyn Node>)
         },
     );
@@ -611,8 +631,7 @@ pub fn registry() -> Registry {
             category: "demod",
         },
         |s: &Settings| {
-            Ok(Box::new(FmDemodNode::new(s.f64_or("deviation_hz", 75_000.0)))
-                as Box<dyn Node>)
+            Ok(Box::new(FmDemodNode::new(s.f64_or("deviation_hz", 75_000.0))) as Box<dyn Node>)
         },
     );
 
@@ -622,9 +641,7 @@ pub fn registry() -> Registry {
             summary: "Undo broadcast FM pre-emphasis (50 us in Europe, 75 in the Americas)",
             category: "filter",
         },
-        |s: &Settings| {
-            Ok(Box::new(DeemphasisNode::new(s.f64_or("tau_us", 50.0))) as Box<dyn Node>)
-        },
+        |s: &Settings| Ok(Box::new(DeemphasisNode::new(s.f64_or("tau_us", 50.0))) as Box<dyn Node>),
     );
 
     r.register(
@@ -642,11 +659,12 @@ pub fn registry() -> Registry {
                 min_pulses: s.i64_or("min_pulses", d.min_pulses as i64).max(1) as usize,
                 min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
                 hysteresis: s.f64_or("hysteresis", d.hysteresis as f64) as f32,
-                noise_threshold_ratio: s.f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64) as f32,
+                noise_threshold_ratio: s
+                    .f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64)
+                    as f32,
                 tau_us: s.f64_or("tau_us", d.tau_us as f64) as f32,
                 merge_dropouts: s.bool_or("merge_dropouts", d.merge_dropouts),
-                measured_noise_floor: s
-                    .bool_or("measured_noise_floor", d.measured_noise_floor),
+                measured_noise_floor: s.bool_or("measured_noise_floor", d.measured_noise_floor),
                 noise_floor_margin: s.f64_or("noise_floor_margin", d.noise_floor_margin as f64)
                     as f32,
             };
@@ -699,8 +717,7 @@ pub fn registry() -> Registry {
                 noise_threshold_ratio: s
                     .f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64)
                     as f32,
-                min_separation_hz: s.f64_or("min_separation_hz", d.min_separation_hz as f64)
-                    as f32,
+                min_separation_hz: s.f64_or("min_separation_hz", d.min_separation_hz as f64) as f32,
                 max_burst_us: s.f64_or("max_burst_us", d.max_burst_us as f64) as u32,
             };
             Ok(Box::new(FskDetectNode::new(cfg)) as Box<dyn Node>)
@@ -817,8 +834,10 @@ pub fn registry() -> Registry {
                 "level" => SquelchKind::Level,
                 _ => SquelchKind::Noise,
             };
-            Ok(Box::new(SquelchNode::new(kind, s.f64_or("threshold_db", 9.0) as f32))
-                as Box<dyn Node>)
+            Ok(
+                Box::new(SquelchNode::new(kind, s.f64_or("threshold_db", 9.0) as f32))
+                    as Box<dyn Node>,
+            )
         },
     );
 
@@ -858,7 +877,10 @@ pub struct NodeSpec {
 
 impl NodeSpec {
     pub fn new(kind: &str) -> Self {
-        Self { kind: kind.into(), settings: Settings::new() }
+        Self {
+            kind: kind.into(),
+            settings: Settings::new(),
+        }
     }
 
     pub fn set(mut self, k: &str, v: pipeline::ParamValue) -> Self {
@@ -910,7 +932,9 @@ pub fn ook_chain(shift_hz: f64, decimate: usize, reset_us: u32) -> Vec<NodeSpec>
         NodeSpec::new("mixer").f("shift_hz", shift_hz),
         NodeSpec::new("decimate").i("factor", decimate as i64),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect").f("reset_us", reset_us as f64).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", reset_us as f64)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -928,7 +952,11 @@ pub fn ook_chain(shift_hz: f64, decimate: usize, reset_us: u32) -> Vec<NodeSpec>
 /// The floor is what a gate is worth: idle channels cost the detector only,
 /// and that is most of the band most of the time.
 pub fn ism_detector_config() -> dsp::DetectorConfig {
-    dsp::DetectorConfig { open_db: 6.0, close_db: 3.0, ..Default::default() }
+    dsp::DetectorConfig {
+        open_db: 6.0,
+        close_db: 3.0,
+        ..Default::default()
+    }
 }
 
 /// Everything an ISM channel needs, in one graph.
@@ -951,7 +979,10 @@ pub fn ism_detector_config() -> dsp::DetectorConfig {
 /// that from the channel it is given.
 pub fn ism_decode_graph(input: StreamSpec) -> Result<Graph> {
     let mut b = Graph::builder(input);
-    let node = b.add_labeled("Classify and route", Box::new(BurstRouteNode::default_ism()));
+    let node = b.add_labeled(
+        "Classify and route",
+        Box::new(BurstRouteNode::default_ism()),
+    );
     b.source(node.i());
     b.output(node.o());
     b.build()
@@ -977,7 +1008,12 @@ pub fn adsb_graph(input: StreamSpec) -> Result<Graph> {
 /// does its own discrimination. `deviation_hz` is the protocol's published
 /// deviation; the separation between the tones is twice that, and the check is
 /// set at half of it so a mistuned or drifting transmitter still passes.
-pub fn fsk_chain(shift_hz: f64, decimate: usize, deviation_hz: f64, reset_us: u32) -> Vec<NodeSpec> {
+pub fn fsk_chain(
+    shift_hz: f64,
+    decimate: usize,
+    deviation_hz: f64,
+    reset_us: u32,
+) -> Vec<NodeSpec> {
     vec![
         NodeSpec::new("mixer").f("shift_hz", shift_hz),
         NodeSpec::new("decimate").i("factor", decimate as i64),
