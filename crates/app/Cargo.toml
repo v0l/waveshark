@@ -43,7 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["limesdr"]
+default = ["limesdr", "stt"]
 limesdr = ["dep:limesdr"]
 # TETRA decryption and key recovery. Off by default; a stock build links no
 # TETRA cipher and no GPU stack, and its Keys view is an encryption monitor
@@ -53,6 +53,12 @@ tea = ["nodes/tea", "decode/tea"]
 # DMR speech decode through the AMBE vocoder (patent-encumbered, off by
 # default). Turns on `nodes/ambe`.
 ambe = ["nodes/ambe"]
+# Transcribe decoded speech with a local Whisper model. On by default: a
+# scanner that cannot tell you what was said is missing the point of a voice
+# channel. The stage is switched off until a model directory exists, so a
+# build with no model costs a node that copies packets. Turn it off with
+# --no-default-features to keep candle and the tokenizer out of the build.
+stt = ["nodes/stt"]
 
 [[example]]
 name = "lime"

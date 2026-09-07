@@ -1,0 +1,32 @@
+[package]
+name = "stt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common.workspace = true
+audio.workspace = true
+tracing.workspace = true
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+byteorder = "1"
+serde_json = "1"
+hf-hub = { version = "0.5", optional = true }
+
+[features]
+default = []
+# Fetch model weights from the Hugging Face hub on first use. Off by default:
+# a receiver should not reach the network to decode what it heard.
+hub = ["dep:hf-hub"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
+[dev-dependencies]
+hound = "3"
+candle-core = "0.11"
+
+[[example]]
+name = "transcribe"

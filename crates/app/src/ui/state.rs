@@ -41,6 +41,9 @@ pub struct Channel {
     /// what an operator who has never touched the control should get.
     pub(super) squelch_db: Option<f32>,
     pub(super) agc: bool,
+    /// Treat what is heard here as speech: calls on the bus, a row in the
+    /// call list, and a transcript where a model is installed.
+    pub(super) voice: bool,
     /// What this channel transmits when it is keyed, or `None` for a channel
     /// that only listens. Every channel starts that way.
     pub(super) tx: Option<crate::radio::TxSpec>,
