@@ -214,6 +214,31 @@ mod tests {
         }
     }
 
+    /// An octet goes on the air low bit first, all the way up the stack.
+    ///
+    /// Packed the other way every block still passes its Fire code, because
+    /// the check runs over the bit stream and never sees the packing, and
+    /// every message above reads as an unknown type. A live cell settled it:
+    /// the second byte of every block came back as 0x60, which is the radio
+    /// resource discriminator 0x06 with its bits reversed.
+    #[test]
+    fn octets_go_out_low_bit_first() {
+        let mut block = [0u8; BLOCK_BYTES];
+        block[0] = 0x01;
+        let bursts = encode(&block).expect("23 bytes");
+        // Bit 0 of byte 0 is the first bit into the encoder, so the first two
+        // coded bits are its two outputs and nothing else is set yet.
+        let mut coded = [0u8; CODED_BITS];
+        for k in 0..CODED_BITS {
+            let (b, j) = place(k);
+            coded[k] = bursts[b][j];
+        }
+        assert_eq!(&coded[..2], &[1, 1], "the low bit of the first octet leads");
+        // And back again through the decoder.
+        let got = decode(&softened(&bursts)).expect("a block");
+        assert_eq!(got[0], 0x01);
+    }
+
     #[test]
     fn a_short_block_is_not_encodable() {
         assert!(encode(&[0u8; 22]).is_none());

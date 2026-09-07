@@ -322,6 +322,28 @@ mod tests {
         assert_eq!(decode(&soft), Some(want));
     }
 
+    /// The 25 bits as they go on the air, for a cell and a frame number, so
+    /// that the field layout cannot be tidied into order by somebody who
+    /// reasonably assumes it is in order.
+    ///
+    /// Not from this file's own encoder, which is the point: a round trip
+    /// through a wrong layout passes, and did, for as long as nothing but
+    /// this crate had an opinion. These positions are `gr-gsm`'s
+    /// `decode_sch`, and the recording that settled it had 337 bursts whose
+    /// frame numbers agreed with the time between them only this way round.
+    #[test]
+    fn the_fields_sit_where_gsm_puts_them() {
+        let sch = sch(2, 7, 51 * 26 * 1180 + 21);
+        let bits = info_bits(&sch).expect("a legal burst");
+        let got: String = bits.iter().map(|b| char::from(b'0' + b)).collect();
+        // Worked out by hand from those positions: colour code 2 as 010 in
+        // bits 7, 6 and 5; colour code 7 as 111 in bits 4, 3 and 2; T1 =
+        // 1180 as 10010011100 across bits 1, 0, 15 down to 8, and 23; T2 =
+        // 21 as 10101 in bits 22 down to 18; T3' = 2 as 010 in bits 17, 16
+        // and 24.
+        assert_eq!(got, "0111101001110010101010100");
+    }
+
     /// What the bus carries is the field, and reading it back gives the same
     /// cell: the packing is a container and not a second decoder.
     #[test]

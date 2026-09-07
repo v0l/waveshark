@@ -1198,6 +1198,87 @@ mod tests {
         assert_eq!(got[0].frame_number, sch.frame_number + 1);
     }
 
+    /// A whole control multiframe, through a channel measured off the air:
+    /// five beacons where the standard puts them, a broadcast block after the
+    /// first, an echo, a 20 kHz tuner error and noise.
+    ///
+    /// This is the shape of the recording that found the two bit orders, with
+    /// the identity replaced by the test network 001-01 so that nothing
+    /// belonging to a real cell is committed. The impairments are the ones
+    /// measured on that recording: a receiver 20 kHz low at 946 MHz, a
+    /// channel whose second path arrives a symbol later a quarter as strong,
+    /// and enough noise to put the burst near 10 dB in the channel.
+    ///
+    /// What it pins down is the thing a single burst cannot. A burst decodes
+    /// and passes its parity whatever order the fields are read in, so the
+    /// only evidence the order is right is that consecutive bursts disagree
+    /// about the frame number by exactly the number of frames between them.
+    #[test]
+    fn a_multiframe_of_beacons_keeps_time_with_itself() {
+        let bcc = 7;
+        let first = Sch { ncc: 2, bcc, frame_number: 51 * 26 * 1180 + 1 };
+        // System information type 3 for the test network: 001-01, location
+        // area 1, cell 1. Octets go out low bit first, which `bcch` does.
+        let mut block = [0x2Bu8; 23];
+        block[..10]
+            .copy_from_slice(&[0x49, 0x06, 0x1B, 0x00, 0x01, 0x00, 0xF1, 0x10, 0x00, 0x01]);
+
+        let sps = 8;
+        let lead = 200.0;
+        let total = ((lead * 2.0 + 45.0 * FRAME_SYMBOLS) * sps as f64) as usize;
+        let mut base = vec![C32::new(0.0, 0.0); total];
+        let mut place = |at: f64, wave: &[C32]| {
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(wave);
+        };
+        // Timeslot zero of a control multiframe: a frequency correction burst
+        // every ten frames, the synchronisation burst after each, and the
+        // broadcast channel in frames 2 to 5.
+        for n in 0..4u32 {
+            let at = lead + 10.0 * f64::from(n) * FRAME_SYMBOLS;
+            let sch = Sch { frame_number: first.frame_number + 10 * n, ..first };
+            place(at, &modulate(&[0u8; BURST_BITS], sps));
+            place(at + FRAME_SYMBOLS, &modulate(&sch_burst_bits(&sch).unwrap(), sps));
+        }
+        for (n, data) in bcch::encode(&block).unwrap().iter().enumerate() {
+            let bits = normal_burst_bits(data, usize::from(bcc));
+            place(lead + (2.0 + n as f64) * FRAME_SYMBOLS, &modulate(&bits, sps));
+        }
+
+        // The channel the recording measured, then the tuner error and the
+        // noise, at the receiver's rate.
+        let echo: Vec<C32> = (0..base.len())
+            .map(|i| {
+                let d = sps;
+                let late = if i >= d { base[i - d] * C32::new(0.20, 0.14) } else { C32::default() };
+                base[i] + late
+            })
+            .collect();
+        let rate = 2_400_000.0;
+        let iq = resample(&echo, SYMBOL_RATE * sps as f64, rate, -20_000.0, 0.25);
+
+        let mut det = SchDetector::new(rate, 0.0, 0.0, GsmConfig::default());
+        let mut out = Vec::new();
+        for chunk in iq.chunks(8192) {
+            det.process(chunk, &mut out);
+        }
+
+        let got = syncs(&out);
+        assert!(got.len() >= 3, "read {} of the four beacons: {got:?}", got.len());
+        for (n, s) in got.iter().enumerate() {
+            assert_eq!((s.sch.ncc, s.sch.bcc), (2, bcc), "burst {n}");
+        }
+        // Every pair has to agree about how much time passed between them,
+        // which is what a wrong field order cannot do.
+        for pair in got.windows(2) {
+            let apart = pair[1].sch.frame_number - pair[0].sch.frame_number;
+            assert!(apart == 0 || apart == 10, "{apart} frames between two bursts ten apart");
+        }
+        let blocks = blocks(&out);
+        assert!(!blocks.is_empty(), "no broadcast block through the echo");
+        assert_eq!(blocks[0].bytes, block);
+    }
+
     /// A beacon with a broadcast block in the four frames after the
     /// synchronisation burst, which is where the multiframe puts it, and a
     /// second beacon ten frames on so the first is corroborated.
