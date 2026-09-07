@@ -30,6 +30,7 @@ pub mod flysky;
 pub mod video_channels;
 pub mod framing;
 pub mod frsky;
+pub mod gsm;
 #[cfg(feature = "tea")]
 pub mod gpu;
 #[cfg(feature = "tea")]

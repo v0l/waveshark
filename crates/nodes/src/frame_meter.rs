@@ -123,6 +123,24 @@ impl FrameMeter {
         }))
     }
 
+    /// A frame at what the channel measured, carrying the samples it names
+    /// rather than everything since the last one.
+    ///
+    /// For a front end that says where its frame sat and can produce several
+    /// from one block. Taking the samples the other way empties the ring, so
+    /// the second frame of a block came out with nothing behind it.
+    pub fn frame_at(&mut self, bytes: Vec<u8>, start_sample: u64, len: usize) -> common::Frame {
+        let f = common::Frame {
+            bytes,
+            center_hz: self.center_hz,
+            rssi_dbfs: self.rssi_dbfs(),
+            snr_db: self.snr_db(),
+            iq: self.iq_at(start_sample, len),
+        };
+        self.peak_pow = 0.0;
+        f
+    }
+
     /// A frame at what the channel measured, with the samples behind it.
     ///
     /// The level is reset afterwards, so the next frame measures its own
