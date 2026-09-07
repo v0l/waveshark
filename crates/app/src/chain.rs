@@ -3043,6 +3043,22 @@ pub fn registry() -> pipeline::registry::Registry {
     );
     r.register(
         StageDesc {
+            name: "video_bus",
+            summary: "Every picture the receiver has in one place: pictures do \
+                      not sum, so this one selects what is watched and keeps \
+                      the last field of everything else",
+            category: "video",
+        },
+        |s: &pipeline::registry::Settings| {
+            let mut n = crate::videobus::VideoBusNode::new();
+            for (name, value) in s {
+                let _ = pipeline::node::Node::set_param(&mut n, name, value.clone());
+            }
+            Ok(Box::new(n) as Box<dyn pipeline::node::Node>)
+        },
+    );
+    r.register(
+        StageDesc {
             name: "audio_bus",
             summary: "Every channel and every voice front end in one place: \
                       what reaches the speaker is what is wired in here, at \
