@@ -298,6 +298,9 @@ fn main() {
     }
     println!();
     println!("channel  freq(MHz)   sf  packets  sync words");
+    // Every detection, so the rate can be worked out from how often packets
+    // arrive rather than from being told what the handset is set to.
+    let mut seen: Vec<(f64, u8, usize)> = Vec::new();
     for &ch in &chans {
         let hz = b.channel_hz(ch as u8) as f64;
         let mut phase = 0.0f64;
@@ -344,6 +347,9 @@ fn main() {
                     Some(p) => {
                         syncs.insert(p.sync_word);
                         found += 1;
+                        if p.sync_word == 0x12 {
+                            seen.push((p.start as f64 / (bw * dsp::lora::OVERSAMPLE as f64), sf, ch));
+                        }
                         if p.sync_word == 0x12 && found <= 2 {
                             // ExpressLRS agrees the length and the coding rate
                             // in advance, so there is no header to read them
@@ -364,7 +370,12 @@ fn main() {
                                 }
                             }
                         }
-                        at = p.start + demod.symbol_len();
+                        // Past the whole packet, not past its first symbol:
+                        // resuming inside one finds it again and turns the
+                        // interval between packets into the interval between
+                        // sub-symbol offsets.
+                        at = p.start
+                            + demod.symbol_len() * (p.preamble_syms + p.symbols.len() + 6);
                     }
                     None => break,
                 }
@@ -377,6 +388,64 @@ fn main() {
                 );
             }
         }
+        }
+    }
+
+    if seen.is_empty() {
+        return;
+    }
+    // The span holds part of the hop set, so it sees that fraction of the
+    // packets. Scaling by it is what makes the number comparable with a rate
+    // in the table.
+    let coverage = (elrs_hi - elrs_lo + 1) as f64 / b.count as f64;
+    let span_s = iq.len() as f64 / rate;
+    let mut by_sf: std::collections::BTreeMap<u8, usize> = Default::default();
+    for (_, sf, _) in &seen {
+        *by_sf.entry(*sf).or_default() += 1;
+    }
+    println!();
+    for (sf, n) in by_sf {
+        let rate_hz = n as f64 / span_s;
+        // Gaps between packets that stayed on one channel. The link
+        // transmits at a fixed interval, so the shortest gaps are that
+        // interval whatever was missed either side of them.
+        let mut gaps: Vec<f64> = Vec::new();
+        for &ch in &chans {
+            let mut ts: Vec<f64> = seen
+                .iter()
+                .filter(|(_, s, c)| *s == sf && *c == ch)
+                .map(|(t, _, _)| *t)
+                .collect();
+            ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            gaps.extend(ts.windows(2).map(|w| w[1] - w[0]).filter(|g| *g < 0.05));
+        }
+        gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let interval = gaps.get(gaps.len() / 2).copied();
+        let identified = match interval {
+            Some(i) => decode::elrs::identify_rate_from_interval(sf, b.bandwidth_hz, i),
+            None => decode::elrs::identify_rate(sf, b.bandwidth_hz, rate_hz, coverage),
+        };
+        println!(
+            "SF{sf}: {n} packets in {span_s:.1} s over {:.0}% of the band, {:.0} packets/s implied across it -> {}",
+            coverage * 100.0,
+            rate_hz / coverage,
+            identified.map(|r| r.name).unwrap_or("no rate in the table fits")
+        );
+        if let Some(i) = interval {
+            println!(
+                "  {} gaps within a dwell, median {:.2} ms -> {:.0} packets a second",
+                gaps.len(),
+                i * 1e3,
+                1.0 / i
+            );
+        }
+        if let Some(r) = identified {
+            println!(
+                "  {} byte packets, hop every {} of them, sweep {:.2e} Hz/s",
+                r.packet_bytes,
+                r.hop_interval,
+                decode::elrs::chirp_rate(sf, b.bandwidth_hz)
+            );
         }
     }
 }

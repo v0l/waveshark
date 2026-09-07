@@ -59,12 +59,22 @@ use common::Value;
 /// value, and both are worth trying against an unknown transmitter.
 pub const OTA_VERSION: u8 = 4;
 
-/// The 8 byte packet, called OTA4 in the firmware. The 13 byte full
-/// resolution packet (OTA8) uses a CRC-16 and is not read here yet.
+/// The 8 byte packet, called OTA4 in the firmware, used by every rate whose
+/// name does not end in Full.
 pub const PACKET_LEN: usize = 8;
+
+/// The 13 byte packet, OTA8, used by the Full rates. It carries eight or
+/// twelve channels instead of four plus switches, puts the CRC in two whole
+/// bytes at the end rather than splitting it around the type, and guards it
+/// with sixteen bits instead of fourteen.
+pub const PACKET_LEN_FULL: usize = 13;
+
+/// Bytes the full packet's CRC covers: everything before the CRC itself.
+const FULL_CRC_LEN: usize = 11;
 
 /// Implicit leading one, as the firmware writes it.
 const CRC14_POLY: u16 = 0x2e57;
+const CRC16_POLY: u16 = 0x3d65;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PacketType {
@@ -128,6 +138,14 @@ pub enum Packet {
         switches: u8,
         armed: bool,
     },
+    /// Eight channels at ten bits, which is what the Full rates carry.
+    RcFull {
+        channels: [u16; 8],
+        armed: bool,
+        /// Whether the high group is AUX6-9 rather than AUX2-5.
+        high_aux: bool,
+        uplink_power: u8,
+    },
     Sync(Sync),
     Data {
         package_index: u8,
@@ -163,6 +181,24 @@ fn crc14(data: &[u8], init: u16) -> u16 {
         crc = (crc << 8) ^ table[(((crc >> 6) ^ u16::from(b)) & 0xff) as usize];
     }
     crc & 0x3fff
+}
+
+/// The same generator at sixteen bits, which is what the full packet uses.
+fn crc16(data: &[u8], init: u16) -> u16 {
+    let mut table = [0u16; 256];
+    for (i, e) in table.iter_mut().enumerate() {
+        let mut crc = (i as u16) << 8;
+        for _ in 0..8 {
+            let high = crc & (1 << 15) != 0;
+            crc = (crc << 1) ^ if high { CRC16_POLY } else { 0 };
+        }
+        *e = crc;
+    }
+    let mut crc = init;
+    for &b in data {
+        crc = (crc << 8) ^ table[(((crc >> 8) ^ u16::from(b)) & 0xff) as usize];
+    }
+    crc
 }
 
 /// The CRC seed a UID gives, before the packet counter is mixed in.
@@ -231,6 +267,61 @@ pub fn validate_with_nonce(packet: &[u8], uid: &[u8; 6], ota_version: u8, nonce:
     let is_sync = PacketType::from_bits(packet[0]) == PacketType::Sync;
     let init = crc_initializer(uid, ota_version) ^ if is_sync { 0 } else { u16::from(nonce) };
     crc14(&body, init) == sent
+}
+
+/// Check a full resolution packet, the same way and with the same caveat
+/// about searching the counter.
+pub fn validate_full(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Option<u8>> {
+    if packet.len() < PACKET_LEN_FULL {
+        return None;
+    }
+    let sent = u16::from_le_bytes([packet[11], packet[12]]);
+    let body = &packet[..FULL_CRC_LEN];
+    let init = crc_initializer(uid, ota_version);
+    if PacketType::from_bits(packet[0]) == PacketType::Sync {
+        return (crc16(body, init) == sent).then_some(None);
+    }
+    (0..=255u8).find_map(|nonce| (crc16(body, init ^ u16::from(nonce)) == sent).then_some(Some(nonce)))
+}
+
+/// Read a full resolution packet. The type is still the low two bits of the
+/// first byte, but everything above them differs from the small packet: an RC
+/// packet carries eight channels in two groups of four and spends the rest of
+/// the first byte on the uplink power, the arming state and which group of
+/// aux channels the high half holds.
+pub fn parse_full(packet: &[u8]) -> Option<Packet> {
+    if packet.len() < PACKET_LEN_FULL {
+        return None;
+    }
+    Some(match PacketType::from_bits(packet[0]) {
+        PacketType::RcData => {
+            let low = unpack_channels(&packet[1..6]);
+            let high = unpack_channels(&packet[6..11]);
+            let mut channels = [0u16; 8];
+            channels[..4].copy_from_slice(&low);
+            channels[4..].copy_from_slice(&high);
+            Packet::RcFull {
+                channels,
+                armed: packet[0] & 0x80 != 0,
+                high_aux: packet[0] & 0x40 != 0,
+                uplink_power: (packet[0] >> 3) & 0x07,
+            }
+        }
+        PacketType::Sync => Packet::Sync(Sync {
+            fhss_index: packet[1],
+            nonce: packet[2],
+            rate_index: packet[3],
+            switch_mode: packet[4] & 0x01,
+            tlm_ratio: (packet[4] >> 1) & 0x07,
+            gemini: packet[4] & 0x10 != 0,
+            uid45: [packet[5], packet[6]],
+        }),
+        PacketType::Data => Packet::Data {
+            package_index: (packet[0] >> 3) & 0x1f,
+            payload: packet[1..FULL_CRC_LEN].to_vec(),
+        },
+        PacketType::Unknown(k) => Packet::Unknown(k),
+    })
 }
 
 /// Read a packet that has already been checked.
@@ -406,10 +497,100 @@ pub const RATES_2G4: [Rate; 10] = [
     Rate { name: "LoRa 50 Hz", packet_hz: 50, spreading_factor: Some(8), bandwidth_hz: 812_500.0, packet_bytes: 8, hop_interval: 2 },
 ];
 
+/// The rates that fit a measured spreading factor and bandwidth.
+///
+/// The dechirp measures both, and on 2.4 GHz they narrow ten rates to one or
+/// two: SF5 is 500 Hz or 333 Hz Full, SF7 is 150 Hz or 100 Hz Full, SF6 and
+/// SF8 are one rate each. What the pair have in common is the modulation and
+/// what separates them is how often they transmit, so the rest of the
+/// question is answered in time rather than in frequency.
+pub fn rates_for(sf: u8, bandwidth_hz: f64) -> Vec<&'static Rate> {
+    RATES_2G4
+        .iter()
+        .filter(|r| {
+            r.spreading_factor == Some(sf) && (r.bandwidth_hz - bandwidth_hz).abs() < 100_000.0
+        })
+        .collect()
+}
+
+/// The rate a link is running, from what a receiver can measure without being
+/// told anything: the spreading factor and bandwidth the dechirp found, and
+/// how often packets arrive.
+///
+/// The packet rate is measured across the whole band rather than on one
+/// channel, because a link hops and a single channel sees a burst only every
+/// few hundred milliseconds. A receiver watching part of the band sees that
+/// fraction of the packets, so `coverage` says what fraction of the 80
+/// channels was in the span and the estimate is scaled by it.
+pub fn identify_rate(
+    sf: u8,
+    bandwidth_hz: f64,
+    packets_per_second: f64,
+    coverage: f64,
+) -> Option<&'static Rate> {
+    let candidates = rates_for(sf, bandwidth_hz);
+    let seen = if coverage > 0.0 {
+        packets_per_second / coverage
+    } else {
+        packets_per_second
+    };
+    candidates
+        .into_iter()
+        // Ratio rather than difference: 150 against 100 is the pair to
+        // separate, and an absolute error would favour the slower rate
+        // whenever packets were missed.
+        .min_by(|a, b| {
+            let e = |r: &Rate| (seen / f64::from(r.packet_hz)).ln().abs();
+            e(a).partial_cmp(&e(b)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// The rate a link is running, from the spacing between packets that stayed
+/// on one channel.
+///
+/// Stronger evidence than counting packets, and it is what a receiver has:
+/// the link transmits at a fixed interval and hops every few packets, so two
+/// packets from one dwell are exactly one interval apart whatever fraction of
+/// the band was watched and whatever fraction of the packets was missed.
+pub fn identify_rate_from_interval(
+    sf: u8,
+    bandwidth_hz: f64,
+    interval_s: f64,
+) -> Option<&'static Rate> {
+    rates_for(sf, bandwidth_hz).into_iter().min_by(|a, b| {
+        let e = |r: &Rate| (interval_s * f64::from(r.packet_hz)).ln().abs();
+        e(a).partial_cmp(&e(b)).unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
+/// The chirp rate a spreading factor and bandwidth give, which is what a
+/// classifier measures off a burst: one sweep of the whole bandwidth per
+/// symbol.
+pub fn chirp_rate(sf: u8, bandwidth_hz: f64) -> f64 {
+    bandwidth_hz * bandwidth_hz / f64::from(1u32 << sf)
+}
+
+/// The spreading factor a measured sweep implies, or `None` when it is not
+/// one of the factors the band uses.
+pub fn sf_from_chirp_rate(rate_hz_per_s: f64, bandwidth_hz: f64) -> Option<u8> {
+    (5..=8u8).find(|&sf| {
+        let want = chirp_rate(sf, bandwidth_hz);
+        (rate_hz_per_s.abs() / want - 1.0).abs() < 0.15
+    })
+}
+
 /// The fields a log or a bus carries.
 pub fn fields(d: &Decoded) -> Vec<(String, Value)> {
     let mut f: Vec<(String, Value)> = Vec::new();
     match &d.packet {
+        Packet::RcFull { channels, armed, uplink_power, .. } => {
+            f.push(("packet".into(), Value::Text("rc".into())));
+            for (i, c) in channels.iter().enumerate() {
+                f.push((format!("ch{}", i + 1), Value::Int(i64::from(*c))));
+            }
+            f.push(("armed".into(), Value::Bool(*armed)));
+            f.push(("uplink_power".into(), Value::Int(i64::from(*uplink_power))));
+        }
         Packet::Rc { channels, armed, .. } => {
             f.push(("packet".into(), Value::Text("rc".into())));
             for (i, c) in channels.iter().enumerate() {
@@ -447,8 +628,17 @@ pub fn fields(d: &Decoded) -> Vec<(String, Value)> {
     f
 }
 
-/// Check and read in one step.
+/// Check and read in one step, taking the packet length to mean which of the
+/// two formats this is: the rate decides it, and the demodulator was told the
+/// rate before it could produce bytes at all.
 pub fn decode(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Decoded> {
+    if packet.len() >= PACKET_LEN_FULL {
+        let nonce = validate_full(packet, uid, ota_version)?;
+        return Some(Decoded {
+            packet: parse_full(packet)?,
+            nonce,
+        });
+    }
     let nonce = validate(packet, uid, ota_version)?;
     Some(Decoded {
         packet: parse(packet)?,
@@ -590,6 +780,90 @@ mod tests {
         // A different binding phrase hops differently, which is the whole
         // point of seeding it.
         assert_ne!(seq, hop_sequence(&[1, 2, 3, 4, 5, 6], OTA_VERSION));
+    }
+
+    /// The Full rates put the CRC in two bytes at the end and guard eleven
+    /// rather than seven, so a packet built the firmware's way has to check
+    /// that way too.
+    #[test]
+    fn a_full_resolution_packet_checks_and_reads() {
+        let mut p = [0u8; PACKET_LEN_FULL];
+        p[0] = 0b00 | (0b101 << 3) | 0x80; // rc, power 5, armed
+        for (i, b) in p[1..11].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37);
+        }
+        let crc = crc16(&p[..FULL_CRC_LEN], crc_initializer(&UID, OTA_VERSION) ^ 77);
+        p[11..].copy_from_slice(&crc.to_le_bytes());
+
+        assert_eq!(validate_full(&p, &UID, OTA_VERSION), Some(Some(77)));
+        let other = [0x11, 0x22, 0x33, 0x44, 0x56, 0x66];
+        assert_eq!(validate_full(&p, &other, OTA_VERSION), None);
+        let Some(Packet::RcFull { channels, armed, uplink_power, .. }) = parse_full(&p) else {
+            panic!("not read as full rc")
+        };
+        assert!(armed);
+        assert_eq!(uplink_power, 5);
+        assert_eq!(channels.len(), 8);
+        // Whatever the packing, the eight values are ten bits each.
+        assert!(channels.iter().all(|c| *c < 1024));
+    }
+
+    /// A sync packet is a sync packet at either size, and it is the one a
+    /// listener can check without knowing the counter.
+    #[test]
+    fn a_full_sync_packet_needs_no_counter() {
+        let mut p = [0u8; PACKET_LEN_FULL];
+        p[0] = 0b10;
+        p[1..7].copy_from_slice(&[40, 128, 8, 0x00, UID[4], UID[5]]);
+        let crc = crc16(&p[..FULL_CRC_LEN], crc_initializer(&UID, OTA_VERSION));
+        p[11..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(validate_full(&p, &UID, OTA_VERSION), Some(None));
+        let Some(Packet::Sync(s)) = parse_full(&p) else {
+            panic!("not read as sync")
+        };
+        assert_eq!(s.fhss_index, 40);
+        assert_eq!(RATES_2G4[usize::from(s.rate_index)].name, "LoRa 100 Hz 8ch");
+        assert_eq!(RATES_2G4[usize::from(s.rate_index)].packet_bytes, PACKET_LEN_FULL);
+    }
+
+    /// A sweep of five gigahertz a second over 812.5 kHz is SF7 and nothing
+    /// else, which is how the rate is found without being told it.
+    #[test]
+    fn a_measured_sweep_names_the_spreading_factor() {
+        let measured = -4.94e9;
+        assert_eq!(sf_from_chirp_rate(measured, 812_500.0), Some(7));
+        assert_eq!(sf_from_chirp_rate(chirp_rate(5, 812_500.0), 812_500.0), Some(5));
+        // A LoRa link on 868 at 250 kHz is not one of these.
+        assert_eq!(sf_from_chirp_rate(chirp_rate(11, 250_000.0), 812_500.0), None);
+    }
+
+    /// SF7 leaves two rates, and only the packet rate separates them: 150 Hz
+    /// with the eight byte packet, 100 Hz Full with the thirteen byte one.
+    #[test]
+    fn the_packet_rate_separates_the_rates_a_spreading_factor_leaves() {
+        assert_eq!(rates_for(7, 812_500.0).len(), 2);
+        let r = identify_rate(7, 812_500.0, 24.0, 0.25).expect("a rate");
+        assert_eq!(r.name, "LoRa 100 Hz 8ch");
+        assert_eq!(r.packet_bytes, PACKET_LEN_FULL);
+        let r = identify_rate(7, 812_500.0, 37.0, 0.25).expect("a rate");
+        assert_eq!(r.name, "LoRa 150 Hz");
+        // SF6 and SF8 are one rate each, so nothing has to be separated.
+        assert_eq!(rates_for(6, 812_500.0).len(), 1);
+        assert_eq!(rates_for(8, 812_500.0).len(), 1);
+    }
+
+    /// Two packets from the same dwell are one interval apart, and that
+    /// separates 150 Hz from 100 Hz Full without counting anything.
+    #[test]
+    fn the_spacing_within_a_dwell_names_the_rate() {
+        assert_eq!(
+            identify_rate_from_interval(7, 812_500.0, 0.0100).map(|r| r.name),
+            Some("LoRa 100 Hz 8ch")
+        );
+        assert_eq!(
+            identify_rate_from_interval(7, 812_500.0, 0.0067).map(|r| r.name),
+            Some("LoRa 150 Hz")
+        );
     }
 
     #[test]
