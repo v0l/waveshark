@@ -201,6 +201,7 @@ impl Simple for VideoNode {
                 label: label.clone(),
                 width: f.width,
                 height: f.height,
+                aspect: f.aspect,
                 pixels,
                 samples: std::sync::Arc::new(samples),
                 lines_seen: f.lines_seen,

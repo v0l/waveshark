@@ -100,10 +100,12 @@ impl VideoPane<'_> {
             return;
         };
 
-        // A PAL pixel is taller than it is wide, and a field is half the
-        // frame's height, so the picture is drawn at twice its stored height
-        // to look like what the camera saw rather than squat.
-        let aspect = f.width as f32 / (f.height as f32 * 2.0);
+        // The shape the transmission says, not the shape of the sample grid.
+        // Drawn from its own numbers a 640 by 288 field is 10:9, which is a
+        // 4:3 picture with the sides pushed in: how many samples a line was
+        // cut into is a fact about the receiver's clock, and a field is half
+        // a frame.
+        let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
         let space = ui.available_size();
         let size = if space.x / space.y > aspect {
             egui::vec2(space.y * aspect, space.y)

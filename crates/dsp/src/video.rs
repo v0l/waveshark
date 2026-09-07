@@ -61,6 +61,16 @@ impl Standard {
         }
     }
 
+    /// The shape of the picture, which is not the shape of the sample grid.
+    ///
+    /// Both standards are 4:3. How many samples a line is cut into is a
+    /// property of the receiver's clock and says nothing about what the
+    /// camera saw: at 20 MS/s a 640 by 288 field drawn from its own numbers
+    /// comes out at 10:9, which is a picture squeezed in from the sides.
+    pub fn aspect(self) -> f32 {
+        4.0 / 3.0
+    }
+
     /// Picture lines in one field.
     pub fn active_lines(self) -> usize {
         match self {
@@ -220,6 +230,9 @@ pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
 pub struct Field {
     pub width: usize,
     pub height: usize,
+    /// How wide the picture is against its height when it is drawn, which
+    /// the sample grid does not say.
+    pub aspect: f32,
     /// Row major, 0 for sync-black and 255 for peak white.
     pub luma: Vec<u8>,
     /// Row major RGB triples, when colour was asked for and the burst was
@@ -681,6 +694,7 @@ impl SyncSeparator {
         out.push(Field {
             width: self.width,
             height,
+            aspect: self.standard.aspect(),
             luma,
             rgb,
             lines_seen: seen,
@@ -979,5 +993,23 @@ mod tests {
         let mut out = Vec::new();
         sep.process(&v, &mut out);
         assert!(out.is_empty(), "noise produced {} fields", out.len());
+    }
+
+    /// The picture's shape is the standard's, not the sample grid's. Drawn
+    /// from its own numbers a field is 10:9 and looks like a 4:3 picture
+    /// with the sides pushed in.
+    #[test]
+    fn a_field_carries_the_shape_of_the_picture_and_not_of_its_samples() {
+        let rate = 20e6;
+        let mut sep = SyncSeparator::new(rate, Standard::Pal, 640);
+        let mut fields = Vec::new();
+        sep.process(&synth(Standard::Pal, rate, 3, true), &mut fields);
+        let f = fields.first().expect("a field");
+        assert!((f.aspect - 4.0 / 3.0).abs() < 1e-6, "{}", f.aspect);
+        assert_ne!(
+            f.aspect,
+            f.width as f32 / (f.height as f32 * 2.0),
+            "the sample grid decided the shape"
+        );
     }
 }
