@@ -1,9 +1,10 @@
-//! Turn an analogue FPV capture into pictures.
-//!     fpv_png <file.cs8|cu8|cs16> <rate> <center_hz> <out-prefix> [fields]
+//! Turn a capture of an analogue video carrier into pictures.
+//!     video_png <file.cs8|cu8|cs16> <rate> <center_hz> <out-prefix> [fields]
 //!
-//! FM demodulate, separate sync, write each field as a PGM. The channel the
-//! carrier sits on is named from the plan, and the line period is measured
-//! rather than assumed, so a capture of an NTSC camera says so.
+//! FM demodulate, separate sync, write each field as a PGM or, when the
+//! colour burst was found, a PPM. The line period is measured rather than
+//! assumed, so a capture of an NTSC camera says so, and where the frequency
+//! is one the 5.8 GHz plan names, it is named.
 
 use common::C32;
 use dsp::video::{Standard, SyncSeparator};

@@ -1,12 +1,14 @@
 //! Analogue television baseband: sync separation and a picture out of it.
 //!
-//! Analogue FPV is not a protocol. A camera produces composite video, the
-//! transmitter frequency modulates a 5.8 GHz carrier with it, and that is the
-//! whole stack: no framing, no addressing, no integrity check anywhere. What
+//! Analogue video is not a protocol. A camera produces composite video, a
+//! transmitter frequency modulates a carrier with it, and that is the whole
+//! stack: no framing, no addressing, no integrity check anywhere. What
 //! carries structure is the video itself, and it is the structure television
 //! had in 1960: a horizontal sync pulse below black at the start of every
 //! line, a pattern of broad pulses between fields, and two interlaced fields
-//! to a frame.
+//! to a frame. A model aircraft's video link, a security camera and a bench
+//! pattern generator all produce the same thing; what differs is the band it
+//! is sent on.
 //!
 //! So this file takes the output of an FM demodulator and finds those pulses.
 //! Levels are relative, because the demodulator's output scale depends on the
@@ -35,8 +37,8 @@
 /// Which set of timings the camera is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standard {
-    /// 625 lines, 25 frames, 15.625 kHz line rate. What almost every FPV
-    /// camera sold outside North America produces.
+    /// 625 lines, 25 frames, 15.625 kHz line rate. What almost every camera
+    /// sold outside North America produces.
     Pal,
     /// 525 lines, 29.97 frames, 15.734 kHz line rate.
     Ntsc,
@@ -210,7 +212,7 @@ pub struct Stats {
 
 impl SyncSeparator {
     /// `width` is the picture width to resample each line to. 720 is what a
-    /// PAL line holds at broadcast sampling; an FPV camera is usually 600 or
+    /// PAL line holds at broadcast sampling; a small camera is usually 600 or
     /// 800, and the sampling here is of the demodulated baseband rather than
     /// of the camera's own pixels, so the number is a choice and not a
     /// measurement.

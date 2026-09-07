@@ -1,8 +1,11 @@
 //! Analogue video as a graph node.
 //!
 //! Wiring only, like `ble_nodes`: the sync separation, the field assembly and
-//! the colour demodulation are `dsp::video`, the channel plan is
-//! `decode::fpv`, and neither knows about pipelines.
+//! the colour demodulation are `dsp::video`, and it knows nothing about
+//! pipelines. Nothing here is specific to a model aircraft's camera; what is
+//! specific to that is the 5.8 GHz channel plan in `decode::fpv`, which names
+//! a frequency when the band has a naming convention and leaves the label
+//! empty when it does not.
 //!
 //! What the node adds is what the receiver needs and a demodulator does not
 //! have: the FM demodulator in front, the standard measured from the line
@@ -16,16 +19,16 @@ use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
 /// What the picture is resampled to. A PAL line holds about 720 samples at
-/// broadcast rates and an FPV camera rather fewer, so this is a choice rather
+/// broadcast rates and a small camera rather fewer, so this is a choice rather
 /// than a measurement.
 const WIDTH: usize = 640;
 
 /// Peak deviation mapped to full scale. Only the contrast depends on it, and
 /// the separator normalises again from the sync tip, so it need not be exact:
-/// the AKK transmitter measured about 1 MHz rms.
+/// the 5.8 GHz transmitter measured here was about 1 MHz rms.
 const DEVIATION_HZ: f64 = 6e6;
 
-pub struct FpvNode {
+pub struct VideoNode {
     demod: dsp::FmDemod,
     sep: Option<SyncSeparator>,
     /// Set by hand, or `None` to measure it from the line period.
@@ -40,13 +43,13 @@ pub struct FpvNode {
     fields: u64,
 }
 
-impl Default for FpvNode {
+impl Default for VideoNode {
     fn default() -> Self {
         Self::new(None, true)
     }
 }
 
-impl FpvNode {
+impl VideoNode {
     pub fn new(forced: Option<Standard>, colour: bool) -> Self {
         Self {
             demod: dsp::FmDemod::new(20e6, DEVIATION_HZ),
@@ -107,20 +110,20 @@ impl FpvNode {
     }
 }
 
-impl Simple for FpvNode {
+impl Simple for VideoNode {
     fn name(&self) -> &str {
-        "fpv"
+        "video"
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
-            return Err(common::Error::other("fpv reads complex baseband"));
+            return Err(common::Error::other("video reads complex baseband"));
         }
         // A PAL luma signal reaches 5 MHz and the colour subcarrier sits at
         // 4.43, so a span narrower than this cannot hold a picture.
         if i.spec.rate < 12e6 {
             return Err(common::Error::other(
-                "fpv needs at least 12 MS/s to hold a video baseband",
+                "analogue video needs at least 12 MS/s to hold its baseband",
             ));
         }
         self.rate = i.spec.rate;
@@ -182,7 +185,7 @@ impl Simple for FpvNode {
                 None => (Pixels::Luma8, f.luma),
             };
             out.push(VideoFrame {
-                system: "FPV",
+                system: "analogue video",
                 channel_hz: self.center_hz,
                 label: label.clone(),
                 width: f.width,
@@ -238,7 +241,7 @@ impl Simple for FpvNode {
                 };
                 self.sep = None;
             }
-            other => return Err(common::Error::other(format!("fpv has no {other}"))),
+            other => return Err(common::Error::other(format!("video has no {other}"))),
         }
         Ok(())
     }
@@ -293,7 +296,7 @@ mod tests {
 
     #[test]
     fn the_node_refuses_a_span_too_narrow_for_a_picture() {
-        let mut n = FpvNode::default();
+        let mut n = VideoNode::default();
         assert!(n.negotiate(&spec(20e6, 5_865e6)).is_ok());
         assert!(n.negotiate(&spec(2e6, 5_865e6)).is_err());
     }
@@ -304,7 +307,7 @@ mod tests {
     fn a_modulated_camera_comes_back_as_fields() {
         let rate = 16e6;
         let iq = modulate(&pal(rate, 4), rate);
-        let mut n = FpvNode::new(None, false);
+        let mut n = VideoNode::new(None, false);
         let out_spec = n.negotiate(&spec(rate, 5_865e6)).expect("a span");
         assert_eq!(out_spec.kind, PortKind::Video);
 
@@ -325,11 +328,12 @@ mod tests {
         assert_eq!(n.standard(), Some(Standard::Pal), "the standard was measured");
 
         let f = fields.iter().max_by_key(|f| f.lines_seen).expect("a field");
-        assert_eq!(f.system, "FPV");
+        assert_eq!(f.system, "analogue video");
         assert_eq!(f.pixels, Pixels::Luma8);
         assert_eq!(f.samples.len(), f.width * f.height);
         assert!(f.completeness() > 0.8, "{} of {} lines", f.lines_seen, f.height);
-        // 5865 MHz is two channels of the plan and the frame says both.
+        // 5865 MHz is two channels of the plan pilots share, and the frame
+        // says both, since nothing in the signal chooses between them.
         assert_eq!(f.label.as_deref(), Some("A1 or B8"));
         // Sequence numbers so a viewer can tell a still picture from a
         // repeated one.

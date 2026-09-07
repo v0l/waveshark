@@ -430,13 +430,19 @@ impl Pixels {
 /// watching. Nothing here copies it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoFrame {
-    /// What produced it: "FPV", and later "APT", "SSTV". What a subscription
-    /// names, the way [`Voice::system`] is.
+    /// What produced it: "analogue video", and later "APT", "SSTV". What a
+    /// subscription names, the way [`Voice::system`] is.
+    ///
+    /// The system, not the use it is being put to: a model aircraft's camera
+    /// and a security camera send the same composite video and differ only in
+    /// where they send it, which `channel_hz` and `label` already say.
     pub system: &'static str,
     /// Centre of the channel it was received on.
     pub channel_hz: f64,
-    /// What the channel is called where it has a name: an FPV channel, a
-    /// satellite, a callsign.
+    /// What the channel is called where it has a name: a channel of the
+    /// 5.8 GHz plan pilots use, a satellite, a callsign. `None` on a band with
+    /// no naming convention, which is a fact about the band rather than a
+    /// gap.
     pub label: Option<String>,
     pub width: usize,
     pub height: usize,

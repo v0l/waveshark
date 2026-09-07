@@ -40,7 +40,7 @@ pub use auto_node::{AutoNode, AUTO_OPEN_DB};
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use bank_node::BankNode;
 pub use ble_nodes::BleNode;
-pub use video_nodes::FpvNode;
+pub use video_nodes::VideoNode;
 pub use capture_nodes::IqCaptureNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
@@ -267,8 +267,8 @@ pub fn registry() -> Registry {
 
     r.register(
         StageDesc {
-            name: "fpv",
-            summary: "Analogue FPV video: FM to composite, sync separation, PAL colour",
+            name: "video",
+            summary: "Analogue video: FM to composite, sync separation, PAL or NTSC fields, colour",
             category: "decode",
         },
         |s: &Settings| {
@@ -277,7 +277,7 @@ pub fn registry() -> Registry {
                 "ntsc" => Some(dsp::video::Standard::Ntsc),
                 _ => None,
             };
-            Ok(Box::new(FpvNode::new(forced, s.bool_or("colour", true))) as Box<dyn Node>)
+            Ok(Box::new(VideoNode::new(forced, s.bool_or("colour", true))) as Box<dyn Node>)
         },
     );
 
