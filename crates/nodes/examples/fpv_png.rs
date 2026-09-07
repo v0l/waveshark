@@ -52,16 +52,34 @@ fn main() {
     let standard = measure_standard(&base, rate).unwrap_or(Standard::Pal);
     eprintln!("line period says {standard:?}");
 
-    let mut sep = SyncSeparator::new(rate, standard, 640);
+    let mut sep = SyncSeparator::new(rate, standard, 640).with_colour();
     let mut fields = Vec::new();
     sep.process(&base, &mut fields);
-    eprintln!("{} fields", fields.len());
+    let st = sep.stats();
+    eprintln!(
+        "{} fields; {} line syncs, {} broad pulses, {} lines kept, {} fields too short; sync {:.3} black {:.3}",
+        fields.len(),
+        st.line_syncs,
+        st.broad_pulses,
+        st.lines_kept,
+        st.fields_short,
+        st.sync_level,
+        st.black_level
+    );
     for (i, f) in fields.iter().take(want).enumerate() {
-        let name = format!("{prefix}{i}.pgm");
-        let mut out = format!("P5\n{} {}\n255\n", f.width, f.height).into_bytes();
-        out.extend_from_slice(&f.luma);
+        let (name, header, body) = match &f.rgb {
+            Some(rgb) => (format!("{prefix}{i}.ppm"), "P6", &rgb[..]),
+            None => (format!("{prefix}{i}.pgm"), "P5", &f.luma[..]),
+        };
+        let mut out = format!("{header}\n{} {}\n255\n", f.width, f.height).into_bytes();
+        out.extend_from_slice(body);
         std::fs::write(&name, out).unwrap();
-        eprintln!("wrote {name}: {} of {} lines", f.lines_seen, f.height);
+        eprintln!(
+            "wrote {name}: {} of {} lines, {}",
+            f.lines_seen,
+            f.height,
+            if f.rgb.is_some() { "colour" } else { "luma only" }
+        );
     }
 }
 

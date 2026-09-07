@@ -14,16 +14,23 @@
 //! designer chose: sync tip and blanking are measured from the signal itself
 //! rather than assumed, the way `crate::ble`'s gate tracks its own floor.
 //!
-//! # What is not here
+//! # Colour
 //!
-//! Colour. PAL carries chrominance on a 4.43 MHz subcarrier whose phase
-//! alternates line to line, and recovering it means a burst-locked oscillator
-//! and a delay line. Luma alone is a grey picture, which is what an FPV feed
-//! is mostly judged on and all that is needed to say what a camera is looking
-//! at. The subcarrier is still in the samples for whoever writes it.
+//! Optional, and off unless asked for. PAL puts chrominance on a 4.43 MHz
+//! subcarrier in quadrature, U on one axis and V on the other, and flips the
+//! sign of V every line: that is what the P and the A stand for, and it is
+//! what makes a phase error tint alternate lines in opposite directions so
+//! the eye averages it away. The receiver does the averaging properly, with
+//! a delay line: the U and V of a line are meaned with the line above.
 //!
-//! Audio, for the same reason: most transmitters put it on a 6.0 or 6.5 MHz
-//! subcarrier, which is another demodulator on this same baseband.
+//! The reference is the burst on the back porch, ten cycles at 135 or 225
+//! degrees. One burst alone cannot say which, since a phase error and a line
+//! flip look the same; the mean of two consecutive bursts is the -U axis,
+//! which is why the phase is estimated over a pair.
+//!
+//! Not here: audio. Most transmitters put it on a 6.0 or 6.5 MHz subcarrier,
+//! which is another demodulator on this same baseband. The line spectrum of
+//! the capture in `testdata` has it plainly at 6.5 MHz.
 
 /// Which set of timings the camera is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,16 +95,21 @@ impl Standard {
         1.0 / self.line_hz()
     }
 
+    /// The colour subcarrier.
+    pub fn subcarrier_hz(self) -> f64 {
+        match self {
+            Self::Pal => 4_433_618.75,
+            Self::Ntsc => 3_579_545.45,
+        }
+    }
+
     /// The standard a measured line period names, or `None` when it is
     /// neither. The two are 0.7% apart, which is far wider than a
     /// transmitter's timebase error, so measuring settles it.
     pub fn from_line_period(period_s: f64) -> Option<Self> {
-        for s in [Self::Pal, Self::Ntsc] {
-            if (period_s / s.line_s() - 1.0).abs() < 0.003 {
-                return Some(s);
-            }
-        }
-        None
+        [Self::Pal, Self::Ntsc]
+            .into_iter()
+            .find(|s| (period_s / s.line_s() - 1.0).abs() < 0.003)
     }
 }
 
@@ -108,6 +120,10 @@ pub struct Field {
     pub height: usize,
     /// Row major, 0 for sync-black and 255 for peak white.
     pub luma: Vec<u8>,
+    /// Row major RGB triples, when colour was asked for and the burst was
+    /// found. `None` means the field was read as luma only, which is what a
+    /// monochrome camera and a lost burst both look like.
+    pub rgb: Option<Vec<u8>>,
     /// Lines whose sync was found, out of `height`. A field assembled from
     /// half its lines is a picture of a fade, and a caller deciding whether
     /// to show it needs the number.
@@ -134,8 +150,62 @@ pub struct SyncSeparator {
     /// Samples of a run below the sync threshold, for telling a horizontal
     /// pulse from a vertical one.
     low_run: usize,
+    /// Running mean over `smooth_len` samples, and the window behind it.
+    ///
+    /// A discriminator reading a 20 MHz span gives a video baseband with all
+    /// of that bandwidth's noise on it, and the picture occupies 5 MHz of it.
+    /// Slicing that unfiltered does not find a sync pulse at all: a single
+    /// noisy sample above the threshold ends the run, and the run has to last
+    /// 4.7 us. Averaging over a quarter of a microsecond keeps the pulse,
+    /// which is nearly twenty times longer, and throws most of the noise
+    /// away. Off air this was the difference between no fields and every
+    /// field.
+    smooth: std::collections::VecDeque<f32>,
+    smooth_sum: f32,
+    smooth_len: usize,
     /// Where the last line started, so the picture can be cut out of it.
     line: Vec<f32>,
+    /// The same line unfiltered. The running mean that makes sync findable
+    /// has its cutoff below the colour subcarrier, so chroma has to be taken
+    /// from the samples as they arrived.
+    raw_line: Vec<f32>,
+    /// Whether to demodulate chroma at all.
+    colour: bool,
+    /// Chroma rows of the field being assembled, as (U, V) per pixel.
+    chroma: Vec<Vec<(f32, f32)>>,
+    /// The reference axis the last line's burst gave, which the next line's
+    /// is resolved against.
+    ///
+    /// A burst is 135 or 225 degrees and one on its own cannot say which, so
+    /// the choice is made by continuity: the axis a receiver locks to does
+    /// not move between lines, and the polarity that keeps it still is the
+    /// right one. This is the delay line's other job.
+    last_axis: Option<f32>,
+    /// Samples since the separator was built.
+    ///
+    /// The subcarrier phase is counted from here rather than from the start
+    /// of each line, because PAL's subcarrier is continuous across lines and
+    /// sync edges land on whole samples: at 20 MS/s one sample of jitter is
+    /// 80 degrees of subcarrier, so a per-line origin rotates the colour by
+    /// most of a turn from line to line.
+    sample: u64,
+    /// Where in that count the line being collected started.
+    line_start: u64,
+    stats: Stats,
+}
+
+/// What the separator saw, for telling a signal it cannot lock to from one
+/// that is not there.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    pub line_syncs: u64,
+    pub broad_pulses: u64,
+    pub lines_kept: u64,
+    pub fields: u64,
+    /// Fields thrown away for holding too few lines.
+    pub fields_short: u64,
+    pub sync_level: f32,
+    pub black_level: f32,
 }
 
 impl SyncSeparator {
@@ -157,8 +227,33 @@ impl SyncSeparator {
             primed: false,
             hist: Vec::new(),
             low_run: 0,
+            smooth: std::collections::VecDeque::new(),
+            smooth_sum: 0.0,
+            smooth_len: ((0.25e-6 * rate).round() as usize).max(1),
             line: Vec::new(),
+            raw_line: Vec::new(),
+            colour: false,
+            chroma: Vec::new(),
+            last_axis: None,
+            sample: 0,
+            line_start: 0,
+            stats: Stats::default(),
         }
+    }
+
+    pub fn stats(&self) -> Stats {
+        Stats {
+            sync_level: self.sync_level,
+            black_level: self.black_level,
+            ..self.stats
+        }
+    }
+
+    /// Demodulate colour as well as luma. Costs a quadrature demodulation and
+    /// two box filters per line.
+    pub fn with_colour(mut self) -> Self {
+        self.colour = true;
+        self
     }
 
     pub fn standard(&self) -> Standard {
@@ -194,8 +289,21 @@ impl SyncSeparator {
         (self.sync_level + self.black_level) / 2.0
     }
 
+    /// One sample of the running mean.
+    fn smoothed(&mut self, x: f32) -> f32 {
+        self.smooth.push_back(x);
+        self.smooth_sum += x;
+        if self.smooth.len() > self.smooth_len {
+            self.smooth_sum -= self.smooth.pop_front().unwrap_or(0.0);
+        }
+        self.smooth_sum / self.smooth.len() as f32
+    }
+
     /// Feed demodulated baseband. Whole fields come back as they complete.
     pub fn process(&mut self, baseband: &[f32], out: &mut Vec<Field>) {
+        let filtered: Vec<f32> = baseband.iter().map(|&x| self.smoothed(x)).collect();
+        let raw = baseband;
+        let baseband = &filtered[..];
         if !self.primed {
             self.hist.extend_from_slice(baseband);
             // A field and a half, so the sample includes sync, blanking and
@@ -214,9 +322,13 @@ impl SyncSeparator {
         // line either side of that is where they are told apart.
         let h_min = self.samples(self.standard.sync_s() * 0.6);
         let broad = self.samples(self.standard.sync_s() * 3.0);
-        for &x in baseband {
+        for (i, &x) in baseband.iter().enumerate() {
             self.line.push(x);
+            if self.colour {
+                self.raw_line.push(raw[i]);
+            }
             self.since_sync += 1;
+            self.sample += 1;
             if x < thresh {
                 self.low_run += 1;
                 continue;
@@ -226,15 +338,21 @@ impl SyncSeparator {
                 continue;
             }
             if run >= broad {
+                self.stats.broad_pulses += 1;
                 // A broad pulse: the field is over. What is in hand is the
                 // field, whether or not every line arrived.
                 self.finish_field(out);
+                self.line_start = self.sample;
                 self.since_sync = 0;
                 self.line.clear();
+                self.raw_line.clear();
                 continue;
             }
             // An ordinary line sync. The line just ended is cut and kept.
-            self.take_line(run);
+            self.stats.line_syncs += 1;
+            let start = self.line_start;
+            self.line_start = self.sample;
+            self.take_line(run, start);
             self.since_sync = 0;
         }
     }
@@ -245,9 +363,14 @@ impl SyncSeparator {
     /// holds the back porch, the picture, the front porch and the sync that
     /// ended it. `sync_run` is that trailing sync, which is where the
     /// picture's far end is measured back from.
-    fn take_line(&mut self, sync_run: usize) {
+    fn take_line(&mut self, sync_run: usize, line_start: u64) {
         let line = std::mem::take(&mut self.line);
         self.line = Vec::with_capacity(line.len());
+        // Taken here rather than beside the chroma below, because every
+        // return in between would otherwise leave it holding this line as
+        // well as the next and put the subcarrier phase a line out.
+        let raw = std::mem::take(&mut self.raw_line);
+        self.raw_line = Vec::with_capacity(raw.len());
         if self.lines.len() >= self.standard.active_lines() {
             return;
         }
@@ -272,15 +395,137 @@ impl SyncSeparator {
         }
         self.lines.push(row);
         self.lines_seen += 1;
+        self.stats.lines_kept += 1;
+
+        if self.colour {
+            let uv = self.chroma_of(&raw, line_start, start, span, scale);
+            self.chroma.push(uv);
+        }
+    }
+
+    /// Demodulate one line's chroma against its own burst.
+    ///
+    /// Returns (U, V) per output pixel, already through the delay line: the
+    /// mean with the line above, which is what cancels a phase error in PAL
+    /// rather than leaving it as alternating tint.
+    fn chroma_of(
+        &mut self,
+        raw: &[f32],
+        line_start: u64,
+        start: usize,
+        span: usize,
+        scale: f32,
+    ) -> Vec<(f32, f32)> {
+        let w = std::f64::consts::TAU * self.standard.subcarrier_hz() / self.rate;
+        // Phase of the free-running subcarrier at an offset into this line.
+        // Straight into f64 rather than through a modulo: an f64 holds the
+        // product exactly for hours of samples, and folding the index instead
+        // would step the phase every time it wrapped, since the subcarrier is
+        // not a whole number of samples.
+        let phase_at = |k: usize| (w * (line_start + k as u64) as f64).rem_euclid(std::f64::consts::TAU) as f32;
+        // The burst sits on the back porch, about 0.9 us after the sync ends
+        // and ten cycles long.
+        let b0 = self.samples(0.8e-6);
+        let b1 = self.samples(3.2e-6).min(raw.len());
+        if b1 <= b0 + 8 {
+            return Vec::new();
+        }
+        let mean = raw[b0..b1].iter().sum::<f32>() / (b1 - b0) as f32;
+        let (mut bi, mut bq) = (0.0f32, 0.0f32);
+        for (n, &x) in raw[b0..b1].iter().enumerate() {
+            let p = phase_at(b0 + n);
+            bi += (x - mean) * p.cos();
+            bq += (x - mean) * p.sin();
+        }
+        let n = (b1 - b0) as f32;
+        let (bi, bq) = (2.0 * bi / n, 2.0 * bq / n);
+        let amp = (bi * bi + bq * bq).sqrt();
+        // A burst is half the sync depth. Much less than that is a burst that
+        // was not there, and demodulating noise against it invents colour.
+        if amp < 0.15 * scale {
+            self.last_axis = None;
+            return Vec::new();
+        }
+        let phase = bq.atan2(bi);
+
+        // Both polarities of the line give a candidate axis, 90 degrees
+        // apart. The one that keeps the axis where the last line put it is
+        // the right one; with no previous line there is nothing to be
+        // continuous with, so the line is left grey rather than guessed.
+        // A burst is the vector -U plus or minus V, which is 135 degrees from
+        // the U axis on one side or the other.
+        let eighth = 0.75 * std::f32::consts::PI;
+        let axis_plus = wrap(phase - eighth);
+        let axis_minus = wrap(phase + eighth);
+        let Some(prev_axis) = self.last_axis else {
+            self.last_axis = Some(axis_plus);
+            return Vec::new();
+        };
+        let (theta, swing) = if wrap(axis_plus - prev_axis).abs() < wrap(axis_minus - prev_axis).abs()
+        {
+            (axis_plus, 1.0f32)
+        } else {
+            (axis_minus, -1.0f32)
+        };
+        self.last_axis = Some(theta);
+
+        // Quadrature demodulate against that reference and box filter to
+        // about 1.3 MHz, which is the chroma bandwidth.
+        let taps = ((self.rate / 2.6e6).round() as usize).max(1);
+        // The burst is the reference for chroma the way the sync tip is for
+        // luma: it is sent at 0.15 V where white is 0.7 V above blanking, so
+        // dividing by the measured burst and multiplying by that ratio puts
+        // U and V in the same units as the luma the picture is built from.
+        // Leaving chroma in volts against a luma normalised to white halves
+        // the saturation, which off air looks like a camera with the colour
+        // turned down rather than like a bug.
+        let gain = (0.15 / 0.7) / amp;
+        let mut out = Vec::with_capacity(self.width);
+        for i in 0..self.width {
+            let at = start + i * span / self.width.max(1);
+            let (mut u, mut v) = (0.0f32, 0.0f32);
+            let mut count = 0.0f32;
+            for k in 0..taps {
+                let Some(&x) = raw.get(at + k) else { break };
+                let p = phase_at(at + k) + theta;
+                u += x * p.cos();
+                v += x * p.sin();
+                count += 1.0;
+            }
+            if count == 0.0 {
+                out.push((0.0, 0.0));
+                continue;
+            }
+            // Scaled by the burst, so the picture's colours are referred to
+            // the amplitude the transmitter sent rather than to the
+            // demodulator's own scale.
+            let u = 2.0 * u / count * gain;
+            let v = 2.0 * v / count * gain * swing;
+            out.push((u, v));
+        }
+        // The delay line: mean with the line above.
+        if let Some(prev_row) = self.chroma.last() {
+            if prev_row.len() == out.len() {
+                for (o, p) in out.iter_mut().zip(prev_row) {
+                    o.0 = (o.0 + p.0) / 2.0;
+                    o.1 = (o.1 + p.1) / 2.0;
+                }
+            }
+        }
+        out
     }
 
     fn finish_field(&mut self, out: &mut Vec<Field>) {
+        let rgb = self.colour.then(|| self.to_rgb()).flatten();
         let height = self.standard.active_lines();
         let seen = std::mem::take(&mut self.lines_seen);
         if seen < height / 4 {
             // Fewer than a quarter of the lines is a fade or a false start,
             // not a picture.
             self.lines.clear();
+            self.chroma.clear();
+            self.last_axis = None;
+            self.stats.fields_short += 1;
             return;
         }
         let mut luma = Vec::with_capacity(self.width * height);
@@ -294,12 +539,55 @@ impl SyncSeparator {
             }
         }
         self.lines.clear();
+        self.chroma.clear();
+        self.last_axis = None;
+        self.stats.fields += 1;
         out.push(Field {
             width: self.width,
             height,
             luma,
+            rgb,
             lines_seen: seen,
         });
+    }
+
+    /// Combine the luma rows and the chroma rows into RGB.
+    ///
+    /// `None` when too few lines carried a burst to call it a colour picture,
+    /// which is what a monochrome camera looks like and is not a failure.
+    fn to_rgb(&self) -> Option<Vec<u8>> {
+        let height = self.standard.active_lines();
+        let with_burst = self.chroma.iter().filter(|r| !r.is_empty()).count();
+        if with_burst * 2 < self.lines.len() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.width * height * 3);
+        for r in 0..height {
+            for c in 0..self.width {
+                let y = self
+                    .lines
+                    .get(r)
+                    .and_then(|row| row.get(c))
+                    .map(|&v| f32::from(v) / 255.0)
+                    .unwrap_or(0.0);
+                let (u, v) = self
+                    .chroma
+                    .get(r)
+                    .and_then(|row| row.get(c))
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+                // U and V are the weighted colour differences, so undoing the
+                // weights gives B-Y and R-Y, and green follows from the luma
+                // equation.
+                let bmy = u / 0.493;
+                let rmy = v / 0.877;
+                let g = y - 0.5094 * rmy - 0.1942 * bmy;
+                for ch in [y + rmy, g, y + bmy] {
+                    out.push((ch.clamp(0.0, 1.0) * 255.0) as u8);
+                }
+            }
+        }
+        Some(out)
     }
 
     pub fn reset(&mut self) {
@@ -310,7 +598,23 @@ impl SyncSeparator {
         self.line.clear();
         self.hist.clear();
         self.primed = false;
+        self.raw_line.clear();
+        self.chroma.clear();
+        self.last_axis = None;
     }
+}
+
+/// An angle folded into -pi to pi.
+fn wrap(a: f32) -> f32 {
+    let t = std::f32::consts::TAU;
+    let mut a = a % t;
+    if a > std::f32::consts::PI {
+        a -= t;
+    }
+    if a < -std::f32::consts::PI {
+        a += t;
+    }
+    a
 }
 
 #[cfg(test)]
@@ -397,6 +701,89 @@ mod tests {
         assert_eq!(Standard::from_line_period(64e-6), Some(Standard::Pal));
         assert_eq!(Standard::from_line_period(63.55e-6), Some(Standard::Ntsc));
         assert_eq!(Standard::from_line_period(50e-6), None);
+    }
+
+    /// Build one line of PAL with a burst and a chroma vector on it. `uv` is
+    /// the colour in the same weighted units the decoder reports, and `swing`
+    /// is the line's V polarity.
+    ///
+    /// The subcarrier phase is counted from the start of the back porch,
+    /// which is where the decoder's line buffer begins.
+    fn colour_line(
+        out: &mut Vec<f32>,
+        standard: Standard,
+        rate: f64,
+        y: f32,
+        uv: (f32, f32),
+        swing: f32,
+    ) {
+        let n = |s: f64| (s * rate).round() as usize;
+        let w = std::f64::consts::TAU * standard.subcarrier_hz() / rate;
+        // The subcarrier runs continuously through the whole signal, sync
+        // pulses included, as a transmitter's does.
+        let base = out.len();
+        let phase_at = |k: usize| (w * (base + k) as f64) as f32;
+        out.extend(std::iter::repeat_n(-0.3f32, n(standard.sync_s())));
+
+        let back = n(standard.back_porch_s());
+        let burst_at = n(0.9e-6);
+        let burst_len = n(2.25e-6);
+        let sync_len = n(standard.sync_s());
+        for k in 0..back {
+            let p = phase_at(sync_len + k);
+            // The burst is -U plus or minus V at 0.15, which is 135 or 225
+            // degrees.
+            let v = if (burst_at..burst_at + burst_len).contains(&k) {
+                0.15 * (-p.cos() + swing * p.sin()) / std::f32::consts::SQRT_2
+            } else {
+                0.0
+            };
+            out.push(v);
+        }
+        let active = n(standard.active_s());
+        for k in 0..active {
+            let p = phase_at(sync_len + back + k);
+            out.push(y * 0.7 + uv.0 * p.cos() + swing * uv.1 * p.sin());
+        }
+        let used = sync_len + back + active;
+        out.extend(std::iter::repeat_n(
+            0.0f32,
+            n(standard.line_s()).saturating_sub(used),
+        ));
+    }
+
+    /// Colour bars through the whole chain: a burst, a chroma vector, the
+    /// line flip, and the delay line that makes the flip worth having.
+    #[test]
+    fn a_colour_field_comes_back_as_the_colours_that_were_sent() {
+        let rate = 20e6;
+        let standard = Standard::Pal;
+        // A mid blue and a mid red, in the weighted units the decoder
+        // reports: U is 0.493(B-Y) and V is 0.877(R-Y).
+        let blue = (0.493 * 0.5, 0.0);
+        let mut v = Vec::new();
+        for _ in 0..3 {
+            for r in 0..standard.active_lines() {
+                let swing = if r % 2 == 0 { 1.0 } else { -1.0 };
+                colour_line(&mut v, standard, rate, 0.5, blue, swing);
+            }
+            v.extend(std::iter::repeat_n(-0.3f32, (27.3e-6 * rate) as usize));
+            v.extend(std::iter::repeat_n(0.0f32, (standard.line_s() * rate) as usize));
+        }
+
+        let mut sep = SyncSeparator::new(rate, standard, 320).with_colour();
+        let mut out = Vec::new();
+        sep.process(&v, &mut out);
+        let f = out.last().expect("a field");
+        let rgb = f.rgb.as_ref().expect("colour");
+        // Sample the middle of the picture, away from the edges where the
+        // box filter is still filling.
+        let at = (f.width * 150 + 160) * 3;
+        let (r, g, b) = (rgb[at], rgb[at + 1], rgb[at + 2]);
+        assert!(
+            b > r + 40 && b > g + 40,
+            "a blue vector should read blue, got r{r} g{g} b{b}"
+        );
     }
 
     #[test]
