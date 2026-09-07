@@ -42,7 +42,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 pub enum Rule {
     /// Whatever is being received, wherever.
     Everything,
-    /// One system: every FPV channel, every weather satellite pass.
+    /// One system: every analogue camera, every weather satellite pass.
     System(String),
     /// One channel, to within its own width.
     Channel(f64),
@@ -318,7 +318,7 @@ mod tests {
 
     fn frame(channel_hz: f64, label: &str, lines: usize) -> VideoFrame {
         VideoFrame {
-            system: "FPV",
+            system: "analogue video",
             channel_hz,
             label: Some(label.into()),
             width: 4,
