@@ -501,9 +501,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         let dest = if m.is_broadcast() { "broadcast".to_string() } else { format!("{:08x}", m.destination) };
         fields.extend([
             ("source".into(), Value::Text(format!("{:08x}", m.source))),
-            ("destination".into(), Value::Text(dest.clone())),
-            ("from".into(), Value::Text(format!("{:08x}", m.source))),
-            ("to".into(), Value::Text(dest)),
+            ("destination".into(), Value::Text(dest)),
             ("packet_id".into(), Value::Text(format!("{:08x}", m.packet_id))),
             ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
             ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
@@ -579,6 +577,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     // MeshCore keeps its routing in the clear, so the shape of the packet
     // reads whether or not its payload does; an advert is the whole node.
     let core = r.meshcore();
+    let mut core_link: Option<pipeline::event::Link> = None;
     if let Some(p) = &core {
         fields.push(("type".into(), Value::Text(p.payload_type.name().into())));
         fields.push(("route".into(), Value::Text(p.route.name().into())));
@@ -590,6 +589,9 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             fields.push(("encrypted".into(), Value::Bool(true)));
         }
         if let Some(a) = p.advert() {
+            core_link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(
+                format!("{:02x}", a.hash()),
+            )));
             fields.push(("node".into(), Value::Text(a.node_type.name().into())));
             fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
             if let Some(n) = &a.name {
@@ -772,8 +774,15 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         "LoRa"
     };
 
-    Some(
-        Decoded::bytes(
+    let link = mesh.as_ref().map(|m| pipeline::event::Link {
+        from: Some(pipeline::event::Party::unit(format!("{:08x}", m.source))),
+        to: Some(if m.is_broadcast() {
+            pipeline::event::Party::broadcast()
+        } else {
+            pipeline::event::Party::unit(format!("{:08x}", m.destination))
+        }),
+    });
+    let mut d = Decoded::bytes(
             protocol,
             center,
             0.0,
@@ -783,8 +792,9 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_bandwidth(r.bandwidth_hz)
         .with_crc(r.crc_ok)
         .with_detail(detail)
-        .with_fields(fields),
-    )
+        .with_fields(fields);
+    d.link = link.or(core_link);
+    Some(d)
 }
 
 fn now_us() -> u64 {

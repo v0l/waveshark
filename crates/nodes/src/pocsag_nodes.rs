@@ -156,10 +156,6 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
             let mut fields: Vec<(String, Value)> = vec![
                 ("address".into(), Value::Int(i64::from(m.address))),
                 ("function".into(), Value::Int(i64::from(m.function))),
-                // A page names the pager it is for and never the transmitter
-                // that sent it, so the link is to a capcode from a network
-                // this receiver cannot identify.
-                ("to".into(), Value::Text(m.address.to_string())),
             ];
             let (protocol, text) = match &m.body {
                 Body::Tone => ("POCSAG-Tone", None),
@@ -174,6 +170,10 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
                 None => format!("address={} tone only", m.address),
             };
             let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+                .with_link(pipeline::event::Link {
+                    from: None,
+                    to: Some(pipeline::event::Party::unit(m.address.to_string())),
+                })
                 .with_detail(detail)
                 .with_fields(fields)
                 .with_modulation("FSK")

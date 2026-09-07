@@ -48,6 +48,91 @@ pub mod media {
     pub const PNG: &str = "image/png";
 }
 
+/// One end of a transmission, as the protocol named it.
+///
+/// Kept as a kind and an identifier rather than as a string, because the two
+/// questions a directory asks are "the same party as that one?" and "is this
+/// a person or a group?", and a string answers neither. `9` is a talkgroup on
+/// DMR and a callsign suffix somewhere else; `broadcast` is a word a device
+/// could be called.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Party {
+    pub kind: PartyKind,
+    /// How the protocol writes it: a MAC, a radio ID, a callsign, an MMSI.
+    /// Empty for [`PartyKind::Broadcast`], which names nobody.
+    pub id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PartyKind {
+    /// One radio, one device, one aircraft.
+    Unit,
+    /// A talkgroup, a channel, a mesh flood: many listeners, one name.
+    Group,
+    /// Everyone in range, named by nobody.
+    Broadcast,
+    /// A base station, repeater or gateway, where the protocol says so.
+    Infrastructure,
+}
+
+impl Party {
+    pub fn unit(id: impl Into<String>) -> Self {
+        Self { kind: PartyKind::Unit, id: id.into() }
+    }
+
+    pub fn group(id: impl Into<String>) -> Self {
+        Self { kind: PartyKind::Group, id: id.into() }
+    }
+
+    pub fn infrastructure(id: impl Into<String>) -> Self {
+        Self { kind: PartyKind::Infrastructure, id: id.into() }
+    }
+
+    pub fn broadcast() -> Self {
+        Self { kind: PartyKind::Broadcast, id: String::new() }
+    }
+
+    /// What a row shows.
+    pub fn label(&self) -> &str {
+        match self.kind {
+            PartyKind::Broadcast => "broadcast",
+            _ => &self.id,
+        }
+    }
+}
+
+/// Who a transmission was between, when the protocol says.
+///
+/// This is the decoder's own statement and not a reading of its fields: a
+/// directory of links keys on it, so a decoder that knows the answer says so
+/// here, and one that does not leaves it out rather than having a view guess
+/// from field names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct Link {
+    pub from: Option<Party>,
+    pub to: Option<Party>,
+}
+
+impl Link {
+    pub fn from(p: Party) -> Self {
+        Self { from: Some(p), to: None }
+    }
+
+    pub fn between(from: Party, to: Party) -> Self {
+        Self { from: Some(from), to: Some(to) }
+    }
+
+    pub fn to(mut self, p: Party) -> Self {
+        self.to = Some(p);
+        self
+    }
+
+    /// A beacon: one end, heard by whoever is listening.
+    pub fn beacon(from: Party) -> Self {
+        Self { from: Some(from), to: Some(Party::broadcast()) }
+    }
+}
+
 /// A successfully decoded frame from some protocol.
 #[derive(Clone, Debug)]
 pub struct Decoded {
@@ -112,6 +197,8 @@ pub struct Decoded {
     /// A voice transmission is not readable as bytes: what it said is in the
     /// audio, so the audio is the payload a view wants.
     pub audio: Option<std::sync::Arc<common::Speech>>,
+    /// Who it was between, where the protocol names them. See [`Link`].
+    pub link: Option<Link>,
 }
 
 impl Decoded {
@@ -133,7 +220,15 @@ impl Decoded {
             snr_db: None,
             iq: None,
             audio: None,
+            link: None,
         }
+    }
+
+    /// Who the frame was between. The decoder's own statement, which is what
+    /// the links directory is built from.
+    pub fn with_link(mut self, link: Link) -> Self {
+        self.link = Some(link);
+        self
     }
 
     pub fn with_iq(mut self, iq: Option<std::sync::Arc<common::IqBurst>>) -> Self {

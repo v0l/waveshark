@@ -98,11 +98,6 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         r.fields.iter().filter(|(k, _)| k.as_str() != "data").map(|(k, v)| (k.clone(), v.clone())).collect();
     let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
     let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
-    if !id.is_empty() {
-        // A meter transmits to whoever is listening: the utility's collector
-        // is not named in the frame.
-        fields.push(("from".into(), common::Value::Text(format!("{m}-{id}"))));
-    }
     let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
     let enc = r.get("payload_encrypted").is_some();
     let text = format!(
@@ -110,5 +105,10 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         if enc { ", payload encrypted" } else { "" }
     );
     d = d.with_text(text.clone()).with_detail(r.fields_line()).with_fields(fields);
+    if !id.is_empty() {
+        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
+            "{m}-{id}"
+        ))));
+    }
     Some(d)
 }

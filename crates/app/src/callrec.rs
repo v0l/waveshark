@@ -146,6 +146,7 @@ mod tests {
             snr_db: f32::NAN,
             bytes: Vec::new(),
             crc: None,
+            link: None,
             iq: None,
             audio: pcm.map(|p| std::sync::Arc::new(Speech { pcm: p, rate: 8000.0 })),
         }

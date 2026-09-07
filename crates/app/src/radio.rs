@@ -880,6 +880,11 @@ pub struct DecodeRecord {
     /// `None` when the protocol has no integrity check, which must stay
     /// visible: an unchecked decode from a noisy band is often wrong.
     pub crc: Option<bool>,
+    /// Who the transmission was between, as the decoder named them. The
+    /// links directory is built from this and not from the fields: a party
+    /// is a kind and an identifier, and reading one out of a display string
+    /// is how a talkgroup and a callsign end up in the same row.
+    pub link: Option<pipeline::event::Link>,
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
@@ -928,6 +933,7 @@ impl DecodeRecord {
             snr_db: 15.0,
             bytes: vec![1, 2, 3],
             crc: Some(true),
+            link: None,
             iq: None,
             audio: None,
         }
@@ -3874,6 +3880,7 @@ pub(crate) mod tests {
             snr_db: 20.0,
             bytes: vec![1, 2, 3],
             crc: None,
+            link: None,
             iq: None,
             audio: None,
         }

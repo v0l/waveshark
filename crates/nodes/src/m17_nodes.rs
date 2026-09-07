@@ -422,6 +422,19 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         }
     };
 
+    let link = lsf.map(|l| {
+        let dst = l.destination().to_string();
+        // ALL and a reflector's own name are many listeners under one name;
+        // anything else is the callsign of one station.
+        let to = if dst.eq_ignore_ascii_case("all") || dst.starts_with("M17-") {
+            pipeline::event::Party::group(dst)
+        } else if dst.is_empty() {
+            pipeline::event::Party::broadcast()
+        } else {
+            pipeline::event::Party::unit(dst)
+        };
+        pipeline::event::Link::between(pipeline::event::Party::unit(l.source().to_string()), to)
+    });
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
@@ -434,6 +447,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(t) = text {
         d = d.with_media(media::TEXT).with_text(t);
     }
+    d.link = link;
     Some(d)
 }
 

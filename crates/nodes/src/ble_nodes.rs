@@ -174,8 +174,16 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(" ");
+    let link = pipeline::event::Link {
+        from: Some(pipeline::event::Party::unit(adv.address.to_string())),
+        to: Some(match adv.target {
+            Some(t) => pipeline::event::Party::unit(t.to_string()),
+            None => pipeline::event::Party::broadcast(),
+        }),
+    };
     Some(
         Decoded::bytes("BLE-Adv", center, 0.0, bytes.to_vec())
+            .with_link(link)
             .with_detail(detail)
             .with_fields(fields)
             .with_modulation("GFSK")
