@@ -8,11 +8,12 @@ fn main() {
     let path = std::env::args().nth(1).expect("file");
     let rate: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(2_048_000.0);
     let centre: f64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(869_200_000.0);
-    let bytes = std::fs::read(&path).unwrap();
-    let iq: Vec<C32> = bytes
-        .chunks_exact(2)
-        .map(|c| C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
-        .collect();
+    // Through the file source, so the format and the rate come from the
+    // name rather than from an assumption that every capture is cu8.
+    let buf = sources::FileSource::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
+    let iq: Vec<C32> = buf.samples.clone();
+    let rate = if buf.rate.as_f64() > 0.0 { buf.rate.as_f64() } else { rate };
+    let centre = if buf.center.0 > 0 { buf.center.as_f64() } else { centre };
     let mut g = build_chain(StreamSpec::iq(rate, Hz(centre as i64 as u64)), &[NodeSpec::new("auto")], &registry()).unwrap();
     let block = 16_384;
     let t0 = std::time::Instant::now();
@@ -63,5 +64,15 @@ fn main() {
     }
     let wall = t0.elapsed().as_secs_f64();
     let secs = iq.len() as f64 / rate;
+    if std::env::var_os("PHASES").is_some() {
+        use pipeline::node::Node;
+        for (id, name) in g.order() {
+            if let Some(node) = g.node(id) {
+                for (phase, cost) in node.phases() {
+                    eprintln!("{name:14} {phase:22} {:8.3} ms {:6.1}%", cost.p95_us as f64 / 1000.0, cost.load().unwrap_or(0.0) * 100.0);
+                }
+            }
+        }
+    }
     println!("{:.2}x real time, {packets} packets, {slow_blocks} of {} blocks slower than real time", secs / wall, iq.len() / block);
 }
