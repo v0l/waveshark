@@ -6,6 +6,7 @@ use pipeline::event::Event;
 use pipeline::port::{PortKind, StreamSpec};
 use pipeline::registry::{Registry, Settings};
 use pipeline::{Graph, Out};
+use std::collections::VecDeque;
 
 use crate::protocol::{Placed, Protocol};
 use crate::{build_chain, NodeSpec};
@@ -88,7 +89,25 @@ pub(super) struct Member {
     /// each once. What places the decoders that wait for a verdict, late,
     /// fed from `ring`.
     pub(super) verdicts: Vec<dsp::Modulation>,
+    /// Samples still to be read before the live ones: what a decoder placed
+    /// late has to catch up on, and every block that arrives while it does.
+    /// Read a bounded amount a block. Two seconds of history through six
+    /// spreading factors of dechirp, in the one block a chirp was named
+    /// in, held the radio thread for several block times and the device
+    /// dropped samples; spread over a few blocks it costs a few times a
+    /// block each and nothing is lost.
+    pub(super) backlog: VecDeque<C32>,
 }
+
+/// How many blocks' worth of backlog a member reads per block, over the
+/// live block itself. Three catches up on two seconds of history in under
+/// a second at a cost the fanout absorbs; ten would be the old stall in
+/// slower motion.
+const CATCHUP_RATIO: usize = 3;
+
+/// The least a draining member reads per call, for the blocks after its
+/// source closed, when there is no live block to scale from.
+const CATCHUP_MIN: usize = 16_384;
 
 /// Longest run of samples kept behind a packet, in seconds.
 const RING_MAX_S: f64 = 2.0;
@@ -168,11 +187,39 @@ impl Member {
             ring: Vec::new(),
             noise_pow: f32::NAN,
             verdicts: Vec::new(),
+            backlog: VecDeque::new(),
         })
     }
 
-    /// Run one block through and collect what came out as packets.
+    /// Give a member placed late the samples it missed. They are read a
+    /// bounded amount a block from then on, ahead of whatever arrives.
+    pub(super) fn catch_up(&mut self, history: &[C32]) {
+        self.backlog.extend(history.iter().copied());
+    }
+
+    /// Whether there is still history to read before the live stream.
+    pub(super) fn behind(&self) -> bool {
+        !self.backlog.is_empty()
+    }
+
+    /// Run one block through and collect what came out as packets. With a
+    /// backlog, the block joins the queue and a bounded amount of the
+    /// queue is read instead.
     pub(super) fn run(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
+        if self.backlog.is_empty() {
+            return self.run_now(iq, at_us, out);
+        }
+        self.backlog.extend(iq.iter().copied());
+        let budget = (iq.len().max(CATCHUP_MIN) * CATCHUP_RATIO).min(self.backlog.len());
+        let take: Vec<C32> = self.backlog.drain(..budget).collect();
+        let mut events = Vec::new();
+        for chunk in take.chunks(16_384) {
+            events.extend(self.run_now(chunk, at_us, out));
+        }
+        events
+    }
+
+    fn run_now(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
         let rate = self.graph.input_spec().rate;
         if !iq.is_empty() {
             let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
@@ -429,4 +476,38 @@ pub(super) fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
         })
         .filter(|o| g.spec_of(*o).map(|s| s.kind) == Some(kind))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::Hz;
+
+    /// A member handed two seconds of history reads a few blocks' worth of
+    /// it per block, not all of it at once: reading it at once is what held
+    /// the radio thread and dropped samples.
+    #[test]
+    fn history_is_read_a_bounded_amount_a_block() {
+        let rate = 250_000.0;
+        let spec = StreamSpec::iq(rate, Hz::mhz(868));
+        let reg = crate::registry();
+        let mut m = Member::classifier(spec, NodeSpec::new("burst_route"), &reg).unwrap();
+        let history = vec![C32::new(0.0, 0.0); (2.0 * rate) as usize];
+        m.catch_up(&history);
+        assert!(m.behind());
+        let block = vec![C32::new(0.0, 0.0); 13_600];
+        let mut out = Vec::new();
+        let before = m.backlog.len();
+        m.run(&block, 0, &mut out);
+        let read = before + block.len() - m.backlog.len();
+        assert_eq!(read, CATCHUP_MIN * CATCHUP_RATIO);
+        // And it does catch up, block by block, until the live stream is
+        // read directly again.
+        let mut blocks = 0;
+        while m.behind() {
+            m.run(&block, 0, &mut out);
+            blocks += 1;
+        }
+        assert!((8..=16).contains(&blocks), "caught up in {blocks} blocks");
+    }
 }
