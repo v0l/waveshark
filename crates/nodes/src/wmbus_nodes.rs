@@ -150,8 +150,13 @@ impl Protocol for Wmbus {
     fn label(&self) -> &'static str {
         "wmbus"
     }
+    /// Where meters transmit (EN 13757-4). Placed by band rather than
+    /// anywhere, because a meter transmission's width is a width many
+    /// things have: placed by width alone the decoder was built on every
+    /// 200 kHz GSM carrier and every splattering 433 MHz sensor, and ran on
+    /// all of them for nothing.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Bands(dsp::wmbus::BANDS.to_vec())
     }
     fn shape(&self) -> Shape {
         Shape {

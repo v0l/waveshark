@@ -27,9 +27,15 @@ use common::C32;
 pub const CHIP_RATE: f64 = 100_000.0;
 
 /// Where meters transmit: mode T and C uplinks on 868.95 MHz, mode S on
-/// 868.3 MHz, with room for a source's centre to sit off nominal.
+/// 868.3 MHz, with room for a source's centre to sit off nominal. The room
+/// is generous on the T and C side because it has to be: the three
+/// Kamstrup mode C captures in rtl_433's corpus measure at 868.746 MHz,
+/// 200 kHz under nominal, and they are real meters read by a real
+/// receiver.
+pub const BANDS: [(f64, f64); 2] = [(868_700_000.0, 869_200_000.0), (868_250_000.0, 868_350_000.0)];
+
 pub fn is_wmbus_band(hz: f64) -> bool {
-    (868_850_000.0..=869_050_000.0).contains(&hz) || (868_250_000.0..=868_350_000.0).contains(&hz)
+    BANDS.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz))
 }
 
 /// CRC-16 of EN 13757-4: polynomial 0x3D65, zero initial value, and the
