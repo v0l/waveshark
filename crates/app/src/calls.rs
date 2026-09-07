@@ -80,6 +80,12 @@ pub struct Call {
     /// Airtime in seconds, where the protocol says how long a transmission
     /// ran. Zero where it does not.
     pub seconds: f64,
+    /// What was said in the most recent over, when something transcribed it.
+    ///
+    /// The last one rather than all of them: this is a scanner's list of who
+    /// is on the air, and the row is one line. The whole text of every over
+    /// stays in the packet log beside the audio it was read from.
+    pub transcript: Option<String>,
 }
 
 impl Call {
@@ -162,6 +168,7 @@ impl Calls {
         };
         let cipher = text(rec, &["encryption"]).filter(|t| !t.eq_ignore_ascii_case("none"));
         let codec = text(rec, &["codec"]).filter(|t| !t.is_empty());
+        let transcript = text(rec, &["transcript"]).filter(|t| !t.trim().is_empty());
         let says_encryption = cipher.is_some()
             || rec.fields.iter().any(|(k, _)| k == "encryption" || k == "encrypted");
         let encrypted = cipher.as_deref().is_some_and(|t| !t.eq_ignore_ascii_case("decrypted"))
@@ -231,6 +238,9 @@ impl Calls {
             if codec.is_some() {
                 c.codec = codec;
             }
+            if transcript.is_some() {
+                c.transcript = transcript;
+            }
             return true;
         }
 
@@ -247,6 +257,7 @@ impl Calls {
             last: at,
             overs: u64::from(!live),
             seconds,
+            transcript,
         });
         if self.seen.len() > MAX_CALLS {
             self.seen.retain(|c| c.age(at) < FORGET);

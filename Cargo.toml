@@ -20,11 +20,15 @@ members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/stt",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
 # restrictions, so nothing builds or links it by default.
 # `cargo test -p mbe` builds and tests it explicitly.
+# `stt` builds by default with the app, which turns its feature on: a receiver
+# that cannot say what was said on a voice channel is missing the point of
+# one. `cargo build -p app --no-default-features` leaves candle out.
 default-members = [
     "crates/common",
     "crates/dsp",
@@ -44,6 +48,7 @@ default-members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/stt",
 ]
 
 [workspace.package]
@@ -56,6 +61,7 @@ license = "GPL-3.0-or-later"
 # `common` rather than `core`: a workspace crate named `core` collides with the
 # Rust sysroot crate and makes every `use core::..` path ambiguous.
 common = { path = "crates/common" }
+stt = { path = "crates/stt" }
 dsp = { path = "crates/dsp" }
 pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }

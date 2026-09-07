@@ -779,6 +779,7 @@ impl App {
             muted: false,
             squelch_db: None,
             agc: true,
+            voice: false,
             tx: None,
         });
         self.audio.next_id += 1;
@@ -1521,6 +1522,7 @@ impl App {
             muted: false,
             squelch_db: None,
             agc: true,
+            voice: false,
             tx: None,
         });
         self.audio.listening = Some(self.audio.channels.len() - 1);
@@ -1559,6 +1561,7 @@ impl App {
                 muted: c.muted,
                 squelch_db: c.squelch_db,
                 agc: c.agc,
+                voice: c.voice,
                 tx: c.tx,
             })
             .collect()
@@ -1856,6 +1859,7 @@ mod tests {
             muted: false,
             squelch_db: None,
             agc: true,
+            voice: false,
             tx: None,
         });
     }
@@ -2057,6 +2061,7 @@ mod tests {
                 muted: false,
                 squelch_db: None,
                 agc: true,
+                voice: false,
             tx: None,
             });
         }

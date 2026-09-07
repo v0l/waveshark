@@ -14,7 +14,7 @@ use crate::calls::Call;
 ///
 /// The two subscription boxes come first, because that is what this pane is
 /// for: the rest of the row is what tells you whether to tick them.
-const COLS: [(&str, f32); 11] = [
+const COLS: [(&str, f32); 12] = [
     ("grp", 34.0),
     ("who", 34.0),
     ("system", 60.0),
@@ -26,6 +26,7 @@ const COLS: [(&str, f32); 11] = [
     ("airtime", 74.0),
     ("overs", 50.0),
     ("last", 56.0),
+    ("said", 320.0),
 ];
 
 /// What the list wants done that it cannot do itself.
@@ -296,5 +297,6 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
             if live { "now".to_string() } else { format!("{}s", c.age(now).as_secs()) },
             if live { CRC_OK } else { theme::LEGEND },
         ),
+        (c.transcript.clone().unwrap_or_default(), theme::READOUT),
     ]
 }
