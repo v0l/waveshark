@@ -368,19 +368,26 @@ pub fn help(ui: &mut egui::Ui, text: &str) -> Response {
     r.on_hover_text(text)
 }
 
-/// A section legend with its explanation on a "?" beside it.
+/// A section legend with its explanation on a "?" at the end of the row.
+///
+/// Against the right edge rather than against the label, so the icons form a
+/// column instead of a ragged edge following the length of each word.
 pub fn legend_help(ui: &mut egui::Ui, label: &str, text: &str) {
     ui.horizontal(|ui| {
         ui.label(legend(label));
-        help(ui, text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            help(ui, text);
+        });
     });
 }
 
-/// A checkbox with its explanation on a "?" beside it.
+/// A checkbox with its explanation on a "?" at the end of the row.
 pub fn check_help(ui: &mut egui::Ui, on: &mut bool, label: &str, text: &str) -> Response {
     ui.horizontal(|ui| {
         let r = ui.checkbox(on, label);
-        help(ui, text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            help(ui, text);
+        });
         r
     })
     .inner
@@ -407,15 +414,20 @@ pub fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
-/// A settings row whose legend carries a "?".
+/// A settings row with its explanation on a "?" at the end of the row.
 ///
-/// The icon sits inside the legend column, so a row that explains itself and a
-/// row that needs no explaining still line their controls up.
+/// The control keeps the column [`row`] puts it in, and the icon lands where
+/// every other icon in the modal is, which is what makes them read as one
+/// affordance rather than as decoration on particular settings.
 pub fn row_help(ui: &mut egui::Ui, label: &str, text: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized([LABEL_W - 18.0, 18.0], egui::Label::new(legend(label)));
-        help(ui, text);
-        add(ui);
+        ui.add_sized([LABEL_W, 18.0], egui::Label::new(legend(label)));
+        // The icon is taken off the right before the control is drawn, or a
+        // slider that fills the row leaves nothing for it to sit in.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            help(ui, text);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), add);
+        });
     });
 }
 
