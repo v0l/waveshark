@@ -3328,6 +3328,38 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    /// The 5.8 GHz camera: an AKK RaceRunner with a PAL camera on it.
+    fn camera_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/pal_camera_5865M_20000k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// A camera through the whole receiver, which is where it was broken.
+    ///
+    /// `decode::video` read this capture from the first commit, because that
+    /// test hands it the samples. The receiver never saw it: the source
+    /// detector refuses a run wider than the widest narrowband signal, so a
+    /// carrier megahertz wide never opened as one source, the runs inside it
+    /// opened instead, and a camera arrived as a packet list of sensors that
+    /// were not there.
+    #[test]
+    fn a_camera_reaches_the_video_bus_through_the_receiver() {
+        let Some(buf) = camera_fixture() else {
+            eprintln!("skipping: pal_camera_5865M_20000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).expect("a receiver");
+        let _ = replay_blocks(&mut rx, &buf);
+        let bus = rx.video().expect("a video bus");
+        let fed = bus.bus().strips().iter().filter(|s| s.is_fed()).count();
+        let picture = bus.bus().thumbnails().next().is_some();
+        assert!(picture, "no picture on the video bus; {fed} strips fed");
+    }
+
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
     /// so the packets are read across the tuner's own DC spike.
     fn ble_fixture() -> Option<common::IqBuf> {

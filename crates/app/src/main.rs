@@ -681,6 +681,10 @@ struct Args {
     #[arg(long)]
     links: bool,
 
+    /// Open on the picture, for analogue video
+    #[arg(long)]
+    video: bool,
+
     /// Tune here, in MHz, without opening a channel on it
     #[arg(long, value_name = "MHZ")]
     center: Option<f64>,
@@ -1047,6 +1051,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.messages {
                 app.show_messages();
+            }
+            if args.video {
+                app.show_video();
             }
             if args.links {
                 app.show_links();
