@@ -238,6 +238,61 @@ fn main() {
         );
     }
 
+    if a.get(5).map(|s| s == "bursts") == Some(true) {
+        // What the bursts are, rather than whether they are the one thing
+        // being looked for. A link that hops is on the grid whatever it
+        // modulates with, and the classifier names chirp, GFSK and OFDM
+        // apart without being told which to expect.
+        let mut strong: Vec<&(f64, usize, f64)> = narrow.iter().collect();
+        strong.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap());
+        strong.truncate(12);
+        strong.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        println!();
+        println!("t(s)      ch   us     verdict     conf  bw(kHz)  baud(k)  chirp fit/rate  tones");
+        let work = 4_000_000.0f64;
+        let factor = (rate / work).round().max(1.0) as usize;
+        for (t, ch, us) in strong {
+            let hz = b.channel_hz(*ch as u8) as f64;
+            let from = ((t - 0.0002) * rate).max(0.0) as usize;
+            let to = (((t + us / 1e6 + 0.0002) * rate) as usize).min(iq.len());
+            if to <= from {
+                continue;
+            }
+            let mut phase = 0.0f64;
+            let cut: Vec<C32> = iq[from..to]
+                .iter()
+                .map(|&x| {
+                    phase -= std::f64::consts::TAU * (hz - center) / rate;
+                    x * C32::new(phase.cos() as f32, phase.sin() as f32)
+                })
+                .collect();
+            let mut decim = dsp::FirDecim::design_hz(rate, factor, work / 2.5, 60.0);
+            let mut d = Vec::new();
+            decim.process(&cut, &mut d);
+            let mut c = dsp::classify::Classifier::new(
+                rate / factor as f64,
+                dsp::classify::ClassifyConfig {
+                    channel_hz: (rate / factor as f64) as f32,
+                    min_samples: 128,
+                    ..Default::default()
+                },
+            );
+            let v = c.classify(&d);
+            let f = &v.features;
+            println!(
+                "{t:<9.4} {ch:<4} {us:<6.0} {:<11} {:<5.2} {:>7.0}  {:>7.1}  {:>4.2}/{:>8.2e}  {}",
+                format!("{:?}", v.modulation),
+                v.confidence,
+                f.bandwidth_hz / 1e3,
+                f.baud / 1e3,
+                f.chirp_fit,
+                f.chirp_rate,
+                f.tones
+            );
+        }
+        return;
+    }
+
     if a.get(5).map(|s| s == "dechirp") != Some(true) {
         return;
     }
@@ -260,7 +315,10 @@ fn main() {
         let want = bw * dsp::lora::OVERSAMPLE as f64;
         let factor = (rate / want).floor() as usize;
         let got = rate / factor as f64;
-        let mut decim = dsp::FirDecim::design_hz(rate, factor, bw / 2.0, 60.0);
+        // The chirp fills the channel edge to edge, so the anti-alias filter
+        // has to pass the whole of it: a cutoff at bw/2 rolls off exactly
+        // where the sweep spends its time.
+        let mut decim = dsp::FirDecim::design_hz(rate, factor, bw * 0.62, 60.0);
         let mut d = Vec::new();
         decim.process(&mixed, &mut d);
         let step = got / want;
@@ -272,16 +330,40 @@ fn main() {
             res.push(d[i] * (1.0 - f) + d[i + 1] * f);
             pos += step;
         }
+        // A capture whose I and Q are the other way round turns every
+        // upchirp into a downchirp, which the demodulator cannot see at all.
+        let conj: Vec<C32> = res.iter().map(|c| c.conj()).collect();
+        for (label, samples) in [("", &res), ("conj ", &conj)] {
         for sf in 5..=9u8 {
             let mut demod = dsp::lora::Demod::new(dsp::lora::Config::for_sf(sf));
             let mut at = 0usize;
             let mut found = 0usize;
             let mut syncs: std::collections::BTreeSet<u8> = Default::default();
-            while at < res.len() {
-                match demod.detect(&res, at) {
+            while at < samples.len() {
+                match demod.detect(samples, at) {
                     Some(p) => {
                         syncs.insert(p.sync_word);
                         found += 1;
+                        if p.sync_word == 0x12 && found <= 2 {
+                            // ExpressLRS agrees the length and the coding rate
+                            // in advance, so there is no header to read them
+                            // from.
+                            for cr in 1..=4u8 {
+                                let r = decode::lora::decode_implicit(
+                                    &p.symbols,
+                                    sf,
+                                    false,
+                                    decode::lora::Implicit { length: 8, coding_rate: cr, has_crc: false },
+                                );
+                                if let Ok(f) = r {
+                                    println!(
+                                        "    ch{ch} sf{sf} cr4/{} payload {}",
+                                        cr + 4,
+                                        f.payload.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                                    );
+                                }
+                            }
+                        }
                         at = p.start + demod.symbol_len();
                     }
                     None => break,
@@ -289,11 +371,12 @@ fn main() {
             }
             if found > 0 {
                 println!(
-                    "{ch:>7}  {:>9.1}  {sf:>3}  {found:>7}  {:?}",
+                    "{ch:>7}  {:>9.1}  {label}{sf:>3}  {found:>7}  {:?}",
                     hz / 1e6,
                     syncs.iter().map(|s| format!("0x{s:02x}")).collect::<Vec<_>>()
                 );
             }
+        }
         }
     }
 }

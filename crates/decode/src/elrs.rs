@@ -7,6 +7,16 @@
 //! sequence, all from the firmware's own source (`src/lib/OTA`,
 //! `src/lib/FHSS`, ExpressLRS 4.x).
 //!
+//! # On 2.4 GHz the chirps run the other way
+//!
+//! The SX1280 transmits LoRa with I and Q swapped against the SX127x
+//! convention, so an ExpressLRS 2.4 GHz preamble is a run of *down*chirps to
+//! a receiver built for 868 MHz LoRa, and a dechirper that expects upchirps
+//! sees nothing at all. Conjugating the samples first is the whole fix, and
+//! without it a link transmitting a hundred and fifty packets a second reads
+//! as an empty band: five captures here said so before the classifier was
+//! pointed at a burst and named it a chirp with a negative sweep.
+//!
 //! # Nothing here is encryption, and nothing here is authentication
 //!
 //! An ExpressLRS packet has no cipher in it. What it has instead is a CRC
