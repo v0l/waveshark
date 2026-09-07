@@ -2010,6 +2010,14 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             let w = nodes::m17_nodes::CHANNEL_WIDTH_HZ;
             Some(((hz - w, hz + w), 192_000.0))
         }
+        Front::Gsm(hz) => {
+            let w = nodes::gsm_nodes::CHANNEL_WIDTH_HZ;
+            // Three samples a symbol is the floor the detector refuses below,
+            // and this leaves four: the burst is sampled where the training
+            // sequence says, not where a sample happens to land, so the
+            // interpolator wants something to work with.
+            Some(((hz - w, hz + w), 1_200_000.0))
+        }
         Front::Ble(hz) => {
             let w = nodes::ble_nodes::CHANNEL_WIDTH_HZ;
             // The demodulator refuses anything under 4 MS/s: at 1 Mbit/s the
@@ -2355,7 +2363,22 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 let id = p.add_derived(derived::at("ble", *hz as u64, 0), "ble", s);
                 p.connect(src, (id, 0));
             }
-            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_) => {}
+            Front::Gsm(hz) if fits(*hz, nodes::gsm_nodes::CHANNEL_WIDTH_HZ) => {
+                let mut s = Settings::new();
+                s.insert("channel_hz".into(), pipeline::ParamValue::Float(*hz));
+                let name = match dsp::gsm::arfcn(*hz) {
+                    Some(n) => format!("ARFCN {n}"),
+                    None => format!("{:.1} GSM", hz / 1e6),
+                };
+                s.insert("label".into(), pipeline::ParamValue::Text(name));
+                let id = p.add_derived(derived::at("gsm", *hz as u64, 0), "gsm", s);
+                p.connect(src, (id, 0));
+            }
+            Front::Aprs(_)
+            | Front::Pocsag(_)
+            | Front::M17(_)
+            | Front::Ble(_)
+            | Front::Gsm(_) => {}
             Front::Auto => {
                 // One node over the band, whatever the band holds. The band
                 // is passed on so it ignores the margin the power-of-two
@@ -3485,6 +3508,14 @@ pub fn scan_marks(
                 label: match nodes::ble_nodes::channel_of(*hz) {
                     Some(ch) => format!("BLE {ch}"),
                     None => "BLE".into(),
+                },
+            }),
+            Front::Gsm(hz) => out.push(ScanMark::Channel {
+                hz: *hz,
+                width: nodes::gsm_nodes::CHANNEL_WIDTH_HZ,
+                label: match dsp::gsm::arfcn(*hz) {
+                    Some(n) => format!("GSM {n}"),
+                    None => "GSM".into(),
                 },
             }),
             Front::Pocsag(hz) => out.push(ScanMark::Channel {

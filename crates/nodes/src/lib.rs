@@ -268,8 +268,8 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            let n = gsm_nodes::GsmNode::new(s.f64_or("offset_hz", 0.0), Default::default());
-            Ok(Box::new(n) as Box<dyn Node>)
+            let hz = s.f64_or("channel_hz", gsm_nodes::DEFAULT_HZ);
+            Ok(Box::new(gsm_nodes::GsmNode::new(hz, Default::default())) as Box<dyn Node>)
         },
     );
 
