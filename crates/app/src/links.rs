@@ -317,18 +317,18 @@ impl Links {
 /// microseconds are laid out relative to now, which keeps the spacing and the
 /// order and loses only the absolute clock, and nothing in the view uses one.
 pub fn from_log(path: &std::path::Path) -> std::io::Result<Links> {
-    let packets = crate::packetlog::read(path)?;
+    let mut packets = crate::packetlog::read(path)?;
     let mut node = nodes::PacketDecodeNode::default();
     let now = Instant::now();
     let last_us = packets.iter().map(|p| p.at_us).max().unwrap_or(0);
     let mut links = Links::new();
     // One packet at a time, because a decode is stamped from the packet that
     // produced it and a batch would collapse a day into one instant.
-    for p in &packets {
-        node.decode_all(std::slice::from_ref(p));
+    for p in &mut packets {
+        node.annotate(std::slice::from_mut(p));
         let ago = Duration::from_micros(last_us.saturating_sub(p.at_us));
         let at = now.checked_sub(ago).unwrap_or(now);
-        for d in node.hits() {
+        for d in &p.decodes {
             let rec = crate::chain::record_of(at, d);
             links.update(&rec, at);
         }

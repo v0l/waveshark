@@ -420,13 +420,21 @@ pub fn decoded_event(
     center: common::Hz,
     modulation: &'static str,
 ) -> Decoded {
-    Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
+    let mut d = Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
         .with_text(report.to_string())
         .with_detail(report.fields_line())
         .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .with_modulation(modulation)
         .with_level(pkg.rssi_dbfs, pkg.snr_db)
-        .with_crc(report.crc_valid)
+        .with_crc(report.crc_valid);
+    if let Some(id) = &report.device {
+        // The model is part of the space, not decoration. A sensor's id is a
+        // handful of bits chosen at random, so two stations of different
+        // makes sharing one is ordinary, and merging them would report a
+        // single device reading two temperatures.
+        d = d.by(common::Identity::new(format!("ism:{}", report.model), id.clone()));
+    }
+    d
 }
 
 /// The event for a burst no protocol claimed, read under a guessed coding.

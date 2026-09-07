@@ -303,7 +303,9 @@ fn decode_packets(
     let mut out = Payload::Packets(Vec::new());
     let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
     Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
-    node.hits().to_vec()
+    // Off the packets the node passed on, which is where every view reads
+    // them.
+    out.as_packets().unwrap_or(&[]).iter().flat_map(|p| p.decodes.clone()).collect()
 }
 
 /// The channel graph must measure the burst rather than assume it, or the

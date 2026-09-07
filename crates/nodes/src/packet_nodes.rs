@@ -56,14 +56,23 @@ impl PacketDecodeNode {
         }
     }
 
-    /// Decode a batch of packets exactly as the bus does.
+    /// Decode a batch of packets and write the conclusions onto them, which
+    /// is the whole of what this node does to a packet.
     ///
     /// Public because the bus is not the only source of packets: a directory
     /// rebuilt from the packet log has to reach the same conclusions as the
     /// receiver did when the packets were live, and two implementations of
     /// "what protocol is this" would drift apart the first time one was
-    /// fixed.
-    pub fn decode_all(&mut self, packets: &[Packet]) {
+    /// fixed. A replay annotates and then reads `Packet::decodes`, exactly as
+    /// a view wired to the bus does.
+    pub fn annotate(&mut self, packets: &mut [Packet]) {
+        self.decode_all(packets);
+        for (p, hits) in packets.iter_mut().zip(self.per_packet()) {
+            p.decodes = hits.to_vec();
+        }
+    }
+
+    fn decode_all(&mut self, packets: &[Packet]) {
         self.hits.clear();
         self.spans.clear();
         for p in packets {
@@ -96,12 +105,8 @@ impl PacketDecodeNode {
     }
 
     /// What each packet of the last batch decoded to, in the same order.
-    pub fn per_packet(&self) -> impl Iterator<Item = &[Decoded]> {
+    fn per_packet(&self) -> impl Iterator<Item = &[Decoded]> {
         self.spans.iter().map(|(a, b)| &self.hits[*a..*b])
-    }
-
-    pub fn hits(&self) -> &[Decoded] {
-        &self.hits
     }
 
     fn decode_burst(&mut self, p: &Packet, pkg: &common::Package, modulation: &'static str) {
@@ -355,10 +360,7 @@ impl Simple for PacketDecodeNode {
         // is the one stage that decides. A view wired here sees the same
         // conclusions the log's replay would reach.
         let mut packets: Vec<Packet> = i.as_packets().unwrap_or(&[]).to_vec();
-        self.decode_all(&packets);
-        for (p, hits) in packets.iter_mut().zip(self.per_packet()) {
-            p.decodes = hits.to_vec();
-        }
+        self.annotate(&mut packets);
         for d in &self.hits {
             c.emit(Event::Decoded(d.clone()));
         }
@@ -406,7 +408,7 @@ mod tests {
         let mut out = Payload::Packets(Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
-        node.hits().to_vec()
+        out.as_packets().unwrap_or(&[]).iter().flat_map(|p| p.decodes.clone()).collect()
     }
 
     fn burst(center_hz: u64, bandwidth_hz: u32, pulses: Vec<Pulse>) -> Packet {
