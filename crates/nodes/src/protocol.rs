@@ -86,6 +86,15 @@ pub struct Shape {
     /// here is built once the classifier has named a burst on the source,
     /// and reads the samples it missed from the ring; one listing none is
     /// built the moment the source opens.
+    ///
+    /// For a decoder that is dear to run and whose modulation the
+    /// classifier names reliably, which so far is LoRa and its chirp. It
+    /// is not a general saving: measured on the off-air M17 capture, the
+    /// classifier names the handheld's 4-FSK `Unknown` for the whole
+    /// transmission, so a voice decoder gated on `Fsk4` would never have
+    /// been built. A decoder that is cheap beside the classifier, or whose
+    /// modulation the classifier is unsure of, lists nothing and is built
+    /// on open.
     pub families: &'static [Modulation],
 }
 
