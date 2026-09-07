@@ -105,7 +105,7 @@ impl AutoNode {
                     rate: self.rate,
                     snr_db: f32::NAN,
                 };
-                let mut m = Member::place(*p, spec, at, &self.reg)?;
+                let mut m = Member::place(*p, spec, at, &Default::default(), &self.reg)?;
                 // One that latches owns its band from the moment the span
                 // reaches it; one that claims owns nothing until it says so.
                 if matches!(p.stickiness(), Stickiness::Latch { .. }) {

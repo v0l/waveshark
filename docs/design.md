@@ -315,6 +315,24 @@ node answers what it can for the decoders it built and passes the rest up;
 the receiver logs what reaches it and keeps it in `Receiver::take_requests`
 for a consumer that moves the dial, which nothing does yet.
 
+An `OpenChannel` carries settings for the decoder placed there, because the
+asker knows things nothing else does. GSM is the case that needs them: an
+immediate assignment on the beacon sends a phone to a signalling channel
+on another carrier, and that carrier has no frequency correction or
+synchronisation burst of its own, so a decoder placed on it alone would
+never find frame timing. The beacon's node asks for the carrier with the
+timeslot, the cell's colour code, its frequency offset and where its last
+synchronisation burst sat, named in samples of the span both streams were
+cut from (every decoder the auto node places is told its stream's origin
+in the span, `span_origin_sample` and `span_rate_hz`). The new node
+converts that into its own channel stream and schedules the timeslot's
+blocks from it (`SchDetector::anchor`), the way a synchronisation burst
+would have. The two streams go through the same extraction and the same
+channel filter, so their delays cancel, and the burst search's six symbols
+of slack cover what is left. Hopping grants name no carrier and are not
+asked for; traffic channels are not either, since their blocks are on a
+different multiframe and ciphered by the time a call reaches them.
+
 Several details of the detector were found by measurement rather than design.
 The extent of a strong signal cannot be every bin over the floor, because sharp
 keying puts sidebands over the floor across hundreds of kilohertz at 60 dB;

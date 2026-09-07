@@ -19,9 +19,11 @@ use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
-use pipeline::event::Decoded;
+use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::registry::{Settings, SettingsExt};
 use pipeline::param::{Param, ParamValue};
+use std::collections::HashMap;
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
 /// What one carrier occupies, and the width a burst was heard through.
@@ -32,6 +34,25 @@ pub const CHANNEL_WIDTH_HZ: f64 = gsm::CHANNEL_SPACING_HZ;
 /// is no frequency worth compiling in beyond that, so the scanner table
 /// carries the channel and this is only what an unconfigured node opens on.
 pub const DEFAULT_HZ: f64 = 947_400_000.0;
+
+/// How long a carrier a cell sent a phone to is kept after the last block
+/// decoded on it, in seconds. A signalling channel holds a transaction for
+/// a few seconds; a carrier nothing has used for this long is one the cell
+/// is not handing out.
+pub const GRANTED_CARRIER_HOLD_S: f64 = 60.0;
+
+/// How often the same carrier and timeslot are asked for again, in frames:
+/// about a minute, so a busy channel is asked for once a hold rather than
+/// once a grant.
+const ASK_AGAIN_FRAMES: u32 = 13_000;
+
+/// Where a stream sits in the span it was cut from, so a position in it
+/// can be named to a decoder on another stream of the same span.
+#[derive(Clone, Copy, Debug)]
+struct Origin {
+    span_sample: f64,
+    span_rate: f64,
+}
 
 pub struct GsmNode {
     cfg: GsmConfig,
@@ -44,6 +65,20 @@ pub struct GsmNode {
     meter: crate::FrameMeter,
     hits: Vec<Hit>,
     accepted: u64,
+    /// Where this stream sits in the span, when whatever placed the node
+    /// said.
+    origin: Option<Origin>,
+    /// Timing handed over from a beacon carrier, in span samples, for a
+    /// carrier with no synchronisation burst of its own; applied once the
+    /// rate is known.
+    handed: Option<(f64, u32, u8, f64)>,
+    /// Timeslots to follow from the start.
+    follow: Vec<u8>,
+    /// Carriers and timeslots this beacon has sent phones to, and the frame
+    /// each was last asked for at.
+    asked: HashMap<(u16, u8), u32>,
+    /// What this node wants of whatever placed it, since the last block.
+    wants: Vec<Request>,
 }
 
 impl Default for GsmNode {
@@ -64,7 +99,75 @@ impl GsmNode {
             meter: crate::FrameMeter::new(rate, channel_hz as u64, 0.25),
             hits: Vec::new(),
             accepted: 0,
+            origin: None,
+            handed: None,
+            follow: Vec::new(),
+            asked: HashMap::new(),
+            wants: Vec::new(),
         }
+    }
+
+    /// What the stage was built with beyond its carrier: where its stream
+    /// sits in the span, and, for a carrier a cell sent a phone to, the
+    /// timeslot and the beacon's frame timing.
+    pub fn configure(&mut self, s: &Settings) {
+        if s.get("span_origin_sample").is_some() {
+            self.origin = Some(Origin {
+                span_sample: s.f64_or("span_origin_sample", 0.0),
+                span_rate: s.f64_or("span_rate_hz", 0.0),
+            });
+        }
+        if let Some(t) = s.get("timeslot").and_then(|v| v.as_i64()) {
+            self.follow.push(t as u8);
+        }
+        if s.get("anchor_span_sample").is_some() {
+            self.handed = Some((
+                s.f64_or("anchor_span_sample", 0.0),
+                s.i64_or("anchor_frame", 0) as u32,
+                s.i64_or("tsc", 0) as u8,
+                s.f64_or("freq_offset_hz", 0.0),
+            ));
+        }
+    }
+
+    /// Whether this carrier is timed from another rather than from a
+    /// beacon of its own.
+    pub fn anchored(&self) -> bool {
+        self.handed.is_some()
+    }
+
+    /// A phone has been sent to a signalling channel on another carrier.
+    /// Ask whatever placed this node to read it, and hand over the timing
+    /// it will need: that carrier has no beacon, and the frame this one
+    /// last synchronised on is the only clock there is.
+    fn ask_for(&mut self, g: &decode::gsm::Grant, rate: f64) {
+        let (Some(arfcn), Some(origin), Some(sync)) = (g.arfcn, self.origin, self.det.last_sync())
+        else {
+            return;
+        };
+        let Some(hz) = gsm::hz_of_arfcn(arfcn, self.channel_hz) else { return };
+        let key = (arfcn, g.timeslot);
+        let last = self.asked.get(&key).copied();
+        if last.is_some_and(|f| sync.frame_number.wrapping_sub(f) < ASK_AGAIN_FRAMES) {
+            return;
+        }
+        self.asked.insert(key, sync.frame_number);
+        let input = self.det.input_of_channel(sync.at);
+        let span = origin.span_sample + input * origin.span_rate / rate;
+        let mut settings = Settings::new();
+        settings.insert("timeslot".into(), ParamValue::Int(g.timeslot.into()));
+        settings.insert("anchor_span_sample".into(), ParamValue::Float(span));
+        settings.insert("anchor_frame".into(), ParamValue::Int(sync.frame_number.into()));
+        settings.insert("tsc".into(), ParamValue::Int(sync.tsc.into()));
+        settings.insert("freq_offset_hz".into(), ParamValue::Float(sync.freq_offset_hz));
+        self.wants.push(Request::OpenChannel {
+            protocol: "gsm".into(),
+            center_hz: hz,
+            width_hz: CHANNEL_WIDTH_HZ,
+            role: g.kind.into(),
+            hold_s: Some(GRANTED_CARRIER_HOLD_S),
+            settings,
+        });
     }
 
     /// Bursts and blocks that passed their check since the node was built.
@@ -98,6 +201,19 @@ impl Simple for GsmNode {
         self.det = SchDetector::new(rate, center, self.channel_hz, self.cfg);
         self.meter =
             crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
+        for t in &self.follow {
+            self.det.follow(*t);
+        }
+        // The beacon's timing, named in span samples, found in this stream.
+        if let (Some((span, frame, tsc, off)), Some(origin)) = (self.handed, self.origin) {
+            let input = (span - origin.span_sample) * rate / origin.span_rate;
+            self.det.anchor(gsm::Anchor {
+                at: self.det.channel_of_input(input),
+                frame_number: frame,
+                tsc,
+                freq_offset_hz: off,
+            });
+        }
 
         // Frames rather than bytes: two bursts written into one buffer cannot
         // be told apart afterwards.
@@ -107,7 +223,11 @@ impl Simple for GsmNode {
         Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+        for r in self.wants.drain(..) {
+            c.request("gsm", r);
+        }
+        let rate = c.inputs.first().map_or(0.0, |p| p.spec.rate);
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.hits.clear();
         self.det.process(iq, &mut self.hits);
@@ -115,7 +235,8 @@ impl Simple for GsmNode {
         // was heard at is the level of one carrier.
         self.meter.feed(self.det.channel());
         let out = o.frames_mut();
-        for hit in &self.hits {
+        let hits = std::mem::take(&mut self.hits);
+        for hit in &hits {
             // Two kinds of evidence off one carrier: the synchronisation
             // burst's 25 bit field, and the 23 byte blocks the broadcast and
             // common control channels carry. Both are bytes on the bus and
@@ -147,6 +268,12 @@ impl Simple for GsmNode {
                         if signalling && g.arfcn == Some(self.arfcn) && g.timeslot != 0 {
                             self.det.follow(g.timeslot);
                         }
+                        // On another carrier it is not this node's to read:
+                        // a hopping grant names no carrier at all, and is
+                        // left where it is.
+                        if signalling && g.arfcn.is_some_and(|a| a != self.arfcn) {
+                            self.ask_for(&g, rate);
+                        }
                     }
                     (b.bytes.to_vec(), b.start_sample, b.samples, b.quality)
                 }
@@ -162,12 +289,9 @@ impl Simple for GsmNode {
                     .at(self.channel_hz as u64),
             );
         }
+        self.hits = hits;
         Ok(())
     }
-
-    /// One 200 kHz carrier, which is what makes this a front end something
-    /// can place rather than one that has to be named here: the auto node
-    /// asks a source's width and puts this on the ones that match.
 
     fn reset(&mut self) {
         self.det.reset();
@@ -698,4 +822,147 @@ mod tests {
         assert!(rows.iter().all(|r| r.identity.is_none()));
     }
 
+
+    /// Bursts at symbol positions, on a carrier `frames` long, at `rate`.
+    fn carrier(frames: f64, bursts: &[(f64, Vec<u8>)], rate: f64) -> Vec<C32> {
+        let sps = 8;
+        let work = gsm::SYMBOL_RATE * sps as f64;
+        let total = ((200.0 * 2.0 + frames * gsm::FRAME_SYMBOLS) * sps as f64) as usize;
+        let mut base = vec![C32::new(0.0, 0.0); total];
+        for (at, bits) in bursts {
+            let wave = gsm::modulate(bits, sps);
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(&wave);
+        }
+        let ratio = work / rate;
+        let n = (base.len() as f64 / ratio) as usize - 1;
+        let mut seed = 0x2545_F491u32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f32 / u32::MAX as f32) - 0.5
+        };
+        (0..n).map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.02).collect()
+    }
+
+    /// Run a node over a stream and return its frames and its requests.
+    fn run(
+        node: &mut GsmNode,
+        rate: f64,
+        center: f64,
+        iq: &[C32],
+    ) -> (Vec<common::Frame>, Vec<Request>) {
+        node.negotiate(&spec(rate, center)).unwrap();
+        let ins = [spec(rate, center)];
+        let tags = Vec::new();
+        let mut frames = Vec::new();
+        let mut asked = Vec::new();
+        for block in iq.chunks(8192) {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = Payload::Frames(Vec::new());
+            let mut events = Vec::new();
+            let mut new_tags = Vec::new();
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&input, &mut out, &mut ctx).unwrap();
+            if let Payload::Frames(f) = out {
+                frames.extend(f);
+            }
+            asked.extend(events.into_iter().filter_map(|e| match e {
+                pipeline::event::Event::Request { request, .. } => Some(request),
+                _ => None,
+            }));
+        }
+        (frames, asked)
+    }
+
+    /// A beacon that sends a phone to another carrier asks for that
+    /// carrier to be read, and hands over its own timing; a node built from
+    /// what it asked reads the signalling channel there, on a carrier that
+    /// has no beacon of its own to synchronise on.
+    ///
+    /// Both streams are cut from one span, so the frame timing one measures
+    /// is a position the other can find: that is what the origin settings
+    /// carry, and what the burst search's six symbols of slack absorb.
+    #[test]
+    fn a_grant_on_another_carrier_is_asked_for_and_read_from_the_beacons_timing() {
+        let rate = 2_400_000.0;
+        let (beacon_hz, other_hz) = (947_400_000.0, 947_800_000.0);
+        let sch = Sch { ncc: 2, bcc: 6, frame_number: 51 * 26 * 9 + 1 };
+        let lead = 200.0;
+        let frame = gsm::FRAME_SYMBOLS;
+        // The beacon: two synchronisation bursts, and in the access grant
+        // block after the first an immediate assignment sending a phone to
+        // SDCCH/8 subchannel 3 on timeslot 1 of channel 64.
+        let mut bursts = Vec::new();
+        for n in 0..2u32 {
+            let at = lead + 10.0 * f64::from(n) * frame;
+            let this = Sch { frame_number: sch.frame_number + 10 * n, ..sch };
+            bursts.push((at, vec![0u8; gsm::BURST_BITS]));
+            bursts.push((at + frame, gsm::sch_burst_bits(&this).unwrap().to_vec()));
+        }
+        let mut assign = vec![0x2D, 0x06, 0x3F, 0x00];
+        assign.extend_from_slice(&[0b0101_1001, 0b1100_0000, 64]);
+        assign.extend_from_slice(&[0x00, 0x00, 0x00, 0x03]);
+        assign.resize(23, 0x2B);
+        let assign: [u8; 23] = assign.try_into().unwrap();
+        for (n, data) in gsm::bcch::encode(&assign).unwrap().iter().enumerate() {
+            let bits = gsm::normal_burst_bits(data, usize::from(sch.bcc));
+            bursts.push((lead + (6.0 + n as f64) * frame, bits.to_vec()));
+        }
+        let beacon = carrier(14.0, &bursts, rate);
+
+        // The other carrier: a location updating request on timeslot 1, in
+        // the block that starts three frames after the beacon's burst.
+        let mut lur = vec![0x01, 0x03, 15 << 2, 0x05, 0x08, 0x70];
+        lur.extend_from_slice(&[0x00, 0xF1, 0x10, 0x00, 0x01, 0x33]);
+        lur.extend_from_slice(&[0x05, 0xF4, 0xAA, 0xBB, 0xCC, 0xDD]);
+        lur.resize(23, 0x2B);
+        let lur: [u8; 23] = lur.try_into().unwrap();
+        let mut bursts = Vec::new();
+        for (n, data) in gsm::bcch::encode(&lur).unwrap().iter().enumerate() {
+            let bits = gsm::normal_burst_bits(data, usize::from(sch.bcc));
+            let at = lead + frame + (3.0 + n as f64) * frame + gsm::BURST_SYMBOLS;
+            bursts.push((at, bits.to_vec()));
+        }
+        let other = carrier(14.0, &bursts, rate);
+
+        let mut origin = Settings::new();
+        origin.insert("span_origin_sample".into(), ParamValue::Float(0.0));
+        origin.insert("span_rate_hz".into(), ParamValue::Float(rate));
+
+        let mut a = GsmNode::new(beacon_hz, Default::default());
+        a.configure(&origin);
+        let (frames, asked) = run(&mut a, rate, beacon_hz, &beacon);
+        assert!(frames.iter().any(|f| f.bytes.len() == 23), "the assignment was not read");
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let Request::OpenChannel { protocol, center_hz, role, settings, .. } = &asked[0] else {
+            panic!("{asked:?}");
+        };
+        assert_eq!((protocol.as_str(), *center_hz, role.as_str()), ("gsm", other_hz, "SDCCH/8"));
+        assert_eq!(settings.i64_or("timeslot", -1), 1);
+        assert_eq!(settings.i64_or("tsc", -1), i64::from(sch.bcc));
+        assert_eq!(settings.i64_or("anchor_frame", -1), i64::from(sch.frame_number));
+
+        // Built as the auto node would build it: the asker's settings and
+        // the stream's own origin.
+        let mut settings = settings.clone();
+        settings.extend(origin.clone());
+        let mut b = GsmNode::new(other_hz, Default::default());
+        b.configure(&settings);
+        assert!(b.anchored());
+        let (frames, _) = run(&mut b, rate, other_hz, &other);
+        let blocks: Vec<&common::Frame> = frames.iter().filter(|f| f.bytes.len() == 23).collect();
+        assert_eq!(blocks.len(), 1, "expected the block off the other carrier, got {frames:?}");
+        assert_eq!(blocks[0].bytes, lur);
+        let d = gsm_decoded(&blocks[0].bytes, Hz(other_hz as u64)).expect("a row");
+        assert_eq!(d.protocol, "GSM-SDCCH");
+
+        // A carrier with no anchor and no beacon reads nothing: the anchor
+        // is what made that decode possible.
+        let mut c = GsmNode::new(other_hz, Default::default());
+        c.configure(&origin);
+        let (frames, _) = run(&mut c, rate, other_hz, &other);
+        assert!(frames.is_empty(), "{frames:?}");
+    }
 }

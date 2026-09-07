@@ -65,6 +65,10 @@ pub enum Request {
         /// What the channel is for, in a word: "traffic", "data".
         role: String,
         hold_s: Option<f64>,
+        /// Settings for the decoder placed there, which the asker knows
+        /// and nothing else does: the timeslot a phone was sent to, and
+        /// the frame timing of the cell that sent it.
+        settings: crate::registry::Settings,
     },
     /// This node is reading all of this band, in absolute hertz, and
     /// nothing else should be opened inside it: the runs in there are
