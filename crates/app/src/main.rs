@@ -461,6 +461,8 @@ fn scan(
     span_khz: f64,
     want: Option<String>,
     packet_log: Option<PathBuf>,
+    survey: Option<PathBuf>,
+    gps: Option<gps::Transport>,
     location: Option<(f64, f64)>,
     dc_on: bool,
     print: bool,
@@ -491,6 +493,10 @@ fn scan(
         r.send(radio::Cmd::Location(lat, lon));
     }
     r.send(radio::Cmd::PacketLog(packet_log.clone()));
+    r.send(radio::Cmd::Survey(survey.clone()));
+    if let Some(t) = gps.clone() {
+        r.send(radio::Cmd::Gps(Some(t)));
+    }
     eprintln!(
         "scanning {:.4} MHz at {:.3} MS/s on {}; packet log {}; ctrl-c stops",
         mhz,
@@ -596,6 +602,12 @@ fn replay(path: &str) -> anyhow::Result<()> {
 /// dozen clicks first.
 /// `53.64,-6.65` as a pair of degrees.
 /// `LAT,LON` in decimal degrees, from the command line or the station field.
+/// A GPS source as the operator writes one on the command line.
+fn parse_gps(s: &str) -> Result<gps::Transport, String> {
+    gps::Transport::parse(s)
+        .ok_or_else(|| format!("{s:?} is not a serial port or a gpsd address"))
+}
+
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
@@ -696,6 +708,20 @@ struct Args {
     /// Do not write the packet log
     #[arg(long)]
     no_packet_log: bool,
+
+    /// Where the device database is written. Defaults to
+    /// $XDG_DATA_HOME/waveshark/survey.sqlite
+    #[arg(long, value_name = "FILE")]
+    survey: Option<PathBuf>,
+
+    /// Do not record a device database
+    #[arg(long)]
+    no_survey: bool,
+
+    /// Read the receiver's own position from a GPS, as a serial port
+    /// (/dev/ttyACM0, or /dev/ttyUSB0@4800) or a gpsd address (gpsd:host:port)
+    #[arg(long, value_name = "SOURCE", value_parser = parse_gps)]
+    gps: Option<gps::Transport>,
 
     /// Receiver position as LAT,LON in degrees, which lets one ADS-B frame
     /// fix an aircraft instead of needing a matching pair
@@ -906,11 +932,18 @@ fn main() -> eframe::Result<()> {
         } else {
             args.packet_log.clone().or_else(packetlog::PacketLog::default_dir)
         };
+        let survey = if args.no_survey {
+            None
+        } else {
+            args.survey.clone().or_else(packetlog::PacketLog::default_survey_path)
+        };
         scan(
             args.tune.first().copied().unwrap_or(433.92),
             args.span.unwrap_or(2_400.0),
             args.device.clone(),
             log,
+            survey,
+            args.gps.clone(),
             args.location,
             !args.no_dc,
             args.print_log,
@@ -968,6 +1001,10 @@ fn main() -> eframe::Result<()> {
                 app.tune_to(*mhz, args.mode.into());
             }
             app.set_packet_log(args.no_packet_log, args.packet_log.clone());
+            app.set_survey(args.no_survey, args.survey.clone());
+            if let Some(t) = args.gps.clone() {
+                app.set_gps(Some(t));
+            }
             if let Some((lat, lon)) = args.location {
                 app.set_location(lat, lon);
             }

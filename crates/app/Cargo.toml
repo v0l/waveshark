@@ -21,6 +21,8 @@ limesdr = { workspace = true, optional = true }
 iqnet.workspace = true
 sources.workspace = true
 nodes.workspace = true
+gps.workspace = true
+survey.workspace = true
 decode.workspace = true
 datasets.workspace = true
 pipeline.workspace = true
