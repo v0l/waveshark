@@ -28,4 +28,4 @@ pub mod nmea;
 pub mod source;
 
 pub use nmea::{parse_sentence, Fix, Sentence};
-pub use source::{Config, Source, Transport};
+pub use source::{Config, Sky, Source, Transport};

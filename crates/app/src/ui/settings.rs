@@ -702,6 +702,7 @@ impl App {
             Some(r) => {
                 use std::sync::atomic::Ordering;
                 let fix = *r.status.gps_fix.lock();
+                let sky = *r.status.gps_sky.lock();
                 let connected = r.status.gps_connected.load(Ordering::Relaxed);
                 let fixes = r.status.gps_fixes.load(Ordering::Relaxed);
                 match (self.survey.gps.is_some(), connected, fix) {
@@ -710,7 +711,16 @@ impl App {
                         let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
                         format!("{:.5}, {:.5}{sats}, {fixes} fixes", f.lat, f.lon)
                     }
-                    (true, true, None) => "connected, waiting for a fix".into(),
+                    // Waiting says nothing on its own: an antenna indoors and
+                    // an antenna unplugged look the same for the first
+                    // minute, and the satellite counts tell them apart.
+                    (true, true, None) => match sky {
+                        Some(s) => format!(
+                            "connected, no fix yet: {} of {} satellites used",
+                            s.used, s.seen
+                        ),
+                        None => "connected, waiting for a fix".into(),
+                    },
                     (true, false, None) => "not connected: check the port or that gpsd is up".into(),
                 }
             }

@@ -92,6 +92,19 @@ pub struct Source {
     connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     fixes: Arc<std::sync::atomic::AtomicU64>,
+    /// Satellites used and in view, from gpsd's `SKY`. Held apart from the
+    /// fix because it is the one thing worth showing while there is no fix:
+    /// seventeen in view and none used is an antenna indoors, and nothing in
+    /// view at all is an antenna unplugged.
+    sky: Arc<Mutex<Option<Sky>>>,
+}
+
+/// What the constellation looks like, whether or not it has produced a fix.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sky {
+    pub used: u8,
+    pub seen: u8,
+    pub hdop: Option<f64>,
 }
 
 impl Source {
@@ -101,16 +114,18 @@ impl Source {
         let connected = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let fixes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let sky = Arc::new(Mutex::new(None));
         let s = Self {
             cfg: cfg.clone(),
             state: state.clone(),
             connected: connected.clone(),
             stop: stop.clone(),
             fixes: fixes.clone(),
+            sky: sky.clone(),
         };
         std::thread::Builder::new()
             .name("gps".into())
-            .spawn(move || run(cfg, state, connected, stop, fixes))
+            .spawn(move || run(cfg, state, connected, stop, fixes, sky))
             .ok();
         s
     }
@@ -127,6 +142,13 @@ impl Source {
 
     pub fn fixes(&self) -> u64 {
         self.fixes.load(Ordering::Relaxed)
+    }
+
+    /// Satellites used and in view, when the source says. gpsd reports this
+    /// in its own object; an NMEA receiver reports the used count in `GGA`
+    /// and the rest in sentences this does not read.
+    pub fn sky(&self) -> Option<Sky> {
+        *self.sky.lock().ok()?
     }
 
     /// The current position, or `None` when there has never been one or the
@@ -150,6 +172,7 @@ fn run(
     connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     fixes: Arc<std::sync::atomic::AtomicU64>,
+    sky: Arc<Mutex<Option<Sky>>>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         let opened: std::io::Result<Box<dyn Read + Send>> = match &cfg.transport {
@@ -159,8 +182,13 @@ fn run(
         match opened {
             Ok(stream) => {
                 connected.store(true, Ordering::Relaxed);
-                read_stream(stream, &state, &stop, &fixes);
+                read_stream(stream, &state, &stop, &fixes, &sky);
                 connected.store(false, Ordering::Relaxed);
+                // The link went away, so what it last said about the sky is
+                // not what is overhead now.
+                if let Ok(mut g) = sky.lock() {
+                    *g = None;
+                }
             }
             Err(e) => {
                 tracing::debug!("gps {}: {e}", cfg.transport);
@@ -180,6 +208,7 @@ fn read_stream(
     state: &Arc<Mutex<Option<(Fix, std::time::Instant)>>>,
     stop: &Arc<AtomicBool>,
     fixes: &Arc<std::sync::atomic::AtomicU64>,
+    sky: &Arc<Mutex<Option<Sky>>>,
 ) {
     let mut asm = Assembler::new();
     let mut lines = BufReader::new(stream).lines();
@@ -187,8 +216,24 @@ fn read_stream(
         if stop.load(Ordering::Relaxed) {
             return;
         }
+        if let Some(s) = parse_sky(&line) {
+            if let Ok(mut g) = sky.lock() {
+                *g = Some(s);
+            }
+            continue;
+        }
         let fix = if line.starts_with('{') { parse_tpv(&line) } else { asm.push(&line) };
-        if let Some(f) = fix {
+        if let Some(mut f) = fix {
+            // gpsd puts the satellite count and the dilution in `SKY` and the
+            // position in `TPV`, so a fix from it arrives with the quality
+            // fields empty. They are the same second's measurement of the
+            // same constellation, so the last `SKY` fills them in.
+            if let Ok(g) = sky.lock() {
+                if let Some(s) = *g {
+                    f.sats = f.sats.or(Some(s.used));
+                    f.hdop = f.hdop.or(s.hdop);
+                }
+            }
             fixes.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut g) = state.lock() {
                 *g = Some((f, std::time::Instant::now()));
@@ -223,6 +268,36 @@ fn parse_tpv(line: &str) -> Option<Fix> {
         sats: None,
         hdop: None,
         utc: v.get("time").and_then(|t| t.as_str()).and_then(iso8601),
+    })
+}
+
+/// gpsd's `SKY`, which is what it says about the constellation whether or not
+/// there is a fix.
+fn parse_sky(line: &str) -> Option<Sky> {
+    if !line.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("class")?.as_str()? != "SKY" {
+        return None;
+    }
+    let sats = v.get("satellites").and_then(|s| s.as_array());
+    let used = v
+        .get("uSat")
+        .and_then(|n| n.as_u64())
+        .or_else(|| {
+            sats.map(|a| a.iter().filter(|s| s.get("used").and_then(|u| u.as_bool()) == Some(true)).count() as u64)
+        })
+        .unwrap_or(0);
+    let seen = v
+        .get("nSat")
+        .and_then(|n| n.as_u64())
+        .or_else(|| sats.map(|a| a.len() as u64))
+        .unwrap_or(0);
+    Some(Sky {
+        used: used.min(255) as u8,
+        seen: seen.min(255) as u8,
+        hdop: v.get("hdop").and_then(|h| h.as_f64()),
     })
 }
 
@@ -340,6 +415,21 @@ mod tests {
         assert!(parse_tpv(r#"{"class":"SKY","device":"/dev/ttyACM0","satellites":[]}"#).is_none());
     }
 
+    /// Seventeen satellites in view and none used is an antenna indoors,
+    /// and it is the one thing worth saying while there is no fix.
+    #[test]
+    fn a_sky_object_says_what_is_overhead() {
+        let line = r#"{"class":"SKY","device":"/dev/modem-gps","nSat":17,"uSat":0,"hdop":1.2,"satellites":[]}"#;
+        let s = parse_sky(line).expect("a sky");
+        assert_eq!((s.used, s.seen), (0, 17));
+        assert_eq!(s.hdop, Some(1.2));
+        // Older daemons send the list without the counts.
+        let listed = r#"{"class":"SKY","satellites":[{"PRN":5,"used":true},{"PRN":6,"used":false}]}"#;
+        let s = parse_sky(listed).expect("a sky");
+        assert_eq!((s.used, s.seen), (1, 2));
+        assert!(parse_sky(r#"{"class":"TPV","mode":1}"#).is_none());
+    }
+
     /// A survey under a bridge should stop recording positions, not keep
     /// attributing sightings to the last place the sky was visible.
     #[test]
@@ -350,6 +440,7 @@ mod tests {
             connected: Arc::new(AtomicBool::new(true)),
             stop: Arc::new(AtomicBool::new(true)),
             fixes: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            sky: Arc::new(Mutex::new(None)),
         };
         assert!(s.fix().is_some());
         std::thread::sleep(Duration::from_millis(50));
