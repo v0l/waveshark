@@ -1349,6 +1349,10 @@ pub struct Status {
     pub gps_connected: AtomicBool,
     pub gps_fixes: AtomicU64,
     pub gps_fix: parking_lot::Mutex<Option<gps::Fix>>,
+    /// Satellites used and in view. The one thing worth showing while there
+    /// is no fix: none in view is an antenna unplugged, and a dozen in view
+    /// with none used is an antenna indoors.
+    pub gps_sky: parking_lot::Mutex<Option<gps::Sky>>,
     /// Whether anything is subscribed on the call bus, whether a recorded
     /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
@@ -1503,6 +1507,7 @@ impl Default for Status {
             gps_connected: AtomicBool::new(false),
             gps_fixes: AtomicU64::new(0),
             gps_fix: parking_lot::Mutex::new(None),
+            gps_sky: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new((None, Vec::new())),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
@@ -2670,6 +2675,7 @@ fn run(
                 status.gps_connected.store(g.connected(), Ordering::Relaxed);
                 status.gps_fixes.store(g.fixes(), Ordering::Relaxed);
                 *status.gps_fix.lock() = fix;
+                *status.gps_sky.lock() = g.sky();
                 rx.set_fix(fix);
             }
             if let Some((devices, sightings, heard)) = rx.survey_counts() {
