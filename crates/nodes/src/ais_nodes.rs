@@ -10,6 +10,8 @@
 //! what reaches the bus is bytes that proved themselves, and the parsing that
 //! happens downstream is reading rather than acceptance.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::ais::{self, Message};
 use dsp::ais::{AisConfig, AisDetector, AisFrame, BAND_CENTER_HZ, CHANNEL_HZ};
@@ -248,6 +250,40 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
 fn round(v: f64, places: i32) -> f64 {
     let f = 10f64.powi(places);
     (v * f).round() / f
+}
+
+
+/// AIS as the auto node and the tables know it: both channels at once,
+/// since stations alternate between them and half of them is half the
+/// traffic.
+pub struct Ais;
+
+impl Protocol for Ais {
+    fn id(&self) -> &'static str {
+        "ais"
+    }
+    fn label(&self) -> &'static str {
+        "ais"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Bands(vec![(
+            CHANNEL_HZ[0] - CHANNEL_WIDTH_HZ,
+            CHANNEL_HZ[1] + CHANNEL_WIDTH_HZ,
+        )])
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_HZ[1] - CHANNEL_HZ[0] + 2.0 * CHANNEL_WIDTH_HZ],
+            // The detector mixes both channels itself and wants room between
+            // them, so this stays well above their separation.
+            min_rate_hz: 600_000.0,
+            span_wide: true,
+            families: &[],
+        }
+    }
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("ais")]
+    }
 }
 
 #[cfg(test)]

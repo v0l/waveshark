@@ -28,6 +28,8 @@
 //! What is not here yet: slot 2 is not separated from slot 1, so the node
 //! follows whichever slot it locks onto first.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::dmr::{self, LinkControl};
 use dsp::fir::FirDecimReal;
@@ -1040,6 +1042,32 @@ impl DmrNode {
         p.iq = self.burst_iq(at);
         p.audio = audio;
         p
+    }
+}
+
+
+pub struct Dmr;
+
+impl Protocol for Dmr {
+    fn id(&self) -> &'static str {
+        "dmr"
+    }
+    fn label(&self) -> &'static str {
+        "dmr"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: CHANNEL_WIDTH_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("dmr").f("channel_hz", at.center_hz)]
     }
 }
 

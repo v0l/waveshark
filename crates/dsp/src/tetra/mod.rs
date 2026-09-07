@@ -73,8 +73,10 @@ pub const NDB_BLK2: usize = 282;
 /// 390 to 400 MHz for the emergency networks and 420 to 430 for the
 /// commercial ones, handsets 10 MHz lower in each. Knowledge about the
 /// world rather than about this receiver, the same kind AIS keeps.
+pub const DOWNLINK_BANDS: [(f64, f64); 2] = [(390.0e6, 400.0e6), (420.0e6, 430.0e6)];
+
 pub fn is_downlink_band(hz: f64) -> bool {
-    (390.0e6..400.0e6).contains(&hz) || (420.0e6..430.0e6).contains(&hz)
+    DOWNLINK_BANDS.iter().any(|(lo, hi)| (*lo..*hi).contains(&hz))
 }
 
 /// Which training sequence a burst carried.

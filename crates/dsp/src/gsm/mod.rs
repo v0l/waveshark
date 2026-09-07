@@ -920,15 +920,16 @@ pub fn sch_burst_bits(sch: &Sch) -> Option<[u8; BURST_BITS]> {
 /// packet bus is told apart from every other four byte payload: the same
 /// trick `dsp::ais::is_ais_band` uses. Uplink is excluded because only a base
 /// station transmits an SCH.
+pub const DOWNLINK_BANDS: [(f64, f64); 5] = [
+    (869.2e6, 894.2e6),   // GSM 850
+    (925.2e6, 960.0e6),   // P-GSM and E-GSM 900
+    (921.2e6, 925.0e6),   // GSM-R
+    (1805.2e6, 1880.0e6), // DCS 1800
+    (1930.2e6, 1990.0e6), // PCS 1900
+];
+
 pub fn is_downlink_band(hz: f64) -> bool {
-    const BANDS: [(f64, f64); 5] = [
-        (869.2e6, 894.2e6),   // GSM 850
-        (925.2e6, 960.0e6),   // P-GSM and E-GSM 900
-        (921.2e6, 925.0e6),   // GSM-R
-        (1805.2e6, 1880.0e6), // DCS 1800
-        (1930.2e6, 1990.0e6), // PCS 1900
-    ];
-    BANDS.iter().any(|&(lo, hi)| hz >= lo && hz <= hi)
+    DOWNLINK_BANDS.iter().any(|&(lo, hi)| hz >= lo && hz <= hi)
 }
 
 /// The channel number a downlink frequency carries, where it is one.

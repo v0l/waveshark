@@ -12,6 +12,8 @@
 //! period rather than configured, and a port that carries whole fields with
 //! the channel they came from.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
+use crate::NodeSpec;
 use common::{Pixels, Result, VideoFrame};
 use dsp::video::{find_lines, Lock, Standard, SyncSeparator};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -268,6 +270,54 @@ impl Simple for VideoNode {
             other => return Err(common::Error::other(format!("video has no {other}"))),
         }
         Ok(())
+    }
+}
+
+
+/// Analogue video as the auto node knows it: on the span, where the
+/// channel plan reaches, and owning the band only once it has a picture.
+///
+/// A camera's carrier is not a channel a detector can cut out: FM video at
+/// 5.8 GHz occupies the best part of twenty megahertz, and what a detector
+/// measures is the few megahertz around the carrier that stand above the
+/// floor. Cut to that, the picture is gone. And claiming the span before
+/// there is a picture would turn the band off for everything else on the
+/// chance a camera turns up.
+pub struct Video;
+
+/// Half of what a channel of the plan occupies.
+const CHANNEL_HALF_HZ: f64 = 9e6;
+
+impl Protocol for Video {
+    fn id(&self) -> &'static str {
+        "video"
+    }
+    fn label(&self) -> &'static str {
+        "video"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Channels(
+            decode::video_channels::channels()
+                .iter()
+                .map(|ch| ch.hz as f64)
+                .collect(),
+        )
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[2.0 * CHANNEL_HALF_HZ],
+            // PAL luma reaches 5 MHz with the colour subcarrier at 4.43, so
+            // a slower stream cannot be carrying a picture.
+            min_rate_hz: 12e6,
+            span_wide: true,
+            families: &[],
+        }
+    }
+    fn stickiness(&self) -> Stickiness {
+        Stickiness::Claim
+    }
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("video")]
     }
 }
 

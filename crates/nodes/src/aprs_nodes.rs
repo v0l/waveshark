@@ -11,6 +11,8 @@
 //! AX.25 is HDLC. What reaches the bus is an AX.25 frame that has already
 //! proved itself.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::{aprs, ax25};
 use dsp::afsk::{AfskConfig, AfskDemod};
@@ -247,6 +249,32 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 fn round(v: f64, places: i32) -> f64 {
     let f = 10f64.powi(places);
     (v * f).round() / f
+}
+
+
+pub struct Aprs;
+
+impl Protocol for Aprs {
+    fn id(&self) -> &'static str {
+        "aprs"
+    }
+    fn label(&self) -> &'static str {
+        "aprs"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: CHANNEL_WIDTH_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("aprs").f("channel_hz", at.center_hz)]
+    }
 }
 
 #[cfg(test)]

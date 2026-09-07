@@ -7,6 +7,8 @@
 //! reach the packet bus as any other frame does, and the protocols node
 //! reads the address out of them; see [`decode::wmbus`].
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use dsp::wmbus::{Demod, CHIP_RATE};
 use pipeline::event::{Decoded, Event};
@@ -133,4 +135,36 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             .by(common::Identity::new("wmbus", format!("{m}-{id}")).made_by(m.clone()));
     }
     Some(d)
+}
+
+/// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
+/// with what the extraction adds around it.
+const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
+
+pub struct Wmbus;
+
+impl Protocol for Wmbus {
+    fn id(&self) -> &'static str {
+        "wmbus"
+    }
+    fn label(&self) -> &'static str {
+        "wmbus"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: 0.0,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn accepts_width(&self, source_width_hz: f64) -> bool {
+        METER_HZ.contains(&source_width_hz)
+    }
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("wmbus")]
+    }
 }

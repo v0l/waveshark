@@ -36,6 +36,7 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
+use crate::protocol::{self, Placed, Protocol, Stickiness, CHANNEL_WIDTH_TOLERANCE};
 use crate::{build_chain, NodeSpec};
 
 /// SNR a bin must reach before the auto node opens a source there.
@@ -45,18 +46,6 @@ use crate::{build_chain, NodeSpec};
 /// weakest openings are mostly the splash and spurs around one signal, and
 /// each of them costs a chain.
 pub const AUTO_OPEN_DB: f32 = 15.0;
-
-/// How much wider than its declared channel a source may measure and still
-/// have that channel's front end placed on it. A clean channel measures a
-/// little over its width (an M17 12.5 kHz channel lands around 25 kHz once
-/// extracted); splatter and a nearby spur can measure it far wider, and past
-/// this a 12.5 kHz decoder does not belong on the signal. Three times keeps
-/// the old ~40 kHz ceiling for a 12.5 kHz channel while scaling with width.
-const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
-
-/// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
-/// with what the extraction adds around it.
-const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
 
 /// How often a transmission that never ends is reported, in seconds.
 ///
@@ -70,6 +59,9 @@ const REPORT_S: f64 = 5.0;
 /// One decoder over one stream: a graph, and where its packets come out.
 struct Member {
     name: &'static str,
+    /// What the graph reads, or None for the burst front end, which is
+    /// not a protocol but the thing that names one.
+    protocol: Option<&'static dyn Protocol>,
     graph: Graph,
     pulses: Vec<Out>,
     frames: Vec<Out>,
@@ -129,9 +121,10 @@ struct Member {
     /// detector did not measure (a channel kept open for the session) still
     /// reports a signal to noise ratio on its packets.
     noise_pow: f32,
-    /// The burst front end inside has named a burst of this source a chirp.
-    /// What places a LoRa front end on the source, late, fed from `ring`.
-    chirp_seen: bool,
+    /// What the burst front end inside has named the bursts of this source,
+    /// each once. What places the decoders that wait for a verdict, late,
+    /// fed from `ring`.
+    verdicts: Vec<dsp::Modulation>,
 }
 
 /// Longest run of samples kept behind a packet, in seconds.
@@ -145,19 +138,28 @@ const RING_MAX_S: f64 = 2.0;
 /// spreading factor over the narrowest bandwidth.
 const IQ_KEEP_S: f64 = 0.25;
 
-/// How fast a span has to be before the video front end runs on it. PAL luma
-/// reaches 5 MHz with the colour subcarrier at 4.43, so a slower stream
-/// cannot be carrying a picture whatever else is in it.
-const VIDEO_MIN_RATE_HZ: f64 = 12e6;
-
 impl Member {
+    /// The burst front end for a stream.
+    fn classifier(spec: StreamSpec, settings: NodeSpec, reg: &Registry) -> Result<Self> {
+        Self::build("burst_route", None, spec, vec![settings], reg)
+    }
+
+    /// A protocol's decoder for a placed channel.
+    fn place(p: &'static dyn Protocol, spec: StreamSpec, at: Placed, reg: &Registry) -> Result<Self> {
+        let mut m = Self::build(p.id(), Some(p), spec, p.chain(at), reg)?;
+        m.channel_hz = at.width_hz;
+        m.source_snr_db = at.snr_db;
+        Ok(m)
+    }
+
     fn build(
         name: &'static str,
+        protocol: Option<&'static dyn Protocol>,
         spec: StreamSpec,
-        settings: NodeSpec,
+        chain: Vec<NodeSpec>,
         reg: &Registry,
     ) -> Result<Self> {
-        let graph = build_chain(spec, &[settings], reg)?;
+        let graph = build_chain(spec, &chain, reg)?;
         let pulses = taps(&graph, PortKind::Pulses);
         let frames = taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
@@ -173,6 +175,7 @@ impl Member {
             .fold(0.25, f64::max);
         Ok(Self {
             name,
+            protocol,
             graph,
             pulses,
             frames,
@@ -188,7 +191,7 @@ impl Member {
             flush_s,
             ring: Vec::new(),
             noise_pow: f32::NAN,
-            chirp_seen: false,
+            verdicts: Vec::new(),
         })
     }
 
@@ -288,8 +291,8 @@ impl Member {
             // packet stream and carries no rate.
             let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
-                if b.class.modulation == dsp::Modulation::Chirp {
-                    self.chirp_seen = true;
+                if !self.verdicts.contains(&b.class.modulation) {
+                    self.verdicts.push(b.class.modulation);
                 }
                 // A diagnostic: with `SR_DUMP_BURSTS` naming a directory,
                 // every burst the router cut is written there as
@@ -500,8 +503,12 @@ struct Slot {
     /// measured, for a front end placed after the source opened.
     spec: StreamSpec,
     signal_hz: f64,
-    /// A LoRa front end has been placed, or ruled out, for this source.
-    lora_placed: bool,
+    /// Protocols that wait for the classifier's verdict and have had it
+    /// for this source: placed, or ruled out.
+    tried: Vec<&'static str>,
+    /// A channel remembered from earlier, which runs the one decoder that
+    /// earned it and nothing else.
+    remembered: bool,
 }
 
 pub struct AutoNode {
@@ -530,11 +537,6 @@ pub struct AutoNode {
     events: Vec<SourceEvent>,
     blocks: Vec<SourceBlock>,
     hits: Vec<(Hz, Event)>,
-    /// Narrowband front ends and the channel widths they declared, asked of
-    /// the registry once rather than kept as a table here: the auto node no
-    /// longer decides who fits where, it asks each front what it wants. Only
-    /// stages that returned a non-empty `Node::channels` are here.
-    narrowband: Vec<(&'static str, &'static [f64])>,
     /// Sources decoders were built for, over the node's life.
     built: u64,
     sticky: Vec<Sticky>,
@@ -568,7 +570,6 @@ impl AutoNode {
             detector: None,
             extractor: None,
             reg: crate::registry(),
-            narrowband: Vec::new(),
             slots: Vec::new(),
             wide: Vec::new(),
             template: None,
@@ -717,78 +718,68 @@ impl AutoNode {
         self.wide.iter().map(|m| m.name).collect()
     }
 
-    /// Speech from every front end inside, read off the ports it came out
-    /// on, whatever protocol produced it.
-    ///
-    /// A source found a moment ago has decoders built for it there and then,
-    /// and they are as much a part of the receiver as a stage somebody
-    /// placed by hand. Taken from the ports rather than from a list of
-    /// protocol names kept here, so a voice front end added later is heard
-    /// without this file being touched.
-    /// The key status of every TETRA front end the scanner placed inside, so
-    /// a cell heard through the auto node reaches the key manager the same as
-    /// one placed by hand.
-    pub fn inner_tetra_status(&self) -> Vec<crate::tetra_nodes::KeyStatus> {
-        let mut out = Vec::new();
+    /// Every node of one type among the decoders placed on sources, for a
+    /// caller that has its own API for it: the key manager reaching every
+    /// TETRA front end the scanner placed, the same as one placed by hand.
+    pub fn each_inner<T: 'static>(&self, mut f: impl FnMut(&T)) {
         for slot in &self.slots {
             for m in &slot.members {
-                for (id, name) in m.graph.order() {
-                    if name != "tetra" {
-                        continue;
-                    }
+                for (id, _) in m.graph.order() {
                     if let Some(t) = m
                         .graph
                         .node(id)
                         .and_then(|n| n.as_any())
-                        .and_then(|a| a.downcast_ref::<crate::tetra_nodes::TetraNode>())
+                        .and_then(|a| a.downcast_ref::<T>())
                     {
-                        out.extend(t.key_status());
+                        f(t);
                     }
                 }
             }
         }
+    }
+
+    /// The mutable counterpart of [`each_inner`](Self::each_inner).
+    pub fn each_inner_mut<T: 'static>(&mut self, mut f: impl FnMut(&mut T)) {
+        for slot in &mut self.slots {
+            for m in &mut slot.members {
+                let ids: Vec<_> = m.graph.order().map(|(id, _)| id).collect();
+                for id in ids {
+                    if let Some(t) = m
+                        .graph
+                        .node_mut(id)
+                        .and_then(|n| n.as_any_mut())
+                        .and_then(|a| a.downcast_mut::<T>())
+                    {
+                        f(t);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The key status of every TETRA front end inside.
+    pub fn inner_tetra_status(&self) -> Vec<crate::tetra_nodes::KeyStatus> {
+        let mut out = Vec::new();
+        self.each_inner::<crate::tetra_nodes::TetraNode>(|t| out.extend(t.key_status()));
         out
     }
 
-    /// Install a key on every inner TETRA front end for a cell colour, so a
-    /// manual key entered in the manager reaches a cell heard through the
-    /// scanner as well as one placed by hand.
+    /// Install a key on every inner TETRA front end for a cell colour.
     #[cfg(feature = "tea")]
     pub fn set_inner_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
-        self.each_inner_tetra(|t| t.add_key(colour, key));
+        self.each_inner_mut::<crate::tetra_nodes::TetraNode>(|t| t.add_key(colour, key));
     }
 
     /// Install a TA61 identity secret on every inner TETRA front end.
     #[cfg(feature = "tea")]
     pub fn set_inner_tetra_id_secret(&mut self, colour: u8, c: [u8; 8]) {
-        self.each_inner_tetra(|t| t.add_id_secret(colour, c));
+        self.each_inner_mut::<crate::tetra_nodes::TetraNode>(|t| t.add_id_secret(colour, c));
     }
 
-    /// Run `f` over every TETRA front end the scanner placed inside.
-    #[cfg(feature = "tea")]
-    fn each_inner_tetra(&mut self, mut f: impl FnMut(&mut crate::tetra_nodes::TetraNode)) {
-        for slot in &mut self.slots {
-            for m in &mut slot.members {
-                let ids: Vec<_> = m
-                    .graph
-                    .order()
-                    .filter(|(_, n)| *n == "tetra")
-                    .map(|(id, _)| id)
-                    .collect();
-                for id in ids {
-                    if let Some(n) = m.graph.node_mut(id) {
-                        if let Some(t) = n
-                            .as_any_mut()
-                            .and_then(|a| a.downcast_mut::<crate::tetra_nodes::TetraNode>())
-                        {
-                            f(t);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    /// Speech from every front end inside, read off the ports it came out
+    /// on, whatever protocol produced it: a source found a moment ago has
+    /// decoders built for it there and then, and they are as much a part of
+    /// the receiver as a stage somebody placed by hand.
     fn inner_voice(&self, out: &mut Vec<common::Voice>) {
         for slot in &self.slots {
             for m in &slot.members {
@@ -893,74 +884,38 @@ impl AutoNode {
         self.detector = Some(d);
         self.slots.clear();
         self.pending_sticky = self.sticky.iter().map(|s| s.id).collect();
-        self.narrowband = self.query_narrowband();
 
         // The span-wide decoders, where the span reaches what they are for.
+        // Each one is asked where it belongs and what it owns; nothing here
+        // knows which protocols those are.
         let mut spec = StreamSpec::iq(self.rate, self.center);
         spec.bandwidth = self.input_bw;
         let c = self.center.as_f64();
         let half = self.input_bw / 2.0;
-        // Each span-wide front end carries the band it owns, which is closed
-        // to the detector for as long as it owns it.
         self.wide.clear();
         let covers = |lo: f64, hi: f64| c - half <= lo && hi <= c + half;
-        let modes = (1_089_000_000.0, 1_091_000_000.0);
-        if self.rate >= 2_000_000.0 && covers(modes.0, modes.1) {
-            let mut m = Member::build("mode_s", spec, NodeSpec::new("mode_s"), &self.reg)?;
-            m.band = Some(modes);
-            self.wide.push(m);
-        }
-        let w = crate::ais_nodes::CHANNEL_WIDTH_HZ;
-        let ais = (dsp::ais::CHANNEL_HZ[0] - w, dsp::ais::CHANNEL_HZ[1] + w);
-        if covers(ais.0, ais.1) {
-            let mut m = Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?;
-            m.band = Some(ais);
-            self.wide.push(m);
-        }
-        // Bluetooth advertising, on whichever of the three channels the span
-        // holds. Span-wide for the reason AIS is: the channel is where the
-        // standard put it rather than where a spectrogram finds it, and an
-        // advertisement is 80 us of a hopping device that may never be heard
-        // twice, which is not enough for a source to open around.
-        // Analogue video, across the whole span rather than on a source.
-        //
-        // A camera's carrier is not a channel a detector can cut out: FM
-        // video at 5.8 GHz occupies the best part of twenty megahertz, and
-        // what a detector measures is the few megahertz around the carrier
-        // that stand above the floor. Cut to that, the picture is gone: the
-        // front end was placed on the source, filtered to 4.2 MHz of a 20 MHz
-        // transmission, and found no line rate to lock to. So it runs on the
-        // span, where a receiver tuned to a camera has the whole of it, and
-        // decides for itself whether there is a picture; when there is not it
-        // backs off for a second rather than demodulating every block.
-        //
-        // Placed where the analogue channel plan reaches, the way AIS and
-        // Mode S are placed by their bands: a 20 MS/s span at 2.4 GHz is
-        // ordinarily Wi-Fi and Bluetooth, and demodulating all of it as FM to
-        // find out otherwise is a cost with no return.
-        //
-        // Unlike the others it owns its band only once it has a picture: a
-        // camera's carrier is the whole span, and claiming that before there
-        // is one would turn the band off for everything else on the chance a
-        // camera turns up.
-        let video_band = decode::video_channels::channels()
-            .iter()
-            .any(|ch| covers(ch.hz as f64 - 9e6, ch.hz as f64 + 9e6));
-        if self.rate >= VIDEO_MIN_RATE_HZ && video_band {
-            self.wide.push(Member::build(
-                "video",
-                spec,
-                NodeSpec::new("video"),
-                &self.reg,
-            )?);
-        }
-        let bw = crate::ble_nodes::CHANNEL_WIDTH_HZ / 2.0;
-        for (_, hz) in dsp::ble::ADV_CHANNELS {
-            if self.rate >= 4_000_000.0 && covers(hz - bw, hz + bw) {
-                let mut m = Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?;
-                m.band = Some((hz - bw, hz + bw));
+        for p in protocol::all() {
+            let shape = p.shape();
+            if !shape.span_wide || self.rate < shape.min_rate_hz {
+                continue;
+            }
+            for (lo, hi) in p.placement().bands(shape.widths[0]) {
+                if !covers(lo, hi) {
+                    continue;
+                }
+                let at = Placed {
+                    center_hz: (lo + hi) / 2.0,
+                    width_hz: hi - lo,
+                    rate: self.rate,
+                    snr_db: f32::NAN,
+                };
+                let mut m = Member::place(*p, spec, at, &self.reg)?;
+                // One that latches owns its band from the moment the span
+                // reaches it; one that claims owns nothing until it says so.
+                if p.stickiness() == Stickiness::Latch {
+                    m.band = Some((lo, hi));
+                }
                 self.wide.push(m);
-                break;
             }
         }
         self.apply_band();
@@ -973,46 +928,28 @@ impl AutoNode {
 
     /// The decoders a source of this shape gets.
     ///
-    /// The burst front end always. The narrowband frame decoders where the
-    /// source is the width of such a channel and its stream is wide enough
-    /// to hold one; each decides for itself whether the bits are its own,
-    /// since a page has its sync word and a packet its flags and checksum.
-    /// A frame decoder that will not build is left out rather than fatal:
-    /// the source still has the front end, and one decoder's refusal is not
-    /// a reason to stop the receiver.
-    /// Ask the registry which decode stages are narrowband channels and what
-    /// widths they want. Each is built once with nominal settings and asked
-    /// through [`Node::channels`]; the ones that answer with a width are the
-    /// candidates [`open`](Self::open) may place. This replaces a hand-kept
-    /// table of who fits where with a question put to each front end.
-    fn query_narrowband(&self) -> Vec<(&'static str, &'static [f64])> {
-        let mut out = Vec::new();
-        for desc in self.reg.by_category("decode") {
-            let Ok(node) = self
-                .reg
-                .build(desc.name, &NodeSpec::new(desc.name).settings)
-            else {
-                continue;
-            };
-            let ch = node.channels();
-            if !ch.is_empty() {
-                out.push((desc.name, ch));
-            }
-        }
-        out
-    }
-
+    /// The burst front end always. Then every protocol whose placement
+    /// covers the frequency, whose declared channel the source could be
+    /// (the stream must carry it, and the measured width must be within
+    /// reach of it, so a fat or splattered measurement does not put a
+    /// 12.5 kHz decoder on a 200 kHz signal), and which does not wait for
+    /// the classifier's verdict; each decides for itself whether the bits
+    /// are its own. A decoder that will not build is left out rather than
+    /// fatal: the source still has the front end, and one decoder's refusal
+    /// is not a reason to stop the receiver.
     fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
         if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
-            let mut m = Member::build(
-                st.name,
-                spec,
-                Self::place(st.name, st.center_hz, st.width_hz),
-                &self.reg,
-            )?;
-            m.channel_hz = st.width_hz;
+            let p = protocol::by_id(st.name)
+                .ok_or_else(|| common::Error::other(format!("no protocol {:?}", st.name)))?;
+            let at = Placed {
+                center_hz: st.center_hz,
+                width_hz: st.width_hz,
+                rate: b.rate,
+                snr_db: b.snr_db,
+            };
+            let m = Member::place(p, spec, at, &self.reg)?;
             return Ok(Slot {
                 id: b.id,
                 center_hz: b.center_hz,
@@ -1020,58 +957,37 @@ impl AutoNode {
                 heard: true,
                 spec,
                 signal_hz: b.signal_hz,
-                lora_placed: true,
+                tried: Vec::new(),
+                remembered: true,
             });
         }
         // The front end is told how strong the detector found the source,
         // so a stream that begins inside a transmission is not read as
         // noise from its first sample to its last.
         let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
-        let mut members = vec![Member::build("burst_route", spec, route, &self.reg)?];
+        let mut classifier = Member::classifier(spec, route, &self.reg)?;
+        classifier.source_snr_db = b.snr_db;
+        let mut members = vec![classifier];
         let hz = b.center_hz as f64;
-        // Place every narrowband front whose declared channel fits inside the
-        // detected source: the stream must carry the channel (rate over its
-        // width), and the source's own width must be within reach of the
-        // channel (up to CHANNEL_WIDTH_TOLERANCE times it), so a fat or
-        // splattered measurement does not put a 12.5 kHz decoder on a
-        // 200 kHz signal, but a channel measured a little wide still places.
-        for (name, widths) in &self.narrowband {
-            let fits = widths
-                .iter()
-                .any(|&w| b.rate > w && b.bandwidth_hz <= w * CHANNEL_WIDTH_TOLERANCE);
-            if fits {
-                if let Ok(mut m) =
-                    Member::build(name, spec, Self::place(name, hz, widths[0]), &self.reg)
-                {
-                    m.channel_hz = widths[0];
+        for p in protocol::all() {
+            let shape = p.shape();
+            if shape.span_wide || !shape.families.is_empty() {
+                continue;
+            }
+            if !candidate(*p, hz, b.bandwidth_hz, b.rate) {
+                continue;
+            }
+            for w in p.widths_for(b.bandwidth_hz) {
+                let at = Placed {
+                    center_hz: hz,
+                    width_hz: w,
+                    rate: b.rate,
+                    snr_db: b.snr_db,
+                };
+                if let Ok(m) = Member::place(*p, spec, at, &self.reg) {
                     members.push(m);
                 }
             }
-        }
-        // TETRA is placed by band, not width: unlike the amateur channels its
-        // carriers live in licensed downlink allocations, and its hunt
-        // correlates continuously, not worth paying on every 433 MHz burst.
-        if dsp::tetra::is_downlink_band(hz) && b.rate >= crate::tetra_nodes::MIN_RATE_HZ {
-            let w = crate::tetra_nodes::CHANNEL_WIDTH_HZ;
-            if let Ok(mut m) = Member::build("tetra", spec, Self::place("tetra", hz, w), &self.reg)
-            {
-                m.channel_hz = w;
-                members.push(m);
-            }
-        }
-        if METER_HZ.contains(&b.bandwidth_hz) {
-            let w = crate::wmbus_nodes::CHANNEL_WIDTH_HZ;
-            if let Ok(mut m) = Member::build("wmbus", spec, Self::place("wmbus", hz, w), &self.reg)
-            {
-                m.channel_hz = w;
-                members.push(m);
-            }
-        }
-        // LoRa is not placed here. It is the dearest front end to run and
-        // a chirp is the one thing the burst front end names reliably, so
-        // it is placed when that front end has named one; see `place_lora`.
-        for m in &mut members {
-            m.source_snr_db = b.snr_db;
         }
         Ok(Slot {
             id: b.id,
@@ -1080,24 +996,26 @@ impl AutoNode {
             heard: false,
             spec,
             signal_hz: b.signal_hz,
-            lora_placed: false,
+            tried: Vec::new(),
+            remembered: false,
         })
     }
 
-    /// Place LoRa front ends on a source the burst front end has named a
-    /// chirp, one per channel width the source could be, and read them the
-    /// source's samples so far from the ring the burst front end kept.
+
+    /// Place the decoders that wait for the classifier's verdict, once it
+    /// has named a burst of this source, and read them the source's samples
+    /// so far from the ring the burst front end kept.
     ///
-    /// Placed on the verdict and not on the width because LoRa was the
-    /// dearest front end on a busy band, dechirping six spreading factors
-    /// on every source over 44 kHz, and on a band of hard-keyed sensors
-    /// most sources measure that wide from their splatter. The verdict
-    /// costs nothing extra: the burst front end classifies every burst
-    /// anyway. What it costs is latency, since a burst is named when it
-    /// ends or half a second in, and the ring is what pays that back: a
-    /// short packet is read whole from it after the fact, and a long one
-    /// is caught up and then followed live.
-    fn place_lora(
+    /// Placed on the verdict and not on the width because a decoder that
+    /// waits is one too dear to run on every source that measures the right
+    /// width: LoRa dechirped six spreading factors on every source over
+    /// 44 kHz, and on a band of hard-keyed sensors most sources measure that
+    /// wide from their splatter. The verdict costs nothing extra: the burst
+    /// front end classifies every burst anyway. What it costs is latency,
+    /// since a burst is named when it ends or half a second in, and the ring
+    /// is what pays that back: a short packet is read whole from it after
+    /// the fact, and a long one is caught up and then followed live.
+    fn place_on_verdict(
         &mut self,
         k: usize,
         at_us: u64,
@@ -1106,52 +1024,61 @@ impl AutoNode {
         pk: &mut Vec<Packet>,
         heard: &mut Vec<(&'static str, f64)>,
     ) {
+        let reg = &self.reg;
         let slot = &mut self.slots[k];
-        slot.lora_placed = true;
-        let Some(history) = slot
-            .members
-            .iter()
-            .find(|m| m.router.is_some())
-            .map(|m| m.ring.clone())
-        else {
+        let Some(router) = slot.members.iter().find(|m| m.router.is_some()) else {
             return;
         };
+        let verdicts = router.verdicts.clone();
         let hz = slot.center_hz as f64;
         let snr = slot.members.first().map_or(f32::NAN, |m| m.source_snr_db);
-        for bw in crate::lora_nodes::bandwidths_for(slot.signal_hz) {
-            let Ok(mut m) =
-                Member::build("lora", slot.spec, Self::place("lora", hz, bw), &self.reg)
-            else {
+        let mut history: Option<Vec<C32>> = None;
+        for p in protocol::all() {
+            let shape = p.shape();
+            if shape.span_wide || slot.tried.contains(&p.id()) {
                 continue;
-            };
-            m.channel_hz = bw;
-            m.source_snr_db = snr;
-            let before = pk.len();
-            // The samples the source has produced so far, in the blocks the
-            // live path would have handed over, then the flush if it has
-            // already closed.
-            for chunk in history.chunks(16_384) {
-                ev.extend(m.run(chunk, at_us, pk));
             }
-            if closed {
-                let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * slot.spec.rate) as usize];
-                ev.extend(m.run(&quiet, at_us, pk));
+            if !shape.families.iter().any(|f| verdicts.contains(f)) {
+                continue;
             }
-            if pk.len() > before {
-                slot.heard = true;
-                heard.push((m.name, m.channel_hz));
+            slot.tried.push(p.id());
+            if !candidate(*p, hz, slot.signal_hz, slot.spec.rate) {
+                continue;
             }
-            slot.members.push(m);
-        }
-    }
-
-    /// The settings a front end is built with for a channel: where it is
-    /// and, for the one that needs telling, how wide.
-    fn place(name: &'static str, hz: f64, width_hz: f64) -> NodeSpec {
-        match name {
-            "lora" => NodeSpec::new(name).f("bandwidth_hz", width_hz),
-            "wmbus" => NodeSpec::new(name),
-            _ => NodeSpec::new(name).f("channel_hz", hz),
+            let history = history.get_or_insert_with(|| {
+                slot.members
+                    .iter()
+                    .find(|m| m.router.is_some())
+                    .map(|m| m.ring.clone())
+                    .unwrap_or_default()
+            });
+            for w in p.widths_for(slot.signal_hz) {
+                let at = Placed {
+                    center_hz: hz,
+                    width_hz: w,
+                    rate: slot.spec.rate,
+                    snr_db: snr,
+                };
+                let Ok(mut m) = Member::place(*p, slot.spec, at, reg) else {
+                    continue;
+                };
+                let before = pk.len();
+                // The samples the source has produced so far, in the blocks
+                // the live path would have handed over, then the flush if
+                // it has already closed.
+                for chunk in history.chunks(16_384) {
+                    ev.extend(m.run(chunk, at_us, pk));
+                }
+                if closed {
+                    let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * slot.spec.rate) as usize];
+                    ev.extend(m.run(&quiet, at_us, pk));
+                }
+                if pk.len() > before {
+                    slot.heard = true;
+                    heard.push((m.name, m.channel_hz));
+                }
+                slot.members.push(m);
+            }
         }
     }
 
@@ -1183,6 +1110,15 @@ impl AutoNode {
             ),
         })
     }
+}
+
+/// Whether a source at `hz`, measured `width_hz` wide and cut out at
+/// `rate`, could be a channel of this protocol.
+fn candidate(p: &dyn Protocol, hz: f64, width_hz: f64, rate: f64) -> bool {
+    let shape = p.shape();
+    rate >= shape.min_rate_hz
+        && p.placement().covers(hz, shape.widths[0])
+        && p.accepts_width(width_hz)
 }
 
 /// Lock a source onto the channel plan when it is plainly on it.
@@ -1566,8 +1502,10 @@ impl Node for AutoNode {
         let mut closed = Vec::new();
         for (k, mut ev, mut pk, done, mut heard, _) in results {
             let center = Hz(self.slots[k].center_hz);
-            if !self.slots[k].lora_placed && self.slots[k].members.iter().any(|m| m.chirp_seen) {
-                self.place_lora(k, at_us, done, &mut ev, &mut pk, &mut heard);
+            let named = !self.slots[k].remembered
+                && self.slots[k].members.iter().any(|m| !m.verdicts.is_empty());
+            if named {
+                self.place_on_verdict(k, at_us, done, &mut ev, &mut pk, &mut heard);
             }
             for (name, width) in &heard {
                 if let Some(e) = self.remember(name, center.as_f64(), *width) {
@@ -1604,11 +1542,16 @@ impl Node for AutoNode {
                 events.push(e);
             }
             // A cell's identity, once, per channel, whatever the decoders
-            // that read it have been through since.
+            // that read it have been through since. Each protocol on the
+            // source says which of its packets are the same news.
             let seen = self.announced.entry(center.0).or_default();
+            let members = &self.slots[k].members;
             out.extend(pk.into_iter().filter(|p| {
-                let PacketBody::Frame(f) = &p.body else { return true };
-                let Some(key) = decode::tetra::Event::identity_key(&f.bytes) else { return true };
+                let key = members
+                    .iter()
+                    .filter_map(|m| m.protocol)
+                    .find_map(|proto| proto.dedupe_key(p));
+                let Some(key) = key else { return true };
                 if seen.contains(&key) {
                     return false;
                 }

@@ -11,6 +11,8 @@
 //! stream is 25 frames a second and none of them means anything on its own,
 //! whereas "M0ABC called M17-M17 C for nine seconds" is one row in a log.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
 use decode::m17::{self, Assembler, DataType, Event};
@@ -463,6 +465,32 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     d.link = link;
     d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
     Some(d)
+}
+
+
+pub struct M17;
+
+impl Protocol for M17 {
+    fn id(&self) -> &'static str {
+        "m17"
+    }
+    fn label(&self) -> &'static str {
+        "m17"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: CHANNEL_WIDTH_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("m17").f("channel_hz", at.center_hz)]
+    }
 }
 
 #[cfg(test)]
