@@ -57,8 +57,7 @@ impl PacketDecodeNode {
         self.hits.clear();
         for p in packets {
             match &p.body {
-                PacketBody::Pulses(_) => {
-                    let Some(pkg) = p.package() else { continue };
+                PacketBody::Pulses(pkg) => {
                     // Which keying a burst arrived under is not something the
                     // protocols can tell, and it belongs in the packet list's
                     // own column: a device that exists in both an OOK and an
@@ -69,14 +68,14 @@ impl PacketDecodeNode {
                     // is only ever a guess: the wide tier carries plenty of
                     // on-off keyed sensors, and this used to label every one
                     // of them FSK.
-                    let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
+                    let modulation = p.modulation().unwrap_or(match p.measure.as_ref() {
                         Some(m) => m.modulation,
                         None if p.bandwidth_hz > 60_000 => "FSK",
                         None => "OOK",
                     });
-                    self.decode_burst(p, &pkg, modulation);
+                    self.decode_burst(p, pkg, modulation);
                 }
-                PacketBody::Frame(bytes) => self.decode_frame(p, bytes),
+                PacketBody::Frame(f) => self.decode_frame(p, &f.bytes),
             }
         }
     }
@@ -125,16 +124,15 @@ impl Default for Options {
 pub fn decode_packet(protocols: &Protocols, opts: Options, p: &Packet) -> Vec<Decoded> {
     let mut out = Vec::new();
     match &p.body {
-        PacketBody::Pulses(_) => {
-            let Some(pkg) = p.package() else { return out };
-            let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
+        PacketBody::Pulses(pkg) => {
+            let modulation = p.modulation().unwrap_or(match p.measure.as_ref() {
                 Some(m) => m.modulation,
                 None if p.bandwidth_hz > 60_000 => "FSK",
                 None => "OOK",
             });
-            decode_burst_into(protocols, opts, p, &pkg, modulation, &mut out);
+            decode_burst_into(protocols, opts, p, pkg, modulation, &mut out);
         }
-        PacketBody::Frame(bytes) => decode_frame_into(p, bytes, &mut out),
+        PacketBody::Frame(f) => decode_frame_into(p, &f.bytes, &mut out),
     }
     out
 }
@@ -147,7 +145,7 @@ fn decode_burst_into(
     modulation: &'static str,
     hits: &mut Vec<Decoded>,
 ) {
-    let center = common::Hz(p.center_hz);
+    let center = common::Hz(p.center_hz());
     let mut matched = false;
     // A protocol that fails is not reported. A CRC failure in particular
     // is a protocol saying "those were my timings but the reception was
@@ -209,11 +207,11 @@ fn decode_frame_into(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     let start = hits.len();
     frame_rows(p, bytes, hits);
     for d in &mut hits[start..] {
-        if d.snr_db.is_none() && p.snr_db.is_finite() {
-            d.snr_db = Some(p.snr_db);
+        if d.snr_db.is_none() && p.snr_db().is_finite() {
+            d.snr_db = Some(p.snr_db());
         }
-        if d.rssi_dbfs.is_none() && p.rssi_dbfs.is_finite() {
-            d.rssi_dbfs = Some(p.rssi_dbfs);
+        if d.rssi_dbfs.is_none() && p.rssi_dbfs().is_finite() {
+            d.rssi_dbfs = Some(p.rssi_dbfs());
         }
         if d.iq.is_none() {
             d.iq = p.iq.clone();
@@ -228,7 +226,7 @@ fn decode_frame_into(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     }
 
 fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
-    let center = common::Hz(p.center_hz);
+    let center = common::Hz(p.center_hz());
     // M17 is the one protocol here that its own frequency cannot
     // identify: it runs wherever an amateur puts it, which includes the
     // 2 m channels APRS uses and the 70 cm ones near the pager bands. So
@@ -260,7 +258,7 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     // A TETRA broadcast identifies itself twice over: it arrives from a
     // downlink band, and its bytes are a tagged PDU that had to pass the
     // standard's own CRC to exist at all.
-    if dsp::tetra::is_downlink_band(p.center_hz as f64) {
+    if dsp::tetra::is_downlink_band(p.center_hz() as f64) {
         if let Some(d) = crate::tetra_nodes::tetra_decoded(bytes, center) {
             hits.push(d);
         }
@@ -269,13 +267,13 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     // A BLE advertisement arrives tagged with the advertising channel it
     // was received on, which is a frequency nothing else here transmits
     // a frame from.
-    if crate::ble_nodes::is_advertising_channel(p.center_hz as f64) {
+    if crate::ble_nodes::is_advertising_channel(p.center_hz() as f64) {
         if let Some(d) = crate::ble_nodes::ble_decoded(bytes, center) {
             hits.push(d);
         }
         return;
     }
-    if dsp::ais::is_ais_band(p.center_hz as f64) {
+    if dsp::ais::is_ais_band(p.center_hz() as f64) {
         let Ok(frame) = decode::ais::parse(bytes) else { return };
         hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
         return;
@@ -286,19 +284,19 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     // Tested before the pager bands because 144 to 146 MHz is inside the
     // VHF paging allocation. Two protocols really do share that spectrum,
     // and the narrower window is the more specific claim.
-    if dsp::afsk::is_packet_band(p.center_hz as f64) {
+    if dsp::afsk::is_packet_band(p.center_hz() as f64) {
         let Ok(frame) = decode::ax25::parse(bytes) else { return };
         hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
         return;
     }
     // A pager transmission is codewords rather than one frame, so it can
     // become several rows: a transmitter empties its queue in one go.
-    if dsp::pocsag::is_pager_band(p.center_hz as f64) {
+    if dsp::pocsag::is_pager_band(p.center_hz() as f64) {
         hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
         return;
     }
     // Meters: the 868.95 MHz uplink and the older 868.3 MHz mode.
-    if dsp::wmbus::is_wmbus_band(p.center_hz as f64) {
+    if dsp::wmbus::is_wmbus_band(p.center_hz() as f64) {
         if let Some(d) = crate::wmbus_nodes::wmbus_decoded(bytes, center) {
             hits.push(d);
         }
@@ -309,8 +307,8 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     // A local demodulator reports no level for a frame it has already
     // accepted, but a Beast feed carries one, and dropping it would make
     // a remote receiver's frames look weaker than nothing.
-    if p.rssi_dbfs.is_finite() {
-        d = d.with_level(p.rssi_dbfs, p.snr_db);
+    if p.rssi_dbfs().is_finite() {
+        d = d.with_level(p.rssi_dbfs(), p.snr_db());
     }
     hits.push(d);
 }
@@ -384,18 +382,18 @@ mod tests {
     }
 
     fn burst(center_hz: u64, bandwidth_hz: u32, pulses: Vec<Pulse>) -> Packet {
-        Packet {
-            at_us: 0,
-            center_hz,
+        Packet::of_pulses(
+            0,
             bandwidth_hz,
-            rssi_dbfs: -20.0,
-            snr_db: 22.0,
-            modulation: None,
-            body: PacketBody::Pulses(pulses),
-            measure: None,
-            iq: None,
-            audio: None,
-        }
+            common::Package {
+                pulses,
+                snr_db: 22.0,
+                rssi_dbfs: -20.0,
+                start_sample: 0,
+                center_hz,
+                modulation: None,
+            },
+        )
     }
 
     #[test]
@@ -424,18 +422,11 @@ mod tests {
             .collect();
         let hits = run(
             &mut n,
-            vec![Packet {
-                at_us: 0,
-                center_hz: 1_090_000_000,
-                bandwidth_hz: 2_000_000,
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: None,
-                body: PacketBody::Frame(bytes),
-                measure: None,
-                iq: None,
-                audio: None,
-            }],
+            vec![Packet::of_frame(
+                0,
+                2_000_000,
+                common::Frame::unmeasured(bytes).at(1_090_000_000),
+            )],
         );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].protocol, "ADSB-Identification");
@@ -471,18 +462,11 @@ mod tests {
         let mut n = PacketDecodeNode::default();
         let hits = run(
             &mut n,
-            vec![Packet {
-                at_us: 0,
-                center_hz: 439_987_500,
-                bandwidth_hz: 12_500,
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: None,
-                body: PacketBody::Frame(bytes),
-                measure: None,
-                iq: None,
-                audio: None,
-            }],
+            vec![Packet::of_frame(
+                0,
+                12_500,
+                common::Frame::unmeasured(bytes).at(439_987_500),
+            )],
         );
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].protocol, "POCSAG-Alpha");
@@ -495,18 +479,11 @@ mod tests {
         let mut n = PacketDecodeNode::default();
         let hits = run(
             &mut n,
-            vec![Packet {
-                at_us: 0,
-                center_hz: 1_090_000_000,
-                bandwidth_hz: 2_000_000,
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: None,
-                body: PacketBody::Frame(vec![0xff; 5]),
-                measure: None,
-                iq: None,
-                audio: None,
-            }],
+            vec![Packet::of_frame(
+                0,
+                2_000_000,
+                common::Frame::unmeasured(vec![0xff; 5]).at(1_090_000_000),
+            )],
         );
         assert!(hits.is_empty());
     }

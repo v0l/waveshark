@@ -267,11 +267,14 @@ pub struct Receiver {
     /// open database for the same reason the packet log holds a directory: a
     /// rebuild replaces the node, and what survives it is the setting.
     survey_path: Option<PathBuf>,
-    /// Where the receiver is, which resolves a position from a single frame.
-    location: Option<(f64, f64)>,
-    /// The last fix from the GPS, or `None` when there is none and sightings
-    /// are recorded without a position.
-    fix: Option<gps::Fix>,
+    /// Where the receiver is: one position, whether it was typed in or came
+    /// from a GPS, carrying the quality fields when a fix supplied it.
+    ///
+    /// One station rather than a position and a fix beside it. The survey
+    /// used to record only what the GPS said, so a receiver whose position
+    /// was typed in wrote every sighting with an empty position while the map
+    /// drew the same receiver on its aerial.
+    station: Option<gps::Fix>,
     /// Bursts logged before the last rebuild, since the node holding the
     /// count is replaced by each one.
     logged: u64,
@@ -466,8 +469,7 @@ impl Receiver {
             tracks: None,
             survey: None,
             survey_path: None,
-            fix: None,
-            location: None,
+            station: None,
             logged: 0,
             center: plan.center,
             rate: plan.rate,
@@ -984,17 +986,15 @@ impl Receiver {
         self.m17 = m17;
         self.tracks = tracks;
         self.survey = survey;
-        // A tracker built fresh has to be told where the receiver is, which
-        // is what resolves a position from a single frame.
-        if let Some((lat, lon)) = self.location {
-            self.set_location(lat, lon);
-        }
-        // And a survey built fresh has to be reopened and told where the
-        // receiver is now, or a rebuild in the middle of a drive silently
-        // stops recording.
+        // A survey built fresh has to be reopened, and both it and a fresh
+        // tracker have to be told where the receiver is: the tracker resolves
+        // a position from a single frame with it, and without it a rebuild in
+        // the middle of a drive silently stops recording where anything was
+        // heard.
         self.open_survey();
-        let fix = self.fix;
-        self.set_fix(fix);
+        if let Some(at) = self.station {
+            self.set_station(at);
+        }
         self.modes = modes;
         self.banks = banks
             .into_iter()
@@ -1813,22 +1813,26 @@ impl Receiver {
         }
     }
 
-    /// Where the receiver is now, from the GPS. `None` says the fix went
-    /// stale, and sightings from here on carry no position.
+    /// A fix from the GPS, which moves the station.
+    ///
+    /// `None` is a fix that went stale rather than a receiver that stopped
+    /// being anywhere, so the station keeps the last position it was known to
+    /// be at. Everything that needs to know where the receiver is reads the
+    /// station, so there is one answer rather than one per consumer.
     pub fn set_fix(&mut self, fix: Option<gps::Fix>) {
-        self.fix = fix;
-        if let Some(n) = self.survey_node_mut() {
-            n.set_fix(fix);
-        }
-        // A moving receiver is also a moving reference for the position of
-        // anything that reports one relative to it.
         if let Some(f) = fix {
-            self.set_location(f.lat, f.lon);
+            self.set_station(f);
         }
     }
 
+    /// Where the receiver is, with whatever the last fix said about how well
+    /// that is known.
     pub fn fix(&self) -> Option<gps::Fix> {
-        self.fix
+        self.station
+    }
+
+    pub fn location(&self) -> Option<(f64, f64)> {
+        self.station.map(|f| (f.lat, f.lon))
     }
 
     /// Devices and sightings the survey holds, and how many receptions were
@@ -1867,15 +1871,25 @@ impl Receiver {
             .and_then(|a| a.downcast_mut::<nodes::SurveyNode>())
     }
 
+    /// A position typed in or taken from the country, which is a station with
+    /// nothing said about its quality.
     pub fn set_location(&mut self, lat: f64, lon: f64) {
-        self.location = Some((lat, lon));
+        self.set_station(gps::Fix { lat, lon, ..Default::default() });
+    }
+
+    /// Move the station, and everything that resolves a position against it.
+    pub fn set_station(&mut self, at: gps::Fix) {
+        self.station = Some(at);
         if let Some(n) = self
             .tracks
             .and_then(|id| self.graph.node_mut(id))
             .and_then(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<crate::tracks::TracksNode>())
         {
-            n.set_reference(lat, lon);
+            n.set_reference(at.lat, at.lon);
+        }
+        if let Some(n) = self.survey_node_mut() {
+            n.set_station(Some(at));
         }
     }
 

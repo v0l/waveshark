@@ -27,17 +27,12 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
         match g.output() {
             pipeline::Payload::Packets(p) => out.extend_from_slice(p),
             pipeline::Payload::Frames(f) => {
-                out.extend(f.iter().map(|f| common::Packet {
-                    at_us: 0,
-                    center_hz: center.0,
-                    bandwidth_hz: 0,
-                    rssi_dbfs: f32::NAN,
-                    snr_db: f32::NAN,
-                    modulation: None,
-                    body: PacketBody::Frame(f.bytes.clone()),
-                    measure: None,
-                    audio: None,
-                    iq: None,
+                out.extend(f.iter().map(|f| {
+                    let mut f = f.clone();
+                    if f.center_hz == 0 {
+                        f.center_hz = center.0;
+                    }
+                    common::Packet::of_frame(0, 0, f)
                 }))
             }
             _ => {}
@@ -53,7 +48,7 @@ fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
         let Some(pkg) = p.package() else { continue };
         for r in protocols.decode_all(&pkg) {
             if r.model.contains(model) && r.crc_valid == Some(true) {
-                out.push((p.center_hz, r.to_string()));
+                out.push((p.center_hz(), r.to_string()));
             }
         }
     }
@@ -154,9 +149,9 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
         pk.iter().filter(|p| matches!(p.body, PacketBody::Frame(_))).collect();
     assert!(!frames.is_empty(), "no frame came out; packets: {}", pk.len());
     let f = frames[0];
-    assert!((f.center_hz as f64 - (center.as_f64() + offset)).abs() < 5_000.0, "page at {}", f.center_hz);
-    let PacketBody::Frame(bytes) = &f.body else { unreachable!() };
-    let pages = nodes::pocsag_nodes::pocsag_decoded(bytes, Hz(f.center_hz));
+    assert!((f.center_hz() as f64 - (center.as_f64() + offset)).abs() < 5_000.0, "page at {}", f.center_hz());
+    let PacketBody::Frame(frame) = &f.body else { unreachable!() };
+    let pages = nodes::pocsag_nodes::pocsag_decoded(&frame.bytes, Hz(f.center_hz()));
     assert_eq!(pages.len(), 1, "{pages:?}");
     assert_eq!(pages[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
 }
@@ -217,7 +212,7 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     // timings, which is what a log or a list gets to show for it.
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
     let measured: Vec<(u64, &common::Measure)> =
-        pk.iter().filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz, m))).collect();
+        pk.iter().filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz(), m))).collect();
     let (hz, chirp) = measured.iter().find(|(_, m)| m.modulation == "chirp").unwrap_or_else(|| {
         panic!(
             "no chirp measurement among {:?}",
@@ -296,7 +291,7 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
     let rows: Vec<pipeline::event::Decoded> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(b) => nodes::m17_nodes::m17_decoded(b, Hz(p.center_hz)),
+            PacketBody::Frame(f) => nodes::m17_nodes::m17_decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -344,7 +339,7 @@ fn auto_finds_dmr_in_a_real_capture() {
     let dmr: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(b) => nodes::dmr_nodes::dmr_decoded(b, Hz(p.center_hz)),
+            PacketBody::Frame(f) => nodes::dmr_nodes::dmr_decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -375,10 +370,10 @@ fn auto_finds_lora_in_a_real_capture() {
     let center = Hz(869_525_000);
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
     let lora: Vec<_> = pk.iter().filter_map(|p| match &p.body {
-        PacketBody::Frame(b) => nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)),
+        PacketBody::Frame(f) => nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())),
         _ => None,
     }).collect();
-    let chirps = pk.iter().filter(|p| p.modulation == Some("chirp")).count();
+    let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
     eprintln!("auto: {} LoRa decoded, {} chirp rows, {} packets total", lora.len(), chirps, pk.len());
     assert!(!lora.is_empty(), "auto placed no LoRa that decoded; {} packets, {chirps} chirps", pk.len());
 }
@@ -411,7 +406,7 @@ fn a_channel_that_decoded_is_remembered() {
         if let pipeline::Payload::Packets(p) = g.output() {
             decoded += p
                 .iter()
-                .filter(|p| matches!(&p.body, PacketBody::Frame(b) if nodes::lora_nodes::lora_decoded(b, Hz(p.center_hz)).is_some()))
+                .filter(|p| matches!(&p.body, PacketBody::Frame(f) if nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())).is_some()))
                 .count();
         }
     }

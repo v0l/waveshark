@@ -401,26 +401,18 @@ impl Simple for LoraNode {
                         (10.0 * sig.max(1e-20).log10(), f32::NAN)
                     };
                     let rate = bw * OVERSAMPLE as f64;
-                    o.packets_mut().push(common::Packet {
-                        at_us: now_us(),
-                        center_hz: self.center_hz as u64,
-                        bandwidth_hz: bw as u32,
+                    let f = common::Frame::measured(
+                        frame.to_bytes(packet.sf, bw, packet.sync_word),
                         rssi_dbfs,
                         snr_db,
-                        modulation: Some("CSS"),
-                        body: common::PacketBody::Frame(frame.to_bytes(
-                            packet.sf,
-                            bw,
-                            packet.sync_word,
-                        )),
-                        iq: Some(std::sync::Arc::new(common::IqBurst {
-                            rate,
-                            center_hz: self.center_hz as u64,
-                            samples,
-                        })),
-                        audio: None,
-                        measure: None,
-                    });
+                    )
+                    .at(self.center_hz as u64)
+                    .with_iq(std::sync::Arc::new(common::IqBurst {
+                        rate,
+                        center_hz: self.center_hz as u64,
+                        samples,
+                    }));
+                    o.packets_mut().push(common::Packet::of_frame(now_us(), bw as u32, f));
                 }
                 Err(e) => {
                     c.emit(Event::Warning {

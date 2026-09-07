@@ -209,12 +209,12 @@ impl Member {
                 }));
                 attached = true;
             }
-            if p.rssi_dbfs.is_nan() {
-                p.rssi_dbfs = 10.0 * self.peak_pow.max(1e-20).log10();
-            }
-            if p.snr_db.is_nan() && self.noise_pow > 0.0 {
-                p.snr_db = 10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10();
-            }
+            let snr = if self.noise_pow > 0.0 {
+                10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10()
+            } else {
+                f32::NAN
+            };
+            p.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), snr);
         }
         if attached {
             self.ring.clear();
@@ -296,41 +296,38 @@ impl Member {
                         }
                         self.last_report_s = Some(t);
                     }
-                    out.push(Packet {
+                    // The level is filled from the source's own in `run`,
+                    // which is where the samples are; the classifier measures
+                    // the burst against the noise it found and reports
+                    // nothing when it never found any.
+                    let mut pkt = Packet::of_pulses(
                         at_us,
-                        center_hz,
                         bandwidth_hz,
-                        // Filled from the source's own level in `run`, which
-                        // is where the samples are; the classifier measures
-                        // the burst against the noise it found, and reports
-                        // nothing when it never found any.
-                        rssi_dbfs: f32::NAN,
-                        snr_db: if b.class.features.snr_db > 0.0 {
-                            b.class.features.snr_db
-                        } else {
-                            f32::NAN
+                        common::Package {
+                            pulses: Vec::new(),
+                            snr_db: if b.class.features.snr_db > 0.0 {
+                                b.class.features.snr_db
+                            } else {
+                                f32::NAN
+                            },
+                            rssi_dbfs: f32::NAN,
+                            start_sample: b.start_sample,
+                            center_hz,
+                            modulation: None,
                         },
-                        modulation: None,
-                        body: PacketBody::Pulses(Vec::new()),
-                        measure: Some(m),
-                        audio: None,
-                        iq: iq.clone(),
-                    });
+                    );
+                    pkt.measure = Some(m);
+                    pkt.iq = iq.clone();
+                    out.push(pkt);
                     continue;
                 }
                 for p in &b.packages {
-                    out.push(Packet {
-                        at_us,
-                        center_hz,
-                        bandwidth_hz,
-                        rssi_dbfs: p.rssi_dbfs,
-                        snr_db: p.snr_db,
-                        modulation: p.modulation,
-                        body: PacketBody::Pulses(p.pulses.clone()),
-                        measure: Some(m.clone()),
-                        audio: None,
-                        iq: iq.clone(),
-                    });
+                    let mut pkg = p.clone();
+                    pkg.center_hz = center_hz;
+                    let mut pkt = Packet::of_pulses(at_us, bandwidth_hz, pkg);
+                    pkt.measure = Some(m.clone());
+                    pkt.iq = iq.clone();
+                    out.push(pkt);
                 }
             }
             // The front end's own report of a burst nothing reads is the
@@ -343,18 +340,11 @@ impl Member {
             let spec = self.graph.spec_of(*t);
             let Some(pkgs) = self.graph.buf(*t).and_then(|p| p.as_pulses()) else { continue };
             for p in pkgs {
-                out.push(Packet {
+                out.push(Packet::of_pulses(
                     at_us,
-                    center_hz: p.center_hz,
-                    bandwidth_hz: spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    rssi_dbfs: p.rssi_dbfs,
-                    snr_db: p.snr_db,
-                    modulation: p.modulation,
-                    body: PacketBody::Pulses(p.pulses.clone()),
-                    measure: None,
-                    audio: None,
-                    iq: None,
-                });
+                    spec.map(|s| s.bandwidth as u32).unwrap_or(0),
+                    p.clone(),
+                ));
             }
         }
         for t in &self.packets {
@@ -366,12 +356,7 @@ impl Member {
             // measure keeps what it said.
             for p in pk {
                 let mut p = p.clone();
-                if p.rssi_dbfs.is_nan() {
-                    p.rssi_dbfs = 10.0 * self.peak_pow.max(1e-20).log10();
-                }
-                if p.snr_db.is_nan() {
-                    p.snr_db = self.source_snr_db;
-                }
+                p.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), self.source_snr_db);
                 out.push(p);
             }
             if !pk.is_empty() {
@@ -382,28 +367,21 @@ impl Member {
             let spec = self.graph.spec_of(*t);
             let Some(frames) = self.graph.buf(*t).and_then(|p| p.as_frames()) else { continue };
             for f in frames {
-                // What the front end measured, where it measured anything: it
-                // read the channel this frame came off, and the source's own
-                // level is the whole extraction. The fallbacks are here for a
+                // What the front end measured, where it measured anything:
+                // it read the channel this frame came off, and the source's
+                // own level is of the whole extraction. The fills are for a
                 // front end that has not been taught to measure yet.
-                let rssi = if f.rssi_dbfs.is_nan() {
-                    10.0 * self.peak_pow.max(1e-20).log10()
-                } else {
-                    f.rssi_dbfs
-                };
-                let snr = if f.snr_db.is_nan() { self.source_snr_db } else { f.snr_db };
-                out.push(Packet {
+                let mut f = f.clone();
+                if f.center_hz == 0 {
+                    f.center_hz = spec.map(|s| s.center.0).unwrap_or(0);
+                }
+                let mut pkt = Packet::of_frame(
                     at_us,
-                    center_hz: f.center_hz.unwrap_or_else(|| spec.map(|s| s.center.0).unwrap_or(0)),
-                    bandwidth_hz: spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    rssi_dbfs: rssi,
-                    snr_db: snr,
-                    modulation: None,
-                    body: PacketBody::Frame(f.bytes.clone()),
-                    measure: None,
-                    audio: None,
-                    iq: f.iq.clone(),
-                });
+                    spec.map(|s| s.bandwidth as u32).unwrap_or(0),
+                    f,
+                );
+                pkt.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), self.source_snr_db);
+                out.push(pkt);
             }
             // The page has left carrying the loudest block it was read
             // from; the next transmission on this source measures its own.
@@ -1376,8 +1354,8 @@ impl Node for AutoNode {
             // that read it have been through since.
             let seen = self.announced.entry(center.0).or_default();
             out.extend(pk.into_iter().filter(|p| {
-                let PacketBody::Frame(bytes) = &p.body else { return true };
-                let Some(key) = decode::tetra::Event::identity_key(bytes) else { return true };
+                let PacketBody::Frame(f) = &p.body else { return true };
+                let Some(key) = decode::tetra::Event::identity_key(&f.bytes) else { return true };
                 if seen.contains(&key) {
                     return false;
                 }

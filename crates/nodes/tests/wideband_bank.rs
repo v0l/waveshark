@@ -239,7 +239,7 @@ fn channels_without_a_chain_are_skipped() {
 /// name the device.
 #[test]
 fn the_automatic_chain_decodes_without_being_told_the_modulation() {
-    use common::{Packet, PacketBody};
+    use common::Packet;
     let base = need_fixture!(fixture());
     let mut bank = make_bank();
     // Exactly what the app runs: gated on detection, both modulations, every
@@ -257,18 +257,7 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
         let packets: Vec<Packet> = bank
             .packages()
             .iter()
-            .map(|p| Packet {
-                at_us: 0,
-                center_hz: p.center_hz,
-                bandwidth_hz: bank.channel_bandwidth() as u32,
-                rssi_dbfs: p.rssi_dbfs,
-                snr_db: p.snr_db,
-                modulation: p.modulation,
-                body: PacketBody::Pulses(p.pulses.clone()),
-                measure: None,
-                audio: None,
-                iq: None,
-            })
+            .map(|p| Packet::of_pulses(0, bank.channel_bandwidth() as u32, p.clone()))
             .collect();
         for d in decode_packets(&mut decoder, packets) {
             // Bursts nothing claims are still reported, and they are counted

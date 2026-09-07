@@ -945,18 +945,17 @@ impl DmrNode {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
         self.accepted += 1;
-        common::Packet {
-            at_us,
-            center_hz: self.channel_hz as u64,
-            bandwidth_hz: CHANNEL_WIDTH_HZ as u32,
-            rssi_dbfs: f32::NAN,
-            snr_db: f32::NAN,
-            modulation: Some("4FSK"),
-            body: common::PacketBody::Frame(encode_burst(pos, self.framer.colour, self.lc.as_ref(), bits)),
-            iq: self.burst_iq(at),
-            audio,
-            measure: None,
-        }
+        let frame = common::Frame::unmeasured(encode_burst(
+            pos,
+            self.framer.colour,
+            self.lc.as_ref(),
+            bits,
+        ))
+        .at(self.channel_hz as u64);
+        let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
+        p.iq = self.burst_iq(at);
+        p.audio = audio;
+        p
     }
 }
 
@@ -1055,7 +1054,7 @@ mod tests {
         let rows: Vec<Decoded> = packets
             .iter()
             .filter_map(|p| match &p.body {
-                common::PacketBody::Frame(b) => dmr_decoded(b, common::Hz(p.center_hz)),
+                common::PacketBody::Frame(f) => dmr_decoded(&f.bytes, common::Hz(p.center_hz())),
                 _ => None,
             })
             .collect();
@@ -1079,7 +1078,7 @@ mod tests {
         let frames = packets
             .iter()
             .filter_map(|p| match &p.body {
-                common::PacketBody::Frame(b) => burst_voice_frames(b),
+                common::PacketBody::Frame(f) => burst_voice_frames(&f.bytes),
                 _ => None,
             })
             .count();

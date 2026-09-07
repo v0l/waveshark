@@ -18,6 +18,11 @@ pub struct Pulse {
 }
 
 /// A complete burst: the pulses between two long silences.
+///
+/// One of the two kinds of evidence a packet carries, the other being
+/// [`Frame`]. A detector produces this, a slicer reads it, and it travels on
+/// [`crate::PacketBody::Pulses`] with the level and the frequency it was
+/// measured at rather than having those copied onto the packet around it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub pulses: Vec<Pulse>,
@@ -186,16 +191,18 @@ pub struct Packet {
     /// Wall clock when the block carrying it was processed, in microseconds
     /// since the epoch.
     pub at_us: u64,
-    /// Where it was received, in Hz: the channel's own centre in a bank.
-    pub center_hz: u64,
+
     /// The width it was heard through. The same burst read through a 31 kHz
     /// channel and a 125 kHz one is not the same recording.
     pub bandwidth_hz: u32,
-    pub rssi_dbfs: f32,
-    pub snr_db: f32,
-    /// What the burst was measured to be keyed on. See
-    /// [`Package::modulation`].
-    pub modulation: Option<&'static str>,
+    /// The evidence itself: a burst's timings or a demodulator's frame, each
+    /// carrying where it was heard and how strongly.
+    ///
+    /// Those used to be four more fields here, copied in from whichever of
+    /// the two produced the packet and copied back out by `package()`. Two
+    /// places to look for a level is one too many: a frame that measured its
+    /// own preamble and a packet that had a level filled in for it disagreed,
+    /// and nothing said which to believe.
     pub body: PacketBody,
     /// The burst itself, as complex samples at the rate it was read at,
     /// when the front end kept them.
@@ -244,10 +251,10 @@ pub struct IqBurst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub bytes: Vec<u8>,
-    /// Where it was received, when the front end knows better than the port
-    /// it publishes on: one advertising channel out of a span holding three,
-    /// one meter's carrier out of a source.
-    pub center_hz: Option<u64>,
+    /// Where it was received. The front end's own answer, which is finer
+    /// than the port's where a span holds more than one channel it reads:
+    /// three BLE advertising channels, two AIS channels.
+    pub center_hz: u64,
     pub rssi_dbfs: f32,
     pub snr_db: f32,
     /// The samples it was read from, when the front end kept them.
@@ -261,15 +268,15 @@ impl Frame {
     /// treat it as a to-do rather than as the normal case: what it produces
     /// is a row in the list reading NaN.
     pub fn unmeasured(bytes: Vec<u8>) -> Self {
-        Self { bytes, center_hz: None, rssi_dbfs: f32::NAN, snr_db: f32::NAN, iq: None }
+        Self { bytes, center_hz: 0, rssi_dbfs: f32::NAN, snr_db: f32::NAN, iq: None }
     }
 
     pub fn measured(bytes: Vec<u8>, rssi_dbfs: f32, snr_db: f32) -> Self {
-        Self { bytes, center_hz: None, rssi_dbfs, snr_db, iq: None }
+        Self { bytes, center_hz: 0, rssi_dbfs, snr_db, iq: None }
     }
 
     pub fn at(mut self, center_hz: u64) -> Self {
-        self.center_hz = Some(center_hz);
+        self.center_hz = center_hz;
         self
     }
 
@@ -402,32 +409,119 @@ pub struct Voice {
 /// What the demodulator actually produced.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PacketBody {
-    /// A burst, as mark and gap timings.
-    Pulses(Vec<Pulse>),
+    /// A burst a detector found, as mark and gap timings.
+    Pulses(Package),
     /// A whole frame from a demodulator that produces bytes.
-    Frame(Vec<u8>),
+    Frame(Frame),
 }
 
 impl Packet {
-    /// The burst as a package again, ready to hand to a decoder.
-    pub fn package(&self) -> Option<Package> {
+    /// A burst a detector found, on the bus.
+    pub fn of_pulses(at_us: u64, bandwidth_hz: u32, package: Package) -> Self {
+        Self {
+            at_us,
+            bandwidth_hz,
+            body: PacketBody::Pulses(package),
+            iq: None,
+            audio: None,
+            measure: None,
+        }
+    }
+
+    /// A frame a demodulator produced, on the bus.
+    pub fn of_frame(at_us: u64, bandwidth_hz: u32, frame: Frame) -> Self {
+        Self {
+            at_us,
+            bandwidth_hz,
+            body: PacketBody::Frame(frame),
+            iq: None,
+            audio: None,
+            measure: None,
+        }
+    }
+
+    /// Fill in a level the evidence did not carry.
+    ///
+    /// For a front end that measures the source rather than the burst: the
+    /// auto node knows how loud its extraction was and the demodulator inside
+    /// it may not have measured anything. Only fills what is missing, so a
+    /// measurement always wins over an estimate.
+    pub fn fill_level(&mut self, rssi_dbfs: f32, snr_db: f32) {
+        let (r, s) = match &mut self.body {
+            PacketBody::Pulses(p) => (&mut p.rssi_dbfs, &mut p.snr_db),
+            PacketBody::Frame(f) => (&mut f.rssi_dbfs, &mut f.snr_db),
+        };
+        if r.is_nan() {
+            *r = rssi_dbfs;
+        }
+        if s.is_nan() {
+            *s = snr_db;
+        }
+    }
+
+    /// Say where it was heard, for a front end whose evidence did not.
+    pub fn set_center(&mut self, hz: u64) {
+        match &mut self.body {
+            PacketBody::Pulses(p) => p.center_hz = hz,
+            PacketBody::Frame(f) => f.center_hz = hz,
+        }
+    }
+
+    /// The burst's timings, ready to hand to a decoder.
+    pub fn package(&self) -> Option<&Package> {
         match &self.body {
-            PacketBody::Pulses(p) => Some(Package {
-                pulses: p.clone(),
-                snr_db: self.snr_db,
-                rssi_dbfs: self.rssi_dbfs,
-                start_sample: 0,
-                center_hz: self.center_hz,
-                modulation: self.modulation,
-            }),
+            PacketBody::Pulses(p) => Some(p),
             PacketBody::Frame(_) => None,
         }
     }
 
     pub fn frame(&self) -> Option<&[u8]> {
         match &self.body {
-            PacketBody::Frame(b) => Some(b),
+            PacketBody::Frame(f) => Some(&f.bytes),
             PacketBody::Pulses(_) => None,
+        }
+    }
+
+    /// Where it was received, in hertz: the channel's own centre in a bank,
+    /// the advertising channel a BLE frame arrived on.
+    pub fn center_hz(&self) -> u64 {
+        match &self.body {
+            PacketBody::Pulses(p) => p.center_hz,
+            PacketBody::Frame(f) => f.center_hz,
+        }
+    }
+
+    /// Received level in dBFS, as whatever produced the evidence measured it.
+    pub fn rssi_dbfs(&self) -> f32 {
+        match &self.body {
+            PacketBody::Pulses(p) => p.rssi_dbfs,
+            PacketBody::Frame(f) => f.rssi_dbfs,
+        }
+    }
+
+    pub fn snr_db(&self) -> f32 {
+        match &self.body {
+            PacketBody::Pulses(p) => p.snr_db,
+            PacketBody::Frame(f) => f.snr_db,
+        }
+    }
+
+    /// What the burst was measured to be keyed on. See
+    /// [`Package::modulation`]. A frame comes from a front end chosen in
+    /// advance, so its keying is the front end's and not a measurement.
+    pub fn modulation(&self) -> Option<&'static str> {
+        match &self.body {
+            PacketBody::Pulses(p) => p.modulation,
+            PacketBody::Frame(_) => None,
+        }
+    }
+
+    /// The samples behind it: the burst's own, or the packet's where the
+    /// front end attached them to the packet instead.
+    pub fn samples(&self) -> Option<&std::sync::Arc<IqBurst>> {
+        match &self.body {
+            PacketBody::Frame(f) if f.iq.is_some() => f.iq.as_ref(),
+            _ => self.iq.as_ref(),
         }
     }
 }

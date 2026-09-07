@@ -865,11 +865,11 @@ impl pipeline::node::Simple for TracksNode {
             // ISM banks. Where a frame was received is what says which parser
             // it belongs to; anything that is neither band fails its parse or
             // its check and is dropped.
-            if dsp::ais::is_ais_band(packet.center_hz as f64) {
+            if dsp::ais::is_ais_band(packet.center_hz() as f64) {
                 if let Ok(f) = ais::parse(bytes) {
                     self.tracks.update_ais(&f, at);
                 }
-            } else if dsp::afsk::is_packet_band(packet.center_hz as f64) {
+            } else if dsp::afsk::is_packet_band(packet.center_hz() as f64) {
                 if let Ok(f) = ax25::parse(bytes) {
                     self.tracks.update_aprs(&f, at);
                 }

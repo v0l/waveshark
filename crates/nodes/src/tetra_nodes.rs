@@ -855,18 +855,11 @@ impl Node for TetraNode {
                 *seen = Some(key);
             }
             self.accepted += 1;
-            out.push(common::Packet {
+            out.push(common::Packet::of_frame(
                 at_us,
-                center_hz: self.channel_hz as u64,
-                bandwidth_hz: CHANNEL_WIDTH_HZ as u32,
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: Some("pi/4-DQPSK"),
-                body: common::PacketBody::Frame(bytes),
-                iq: None,
-                audio: None,
-                measure: None,
-            });
+                CHANNEL_WIDTH_HZ as u32,
+                common::Frame::unmeasured(bytes).at(self.channel_hz as u64),
+            ));
         }
         // Speech the traffic slots carried this block, one Voice per call
         // for the bus and one packet per burst for the log.
@@ -876,23 +869,17 @@ impl Node for TetraNode {
         for vb in per_burst {
             let b = &bursts[vb.burst_index];
             self.accepted += 1;
-            out.push(common::Packet {
-                at_us,
-                center_hz: self.channel_hz as u64,
-                bandwidth_hz: CHANNEL_WIDTH_HZ as u32,
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: Some("pi/4-DQPSK"),
-                body: common::PacketBody::Frame(encode_traffic_burst(
-                    &vb,
-                    b,
-                    self.last_aie != 0 || self.slot_enciphered(vb.tn),
-                )),
-                iq: self.burst_iq(b),
-                audio: (!vb.pcm.is_empty())
-                    .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ })),
-                measure: None,
-            });
+            let frame = common::Frame::unmeasured(encode_traffic_burst(
+                &vb,
+                b,
+                self.last_aie != 0 || self.slot_enciphered(vb.tn),
+            ))
+            .at(self.channel_hz as u64);
+            let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
+            p.iq = self.burst_iq(b);
+            p.audio = (!vb.pcm.is_empty())
+                .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ }));
+            out.push(p);
         }
         self.bursts = bursts;
         let vout = outputs[OUT_VOICE].voice_mut();
@@ -1242,8 +1229,8 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(b) = p.body {
-                        rows.push(tetra_decoded(&b, Hz(hz as u64)).unwrap());
+                    if let common::PacketBody::Frame(f) = p.body {
+                        rows.push(tetra_decoded(&f.bytes, Hz(hz as u64)).unwrap());
                     }
                 }
             }
@@ -1331,7 +1318,8 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(b) = &p.body {
+                    if let common::PacketBody::Frame(f) = &p.body {
+                        let b = &f.bytes;
                         let d = tetra_decoded(b, Hz(hz as u64)).unwrap();
                         if d.protocol == "TETRA-Voice" {
                             // Every burst carries the samples it was sliced
@@ -1451,8 +1439,8 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(b) = &p.body {
-                        rows.push(tetra_decoded(b, Hz(hz as u64)).unwrap());
+                    if let common::PacketBody::Frame(f) = &p.body {
+                        rows.push(tetra_decoded(&f.bytes, Hz(hz as u64)).unwrap());
                     }
                 }
             }

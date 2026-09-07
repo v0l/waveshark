@@ -477,38 +477,20 @@ impl pipeline::node::Node for PacketBusNode {
                 Payload::Pulses(pkgs) => {
                     let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
                     for p in pkgs.iter() {
-                        out.push(common::Packet {
-                            at_us,
-                            center_hz: p.center_hz,
-                            bandwidth_hz,
-                            rssi_dbfs: p.rssi_dbfs,
-                            snr_db: p.snr_db,
-                            modulation: p.modulation,
-                            body: common::PacketBody::Pulses(p.pulses.clone()),
-                            measure: None,
-                            audio: None,
-                            iq: None,
-                        });
+                        out.push(common::Packet::of_pulses(at_us, bandwidth_hz, p.clone()));
                     }
                 }
                 Payload::Frames(frames) => {
                     let center_hz = spec.map(|s| s.center.0).unwrap_or(0);
                     let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
                     for f in frames.iter() {
-                        out.push(common::Packet {
-                            at_us,
-                            // A front end that read one channel out of a span
-                            // says which; the rest take the port's centre.
-                            center_hz: f.center_hz.unwrap_or(center_hz),
-                            bandwidth_hz,
-                            rssi_dbfs: f.rssi_dbfs,
-                            snr_db: f.snr_db,
-                            modulation: None,
-                            body: common::PacketBody::Frame(f.bytes.clone()),
-                            measure: None,
-                            iq: f.iq.clone(),
-                            audio: None,
-                        });
+                        // A front end that read one channel out of a span
+                        // says which; the rest take the port's centre.
+                        let mut f = f.clone();
+                        if f.center_hz == 0 {
+                            f.center_hz = center_hz;
+                        }
+                        out.push(common::Packet::of_frame(at_us, bandwidth_hz, f));
                     }
                 }
                 // A feed from another receiver arrives already stamped: it
