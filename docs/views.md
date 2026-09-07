@@ -252,7 +252,11 @@ afternoon to the last place it saw a satellite. Without a GPS the survey still
 runs and the position column is empty, which is the indoor case.
 
 `--survey FILE` points it somewhere, `--no-survey` turns it off, and
-`--gps /dev/ttyACM0` or `--gps gpsd:localhost` gives it a position. The pane
+`--gps /dev/ttyACM0` or `--gps gpsd:localhost` gives it a position. Both are
+in settings under the station position, which is where they belong: a GPS is
+the other way of answering the question that box asks, and while one is
+running the station is wherever the last fix put it, so the range rings, the
+map and anything resolving a position against the receiver follow the car. The pane
 exports WiGLE CSV, which is what wardriving tools read; the survey file itself
 is the record, and the CSV is a copy shaped for other people's tools.
 

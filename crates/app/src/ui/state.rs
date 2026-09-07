@@ -383,6 +383,10 @@ pub struct SurveyState {
     /// When the rows were last read, so a pane open on a busy band is not a
     /// query per frame.
     pub refreshed: Option<Instant>,
+    /// The GPS source being typed in settings, while it is being typed. Kept
+    /// apart from the live one so a half-written port does not restart the
+    /// reader on every keystroke.
+    pub gps_edit: Option<String>,
 }
 
 impl Default for SurveyState {
@@ -397,6 +401,7 @@ impl Default for SurveyState {
             filter: String::new(),
             db: None,
             refreshed: None,
+            gps_edit: None,
         }
     }
 }
