@@ -12,6 +12,7 @@ pub mod auto_node;
 pub mod bank;
 pub mod bank_node;
 pub mod ble_nodes;
+pub mod video_nodes;
 pub mod capture_nodes;
 pub mod decode_nodes;
 pub mod dmr_nodes;
@@ -39,6 +40,7 @@ pub use auto_node::{AutoNode, AUTO_OPEN_DB};
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use bank_node::BankNode;
 pub use ble_nodes::BleNode;
+pub use video_nodes::FpvNode;
 pub use capture_nodes::IqCaptureNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
@@ -261,6 +263,22 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "fpv",
+            summary: "Analogue FPV video: FM to composite, sync separation, PAL colour",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let forced = match s.str_or("standard", "auto") {
+                "pal" => Some(dsp::video::Standard::Pal),
+                "ntsc" => Some(dsp::video::Standard::Ntsc),
+                _ => None,
+            };
+            Ok(Box::new(FpvNode::new(forced, s.bool_or("colour", true))) as Box<dyn Node>)
+        },
     );
 
     r.register(

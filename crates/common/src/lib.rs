@@ -18,7 +18,9 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
-pub use pulse::{Frame, IqBurst, Measure, Package, Packet, PacketBody, Pulse, Speech, Voice};
+pub use pulse::{
+    Frame, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse, Speech, VideoFrame, Voice,
+};
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;
 pub use units::{Hz, Sps};
