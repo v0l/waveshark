@@ -150,6 +150,15 @@ impl Modulation {
     pub fn has_front_end(&self) -> bool {
         matches!(self, Modulation::Ook | Modulation::Ask | Modulation::Fsk2 | Modulation::Fsk4)
     }
+
+    /// Whether the verdict says anything about the signal. Noise-like is
+    /// the classifier reporting that it found power and no structure in
+    /// it, which names nothing and cannot be gone looking for: a list of
+    /// those is a list of squelch gates opening, and it buries the bursts
+    /// that were worth a row.
+    pub fn is_named(&self) -> bool {
+        !matches!(self, Modulation::NoiseLike | Modulation::Unknown)
+    }
 }
 
 /// Everything measured from the burst, kept whatever the verdict.
