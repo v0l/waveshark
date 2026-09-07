@@ -28,7 +28,6 @@ pub mod frame_meter;
 pub mod sink_nodes;
 pub mod source_nodes;
 #[cfg(feature = "stt")]
-pub mod stt_nodes;
 pub mod survey_nodes;
 pub mod voice_nodes;
 pub mod wfm;
@@ -67,7 +66,6 @@ pub use mod_nodes::{
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 #[cfg(feature = "stt")]
-pub use stt_nodes::TranscribeNode;
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use scope_nodes::{ScopeFrame, ScopeNode};
@@ -487,32 +485,6 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(PacketDecodeNode::default()) as Box<dyn Node>),
-    );
-
-    #[cfg(feature = "stt")]
-    r.register(
-        StageDesc {
-            name: "transcribe",
-            summary: "Read what was said in every call on the bus, with a local \
-                      Whisper model",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut n = TranscribeNode::new(s.str_or("dir", ""))
-                .model(s.str_or("model", stt::DEFAULT_REPO));
-            let lang = s.str_or("language", "en");
-            n = n.language((!lang.is_empty()).then_some(lang));
-            n.set_param("enabled", pipeline::ParamValue::Bool(s.bool_or("enabled", true)))?;
-            n.set_param(
-                "min_speech_s",
-                pipeline::ParamValue::Float(s.f64_or("min_speech_s", 0.4)),
-            )?;
-            n.set_param(
-                "max_wait_s",
-                pipeline::ParamValue::Float(s.f64_or("max_wait_s", 20.0)),
-            )?;
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
     );
 
     r.register(

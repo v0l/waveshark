@@ -1105,6 +1105,14 @@ impl App {
         // subscriptions used to be made where the call list is drawn, so a
         // receiver sitting on the spectrum heard nothing however much it
         // decoded, and the fault looked like a broken vocoder.
+        // What the transcriber heard, matched to the calls by key. A call
+        // that produced no speech the model would read keeps whatever text
+        // its own decoder gave it.
+        #[cfg(feature = "stt")]
+        if let Some(r) = &self.radio {
+            let said = r.status.said.lock().clone();
+            self.calls.list.read_transcripts(&said);
+        }
         let heard: Vec<crate::calls::Call> =
             self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
         let mut cmds = std::mem::take(&mut self.cmds);

@@ -137,6 +137,28 @@ impl Calls {
         v
     }
 
+    /// Give every call the text the transcriber has for it.
+    ///
+    /// The transcriber writes down conversations, keyed by who was talking on
+    /// what, and the call list keeps calls. They meet on the key rather than
+    /// on a wire between them: neither has to know the other exists, and a
+    /// view that wants the whole conversation asks the log for the key.
+    #[cfg(feature = "stt")]
+    pub fn read_transcripts(&mut self, said: &[crate::transcripts::Utterance]) {
+        for c in &mut self.seen {
+            let key = crate::transcripts::Speaker {
+                proto: c.system.clone(),
+                freq_hz: c.channel_hz.max(0.0) as u64,
+                channel: (!c.to.is_empty()).then(|| c.to.clone()),
+                speaker: c.from.clone(),
+            }
+            .key();
+            if let Some(u) = said.iter().rev().find(|u| u.key == key) {
+                c.transcript = Some(u.text.clone());
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
