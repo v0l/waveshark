@@ -977,6 +977,15 @@ impl Protocol for Lora {
     fn widths_for(&self, source_width_hz: f64) -> Vec<f64> {
         bandwidths_for(source_width_hz)
     }
+    /// Two channels an octave apart share a sweep rate two spreading
+    /// factors apart, so a 250 kHz packet also reads, as something, through
+    /// a 125 kHz demodulator seeing half of it. The narrower one cannot
+    /// read a chirp of the wider, so when both read the wider is the
+    /// channel.
+    fn resolve_widths(&self, heard: &mut Vec<f64>) {
+        let widest = heard.iter().copied().fold(0.0, f64::max);
+        heard.retain(|w| *w >= widest);
+    }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("lora").f("bandwidth_hz", at.width_hz)]
     }
