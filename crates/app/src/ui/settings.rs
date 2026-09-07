@@ -647,6 +647,78 @@ impl App {
         ui.separator();
         ui.add_space(6.0);
         Self::data_settings(ui);
+
+        ui.separator();
+        ui.add_space(6.0);
+        Self::version_settings(ui);
+    }
+
+    /// What this build is, and what the newest published release is.
+    ///
+    /// Nothing is downloaded here. The answer an operator wants is whether
+    /// the binary they are running is the current one, and where to get the
+    /// one that is; the archive's name is shown because a release carries one
+    /// per platform and picking the wrong one is the usual mistake.
+    fn version_settings(ui: &mut egui::Ui) {
+        let t = crate::i18n::t;
+        legend_help(ui, t("settings.version"), t("settings.version.help"));
+        ui.add_space(4.0);
+
+        let state = crate::update::state();
+        let busy = matches!(state, crate::update::State::Checking);
+        ui.horizontal(|ui| {
+            theme::Line::new()
+                .legend("running")
+                .value(crate::update::running())
+                .size(13.0)
+                .gap(18.0)
+                .legend("build")
+                .value(crate::update::platform())
+                .size(13.0)
+                .show(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if busy { "CHECKING" } else { t("ui.check") };
+                if ui.add_enabled(!busy, egui::Button::new(legend(label))).clicked() {
+                    crate::update::check_now();
+                }
+            });
+        });
+
+        match &state {
+            crate::update::State::Unchecked => hint(ui, "Not checked yet."),
+            crate::update::State::Checking => {
+                hint(ui, "Asking GitHub for the latest release.");
+            }
+            crate::update::State::Current(r) => {
+                hint(ui, &format!("Up to date. Latest release is {}.", r.version));
+            }
+            crate::update::State::Newer(r) => {
+                theme::Line::new()
+                    .legend("available")
+                    .value(&r.version)
+                    .tint(theme::OK)
+                    .size(13.0)
+                    .show(ui);
+                match &r.asset {
+                    Some(a) => hint(
+                        ui,
+                        &format!("{} ({})", a.name, crate::data::fmt_bytes(a.bytes)),
+                    ),
+                    None => hint(ui, &format!("No {} archive in that release.", crate::update::platform())),
+                }
+                if !r.page.is_empty() && ui.button(legend("OPEN THE RELEASE")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(r.page.clone()));
+                }
+            }
+            crate::update::State::Failed(e) => {
+                ui.label(egui::RichText::new(e).small().color(theme::FAULT));
+            }
+        }
+        // The check runs on a thread of its own, so without this the answer
+        // sits unshown until the pointer moves.
+        if busy {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        }
     }
 
     /// Where the position comes from, and what the survey does with it.

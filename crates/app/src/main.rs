@@ -34,6 +34,7 @@ mod session;
 mod station;
 mod shutdown;
 mod ui;
+mod update;
 mod waterfall;
 
 /// `--probe <mhz>` runs the radio thread without a window and reports what the
@@ -986,6 +987,9 @@ fn main() -> eframe::Result<()> {
     // Started before the window: on a warm cache the airports are parsed
     // before the first frame that could draw them.
     data::start();
+    // One request, so it is asked for before the window and answered while
+    // the first frames draw.
+    update::check();
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
