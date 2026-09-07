@@ -115,6 +115,106 @@ impl Standard {
     }
 }
 
+/// Whether a demodulated baseband is analogue video, and which standard.
+///
+/// The positive test, rather than "try to decode it and see". A camera keys a
+/// sync pulse of about 4.7 us at the start of every line, so the gaps between
+/// those pulses cluster hard at the line period: 64 us for PAL, 63.55 for
+/// NTSC, the two 0.7% apart, which no transmitter's timebase error reaches.
+/// Noise and every other modulation here give gaps scattered across the
+/// range instead.
+///
+/// So the measurement is the median gap, and the evidence is how many of the
+/// gaps agree with it. `agreement` is that fraction, and it separates the two
+/// cases a median alone cannot: a real camera puts nearly every gap within a
+/// percent of the median, while a burst that happens to have two pulses the
+/// right distance apart puts almost none there.
+///
+/// The samples must be filtered first, exactly as [`SyncSeparator`] filters:
+/// a discriminator on a 20 MHz span carries all of that bandwidth's noise and
+/// a single sample above the threshold ends a run that has to last 4.7 us.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lock {
+    pub standard: Standard,
+    /// Sync pulses found.
+    pub pulses: usize,
+    /// Fraction of the gaps between them within one percent of the median.
+    pub agreement: f32,
+}
+
+/// Look for a line rate in demodulated baseband.
+///
+/// `None` when there is no pulse train at either standard's rate, which is
+/// what everything that is not video looks like.
+pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
+    // Two fields is enough to see six hundred lines, and more is only more
+    // cost on a source that is not video.
+    let take = ((0.04 * rate) as usize).min(baseband.len());
+    let base = &baseband[..take];
+    let taps = ((0.25e-6 * rate) as usize).max(1);
+    if base.len() < taps * 4 {
+        return None;
+    }
+
+    let mut sorted: Vec<f32> = base.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let (tip, black) = (sorted[sorted.len() / 50], sorted[sorted.len() * 13 / 100]);
+    // A signal with no sync in it has no gap between those percentiles worth
+    // slicing between, and slicing anyway finds runs in the noise.
+    if black <= tip {
+        return None;
+    }
+    let thresh = (tip + black) / 2.0;
+
+    let (mut edges, mut low) = (Vec::new(), 0usize);
+    let (lo, hi) = ((2e-6 * rate) as usize, (8e-6 * rate) as usize);
+    // A running mean over the same quarter microsecond the separator uses,
+    // carried rather than resummed: this runs over every sample of a wide
+    // source.
+    let mut sum: f32 = base[..taps].iter().sum();
+    for i in 0..base.len() - taps {
+        let mean = sum / taps as f32;
+        sum += base[i + taps] - base[i];
+        if mean < thresh {
+            low += 1;
+        } else {
+            if (lo..=hi).contains(&low) {
+                edges.push(i);
+            }
+            low = 0;
+        }
+    }
+    // Six hundred lines are on offer in two fields. A hundred is a signal
+    // that has been keying steadily for six milliseconds and is still a long
+    // way short of a camera.
+    if edges.len() < 100 {
+        return None;
+    }
+
+    let mut gaps: Vec<f64> = edges
+        .windows(2)
+        .map(|w| (w[1] - w[0]) as f64 / rate)
+        .collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = gaps[gaps.len() / 2];
+    let standard = Standard::from_line_period(median)?;
+    let agree = gaps
+        .iter()
+        .filter(|g| (*g / median - 1.0).abs() < 0.01)
+        .count();
+    let agreement = agree as f32 / gaps.len() as f32;
+    // Measured, not guessed. The off-air capture in `testdata` scores 0.67,
+    // a synthesised camera 0.99, and the three wide captures that are not
+    // cameras (WiFi, BLE, impulsive noise) never get this far: they fail on
+    // the pulse count or on the median landing at no line period at all. Half
+    // is between the two with room for a worse signal than the one recorded.
+    (agreement > 0.5).then_some(Lock {
+        standard,
+        pulses: edges.len(),
+        agreement,
+    })
+}
+
 /// One field, as luma samples.
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -786,6 +886,48 @@ mod tests {
             b > r + 40 && b > g + 40,
             "a blue vector should read blue, got r{r} g{g} b{b}"
         );
+    }
+
+    /// The positive test: a camera's sync pulses agree with each other, and
+    /// nothing else does. This is what keeps a video front end off the wide
+    /// sources that are not cameras, rather than letting it demodulate every
+    /// block of one forever.
+    #[test]
+    fn a_camera_is_told_from_everything_else_by_its_line_rate() {
+        let rate = 16e6;
+        let lock = find_lines(&synth(Standard::Pal, rate, 3, true), rate).expect("a camera");
+        assert_eq!(lock.standard, Standard::Pal);
+        assert!(lock.agreement > 0.9, "agreement {}", lock.agreement);
+        assert!(lock.pulses > 500, "{} pulses", lock.pulses);
+
+        let ntsc = find_lines(&synth(Standard::Ntsc, rate, 3, true), rate).expect("a camera");
+        assert_eq!(ntsc.standard, Standard::Ntsc);
+    }
+
+    #[test]
+    fn noise_is_not_a_camera() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<f32> = (0..2_000_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 40) as f32 / 8_388_608.0 - 1.0
+            })
+            .collect();
+        assert_eq!(find_lines(&noise, 16e6), None);
+
+        // Nor is a keyed carrier: a burst train at some other rate has gaps
+        // that do not land on a line period, which is the case a median alone
+        // would fall for.
+        let rate = 16e6;
+        let mut keyed = Vec::new();
+        for i in 0..2000 {
+            let on = ((i as f64 * 0.0007 * rate) as usize % 90) + 40;
+            keyed.extend(std::iter::repeat_n(-0.3f32, on));
+            keyed.extend(std::iter::repeat_n(0.2f32, 700));
+        }
+        assert_eq!(find_lines(&keyed, rate), None);
     }
 
     #[test]

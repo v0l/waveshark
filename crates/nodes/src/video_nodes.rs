@@ -13,7 +13,7 @@
 //! the channel they came from.
 
 use common::{Pixels, Result, VideoFrame};
-use dsp::video::{Standard, SyncSeparator};
+use dsp::video::{find_lines, Lock, Standard, SyncSeparator};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -39,6 +39,18 @@ pub struct VideoNode {
     base: Vec<f32>,
     /// Samples kept while the standard is still being measured.
     priming: Vec<f32>,
+    /// Samples to skip before looking again, after a look that found no line
+    /// rate.
+    ///
+    /// A source can be megahertz wide and not be video, and the receiver
+    /// places this front end on width alone, so most of what reaches here on
+    /// a busy band is not a camera. Measuring 40 ms and then waiting a second
+    /// costs a twenty-fifth of the demodulation while still finding a picture
+    /// within a second of it starting.
+    backoff: usize,
+    /// What the last successful look found, for a caller that wants to know
+    /// why there is a picture or why there is not.
+    lock: Option<Lock>,
     sequence: u64,
     fields: u64,
 }
@@ -60,6 +72,8 @@ impl VideoNode {
             center_hz: 0.0,
             base: Vec::new(),
             priming: Vec::new(),
+            backoff: 0,
+            lock: None,
             sequence: 0,
             fields: 0,
         }
@@ -75,39 +89,13 @@ impl VideoNode {
         self.sep.as_ref().map(|s| s.standard())
     }
 
-    /// Measure the line period and name the standard.
-    ///
-    /// PAL and NTSC are 0.7% apart, which no transmitter's timebase error
-    /// reaches, so this settles it. The sync pulses have to be found on a
-    /// filtered copy for the same reason the separator filters: a 20 MHz
-    /// baseband's noise breaks every run otherwise.
-    fn measure(&self, base: &[f32]) -> Option<Standard> {
-        let mut sorted: Vec<f32> = base.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let thresh = (sorted[sorted.len() / 50] + sorted[sorted.len() * 13 / 100]) / 2.0;
-        let taps = ((0.25e-6 * self.rate) as usize).max(1);
-        let (mut edges, mut low) = (Vec::new(), 0usize);
-        for (i, w) in base.windows(taps).enumerate() {
-            let mean = w.iter().sum::<f32>() / taps as f32;
-            if mean < thresh {
-                low += 1;
-            } else {
-                if ((2e-6 * self.rate) as usize..=(8e-6 * self.rate) as usize).contains(&low) {
-                    edges.push(i);
-                }
-                low = 0;
-            }
-        }
-        if edges.len() < 100 {
-            return None;
-        }
-        let mut gaps: Vec<f64> = edges
-            .windows(2)
-            .map(|w| (w[1] - w[0]) as f64 / self.rate)
-            .collect();
-        gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Standard::from_line_period(gaps[gaps.len() / 2])
+    /// What the line-rate test found, if anything: how many sync pulses and
+    /// how well they agreed. Empty on a source that is not video, which is
+    /// most of the wide ones.
+    pub fn lock(&self) -> Option<Lock> {
+        self.lock
     }
+
 }
 
 impl Simple for VideoNode {
@@ -151,20 +139,28 @@ impl Simple for VideoNode {
         self.demod.process(iq, &mut self.base);
 
         if self.sep.is_none() {
-            // Two fields' worth before deciding, so the measurement has
-            // hundreds of lines behind it rather than a handful.
+            if self.backoff > 0 {
+                self.backoff = self.backoff.saturating_sub(self.base.len());
+                return Ok(());
+            }
+            // Two fields' worth before deciding, so the test has hundreds of
+            // lines to judge rather than a handful.
             self.priming.extend_from_slice(&self.base);
             if self.priming.len() as f64 <= 0.04 * self.rate {
                 return Ok(());
             }
             let priming = std::mem::take(&mut self.priming);
-            let Some(std) = self.measure(&priming) else {
-                // Not video, or not yet. Drop what was kept rather than
-                // growing without bound on a channel that never locks.
+            let Some(lock) = find_lines(&priming, self.rate) else {
+                // Not a camera. Wait before looking again rather than
+                // demodulating every block of a wide source that will never
+                // be one.
+                self.lock = None;
+                self.backoff = self.rate as usize;
                 return Ok(());
             };
-            let s = SyncSeparator::new(self.rate, std, WIDTH);
+            let s = SyncSeparator::new(self.rate, lock.standard, WIDTH);
             self.sep = Some(if self.colour { s.with_colour() } else { s });
+            self.lock = Some(lock);
             // The samples that decided it are still video, so they are read
             // rather than thrown away.
             self.base.splice(0..0, priming);
@@ -202,6 +198,8 @@ impl Simple for VideoNode {
     fn reset(&mut self) {
         self.demod.reset();
         self.priming.clear();
+        self.backoff = 0;
+        self.lock = None;
         if let Some(s) = self.sep.as_mut() {
             s.reset();
         }

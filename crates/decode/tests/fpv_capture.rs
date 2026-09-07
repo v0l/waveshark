@@ -35,43 +35,29 @@ fn baseband() -> Option<Vec<f32>> {
     Some(out)
 }
 
-/// The line period says which standard the camera is, and it is measured
-/// rather than configured: PAL and NTSC are 0.7% apart, which no
-/// transmitter's timebase error reaches.
+/// The line rate says this is a camera, and which standard it is. Both are
+/// measured rather than configured: PAL and NTSC are 0.7% apart, which no
+/// transmitter's timebase error reaches, and what separates a camera from a
+/// wide burst that is not one is how well its sync pulses agree with each
+/// other.
 #[test]
-fn the_transmission_says_which_standard_it_is() {
+fn the_transmission_is_recognisable_as_video() {
     let Some(base) = baseband() else { return };
-    let mut sorted: Vec<f32> = base.iter().take(1 << 20).copied().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let thresh = (sorted[sorted.len() / 50] + sorted[sorted.len() * 13 / 100]) / 2.0;
-    let mut edges = Vec::new();
-    let mut low = 0usize;
-    // The same quarter-microsecond mean the separator uses: without it the
-    // noise on a 20 MHz baseband breaks every run.
-    let taps = (0.25e-6 * RATE) as usize;
-    for (i, w) in base.windows(taps).enumerate() {
-        let window = w.iter().sum::<f32>() / taps as f32;
-        if window < thresh {
-            low += 1;
-        } else {
-            if ((2e-6 * RATE) as usize..=(8e-6 * RATE) as usize).contains(&low) {
-                edges.push(i);
-            }
-            low = 0;
-        }
-    }
-    assert!(edges.len() > 500, "only {} sync edges found", edges.len());
-    let mut gaps: Vec<f64> = edges
-        .windows(2)
-        .map(|w| (w[1] - w[0]) as f64 / RATE)
-        .collect();
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = gaps[gaps.len() / 2];
-    assert_eq!(
-        Standard::from_line_period(median),
-        Some(Standard::Pal),
-        "median line period {:.3} us",
-        median * 1e6
+    let lock = dsp::video::find_lines(&base, RATE).expect("a camera");
+    assert_eq!(lock.standard, dsp::video::Standard::Pal);
+    // Two fields hold 625 lines and off air 410 of them clear the slicer,
+    // which is what a real picture with a noisy baseband looks like: the
+    // separator recovers most of the rest by then knowing where to look.
+    assert!(lock.pulses > 300, "{} sync pulses", lock.pulses);
+    // 0.67 off air against 0.99 on a synthesised camera: the difference is
+    // noise breaking runs and the odd line lost to the vertical interval.
+    // What matters is the gap to everything that is not a camera, and the
+    // WiFi, BLE and impulsive-noise captures in `testdata/offair` do not
+    // reach this test at all.
+    assert!(
+        lock.agreement > 0.5,
+        "only {:.2} of the gaps agree with the line period",
+        lock.agreement
     );
 }
 
