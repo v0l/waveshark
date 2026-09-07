@@ -3358,6 +3358,14 @@ pub(crate) mod tests {
         let fed = bus.bus().channels().iter().filter(|c| c.is_fed()).count();
         let picture = bus.bus().thumbnails().next().is_some();
         assert!(picture, "no picture on the video bus; {fed} channels fed");
+        // And once it has a picture the camera owns the span: it asked for
+        // the band, and the auto node closed the detector out of it.
+        let owned = rx
+            .live_sources()
+            .into_iter()
+            .find(|s| s.locked_to == Some("video"))
+            .expect("the camera never claimed its band");
+        assert!(owned.bandwidth_hz >= 19e6, "{owned:?}");
     }
 
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
