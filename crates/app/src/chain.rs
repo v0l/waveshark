@@ -2491,11 +2491,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             let mut s = Settings::new();
             let dir = default_model_dir();
             s.insert("dir".into(), pipeline::ParamValue::Text(dir.display().to_string()));
-            // In the graph whether or not a model is installed, and switched
-            // off when there is none, for the reason the raw capture is: a
-            // stage that appears when it is first wanted rebuilds the graph
-            // and loses whatever the auto node had open.
-            s.insert("enabled".into(), pipeline::ParamValue::Bool(dir.join("config.json").exists()));
+            // On whether or not a model is installed: the worker fetches one
+            // the first time a call is worth reading, so the alternative is a
+            // receiver that stays silent about speech until somebody knows to
+            // go and find the weights.
+            s.insert("enabled".into(), pipeline::ParamValue::Bool(true));
             let t = p.add_derived(derived::TRANSCRIBE, "transcribe", s);
             p.connect(Source::Stage(decode, 0), (t, 0));
             decode = t;

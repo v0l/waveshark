@@ -2,7 +2,7 @@
 //! receiver depends on it.
 //!
 //! ```sh
-//! cargo run --release -p stt --features hub --example transcribe -- jfk.wav
+//! cargo run --release -p stt --example transcribe -- jfk.wav
 //! ```
 
 use std::path::PathBuf;
@@ -16,21 +16,12 @@ fn main() -> common::Result<()> {
     let dir: PathBuf = args
         .next()
         .map(PathBuf::from)
-        .unwrap_or_else(|| stt::default_dir().join("whisper-tiny.en"));
+        .unwrap_or_else(|| stt::default_dir().join("whisper"));
 
-    let files = match stt::Files::in_dir(&dir) {
-        Ok(f) => f,
-        #[cfg(feature = "hub")]
-        Err(_) => {
-            eprintln!("fetching openai/whisper-tiny.en into {}", dir.display());
-            stt::fetch("openai/whisper-tiny.en", "refs/pr/15", &dir)?
-        }
-        #[cfg(not(feature = "hub"))]
-        Err(e) => return Err(e),
-    };
+    let files = stt::ensure(stt::DEFAULT_REPO, &dir)?;
 
     let (pcm, rate) = read_wav(&wav)?;
-    let mut w = stt::Whisper::load(&files, candle_core::Device::Cpu, None)?;
+    let mut w = stt::Whisper::load(&files, stt::best_device(), None)?;
     let t0 = std::time::Instant::now();
     let out = w.transcribe(&pcm, rate)?;
     let secs = pcm.len() as f64 / rate;

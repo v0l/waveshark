@@ -498,7 +498,8 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            let mut n = TranscribeNode::new(s.str_or("dir", ""));
+            let mut n = TranscribeNode::new(s.str_or("dir", ""))
+                .model(s.str_or("model", stt::DEFAULT_REPO));
             let lang = s.str_or("language", "en");
             n = n.language((!lang.is_empty()).then_some(lang));
             n.set_param("enabled", pipeline::ParamValue::Bool(s.bool_or("enabled", true)))?;

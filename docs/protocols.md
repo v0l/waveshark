@@ -324,11 +324,16 @@ in the IF: a level read off a demodulator's output is a level of the
 demodulator.
 
 What was said is read by `crates/stt`, a local Whisper model through candle,
-as `nodes::TranscribeNode` on the far side of the protocol decoder. It is on
-by default and needs a model directory
-(`~/.local/share/waveshark/models/whisper*`); without one the stage is in the
-graph and switched off, and `--no-default-features` leaves candle out of the
-build entirely. Any front end that carries speech is transcribed, not
+as `nodes::TranscribeNode` on the far side of the protocol decoder. It is on by default and fetches its
+own weights: the worker thread downloads `openai/whisper-base.en`, 74 MB, into
+`~/.local/share/waveshark/models/whisper` the first time a call is long enough
+to be worth reading, so a receiver that hears no speech never reaches the
+network and one that does waits once. Another model is a `model` setting on
+the stage, or a directory placed there by hand. `--no-default-features` leaves
+candle out of the build entirely. The model runs on whatever candle was built
+for: CUDA under `--features cuda`, Metal on a Mac, the CPU otherwise, and a
+GPU that opens but cannot launch a kernel falls back rather than failing every
+call. Any front end that carries speech is transcribed, not
 just analogue channels, so an M17 or DMR call gets the same treatment. The
 text arrives as a `transcript` field on the decode, with the model's own mean
 log probability beside it, and a call whose text the model does not believe
