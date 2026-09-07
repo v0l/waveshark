@@ -378,6 +378,9 @@ pub struct SurveyState {
     /// Sightings of the selected device, fetched when the selection changes
     /// rather than every frame: a device heard all afternoon has thousands.
     pub trail: Vec<survey::Sighting>,
+    /// Where those sightings put the device, when they can say: refitted
+    /// whenever the trail is.
+    pub estimate: Option<survey::Estimate>,
     /// Free text the list is filtered by: an address, a name, a protocol.
     pub filter: String,
     /// A read-only handle on the same file the radio thread is writing, which
@@ -402,6 +405,7 @@ impl Default for SurveyState {
             selected: None,
             rows: Vec::new(),
             trail: Vec::new(),
+            estimate: None,
             filter: String::new(),
             db: None,
             refreshed: None,

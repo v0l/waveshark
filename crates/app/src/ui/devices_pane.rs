@@ -57,6 +57,23 @@ impl Devices<'_> {
                 (false, None) => ("gps", "nothing answering".into()),
             };
             theme::Line::new().legend(legend).value(value).size(11.0).show(ui);
+            // Where the selected device's sightings put it. A conclusion
+            // drawn from the levels along the drive, with how far it might
+            // be out, which is what makes it worth saying at all.
+            if self.st.selected.is_some() {
+                ui.add_space(12.0);
+                let (legend, value) = match &self.st.estimate {
+                    Some(e) => (
+                        "likely at",
+                        format!(
+                            "{:.5}, {:.5} within {:.0} m, from {} sightings",
+                            e.lat, e.lon, e.radius_m, e.sightings
+                        ),
+                    ),
+                    None => ("likely at", "not enough places heard from yet".into()),
+                };
+                theme::Line::new().legend(legend).value(value).size(11.0).show(ui);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);

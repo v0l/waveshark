@@ -23,9 +23,9 @@
 //! A sighting is one reception: when, from where, at what level, on what
 //! frequency. It says the receiver was at that position and heard that
 //! device, which is all a moving receiver can honestly claim. It is not the
-//! device's position. Inferring one from several sightings is a real thing to
-//! want and is not done here: what is stored is the measurement, and any
-//! trilateration is a view's conclusion drawn from it later.
+//! device's position. What is stored is the measurement; where the device
+//! is, inferred from several of them, is [`locate`]'s conclusion drawn
+//! later, and it says how sure it is.
 //!
 //! Sightings are thinned rather than kept in full. A beacon advertising ten
 //! times a second for an hour is thirty-six thousand rows that all say the
@@ -48,7 +48,9 @@ use common::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
+mod locate;
 mod wigle;
+pub use locate::{locate, Estimate};
 pub use wigle::write_wigle;
 
 /// Schema version, written into the file. A file from a newer version is

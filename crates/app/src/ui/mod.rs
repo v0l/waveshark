@@ -1234,7 +1234,11 @@ impl App {
             .selected
             .and_then(|id| self.survey.rows.iter().find(|d| d.id == id))
             .map(|d| d.ident.clone());
-        let trail = map_pane::Trail { points: &self.survey.trail, ident: ident.as_deref() };
+        let trail = map_pane::Trail {
+            points: &self.survey.trail,
+            ident: ident.as_deref(),
+            estimate: self.survey.estimate,
+        };
         let place = map_pane::Map {
             st: &mut self.map,
             home: self.location,
@@ -1375,6 +1379,7 @@ impl App {
                     (Some(id), Some(db)) => db.sightings(id).unwrap_or_default(),
                     _ => Vec::new(),
                 };
+                self.survey.estimate = survey::locate(&self.survey.trail);
             }
             Some(devices_pane::Action::Export) => self.export_survey(),
             None => {}
@@ -1433,6 +1438,7 @@ impl App {
             }
             if let Some(id) = self.survey.selected {
                 self.survey.trail = db.sightings(id).unwrap_or_default();
+                self.survey.estimate = survey::locate(&self.survey.trail);
             }
         }
         self.survey.refreshed = Some(std::time::Instant::now());

@@ -318,8 +318,20 @@ itself.
 **A sighting is where the receiver was, not where the device is.** It carries
 the time, the position from the GPS, the level and the frequency. A survey
 driving past a beacon is a line of positions along a road with a level at
-each; the strongest of them is the closest approach, and that is the most this
-claims. Nothing trilaterates, and the map draws the trail rather than a pin.
+each; the strongest of them is the closest approach, and that is what the
+store claims. The map draws the trail, and beside it what the trail can
+say: `survey::locate` fits the log-distance model, `rssi = P0 - 10 n
+log10(d)`, for the transmitter's position with its own strength solved out
+and the exponent fixed at 2.5, by a grid search over the drive's reach.
+What it draws is the point and the region the levels fit about as well
+(a chi-square test on the rise in squared residual, at the 95th
+percentile), because levels carry no bearing: a drive along one road
+cannot tell which side of it the transmitter is on, the region reaches
+across the road to say so, and only a drive that turns a corner closes
+it. It wants at least four positioned sightings spread over a hundred
+metres, and says nothing from fewer. On a synthesised drive round a block
+with 3 dB of fading it lands within 40 m; on a straight one it lands
+abeam and reports a radius that reaches the mirror image.
 
 **Sightings are thinned, devices are not.** A beacon advertising ten times a
 second for an hour is thirty-six thousand rows that all say the same thing, so
