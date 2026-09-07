@@ -318,7 +318,10 @@ An analogue channel says nothing about itself, so the strip has a `voice`
 switch per channel and that is what turns one into a front end. Switched on,
 `nodes::VoiceChannelNode` ends an over where the squelch does, puts the whole
 transmission on the packet bus with its audio, and the call appears in the
-call list beside the digital ones. It takes two wires, the channel's IF and
+call list beside the digital ones. It is on by default for the modes people
+talk on, NFM, AM and SSB, and off for broadcast FM, which would otherwise
+transcribe a music station for as long as the receiver runs; the switch is on
+the strip, for a channel that turns out to be data. It takes two wires, the channel's IF and
 its audio, because what was said is in the audio and how strong it was is only
 in the IF: a level read off a demodulator's output is a level of the
 demodulator.
