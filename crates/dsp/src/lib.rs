@@ -33,6 +33,7 @@ pub mod route;
 pub mod source;
 pub mod spectrum;
 pub mod squelch;
+pub mod video;
 pub mod ssb;
 pub mod stereo;
 pub mod tetra;
