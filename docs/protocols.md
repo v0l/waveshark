@@ -324,10 +324,11 @@ in the IF: a level read off a demodulator's output is a level of the
 demodulator.
 
 What was said is read by `crates/stt`, a local Whisper model through candle,
-as `nodes::TranscribeNode` on the far side of the protocol decoder. It is
-behind the `stt` feature and needs a model directory
+as `nodes::TranscribeNode` on the far side of the protocol decoder. It is on
+by default and needs a model directory
 (`~/.local/share/waveshark/models/whisper*`); without one the stage is in the
-graph and switched off. Any front end that carries speech is transcribed, not
+graph and switched off, and `--no-default-features` leaves candle out of the
+build entirely. Any front end that carries speech is transcribed, not
 just analogue channels, so an M17 or DMR call gets the same treatment. The
 text arrives as a `transcript` field on the decode, with the model's own mean
 log probability beside it, and a call whose text the model does not believe

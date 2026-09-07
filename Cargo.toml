@@ -26,9 +26,9 @@ members = [
 # The MBE vocoder port is opt-in only: its algorithms carry patent
 # restrictions, so nothing builds or links it by default.
 # `cargo test -p mbe` builds and tests it explicitly.
-# `stt` is out for a different reason: candle and the tokenizers pull in a
-# large dependency tree that a receiver build has no use for.
-# `cargo test -p stt`, or the app's `stt` feature, builds it.
+# `stt` builds by default with the app, which turns its feature on: a receiver
+# that cannot say what was said on a voice channel is missing the point of
+# one. `cargo build -p app --no-default-features` leaves candle out.
 default-members = [
     "crates/common",
     "crates/dsp",
@@ -48,6 +48,7 @@ default-members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/stt",
 ]
 
 [workspace.package]
