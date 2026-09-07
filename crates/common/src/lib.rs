@@ -4,6 +4,7 @@
 //! Rust sysroot crate. Nothing in here does DSP or I/O: it defines sample
 //! buffers, the device abstraction, tuning units, and errors.
 
+pub mod decode;
 pub mod device;
 pub mod error;
 pub mod iq;
@@ -18,6 +19,7 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
+pub use decode::{media, Decoded, Link, Party, PartyKind};
 pub use pulse::{Frame, IqBurst, Measure, Package, Packet, PacketBody, Pulse, Speech, Voice};
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;

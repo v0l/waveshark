@@ -33,6 +33,10 @@ pub struct PacketDecodeNode {
     /// What decoded in the last block, for a host that wants this node's
     /// output rather than every event the graph produced.
     hits: Vec<Decoded>,
+    /// Where each packet's decodes sit in `hits`, one span per packet of the
+    /// last batch, so the conclusions can be handed back to the packets they
+    /// came from.
+    spans: Vec<(usize, usize)>,
 }
 
 impl Default for PacketDecodeNode {
@@ -43,7 +47,13 @@ impl Default for PacketDecodeNode {
 
 impl PacketDecodeNode {
     pub fn new(protocols: Protocols) -> Self {
-        Self { protocols, report_all: true, report_unknown: true, hits: Vec::new() }
+        Self {
+            protocols,
+            report_all: true,
+            report_unknown: true,
+            hits: Vec::new(),
+            spans: Vec::new(),
+        }
     }
 
     /// Decode a batch of packets exactly as the bus does.
@@ -55,7 +65,9 @@ impl PacketDecodeNode {
     /// fixed.
     pub fn decode_all(&mut self, packets: &[Packet]) {
         self.hits.clear();
+        self.spans.clear();
         for p in packets {
+            let from = self.hits.len();
             match &p.body {
                 PacketBody::Pulses(pkg) => {
                     // Which keying a burst arrived under is not something the
@@ -77,7 +89,15 @@ impl PacketDecodeNode {
                 }
                 PacketBody::Frame(f) => self.decode_frame(p, &f.bytes),
             }
+            // Where this packet's decodes are in `hits`, so they can be put
+            // back on the packet they came from without matching on anything.
+            self.spans.push((from, self.hits.len()));
         }
+    }
+
+    /// What each packet of the last batch decoded to, in the same order.
+    pub fn per_packet(&self) -> impl Iterator<Item = &[Decoded]> {
+        self.spans.iter().map(|(a, b)| &self.hits[*a..*b])
     }
 
     pub fn hits(&self) -> &[Decoded] {
@@ -329,12 +349,20 @@ impl Simple for PacketDecodeNode {
         Ok(i.spec)
     }
 
-    fn process(&mut self, i: &Payload, _o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let packets: Vec<Packet> = i.as_packets().unwrap_or(&[]).to_vec();
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+        // Annotated and passed on, rather than consumed: everything that
+        // wants to know what a packet was reads it from the packet, and this
+        // is the one stage that decides. A view wired here sees the same
+        // conclusions the log's replay would reach.
+        let mut packets: Vec<Packet> = i.as_packets().unwrap_or(&[]).to_vec();
         self.decode_all(&packets);
+        for (p, hits) in packets.iter_mut().zip(self.per_packet()) {
+            p.decodes = hits.to_vec();
+        }
         for d in &self.hits {
             c.emit(Event::Decoded(d.clone()));
         }
+        o.packets_mut().extend(packets);
         Ok(())
     }
     fn params(&self) -> Vec<Param> {

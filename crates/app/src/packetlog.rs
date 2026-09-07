@@ -705,6 +705,11 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             bandwidth_hz: get32(20),
             body: packet_body,
             measure,
+            // The log keeps evidence, not conclusions: a packet read back is
+            // decoded again by whatever decoders exist now, which is the
+            // reason a protocol written in October can read a burst recorded
+            // in September.
+            decodes: Vec::new(),
             iq: take_iq(tail),
             // The log is a record of what was on the air, in timings and
             // bytes. Speech is not written to it: an hour of a busy repeater
