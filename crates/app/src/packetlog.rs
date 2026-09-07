@@ -447,6 +447,16 @@ impl nodes::PacketSink for PacketLog {
     }
 
     fn write(&mut self, p: &Packet) {
+        // The log holds evidence, and speech is not evidence of itself: an
+        // over from a voice channel is on the bus so it is heard, listed as a
+        // call and read by the transcriber, and its body is an empty frame
+        // with a megabyte of audio hanging off it. Writing that put a row
+        // with nothing in it into the log for every transmission, and
+        // replaying it produced a packet no decoder could ever say anything
+        // about.
+        if !carries_evidence(p) {
+            return;
+        }
         let rec = match &p.body {
             PacketBody::Pulses(package) => {
                 let pulses = &package.pulses;
@@ -489,6 +499,22 @@ impl nodes::PacketSink for PacketLog {
     fn flush(&mut self) {
         self.flush_due();
     }
+}
+
+/// Whether there is anything in this packet a decoder could read.
+///
+/// Timings, bytes, samples or a measurement. A packet with none of them is a
+/// record of something having happened, which the call list and the survey
+/// already keep, in a file whose whole purpose is to be decoded again later.
+fn carries_evidence(p: &Packet) -> bool {
+    let body = match &p.body {
+        PacketBody::Pulses(package) => !package.pulses.is_empty(),
+        PacketBody::Frame(frame) => !frame.bytes.is_empty(),
+    };
+    // A measurement counts. A chirp has no timings and no bytes, and what the
+    // classifier made of it is the whole record of a LoRa transmission
+    // nothing decoded.
+    body || p.measure.is_some() || p.samples().is_some_and(|q| !q.samples.is_empty())
 }
 
 /// A measurement: three length-prefixed strings, then the numbers.
@@ -1020,6 +1046,27 @@ mod tests {
         assert!(d.join("2026-08-31.000.wspkt").exists(), "today was not written");
         assert!(!log.full(), "logging stopped although there was room to make");
         assert!(log.total() < 100_000, "the folder is {} bytes", log.total());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A voice over is on the bus so it can be heard, listed and read, and
+    /// its body is empty: there is nothing in it for a decoder to find later,
+    /// which is what this file is for.
+    #[test]
+    fn speech_is_not_evidence_and_is_not_logged() {
+        let d = dir("voice");
+        let mut log = PacketLog::new(d.clone());
+        let mut over = Packet::of_frame(AT, 12_500, common::Frame::unmeasured(Vec::new()));
+        over.audio = Some(std::sync::Arc::new(common::Speech {
+            pcm: vec![0.1; 48_000],
+            rate: 48_000.0,
+        }));
+        log.write(&over);
+        log.write(&burst(868_300_000));
+        log.flush();
+        let got = read(d.join(format!("{}.000.wspkt", day_of(AT)))).expect("the log reads back");
+        assert_eq!(got.len(), 1, "the over went into the log");
+        assert!(matches!(got[0].body, PacketBody::Pulses(_)));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -210,6 +210,14 @@ a connection.
 
 ## The packet log settings
 
+What is written is evidence: timings, bytes, samples or a measurement. A
+transmission that has none of those is not written, which is how speech stays
+out: an over from a voice channel is on the bus so it can be heard, listed as
+a call and read by the transcriber, and its body is an empty frame with the
+audio hanging off it. Logging that put a row with nothing in it into the file
+for every transmission, and replaying one produced a packet no decoder could
+say anything about.
+
 On the SETTINGS button in the packet list: whether packets are written at all,
 where they go, whether unrecognised bursts are shown in the list, and how much
 the whole folder may take. The limit is a runaway guard rather than a budget:
