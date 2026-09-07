@@ -20,11 +20,15 @@ members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/stt",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
 # restrictions, so nothing builds or links it by default.
 # `cargo test -p mbe` builds and tests it explicitly.
+# `stt` is out for a different reason: candle and the tokenizers pull in a
+# large dependency tree that a receiver build has no use for.
+# `cargo test -p stt`, or the app's `stt` feature, builds it.
 default-members = [
     "crates/common",
     "crates/dsp",
@@ -56,6 +60,7 @@ license = "GPL-3.0-or-later"
 # `common` rather than `core`: a workspace crate named `core` collides with the
 # Rust sysroot crate and makes every `use core::..` path ambiguous.
 common = { path = "crates/common" }
+stt = { path = "crates/stt" }
 dsp = { path = "crates/dsp" }
 pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }

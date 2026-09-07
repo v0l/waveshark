@@ -27,6 +27,8 @@ pub mod filter_nodes;
 pub mod frame_meter;
 pub mod sink_nodes;
 pub mod source_nodes;
+#[cfg(feature = "stt")]
+pub mod stt_nodes;
 pub mod survey_nodes;
 pub mod wfm;
 pub mod lora_nodes;
@@ -62,6 +64,8 @@ pub use mod_nodes::{
 };
 pub use bank_node::BankNode;
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
+#[cfg(feature = "stt")]
+pub use stt_nodes::TranscribeNode;
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use scope_nodes::{ScopeFrame, ScopeNode};
