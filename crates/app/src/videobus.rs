@@ -49,39 +49,65 @@ pub enum Rule {
     /// Whatever is being received, wherever: the bus then shows the most
     /// complete picture it has.
     Everything,
-    /// One input of the bus, whatever it carries.
-    Input(usize),
+    /// One transmission, by the key its channel is kept under.
+    ///
+    /// Not an input of the bus: everything the auto node finds arrives on one
+    /// port, so keying on the port collapsed four cameras into one picture
+    /// that flickered between them. What tells them apart is where they were
+    /// received, which every field carries.
+    Channel(String),
 }
 
 impl Rule {
-    pub fn matches(&self, input: usize, _f: &VideoFrame) -> bool {
+    pub fn matches(&self, f: &VideoFrame) -> bool {
         match self {
             Rule::Everything => true,
-            Rule::Input(k) => *k == input,
+            Rule::Channel(k) => *k == key_of(f),
         }
     }
 }
 
-/// One input, and the last thing that arrived on it.
+/// What tells one transmission from another: the system and where it was
+/// received, to the kilohertz. Two cameras on adjacent channels of the plan
+/// are 19 MHz apart and nothing rounds them together.
+pub fn key_of(f: &VideoFrame) -> String {
+    format!("{}:{}", f.system, (f.channel_hz / 1e3).round() as i64)
+}
+
+/// One transmission the bus has seen, and the last picture from it.
 #[derive(Clone, Debug, Default)]
-pub struct Strip {
+pub struct Channel {
+    /// What it is kept under; see [`key_of`].
+    pub key: String,
+    /// What to call it: the channel of the plan where the band has one, else
+    /// the frequency.
     pub label: String,
-    /// Ignore this input entirely.
+    pub channel_hz: f64,
+    /// Ignore this one entirely.
     pub muted: bool,
     pub last: Option<VideoFrame>,
     /// Fields that have arrived on it, so a view can show a rate and tell a
     /// live channel from one that stopped.
     pub fields: u64,
+    /// Seconds since the last field, so a channel that stopped can be shown
+    /// as stopped rather than dropped from the list mid-glance.
+    pub since_s: f64,
 }
 
-impl Strip {
+impl Channel {
     pub fn is_fed(&self) -> bool {
         self.fields > 0
+    }
+
+    /// Whether it is still arriving.
+    pub fn live(&self) -> bool {
+        self.since_s <= HOLD_S
     }
 }
 
 pub struct VideoBus {
-    strips: Vec<Strip>,
+    /// One per transmission, in the order they were first heard.
+    channels: Vec<Channel>,
     rules: Vec<Rule>,
     /// The picture published this block, if any.
     out: Option<VideoFrame>,
@@ -106,8 +132,7 @@ impl Default for VideoBus {
 impl VideoBus {
     pub fn new() -> Self {
         Self {
-            // One spare, which is what a chain drawn by hand is wired into.
-            strips: vec![Strip::default()],
+            channels: Vec::new(),
             rules: vec![Rule::Everything],
             out: None,
             held: None,
@@ -115,28 +140,53 @@ impl VideoBus {
         }
     }
 
-    pub fn strips(&self) -> &[Strip] {
-        &self.strips
+    pub fn channels(&self) -> &[Channel] {
+        &self.channels
+    }
+
+    pub fn channel(&self, key: &str) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.key == key)
+    }
+
+    pub fn channel_mut(&mut self, key: &str) -> Option<&mut Channel> {
+        self.channels.iter_mut().find(|c| c.key == key)
     }
 
     pub fn set_rules(&mut self, rules: Vec<Rule>) {
         self.rules = rules;
     }
 
-    /// Take a field that arrived on one input.
-    pub fn push(&mut self, input: usize, frame: VideoFrame) {
-        if self.strips.len() <= input {
-            self.strips.resize_with(input + 2, Strip::default);
-        }
-        let muted = self.strips[input].muted;
-        let s = &mut self.strips[input];
-        s.fields += 1;
-        s.last = Some(frame);
-        if muted {
+    /// Take a field, whichever input it arrived on.
+    pub fn push(&mut self, _input: usize, frame: VideoFrame) {
+        let key = key_of(&frame);
+        let label = frame
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("{:.3} MHz", frame.channel_hz / 1e6));
+        let k = match self.channels.iter().position(|c| c.key == key) {
+            Some(k) => k,
+            None => {
+                self.channels.push(Channel {
+                    key: key.clone(),
+                    label,
+                    channel_hz: frame.channel_hz,
+                    ..Default::default()
+                });
+                while self.channels.len() > MAX_CHANNELS {
+                    self.channels.remove(0);
+                }
+                self.channels.len() - 1
+            }
+        };
+        let c = &mut self.channels[k];
+        c.fields += 1;
+        c.since_s = 0.0;
+        c.last = Some(frame.clone());
+        if c.muted {
             return;
         }
-        let Some(f) = s.last.clone() else { return };
-        if !self.rules.iter().any(|r| r.matches(input, &f)) {
+        let f = frame;
+        if !self.rules.iter().any(|r| r.matches(&f)) {
             return;
         }
         // A more complete picture wins. Two inputs matching one rule is a
@@ -176,21 +226,37 @@ impl VideoBus {
         self.out.as_ref()
     }
 
-    /// Time passing with nothing arriving.
+    /// Time passing. Every channel ages; the ones that went away stop being
+    /// live and the held picture is dropped once nothing is arriving.
     pub fn idle(&mut self, seconds: f64) {
-        self.since_s += seconds.max(0.0);
+        let dt = seconds.max(0.0);
+        self.since_s += dt;
+        for c in &mut self.channels {
+            c.since_s += dt;
+        }
     }
 
-    /// The last field each input received, for a view of everything at once.
-    pub fn thumbnails(&self) -> impl Iterator<Item = (usize, &VideoFrame)> {
-        self.strips
+    /// The channels with a picture in the last [`HOLD_S`], newest first.
+    pub fn live(&self) -> impl Iterator<Item = &Channel> {
+        self.channels.iter().filter(|c| c.live())
+    }
+
+    /// The last field of every channel, for a view of everything at once.
+    pub fn thumbnails(&self) -> impl Iterator<Item = (&str, &VideoFrame)> {
+        self.channels
             .iter()
-            .enumerate()
-            .filter_map(|(k, s)| s.last.as_ref().map(|f| (k, f)))
+            .filter_map(|c| c.last.as_ref().map(|f| (c.key.as_str(), f)))
     }
 
     pub fn clear(&mut self) {
         self.out = None;
+    }
+
+    /// The picture being shown, without forgetting the channels.
+    pub fn forget_watched(&mut self) {
+        self.out = None;
+        self.held = None;
+        self.since_s = f64::INFINITY;
     }
 
     /// Everything, for a receiver that has stopped or been retuned.
@@ -198,6 +264,7 @@ impl VideoBus {
         self.out = None;
         self.held = None;
         self.since_s = f64::INFINITY;
+        self.channels.clear();
     }
 }
 
@@ -206,9 +273,14 @@ impl VideoBus {
 /// mistakes a still of a departed transmitter for a live picture.
 const HOLD_S: f64 = 0.5;
 
+/// Transmissions kept. A band holds forty channels of the analogue plan and
+/// nothing tunes across more than one band at a time.
+const MAX_CHANNELS: usize = 64;
+
 /// The bus as a node.
 pub struct VideoBusNode {
     bus: VideoBus,
+    inputs: usize,
 }
 
 impl Default for VideoBusNode {
@@ -219,7 +291,7 @@ impl Default for VideoBusNode {
 
 impl VideoBusNode {
     pub fn new() -> Self {
-        Self { bus: VideoBus::new() }
+        Self { bus: VideoBus::new(), inputs: 1 }
     }
 
     pub fn bus(&self) -> &VideoBus {
@@ -230,19 +302,14 @@ impl VideoBusNode {
         &mut self.bus
     }
 
-    fn per_strip(name: &str) -> Option<(&str, usize)> {
-        for what in ["mute", "label"] {
-            if let Some(k) = name.strip_prefix(what).and_then(|k| k.parse().ok()) {
-                return Some((what, k));
-            }
-        }
-        None
+    fn muted_param(name: &str) -> Option<&str> {
+        name.strip_prefix("mute:")
     }
 }
 
 impl pipeline::node::Node for VideoBusNode {
     fn name(&self) -> &str {
-        "videobus"
+        "video_bus"
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -253,8 +320,11 @@ impl pipeline::node::Node for VideoBusNode {
         Some(self)
     }
 
+    /// One per feed drawn into it, plus the spare a chain drawn by hand
+    /// lands on. The transmissions are told apart by what they carry, not by
+    /// which wire brought them.
     fn num_inputs(&self) -> usize {
-        self.bus.strips.len().max(1)
+        self.inputs.max(1)
     }
 
     /// A bus has a spare input by nature.
@@ -264,7 +334,11 @@ impl pipeline::node::Node for VideoBusNode {
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         for (k, i) in inputs.iter().enumerate() {
-            if i.spec.kind != PortKind::Video {
+            // The spare input nothing is wired into arrives as silence, the
+            // way it does on the audio bus: a bus has one by nature, and it
+            // is what a chain drawn by hand is dropped onto.
+            let spare = i.spec.kind == PortKind::Real && i.spec.is_silence();
+            if i.spec.kind != PortKind::Video && !spare {
                 return Err(common::Error::other(format!(
                     "the video bus takes pictures, and input {k} carries {:?}",
                     i.spec.kind
@@ -307,40 +381,30 @@ impl pipeline::node::Node for VideoBusNode {
         self.bus.forget();
     }
 
+    /// A switch per transmission rather than per wire, named after the
+    /// channel: which input a picture arrived on is not something an operator
+    /// can see or would recognise.
     fn params(&self) -> Vec<Param> {
-        let mut p = Vec::new();
-        for (k, s) in self.bus.strips.iter().enumerate() {
-            if !s.is_fed() {
-                continue;
-            }
-            let name = if s.label.is_empty() {
-                s.last
-                    .as_ref()
-                    .and_then(|f| f.label.clone())
-                    .unwrap_or_else(|| format!("input {k}"))
-            } else {
-                s.label.clone()
-            };
-            p.push(Param::bool(&format!("mute{k}"), s.muted).label(&format!("{name} off")));
+        let mut p = vec![Param::int("inputs", self.inputs as i64, 1..=32).label("Inputs")];
+        for c in self.bus.channels() {
+            p.push(Param::bool(&format!("mute:{}", c.key), c.muted).label(&format!("{} off", c.label)));
         }
         p
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
-        match Self::per_strip(name) {
-            Some(("mute", k)) => {
-                if let Some(s) = self.bus.strips.get_mut(k) {
-                    s.muted = v.as_bool().unwrap_or(false);
+        if name == "inputs" {
+            self.inputs = v.as_i64().unwrap_or(1).max(1) as usize;
+            return Ok(());
+        }
+        match Self::muted_param(name) {
+            Some(key) => {
+                if let Some(c) = self.bus.channel_mut(key) {
+                    c.muted = v.as_bool().unwrap_or(false);
                 }
                 Ok(())
             }
-            Some(("label", k)) => {
-                if let Some(s) = self.bus.strips.get_mut(k) {
-                    s.label = v.as_str().unwrap_or_default().into();
-                }
-                Ok(())
-            }
-            _ => Err(common::Error::other(format!("the video bus has no {name}"))),
+            None => Err(common::Error::other(format!("the video bus has no {name}"))),
         }
     }
 }
@@ -365,13 +429,22 @@ mod tests {
         }
     }
 
+    /// Two cameras on one wire are two channels. Everything the auto node
+    /// finds arrives on its one video port, so keying on the port collapsed
+    /// them into a single picture that flickered between the two.
     #[test]
-    fn the_bus_keeps_the_last_picture_from_every_input() {
+    fn the_bus_keeps_a_channel_per_transmission_not_per_wire() {
         let mut bus = VideoBus::new();
         bus.push(0, frame(5_800e6, "F4", 288));
-        bus.push(1, frame(5_865e6, "A1 or B8", 288));
+        bus.push(0, frame(5_865e6, "A1 or B8", 288));
         assert_eq!(bus.thumbnails().count(), 2);
-        assert_eq!(bus.strips()[0].fields, 1);
+        assert_eq!(bus.channels()[0].fields, 1);
+        assert_eq!(bus.channels()[0].label, "F4");
+        // And the same camera again is the same channel, whatever wire it
+        // came in on.
+        bus.push(1, frame(5_800e6, "F4", 288));
+        assert_eq!(bus.channels().len(), 2);
+        assert_eq!(bus.channels()[0].fields, 2);
     }
 
     /// Pictures do not sum, so the bus chooses. Where a rule matches two
@@ -393,22 +466,27 @@ mod tests {
         // The chosen input wins even though the other picture is more
         // complete, which is the point: an operator watching one channel is
         // not asking for the best signal.
-        bus.set_rules(vec![Rule::Input(1)]);
+        bus.push(0, frame(5_865e6, "A1 or B8", 200));
+        let key = bus.channels()[0].key.clone();
+        bus.set_rules(vec![Rule::Channel(key)]);
         bus.push(0, frame(5_800e6, "F4", 288));
-        bus.push(1, frame(5_865e6, "A1 or B8", 200));
+        bus.push(0, frame(5_865e6, "A1 or B8", 200));
         assert_eq!(bus.watched().and_then(|f| f.label.as_deref()), Some("A1 or B8"));
     }
 
-    /// A muted input is still received and still shows a thumbnail: muting
+    /// A muted channel is still received and still shows a thumbnail: muting
     /// says "do not put this on the screen", not "stop looking".
     #[test]
-    fn a_muted_input_is_still_received() {
+    fn a_muted_channel_is_still_received() {
         let mut bus = VideoBus::new();
-        bus.strips[0].muted = true;
         bus.push(0, frame(5_800e6, "F4", 288));
-        assert!(bus.watched().is_none(), "a muted input is not shown");
+        let key = bus.channels()[0].key.clone();
+        bus.channel_mut(&key).unwrap().muted = true;
+        bus.forget_watched();
+        bus.push(0, frame(5_800e6, "F4", 288));
+        assert!(bus.watched().is_none(), "a muted channel is not shown");
         assert_eq!(bus.thumbnails().count(), 1, "but it is still received");
-        assert_eq!(bus.strips()[0].fields, 1);
+        assert_eq!(bus.channels()[0].fields, 2);
     }
 
     #[test]

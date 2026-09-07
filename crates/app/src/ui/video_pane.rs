@@ -33,17 +33,18 @@ pub(super) struct VideoState {
     /// The field that texture holds, for the caption.
     shown: Option<VideoFrame>,
     last: Option<std::time::Instant>,
-    /// Which input is being watched, or `None` for whatever is best.
-    watching: Option<usize>,
+    /// Which transmission is being watched, by the key the bus keeps it
+    /// under, or `None` for whatever is best.
+    watching: Option<String>,
 }
 
 pub(super) struct VideoPane<'a> {
     pub st: &'a mut VideoState,
     /// The newest field, or `None` when nothing is producing pictures.
     pub frame: Option<VideoFrame>,
-    /// Every input the bus has, with what it is called and how complete its
-    /// last picture was.
-    pub inputs: Vec<(usize, String, f32)>,
+    /// Every transmission the bus is seeing, with what it is called and how
+    /// complete its last picture was.
+    pub inputs: Vec<(String, String, f32)>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -56,20 +57,20 @@ impl VideoPane<'_> {
         if self.inputs.len() > 1 {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("watching").color(theme::LEGEND).size(11.0));
-                let mut want = st.watching;
+                let mut want = st.watching.clone();
                 if ui.selectable_label(want.is_none(), "best").clicked() {
                     want = None;
                 }
-                for (k, label, complete) in &self.inputs {
+                for (key, label, complete) in &self.inputs {
                     let text = format!("{label}  {:.0}%", complete * 100.0);
-                    if ui.selectable_label(want == Some(*k), text).clicked() {
-                        want = Some(*k);
+                    if ui.selectable_label(want.as_deref() == Some(key.as_str()), text).clicked() {
+                        want = Some(key.clone());
                     }
                 }
                 if want != st.watching {
-                    st.watching = want;
+                    st.watching = want.clone();
                     self.cmds.push(Cmd::WatchVideo(match want {
-                        Some(k) => vec![crate::videobus::Rule::Input(k)],
+                        Some(k) => vec![crate::videobus::Rule::Channel(k)],
                         None => vec![crate::videobus::Rule::Everything],
                     }));
                 }
@@ -113,21 +114,27 @@ impl VideoPane<'_> {
             egui::vec2(space.x, space.x / aspect)
         };
         ui.centered_and_justified(|ui| {
-            let r = ui.add(egui::Image::new(tex).fit_to_exact_size(size));
-            let caption = match &f.label {
-                Some(l) => format!(
-                    "{l}  {:.3} MHz  {} of {} lines",
-                    f.channel_hz / 1e6,
-                    f.lines_seen,
-                    f.height
-                ),
-                None => format!(
-                    "{:.3} MHz  {} of {} lines",
-                    f.channel_hz / 1e6,
-                    f.lines_seen,
-                    f.height
-                ),
+            // The ratio is told, not taken from the texture: `fit_to_exact_size`
+            // still keeps the image's own proportions unless this is off, so a
+            // 640 by 288 field was drawn at 20:9 whatever shape was asked for.
+            let r = ui.add(
+                egui::Image::new(tex)
+                    .maintain_aspect_ratio(false)
+                    .fit_to_exact_size(size),
+            );
+            // What it is, where it is, and what was actually received: the
+            // grid it was sampled into, then the lines that arrived out of
+            // the lines a field has. A picture assembled from a third of its
+            // lines is a picture of a fade, and analogue video has nothing
+            // else to judge it by.
+            let where_ = match &f.label {
+                Some(l) => format!("{l}  {:.3} MHz", f.channel_hz / 1e6),
+                None => format!("{:.3} MHz", f.channel_hz / 1e6),
             };
+            let caption = format!(
+                "{where_}  {}x{}  {} of {} lines",
+                f.width, f.height, f.lines_seen, f.height
+            );
             // Over the picture rather than beside it, so the image keeps the
             // whole pane and the caption cannot push it about as the text
             // changes width.

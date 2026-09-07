@@ -130,6 +130,20 @@ claims what it can render.
   the same log for the whole of a conversation instead of the last line of
   it. See `crates/app/src/transcripts.rs`.
 
+- **Video**: the picture, from anything that produces one. The bus keeps a
+  channel per transmission, keyed by what it is and where it was received
+  rather than by which wire it arrived on: everything the auto node finds
+  comes in on its one video port, so keying on the port collapsed several
+  cameras into one picture that flickered between them. A chooser lists the
+  channels that have sent a field lately and picking one subscribes to it;
+  "best" shows whichever picture is most complete. The image is drawn at the
+  shape the transmission says, 4:3 for both analogue standards, and not at
+  the shape of the sample grid, which is a fact about the receiver's clock.
+  The caption says the grid, the lines received out of the lines a field
+  has, and the channel: analogue video has no integrity check, so how much of
+  the picture arrived is the only quality there is.
+  `crates/app/src/videobus.rs`, `crates/app/src/ui/video_pane.rs`.
+
 - **Keys**: a row per enciphered channel a front end reports, and what is known
   about the key for it. The view is always there as an encryption monitor; the
   key store, key entry and the TETRA decryption behind it need the `tea`
