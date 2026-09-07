@@ -363,7 +363,8 @@ pub(super) struct LogState {
 pub struct SurveyState {
     /// Where the survey file is, or `None` when nothing is being recorded.
     pub path: Option<std::path::PathBuf>,
-    /// How the receiver's own position is read, if it is.
+    /// A GPS named by the operator, or `None` for the local gpsd the reader
+    /// looks for on its own. The reader always runs.
     pub gps: Option<gps::Transport>,
     pub open: bool,
     /// The row the pane is expanded on, which is the device whose sightings

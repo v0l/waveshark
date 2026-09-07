@@ -589,6 +589,9 @@ pub enum Cmd {
     /// Read the receiver's own position from this GPS, or `None` for the
     /// local gpsd, which is what the reader looks for on its own. There is no
     /// off: a fix moves the station position, and no fix leaves it alone.
+    ///
+    /// The reader itself is not on this thread. This only names it, which is
+    /// why choosing a GPS works with no radio running.
     Gps(Option<gps::Transport>),
     /// Log every burst the front ends detect to this directory, or stop.
     ///
@@ -1351,15 +1354,6 @@ pub struct Status {
     pub survey_devices: AtomicU64,
     pub survey_sightings: AtomicU64,
     pub survey_heard: AtomicU64,
-    /// Whether the GPS link is up, how many fixes it has produced, and the
-    /// last one. Connected and no fix is a receiver indoors.
-    pub gps_connected: AtomicBool,
-    pub gps_fixes: AtomicU64,
-    pub gps_fix: parking_lot::Mutex<Option<gps::Fix>>,
-    /// Satellites used and in view. The one thing worth showing while there
-    /// is no fix: none in view is an antenna unplugged, and a dozen in view
-    /// with none used is an antenna indoors.
-    pub gps_sky: parking_lot::Mutex<Option<gps::Sky>>,
     /// Whether anything is subscribed on the call bus, whether a recorded
     /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
@@ -1511,10 +1505,6 @@ impl Default for Status {
             survey_devices: AtomicU64::new(0),
             survey_sightings: AtomicU64::new(0),
             survey_heard: AtomicU64::new(0),
-            gps_connected: AtomicBool::new(false),
-            gps_fixes: AtomicU64::new(0),
-            gps_fix: parking_lot::Mutex::new(None),
-            gps_sky: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new((None, Vec::new())),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
@@ -2018,14 +2008,10 @@ fn run(
     // is a node and a rebuild can hand back a new one.
     let mut calls = BusSettings::default();
     let mut call_dir: Option<std::path::PathBuf> = None;
-    // The GPS, and where the survey is written. Both outlive a rebuild: the
-    // nodes are replaced with the graph and the settings are not.
-    //
-    // The reader always runs. A machine with a GPS on it is running gpsd, and
-    // a reader that reconnects anyway costs one refused connection every five
-    // seconds on a machine that is not: cheaper than an operator finding out
-    // a week of survey rows have no position because a box was left empty.
-    let mut gps = gps::Source::start(gps::Config::new(gps::Transport::default()));
+    // Where the survey is written, which outlives a rebuild: the node is
+    // replaced with the graph and the setting is not. The GPS is not here at
+    // all; it runs for as long as the program does, in `crate::station`, and
+    // this thread reads the same fix the interface does.
     let mut survey_path: Option<std::path::PathBuf> = None;
     let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
@@ -2387,15 +2373,7 @@ fn run(
                     survey_path = path.clone();
                     rx.set_survey(path);
                 }
-                Cmd::Gps(transport) => {
-                    // Dropping the old source stops its thread, so switching
-                    // transports mid-run does not leave two readers fighting
-                    // over one serial port.
-                    let t = transport.unwrap_or_default();
-                    if *gps.transport() != t {
-                        gps = gps::Source::start(gps::Config::new(t));
-                    }
-                }
+                Cmd::Gps(transport) => crate::station::set_source(transport),
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
                 Cmd::Feeds(feeds) => {
@@ -2679,16 +2657,11 @@ fn run(
         }
 
         if rx.spectrum_ready() {
-            // The fix is read at the display's rate rather than per block:
-            // a GPS reports once a second and a block is seven milliseconds,
-            // so asking per block is two hundred locks for one new number.
-            let fix = gps.fix();
-            status.gps_connected.store(gps.connected(), Ordering::Relaxed);
-            status.gps_fixes.store(gps.fixes(), Ordering::Relaxed);
-            *status.gps_fix.lock() = fix;
-            *status.gps_sky.lock() = gps.sky();
+            // The fix is read at the display's rate rather than per block: a
+            // GPS reports once a second and a block is seven milliseconds, so
+            // asking per block is two hundred locks for one new number.
             // A fix moves the station; losing the sky leaves it where it was.
-            rx.set_fix(fix);
+            rx.set_fix(crate::station::fix());
             if let Some((devices, sightings, heard)) = rx.survey_counts() {
                 status.survey_devices.store(devices, Ordering::Relaxed);
                 status.survey_sightings.store(sightings, Ordering::Relaxed);

@@ -56,7 +56,7 @@ impl Devices<'_> {
             let (legend, value) = match (self.gps_connected, self.fix) {
                 (_, Some(f)) => ("fix", format!("{:.5}, {:.5}", f.lat, f.lon)),
                 (true, None) => ("gps", "connected, no fix".into()),
-                (false, None) => ("gps", "off".into()),
+                (false, None) => ("gps", "nothing answering".into()),
             };
             theme::Line::new().legend(legend).value(value).size(11.0).show(ui);
 

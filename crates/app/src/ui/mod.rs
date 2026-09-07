@@ -129,6 +129,10 @@ pub struct App {
     capture: bool,
     /// Where the receiver is, when it has been told.
     location: Option<(f64, f64)>,
+    /// How far out that position may be, in metres, when a fix said. `None`
+    /// for a position typed in or taken from the country, which is a claim
+    /// with no error bar rather than a perfect one.
+    accuracy_m: Option<f64>,
     /// When the radio last delivered a spectrum, for noticing that it has
     /// stopped.
     last_frame: Option<std::time::Instant>,
@@ -403,6 +407,7 @@ impl Default for App {
             dc_block: true,
             view: View::Spectrum,
             location: None,
+            accuracy_m: None,
             last_frame: None,
             country: String::new(),
             audio_out: String::new(),
@@ -459,6 +464,7 @@ impl App {
             dc_block: s.dc_block,
             decode_on: s.decode_on,
             location: s.location,
+            accuracy_m: None,
             country: s.country.clone(),
             audio_out: s.audio_out.clone(),
             audio_in: s.audio_in.clone(),
@@ -633,6 +639,7 @@ impl App {
     /// resolves instead of waiting for a matching pair.
     pub fn set_location(&mut self, lat: f64, lon: f64) {
         self.location = Some((lat, lon));
+        self.accuracy_m = None;
         self.send(Cmd::Location(lat, lon));
     }
 
@@ -649,10 +656,35 @@ impl App {
         self.survey.refreshed = None;
     }
 
-    /// Read the receiver's own position from a GPS, or stop.
+    /// Read the receiver's own position from a named GPS, or `None` to go
+    /// back to the local gpsd the reader finds on its own.
+    ///
+    /// Set here rather than sent to the radio, since the reader is not the
+    /// radio's: choosing a GPS works with no device connected, and the radio
+    /// thread reads the same fixes when there is one.
     pub fn set_gps(&mut self, transport: Option<gps::Transport>) {
         self.survey.gps = transport.clone();
-        self.send(Cmd::Gps(transport));
+        crate::station::set_source(transport);
+    }
+
+    /// Move the station to wherever the GPS last said, whether or not a radio
+    /// is running.
+    ///
+    /// The station is one position for the whole receiver, so this is also
+    /// what the map, the range rings and anything resolving a bearing against
+    /// the receiver follow.
+    fn follow_gps(&mut self) {
+        let Some(f) = crate::station::fix() else { return };
+        self.accuracy_m = f.accuracy_m();
+        let moved = self
+            .location
+            .is_none_or(|(lat, lon)| (lat - f.lat).abs() > 1e-5 || (lon - f.lon).abs() > 1e-5);
+        if moved {
+            self.location = Some((f.lat, f.lon));
+            // The box in settings shows the position; a stale string in it
+            // would sit there claiming the receiver had not moved.
+            self.station_edit = None;
+        }
     }
 
     /// Turn the packet log off, or point it somewhere other than the default.
@@ -888,6 +920,7 @@ impl App {
     }
 
     fn drain(&mut self) {
+        self.follow_gps();
         let Some(radio) = &self.radio else { return };
         // The flight tracker lives in the graph; this is the table it
         // published on the last frame.
@@ -895,22 +928,11 @@ impl App {
             self.map.tracks = radio.status.track_list.lock().clone();
         }
         // A fix moves the station. The receiver already has it, since the
-        // survey node is told directly on the radio thread; this is the
-        // interface following the same position, so the map, the range rings
-        // and anything that resolves a position against the station are where
-        // the receiver actually is rather than where it was parked this
-        // morning.
-        if let Some(f) = *radio.status.gps_fix.lock() {
-            let moved = self
-                .location
-                .is_none_or(|(lat, lon)| (lat - f.lat).abs() > 1e-5 || (lon - f.lon).abs() > 1e-5);
-            if moved {
-                self.location = Some((f.lat, f.lon));
-                // The box in settings shows the position; a stale string in
-                // it would sit there claiming the receiver had not moved.
-                self.station_edit = None;
-            }
-        }
+        // station is moved on the radio thread, where the survey and the
+        // tracker read it; this is the interface following the same position,
+        // so the map, the range rings and anything else that resolves against
+        // the station are where the receiver actually is rather than where it
+        // was parked this morning.
         if let Some(e) = radio.status.error.lock().take() {
             self.err = Some(e);
             self.err_at = Some(std::time::Instant::now());
@@ -1202,6 +1224,7 @@ impl App {
         let place = map_pane::Map {
             st: &mut self.map,
             home: self.location,
+            accuracy_m: self.accuracy_m,
             edit: &mut edit,
             trail,
             rt,
@@ -1295,24 +1318,20 @@ impl App {
 
     /// Draw the device database, then do what a click asked for.
     fn devices_view(&mut self, ui: &mut egui::Ui) {
-        let (counts, fix, connected) = match self.radio.as_ref() {
+        let counts = match self.radio.as_ref() {
             Some(r) => (
-                (
-                    r.status.survey_devices.load(std::sync::atomic::Ordering::Relaxed),
-                    r.status.survey_sightings.load(std::sync::atomic::Ordering::Relaxed),
-                    r.status.survey_heard.load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                *r.status.gps_fix.lock(),
-                r.status.gps_connected.load(std::sync::atomic::Ordering::Relaxed),
+                r.status.survey_devices.load(std::sync::atomic::Ordering::Relaxed),
+                r.status.survey_sightings.load(std::sync::atomic::Ordering::Relaxed),
+                r.status.survey_heard.load(std::sync::atomic::Ordering::Relaxed),
             ),
-            None => ((0, 0, 0), None, false),
+            None => (0, 0, 0),
         };
         self.refresh_survey();
         let act = devices_pane::Devices {
             st: &mut self.survey,
             counts,
-            fix,
-            gps_connected: connected,
+            fix: crate::station::fix(),
+            gps_connected: crate::station::connected(),
         }
         .show(ui);
         match act {
