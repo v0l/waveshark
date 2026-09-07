@@ -849,13 +849,13 @@ impl pipeline::node::Simple for TracksNode {
             }
             // ADS-B still comes in as bytes: a frame carries half a position
             // in compact form, and pairing two of them or resolving one
-            // against a reference is the tracker's own state rather than
-            // anything a single decode can report.
-            if let Some(bytes) = packet.frame() {
-                if packet.decodes.iter().any(|d| d.protocol.starts_with("ADSB")) {
-                    if let Ok(f) = adsb::parse(bytes) {
-                        self.tracks.update_adsb(&f, at);
-                    }
+            // against a reference is state that belongs to the map, since it
+            // is the thing that knows where this aircraft was a second ago.
+            // Which band it arrived on says it is Mode S, the same evidence
+            // the decoder uses; a decode's protocol name is not a rule.
+            if dsp::modes::is_modes_band(packet.center_hz() as f64) {
+                if let Some(Ok(f)) = packet.frame().map(adsb::parse) {
+                    self.tracks.update_adsb(&f, at);
                 }
             }
         }

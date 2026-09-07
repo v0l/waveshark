@@ -27,6 +27,21 @@
 //! rate that is not a whole number of samples per bit, such as the 2.4 MS/s an
 //! RTL-SDR is usually run at for this, does not drift across 112 bits.
 
+/// Where Mode S is: 1090 MHz, with room for a source's centre to sit off
+/// nominal.
+///
+/// The counterpart of `ais::is_ais_band`, used the same way. A Mode S frame
+/// and an AIS frame are both bytes, and nothing distinguishes them except
+/// where they were received, which is evidence the packet already carries.
+pub const BAND_CENTER_HZ: f64 = 1_090_000_000.0;
+
+/// Whether a packet's reported centre says it came off the Mode S band.
+pub fn is_modes_band(center_hz: f64) -> bool {
+    (center_hz - BAND_CENTER_HZ).abs() < 1_000_000.0
+}
+
+
+
 use crate::pulse::dbfs;
 use common::C32;
 
