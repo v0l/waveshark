@@ -70,6 +70,33 @@ nothing to be wired to. If you find yourself summing audio anywhere but on
 the bus, or keeping a level anywhere but as one of its parameters, you are
 adding that back.
 
+## A protocol is one `impl Protocol`, and nothing else
+
+What the receiver knows about a protocol lives in one place:
+`crates/nodes/src/protocol.rs` declares the trait, and each `*_nodes.rs` has
+the one implementation for its protocol, registered in `protocol::all()`.
+Where it can be, what stream it reads, how sticky a channel it has read on
+is, the chain of stages that reads it, and which packets repeat. The auto
+node, the scanner table, the strip's mode menu, the spectrum markers and the
+chain view labels all ask that registry and keep no list of their own.
+
+So: **adding a protocol is a node, an `impl Protocol`, and a line in
+`protocol::all()`.** If you find yourself matching on a protocol's name in
+`crates/nodes/src/auto/`, in `chain.rs` or in `scanners.rs`, the question you
+are answering belongs on the trait. The test beside the registry builds every
+protocol's chain and checks its declared outputs against what the chain
+negotiates, so a wrong declaration fails there rather than as a wire drawn
+to the wrong port.
+
+Two things the trait deliberately does not do. A decoder that is dear to run
+may wait for the burst classifier's verdict (`Shape::families`) and be built
+late from the ring; only LoRa does, because the classifier is sure of a
+chirp and was measured to name an off-air M17 handheld `Unknown` for its
+whole transmission. And a decoder that needs more than the stream it was
+given asks for it (`pipeline::Request`: a claim, a channel beside it, a
+reshape, a release, a retune) rather than reaching for the detector; the
+auto node answers what it can and the receiver logs the rest.
+
 ## Every packet carries what it was heard at
 
 A row in the packet list is evidence, and evidence that does not say how

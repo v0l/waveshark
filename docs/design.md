@@ -259,9 +259,61 @@ source is opened inside their bands. That is the one piece of knowledge about
 where things are that the receiver keeps, because it is knowledge about the
 world rather than about this radio.
 
-`dsp::source` holds the detector and the extractor; `nodes::auto_node` the
-node; `source_detect` and `source_decode` are the same two halves as separate
-stages, for a chain built by hand.
+`dsp::source` holds the detector and the extractor; `nodes::auto` the node,
+split into what it watches (`watch.rs`: the detector, the extractor, the
+span-wide decoders), what it places on a source (`place.rs`), one decoder
+over one stream (`member.rs`), the channels it keeps (`memory.rs`) and what
+it does when a decoder asks for something (`requests.rs`); `source_detect`
+and `source_decode` are the same two halves as separate stages, for a chain
+built by hand.
+
+### What the node knows about protocols: nothing
+
+Every question the node asks about a protocol is answered by
+`nodes::protocol::Protocol`, one implementation per protocol beside its node,
+registered in `protocol::all()`. Where the transmitter can be
+(`Placement`: anywhere, inside licensed bands, on fixed channels), what
+stream its decoder reads (`Shape`: channel widths, the slowest rate it
+accepts, the rate to feed it, whether it reads the span or a cut source,
+and which classifier verdicts it waits for), what happens to a channel once
+it has read there (`Stickiness`), the chain of stages that reads a placed
+channel, and which of its packets are the same news twice. The scanner
+table, the strip's mode menu and the spectrum's markers ask the same
+registry, so adding a protocol is one `impl Protocol` and nothing else:
+the auto node finds it, a block can pin it, a strip channel can be set to
+it, and the chain view labels it.
+
+That replaced five tables that said the same things differently: a
+`Node::channels` method the node had to be built to answer, a list of
+band-placed decoders with their own rate floors in the auto node, three
+special cases in its `open` (TETRA by band, wM-Bus by width, LoRa deferred
+to the chirp verdict), a `Front` enum in the scanner table with a variant
+per protocol, and the app's own band-and-rate table beside it. Thirty-eight
+protocol name literals in the auto node and sixty-seven in the app's chain
+builder went with them.
+
+A decoder that waits for the classifier's verdict is built when the burst
+front end names a burst of its source one of the modulations it listed,
+and reads what it missed from the ring the front end keeps
+(`place_on_verdict`). Only LoRa lists one. Measured on the off-air M17
+capture, the classifier names the handheld's 4-FSK `Unknown` for the whole
+transmission, so a voice decoder gated on `Fsk4` would never have been
+built; the saving is real only where the classifier is reliable and the
+decoder is dear, which so far is the chirp.
+
+### What a decoder can ask for
+
+A decoder knows things the detector that found it does not: that a control
+channel has just sent a call to another carrier, that the picture it is
+reading is the whole span. It holds one stream and cannot open another, so
+it asks, through `pipeline::Request` on the node's event stream:
+`Claim` a band (the camera, once locked), `OpenChannel` beside it (the TETRA
+control channel, for a traffic carrier it was told about, kept for a minute
+after the last decode there and dropped when the control channel is
+forgotten), `Reshape` its own stream, `Release` itself, or `Retune`. The auto
+node answers what it can for the decoders it built and passes the rest up;
+the receiver logs what reaches it and keeps it in `Receiver::take_requests`
+for a consumer that moves the dial, which nothing does yet.
 
 Several details of the detector were found by measurement rather than design.
 The extent of a strong signal cannot be every bin over the floor, because sharp
@@ -807,9 +859,10 @@ A strip channel does not have to be played. Pick a front end instead of a
 demodulator and the channel is that decoder alone, at the frequency the dial
 is set to and the channel width the decoder asks for: a mixer, a decimator and
 the front end, on the packet bus with everything else and on the audio bus if
-it has speech to give. The list of front ends offered is asked of the registry
-rather than kept in the interface, and a decoder that declares a channel width
-through `Node::channels` is one that can be put on a channel. The (+) on a
+it has speech to give. The list of front ends offered is the protocol registry
+(`nodes::protocol::all()`), so every protocol the auto node can place is a
+mode a strip channel can be set to, the span-wide ones included: a Mode S
+channel is a channel two megahertz wide at 1090. The (+) on a
 packet log row adds one at the frequency that packet arrived on. This is what
 reading a single frequency costs now: before it, the only way to decode one
 channel was a scanner block, which searched the whole span it covered whether
