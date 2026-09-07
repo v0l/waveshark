@@ -100,13 +100,30 @@ fn main() {
                 s.sch.ncc, s.sch.bcc, s.sch.frame_number, s.freq_offset_hz, s.quality
             );
         }
+        // Paging is not a fact about the cell but about who is being called,
+        // so it is counted rather than listed one line at a time.
+        let mut paged = 0usize;
+        let mut permanent = 0usize;
+        for b in &blocks {
+            if let Some(m) = decode::gsm::parse(&b.bytes) {
+                paged += m.pages.len();
+                permanent += m
+                    .pages
+                    .iter()
+                    .filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_)))
+                    .count();
+            }
+        }
+        if paged > 0 {
+            eprintln!("  paged {paged} times, {permanent} by permanent identity");
+        }
         let mut seen: Vec<String> = Vec::new();
         for b in &blocks {
             let name = match decode_name(&b.bytes) {
                 Some(n) => n,
                 None => continue,
             };
-            if !seen.contains(&name) {
+            if !seen.contains(&name) && !name.starts_with("Paging") {
                 if std::env::var("GSM_RAW").is_ok() {
                     eprintln!("  {name}  {:02x?}", b.bytes);
                 } else {
@@ -192,6 +209,9 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
     }
     if let Some(id) = m.cell_id {
         s.push_str(&format!(" CI {id}"));
+    }
+    for p in &m.pages {
+        s.push_str(&format!(" {p}"));
     }
     if !m.channels.is_empty() {
         s.push_str(&format!(
