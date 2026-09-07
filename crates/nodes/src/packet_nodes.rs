@@ -170,6 +170,15 @@ impl PacketDecodeNode {
             }
             return;
         }
+        // A BLE advertisement arrives tagged with the advertising channel it
+        // was received on, which is a frequency nothing else here transmits
+        // a frame from.
+        if crate::ble_nodes::is_advertising_channel(p.center_hz as f64) {
+            if let Some(d) = crate::ble_nodes::ble_decoded(bytes, center) {
+                self.hits.push(d);
+            }
+            return;
+        }
         if dsp::ais::is_ais_band(p.center_hz as f64) {
             let Ok(frame) = decode::ais::parse(bytes) else { return };
             self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
