@@ -12,7 +12,15 @@
 
 use common::C32;
 
-const CHANNEL_HZ: f64 = 1_000_000.0;
+/// Which domain's hop set to look for. The band a capture came from does not
+/// say which: 868 and 915 are different domains and 2.4 is a third.
+fn band() -> &'static decode::elrs::Band {
+    match std::env::var("ELRS_BAND").as_deref() {
+        Ok("eu868") => &decode::elrs::BAND_EU868,
+        Ok("fcc915") => &decode::elrs::BAND_FCC915,
+        _ => &decode::elrs::BAND_2G4,
+    }
+}
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -20,17 +28,26 @@ fn main() {
     let rate: f64 = a[2].parse().unwrap();
     let center: f64 = a[3].parse().unwrap();
     let secs: f64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(2.0);
-    let signed = !path.ends_with(".cu8");
     let bytes = std::fs::read(path).unwrap();
-    let want = ((secs * rate) as usize * 2).min(bytes.len());
+    // The recorder writes what the radio's converter has: unsigned bytes from
+    // an RTL-SDR, signed bytes from a HackRF, signed sixteen bit words from a
+    // LimeSDR. Reading one as another rescales every sample or, for cs16,
+    // reads one sample as two.
+    let (width, unsigned) = match path.rsplit('.').next() {
+        Some("cu8") => (2usize, true),
+        Some("cs16") => (4usize, false),
+        _ => (2usize, false),
+    };
+    let want = ((secs * rate) as usize * width).min(bytes.len());
     let iq: Vec<C32> = bytes[..want]
-        .chunks_exact(2)
-        .map(|c| {
-            if signed {
-                C32::new(c[0] as i8 as f32 / 128.0, c[1] as i8 as f32 / 128.0)
-            } else {
-                C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
-            }
+        .chunks_exact(width)
+        .map(|c| match (width, unsigned) {
+            (4, _) => C32::new(
+                i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0,
+                i16::from_le_bytes([c[2], c[3]]) as f32 / 32768.0,
+            ),
+            (_, true) => C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5),
+            _ => C32::new(c[0] as i8 as f32 / 128.0, c[1] as i8 as f32 / 128.0),
         })
         .collect();
 
@@ -47,15 +64,22 @@ fn main() {
         .collect();
 
     let lo = center - rate / 2.0;
-    let elrs_lo = ((lo - decode::elrs::FREQ_START_HZ as f64) / CHANNEL_HZ).ceil().max(0.0) as usize;
-    let elrs_hi = (((center + rate / 2.0) - decode::elrs::FREQ_START_HZ as f64) / CHANNEL_HZ)
+    let b = band();
+    let spread = (b.stop_hz - b.start_hz) as f64 / (b.count as f64 - 1.0);
+    let elrs_lo = ((lo - b.start_hz as f64) / spread).ceil().max(0.0) as usize;
+    let elrs_hi = (((center + rate / 2.0) - b.start_hz as f64) / spread)
         .floor()
-        .min(decode::elrs::CHANNEL_COUNT as f64 - 1.0) as usize;
+        .min(b.count as f64 - 1.0) as usize;
+    if elrs_lo > elrs_hi {
+        eprintln!("no {} channel is inside this span", b.name);
+        return;
+    }
     eprintln!(
-        "{:.2} s, span {:.1}-{:.1} MHz, ExpressLRS channels {elrs_lo}-{elrs_hi} inside it",
+        "{:.2} s, span {:.1}-{:.1} MHz, {} channels {elrs_lo}-{elrs_hi} inside it",
         iq.len() as f64 / rate,
         lo / 1e6,
-        (center + rate / 2.0) / 1e6
+        (center + rate / 2.0) / 1e6,
+        b.name
     );
 
     // Power per channel per frame, and the floor each channel sits at.
@@ -68,7 +92,7 @@ fn main() {
         }
         plan.process(&mut buf);
         for (ci, &ch) in chans.iter().enumerate() {
-            let hz = decode::elrs::channel_hz(ch as u8) as f64;
+            let hz = b.channel_hz(ch as u8) as f64;
             let bin = (((hz - center) / rate * n as f64).round() as i64 + n as i64) % n as i64;
             // Three bins is 470 kHz, which is most of an 812 kHz LoRa channel
             // without reaching into its neighbours a megahertz away.
@@ -137,7 +161,7 @@ fn main() {
     for (ch, bursts, mean_us, snr) in &hits {
         println!(
             "{ch:>7}  {:>9.1}  {bursts:>6}  {:>8.0}  {mean_us:>8.0}  {snr:>14.1}",
-            decode::elrs::channel_hz(*ch as u8) as f64 / 1e6,
+            b.channel_hz(*ch as u8) as f64 / 1e6,
             *bursts as f64 / span_s,
         );
     }
@@ -220,7 +244,7 @@ fn main() {
     println!();
     println!("channel  freq(MHz)   sf  packets  sync words");
     for &ch in &chans {
-        let hz = decode::elrs::channel_hz(ch as u8) as f64;
+        let hz = b.channel_hz(ch as u8) as f64;
         let mut phase = 0.0f64;
         let mixed: Vec<C32> = iq
             .iter()
@@ -232,7 +256,7 @@ fn main() {
         // 812.5 kHz at two samples a chip is 1.625 MS/s, which 20 MS/s does
         // not divide, so decimate to the nearest whole factor and resample
         // the remainder linearly.
-        let bw = 812_500.0f64;
+        let bw = b.bandwidth_hz;
         let want = bw * dsp::lora::OVERSAMPLE as f64;
         let factor = (rate / want).floor() as usize;
         let got = rate / factor as f64;
@@ -248,7 +272,7 @@ fn main() {
             res.push(d[i] * (1.0 - f) + d[i + 1] * f);
             pos += step;
         }
-        for sf in 5..=8u8 {
+        for sf in 5..=9u8 {
             let mut demod = dsp::lora::Demod::new(dsp::lora::Config::for_sf(sf));
             let mut at = 0usize;
             let mut found = 0usize;

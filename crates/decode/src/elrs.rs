@@ -273,9 +273,58 @@ pub const FREQ_START_HZ: u64 = 2_400_400_000;
 pub const FREQ_STOP_HZ: u64 = 2_479_400_000;
 
 pub fn channel_hz(channel: u8) -> u64 {
-    let spread = (FREQ_STOP_HZ - FREQ_START_HZ) / (CHANNEL_COUNT as u64 - 1);
-    FREQ_START_HZ + spread * u64::from(channel)
+    BAND_2G4.channel_hz(channel)
 }
+
+/// One regulatory domain's hop set, as `fhss_config_t` states it.
+pub struct Band {
+    pub name: &'static str,
+    pub start_hz: u64,
+    pub stop_hz: u64,
+    pub count: usize,
+    /// What the modulation occupies on this band, which is what a receiver
+    /// has to filter to.
+    pub bandwidth_hz: f64,
+}
+
+impl Band {
+    pub fn channel_hz(&self, channel: u8) -> u64 {
+        let spread = (self.stop_hz - self.start_hz) / (self.count as u64 - 1);
+        self.start_hz + spread * u64::from(channel)
+    }
+
+    /// The sync channel, which is the middle one in every domain.
+    pub fn sync_channel(&self) -> u8 {
+        (self.count / 2) as u8
+    }
+}
+
+pub const BAND_2G4: Band = Band {
+    name: "ISM2G4",
+    start_hz: FREQ_START_HZ,
+    stop_hz: FREQ_STOP_HZ,
+    count: CHANNEL_COUNT,
+    bandwidth_hz: 812_500.0,
+};
+
+/// The European 868 MHz domain: thirteen channels, and the LoRa modes there
+/// are SF6 through SF9 over 500 kHz rather than 812.5.
+pub const BAND_EU868: Band = Band {
+    name: "EU868",
+    start_hz: 863_275_000,
+    stop_hz: 869_575_000,
+    count: 13,
+    bandwidth_hz: 500_000.0,
+};
+
+/// The American 900 MHz domain.
+pub const BAND_FCC915: Band = Band {
+    name: "FCC915",
+    start_hz: 903_500_000,
+    stop_hz: 926_900_000,
+    count: 40,
+    bandwidth_hz: 500_000.0,
+};
 
 /// The firmware's own generator: a Microsoft C library LCG, kept because the
 /// sequence has to match bit for bit rather than because it is a good one.
