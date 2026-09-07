@@ -333,12 +333,17 @@ fn main() {
             res.push(d[i] * (1.0 - f) + d[i + 1] * f);
             pos += step;
         }
-        // A capture whose I and Q are the other way round turns every
-        // upchirp into a downchirp, which the demodulator cannot see at all.
-        let conj: Vec<C32> = res.iter().map(|c| c.conj()).collect();
-        for (label, samples) in [("", &res), ("conj ", &conj)] {
+        // An SX1280 transmits with I and Q swapped, so both ways up are
+        // tried and the one that reads is reported.
+        for (label, inverted) in [("", false), ("inv ", true)] {
         for sf in 5..=9u8 {
-            let mut demod = dsp::lora::Demod::new(dsp::lora::Config::for_sf(sf));
+            let cfg = if inverted {
+                dsp::lora::Config::inverted_for_sf(sf)
+            } else {
+                dsp::lora::Config::for_sf(sf)
+            };
+            let mut demod = dsp::lora::Demod::new(cfg);
+            let samples = &res;
             let mut at = 0usize;
             let mut found = 0usize;
             let mut syncs: std::collections::BTreeSet<u8> = Default::default();

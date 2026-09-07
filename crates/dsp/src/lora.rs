@@ -99,6 +99,15 @@ pub struct Config {
     /// Symbols to read after the header before giving up on a packet whose
     /// end never falls below `peak_min`.
     pub max_symbols: usize,
+    /// Read the band the other way up.
+    ///
+    /// The SX1280 puts LoRa on 2.4 GHz with I and Q swapped against the
+    /// SX127x convention, so its preamble is a run of downchirps to a
+    /// receiver built for 868 MHz and a dechirper that expects upchirps finds
+    /// nothing whatever the spreading factor. That is not a property of the
+    /// capture or of the tuner, so it belongs here rather than in a caller
+    /// that remembers to conjugate.
+    pub inverted: bool,
 }
 
 impl Config {
@@ -107,6 +116,12 @@ impl Config {
     /// which keeps SF7's floor whatever the factor.
     pub fn for_sf(sf: u8) -> Self {
         Config { sf, peak_min: peak_min_for(sf), ..Default::default() }
+    }
+
+    /// The same, for a transmitter that inverts: ExpressLRS and everything
+    /// else on an SX1280.
+    pub fn inverted_for_sf(sf: u8) -> Self {
+        Config { inverted: true, ..Config::for_sf(sf) }
     }
 }
 
@@ -117,6 +132,7 @@ impl Default for Config {
             peak_min: 10.0,
             preamble_min: 6,
             max_symbols: 600,
+            inverted: false,
         }
     }
 }
@@ -247,8 +263,17 @@ impl Demod {
         self.buf.clear();
         self.buf.resize(len, C32::default());
         let r = if up_ref { &self.down } else { &self.up };
-        for k in 0..self.step {
-            self.buf[k] = iq[at + k] * r[k];
+        // Conjugating the samples rather than the reference chirps: the
+        // reference way round mirrors the transform, which would negate every
+        // symbol value while leaving the preamble looking correct.
+        if self.cfg.inverted {
+            for k in 0..self.step {
+                self.buf[k] = iq[at + k].conj() * r[k];
+            }
+        } else {
+            for k in 0..self.step {
+                self.buf[k] = iq[at + k] * r[k];
+            }
         }
         if fine { &self.fft_fine } else { &self.fft }.process(&mut self.buf);
 
@@ -596,6 +621,32 @@ mod tests {
         }
         out.extend(std::iter::repeat_n(C32::default(), sym));
         out
+    }
+
+    /// A transmitter that swaps I and Q is read by a demodulator told to
+    /// expect it, and is invisible to one that is not. This is what an
+    /// ExpressLRS handset on 2.4 GHz does, and five captures of one read as
+    /// an empty band before it was noticed.
+    #[test]
+    fn an_inverted_transmitter_is_read_when_the_demodulator_is_told() {
+        let values: Vec<u16> = (0..16).map(|i| i * 5 + 9).collect();
+        let iq = synth(7, 8, 0x12, &values);
+        let inverted: Vec<C32> = iq.iter().map(|c| c.conj()).collect();
+
+        let mut plain = Demod::new(Config::for_sf(7));
+        assert!(
+            plain.detect(&inverted, 0).is_none(),
+            "an upchirp demodulator should not see downchirps"
+        );
+
+        let mut d = Demod::new(Config::inverted_for_sf(7));
+        let p = d.detect(&inverted, 0).expect("packet");
+        assert_eq!(p.sync_word, 0x12);
+        assert_eq!(&p.symbols[..values.len()], &values[..], "symbols came back changed");
+
+        // And the same demodulator does not then read an ordinary
+        // transmitter, which is why this is a setting and not a fallback.
+        assert!(d.detect(&iq, 0).is_none());
     }
 
     #[test]
