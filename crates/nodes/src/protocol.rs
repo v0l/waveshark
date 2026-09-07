@@ -90,18 +90,25 @@ pub struct Shape {
 }
 
 /// What the receiver does with a channel once a protocol has read on it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Stickiness {
     /// Nothing kept: the next transmission is found again. For a hopper, or
     /// a burst that is over before a channel is worth remembering.
     Forget,
-    /// The channel is cut out for this protocol alone from then on, for the
-    /// session. A span-wide decoder with this owns its band from the moment
-    /// the span reaches it.
-    Latch,
+    /// The channel is cut out for this protocol alone from then on: for the
+    /// session, or until nothing has decoded on it for `hold_s` seconds. A
+    /// span-wide decoder with this owns its band from the moment the span
+    /// reaches it.
+    Latch { hold_s: Option<f64> },
     /// The decoder says what it is reading through `Node::claimed_hz`, and
     /// owns that once it does, and nothing before.
     Claim,
+}
+
+impl Stickiness {
+    /// Kept for the session, which is what most channels want: a channel
+    /// that has produced a decoded frame is one that will produce another.
+    pub const SESSION: Stickiness = Stickiness::Latch { hold_s: None };
 }
 
 /// A marker on the spectrum for a placed channel.
@@ -174,8 +181,14 @@ pub trait Protocol: Send + Sync {
     }
 
     fn stickiness(&self) -> Stickiness {
-        Stickiness::Latch
+        Stickiness::SESSION
     }
+
+    /// Of the channel widths that each read something on one source, the
+    /// ones to keep. All of them unless the protocol knows better: two
+    /// widths of one protocol reading the same packet is usually one of
+    /// them reading half of it.
+    fn resolve_widths(&self, _heard: &mut Vec<f64>) {}
 
     /// Whether a source measured this wide could be a channel of this
     /// protocol. Within reach of one of the declared widths unless the

@@ -485,6 +485,11 @@ struct Sticky {
     name: &'static str,
     center_hz: f64,
     width_hz: f64,
+    /// How long the channel is kept after the last decode on it, or for
+    /// the session.
+    hold_s: Option<f64>,
+    /// When something last decoded there, in seconds of stream.
+    last_heard_s: f64,
 }
 
 /// Source ids counted down from the top, where the detector's never reach.
@@ -540,9 +545,17 @@ pub struct AutoNode {
     /// Sources decoders were built for, over the node's life.
     built: u64,
     sticky: Vec<Sticky>,
+    /// Channels ever remembered, so an id is never reused after a channel
+    /// is forgotten.
+    sticky_made: u64,
     /// Channels to cut out from the next block on: newly heard ones, and
     /// after a rebuild every one the span still covers.
     pending_sticky: Vec<SourceId>,
+    /// Remembered channels nothing has decoded on for their hold, to be
+    /// closed on the next block.
+    expiring: Vec<SourceId>,
+    /// Seconds of stream so far, the clock a hold is measured on.
+    now_s: f64,
     /// What each channel has announced about itself, so a source that
     /// closes and opens again, or decoders rebuilt with the graph, do not
     /// log the same cell's identity a second time.
@@ -578,7 +591,10 @@ impl AutoNode {
             hits: Vec::new(),
             built: 0,
             sticky: Vec::new(),
+            sticky_made: 0,
             pending_sticky: Vec::new(),
+            expiring: Vec::new(),
+            now_s: 0.0,
             announced: HashMap::new(),
             phases: BTreeMap::new(),
             phase_sum: BTreeMap::new(),
@@ -912,7 +928,7 @@ impl AutoNode {
                 let mut m = Member::place(*p, spec, at, &self.reg)?;
                 // One that latches owns its band from the moment the span
                 // reaches it; one that claims owns nothing until it says so.
-                if p.stickiness() == Stickiness::Latch {
+                if matches!(p.stickiness(), Stickiness::Latch { .. }) {
                     m.band = Some((lo, hi));
                 }
                 self.wide.push(m);
@@ -1085,6 +1101,21 @@ impl AutoNode {
     /// Remember a channel a front end has just read, unless it is one
     /// already kept, and have it cut out from the next block on.
     fn remember(&mut self, name: &'static str, center_hz: f64, width_hz: f64) -> Option<Event> {
+        let hold_s = match protocol::by_id(name).map(|p| p.stickiness()) {
+            Some(Stickiness::Forget) => return None,
+            Some(Stickiness::Latch { hold_s }) => hold_s,
+            Some(Stickiness::Claim) | None => None,
+        };
+        self.remember_for(name, center_hz, width_hz, hold_s)
+    }
+
+    fn remember_for(
+        &mut self,
+        name: &'static str,
+        center_hz: f64,
+        width_hz: f64,
+        hold_s: Option<f64>,
+    ) -> Option<Event> {
         if width_hz <= 0.0 {
             return None;
         }
@@ -1093,12 +1124,15 @@ impl AutoNode {
         if self.sticky.iter().any(same) {
             return None;
         }
-        let id = SourceId(STICKY_ID_BASE + self.sticky.len() as u64);
+        let id = SourceId(STICKY_ID_BASE + self.sticky_made as u64);
+        self.sticky_made += 1;
         self.sticky.push(Sticky {
             id,
             name,
             center_hz,
             width_hz,
+            hold_s,
+            last_heard_s: self.now_s,
         });
         self.pending_sticky.push(id);
         self.apply_locked();
@@ -1356,6 +1390,19 @@ impl Node for AutoNode {
                 frames: 0,
             }));
         }
+        for id in std::mem::take(&mut self.expiring) {
+            self.events.push(SourceEvent::Closed(dsp::Source {
+                id,
+                lo_hz: 0.0,
+                hi_hz: 0.0,
+                center_hz: 0.0,
+                start_sample: 0,
+                end_sample: None,
+                peak_snr_db: f32::NAN,
+                frames: 0,
+            }));
+        }
+        self.now_s = d.position() as f64 / rate;
         self.blocks.clear();
         let t_extract = Instant::now();
         e.process(iq, &self.events, &mut self.blocks);
@@ -1517,23 +1564,35 @@ impl Node for AutoNode {
             // answered what the source is, and from here it alone reads
             // it. The others were each a decoder's worth of work per block
             // and, for a pager or a packet channel, a second row saying
-            // the same burst was nothing.
+            // the same burst was nothing. Where several widths of one
+            // protocol read, the protocol says which to keep.
             if !heard.is_empty() && self.slots[k].members.len() > 1 {
-                // Two LoRa channels an octave apart share a sweep rate two
-                // spreading factors apart, so a 250 kHz packet also reads,
-                // as something, through a 125 kHz demodulator seeing half of
-                // it. The narrower one cannot read a chirp of the wider, so
-                // when both read the wider one is the channel.
-                let widest = heard
-                    .iter()
-                    .filter(|(n, _)| *n == "lora")
-                    .map(|(_, w)| *w)
-                    .fold(0.0, f64::max);
-                self.slots[k].members.retain(|m| {
-                    heard
+                let mut keep: Vec<(&'static str, f64)> = Vec::new();
+                for p in protocol::all() {
+                    let mut widths: Vec<f64> = heard
                         .iter()
-                        .any(|(n, w)| *n == m.name && (*n != "lora" || *w >= widest))
+                        .filter(|(n, _)| *n == p.id())
+                        .map(|(_, w)| *w)
+                        .collect();
+                    if widths.is_empty() {
+                        continue;
+                    }
+                    p.resolve_widths(&mut widths);
+                    keep.extend(widths.into_iter().map(|w| (p.id(), w)));
+                }
+                self.slots[k].members.retain(|m| {
+                    keep.iter().any(|(n, w)| *n == m.name && *w == m.channel_hz)
                 });
+            }
+            // A remembered channel that is still decoding is kept; one that
+            // has gone quiet for its hold is given back to the detector.
+            if !pk.is_empty() {
+                let hz = self.slots[k].center_hz as f64;
+                for st in self.sticky.iter_mut() {
+                    if (st.center_hz - hz).abs() <= st.width_hz / 2.0 {
+                        st.last_heard_s = self.now_s;
+                    }
+                }
             }
             for e in ev {
                 if matches!(e, Event::Decoded(_)) {
@@ -1563,6 +1622,33 @@ impl Node for AutoNode {
             }
         }
         self.slots.retain(|s| !closed.contains(&s.id));
+        let now = self.now_s;
+        let mut expired = Vec::new();
+        self.sticky.retain(|s| {
+            let gone = s.hold_s.is_some_and(|h| now - s.last_heard_s > h);
+            if gone {
+                expired.push(s.id);
+            }
+            !gone
+        });
+        if !expired.is_empty() {
+            self.expiring.extend(expired.iter().copied());
+            self.pending_sticky.retain(|id| !expired.contains(id));
+            self.apply_locked();
+            for id in expired {
+                let Some(st) = self.slots.iter().find(|s| s.id == id) else { continue };
+                if let Some(m) = st.members.first() {
+                    c.emit(Event::Warning {
+                        stage: self.label.clone(),
+                        message: format!(
+                            "{} quiet on {:.4} MHz; giving the channel back",
+                            m.name,
+                            st.center_hz as f64 / 1e6
+                        ),
+                    });
+                }
+            }
+        }
         self.inner_voice(outputs[OUT_VOICE].voice_mut());
         self.inner_video(outputs[OUT_VIDEO].video_mut());
 
@@ -1945,6 +2031,48 @@ mod tests {
         let slot = n.open(&b).unwrap();
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
         assert_eq!(names, ["pocsag"], "a locked channel runs one front end");
+    }
+
+    /// A channel kept with a hold is given back once nothing has decoded
+    /// on it for that long: the detector may open there again, and the
+    /// decoder that was reading it is gone.
+    #[test]
+    fn a_remembered_channel_with_a_hold_is_forgotten_when_it_goes_quiet() {
+        let rate = 1_000_000.0;
+        let center = Hz::mhz(434);
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        n.remember_for("pocsag", 434_100_000.0, 25_000.0, Some(0.5));
+        assert_eq!(n.remembered().len(), 1);
+        let iq = keyed(rate, 356_000.0);
+        let ins = [spec(rate, center)];
+        let mut forgotten_at = None;
+        for (i, block) in iq.chunks(16_384).enumerate() {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
+            let (mut events, mut tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+            Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();
+            if n.remembered().is_empty() && forgotten_at.is_none() {
+                forgotten_at = Some(i as f64 * 16_384.0 / rate);
+            }
+        }
+        let at = forgotten_at.expect("the channel was kept forever");
+        assert!(at > 0.45 && at < 1.0, "forgotten at {at} s");
+        assert!(
+            n.slots.iter().all(|s| s.id.0 < STICKY_ID_BASE),
+            "the decoder on it is still running"
+        );
+        // And one kept for the session is still there.
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        n.remember("pocsag", 434_100_000.0, 25_000.0);
+        openings(&mut n, rate, center, &iq);
+        assert_eq!(n.remembered().len(), 1);
     }
 
     #[test]
