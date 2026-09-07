@@ -47,37 +47,16 @@ use survey::{Db, Report, Sighting};
 /// Matched on the start of the protocol name because several decoders report
 /// a family: `APRS-Position` and `APRS-Status` are one radio, and `AIS-Static`
 /// and `AIS-Position` are one vessel.
-/// Protocols whose `id` field is the sensor's own identity.
-///
-/// The last of the name-keyed identity rules. The ISM device decoders are
-/// transcribed from rtl_433 and produce a `Report` rather than naming a
-/// transmitter, so until they say who sent a frame this reads their `id`
-/// field. Everything else says who it was: see [`common::Identity`].
-const ISM_ID: &[&str] = &[
-    "Acurite", "LaCrosse", "Nexus", "Rubicson", "Bresser", "GT-WT", "FineOffset", "Oregon",
-    "Honeywell", "EV1527", "Princeton", "KeeLoq", "Holtek", "Somfy", "X10",
-];
-
 /// What a decode says about who transmitted it.
 ///
-/// The decoder's own answer where it gave one, which is every protocol that
-/// names a transmitter. `None` for a decode that identifies nothing: an
+/// The decoder's own answer, and there is no other: every protocol that
+/// names a transmitter says so on the decode. `None` for a decode that identifies nothing: an
 /// unclaimed burst, a frame whose protocol has no notion of a transmitter.
 /// Those are real receptions and they belong in the packet log, which has
 /// them; they are not devices.
 pub fn identity(d: &Decoded) -> Option<(String, String)> {
-    if let Some(who) = &d.identity {
-        return Some((who.space.clone(), who.id.clone()));
-    }
-    if ISM_ID.iter().any(|p| d.protocol.starts_with(p)) {
-        // The model is part of the identity here. An ISM sensor's id is eight
-        // bits chosen at random when the batteries go in, so two stations of
-        // different makes sharing an id is ordinary, and merging them would
-        // report one device that reads two temperatures.
-        let id = d.fields.iter().find(|(k, _)| k == "id").map(|(_, v)| v.to_string())?;
-        return Some((format!("ism:{}", d.protocol), id));
-    }
-    None
+    let who = d.identity.as_ref()?;
+    Some((who.space.clone(), who.id.clone()))
 }
 
 /// A name a device gave for itself, where its decode carries one.
@@ -275,11 +254,21 @@ mod tests {
     }
 
     /// A sensor's id is eight bits chosen when the batteries go in, so it is
-    /// only an identity together with the model that read it.
+    /// only an identity together with the model that read it. Built through
+    /// the decoder's own report, since that is what decides it now.
     #[test]
     fn an_ism_sensor_is_identified_by_its_model_and_id_together() {
-        let a = decoded("Acurite-Tower", &[("id", "163")]);
-        let b = decoded("Nexus-TH", &[("id", "163")]);
+        let report = |model| {
+            let r = decode::Report::new(model).int("id", 163);
+            crate::decode_nodes::decoded_event(
+                &r,
+                &common::Package::default(),
+                Hz(433_920_000),
+                "OOK",
+            )
+        };
+        let a = report("Acurite-Tower");
+        let b = report("Nexus-TH");
         assert_ne!(identity(&a), identity(&b), "two makes sharing an id are two devices");
         assert_eq!(identity(&a), Some(("ism:Acurite-Tower".into(), "163".into())));
     }
@@ -313,10 +302,7 @@ mod tests {
     /// testing nothing the receiver does.
     fn annotated(mut packets: Vec<Packet>) -> Vec<Packet> {
         let mut d = crate::PacketDecodeNode::default();
-        d.decode_all(&packets);
-        for (p, hits) in packets.iter_mut().zip(d.per_packet()) {
-            p.decodes = hits.to_vec();
-        }
+        d.annotate(&mut packets);
         packets
     }
 

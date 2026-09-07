@@ -26,6 +26,14 @@ pub struct Report {
     pub crc_valid: Option<bool>,
     /// Raw frame, for logging and for reporting unknown variants.
     pub raw: Vec<u8>,
+    /// Who transmitted it, where the frame says so.
+    ///
+    /// Filled from the `id` field, because in this family of protocols that
+    /// is what `id` means: the byte or three a sensor picks when its
+    /// batteries go in and repeats in every frame afterwards. Saying it here
+    /// rather than leaving each reader to look for a field by name is what
+    /// stops a device list keeping a list of which protocols have one.
+    pub device: Option<String>,
 }
 
 impl Report {
@@ -35,10 +43,14 @@ impl Report {
             fields: BTreeMap::new(),
             crc_valid: None,
             raw: Vec::new(),
+            device: None,
         }
     }
 
     pub fn set(mut self, k: &str, v: Value) -> Self {
+        if k == "id" {
+            self.device = Some(v.to_string());
+        }
         self.fields.insert(k.to_string(), v);
         self
     }
