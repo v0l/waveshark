@@ -163,13 +163,11 @@ fn main() {
     for ch in ch_lo..=ch_hi {
         let hz = b.channel_hz(ch as u8) as f64;
         let mut phase = 0.0f64;
-        // The SX1280 sends with I and Q swapped against the SX127x
-        // convention, so the samples are conjugated before anything else.
         let mixed: Vec<C32> = iq
             .iter()
             .map(|&x| {
                 phase -= std::f64::consts::TAU * (hz - center) / rate;
-                (x * C32::new(phase.cos() as f32, phase.sin() as f32)).conj()
+                x * C32::new(phase.cos() as f32, phase.sin() as f32)
             })
             .collect();
         let mut decim = dsp::FirDecim::design_hz(rate, factor, bw * 0.62, 60.0);
@@ -183,7 +181,10 @@ fn main() {
             res.push(d[i] * (1.0 - f) + d[i + 1] * f);
             pos += step;
         }
-        let mut demod = dsp::lora::Demod::new(dsp::lora::Config::for_sf(7));
+        // The SX1280 sends with I and Q swapped against the SX127x
+        // convention, which the demodulator is told rather than the samples
+        // being turned over here.
+        let mut demod = dsp::lora::Demod::new(dsp::lora::Config::inverted_for_sf(7));
         let mut at = 0usize;
         while at < res.len() {
             match demod.detect(&res, at) {

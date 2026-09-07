@@ -322,13 +322,56 @@ saying "an ELRS transmitter at 500 Hz is up" is most of the operational value.
 | Digital FPV video: DJI O3/O4, Walksnail Avatar, HDZero | 5.65-5.95 GHz mostly | proprietary OFDM, 20 MHz and wider | 20 MHz | chain | chain | No layout is published for any of them. What a spectrum shows is a wide flat carrier keyed to the frame rate, which is enough to say a link is up and which system it is by width and duty cycle, and nothing beyond that without a large reversing effort. There is a Walksnail Avatar here, so its width, duty cycle and how the downlink and the uplink sit against each other can be measured rather than repeated from a forum post |
 | Analogue FPV video | 5.65-5.95 GHz, also 1.2 and 2.4 GHz | FM, composite video, about 6 MHz deviation, 20-30 MHz occupied | 20 MHz | framing | mod | An image rather than packets, like APT: the FM demodulator exists and the work is sync separation, line assembly and presentation. A HackRF at 20 MS/s clips the skirts of a channel keyed hard, so expect a soft picture rather than a clean one until something wider is on the bench. Channel plans (A, B, E, F/Airwave, R/Raceband) are a table, and identifying which channel is occupied is worth having on its own |
 | ExpressLRS 900 MHz | 433/868/915 MHz | LoRa, SF6-SF9 over 500 kHz | 500 kHz | framing | mod | `dsp::lora` demodulates it already. What is missing is that ELRS uses implicit header mode with a fixed 8 byte payload and no LoRa CRC, guarding the packet with its own 14 bit CRC seeded from the binding UID, and hops on every packet. The payload is CRSF: packed RC channels, or telemetry and link statistics on the return slot |
-| ExpressLRS 2.4 GHz | 2400.4-2479.4 MHz, 80 channels 1 MHz apart | LoRa SF5-SF8 over 812.5 kHz, or FLRC at 1 Mbps | 2 MHz | framing, demod for FLRC | mod | An SX1280. `decode::elrs` reads the link layer: the CRC-14 seeded from the binding UID, the four packet types, a sync packet's hop index, counter, rate and the two UID bytes it sends in the clear, the four ten bit channels an RC packet carries, and the hop sequence a UID generates, all from the firmware's own `src/lib/OTA` and `src/lib/FHSS`. Confirmed off air against a TX16S: SF7 over 812.5 kHz, sync word 0x12, on channel after channel of the hop set. Which of the ten rates is running is measured rather than configured, the way every other front end here decides things: the sweep the classifier reads off a burst gives the spreading factor (5.16e9 Hz/s over 812.5 kHz is SF7 and nothing else), and where that leaves two rates, the spacing between packets that stayed on one channel separates them, since the link keys on a fixed interval and hops every four packets. On the bench capture that measures 10.00 ms, which is 100 Hz Full, and the handset was set to 100 Hz Full. The SX1280 transmits with I and Q swapped against the SX127x convention, so the preamble is downchirps to this receiver and the samples have to be conjugated before `dsp::lora` sees anything; five captures read as an empty band before that was found. What is still missing above the dechirper is the SX1280's long interleaved coding rates, which are not the SX127x interleaver `decode::lora` implements, so the payload bytes it currently produces are not to be trusted, and hop following. FLRC is a coherent GFSK burst mode with its own coding and is a front end of its own |
+| ExpressLRS 2.4 GHz | 2400.4-2479.4 MHz, 80 channels 1 MHz apart | LoRa SF5-SF8 over 812.5 kHz, or FLRC at 1 Mbps | 2 MHz | framing, demod for FLRC | mod | An SX1280. `decode::elrs` reads the link layer: the CRC-14 seeded from the binding UID, the four packet types, a sync packet's hop index, counter, rate and the two UID bytes it sends in the clear, the four ten bit channels an RC packet carries, and the hop sequence a UID generates, all from the firmware's own `src/lib/OTA` and `src/lib/FHSS`. Confirmed off air against a TX16S: SF7 over 812.5 kHz, sync word 0x12, on channel after channel of the hop set. Which of the ten rates is running is measured rather than configured, the way every other front end here decides things: the sweep the classifier reads off a burst gives the spreading factor (5.16e9 Hz/s over 812.5 kHz is SF7 and nothing else), and where that leaves two rates, the spacing between packets that stayed on one channel separates them, since the link keys on a fixed interval and hops every four packets. On the bench capture that measures 10.00 ms, which is 100 Hz Full, and the handset was set to 100 Hz Full. The SX1280 transmits with I and Q swapped against the SX127x convention, so the preamble is downchirps to this receiver and the samples have to be conjugated before `dsp::lora` sees anything; five captures read as an empty band before that was found. What is still missing above the dechirper is the SX1280's long interleaved coding rates, which are not the SX127x interleaver `decode::lora` implements, so the payload bytes it currently produces are not to be trusted, and hop following. [Getting the SX1280's coding out of an SX1280](#getting-the-sx1280s-coding-out-of-an-sx1280) is the procedure for closing that. FLRC is a coherent GFSK burst mode with its own coding and is a front end of its own |
 | TBS Crossfire | 868/915 MHz | LoRa, roughly 50 channel FHSS | 250 kHz | framing | mod | An SX1272 running LoRa with a proprietary framing and hop sequence on top, reversed publicly by g3gg0. Same shape of work as ELRS and the same CRSF payload underneath |
 | FrSky ACCST D16 and ACCESS | 2400-2480 MHz | GFSK, CC2500, 47 channel FHSS on a 9 ms frame | 500 kHz | framing | mod | The hop table is computed from the model id, and both the sequence and the packet layout are in Deviation and MultiModule. Cheap radios, so plenty of them in the air |
 | FlySky AFHDS-2A | 2400-2480 MHz | GFSK 500 kbps, A7105, 16 channel FHSS | 1 MHz | framing | mod | As FrSky: published layout, unpublished only in the sense that the vendor never wrote it down |
 | Spektrum DSM2 and DSMX | 2400-2480 MHz | DSSS GFSK 1 Mbps, CYRF6936 | 2 MHz | demod | mod | Needs the despreader the 802.15.4 rows need |
 | Toy drone links: Bayang, Syma, Hubsan, E010 | 2400-2480 MHz | GFSK 250 kbps-1 Mbps, nRF24 or XN297 or A7105 | 2 MHz | demod | mod | The nRF24 ShockBurst row above is the front end for most of these; XN297 adds its own scrambler over the same shape |
 | MAVLink over a SiK radio | 433/868/915 MHz | GFSK 64-250 kbps, FHSS, Golay | 250 kHz | framing | mod | 3DR and RFD900 telemetry, in the clear unless the operator set a key: position, attitude, battery, flight mode and the parameter set. The FSK front end reaches the symbols; the framing is the SiK link layer under the MAVLink v1/v2 parser |
+
+### Getting the SX1280's coding out of an SX1280
+
+The payload of an ExpressLRS 2.4 GHz packet is coded at one of the SX1280's
+long interleaved rates, and nobody has published what those are. Semtech names
+them in the data sheet and describes nothing; ExpressLRS writes
+`SX1280_LORA_CR_LI_4_8` into a register and the modem does the rest, so
+neither the firmware nor any of the open LoRa decoders (gr-lora_sdr, gr-lora,
+LoRa-SDR, all SX127x) contains the layout. Every ExpressLRS receiver on the
+market, the RadioMaster RP series included, is a Semtech SX1280 or SX1281
+doing it in hardware.
+
+Guessing is not hopeless, because ExpressLRS supplies an oracle. Its CRC-16 is
+seeded with the binding UID and the packet counter, a CRC is linear in its
+seed, so any candidate decode can be solved for the seed that would make it
+valid. The counter is the low byte of that seed and the UID the high byte, and
+the UID does not change between packets: a wrong hypothesis scatters the
+solved high byte over all 256 values, and the right one repeats it.
+`crates/nodes/examples/elrs_crack.rs` is that test, and no binding phrase is
+needed to run it. Against thirty packets off the bench, every arrangement of
+the SX127x interleaver scored 0.13 or below where chance is 0.004 and a
+correct answer would be 1.0, which is the evidence that the coding really is
+something else.
+
+The cheap way to settle it is to make an SX1280 encode payloads we choose:
+
+1. Any SX1280 or SX1281 on an SPI bus. An Ebyte E28-2G4M12S on a spare ESP32
+   header, or a spare ExpressLRS receiver reflashed, since an RP1 is an
+   ESP8285 wired to an SX1281 and its pin map is in the ExpressLRS target
+   definitions. RadioLib drives the family and takes the long interleave flag
+   on `setCodingRate`, and `../sub-ghz-modem` already links RadioLib, so this
+   is a board variant rather than new protocol code.
+2. Configure it as the link does: SF7, 812.5 kHz, CR_LI 4/8, 12 symbol
+   preamble, implicit header, 13 byte payload.
+3. Transmit an all-zero payload first. Whatever comes back out of the dechirp
+   is the whitening sequence by definition, which is one unknown removed.
+4. Then transmit 104 payloads with exactly one bit set, walking the position.
+   Where each bit lands in the symbols is the interleaver and the Hamming
+   layout, read off rather than searched for.
+5. Record with the HackRF at 2.4 GHz and dechirp with
+   `crates/nodes/examples/elrs_crack.rs`, which already collects symbols per
+   packet. Check the answer against the oracle above on real link traffic
+   before believing it.
 
 ### What we can verify here
 
