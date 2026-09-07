@@ -582,6 +582,13 @@ pub enum Cmd {
     /// Where the receiver is, in degrees, which lets the flight tracker
     /// resolve a position from a single frame instead of waiting for a pair.
     Location(f64, f64),
+    /// Record a survey to this file, or stop. The device database is a node
+    /// on the packet bus, so like the packet log this is a command to the
+    /// radio thread rather than a setting the interface keeps.
+    Survey(Option<std::path::PathBuf>),
+    /// Read the receiver's own position from a GPS, or stop. A survey without
+    /// one records what was heard and no idea where from.
+    Gps(Option<gps::Transport>),
     /// Log every burst the front ends detect to this directory, or stop.
     ///
     /// Sent to the radio thread rather than kept in the interface because the
@@ -1332,6 +1339,20 @@ pub struct Status {
     pub patch_rev: AtomicU64,
     /// Bursts written to the packet log since the receiver started.
     pub logged: AtomicU64,
+    /// What the survey holds, and how many receptions have been attributed to
+    /// a device since the receiver started. Zero when nothing is recording.
+    pub survey_devices: AtomicU64,
+    pub survey_sightings: AtomicU64,
+    pub survey_heard: AtomicU64,
+    /// Whether the GPS link is up, how many fixes it has produced, and the
+    /// last one. Connected and no fix is a receiver indoors.
+    pub gps_connected: AtomicBool,
+    pub gps_fixes: AtomicU64,
+    pub gps_fix: parking_lot::Mutex<Option<gps::Fix>>,
+    /// Satellites used and in view. The one thing worth showing while there
+    /// is no fix: none in view is an antenna unplugged, and a dozen in view
+    /// with none used is an antenna indoors.
+    pub gps_sky: parking_lot::Mutex<Option<gps::Sky>>,
     /// Whether anything is subscribed on the call bus, whether a recorded
     /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
@@ -1480,6 +1501,13 @@ impl Default for Status {
                 SPEED_HISTORY,
             )),
             call_audio: AtomicBool::new(false),
+            survey_devices: AtomicU64::new(0),
+            survey_sightings: AtomicU64::new(0),
+            survey_heard: AtomicU64::new(0),
+            gps_connected: AtomicBool::new(false),
+            gps_fixes: AtomicU64::new(0),
+            gps_fix: parking_lot::Mutex::new(None),
+            gps_sky: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new((None, Vec::new())),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
@@ -1983,6 +2011,10 @@ fn run(
     // is a node and a rebuild can hand back a new one.
     let mut calls = BusSettings::default();
     let mut call_dir: Option<std::path::PathBuf> = None;
+    // The GPS, and where the survey is written. Both outlive a rebuild: the
+    // nodes are replaced with the graph and the settings are not.
+    let mut gps: Option<gps::Source> = None;
+    let mut survey_path: Option<std::path::PathBuf> = None;
     let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
@@ -2339,6 +2371,19 @@ fn run(
                     rx.set_capture(on);
                 }
                 Cmd::Location(lat, lon) => rx.set_location(lat, lon),
+                Cmd::Survey(path) => {
+                    survey_path = path.clone();
+                    rx.set_survey(path);
+                }
+                Cmd::Gps(transport) => {
+                    // Dropping the old source stops its thread, so switching
+                    // transports mid-run does not leave two readers fighting
+                    // over one serial port.
+                    gps = transport.map(|t| gps::Source::start(gps::Config::new(t)));
+                    if gps.is_none() {
+                        rx.set_fix(None);
+                    }
+                }
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
                 Cmd::Feeds(feeds) => {
@@ -2507,6 +2552,8 @@ fn run(
                 r.retune(plan.eff_rate(), plan.center);
             }
             status.logged.store(rx.logged(), Ordering::Relaxed);
+            // A rebuild replaced the survey node with an empty one.
+            rx.set_survey(survey_path.clone());
             // The stage comes back switched off, as the derived graph draws
             // it. A capture running across a retune has to be switched on
             // again, and it starts a new file: the old one's name says which
@@ -2620,6 +2667,22 @@ fn run(
         }
 
         if rx.spectrum_ready() {
+            // The fix is read at the display's rate rather than per block:
+            // a GPS reports once a second and a block is seven milliseconds,
+            // so asking per block is two hundred locks for one new number.
+            if let Some(g) = &gps {
+                let fix = g.fix();
+                status.gps_connected.store(g.connected(), Ordering::Relaxed);
+                status.gps_fixes.store(g.fixes(), Ordering::Relaxed);
+                *status.gps_fix.lock() = fix;
+                *status.gps_sky.lock() = g.sky();
+                rx.set_fix(fix);
+            }
+            if let Some((devices, sightings, heard)) = rx.survey_counts() {
+                status.survey_devices.store(devices, Ordering::Relaxed);
+                status.survey_sightings.store(sightings, Ordering::Relaxed);
+                status.survey_heard.store(heard, Ordering::Relaxed);
+            }
             // Published with the spectrum rather than every block: the table
             // is redrawn at the display's rate, and cloning it 140 times a
             // second for a pane nobody may be looking at is wasted work.
@@ -3263,6 +3326,50 @@ pub(crate) mod tests {
             assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.model);
             assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.model);
         }
+    }
+
+    /// A survey built by replaying the BLE capture through the whole
+    /// receiver, with the GPS saying the receiver was in one place.
+    ///
+    /// The point of the test is the seam between the three parts: the front
+    /// end finds packets, the survey node turns a decode into an identity,
+    /// and the database holds one row per transmitter with the position the
+    /// receiver was at. A device list built from a capture whose contents are
+    /// known is the only way to see all three working at once.
+    #[test]
+    fn a_survey_records_the_devices_heard_and_where_from() {
+        let Some(buf) = ble_fixture() else {
+            eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let fronts =
+            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = fronts;
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("waveshark-survey-{}", std::process::id()));
+        let path = dir.join("survey.sqlite");
+        let _ = std::fs::remove_file(&path);
+        rx.set_survey(Some(path.clone()));
+        rx.set_fix(Some(gps::Fix { lat: 53.6369, lon: -6.6528, hdop: Some(0.9), ..Default::default() }));
+
+        let _ = replay_blocks(&mut rx, &buf);
+        let rows = rx.survey_devices(survey::Query::default());
+        assert!(!rows.is_empty(), "the capture decodes and nothing was recorded");
+        assert!(rows.iter().all(|d| d.protocol == "ble"), "{rows:?}");
+        // The advertiser that dominates this capture.
+        let d = rows
+            .iter()
+            .find(|d| d.ident == "6C:70:CB:EF:72:4D")
+            .unwrap_or_else(|| panic!("the Samsung advertiser is missing: {rows:?}"));
+        assert!(d.packets >= 4, "only {} receptions attributed to it", d.packets);
+        // A sighting says where the receiver was, not where the device is.
+        let s = rx.survey_sightings(d.id);
+        assert!(!s.is_empty());
+        assert_eq!((s[0].lat, s[0].lon), (Some(53.6369), Some(-6.6528)));
+        assert_eq!(d.best_lat, Some(53.6369), "the strongest sighting keeps its position");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tetra_fixture() -> Option<common::IqBuf> {

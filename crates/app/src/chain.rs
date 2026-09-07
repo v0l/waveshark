@@ -36,7 +36,7 @@ use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
 use crate::radio::{ChanMode, ChannelSpec, DecodeRecord, Demod};
 use crate::record::Recorder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Channel width for the OOK bank. Below this the measurements show no further
 /// gain, because the sensor's own bandwidth and its carrier offset start to
@@ -262,8 +262,16 @@ pub struct Receiver {
     bus: Option<NodeId>,
     decode: Option<NodeId>,
     tracks: Option<NodeId>,
+    survey: Option<NodeId>,
+    /// Where the survey is written, if it is. Held as a path rather than an
+    /// open database for the same reason the packet log holds a directory: a
+    /// rebuild replaces the node, and what survives it is the setting.
+    survey_path: Option<PathBuf>,
     /// Where the receiver is, which resolves a position from a single frame.
     location: Option<(f64, f64)>,
+    /// The last fix from the GPS, or `None` when there is none and sightings
+    /// are recorded without a position.
+    fix: Option<gps::Fix>,
     /// Bursts logged before the last rebuild, since the node holding the
     /// count is replaced by each one.
     logged: u64,
@@ -456,6 +464,9 @@ impl Receiver {
             bus: None,
             decode: None,
             tracks: None,
+            survey: None,
+            survey_path: None,
+            fix: None,
             location: None,
             logged: 0,
             center: plan.center,
@@ -854,6 +865,7 @@ impl Receiver {
         let bus = of_kind("packet_bus").first().copied();
         let decode = of_kind("protocols").first().copied();
         let tracks = of_kind("tracks").first().copied();
+        let survey = of_kind("survey").first().copied();
 
         // The bus is the output: everything that is heard leaves through it.
         // Everything else that leaves the graph is read by the port it is
@@ -971,11 +983,18 @@ impl Receiver {
         self.pocsag = pocsag;
         self.m17 = m17;
         self.tracks = tracks;
+        self.survey = survey;
         // A tracker built fresh has to be told where the receiver is, which
         // is what resolves a position from a single frame.
         if let Some((lat, lon)) = self.location {
             self.set_location(lat, lon);
         }
+        // And a survey built fresh has to be reopened and told where the
+        // receiver is now, or a rebuild in the middle of a drive silently
+        // stops recording.
+        self.open_survey();
+        let fix = self.fix;
+        self.set_fix(fix);
         self.modes = modes;
         self.banks = banks
             .into_iter()
@@ -1767,6 +1786,87 @@ impl Receiver {
     }
 
     /// Tell the tracker roughly where the receiver is.
+    /// Start or stop recording a survey. The node stays in the graph either
+    /// way; what changes is whether it has a file.
+    pub fn set_survey(&mut self, path: Option<PathBuf>) {
+        self.survey_path = path;
+        self.open_survey();
+    }
+
+    pub fn survey_path(&self) -> Option<&Path> {
+        self.survey_path.as_deref()
+    }
+
+    fn open_survey(&mut self) {
+        let db = match &self.survey_path {
+            Some(p) => match survey::Db::open(p) {
+                Ok(db) => Some(db),
+                Err(e) => {
+                    self.warnings.push(format!("survey: {e}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(n) = self.survey_node_mut() {
+            n.set_db(db);
+        }
+    }
+
+    /// Where the receiver is now, from the GPS. `None` says the fix went
+    /// stale, and sightings from here on carry no position.
+    pub fn set_fix(&mut self, fix: Option<gps::Fix>) {
+        self.fix = fix;
+        if let Some(n) = self.survey_node_mut() {
+            n.set_fix(fix);
+        }
+        // A moving receiver is also a moving reference for the position of
+        // anything that reports one relative to it.
+        if let Some(f) = fix {
+            self.set_location(f.lat, f.lon);
+        }
+    }
+
+    pub fn fix(&self) -> Option<gps::Fix> {
+        self.fix
+    }
+
+    /// Devices and sightings the survey holds, and how many receptions were
+    /// attributed to a device since the receiver started.
+    pub fn survey_counts(&self) -> Option<(u64, u64, u64)> {
+        let n = self.survey_node()?;
+        let db = n.db()?;
+        let (devices, sightings) = db.counts().ok()?;
+        Some((devices, sightings, n.heard()))
+    }
+
+    /// The survey's rows, for a pane that draws them.
+    pub fn survey_devices(&self, q: survey::Query) -> Vec<survey::Device> {
+        self.survey_node()
+            .and_then(|n| n.db())
+            .and_then(|db| db.devices(q).ok())
+            .unwrap_or_default()
+    }
+
+    /// Every sighting of one device, which is the trail it was heard along.
+    pub fn survey_sightings(&self, device: i64) -> Vec<survey::Sighting> {
+        self.survey_node()
+            .and_then(|n| n.db())
+            .and_then(|db| db.sightings(device).ok())
+            .unwrap_or_default()
+    }
+
+    fn survey_node(&self) -> Option<&nodes::SurveyNode> {
+        self.survey.and_then(|id| downcast::<nodes::SurveyNode>(&self.graph, id))
+    }
+
+    fn survey_node_mut(&mut self) -> Option<&mut nodes::SurveyNode> {
+        self.survey
+            .and_then(|id| self.graph.node_mut(id))
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::SurveyNode>())
+    }
+
     pub fn set_location(&mut self, lat: f64, lon: f64) {
         self.location = Some((lat, lon));
         if let Some(n) = self
@@ -1997,6 +2097,7 @@ pub mod derived {
     pub const PROTOCOLS: u64 = Patch::DERIVED_BASE + 6;
     pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
     pub const CAPTURE: u64 = Patch::DERIVED_BASE + 8;
+    pub const SURVEY: u64 = Patch::DERIVED_BASE + 14;
     pub const AUDIO: u64 = Patch::DERIVED_BASE + 9;
     /// The transmit chain: its clock, what is modulated, the modulator, and
     /// the radio at the end of it.
@@ -2364,6 +2465,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
             p.connect(Source::Stage(bus, 0), (t, 0));
         }
+
+        // The device database is another consumer of the bus, and it is in
+        // the graph whether or not a survey is being recorded: opening the
+        // file is a setting on a node that is already there, so turning it on
+        // mid-drive does not rebuild the receiver under the packets.
+        let survey = p.add_derived(derived::SURVEY, "survey", Settings::new());
+        p.connect(Source::Stage(bus, 0), (survey, 0));
     }
 
     p
@@ -3021,6 +3129,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "high_blend" => "High blend".into(),
         "protocols" => "Protocols".into(),
         "tracks" => "Tracks".into(),
+        "survey" => "Devices".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
         "wfm_demod" => "WFM demod".into(),

@@ -651,9 +651,97 @@ impl App {
         hint(ui, t("settings.position.help"));
         ui.add_space(10.0);
 
+        self.gps_settings(ui);
+
         ui.separator();
         ui.add_space(6.0);
         Self::data_settings(ui);
+    }
+
+    /// Where the position comes from, and what the survey does with it.
+    ///
+    /// Under the station position rather than in a pane of its own, because
+    /// a GPS is not a feature of the device database: it is the other way of
+    /// answering the question the box above asks, and a receiver that is
+    /// moving should say so where somebody would go to type a position by
+    /// hand.
+    fn gps_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label(legend("GPS"));
+        let mut set: Option<Option<gps::Transport>> = None;
+        ui.horizontal(|ui| {
+            let text = self
+                .survey
+                .gps_edit
+                .get_or_insert_with(|| {
+                    self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default()
+                });
+            let r = ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(190.0)
+                    .hint_text("/dev/ttyACM0 or gpsd:localhost")
+                    .font(FontId::new(12.0, FontFamily::Name(theme::READOUT_FONT.into()))),
+            );
+            let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if typed || ui.small_button("SET").clicked() {
+                set = Some(gps::Transport::parse(text));
+            }
+            if self.survey.gps.is_some() && ui.small_button("OFF").clicked() {
+                text.clear();
+                set = Some(None);
+            }
+        });
+        if let Some(t) = set {
+            self.set_gps(t);
+            self.survey.gps_edit = None;
+        }
+        // What the link is doing, which is three different states an operator
+        // has to be able to tell apart: nothing configured, a receiver
+        // talking but with no sky, and a real fix.
+        let line = match self.radio.as_ref() {
+            None => "no radio running".to_string(),
+            Some(r) => {
+                use std::sync::atomic::Ordering;
+                let fix = *r.status.gps_fix.lock();
+                let sky = *r.status.gps_sky.lock();
+                let connected = r.status.gps_connected.load(Ordering::Relaxed);
+                let fixes = r.status.gps_fixes.load(Ordering::Relaxed);
+                match (self.survey.gps.is_some(), connected, fix) {
+                    (false, _, _) => "off: the station position is whatever is typed above".into(),
+                    (true, _, Some(f)) => {
+                        let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
+                        format!("{:.5}, {:.5}{sats}, {fixes} fixes", f.lat, f.lon)
+                    }
+                    // Waiting says nothing on its own: an antenna indoors and
+                    // an antenna unplugged look the same for the first
+                    // minute, and the satellite counts tell them apart.
+                    (true, true, None) => match sky {
+                        Some(s) => format!(
+                            "connected, no fix yet: {} of {} satellites used",
+                            s.used, s.seen
+                        ),
+                        None => "connected, waiting for a fix".into(),
+                    },
+                    (true, false, None) => "not connected: check the port or that gpsd is up".into(),
+                }
+            }
+        };
+        hint(ui, &line);
+        ui.add_space(6.0);
+
+        // The survey is what a position is for, and the switch belongs beside
+        // it rather than three panes away.
+        let mut on = self.survey.path.is_some();
+        if ui.checkbox(&mut on, "Record a device database").changed() {
+            self.set_survey(!on, None);
+        }
+        match self.survey.path.as_ref() {
+            Some(p) => hint(ui, &format!("one row per transmitter heard, in {}", p.display())),
+            None => hint(
+                ui,
+                "one row per transmitter heard, with the places it was heard from.                  The packet log keeps the transmissions; this keeps the transmitters",
+            ),
+        }
+        ui.add_space(10.0);
     }
 
     /// What is in the dataset cache, and the button that goes and asks.

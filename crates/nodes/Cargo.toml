@@ -11,6 +11,8 @@ audio.workspace = true
 dsp.workspace = true
 pipeline.workspace = true
 decode.workspace = true
+gps.workspace = true
+survey.workspace = true
 # AMBE/IMBE vocoder for the DMR node. Off by default: the algorithm is
 # patent-encumbered (see crates/mbe). Without it the DMR node still reads
 # signalling and shows who is talking, but decodes no speech.

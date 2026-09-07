@@ -302,6 +302,7 @@ dependencies = [
  "dsp",
  "eframe",
  "egui",
+ "gps",
  "hackrf",
  "image",
  "iqnet",
@@ -314,6 +315,7 @@ dependencies = [
  "reqwest",
  "rtlsdr",
  "sources",
+ "survey",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1854,6 +1856,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gps"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "libc",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2719,11 +2731,13 @@ dependencies = [
  "common",
  "decode",
  "dsp",
+ "gps",
  "mbe",
  "pipeline",
  "poll-promise",
  "rayon",
  "sources",
+ "survey",
  "tracing",
 ]
 
@@ -4338,6 +4352,14 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "survey"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "rusqlite",
+]
 
 [[package]]
 name = "syn"

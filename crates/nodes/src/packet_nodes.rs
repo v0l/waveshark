@@ -86,173 +86,233 @@ impl PacketDecodeNode {
     }
 
     fn decode_burst(&mut self, p: &Packet, pkg: &common::Package, modulation: &'static str) {
-        let center = common::Hz(p.center_hz);
-        let mut matched = false;
-        // A protocol that fails is not reported. A CRC failure in particular
-        // is a protocol saying "those were my timings but the reception was
-        // not good enough", which is worth knowing while tuning a chain and
-        // is noise in a packet list.
-        for (_, res) in self.protocols.diagnose(pkg) {
-            if let Ok(report) = res {
-                matched = true;
-                self.hits.push(
-                    decoded_event(&report, pkg, center, modulation)
-                        .with_bandwidth(p.bandwidth_hz as f64)
-                        .with_iq(p.iq.clone()),
-                );
-                if !self.report_all {
-                    break;
-                }
-            }
+        decode_burst_into(
+            &self.protocols,
+            Options { report_all: self.report_all, report_unknown: self.report_unknown },
+            p,
+            pkg,
+            modulation,
+            &mut self.hits,
+        );
+    }
+
+    fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
+        decode_frame_into(p, bytes, &mut self.hits);
+    }
+}
+
+/// What to report about a burst. A preference rather than a fact about the
+/// packet: a packet list wants every protocol that claimed a burst, and a
+/// survey wants one identity per transmission.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub report_all: bool,
+    pub report_unknown: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { report_all: true, report_unknown: true }
+    }
+}
+
+/// Decode one packet off the bus.
+///
+/// A free function because more than one consumer decodes. A node cannot see
+/// another node's events, so the survey cannot read the packet list's rows,
+/// and decoding twice is a few microseconds on a burst the DSP already spent
+/// milliseconds finding. The alternative is one node reaching into another.
+pub fn decode_packet(protocols: &Protocols, opts: Options, p: &Packet) -> Vec<Decoded> {
+    let mut out = Vec::new();
+    match &p.body {
+        PacketBody::Pulses(_) => {
+            let Some(pkg) = p.package() else { return out };
+            let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
+                Some(m) => m.modulation,
+                None if p.bandwidth_hz > 60_000 => "FSK",
+                None => "OOK",
+            });
+            decode_burst_into(protocols, opts, p, &pkg, modulation, &mut out);
         }
-        if !matched && self.report_unknown {
-            // The keying column shows what the classifier measured where it
-            // is more specific than the front end that read the burst: a
-            // chirp or a carrier that no front end reads, or a burst it
-            // could not name at all.
-            let label = match p.measure.as_ref().map(|m| m.modulation) {
-                Some(l) if l != "unknown" => l,
-                _ => modulation,
-            };
-            self.hits.push(
-                unmatched_event(pkg, center, label, p.measure.as_ref())
+        PacketBody::Frame(bytes) => decode_frame_into(p, bytes, &mut out),
+    }
+    out
+}
+
+fn decode_burst_into(
+    protocols: &Protocols,
+    opts: Options,
+    p: &Packet,
+    pkg: &common::Package,
+    modulation: &'static str,
+    hits: &mut Vec<Decoded>,
+) {
+    let center = common::Hz(p.center_hz);
+    let mut matched = false;
+    // A protocol that fails is not reported. A CRC failure in particular
+    // is a protocol saying "those were my timings but the reception was
+    // not good enough", which is worth knowing while tuning a chain and
+    // is noise in a packet list.
+    for (_, res) in protocols.diagnose(pkg) {
+        if let Ok(report) = res {
+            matched = true;
+            hits.push(
+                decoded_event(&report, pkg, center, modulation)
                     .with_bandwidth(p.bandwidth_hz as f64)
                     .with_iq(p.iq.clone()),
             );
+            if !opts.report_all {
+                break;
+            }
         }
+    }
+    if !matched && opts.report_unknown {
+        // The keying column shows what the classifier measured where it
+        // is more specific than the front end that read the burst: a
+        // chirp or a carrier that no front end reads, or a burst it
+        // could not name at all.
+        let label = match p.measure.as_ref().map(|m| m.modulation) {
+            Some(l) if l != "unknown" => l,
+            _ => modulation,
+        };
+        hits.push(
+            unmatched_event(pkg, center, label, p.measure.as_ref())
+                .with_bandwidth(p.bandwidth_hz as f64)
+                .with_iq(p.iq.clone()),
+        );
+    }
+}
+
+/// A frame from a demodulator that produces bytes.
+///
+/// Mode S and AIS both arrive here as bytes with nothing to distinguish
+/// them, so the packet's own centre frequency does it. That is not a tag
+/// somebody attached: where a frame was received is evidence the packet
+/// already carries, and a 162 MHz frame is not a Mode S frame no matter
+/// what its bits would parse as.
+///
+/// Parsing again here rather than carrying the demodulator's own parse on
+/// the bus is deliberate: what travels is the evidence, and every consumer
+/// draws its own conclusions from it.
+fn decode_frame_into(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
+    // A frame demodulator reads bits, not power, so its decodes carry no
+    // level of their own. The source they came from was measured,
+    // though, and that SNR belongs on every row this frame produces: a
+    // pager page with a blank SNR column looks weaker than a sensor
+    // reading beside it, which is backwards. RSSI stays absent, since
+    // what the detector has is a ratio and not an absolute level.
+    //
+    // The samples the frame was read from and the width it was heard
+    // through travel the same way: they are the packet's, and every row
+    // made of the packet carries them. A row without them is a
+    // conclusion with its evidence left behind.
+    let start = hits.len();
+    frame_rows(p, bytes, hits);
+    for d in &mut hits[start..] {
+        if d.snr_db.is_none() && p.snr_db.is_finite() {
+            d.snr_db = Some(p.snr_db);
+        }
+        if d.rssi_dbfs.is_none() && p.rssi_dbfs.is_finite() {
+            d.rssi_dbfs = Some(p.rssi_dbfs);
+        }
+        if d.iq.is_none() {
+            d.iq = p.iq.clone();
+        }
+        if d.audio.is_none() {
+            d.audio = p.audio.clone();
+        }
+        if d.bandwidth_hz.is_none() && p.bandwidth_hz > 0 {
+            d.bandwidth_hz = Some(f64::from(p.bandwidth_hz));
+        }
+    }
     }
 
-    /// A frame from a demodulator that produces bytes.
-    ///
-    /// Mode S and AIS both arrive here as bytes with nothing to distinguish
-    /// them, so the packet's own centre frequency does it. That is not a tag
-    /// somebody attached: where a frame was received is evidence the packet
-    /// already carries, and a 162 MHz frame is not a Mode S frame no matter
-    /// what its bits would parse as.
-    ///
-    /// Parsing again here rather than carrying the demodulator's own parse on
-    /// the bus is deliberate: what travels is the evidence, and every consumer
-    /// draws its own conclusions from it.
-    fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
-        // A frame demodulator reads bits, not power, so its decodes carry no
-        // level of their own. The source they came from was measured,
-        // though, and that SNR belongs on every row this frame produces: a
-        // pager page with a blank SNR column looks weaker than a sensor
-        // reading beside it, which is backwards. RSSI stays absent, since
-        // what the detector has is a ratio and not an absolute level.
-        //
-        // The samples the frame was read from and the width it was heard
-        // through travel the same way: they are the packet's, and every row
-        // made of the packet carries them. A row without them is a
-        // conclusion with its evidence left behind.
-        let start = self.hits.len();
-        self.decode_frame_inner(p, bytes);
-        for d in &mut self.hits[start..] {
-            if d.snr_db.is_none() && p.snr_db.is_finite() {
-                d.snr_db = Some(p.snr_db);
-            }
-            if d.rssi_dbfs.is_none() && p.rssi_dbfs.is_finite() {
-                d.rssi_dbfs = Some(p.rssi_dbfs);
-            }
-            if d.iq.is_none() {
-                d.iq = p.iq.clone();
-            }
-            if d.audio.is_none() {
-                d.audio = p.audio.clone();
-            }
-            if d.bandwidth_hz.is_none() && p.bandwidth_hz > 0 {
-                d.bandwidth_hz = Some(f64::from(p.bandwidth_hz));
-            }
-        }
+fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
+    let center = common::Hz(p.center_hz);
+    // M17 is the one protocol here that its own frequency cannot
+    // identify: it runs wherever an amateur puts it, which includes the
+    // 2 m channels APRS uses and the 70 cm ones near the pager bands. So
+    // it is recognised by shape instead, and tried first because that
+    // shape is the most specific claim any of these make: a tagged event
+    // of an exact length, carrying a link setup frame whose CRC checks.
+    if let Some(d) = crate::m17_nodes::m17_decoded(bytes, center) {
+        // The speech travelled with the packet rather than in its bytes,
+        // and this is the row it belongs to.
+        hits.push(d.with_audio(p.audio.clone()));
+        return;
     }
-
-    fn decode_frame_inner(&mut self, p: &Packet, bytes: &[u8]) {
-        let center = common::Hz(p.center_hz);
-        // M17 is the one protocol here that its own frequency cannot
-        // identify: it runs wherever an amateur puts it, which includes the
-        // 2 m channels APRS uses and the 70 cm ones near the pager bands. So
-        // it is recognised by shape instead, and tried first because that
-        // shape is the most specific claim any of these make: a tagged event
-        // of an exact length, carrying a link setup frame whose CRC checks.
-        if let Some(d) = crate::m17_nodes::m17_decoded(bytes, center) {
-            // The speech travelled with the packet rather than in its bytes,
-            // and this is the row it belongs to.
-            self.hits.push(d.with_audio(p.audio.clone()));
-            return;
-        }
-        // DMR is another shape-identified mode: like M17 it runs wherever it
-        // is put, so it is recognised by its own tagged body rather than by
-        // band. Its voice travels with the packet too.
-        if let Some(d) = crate::dmr_nodes::dmr_decoded(bytes, center) {
-            self.hits.push(d.with_audio(p.audio.clone()));
-            return;
-        }
-        // LoRa is the other one its frequency cannot identify: the same
-        // chirp is legal at 433, 868 and 915 MHz and none of those bands is
-        // only LoRa. The front end tags what it read with the parameters it
-        // read it at, so the claim here is a tag plus a spreading factor, a
-        // bandwidth and a coding rate that all have to be ones LoRa defines.
-        if let Some(d) = crate::lora_nodes::lora_decoded(bytes, center) {
-            self.hits.push(d);
-            return;
-        }
-        // A TETRA broadcast identifies itself twice over: it arrives from a
-        // downlink band, and its bytes are a tagged PDU that had to pass the
-        // standard's own CRC to exist at all.
-        if dsp::tetra::is_downlink_band(p.center_hz as f64) {
-            if let Some(d) = crate::tetra_nodes::tetra_decoded(bytes, center) {
-                self.hits.push(d);
-            }
-            return;
-        }
-        // A BLE advertisement arrives tagged with the advertising channel it
-        // was received on, which is a frequency nothing else here transmits
-        // a frame from.
-        if crate::ble_nodes::is_advertising_channel(p.center_hz as f64) {
-            if let Some(d) = crate::ble_nodes::ble_decoded(bytes, center) {
-                self.hits.push(d);
-            }
-            return;
-        }
-        if dsp::ais::is_ais_band(p.center_hz as f64) {
-            let Ok(frame) = decode::ais::parse(bytes) else { return };
-            self.hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
-            return;
-        }
-        // The 2 m packet channels. Wherever the scanner put APRS, a frame
-        // from it arrives tagged with that channel rather than 1090.
-        //
-        // Tested before the pager bands because 144 to 146 MHz is inside the
-        // VHF paging allocation. Two protocols really do share that spectrum,
-        // and the narrower window is the more specific claim.
-        if dsp::afsk::is_packet_band(p.center_hz as f64) {
-            let Ok(frame) = decode::ax25::parse(bytes) else { return };
-            self.hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
-            return;
-        }
-        // A pager transmission is codewords rather than one frame, so it can
-        // become several rows: a transmitter empties its queue in one go.
-        if dsp::pocsag::is_pager_band(p.center_hz as f64) {
-            self.hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
-            return;
-        }
-        // Meters: the 868.95 MHz uplink and the older 868.3 MHz mode.
-        if dsp::wmbus::is_wmbus_band(p.center_hz as f64) {
-            if let Some(d) = crate::wmbus_nodes::wmbus_decoded(bytes, center) {
-                self.hits.push(d);
-            }
-            return;
-        }
-        let Ok(frame) = adsb::parse(bytes) else { return };
-        let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
-        // A local demodulator reports no level for a frame it has already
-        // accepted, but a Beast feed carries one, and dropping it would make
-        // a remote receiver's frames look weaker than nothing.
-        if p.rssi_dbfs.is_finite() {
-            d = d.with_level(p.rssi_dbfs, p.snr_db);
-        }
-        self.hits.push(d);
+    // DMR is another shape-identified mode: like M17 it runs wherever it
+    // is put, so it is recognised by its own tagged body rather than by
+    // band. Its voice travels with the packet too.
+    if let Some(d) = crate::dmr_nodes::dmr_decoded(bytes, center) {
+        hits.push(d.with_audio(p.audio.clone()));
+        return;
     }
+    // LoRa is the other one its frequency cannot identify: the same
+    // chirp is legal at 433, 868 and 915 MHz and none of those bands is
+    // only LoRa. The front end tags what it read with the parameters it
+    // read it at, so the claim here is a tag plus a spreading factor, a
+    // bandwidth and a coding rate that all have to be ones LoRa defines.
+    if let Some(d) = crate::lora_nodes::lora_decoded(bytes, center) {
+        hits.push(d);
+        return;
+    }
+    // A TETRA broadcast identifies itself twice over: it arrives from a
+    // downlink band, and its bytes are a tagged PDU that had to pass the
+    // standard's own CRC to exist at all.
+    if dsp::tetra::is_downlink_band(p.center_hz as f64) {
+        if let Some(d) = crate::tetra_nodes::tetra_decoded(bytes, center) {
+            hits.push(d);
+        }
+        return;
+    }
+    // A BLE advertisement arrives tagged with the advertising channel it
+    // was received on, which is a frequency nothing else here transmits
+    // a frame from.
+    if crate::ble_nodes::is_advertising_channel(p.center_hz as f64) {
+        if let Some(d) = crate::ble_nodes::ble_decoded(bytes, center) {
+            hits.push(d);
+        }
+        return;
+    }
+    if dsp::ais::is_ais_band(p.center_hz as f64) {
+        let Ok(frame) = decode::ais::parse(bytes) else { return };
+        hits.push(crate::ais_nodes::ais_decoded(&frame, bytes, center));
+        return;
+    }
+    // The 2 m packet channels. Wherever the scanner put APRS, a frame
+    // from it arrives tagged with that channel rather than 1090.
+    //
+    // Tested before the pager bands because 144 to 146 MHz is inside the
+    // VHF paging allocation. Two protocols really do share that spectrum,
+    // and the narrower window is the more specific claim.
+    if dsp::afsk::is_packet_band(p.center_hz as f64) {
+        let Ok(frame) = decode::ax25::parse(bytes) else { return };
+        hits.push(crate::aprs_nodes::aprs_decoded(&frame, bytes, center));
+        return;
+    }
+    // A pager transmission is codewords rather than one frame, so it can
+    // become several rows: a transmitter empties its queue in one go.
+    if dsp::pocsag::is_pager_band(p.center_hz as f64) {
+        hits.extend(crate::pocsag_nodes::pocsag_decoded(bytes, center));
+        return;
+    }
+    // Meters: the 868.95 MHz uplink and the older 868.3 MHz mode.
+    if dsp::wmbus::is_wmbus_band(p.center_hz as f64) {
+        if let Some(d) = crate::wmbus_nodes::wmbus_decoded(bytes, center) {
+            hits.push(d);
+        }
+        return;
+    }
+    let Ok(frame) = adsb::parse(bytes) else { return };
+    let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
+    // A local demodulator reports no level for a frame it has already
+    // accepted, but a Beast feed carries one, and dropping it would make
+    // a remote receiver's frames look weaker than nothing.
+    if p.rssi_dbfs.is_finite() {
+        d = d.with_level(p.rssi_dbfs, p.snr_db);
+    }
+    hits.push(d);
 }
 
 impl Simple for PacketDecodeNode {
