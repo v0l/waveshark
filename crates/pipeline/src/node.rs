@@ -179,6 +179,24 @@ pub trait Node: Send + 'static {
         &[]
     }
 
+    /// The band this node is reading right now, in hertz, when it has taken
+    /// one: `(lo, hi)`, absolute.
+    ///
+    /// A claim, not a preference. `None`, the default, means the node is
+    /// reading whatever it is given and nothing is owed to it. A front end
+    /// that has locked onto a transmission returns the extent of what it is
+    /// reading, and whatever placed it stops looking inside that band: the
+    /// runs in there are pieces of the thing already being read, and opening
+    /// them again spends an extraction and a set of decoders to report the
+    /// same signal twice, or worse, to invent devices out of it.
+    ///
+    /// Asked of every front end rather than known about a few, so a front end
+    /// written later says what it has taken in the same words. The auto node
+    /// keeps no list of which ones can.
+    fn claimed_hz(&self) -> Option<(f64, f64)> {
+        None
+    }
+
     /// Seconds of silence this node needs after a transmission to finish
     /// with it: what a decoder that ends an over on a timeout has to hear
     /// before it says the over ended. A quarter second unless a node says
@@ -248,6 +266,10 @@ pub trait Simple: Send {
     fn channels(&self) -> &'static [f64] {
         &[]
     }
+    /// See [`Node::claimed_hz`].
+    fn claimed_hz(&self) -> Option<(f64, f64)> {
+        None
+    }
     /// See [`Node::flush_s`].
     fn flush_s(&self) -> f64 {
         0.25
@@ -285,6 +307,9 @@ impl<T: Simple + 'static> Node for T {
     }
     fn channels(&self) -> &'static [f64] {
         Simple::channels(self)
+    }
+    fn claimed_hz(&self) -> Option<(f64, f64)> {
+        Simple::claimed_hz(self)
     }
     fn flush_s(&self) -> f64 {
         Simple::flush_s(self)
