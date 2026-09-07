@@ -15,7 +15,7 @@
 //! channel is read and the port carries the band instead, because a frame
 //! cannot then be placed by the port alone.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::ble as pdu;
@@ -245,9 +245,25 @@ impl Protocol for Ble {
             // themselves, and four a symbol is where the packet count stops
             // moving.
             min_rate_hz: 4_000_000.0,
+            feed_rate_hz: 8_000_000.0,
             span_wide: true,
             families: &[],
         }
+    }
+    /// Advertising channel 38, which sits in the gap between the Wi-Fi
+    /// channels and is the one of the three least often buried.
+    fn default_hz(&self) -> f64 {
+        2_426_000_000.0
+    }
+    fn stage_label(&self, hz: f64) -> String {
+        format!("{:.0} BLE", hz / 1e6)
+    }
+    fn marks(&self, hz: f64) -> Vec<Mark> {
+        let label = match channel_of(hz) {
+            Some(ch) => format!("BLE {ch}"),
+            None => "BLE".into(),
+        };
+        vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label }]
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("ble")]

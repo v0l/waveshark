@@ -309,12 +309,16 @@ impl Protocol for Video {
             // PAL luma reaches 5 MHz with the colour subcarrier at 4.43, so
             // a slower stream cannot be carrying a picture.
             min_rate_hz: 12e6,
+            feed_rate_hz: 12e6,
             span_wide: true,
             families: &[],
         }
     }
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim
+    }
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Video]
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("video")]

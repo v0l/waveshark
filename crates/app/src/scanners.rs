@@ -83,66 +83,51 @@ pub enum Front {
     Auto,
     /// Channelize the span and run the protocol tables over every channel.
     Banks(Vec<f64>),
-    /// The 1090 MHz wideband envelope demodulator.
-    ModeS,
-    /// Both 162 MHz channels, GMSK.
-    Ais,
-    /// Narrowband FM into Bell 202 AFSK, and AX.25 above it. Carries the
-    /// channel, since APRS is on a different frequency in each region.
-    Aprs(f64),
-    /// One paging channel, NRZ FSK at whichever of the three POCSAG rates it
-    /// turns out to be. Carries the channel, because paging allocations are
-    /// national and there is no frequency worth compiling in.
-    Pocsag(f64),
-    /// One M17 channel: narrowband FM into 4-FSK at 4800 baud. Carries the
-    /// channel for the same reason APRS does, and more so: M17 runs wherever
-    /// an amateur puts it.
-    M17(f64),
-    /// One BLE advertising channel: GFSK at 1 Mbit/s, dewhitened and checked.
-    /// Carries the channel because the three of them are 24 and 54 MHz apart
-    /// and no receiver here samples wide enough to hold two at once.
-    Ble(f64),
-    /// One GSM carrier: the frequency correction tone, then the cell identity
-    /// and frame number in the synchronisation burst after it. Carries the
-    /// channel because a beacon is wherever the operator put it, and there
-    /// are 174 of them in the 900 downlink alone.
-    Gsm(f64),
+    /// One protocol's decoder, pinned where the block says. A protocol that
+    /// reads one channel carries the channel, since paging allocations are
+    /// national and M17 runs wherever an amateur puts it; one that reads a
+    /// span carries the middle of what it reads. Nothing here knows which
+    /// protocols exist: the registry in `nodes::protocol` does.
+    Protocol { id: &'static str, hz: f64 },
 }
 
-/// The amateur DAPNET channel, used until a block says otherwise. Amateur
-/// rather than commercial because it is the one paging frequency that is the
-/// same across Europe.
-pub const DEFAULT_POCSAG_HZ: f64 = 439_987_500.0;
-
-/// Where APRS is across Europe, used until a block says otherwise. North
-/// America is 144.390 and Japan 144.640.
-pub const DEFAULT_APRS_HZ: f64 = 144_800_000.0;
-
-/// The M17 calling frequency in Region 1, used until a block says otherwise.
-pub const DEFAULT_M17_HZ: f64 = 433_475_000.0;
-
-/// Advertising channel 38, which sits in the gap between the Wi-Fi channels
-/// and is the one of the three least often buried.
-pub const DEFAULT_BLE_HZ: f64 = 2_426_000_000.0;
-
-/// The middle of the E-GSM 900 downlink, used until a block says otherwise.
-/// A beacon has no frequency worth compiling in: which carriers a network
-/// uses is licensed per operator and per country.
-pub const DEFAULT_GSM_HZ: f64 = nodes::gsm_nodes::DEFAULT_HZ;
+/// Words the file has accepted for a protocol besides its own name.
+const ALIASES: [(&str, &str); 6] = [
+    ("modes", "mode_s"),
+    ("mode-s", "mode_s"),
+    ("adsb", "mode_s"),
+    ("pager", "pocsag"),
+    ("bluetooth", "ble"),
+    ("gsm-sch", "gsm"),
+];
 
 impl Front {
+    /// A protocol by registry name, at its own default frequency.
+    pub fn named(id: &str) -> Option<Front> {
+        let p = nodes::protocol::by_id(id)?;
+        Some(Front::Protocol { id: p.id(), hz: p.default_hz() })
+    }
+
+    /// A protocol by registry name, on a channel.
+    pub fn protocol(id: &str, hz: f64) -> Front {
+        let p = nodes::protocol::by_id(id).unwrap_or_else(|| panic!("no protocol {id:?}"));
+        Front::Protocol { id: p.id(), hz }
+    }
+
+    /// The protocol behind this front end, for one that is one.
+    pub fn proto(&self) -> Option<&'static dyn nodes::Protocol> {
+        match self {
+            Front::Protocol { id, .. } => nodes::protocol::by_id(id),
+            _ => None,
+        }
+    }
+
     /// The word this front end is written as in the file.
     pub fn key(&self) -> &'static str {
         match self {
             Front::Auto => "auto",
             Front::Banks(_) => "banks",
-            Front::ModeS => "modes",
-            Front::Ais => "ais",
-            Front::Aprs(_) => "aprs",
-            Front::Pocsag(_) => "pocsag",
-            Front::M17(_) => "m17",
-            Front::Ble(_) => "ble",
-            Front::Gsm(_) => "gsm",
+            Front::Protocol { id, .. } => id,
         }
     }
 
@@ -151,69 +136,54 @@ impl Front {
         match self {
             Front::Auto => "auto",
             Front::Banks(_) => "banks",
-            Front::ModeS => "mode s",
-            Front::Ais => "ais",
-            Front::Aprs(_) => "aprs",
-            Front::Pocsag(_) => "pager",
-            Front::M17(_) => "m17",
-            Front::Ble(_) => "ble",
-            Front::Gsm(_) => "gsm",
+            Front::Protocol { .. } => self.proto().map_or("?", |p| p.label()),
         }
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 9] {
-        [
-            Front::Auto,
-            Front::ModeS,
-            Front::Ais,
-            Front::Aprs(DEFAULT_APRS_HZ),
-            Front::Pocsag(DEFAULT_POCSAG_HZ),
-            Front::M17(DEFAULT_M17_HZ),
-            Front::Ble(DEFAULT_BLE_HZ),
-            Front::Gsm(DEFAULT_GSM_HZ),
-            Front::Banks(DEFAULT_WIDTHS.to_vec()),
-        ]
+    pub fn all() -> Vec<Front> {
+        let mut out = vec![Front::Auto];
+        out.extend(
+            nodes::protocol::all()
+                .iter()
+                .map(|p| Front::Protocol { id: p.id(), hz: p.default_hz() }),
+        );
+        out.push(Front::Banks(DEFAULT_WIDTHS.to_vec()));
+        out
     }
 
     /// Whether this front end demodulates one named channel, so a block
     /// listing several means one of these per channel.
     ///
     /// The others are about a band: `auto` searches it, a bank channelizes it,
-    /// Mode S and AIS have one allocation each and find their own traffic
-    /// inside it.
+    /// and a protocol placed by band, such as AIS with its two channels, is
+    /// one decoder over all of it.
     pub fn per_channel(&self) -> bool {
-        matches!(
-            self,
-            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_) | Front::Gsm(_)
-        )
+        self.proto()
+            .is_some_and(|p| !matches!(p.placement(), nodes::Placement::Bands(_)))
     }
 
     /// The same front end moved to another channel.
     fn at(&self, hz: f64) -> Front {
         match self {
-            Front::Aprs(_) => Front::Aprs(hz),
-            Front::Pocsag(_) => Front::Pocsag(hz),
-            Front::M17(_) => Front::M17(hz),
-            Front::Ble(_) => Front::Ble(hz),
-            Front::Gsm(_) => Front::Gsm(hz),
+            Front::Protocol { id, .. } if self.per_channel() => Front::Protocol { id, hz },
             other => other.clone(),
         }
     }
 
     fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "auto" | "sources" | "scan" => Some(Front::Auto),
-            "banks" => Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
-            "modes" | "mode-s" | "adsb" => Some(Front::ModeS),
-            "ais" => Some(Front::Ais),
-            "aprs" => Some(Front::Aprs(DEFAULT_APRS_HZ)),
-            "pocsag" | "pager" => Some(Front::Pocsag(DEFAULT_POCSAG_HZ)),
-            "m17" => Some(Front::M17(DEFAULT_M17_HZ)),
-            "ble" | "bluetooth" => Some(Front::Ble(DEFAULT_BLE_HZ)),
-            "gsm" | "gsm-sch" => Some(Front::Gsm(DEFAULT_GSM_HZ)),
-            _ => None,
+        let s = s.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "auto" | "sources" | "scan" => return Some(Front::Auto),
+            "banks" => return Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
+            _ => {}
         }
+        let id = ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == s)
+            .map(|(_, id)| *id)
+            .unwrap_or(s.as_str());
+        Front::named(id)
     }
 }
 
@@ -618,9 +588,8 @@ impl Scanner {
         // several listed it is the first, and the rest become their own front
         // ends when the span covers them.
         let Some(&c) = self.channels.first() else { return };
-        match &mut self.front {
-            Front::Aprs(f) | Front::Pocsag(f) | Front::M17(f) => *f = c,
-            _ => {}
+        if self.front.per_channel() {
+            self.front = self.front.at(c);
         }
     }
 }
@@ -679,11 +648,12 @@ pub const HEADER: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | m17 | ble | banks
-#   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
-#             one demodulator per channel, and run for each channel the span
-#             covers; ais needs both of its, so it runs only when the span
-#             holds both
+#   front     auto | banks | a protocol: modes, ais, aprs, pocsag, m17, dmr,
+#             tetra, gsm, ble, lora, wmbus, video
+#   channels  frequencies to demodulate (optional). A protocol that reads one
+#             channel is one demodulator per channel, and runs for each
+#             channel the span covers; ais needs both of its, so it runs only
+#             when the span holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
 #   version   which shipped table this file was written from; blocks added
@@ -705,11 +675,12 @@ pub const DEFAULT_TEXT: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | m17 | ble | banks
-#   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
-#             one demodulator per channel, and run for each channel the span
-#             covers; ais needs both of its, so it runs only when the span
-#             holds both
+#   front     auto | banks | a protocol: modes, ais, aprs, pocsag, m17, dmr,
+#             tetra, gsm, ble, lora, wmbus, video
+#   channels  frequencies to demodulate (optional). A protocol that reads one
+#             channel is one demodulator per channel, and runs for each
+#             channel the span covers; ais needs both of its, so it runs only
+#             when the span holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
 #   version   which shipped table this file was written from; blocks added
@@ -1003,7 +974,7 @@ mod tests {
         // here, so it is a place to put one rather than a place one is.
         let gsm = s.list.iter().find(|x| x.name == "GSM").unwrap();
         assert!(!gsm.enabled);
-        assert_eq!(gsm.front, Front::Gsm(947_400_000.0));
+        assert_eq!(gsm.front, Front::protocol("gsm", 947_400_000.0));
     }
 
     /// Every licence-free allocation the ribbon draws has a block that scans
@@ -1077,10 +1048,10 @@ mod tests {
         let fronts = |c: f64, r: f64| -> Vec<Front> {
             s.fronts(c, r).into_iter().map(|f| f.front).collect()
         };
-        assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::ModeS]);
-        assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::Ais]);
-        assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::Aprs(144_800_000.0)]);
-        assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::Pocsag(439_987_500.0)]);
+        assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::named("mode_s").unwrap()]);
+        assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::named("ais").unwrap()]);
+        assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::protocol("aprs", 144_800_000.0)]);
+        assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::protocol("pocsag", 439_987_500.0)]);
         // M17 has no channel of its own to list: it runs wherever an amateur
         // puts it, and `auto` finds it there. A block naming one frequency
         // would decode that frequency and miss every other.
@@ -1104,7 +1075,7 @@ mod tests {
         // Widen that last span until it reaches the packet channel 700 kHz
         // away, though, and APRS runs: the receiver is sampling it either
         // way, and the dial is only where somebody is looking.
-        assert_eq!(kinds(&s.fronts(145_500_000.0, 2_400_000.0)), [Front::Aprs(144_800_000.0)]);
+        assert_eq!(kinds(&s.fronts(145_500_000.0, 2_400_000.0)), [Front::protocol("aprs", 144_800_000.0)]);
     }
 
     /// A span too narrow for the front end is not that front end.
@@ -1113,7 +1084,7 @@ mod tests {
         let s = Scanners::default();
         // Mode S bits are 1 us wide and need 2 MS/s.
         assert!(s.fronts(1_090_000_000.0, 1_024_000.0).is_empty());
-        assert_eq!(kinds(&s.fronts(1_090_000_000.0, 2_048_000.0)), [Front::ModeS]);
+        assert_eq!(kinds(&s.fronts(1_090_000_000.0, 2_048_000.0)), [Front::named("mode_s").unwrap()]);
     }
 
     /// The channel test is what the AIS gate used to be: both channels have to
@@ -1124,7 +1095,7 @@ mod tests {
         // Centred on one channel with 60 kHz: the other is 50 kHz away and
         // the span reaches only 30 kHz, so it is outside.
         assert!(s.fronts(161_975_000.0, 60_000.0).is_empty());
-        assert_eq!(kinds(&s.fronts(162_000_000.0, 200_000.0)), [Front::Ais]);
+        assert_eq!(kinds(&s.fronts(162_000_000.0, 200_000.0)), [Front::named("ais").unwrap()]);
     }
 
     /// The span decides, not the dial. A pager channel 200 kHz off the
@@ -1135,9 +1106,9 @@ mod tests {
         let s = Scanners::default();
         // Tuned 200 kHz below the DAPNET channel, which the old rule would
         // have refused because the dial sits outside the block's range.
-        assert_eq!(kinds(&s.fronts(439_787_500.0, 2_400_000.0)), [Front::Pocsag(439_987_500.0)]);
+        assert_eq!(kinds(&s.fronts(439_787_500.0, 2_400_000.0)), [Front::protocol("pocsag", 439_987_500.0)]);
         // And AIS from a dial parked on marine voice a megahertz away.
-        assert_eq!(kinds(&s.fronts(161_000_000.0, 2_400_000.0)), [Front::Ais]);
+        assert_eq!(kinds(&s.fronts(161_000_000.0, 2_400_000.0)), [Front::named("ais").unwrap()]);
     }
 
     /// Everything the span covers runs. Which of two protocols a receiver
@@ -1151,7 +1122,7 @@ mod tests {
              channels = 153.55 MHz\nmargin = 8 kHz\n",
         );
         let fronts = kinds(&s.fronts(153_450_000.0, 1_000_000.0));
-        assert_eq!(fronts, [Front::Pocsag(153_350_000.0), Front::Aprs(153_550_000.0)]);
+        assert_eq!(fronts, [Front::protocol("pocsag", 153_350_000.0), Front::protocol("aprs", 153_550_000.0)]);
     }
 
     /// Two blocks asking for the same thing are one front end. A duplicate
@@ -1195,7 +1166,7 @@ mod tests {
             "[APRS]\nrange = 144.38 - 144.40 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
-        assert_eq!(kinds(&s.fronts(144_390_000.0, 500_000.0)), [Front::Aprs(144_390_000.0)]);
+        assert_eq!(kinds(&s.fronts(144_390_000.0, 500_000.0)), [Front::protocol("aprs", 144_390_000.0)]);
         assert!(s.fronts(144_800_000.0, 500_000.0).is_empty(), "the European one is gone");
     }
 
@@ -1208,14 +1179,14 @@ mod tests {
             "[Pagers]\nrange = 153 - 154 MHz\nspan = 100 kHz\nfront = pocsag\n\
              channels = 153.35 MHz\nmargin = 12.5 kHz\n",
         );
-        assert_eq!(s.list[0].front, Front::Pocsag(153_350_000.0));
+        assert_eq!(s.list[0].front, Front::protocol("pocsag", 153_350_000.0));
         // And in the other order, since a hand-written block may write
         // either key first.
         let s = Scanners::parse(
             "[Pagers]\nchannels = 153.35 MHz\nrange = 153 - 154 MHz\nspan = 100 kHz\n\
              front = pocsag\n",
         );
-        assert_eq!(s.list[0].front, Front::Pocsag(153_350_000.0));
+        assert_eq!(s.list[0].front, Front::protocol("pocsag", 153_350_000.0));
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //! pipelines. This node is the wiring, exactly as `PulseDetectNode` is the
 //! wiring around `dsp::OokDetector`.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
@@ -435,9 +435,16 @@ impl Protocol for ModeS {
             widths: &[2_000_000.0],
             // Its bits are a microsecond wide; the detector refuses slower.
             min_rate_hz: 2_000_000.0,
+            feed_rate_hz: 2_400_000.0,
             span_wide: true,
             families: &[],
         }
+    }
+    fn stage_label(&self, _hz: f64) -> String {
+        "1090 Mode S".into()
+    }
+    fn marks(&self, hz: f64) -> Vec<Mark> {
+        vec![Mark { hz, width_hz: self.shape().widths[0], label: "Mode S".into() }]
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("mode_s")]

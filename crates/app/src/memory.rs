@@ -173,10 +173,9 @@ pub fn mode_from(s: &str) -> Option<ChanMode> {
         "lsb" => ChanMode::Audio(Demod::Lsb),
         "cw" => ChanMode::Audio(Demod::Cw),
         "auto" => ChanMode::Auto,
-        _ => {
-            crate::chain::front_width(&l)?;
-            ChanMode::Decode(l)
-        }
+        // A protocol, by the name the file writes (its label) or the one
+        // the registry knows it by.
+        _ => ChanMode::Decode(crate::chain::front_kind(&l)?.to_string()),
     })
 }
 

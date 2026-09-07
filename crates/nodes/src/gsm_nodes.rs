@@ -15,7 +15,7 @@
 //! a front end that quietly follows the tuning is one that says it heard a
 //! cell where there is none.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
@@ -168,9 +168,6 @@ impl Simple for GsmNode {
     /// One 200 kHz carrier, which is what makes this a front end something
     /// can place rather than one that has to be named here: the auto node
     /// asks a source's width and puts this on the ones that match.
-    fn channels(&self) -> &'static [f64] {
-        &[CHANNEL_WIDTH_HZ]
-    }
 
     fn reset(&mut self) {
         self.det.reset();
@@ -466,10 +463,35 @@ impl Protocol for Gsm {
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
+            // Three samples a symbol is the floor the detector refuses
+            // below; fed by band it is given four, since the burst is
+            // sampled where the training sequence says, not where a sample
+            // happens to land, so the interpolator wants something to work
+            // with.
+            min_rate_hz: gsm::SYMBOL_RATE * 3.0,
+            feed_rate_hz: 1_200_000.0,
             span_wide: false,
             families: &[],
         }
+    }
+    /// The middle of the E-GSM 900 downlink. A beacon has no frequency
+    /// worth compiling in: which carriers a network uses is licensed per
+    /// operator and per country.
+    fn default_hz(&self) -> f64 {
+        DEFAULT_HZ
+    }
+    fn stage_label(&self, hz: f64) -> String {
+        match gsm::arfcn(hz) {
+            Some(n) => format!("ARFCN {n}"),
+            None => format!("{:.1} GSM", hz / 1e6),
+        }
+    }
+    fn marks(&self, hz: f64) -> Vec<Mark> {
+        let label = match gsm::arfcn(hz) {
+            Some(n) => format!("GSM {n}"),
+            None => "GSM".into(),
+        };
+        vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label }]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("gsm").f("channel_hz", at.center_hz)]

@@ -958,9 +958,18 @@ impl Protocol for Lora {
         Shape {
             widths: &BANDWIDTHS_HZ,
             min_rate_hz: 0.0,
+            feed_rate_hz: 0.0,
             span_wide: false,
             families: &[dsp::Modulation::Chirp],
         }
+    }
+    /// The Meshtastic EU_868 slot, which is where a LoRa packet heard in
+    /// Europe most often is.
+    fn default_hz(&self) -> f64 {
+        869_525_000.0
+    }
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Packets]
     }
     fn accepts_width(&self, source_width_hz: f64) -> bool {
         !bandwidths_for(source_width_hz).is_empty()

@@ -163,9 +163,6 @@ impl Node for M17Node {
         "m17"
     }
 
-    fn channels(&self) -> &'static [f64] {
-        &[CHANNEL_WIDTH_HZ]
-    }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
@@ -484,9 +481,17 @@ impl Protocol for M17 {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: CHANNEL_WIDTH_HZ,
+            feed_rate_hz: 192_000.0,
             span_wide: false,
             families: &[],
         }
+    }
+    /// The M17 calling frequency in Region 1.
+    fn default_hz(&self) -> f64 {
+        DEFAULT_HZ
+    }
+    fn outputs(&self) -> &'static [PortKind] {
+        &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("m17").f("channel_hz", at.center_hz)]

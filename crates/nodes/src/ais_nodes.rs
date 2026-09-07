@@ -10,7 +10,7 @@
 //! what reaches the bus is bytes that proved themselves, and the parsing that
 //! happens downstream is reading rather than acceptance.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::ais::{self, Message};
@@ -276,10 +276,25 @@ impl Protocol for Ais {
             widths: &[CHANNEL_HZ[1] - CHANNEL_HZ[0] + 2.0 * CHANNEL_WIDTH_HZ],
             // The detector mixes both channels itself and wants room between
             // them, so this stays well above their separation.
-            min_rate_hz: 600_000.0,
+            min_rate_hz: 150_000.0,
+            feed_rate_hz: 600_000.0,
             span_wide: true,
             families: &[],
         }
+    }
+    fn stage_label(&self, _hz: f64) -> String {
+        "162 AIS".into()
+    }
+    fn marks(&self, _hz: f64) -> Vec<Mark> {
+        CHANNEL_HZ
+            .iter()
+            .enumerate()
+            .map(|(i, hz)| Mark {
+                hz: *hz,
+                width_hz: CHANNEL_WIDTH_HZ,
+                label: format!("AIS {}", if i == 0 { "A" } else { "B" }),
+            })
+            .collect()
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("ais")]

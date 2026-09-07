@@ -626,13 +626,13 @@ impl Strip<'_> {
                                         r.on_hover_text(
                                             "find and decode everything inside this channel's bandwidth",
                                         );
-                                        // The front ends that read one
-                                        // channel, asked of the registry
-                                        // rather than listed here: picking
-                                        // one runs that decoder on this
-                                        // frequency alone, which is what
-                                        // makes a single channel readable
-                                        // with the scanner switched off.
+                                        // Every protocol the registry
+                                        // knows, rather than a list kept
+                                        // here: picking one runs that
+                                        // decoder on this frequency alone,
+                                        // which is what makes a single
+                                        // channel readable with the scanner
+                                        // switched off.
                                         for (kind, width) in crate::chain::channel_fronts() {
                                             let want = ChanMode::Decode(kind.to_string());
                                             let on = ch.mode == want;
@@ -644,10 +644,14 @@ impl Strip<'_> {
                                                 ch.mode = want;
                                                 tune = Some(i);
                                             }
+                                            let width = if width >= 1e6 {
+                                                format!("{:.1} MHz", width / 1e6)
+                                            } else {
+                                                format!("{:.1} kHz", width / 1e3)
+                                            };
                                             r.on_hover_text(format!(
-                                                "decode this frequency as {} in a {:.1} kHz channel",
+                                                "decode this frequency as {} in a {width} channel",
                                                 crate::chain::front_label(kind),
-                                                width / 1e3,
                                             ));
                                         }
                                     });
