@@ -357,6 +357,7 @@ mod tests {
             label: Some(label.into()),
             width: 4,
             height: 288,
+            aspect: 4.0 / 3.0,
             pixels: Pixels::Luma8,
             samples: std::sync::Arc::new(vec![0u8; 4 * 288]),
             lines_seen: lines,

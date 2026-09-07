@@ -467,6 +467,13 @@ pub struct VideoFrame {
     pub label: Option<String>,
     pub width: usize,
     pub height: usize,
+    /// How wide the picture is against its height when drawn.
+    ///
+    /// Not `width` over `height`: how many samples a line was cut into is a
+    /// fact about the receiver's clock, and a field is half a frame. Both
+    /// analogue standards are 4:3, and a picture drawn from the sample grid
+    /// instead came out squeezed in from the sides.
+    pub aspect: f32,
     pub pixels: Pixels,
     pub samples: std::sync::Arc<Vec<u8>>,
     /// Rows that were actually received, out of `height`.
