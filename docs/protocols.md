@@ -24,6 +24,7 @@ that turns radio into symbols, and there are only a few of those.
 | discriminator plus three bit clocks, `dsp::pocsag` | NRZ FSK bits at 512, 1200 or 2400 | yes | no |
 | discriminator plus Bell 202, `dsp::afsk` | 1200 baud bits over FM | yes | no |
 | GMSK with timing recovery, `dsp::ais` | 9600 baud bits | yes | no |
+| coherent GMSK on a training sequence, `dsp::gsm` | GSM burst bits at 270.833 kbaud | yes | no |
 | 100 kchip/s FSK, 3-of-6 and NRZ, `dsp::wmbus` | meter frame bits | yes | no |
 | pulse-position at 1 Mbit/s, `dsp::modes` | Mode S frames | yes | no |
 | differential PSK on a training sequence, `dsp::tetra` | soft symbols | yes | no |
@@ -359,7 +360,9 @@ A DMR radio ID is a number until one of those says whose it is.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| GSM downlink control | 900/1800 MHz | GMSK 270.833 kbps | 200 kHz | demod | mod | Broadcast channels carry cell identity in the clear; traffic uses A5 ciphers, so only the control plane is decodable without attacking them |
+| GSM synchronisation channel | 850/900/1800/1900 MHz | GMSK 270.833 kbps | 200 kHz | synthetic | mod | `dsp::gsm` finds the frequency correction burst by the variance of its phase advance, which is a tone a quarter of the symbol rate up, and reads the synchronisation burst one TDMA frame later: the cell's identity code and the frame number, behind ten bits of parity that decide whether a burst happened at all. The tone also measures the tuner's error, which the burst after it needs to a few hundred hertz. Checked on synthetic RF only: no recording of a real cell yet |
+| GSM broadcast control | as above | as above | 200 kHz | framing | mod | The next step up from the SCH and a larger one: a normal burst needs an equaliser over its 26 bit training sequence rather than the one path assumption that serves a beacon, and the BCCH above it needs the 05.03 block code, the four burst interleave and LAPDm. Cell identity, location area and neighbour lists are all in the clear there |
+| GSM traffic | as above | as above | 200 kHz | chain | chain | A5/1 and A5/3 stand in the way, and past the cipher it is a stack rather than a decoder |
 | LTE / 5G | various | OFDM | 1.4-100 MHz | chain | chain | Cell search and MIB decode is possible in principle; past that it is a stack, not a decoder |
 
 ## Time and beacons

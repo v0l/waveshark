@@ -25,6 +25,7 @@ pub mod scope_nodes;
 pub mod bank_node;
 pub mod filter_nodes;
 pub mod frame_meter;
+pub mod gsm_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
@@ -257,6 +258,19 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "gsm",
+            summary: "One GSM carrier: the frequency correction tone, then the \
+                      synchronisation burst's cell identity and frame number",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let n = gsm_nodes::GsmNode::new(s.f64_or("offset_hz", 0.0), Default::default());
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
     );
 
     r.register(
