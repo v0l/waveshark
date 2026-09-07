@@ -1971,6 +1971,15 @@ const BUS_TAILS: [&str; 12] = [
 /// wire to draw.
 const VOICE_TAILS: [(&str, usize); 4] = [("m17", 1), ("tetra", 1), ("dmr", 1), ("auto", 1)];
 
+/// The stages that produce pictures, and the port each leaves them on.
+///
+/// The video counterpart of [`VOICE_TAILS`] and read the same way: a stage
+/// that decodes video by itself puts it on its only output, and the auto node
+/// puts whatever a source turned out to be on a port of its own, so a camera
+/// it finds reaches the bus without anything here knowing which front end
+/// read it.
+const VIDEO_TAILS: [(&str, usize); 2] = [("video", 0), ("auto", 2)];
+
 /// The port a front end's speech leaves on, if it has any.
 fn voice_port(kind: &str) -> Option<usize> {
     VOICE_TAILS.iter().find(|(k, _)| *k == kind).map(|(_, port)| *port)
@@ -2356,6 +2365,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // be on the bus with the rest. Drawn afterwards, its packets went
     // nowhere: nothing was wired to it and the log stayed empty.
     sync_audio(&mut p, plan);
+    // And everything that produces a picture meets at the video bus, for the
+    // same reason and in the same place.
+    sync_video(&mut p);
 
     // Everything that produces packets meets at the bus, and everything that
     // consumes them hangs off the far side. One input per source: the bus is
@@ -2428,21 +2440,24 @@ const CHAN_STAGES: [&str; 10] = [
 
 /// The video bus, and what feeds it.
 ///
-/// Drawn only when something in the patch produces pictures: a receiver with
-/// no camera in earshot should not carry a bus for one, and an empty bus in
-/// the chain view is a box that says nothing. The moment a video front end is
-/// placed, by the operator or by the scanner table, its output has somewhere
-/// to go, which is what makes a picture reachable without hand wiring.
+/// Drawn whenever something in the patch can produce pictures, which the auto
+/// node always can: it publishes whatever front end it placed on a source, so
+/// a camera it finds reaches the bus without anything here knowing which
+/// front end read it. Exactly the arrangement the audio bus has with voice
+/// ports, and for the same reason: a picture that arrives somewhere other
+/// than the bus is a picture no view can find.
 fn sync_video(p: &mut crate::patch::Patch) {
     use crate::patch::Source;
     use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
 
-    let feeds: Vec<(u64, String)> = p
+    let feeds: Vec<(u64, usize, String)> = p
         .stages()
         .iter()
-        .filter(|st| st.kind == "video")
-        .map(|st| (st.id, stage_label(&st.kind, &st.settings)))
+        .filter_map(|st| {
+            let (_, port) = VIDEO_TAILS.iter().find(|(kind, _)| *kind == st.kind)?;
+            Some((st.id, *port, stage_label(&st.kind, &st.settings)))
+        })
         .collect();
     if feeds.is_empty() {
         p.remove(derived::VIDEO);
@@ -2451,8 +2466,11 @@ fn sync_video(p: &mut crate::patch::Patch) {
     let bus = derived::VIDEO;
     let mut s: Settings = p.stage(bus).map(|s| s.settings.clone()).unwrap_or_default();
     s.insert("label".into(), V::Text("Video".into()));
-    for (k, (id, label)) in feeds.iter().enumerate() {
-        p.connect(Source::Stage(*id, 0), (bus, k));
+    // The stage has to exist before anything can be wired into it, the way
+    // the audio bus is added before its inputs are drawn.
+    p.add_derived(bus, "video_bus", s.clone());
+    for (k, (id, port, label)) in feeds.iter().enumerate() {
+        p.connect(Source::Stage(*id, *port), (bus, k));
         s.entry(format!("label{k}")).or_insert(V::Text(label.clone()));
     }
     // One spare, the way the audio bus keeps one, so a chain drawn by hand
@@ -3936,6 +3954,10 @@ mod tests {
         };
         assert!(to(derived::BUS, 0), "its packets never reach the log");
         assert!(to(derived::AUDIO, 1), "its speech never reaches the mixer");
+        // And whatever it finds that produces a picture, on the port it
+        // publishes those on: the video bus is where a camera it opened lands,
+        // with nothing here knowing which front end read it.
+        assert!(to(derived::VIDEO, 2), "its pictures never reach the video bus");
 
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert_eq!(rx.channels().len(), 1);

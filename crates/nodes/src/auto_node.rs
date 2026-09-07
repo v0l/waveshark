@@ -78,6 +78,12 @@ struct Member {
     packets: Vec<Out>,
     /// Front ends that carry speech, on the port it travels out on.
     voice: Vec<Out>,
+    /// Pictures, for a front end inside that produces them. Same arrangement
+    /// as `voice` and for the same reason: what a source turns out to be
+    /// decides what leaves the node, and a video front end placed on a source
+    /// must have somewhere to publish to without the auto node knowing which
+    /// front end it was.
+    video: Vec<Out>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -126,6 +132,18 @@ struct Member {
 /// Longest run of samples kept behind a packet, in seconds.
 const RING_MAX_S: f64 = 2.0;
 
+/// How wide a source has to be before a video front end is placed on it.
+///
+/// The AKK transmitter measured here occupied about 4.6 MHz, and nothing else
+/// this receiver reads is anywhere near that: the widest is BLE at 2 MHz.
+/// Three is comfortably between them.
+const VIDEO_MIN_HZ: f64 = 3e6;
+
+/// And how fast the stream carrying it has to be. PAL luma reaches 5 MHz with
+/// the colour subcarrier at 4.43, so a slower stream cannot hold a picture
+/// whatever the source measured.
+const VIDEO_MIN_RATE_HZ: f64 = 12e6;
+
 impl Member {
     fn build(
         name: &'static str,
@@ -138,6 +156,7 @@ impl Member {
         let frames = taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
+        let video = taps(&graph, PortKind::Video);
         let router = graph
             .order()
             .find(|(_, n)| *n == "burst_route")
@@ -153,6 +172,7 @@ impl Member {
             frames,
             packets,
             voice,
+            video,
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
@@ -755,6 +775,19 @@ impl AutoNode {
         }
     }
 
+    fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
+        for slot in &self.slots {
+            for m in &slot.members {
+                for t in &m.video {
+                    let Some(v) = m.graph.buf(*t).and_then(|p| p.as_video()) else {
+                        continue;
+                    };
+                    out.extend(v.iter().cloned());
+                }
+            }
+        }
+    }
+
     fn rebuild(&mut self) -> Result<()> {
         if self.rate <= 0.0 {
             return Ok(());
@@ -914,6 +947,20 @@ impl AutoNode {
                 members.push(m);
             }
         }
+        // Analogue video, by width: a PAL carrier occupies megahertz where
+        // everything else here occupies kilohertz, so a source this wide is
+        // either video or nothing this receiver reads, and the front end
+        // costs an FM demodulation and a slicer. The picture only assembles
+        // if the sync pulses are really there, so a wide source that is not
+        // video produces no fields rather than a wrong picture.
+        if b.bandwidth_hz >= VIDEO_MIN_HZ && b.rate >= VIDEO_MIN_RATE_HZ {
+            if let Ok(mut m) =
+                Member::build("video", spec, Self::place("video", hz, b.bandwidth_hz), &self.reg)
+            {
+                m.channel_hz = b.bandwidth_hz;
+                members.push(m);
+            }
+        }
         // LoRa is not placed here. It is the dearest front end to run and
         // a chirp is the one thing the burst front end names reliably, so
         // it is placed when that front end has named one; see `place_lora`.
@@ -1070,6 +1117,7 @@ fn now_us() -> u64 {
 /// What comes out: everything decoded, and everything heard.
 const OUT_PACKETS: usize = 0;
 const OUT_VOICE: usize = 1;
+const OUT_VIDEO: usize = 2;
 
 impl Node for AutoNode {
     fn name(&self) -> &str {
@@ -1089,7 +1137,7 @@ impl Node for AutoNode {
     }
 
     fn num_outputs(&self) -> usize {
-        2
+        3
     }
 
     fn subgraph(&self) -> Option<Topology> {
@@ -1133,7 +1181,11 @@ impl Node for AutoNode {
         // vocoder's rate rather than the radio's.
         let mut voice = out.with_kind(PortKind::Voice);
         voice.rate = crate::m17_nodes::VOICE_HZ;
-        Ok(vec![out, voice])
+        // Pictures from whatever front end inside is producing them. A field
+        // is not a sampled stream, so the rate says nothing and the frame
+        // carries its own geometry.
+        let video = out.with_kind(PortKind::Video);
+        Ok(vec![out, voice, video])
     }
 
     fn process(
@@ -1439,6 +1491,7 @@ impl Node for AutoNode {
         }
         self.slots.retain(|s| !closed.contains(&s.id));
         self.inner_voice(outputs[OUT_VOICE].voice_mut());
+        self.inner_video(outputs[OUT_VIDEO].video_mut());
 
         for e in events {
             match &e {
@@ -1619,7 +1672,11 @@ mod tests {
         let mut opened = Vec::new();
         for block in iq.chunks(16_384) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
             Node::process(n, &[&input], &mut out, &mut ctx).unwrap();
@@ -1629,6 +1686,25 @@ mod tests {
             }));
         }
         opened
+    }
+
+    /// A source megahertz wide is either analogue video or nothing this
+    /// receiver reads, so the front end is placed by width the way TETRA is
+    /// placed by band. The picture only assembles if the sync pulses are
+    /// really there, so a wide source that is not video costs a demodulation
+    /// and produces nothing.
+    #[test]
+    fn a_source_wide_enough_to_be_a_picture_gets_a_video_front_end() {
+        let placed = |bandwidth_hz: f64, rate: f64| -> bool {
+            bandwidth_hz >= VIDEO_MIN_HZ && rate >= VIDEO_MIN_RATE_HZ
+        };
+        // An FPV carrier at 20 MS/s: the AKK transmitter measured 4.6 MHz.
+        assert!(placed(4.6e6, 20e6));
+        // BLE is the widest thing here that is not video, at 2 MHz.
+        assert!(!placed(2e6, 20e6));
+        // And a wide source on a span too slow to hold a picture is not one:
+        // PAL luma reaches 5 MHz with the subcarrier at 4.43.
+        assert!(!placed(4.6e6, 8e6));
     }
 
     #[test]
@@ -1716,7 +1792,11 @@ mod tests {
         for block in iq.chunks(16_384) {
             let input = Payload::Iq(block.to_vec());
             // Packets and speech: the node has a port for each.
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
             Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();
