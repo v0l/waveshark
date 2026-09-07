@@ -242,6 +242,11 @@ impl Demod {
         self.cfg.sf
     }
 
+    /// Whether this reads a transmitter that swaps I and Q.
+    pub fn inverted(&self) -> bool {
+        self.cfg.inverted
+    }
+
     /// Dechirp one symbol-length window and find the tone. `up_ref` selects
     /// the reference: an upchirp window is read against the conjugate sweep,
     /// a downchirp against the sweep itself.
