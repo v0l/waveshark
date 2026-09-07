@@ -46,6 +46,41 @@ impl PacketDecodeNode {
         Self { protocols, report_all: true, report_unknown: true, hits: Vec::new() }
     }
 
+    /// Decode a batch of packets exactly as the bus does.
+    ///
+    /// Public because the bus is not the only source of packets: a directory
+    /// rebuilt from the packet log has to reach the same conclusions as the
+    /// receiver did when the packets were live, and two implementations of
+    /// "what protocol is this" would drift apart the first time one was
+    /// fixed.
+    pub fn decode_all(&mut self, packets: &[Packet]) {
+        self.hits.clear();
+        for p in packets {
+            match &p.body {
+                PacketBody::Pulses(_) => {
+                    let Some(pkg) = p.package() else { continue };
+                    // Which keying a burst arrived under is not something the
+                    // protocols can tell, and it belongs in the packet list's
+                    // own column: a device that exists in both an OOK and an
+                    // FSK variant decodes the same either way.
+                    //
+                    // Measured where a classifier saw the burst. The fallback
+                    // is the channel width the packet arrived through, which
+                    // is only ever a guess: the wide tier carries plenty of
+                    // on-off keyed sensors, and this used to label every one
+                    // of them FSK.
+                    let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
+                        Some(m) => m.modulation,
+                        None if p.bandwidth_hz > 60_000 => "FSK",
+                        None => "OOK",
+                    });
+                    self.decode_burst(p, &pkg, modulation);
+                }
+                PacketBody::Frame(bytes) => self.decode_frame(p, bytes),
+            }
+        }
+    }
+
     pub fn hits(&self) -> &[Decoded] {
         &self.hits
     }
@@ -237,38 +272,13 @@ impl Simple for PacketDecodeNode {
     }
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        self.hits.clear();
         let packets: Vec<Packet> = i.as_packets().unwrap_or(&[]).to_vec();
-        for p in &packets {
-            match &p.body {
-                PacketBody::Pulses(_) => {
-                    let Some(pkg) = p.package() else { continue };
-                    // Which keying a burst arrived under is not something the
-                    // protocols can tell, and it belongs in the packet list's
-                    // own column: a device that exists in both an OOK and an
-                    // FSK variant decodes the same either way.
-                    //
-                    // Measured where a classifier saw the burst. The fallback
-                    // is the channel width the packet arrived through, which
-                    // is only ever a guess: the wide tier carries plenty of
-                    // on-off keyed sensors, and this used to label every one
-                    // of them FSK.
-                    let modulation = p.modulation.unwrap_or(match p.measure.as_ref() {
-                        Some(m) => m.modulation,
-                        None if p.bandwidth_hz > 60_000 => "FSK",
-                        None => "OOK",
-                    });
-                    self.decode_burst(p, &pkg, modulation);
-                }
-                PacketBody::Frame(bytes) => self.decode_frame(p, bytes),
-            }
-        }
+        self.decode_all(&packets);
         for d in &self.hits {
             c.emit(Event::Decoded(d.clone()));
         }
         Ok(())
     }
-
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool("report_all", self.report_all).label("Report every matching protocol"),
