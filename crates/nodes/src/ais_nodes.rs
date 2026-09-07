@@ -117,6 +117,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
     // The identity every message carries, and the field that turns a stream of
     // them into tracks.
     fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
+    fields.push(("from".into(), Value::Text(frame.mmsi.to_string())));
 
     let protocol = match &frame.kind {
         Message::Position(p) => {

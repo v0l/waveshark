@@ -167,6 +167,7 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
     let mut fields: Vec<(String, Value)> = Vec::new();
     if let Some(icao) = frame.icao {
         fields.push(("icao".into(), Value::Text(format!("{icao:06x}"))));
+        fields.push(("from".into(), Value::Text(format!("{icao:06x}"))));
     }
     let protocol = match &frame.kind {
         Message::Identification { callsign, category } => {
