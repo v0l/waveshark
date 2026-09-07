@@ -261,7 +261,7 @@ fn parse_extended_header(body: &[u8]) -> Option<(usize, Option<Address>, Option<
     let mut at = 2usize;
     let mut adv_a = None;
     let mut aux = None;
-    let mut take = |n: usize, at: &mut usize| -> Option<&[u8]> {
+    let take = |n: usize, at: &mut usize| -> Option<&[u8]> {
         let s = body.get(*at..*at + n)?;
         *at += n;
         Some(s)
