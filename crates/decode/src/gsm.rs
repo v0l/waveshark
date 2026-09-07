@@ -217,6 +217,73 @@ fn pages(type_id: u8, body: &[u8]) -> Vec<Identity> {
     out
 }
 
+/// The channel a network has just granted a phone.
+///
+/// An immediate assignment is the reply to a phone that asked for a channel,
+/// so it says where a transaction is about to happen: which timeslot on
+/// which carrier, or which hopping sequence, and how far away the phone is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// What kind of channel, as the standard names them.
+    pub kind: &'static str,
+    /// Subchannel within it, where the kind has several.
+    pub subchannel: u8,
+    /// Timeslot in the TDMA frame, zero to seven.
+    pub timeslot: u8,
+    /// Which training sequence the channel uses.
+    pub tsc: u8,
+    /// The channel number, where the channel does not hop.
+    pub arfcn: Option<u16>,
+    /// The hopping sequence and this channel's offset in it, where it does.
+    pub hopping: Option<(u8, u8)>,
+    /// Timing advance the network told the phone to use, in bit periods.
+    ///
+    /// A measurement rather than a setting: it is how long the phone's burst
+    /// took to arrive, so it is the distance to it. One unit is a bit period,
+    /// which light covers in about 554 metres there and back.
+    pub timing_advance: u8,
+}
+
+impl Grant {
+    /// How far away the phone is, in metres, as the timing advance measures
+    /// it. Coarse by construction: the whole scale is 64 steps of 554 m.
+    pub fn distance_m(&self) -> u32 {
+        u32::from(self.timing_advance) * 554
+    }
+}
+
+/// Read the channel description and what follows it, 3GPP TS 44.018 sections
+/// 10.5.2.5 and 9.1.18.
+fn grant(body: &[u8]) -> Option<Grant> {
+    let d = body.get(1..4)?;
+    // The first octet is the same layout the A-bis interface uses for a
+    // channel number: a variable length type field with the timeslot in the
+    // low three bits.
+    let (kind, subchannel) = match d[0] >> 3 {
+        0b00001 => ("TCH/F", 0),
+        v if v >> 1 == 0b0001 => ("TCH/H", v & 1),
+        v if v >> 2 == 0b001 => ("SDCCH/4", v & 3),
+        v if v >> 3 == 0b01 => ("SDCCH/8", v & 7),
+        0b10000 => ("BCCH", 0),
+        0b10010 => ("CCCH", 0),
+        _ => return None,
+    };
+    let hopping = d[1] & 0x10 != 0;
+    Some(Grant {
+        kind,
+        subchannel,
+        timeslot: d[0] & 0x07,
+        tsc: d[1] >> 5,
+        arfcn: (!hopping).then(|| u16::from(d[1] & 0x03) << 8 | u16::from(d[2])),
+        // Four bits of the offset in the second octet and two in the third,
+        // then the hopping sequence number.
+        hopping: hopping.then(|| ((d[1] & 0x0F) << 2 | d[2] >> 6, d[2] & 0x3F)),
+        // Page mode octet, channel description, request reference, then the
+        // timing advance.
+        timing_advance: body.get(7).copied().unwrap_or(0),
+    })
+}
+
 /// A message off the broadcast channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -240,6 +307,8 @@ pub struct Message {
     pub channels_are_neighbours: bool,
     /// Who a paging request is calling, where the message is one.
     pub pages: Vec<Identity>,
+    /// The channel an immediate assignment grants.
+    pub grant: Option<Grant>,
 }
 
 /// Read a block off the broadcast or common control channel.
@@ -311,6 +380,7 @@ pub fn parse(block: &[u8]) -> Option<Message> {
         // identity it was sent to carry, and the padding after one cannot be
         // mistaken for another, since a second has to arrive behind its tag.
         pages: pages(type_id, &block[3..]),
+        grant: (type_id == 0x3F).then(|| grant(body)).flatten(),
     })
 }
 
@@ -483,6 +553,43 @@ mod tests {
         b.resize(23, 0x2B);
         let m = parse(&b).unwrap();
         assert_eq!(m.pages, vec![Identity::Tmsi(0xAAAA_AAAA), Identity::Tmsi(0xBBBB_BBBB)]);
+    }
+
+    /// An immediate assignment says which channel a phone was sent to and
+    /// how far away it is.
+    #[test]
+    fn an_assignment_names_a_channel_and_a_distance() {
+        // Page mode, then a channel description: SDCCH/8 subchannel 3 on
+        // timeslot 1, training sequence 7, no hopping, channel 56. Then a
+        // request reference and a timing advance of 3.
+        let mut b = vec![0x2D, 0x06, 0x3F, 0x00];
+        b.extend_from_slice(&[0b0101_1001, 0b1110_0000, 56]);
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x03]);
+        b.resize(23, 0x2B);
+        let g = parse(&b).unwrap().grant.expect("a grant");
+        assert_eq!(g.kind, "SDCCH/8");
+        assert_eq!((g.subchannel, g.timeslot, g.tsc), (3, 1, 7));
+        assert_eq!(g.arfcn, Some(56));
+        assert_eq!(g.hopping, None);
+        assert_eq!(g.timing_advance, 3);
+        assert_eq!(g.distance_m(), 1662);
+    }
+
+    /// A hopping channel names a sequence and an offset instead of a
+    /// frequency, and reading the frequency field anyway would report a
+    /// carrier the transaction never touches.
+    #[test]
+    fn a_hopping_grant_names_its_sequence() {
+        let mut b = vec![0x2D, 0x06, 0x3F, 0x00];
+        // TCH/F on timeslot 2, training sequence 5, hopping, offset 9,
+        // sequence 42.
+        b.extend_from_slice(&[0b0000_1010, 0b1011_0010, 0b0110_1010]);
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        b.resize(23, 0x2B);
+        let g = parse(&b).unwrap().grant.unwrap();
+        assert_eq!((g.kind, g.timeslot, g.tsc), ("TCH/F", 2, 5));
+        assert_eq!(g.arfcn, None);
+        assert_eq!(g.hopping, Some((9, 42)));
     }
 
     #[test]

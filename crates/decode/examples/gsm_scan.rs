@@ -117,13 +117,33 @@ fn main() {
         if paged > 0 {
             eprintln!("  paged {paged} times, {permanent} by permanent identity");
         }
+        // Channel grants, summarised the same way: what matters is what the
+        // cell hands out and how far away the phones are, not each one.
+        let mut grants: Vec<decode::gsm::Grant> = Vec::new();
+        for b in &blocks {
+            if let Some(g) = decode::gsm::parse(&b.bytes).and_then(|m| m.grant) {
+                grants.push(g);
+            }
+        }
+        if !grants.is_empty() {
+            let far = grants.iter().map(|g| g.distance_m()).max().unwrap_or(0);
+            let hopping = grants.iter().filter(|g| g.hopping.is_some()).count();
+            let mut kinds: Vec<&str> = grants.iter().map(|g| g.kind).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            eprintln!(
+                "  granted {} channels ({}), {hopping} hopping, furthest phone {far} m",
+                grants.len(),
+                kinds.join(" ")
+            );
+        }
         let mut seen: Vec<String> = Vec::new();
         for b in &blocks {
             let name = match decode_name(&b.bytes) {
                 Some(n) => n,
                 None => continue,
             };
-            if !seen.contains(&name) && !name.starts_with("Paging") {
+            if !seen.contains(&name) && !name.starts_with("Paging") && !name.starts_with("Imm") {
                 if std::env::var("GSM_RAW").is_ok() {
                     eprintln!("  {name}  {:02x?}", b.bytes);
                 } else {
@@ -209,6 +229,15 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
     }
     if let Some(id) = m.cell_id {
         s.push_str(&format!(" CI {id}"));
+    }
+    if let Some(g) = m.grant {
+        s.push_str(&format!(" {} TS {} TA {}", g.kind, g.timeslot, g.timing_advance));
+        if let Some(n) = g.arfcn {
+            s.push_str(&format!(" ARFCN {n}"));
+        }
+        if let Some((maio, hsn)) = g.hopping {
+            s.push_str(&format!(" MAIO {maio} HSN {hsn}"));
+        }
     }
     for p in &m.pages {
         s.push_str(&format!(" {p}"));
