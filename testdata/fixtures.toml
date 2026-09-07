@@ -245,3 +245,46 @@ radio_id = 1_234_567
 call_type = "group"
 overs = 1
 seconds_min = 3.0
+
+[[capture]]
+name = "odid_holybro_2431M_20000k.cs8"
+sha256 = "599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287"
+url = "https://nostr.download/599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287.xz"
+compression = "xz"
+center_hz = 2_431_000_000
+rate_sps = 20_000_000
+format = "cs8"
+description = """
+Open Drone ID over Bluetooth legacy advertising, from a Holybro RemoteID
+module (an ESP32 running ArduRemoteID) on an S500 airframe, on a bench with no
+GPS fix and no flight controller attached. HackRF at 20 MS/s tuned to 2431 MHz,
+which puts advertising channel 38 inside the span and the tuner's DC spike well
+away from it. Six seconds of the band held 78 advertisements that passed the
+link layer's CRC-24, 28 of them from the module.
+
+Cut down from the 234 MB recording to the bursts themselves by
+`crates/nodes/examples/odid_probe.rs`, which keeps 2 ms either side of each
+packet so the level gate still has a floor to measure against. All 28 packets
+come back out of the cut, and the file is a fiftieth of the size.
+
+The evidence is the transmitter's, twice over: every packet passed a CRC-24
+this project did not compute the input to, and the message layout is ASTM
+F3411 as `opendroneid/opendroneid-core-c` implements it. What the module is
+saying is its shipped configuration rather than anything set for the test, so
+the expectations below are deliberately thin: the UAS ID, the ID type, the
+aircraft type, and that a location message arrives with its position marked
+absent. It has no fix, so it says so, and a decoder that reports a position
+here has invented one.
+
+Do not key an expectation on the Bluetooth address. It is a random address and
+it rotated between two recordings ten minutes apart; the UAS ID is what
+identifies the aircraft.
+"""
+
+[capture.expect]
+channel = 38
+packets_min = 20
+uas_id = "123"
+id_type = "utm uuid"
+ua_type = "aeroplane"
+position_reported = false
