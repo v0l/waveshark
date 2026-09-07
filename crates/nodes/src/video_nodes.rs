@@ -16,6 +16,7 @@ use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
 use common::{Pixels, Result, VideoFrame};
 use dsp::video::{find_lines, Lock, Standard, SyncSeparator};
+use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -118,15 +119,6 @@ impl Simple for VideoNode {
         "video"
     }
 
-    /// The whole of what it is reading, which for composite video is the
-    /// whole span: an FM camera carrier at 5.8 GHz occupies the best part of
-    /// twenty megahertz, and every run a detector finds inside it is a piece
-    /// of the picture rather than a signal of its own.
-    fn claimed_hz(&self) -> Option<(f64, f64)> {
-        let locked = self.sep.is_some() && self.lock.is_some();
-        locked.then(|| (self.center_hz - self.rate / 2.0, self.center_hz + self.rate / 2.0))
-    }
-
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("video reads complex baseband"));
@@ -157,7 +149,7 @@ impl Simple for VideoNode {
         Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         // Before the demodulation and not after it: this runs on the whole
         // span, so a span with no camera in it would otherwise FM demodulate
@@ -188,6 +180,18 @@ impl Simple for VideoNode {
             let s = SyncSeparator::new(self.rate, lock.standard, WIDTH);
             self.sep = Some(if self.colour { s.with_colour() } else { s });
             self.lock = Some(lock);
+            // The whole of what it is reading, which for composite video is
+            // the whole span: an FM camera carrier at 5.8 GHz occupies the
+            // best part of twenty megahertz, and every run a detector finds
+            // inside it is a piece of the picture rather than a signal of
+            // its own.
+            c.request(
+                "video",
+                Request::Claim {
+                    lo_hz: self.center_hz - self.rate / 2.0,
+                    hi_hz: self.center_hz + self.rate / 2.0,
+                },
+            );
             // The samples that decided it are still video, so they are read
             // rather than thrown away.
             self.base.splice(0..0, priming);

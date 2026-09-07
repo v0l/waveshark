@@ -25,7 +25,7 @@
 
 use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
-use pipeline::event::Event;
+use pipeline::event::{Event, Request};
 use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
@@ -193,16 +193,6 @@ impl Member {
             noise_pow: f32::NAN,
             verdicts: Vec::new(),
         })
-    }
-
-    /// The band the front end inside says it is reading, if it has taken
-    /// one. Asked of every node in the chain, so a claim can come from the
-    /// demodulator or from a decoder behind it.
-    fn claimed(&self) -> Option<(f64, f64)> {
-        self.graph
-            .order()
-            .filter_map(|(id, _)| self.graph.node(id))
-            .find_map(|n| n.claimed_hz())
     }
 
     /// Run one block through and collect what came out as packets.
@@ -490,6 +480,9 @@ struct Sticky {
     hold_s: Option<f64>,
     /// When something last decoded there, in seconds of stream.
     last_heard_s: f64,
+    /// The channel that asked for this one, as (protocol, centre), for a
+    /// side channel that goes when its parent does.
+    parent: Option<(&'static str, f64)>,
 }
 
 /// Source ids counted down from the top, where the detector's never reach.
@@ -811,51 +804,15 @@ impl AutoNode {
         }
     }
 
-    /// Take whatever the front ends say they are reading, and keep it.
+    /// Whether what the span-wide decoders have claimed covers the whole
+    /// span, since then there is nothing left for the detector to look at.
     ///
-    /// A front end that has locked onto a transmission returns its extent
-    /// from `Node::claimed_hz`, and that band becomes its own: the detector
-    /// is closed out of it and the spectrum draws it, the way a channel
-    /// something decoded on is remembered. Asked of every front end and
-    /// keyed on nothing: a front end written later joins in by answering the
-    /// same question.
-    ///
-    /// Kept once taken, for the session, rather than followed block by
-    /// block. A picture fades and comes back, a call ends and the next one
-    /// starts on the same channel, and a claim that flapped with the signal
-    /// would hand the band back to the detector every time and take it again
-    /// a moment later.
-    ///
-    /// Returns whether what is claimed covers the whole span, since then
-    /// there is nothing left for the detector to look at.
-    fn take_claims(&mut self, out: &mut Vec<Event>) -> bool {
-        let mut changed = false;
-        for m in self.wide.iter_mut() {
-            if m.band.is_some() {
-                continue;
-            }
-            if let Some(band) = m.claimed() {
-                m.band = Some(band);
-                changed = true;
-            }
-        }
-        // A front end placed on a source claims through the same door, and
-        // what it claims is remembered: the channel is cut out for it from
-        // then on, which is what happens when one decodes there.
-        let taken: Vec<(&'static str, f64, f64)> = self
-            .slots
-            .iter()
-            .flat_map(|s| s.members.iter())
-            .filter_map(|m| m.claimed().map(|(lo, hi)| (m.name, (lo + hi) / 2.0, hi - lo)))
-            .collect();
-        for (name, hz, w) in taken {
-            if let Some(e) = self.remember(name, hz, w) {
-                out.push(e);
-            }
-        }
-        if changed {
-            self.apply_locked();
-        }
+    /// A claim is kept once taken, for the session, rather than followed
+    /// block by block. A picture fades and comes back, a call ends and the
+    /// next one starts on the same channel, and a claim that flapped with
+    /// the signal would hand the band back to the detector every time and
+    /// take it again a moment later.
+    fn claimed_whole_span(&self) -> bool {
         let (lo, hi) = (
             self.center.as_f64() - self.input_bw / 2.0,
             self.center.as_f64() + self.input_bw / 2.0,
@@ -864,6 +821,141 @@ impl AutoNode {
             .iter()
             .filter_map(|m| m.band)
             .any(|(a, b)| a <= lo && hi <= b)
+    }
+
+    /// Answer what a decoder asked, and return what only the receiver can
+    /// answer.
+    ///
+    /// `slot` is the source the decoder is on, or None for one over the
+    /// span. A claim closes the detector out of the band; a channel asked
+    /// for is remembered the way one that decoded is, tied to the asker; a
+    /// reshape remembers the wider channel and closes the source it was
+    /// cut from, so the remembered one takes over on the next block; a
+    /// release drops the decoder and lets the band go. Anything that needs
+    /// the dial is handed back.
+    fn answer(
+        &mut self,
+        slot: Option<usize>,
+        stage: &str,
+        r: Request,
+        out: &mut Vec<Event>,
+    ) -> Option<Request> {
+        let warn = |message: String| Event::Warning {
+            stage: stage.to_string(),
+            message,
+        };
+        let half = self.input_bw / 2.0;
+        let c0 = self.center.as_f64();
+        let in_span = |hz: f64, w: f64| (hz - c0).abs() + w / 2.0 <= half;
+        let asker = slot.map(|k| self.slots[k].center_hz as f64);
+        let name = protocol::by_id(stage).map(|p| p.id());
+        let hold_of = |name: &str| match protocol::by_id(name).map(|p| p.stickiness()) {
+            Some(Stickiness::Latch { hold_s }) => hold_s,
+            _ => None,
+        };
+        match r {
+            Request::Claim { lo_hz, hi_hz } => {
+                match slot {
+                    None => {
+                        for m in self.wide.iter_mut().filter(|m| m.name == stage) {
+                            m.band = Some((lo_hz, hi_hz));
+                        }
+                        self.apply_locked();
+                    }
+                    Some(_) => {
+                        if let Some(name) = name {
+                            let (hz, w) = ((lo_hz + hi_hz) / 2.0, hi_hz - lo_hz);
+                            if let Some(e) = self.remember(name, hz, w) {
+                                out.push(e);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Request::OpenChannel { protocol: p, center_hz, width_hz, role, hold_s } => {
+                let Some(proto) = protocol::by_id(&p) else {
+                    out.push(warn(format!(
+                        "asked for a channel read by {p:?}, which is not a protocol"
+                    )));
+                    return None;
+                };
+                if !in_span(center_hz, width_hz) {
+                    return Some(Request::OpenChannel { protocol: p, center_hz, width_hz, role, hold_s });
+                }
+                let hold = hold_s.or(hold_of(proto.id()));
+                let parent = name.zip(asker);
+                if self
+                    .remember_for(proto.id(), center_hz, width_hz, hold, parent)
+                    .is_some()
+                {
+                    out.push(warn(format!(
+                        "opened a {role} channel at {:.4} MHz for {}",
+                        center_hz / 1e6,
+                        proto.label()
+                    )));
+                }
+                None
+            }
+            Request::Reshape { lo_hz, hi_hz } => {
+                let (Some(k), Some(name)) = (slot, name) else { return None };
+                let (hz, w) = ((lo_hz + hi_hz) / 2.0, hi_hz - lo_hz);
+                if !in_span(hz, w) {
+                    return Some(Request::Reshape { lo_hz, hi_hz });
+                }
+                // The source it was cut from is closed, and the channel it
+                // asked for is remembered in its place; if it was itself a
+                // remembered channel, that one goes.
+                let id = self.slots[k].id;
+                self.forget(&[id]);
+                self.expiring.push(id);
+                if let Some(e) = self.remember_for(name, hz, w, hold_of(name), None) {
+                    out.push(e);
+                }
+                None
+            }
+            Request::Release => {
+                let Some(k) = slot else { return None };
+                self.slots[k].members.retain(|m| m.name != stage);
+                if self.slots[k].remembered || self.slots[k].members.is_empty() {
+                    let id = self.slots[k].id;
+                    self.forget(&[id]);
+                    self.expiring.push(id);
+                }
+                None
+            }
+            Request::Retune { center_hz } => Some(Request::Retune { center_hz }),
+        }
+    }
+
+    /// Drop remembered channels, and every channel they asked for.
+    fn forget(&mut self, ids: &[SourceId]) {
+        let gone: Vec<(&'static str, f64)> = self
+            .sticky
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .map(|s| (s.name, s.center_hz))
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let mut children: Vec<SourceId> = Vec::new();
+        self.sticky.retain(|s| {
+            if ids.contains(&s.id) {
+                return false;
+            }
+            if s.parent.is_some_and(|p| gone.contains(&p)) {
+                children.push(s.id);
+                return false;
+            }
+            true
+        });
+        self.pending_sticky.retain(|id| !ids.contains(id) && !children.contains(id));
+        self.expiring.extend(children.iter().copied());
+        self.apply_locked();
+        if !children.is_empty() {
+            self.forget(&children);
+        }
     }
 
     fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
@@ -1111,7 +1203,7 @@ impl AutoNode {
             Some(Stickiness::Latch { hold_s }) => hold_s,
             Some(Stickiness::Claim) | None => None,
         };
-        self.remember_for(name, center_hz, width_hz, hold_s)
+        self.remember_for(name, center_hz, width_hz, hold_s, None)
     }
 
     fn remember_for(
@@ -1120,6 +1212,7 @@ impl AutoNode {
         center_hz: f64,
         width_hz: f64,
         hold_s: Option<f64>,
+        parent: Option<(&'static str, f64)>,
     ) -> Option<Event> {
         if width_hz <= 0.0 {
             return None;
@@ -1138,6 +1231,7 @@ impl AutoNode {
             width_hz,
             hold_s,
             last_heard_s: self.now_s,
+            parent,
         });
         self.pending_sticky.push(id);
         self.apply_locked();
@@ -1300,11 +1394,7 @@ impl Node for AutoNode {
         // ends together ran at nearly four times real time on them, which is
         // a receiver that cannot keep up rather than one that reads more. The
         // picture going away puts all of it back.
-        let mut claimed_events: Vec<Event> = Vec::new();
-        let watching = self.take_claims(&mut claimed_events);
-        for e in claimed_events {
-            c.emit(e);
-        }
+        let watching = self.claimed_whole_span();
         let excluded: Vec<(f64, f64)> = self.wide.iter().filter_map(|m| m.band).collect();
         let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
             return Ok(());
@@ -1530,8 +1620,14 @@ impl Node for AutoNode {
         );
         let fronts_us = t_fronts.elapsed().as_micros() as u64;
         self.phase_sum.clear();
+        let mut asked: Vec<(Option<usize>, String, Request)> = Vec::new();
         for (ev, pk, name, us) in wide_results {
-            events.extend(ev);
+            for e in ev {
+                match e {
+                    Event::Request { stage, request } => asked.push((None, stage, request)),
+                    e => events.push(e),
+                }
+            }
             out.extend(pk);
             *self.phase_sum.entry(name).or_default() += us;
         }
@@ -1603,10 +1699,15 @@ impl Node for AutoNode {
                 }
             }
             for e in ev {
-                if matches!(e, Event::Decoded(_)) {
-                    self.hits.push((center, e.clone()));
+                match e {
+                    Event::Request { stage, request } => asked.push((Some(k), stage, request)),
+                    e => {
+                        if matches!(e, Event::Decoded(_)) {
+                            self.hits.push((center, e.clone()));
+                        }
+                        events.push(e);
+                    }
                 }
-                events.push(e);
             }
             // A cell's identity, once, per channel, whatever the decoders
             // that read it have been through since. Each protocol on the
@@ -1630,19 +1731,28 @@ impl Node for AutoNode {
             }
         }
         self.slots.retain(|s| !closed.contains(&s.id));
-        let now = self.now_s;
-        let mut expired = Vec::new();
-        self.sticky.retain(|s| {
-            let gone = s.hold_s.is_some_and(|h| now - s.last_heard_s > h);
-            if gone {
-                expired.push(s.id);
+        // What the decoders asked for, answered here where it can be, and
+        // handed on where it cannot. After the slots are settled, so a
+        // release or a reshape closes what is there now.
+        for (k, stage, r) in asked {
+            let mut said = Vec::new();
+            if let Some(r) = self.answer(k, &stage, r, &mut said) {
+                c.emit(Event::Request { stage, request: r });
             }
-            !gone
-        });
+            for e in said {
+                c.emit(e);
+            }
+        }
+        let now = self.now_s;
+        let expired: Vec<SourceId> = self
+            .sticky
+            .iter()
+            .filter(|s| s.hold_s.is_some_and(|h| now - s.last_heard_s > h))
+            .map(|s| s.id)
+            .collect();
         if !expired.is_empty() {
             self.expiring.extend(expired.iter().copied());
-            self.pending_sticky.retain(|id| !expired.contains(id));
-            self.apply_locked();
+            self.forget(&expired);
             for id in expired {
                 let Some(st) = self.slots.iter().find(|s| s.id == id) else { continue };
                 if let Some(m) = st.members.first() {
@@ -2050,7 +2160,7 @@ mod tests {
         let center = Hz::mhz(434);
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
-        n.remember_for("pocsag", 434_100_000.0, 25_000.0, Some(0.5));
+        n.remember_for("pocsag", 434_100_000.0, 25_000.0, Some(0.5), None);
         assert_eq!(n.remembered().len(), 1);
         let iq = keyed(rate, 356_000.0);
         let ins = [spec(rate, center)];
@@ -2112,10 +2222,9 @@ mod tests {
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
-    /// A camera owns the span while it is reading a picture, and gives it
-    /// back when the picture stops. Before this the detector opened the
-    /// pieces of the carrier as sources and every front end ran on each of
-    /// them, which cost more than the camera did.
+    /// A camera owns the span while it is reading a picture. Before this the
+    /// detector opened the pieces of the carrier as sources and every front
+    /// end ran on each of them, which cost more than the camera did.
     #[test]
     fn a_front_end_that_claims_a_band_keeps_it() {
         let mut n = AutoNode::new("auto", SourceConfig::default());
@@ -2125,14 +2234,17 @@ mod tests {
             "the span was claimed before anything was being read"
         );
         // Nothing is claimed until a front end says it is reading something,
-        // and what it says is taken as it comes: the auto node asks every
-        // front end the same question and knows nothing about video.
-        let mut events = Vec::new();
-        assert!(!n.take_claims(&mut events));
-        let claim = (5_855_000_000.0, 5_875_000_000.0);
-        for m in n.wide.iter_mut().filter(|m| m.name == "video") {
-            m.band = Some(claim);
-        }
+        // and what it says is taken as it comes: the auto node answers the
+        // same request from every front end and knows nothing about video.
+        assert!(!n.claimed_whole_span());
+        let mut said = Vec::new();
+        let left = n.answer(
+            None,
+            "video",
+            Request::Claim { lo_hz: 5_855_000_000.0, hi_hz: 5_875_000_000.0 },
+            &mut said,
+        );
+        assert!(left.is_none(), "a claim is the auto node's to answer");
         let owned = n.locked_channels();
         let (_, hz, w) = owned
             .iter()
@@ -2143,8 +2255,59 @@ mod tests {
         // And it is kept: a picture fades and comes back, and a claim that
         // followed the signal would hand the band to the detector between
         // every field.
-        assert!(n.take_claims(&mut events), "a claim over the span leaves nothing to detect");
-        assert!(n.locked_channels().iter().any(|(name, ..)| *name == "video"));
+        assert!(n.claimed_whole_span(), "a claim over the span leaves nothing to detect");
+        // What needs the dial is handed back.
+        let left = n.answer(None, "video", Request::Retune { center_hz: 1e9 }, &mut said);
+        assert_eq!(left, Some(Request::Retune { center_hz: 1e9 }));
+    }
+
+    /// A decoder on a source can ask for a channel beside it, and the
+    /// channel is remembered for the protocol it named, tied to the asker:
+    /// a trunked control channel sending a call to a traffic carrier is the
+    /// case, and the traffic channel goes when the control channel is
+    /// forgotten.
+    #[test]
+    fn a_decoder_can_ask_for_a_side_channel_and_it_goes_with_the_asker() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(395))]).unwrap();
+        n.remember_for("tetra", 395_100_000.0, 25_000.0, Some(1.0), None);
+        let b = SourceBlock {
+            id: n.sticky[0].id,
+            state: SourceState::Opened,
+            center_hz: 395_100_000,
+            bandwidth_hz: 25_000.0,
+            signal_hz: 25_000.0,
+            rate: n.cfg.min_rate_hz,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b).unwrap();
+        n.slots.push(slot);
+        let mut said = Vec::new();
+        let ask = Request::OpenChannel {
+            protocol: "tetra".into(),
+            center_hz: 395_300_000.0,
+            width_hz: 25_000.0,
+            role: "traffic".into(),
+            hold_s: Some(30.0),
+        };
+        assert!(n.answer(Some(0), "tetra", ask, &mut said).is_none());
+        let at: Vec<f64> = n.remembered().into_iter().map(|(_, hz, _)| hz).collect();
+        assert_eq!(at, [395_100_000.0, 395_300_000.0]);
+        // Outside the span it is not this node's to open.
+        let far = Request::OpenChannel {
+            protocol: "tetra".into(),
+            center_hz: 420_000_000.0,
+            width_hz: 25_000.0,
+            role: "traffic".into(),
+            hold_s: None,
+        };
+        assert_eq!(n.answer(Some(0), "tetra", far.clone(), &mut said), Some(far));
+        // The parent goes, and the traffic channel with it.
+        let parent = n.sticky[0].id;
+        n.forget(&[parent]);
+        assert!(n.remembered().is_empty(), "{:?}", n.remembered());
     }
 
 }

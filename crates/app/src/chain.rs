@@ -292,6 +292,10 @@ pub struct Receiver {
     /// stops, so a warning left in the graph's event list is a warning
     /// nobody sees: the capture that would not start said why, to nobody.
     warnings: Vec<String>,
+    /// What a decoder asked for that nothing between it and here could
+    /// give: a channel outside the span, a retune. The auto node answers
+    /// what it can for the decoders it built; these reached the top.
+    requests: Vec<(String, pipeline::Request)>,
     /// Spectrum stages the operator added, by patch id. Each is a display of
     /// its own: a patch can watch a decimated band and the whole span at the
     /// same time, which is most of the reason to draw one.
@@ -482,6 +486,7 @@ impl Receiver {
             rate: plan.rate,
             spectrum_rate: plan.eff_rate(),
             warnings: Vec::new(),
+            requests: Vec::new(),
             patch_spectra: Vec::new(),
             refused: None,
         };
@@ -1046,8 +1051,19 @@ impl Receiver {
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
         for e in self.graph.run()? {
-            if let pipeline::event::Event::Warning { stage, message } = e {
-                self.warnings.push(format!("{stage}: {message}"));
+            match e {
+                pipeline::event::Event::Warning { stage, message } => {
+                    self.warnings.push(format!("{stage}: {message}"));
+                }
+                // Nothing here moves the dial or opens a channel on a
+                // decoder's say-so yet; what was asked is kept where the
+                // interface can read it, and said out loud so it is not
+                // silently dropped.
+                pipeline::event::Event::Request { stage, request } => {
+                    self.warnings.push(format!("{stage} asks: {}", describe(request)));
+                    self.requests.push((stage.clone(), request.clone()));
+                }
+                _ => {}
             }
         }
         self.read_back();
@@ -1057,6 +1073,12 @@ impl Receiver {
     /// The warnings nodes raised since the last call.
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    /// What decoders asked of the receiver since the last call.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_requests(&mut self) -> Vec<(String, pipeline::Request)> {
+        std::mem::take(&mut self.requests)
     }
 
     /// Copy out the state a display wants on every frame.
@@ -3328,6 +3350,24 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "source_decode" => "Source decoders".into(),
         "auto" => "Auto".into(),
         other => other.to_string(),
+    }
+}
+
+/// A request in a sentence, for the log.
+fn describe(r: &pipeline::Request) -> String {
+    use pipeline::Request;
+    match r {
+        Request::Reshape { lo_hz, hi_hz } => {
+            format!("a band of {:.4} to {:.4} MHz", lo_hz / 1e6, hi_hz / 1e6)
+        }
+        Request::OpenChannel { protocol, center_hz, role, .. } => {
+            format!("a {role} channel at {:.4} MHz for {protocol}", center_hz / 1e6)
+        }
+        Request::Claim { lo_hz, hi_hz } => {
+            format!("{:.4} to {:.4} MHz for itself", lo_hz / 1e6, hi_hz / 1e6)
+        }
+        Request::Release => "to be dropped".into(),
+        Request::Retune { center_hz } => format!("a retune to {:.4} MHz", center_hz / 1e6),
     }
 }
 

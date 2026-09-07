@@ -109,7 +109,7 @@ pub enum Stickiness {
     /// span-wide decoder with this owns its band from the moment the span
     /// reaches it.
     Latch { hold_s: Option<f64> },
-    /// The decoder says what it is reading through `Node::claimed_hz`, and
+    /// The decoder says what it is reading through `Request::Claim`, and
     /// owns that once it does, and nothing before.
     Claim,
 }

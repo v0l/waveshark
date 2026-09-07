@@ -33,7 +33,7 @@ use dsp::tetra::{
     OCCUPIED_HZ, SLOT_BITS, SLOT_SYMBOLS,
 };
 use dsp::{FirDecim, Mixer};
-use pipeline::event::Decoded;
+use pipeline::event::{Decoded, Request};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use tetra_crypto::Crypto;
@@ -69,6 +69,17 @@ const RESOURCE_EVERY_SLOTS: u64 = 140;
 /// for one timeslot comes once a frame, so this is three frames of it
 /// missing, or the demodulator losing lock for that long.
 const TRAFFIC_HANG_SLOTS: u64 = 12;
+
+/// How long a traffic carrier this control channel sent a call to is kept
+/// open after the last thing decoded on it, in seconds. A call on a trunked
+/// network is a few seconds to a minute; a carrier nothing has used for
+/// this long is a carrier the network is not using.
+pub const TRAFFIC_CARRIER_HOLD_S: f64 = 60.0;
+
+/// How often the same traffic carrier is asked for again, in slots: about
+/// a minute, so a busy carrier is asked for once a hold rather than once a
+/// call.
+const ASK_AGAIN_SLOTS: u64 = 4_000;
 
 /// Seconds a slot is: 255 symbols at 18 kbaud.
 const SLOT_S: f64 = 255.0 / 18_000.0;
@@ -287,6 +298,11 @@ pub struct TetraNode {
     /// traffic itself never says who is talking; only the signalling that
     /// handed the slot over does.
     talkers: HashMap<u32, u32>,
+    /// Traffic carriers this control channel has sent calls to, by
+    /// frequency, and the slot each was last asked for at.
+    asked: HashMap<u64, u64>,
+    /// What this node wants of whatever placed it, since the last block.
+    wants: Vec<Request>,
     /// Traffic on each timeslot right now, by timeslot number.
     traffic: HashMap<u8, Traffic>,
     /// How each timeslot's speech frames move, for telling ciphertext from
@@ -343,6 +359,8 @@ impl TetraNode {
             markers: HashMap::new(),
             marker_speech: HashMap::new(),
             talkers: HashMap::new(),
+            asked: HashMap::new(),
+            wants: Vec::new(),
             traffic: HashMap::new(),
             lsp_by_tn: HashMap::new(),
             voice_calls: HashMap::new(),
@@ -393,6 +411,32 @@ impl TetraNode {
     /// has decoded.
     pub fn cell(&self) -> Option<dsp::tetra::Cell> {
         self.rx.cell
+    }
+
+    /// A call has been sent to a traffic carrier. Where that is another
+    /// carrier, ask whatever placed this node to read it too: this node
+    /// holds one stream and cannot open another, and the traffic channel
+    /// is where the call's speech is.
+    fn ask_for_traffic(&mut self, hz: f64, slot: u64) {
+        if (hz - self.channel_hz).abs() < CHANNEL_WIDTH_HZ / 2.0 {
+            return;
+        }
+        let key = hz as u64;
+        if self
+            .asked
+            .get(&key)
+            .is_some_and(|last| slot.saturating_sub(*last) < ASK_AGAIN_SLOTS)
+        {
+            return;
+        }
+        self.asked.insert(key, slot);
+        self.wants.push(Request::OpenChannel {
+            protocol: "tetra".into(),
+            center_hz: hz,
+            width_hz: CHANNEL_WIDTH_HZ,
+            role: "traffic".into(),
+            hold_s: Some(TRAFFIC_CARRIER_HOLD_S),
+        });
     }
 
     /// Whether a call PDU is news. Call control always is; a resource whose
@@ -755,8 +799,11 @@ impl Node for TetraNode {
         &mut self,
         inputs: &[&Payload],
         outputs: &mut [Payload],
-        _c: &mut NodeCtx<'_>,
+        c: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        for r in self.wants.drain(..) {
+            c.request("tetra", r);
+        }
         let Some(iq) = inputs[0].as_iq() else {
             return Ok(());
         };
@@ -841,6 +888,7 @@ impl Node for TetraNode {
                     }
                     if let (Some(a), Some(band)) = (c.alloc.as_mut(), self.cell_band) {
                         a.band.get_or_insert(band);
+                        self.ask_for_traffic(a.hz(band), block.slot);
                     }
                     // Enciphered SDUs are the material a key search runs on;
                     // the encrypted identity is a pair for the identity one.

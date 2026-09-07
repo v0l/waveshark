@@ -22,7 +22,7 @@ pub mod port;
 pub mod registry;
 
 pub use cost::Cost;
-pub use event::{Decoded, Event};
+pub use event::{Decoded, Event, Request};
 pub use graph::{chain, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT};
 pub use node::{Node, NodeCtx, PortSpec, Simple};
 pub use param::{Param, ParamRange, ParamValue};
