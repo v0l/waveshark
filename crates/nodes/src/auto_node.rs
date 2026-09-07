@@ -915,7 +915,7 @@ impl AutoNode {
                 None
             }
             Request::Release => {
-                let Some(k) = slot else { return None };
+                let k = slot?;
                 self.slots[k].members.retain(|m| m.name != stage);
                 if self.slots[k].remembered || self.slots[k].members.is_empty() {
                     let id = self.slots[k].id;
@@ -1222,7 +1222,7 @@ impl AutoNode {
         if self.sticky.iter().any(same) {
             return None;
         }
-        let id = SourceId(STICKY_ID_BASE + self.sticky_made as u64);
+        let id = SourceId(STICKY_ID_BASE + self.sticky_made);
         self.sticky_made += 1;
         self.sticky.push(Sticky {
             id,
