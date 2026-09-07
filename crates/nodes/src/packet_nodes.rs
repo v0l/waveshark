@@ -327,6 +327,9 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
         }
         return;
     }
+    if !dsp::modes::is_modes_band(p.center_hz() as f64) {
+        return;
+    }
     let Ok(frame) = adsb::parse(bytes) else { return };
     let mut d = crate::modes_nodes::adsb_decoded(&frame, bytes, center);
     // A local demodulator reports no level for a frame it has already
