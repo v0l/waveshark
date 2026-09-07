@@ -302,9 +302,9 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
     // carries is a field of 25 bits that had to pass the standard's parity to
     // reach the bus at all.
     if dsp::gsm::is_downlink_band(p.center_hz() as f64) {
-        if let Some(d) = crate::gsm_nodes::gsm_decoded(bytes, center) {
-            hits.push(d);
-        }
+        // A paging request names several phones, and each is a call from
+        // this cell to one of them, so a block can be more than one row.
+        hits.extend(crate::gsm_nodes::gsm_rows(bytes, center));
         return;
     }
     if dsp::ais::is_ais_band(p.center_hz() as f64) {
