@@ -1,8 +1,18 @@
 # Working on WaveShark
 
 Read [`docs/design.md`](docs/design.md) first. It has the layout, the
-measurements behind the current shape, and the mistakes that produced it. What
-follows is the two rules that are easiest to break without noticing.
+measurements behind the current shape, and the mistakes that produced it. Then
+[`docs/protocols.md`](docs/protocols.md) for what is decoded and what is not,
+[`docs/views.md`](docs/views.md) before adding a pane, and
+[`docs/web.md`](docs/web.md) only knowing it is a plan and not a status report.
+What follows is the two rules that are easiest to break without noticing, and
+the procedure for adding a capture to the test corpus.
+
+Two cargo features change what builds: `--features tea` is TETRA decryption
+and key recovery, and `--features ambe` is DMR speech through
+`crates/mbe`. Neither is on by default, so a plain `cargo test` at the root
+never builds either path, and `crates/mbe` is not a default workspace member at
+all.
 
 ## Everything the receiver does is in the graph
 
@@ -24,12 +34,16 @@ What this rules out in practice:
 - No processing in the radio loop. `crates/app/src/radio.rs` moves blocks and
   commands. If you find yourself filtering, mixing or deciding in it, that
   belongs in a node the graph holds.
+- The same applies to transmitting. `derived_patch` draws four stages,
+  `tx_clock`, the source, the modulator and `radio_tx`, whether or not a key is
+  down, so the chain can be looked at before it is used.
 - No state that only one hard-coded stage can produce. Reaching into a named
   stage by field (`self.m17`, `self.record`) works until the same front end
   exists somewhere else. Live speech was read from the one M17 stage the
   scanner table places, so every M17 transmission the auto node found for
-  itself decoded, logged, and played back as silence. The fix was a method on
-  `Node` that any node can answer, asked of all of them.
+  itself decoded, logged, and played back as silence. The fix was a port kind
+  every front end can publish on: `Receiver::voices` reads `PortKind::Voice`
+  off the whole graph rather than off a named stage.
 - No behaviour keyed on a protocol name where a capability will do. Ask nodes
   what they can do; do not keep a list here of which ones can.
 - A composite node owns an inner graph and must say so through
@@ -56,9 +70,11 @@ adding that back.
 ## The graph is the same graph in both modes
 
 Manual mode is a lock on editing and nothing else. The receiver draws its
-graph from the plan on every rebuild (`derived_patch`: the head, the spectrum,
-the front ends the scanner table puts on the span, the listening channels,
-the buses), and what the operator changed is kept apart from it as
+graph from the plan on every rebuild (`derived_patch`: the head with its DC
+blocker and zoom, the spectrum, the recorder's ring, the raw capture, the front
+ends the scanner table puts on the span, the listening channels, the transmit
+chain, the feeds, the protocol decoder and the tracker, and the buses), and
+what the operator changed is kept apart from it as
 `patch::Edits`: stages added, derived stages removed, wires drawn or moved,
 settings overridden. Every rebuild is derived graph, then edits on top, then
 `sync_audio` to put the strip's stages in step with the result. The edits
@@ -97,10 +113,11 @@ silently changed cannot invalidate an expectation quietly.
 
 A capture earns its place by failing something. Synthesised signals share every
 assumption the code makes and pass; the M17 fixture is here because three
-separate thresholds threw a real transmission away and none of them was
-visible on a generated one.
+separate faults threw a real transmission away and every one of them was
+invisible on synthesised M17.
 
-1. **Record and trim.** Capture with the raw IQ button, or `--capture-iq`, into
+1. **Record and trim.** Capture with the "Capture the raw span" switch in the
+   radio settings, or `--capture-iq`, into
    `~/.local/share/waveshark/captures`. Cut it to the shortest span that
    contains the evidence, keeping enough noise around it for the detector's
    floor. A radio delivers zeros for the first seconds while its stream starts:
@@ -133,12 +150,15 @@ visible on a generated one.
 
 4. **Add the manifest entry** to `testdata/fixtures.toml`, or
    `testdata/offair.toml` for a capture labelled by what it demonstrates rather
-   than by an independent decode. Fill in `name`, `sha256`, `url`,
-   `compression`, `center_hz`, `rate_sps`, `format`, a description saying what
-   the capture is evidence of and how that was established, and a
-   `[capture.expect]` block with the values a test asserts. Write the
-   description for somebody who has to decide, two years from now, whether a
-   failing assertion means the code broke or the expectation was wrong.
+   than by an independent decode. Both take `name`, `sha256`, `url`,
+   `compression`, `center_hz`, `rate_sps`, `format` and a description saying
+   what the capture is evidence of and how that was established. A
+   `fixtures.toml` entry then takes a `[capture.expect]` block with the values
+   a test asserts; an `offair.toml` entry takes `family`, which is only ever
+   what the capture demonstrates, and `receiver`, and asserts nothing beyond
+   the classifier's verdict. Write the description for somebody who has to
+   decide, two years from now, whether a failing assertion means the code broke
+   or the expectation was wrong.
 
 5. **Verify the round trip.** Delete the local file, run `./testdata/fetch.sh`,
    and check the hash of what comes back matches what you uploaded. A manifest
@@ -153,5 +173,8 @@ visible on a generated one.
    the transmission itself says, such as a callsign or a CRC, rather than what
    this code currently produces.
 
-Run the corpus tests in release. Several assert the audio chain keeps ahead of
-real time, and a debug build misses by enough that the numbers mean nothing.
+Run the tests that time the audio chain in release. They check
+`cfg!(debug_assertions)` and return with a printed note, so a debug run passes
+by skipping them rather than by measuring anything. The rest do not need it: the workspace
+already builds the signal path and the test binaries at `opt-level = 3` in the
+dev profile.

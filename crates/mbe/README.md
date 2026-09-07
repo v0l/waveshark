@@ -11,6 +11,14 @@ vocoder family.
 Both produce 160 samples of 8 kHz mono f32 audio per 20 ms frame. Decode
 only; there is no encoder.
 
+An AMBE frame arrives three ways: `decode` for the 9 bytes DMR carries,
+`decode_bits` for a transport that recovered the 72 bits through its own outer
+FEC, and `decode_keyed` for a frame under a 49-bit privacy keystream.
+
+Only DMR speech uses this crate, through
+`crates/nodes/src/dmr_nodes/dmr_ambe.rs`. `ImbeSynthesizer` has no caller: it
+is here for a P25 front end nobody has written.
+
 ## Patent notice
 
 Verbatim from the jmbe and mbelib READMEs this code descends from:
@@ -22,9 +30,12 @@ Verbatim from the jmbe and mbelib READMEs this code descends from:
 > advised to check for any patent restrictions or licensing requirements
 > before compiling or using this source code.
 
-For that reason this crate is a workspace member but not a default member:
-`cargo build` and `cargo test` at the workspace root never build it, and no
-other crate depends on it. Build it explicitly with `cargo test -p mbe`.
+For that reason this crate is a workspace member but not a default member, and
+the one crate that uses it depends on it optionally: `cargo build` and
+`cargo test` at the workspace root never build it. `nodes` links it only under
+`--features ambe`, which `app` forwards as its own `ambe` feature; without it
+the DMR node still reads signalling and shows who is talking, and decodes no
+speech. Build the crate on its own with `cargo test -p mbe`.
 
 ## Porting notes
 

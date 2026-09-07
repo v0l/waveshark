@@ -8,14 +8,16 @@ the [README](../README.md).
 
 | crate | what it does |
 |---|---|
-| `common` | sample buffers, `Device`/`RxStream` traits, `Hz`/`Sps` units |
-| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM demod, FM stereo, RDS, DC blocker, burst detector, OOK/ASK/FSK pulse extraction |
+| `common` | sample buffers, `Device`/`RxStream`/`TxStream` traits, `Hz`/`Sps` units |
+| `dsp` | polyphase channelizer, FIR design, mixer, FM/AM/SSB demod, FM stereo, RDS, DC blocker, burst detector and classifier, source detector and extractor, OOK/ASK/FSK pulse extraction, C4FM, GMSK, HDLC, Mode S |
 | `pipeline` | the flow graph: typed DAG, rate negotiation, stream tags, events |
-| `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders |
-| `nodes` | DSP and decoders as graph nodes, the registry, and the wideband channel bank |
+| `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders, and the frame layers of ADS-B, AIS, APRS, POCSAG, DMR, TETRA, M17, LoRa and the mesh protocols |
+| `nodes` | DSP and decoders as graph nodes, the registry, the auto node, the wideband channel bank, the modulators and the transmit sinks |
 | `sources` | file replay with rtl_433-style filename metadata, and the file sink that transmit is tested into |
-| `audio` | cpal playback with a drift-tracking resampler |
-| `app` | egui front end: spectrum, waterfall, tuner, channels, chain view |
+| `datasets` | cached third party data: airports and their frequencies, DMR and NXDN registries, repeater and reflector lists, the Artemis signal database |
+| `mbe` | AMBE and IMBE vocoder port, opt-in only: the algorithms are patent encumbered, so nothing builds it unless `ambe` is on |
+| `audio` | cpal playback with a drift-tracking resampler, and microphone capture |
+| `app` | egui front end: spectrum, waterfall, tuner, channels, chain view, map, packet list, calls, messages, keys |
 | `rtlsdr-sys` | bindgen FFI to librtlsdr |
 | `hackrf` | HackRF One, adapting `hackrf-usb` to the `Device` trait |
 | `hackrf-usb` | HackRF USB transport, receive and transmit; vendored from `rs-hackrf` (MIT) |
@@ -26,6 +28,23 @@ the [README](../README.md).
 
 Named `common` rather than `core` because a workspace crate called `core`
 shadows the Rust sysroot crate.
+
+Two cargo features change what the receiver can do, both off by default
+(`crates/app/Cargo.toml`). `tea` is TETRA decryption, key recovery and the key
+manager: it turns on `decode/tea` and `nodes/tea`, which is what
+`decode::tea`, `decode::ta61`, `decode::recover` and `decode::gpu` are, the
+last of those a wgpu compute shader searching TEA1's 32-bit fold. A stock build
+links no TETRA cipher and no GPU stack, and its keys view is an encryption
+monitor with nothing to decrypt with. The mesh ciphers are not part of that:
+`decode` depends on AES unconditionally, which is how Meshtastic and MeshCore
+traffic decrypts in every build. `ambe` is DMR
+speech through `crates/mbe`. Both are off for the same kind of reason and not
+the same reason: the vocoder is patent encumbered, and the cipher work drags
+in a GPU stack most builds have no use for.
+
+The other documents: [`protocols.md`](protocols.md) is what is decoded and
+what is not, [`views.md`](views.md) the contract a view uses on the packet
+bus, [`web.md`](web.md) a browser build that is still only a plan.
 
 ## Design decisions worth knowing
 
@@ -93,12 +112,15 @@ channels run, so the view shows the decoder rather than an opaque box.
 
 The graph is built from a description rather than by hand. The receiver draws
 one for itself out of what it is doing (`chain::derived_patch`): the DC block
-and the zoom decimator, the spectrum, the recorder's ring, the band extractions
-and front ends the scanner table asks for, eight stages per listening channel,
-the packet bus and the protocols and the tracker. Every one of them is a
-registry stage with settings and wires, named by an id computed from what it is
-for, which is what lets a node keep its state across the rebuild that changed
-the shape around it.
+and the zoom decimator, the spectrum, the recorder's ring, the raw IQ capture,
+the band extractions and front ends the scanner table asks for, the transmit
+chain, the feeds from other receivers, seven to nine stages per listening
+channel depending on what the mode needs, or three for a channel that decodes
+rather than plays, the packet bus and the protocols and the tracker, and the
+audio bus that `sync_audio` draws behind them. Every one of them is a registry
+stage with settings and wires, named by an id computed from what it is for,
+which is what lets a node keep its state across the rebuild that changed the
+shape around it.
 
 The chain view draws that description, and in manual mode it edits it. Stages
 can be added from the block list, deleted, dragged, and wired by pulling a wire
@@ -244,7 +266,7 @@ The extent of a strong signal cannot be every bin over the floor, because sharp
 keying puts sidebands over the floor across hundreds of kilohertz at 60 dB;
 it is every bin within 20 dB of the run's peak, which also takes in both tones
 of a two-tone signal whose onset lit the whole band for a frame. Two runs that
-open in the same frame within 200 kHz and within 12 dB of each other are one
+open in the same frame within 150 kHz and within 12 dB of each other are one
 transmitter, since that is what frequency-shift keying looks like and a
 LaCrosse sensor keys tones 120 kHz apart. A source whose extent keeps growing
 frame after frame until it is half again the width it opened at is a sweep,
@@ -338,22 +360,34 @@ per burst on every source, is what remains.
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.
 
-## Two channelizers, not one
+## The channel banks
+
+The banks are not what the receiver does any more: no shipped scanner block
+places one, and a block has to ask for `banks` by name to get them. They are
+kept because they are the thing the auto node is measured against, and because
+what they got right about channel width is still true.
 
 Within a band that channelizes, the receiver splits the span into channels and
 runs a decoder on every one at once, all the time, so a sensor that transmits
 once a minute is caught whether or not you were looking at its frequency.
 
-It splits the span twice, because the two front ends want opposite things from
-a channel. Measured by adding noise to the Fine Offset capture until decoding
-stops, a 1.5 kbit/s OOK sensor survives down to 12.3 dB peak-to-noise in a
-31 kHz channel and needs 22.9 dB in a 125 kHz one: a wide channel integrates
-noise across its whole width while the signal occupies a sliver of it, so it
-costs 10.6 dB for nothing. FSK needs the opposite, because its two tones are
-tens of kHz apart and a narrow channel cuts one of them off: the same synthetic
-packet reads as 46 bits at 110 us a symbol in a 125 kHz channel and as eight
-bits of nonsense in a 31 kHz one. So there are two channelizers, a 31.25 kHz
-bank feeding the OOK path and a 125 kHz bank feeding the FSK path.
+It splits the span four times, at 12.5, 31.25, 125 and 500 kHz
+(`scanners::DEFAULT_WIDTHS`), because width is the one thing a grid of fixed
+channels decides before it has heard anything. Measured by adding noise to the
+Fine Offset capture until decoding stops, a 1.5 kbit/s OOK sensor survives down
+to 12.3 dB peak-to-noise in a 31 kHz channel and needs 22.9 dB in a 125 kHz
+one: a wide channel integrates noise across its whole width while the signal
+occupies a sliver of it, so it costs 10.6 dB for nothing. FSK needs the
+opposite, because its two tones are tens of kHz apart and a narrow channel cuts
+one of them off: the same synthetic packet reads as 46 bits at 110 us a symbol
+in a 125 kHz channel and as eight bits of nonsense in a 31 kHz one.
+
+What the width does not decide is which front end runs. Every tier builds the
+same graph, and the burst is classified and routed to the demodulator that fits
+it (`nodes::ism_decode_graph`, a `burst_route` node). There used to be an OOK
+flavour and an FSK flavour chosen by the channel width, because the width was
+the only evidence available about what a channel would hear. It is not
+evidence.
 
 Neither front end needs the signal centred, which is what makes any of it work:
 the OOK path is an envelope detector and does not care where in the channel the
@@ -361,8 +395,8 @@ carrier sits, and the FSK path measures both tones from the burst itself, so a
 SAW transmitter tens of kHz off nominal reads the same as one on frequency.
 Channel width therefore costs sensitivity and nothing else.
 
-Channels overlap by design, so one burst is seen by several of them and by both
-banks at once, each reading a different mangled copy. The strongest report of a
+Channels overlap by design, so one burst is seen by several of them and by
+several tiers at once, each reading a different mangled copy. The strongest report of a
 burst wins and a real decode beats a louder guess, so a transmission appears
 once. A device that repeats its packet still gets a row per repeat, because
 those are separate bursts on the same channel through the same front end.
@@ -376,7 +410,7 @@ is a guess, labelled as one, and it is enough to recognise the same device ID
 across several receptions, which is where reverse engineering starts.
 
 Idle channels cost only the burst detector, which is why the whole band can be
-covered continuously even with two banks running: measured at 2.4 MS/s over 78
+covered continuously with several tiers running: measured at 2.4 MS/s over 78
 narrow and 20 wide channels, the scanner runs at about 17x real time.
 
 ## The packet log format
@@ -423,14 +457,27 @@ JSON per pulse turns an overnight capture into gigabytes. The length prefix
 means an unknown record kind is skipped rather than misparsed, and a receiver
 killed mid-write costs the last record rather than the file.
 
+From version 2 the burst's own samples follow the body, sixteen bits a
+component, capped at four million of them. Timings and bytes are what one
+demodulator made of a burst; a different demodulator, or the same one fixed,
+wants the burst. A row without the samples can be read again but not re-read,
+which is the same argument as the one above about parses, one layer down.
+
+The log holds the whole folder to 2 GB by deleting the oldest days rather than
+refusing to write, and stops only in the one case a single day's file is over
+the limit on its own.
+
 ## Recording captures
 
 The recorder keeps the last three quarters of a second of signal in memory and
 writes it out when a decode arrives, because a packet is reported long after it
 was transmitted: the transmission itself takes tens of milliseconds, the pulse
 detector waits for the silence after it, and the filters add their own latency.
-Measured on the Fine Offset capture, a quarter of a second of history loses the
-packet entirely and three tenths catches it.
+Measured on the Fine Offset capture, two tenths of a second of history loses the
+packet and a quarter catches it. It was a quarter and three tenths before the
+banks were given a sub-band of their own, which lowered the rate the
+channelizer runs at. The ring holds three quarters because a lost burst cannot
+be recovered and the memory is cheap.
 
 Each burst is mixed down to its own frequency, decimated to 250 kS/s and
 written as `g0001_<protocol>_<mod>_<freq>M_<rate>k.cu8`, about 380 kB, so the
@@ -484,8 +531,9 @@ public-domain OurAirports dataset through the dataset cache described below.
 
 ## Cached datasets
 
-Airports, the DMR repeater list and the DMR and NXDN ID registries are all the
-same kind of thing: published by somebody else, large, and stale eventually.
+Airports and their frequencies, the repeater and reflector lists, the DMR and
+NXDN ID registries and the Artemis signal database are all the same kind of
+thing: published by somebody else, large, and stale eventually.
 `crates/datasets` is the one mechanism for them. A `Source` says where a file
 comes from and how often it is worth asking whether it changed, `Cache` keeps
 it under `$XDG_CACHE_HOME/waveshark/data` with an entity tag and a
@@ -510,6 +558,19 @@ airports on a background thread at startup and holds the registries until
 something asks for one; `--fetch-data` downloads or revalidates the lot and
 prints what it found, for warming the cache before going somewhere without a
 connection.
+
+## Digital voice, and the rest
+
+ADS-B, APRS and POCSAG have sections here because each taught the shared
+layers something. The rest are described in [`protocols.md`](protocols.md),
+which is the file that says what is decoded, what is half decoded and what is
+only a plan: M17, DMR, TETRA, AIS, LoRa with LoRaWAN, Meshtastic and MeshCore,
+wireless M-Bus and Morse. What they share here is the surface rather than the
+signal processing. Anything that recovers speech publishes it on a
+`PortKind::Voice` port with the call it belongs to, which is what the call
+list reads and what the audio bus mixes, and anything that recovers a frame
+puts it on the packet bus. Neither surface knows which protocol produced what
+reached it.
 
 ## POCSAG
 
@@ -566,6 +627,49 @@ and start with it off. There is no sensible fixed setting: on an empty 2 m
 channel the audio sits at -26 dBFS in AM, -36 in USB and -59 in CW, all of
 which move with the RF gain.
 
+## Transmitting
+
+A transmission is something the receiver is doing, so it is in the graph like
+everything else, and the chain view draws it as the TX side. Four derived
+stages (`chain::derived_patch`): `tx_clock`, the source (`mic` or `tone`), the
+modulator (`fm_mod` or `am_mod`) and `radio_tx`. It is drawn whether or not a
+key is down, for the same reason the raw capture is: a chain that exists only
+while transmitting cannot be looked at before transmitting, which is exactly
+when an operator wants to look at it, and building it at key-down would rebuild
+the graph twice an over.
+
+The clock comes from the raw span rather than from the head. The head is
+downstream of the zoom decimator, so a chain taken from there runs at the
+zoomed rate and hands the radio blocks at a rate it is not sampling: the device
+refuses every one of them and transmits its own idle filler, which on air is a
+carrier full of holes.
+
+A port carries which way it points (`port::Flow`), so a demodulator wired into
+a radio sink is refused at build time rather than radiating nonsense; GNU Radio
+has no equivalent, and a mistake on this side of the antenna leaves the
+building. Keying is on stream tags rather than inferred from the samples going
+quiet: `tx_start`, `tx_end`, and `tx_at` for a transmission that has to land in
+a slot.
+
+While the radio transmits it cannot receive, and the driver hands the receive
+side a floor rather than nothing: three least significant bits of the eight bit
+converter, about 33 dB down, which is what a HackRF's own floor measures with
+the front end running. Silence would leave the spectrum drawing minus infinity,
+the level gates with nothing to measure against, and the AGC wound to maximum
+by the end of the over. A floor far below that is not a quiet band but a
+starved converter, and the ADC health check says so.
+
+The modulators are shared with anything that produces timings, so a protocol
+with a timing table adds an encoder and reuses the carrier: `morse_tx` is one
+node holding a keyer and an OOK modulator, shown through `Node::subgraph`, the
+transmit mirror of a front end. Tests run the whole path into
+`sources::FileSink` and demodulate the file back
+(`crates/nodes/tests/nfm_tx_path.rs`, `morse_round_trip.rs`), so the round trip
+is checked without keying anything.
+
+Only the HackRF and the LimeSDR can transmit. The strip draws no transmit
+controls at all on a radio that cannot, rather than controls that fail.
+
 ## Radio controls
 
 Each gain stage the device reports gets a slider that snaps to the steps the
@@ -581,11 +685,13 @@ and the front end amp costs noise figure and overloads on a crowded band.
 A LimeSDR is the exception and shows one number for 0 to 73 dB. Its LNA, TIA
 and PGA are split by a table inside LimeSuite, and reimplementing that split
 through register writes to draw three sliders would change the noise figure in
-ways nothing here could account for. It also gets two dropdowns, because a
+ways nothing here could account for. It is also the only radio here that is
+full duplex, with two receive and two transmit channels on a USB board. It
+gets two dropdowns, because a
 switch cannot say which of six sockets the cable is in: the board has an H, L
 and W port on each of two receivers, separately matched, and Auto picks L below
 1.5 GHz and H above. A cable in RX2_H hears almost nothing at 100 MHz, which
-looks exactly like a dead radio. `cargo run --release --example limediag`
+looks exactly like a dead radio. `cargo run --release -p app --example limediag`
 answers that question directly: it plays the chip's internal test tone to prove
 the converter and the path back to the host, then sweeps the gain, since a live
 analogue front end has a noise floor that climbs with RF gain and a dead one
@@ -615,22 +721,23 @@ own meter, the squelch, the cell of a painted table. Each is an `egui::Widget`
 over the one value it edits and knows nothing about the receiver, so any pane
 can use one, twice on a row if it wants.
 
-`mapview.rs` is in that layer too, and is the largest of them: a slippy map
-with its own camera, tile cache and layer switches, knowing nothing about the
-receiver. What is drawn over the tiles arrives as a list of `Layer`
-implementations built fresh each frame, so the range rings, the station, the
-airports and the tracks live with the pane that knows what those are
-(`map_pane/layers.rs`), and a second view wanting a map hands over a different
-list rather than copying the file. Tiles are fetched through `poll-promise`,
-two requests in flight because that is what the OSM usage policy asks for,
-decoded with `spawn_blocking`, and uploaded as textures on the main thread
-where a resolved promise is collected. The runtime they run on belongs to
+`mapview.rs` is in that layer too: a slippy map with its own camera and layer
+switches, knowing nothing about the receiver. What is drawn over the tiles
+arrives as a list of `Layer` implementations built fresh each frame, so the
+range rings, the station, the airports and the tracks live with the pane that
+knows what those are (`map_pane/layers.rs`), and a second view wanting a map
+hands over a different list rather than copying the file. The tiles behind it
+are `crates/app/src/map.rs`, outside the ui layer: fetched through
+`poll-promise`, two requests in flight because that is what the OSM usage
+policy asks for, decoded with `spawn_blocking`, and uploaded as textures on the
+main thread where a resolved promise is collected. The runtime they run on belongs to
 `App`, one for the whole application, and reaches the tile cache as a handle
 passed down with the frame: a view that needs to wait on a network borrows it
 rather than starting threads of its own.
 
 Each view is then a struct that borrows its own state out of `state.rs` and
-nothing else: `Scope`, `Strip`, `Log`, `Map`, `Chain`, `CallList`. A pane
+nothing else: `Scope`, `Strip`, `Log`, `Map`, `Chain`, `CallList`, `Msgs` and
+`Keys`. A pane
 cannot reach the radio. What it wants done it either pushes into the command
 queue, for the things the receiver does, or returns as its own `Action`, for
 the things the application does, and `App` carries those out. This is the rule
@@ -769,9 +876,11 @@ passes without network access. [`AGENTS.md`](../AGENTS.md) has the process for
 adding one: trimming, naming, uploading, and what the manifest entry has to
 say.
 
-The same script fetches the rtl_433 corpus samples listed in
-`testdata/rtl433.toml`: a capture and the reference decode beside it, straight
-from `merbanan/rtl_433_tests` at a pinned commit. Those recordings were
+`testdata/fixtures.toml` holds the captures a decode is asserted against, and
+`testdata/offair.toml` the ones labelled by what they demonstrate rather than
+by an independent decode. The same script fetches the rtl_433 corpus samples
+listed in `testdata/rtl433.toml`: a capture and the reference decode beside it,
+straight from `merbanan/rtl_433_tests` at a pinned commit. Those recordings were
 contributed by their owners under no stated licence, so this repository points
 at them rather than copying them.
 

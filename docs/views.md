@@ -7,8 +7,8 @@ temperature sensor, a text pane for pager traffic. Each of those is a view over
 the same stream, filtered differently, and none of them should need a private
 path back to the demodulator that produced it.
 
-This file describes the contract a view uses, what exists today, and what each
-planned view needs from it.
+This file describes the contract a view uses, the views built on it, and what
+the ones not built yet would need.
 
 ## What a packet carries
 
@@ -18,10 +18,13 @@ planned view needs from it.
 |---|---|---|
 | `at` | when the burst arrived, stamped at the start of the block that held it | every view, for ageing and ordering |
 | `freq` | centre of the channel it arrived on | list, map (as a filter) |
+| `channel_hz` | how wide that channel was, and so how far apart two reports must be to be different bursts | deduplication |
 | `model` | protocol name, or "unknown" | routing |
 | `media_type` | what `bytes` holds | routing |
 | `fields` | the decoder's own fields, structured | map, chart, text |
 | `bytes` | the raw frame | hex dump, image pane |
+| `iq` | the burst's own samples, where the front end kept them | the packet list's burst detail |
+| `audio` | decoded speech, with the call it belongs to | call list, audio bus |
 | `rssi_dbfs`, `snr_db` | how it was received | list, and a map colouring tracks by signal |
 | `crc` | integrity check result, `None` when the protocol has none | every view: an unverified position is not a position |
 
@@ -36,23 +39,35 @@ does not need to know which protocol produced the packet.
 `PNG`, and `Decoded::matches_media` handles `image/*` style patterns. A view
 claims what it can render.
 
-## Today
+## The views
 
 - **Packet list**: every record, newest at the bottom, with a detail pane
   showing the selected packet's burst as the front end saw it, its
   envelope and instantaneous frequency against time, then its fields and a
   hex dump. The burst view is what an unknown device is worked out from, the
   way Universal Radio Hacker shows a burst beside its bits; the samples are
-  kept for the newest rows only.
+  kept for the newest rows only. `crates/app/src/ui/packets.rs`.
+
+- **Map**: everything on the bus that reports a position, over OpenStreetMap
+  tiles, with a table of tracks beside it. Described in full below.
+  `crates/app/src/ui/map_pane/`.
+
+- **Calls**: who is talking, from anything that decodes speech. Its own header
+  says what makes it a view rather than a protocol pane: it is fed from the
+  bus, not from a protocol, and reads `from`, `to`, `seconds`, `call_type` and
+  the codec off the record. A DMR call, a TETRA call and an M17 call are the
+  same row with different fields filled in. `crates/app/src/calls.rs`.
+
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
   width rather than clipped to a column. The recipient is read from
   `addressee`, `to`, `dst`, `destination`, `talkgroup`, `channel` or
   `address`, so a pager's capcode, a TETRA talkgroup and a mesh channel land
   in the same place; the sender from `from`, `src`, `source` or `radio_id`.
-  Identical words from the same sender inside two minutes are one message with
-  a count, because a pager sends every page twice and TETRA retransmits until
-  it is acknowledged. `crates/app/src/messages.rs`.
+  Identical words from the same sender to the same recipient on the same
+  system inside two minutes are one message with a count, because a pager
+  sends every page twice and TETRA retransmits until it is acknowledged.
+  `crates/app/src/messages.rs`.
 
   The reading itself is `DecodeRecord::to_message`, so anything holding a
   record can ask it for a message rather than repeating the field names:
@@ -66,28 +81,132 @@ claims what it can render.
   messages, with nobody's name on them: MeshCore called it `sender` and its
   traffic arrived under a blank header. Nothing errors, and the view looks
   like it works.
-Both are views by this definition. Neither knows anything about a protocol.
 
-## Planned views
+- **Keys**: a row per enciphered channel a front end reports, and what is known
+  about the key for it. The view is always there as an encryption monitor; the
+  key store, key entry and the TETRA decryption behind it need the `tea`
+  feature. `crates/app/src/ui/keys_pane.rs`.
 
-### Map, for ADS-B, AIS and radiosondes
+All of them are views by this definition. None knows anything about a protocol.
 
-Needs `lat` and `lon` as floats, and takes `altitude_m`, `ground_speed_kt`,
-`track_deg`, `callsign` and an identity field (`icao`, `mmsi`, `serial`) when
-the protocol has them. The identity is what turns a stream of positions into
-tracks, so it is the one field a protocol must supply to appear on a map at
-all.
+## Where retention and identity live
 
-Retention differs from the list: a list keeps the last N packets, a map keeps
-the last position per identity plus a trail, and drops an aircraft that has
-been silent for a minute or two. That is the view's business, not the bus's.
+An early draft of this file said a capped vector in the app would not carry
+more than two views, and listed retention per view and indexing by identity as
+work to be done. Both happened, and not in the store: they moved into the
+graph. A view that needs either holds a node on the bus and publishes the table
+its pane copies each frame. `TracksNode` (`crates/app/src/tracks.rs`,
+registered as `tracks` in `chain.rs`) is the worked example: it keeps the last position per identity
+with a trail, ages each kind on its own clock, and the map pane draws whatever
+it published on the last frame. The message store does the same thing with its
+own cap.
 
-ADS-B, AIS and APRS all exist now, and the map was generalised with the second
-of them rather than before it, which was the right order. Written against
-ADS-B alone the abstraction would have had one implementation, and the parts
-that look general would have been indistinguishable from the parts that are
-pure ADS-B. What the second protocol showed is where the seam actually is, and
-the third fitted without moving it.
+What is left in the app is the packet list's own last 500 records, which is a
+list of what arrived rather than a store anything else reads, and is capped
+because it carries burst samples for the newest of them.
+
+The bus is a node too: every front end feeds `packet_bus`, which writes the
+packet log on the way through, and consumers attach to its output. The flight
+tracker reads it, and so does `packet_decode`, which runs the protocol tables
+once over everything and produces the rows the packet list shows. A chart or an
+alert would attach the same way, with one input and nothing to say about which
+demodulator was involved.
+
+Replay goes through the same bus. `--record` writes the IQ of every burst and
+an `index.jsonl` describing it, and `--replay` runs a capture back through the
+whole receiver rather than a simplified copy of it, bus included, and prints
+what came out. A view can be driven from a file by reading the bus instead of
+the printout.
+
+## The map
+
+Aircraft from ADS-B on 1090 MHz, vessels and navigation marks from AIS on
+162 MHz, vehicles and stations from APRS on 144.800, and mesh nodes from
+Meshtastic and MeshCore, all on OpenStreetMap tiles.
+
+Five sources, one tracker, and the differences between them are where the
+design is. Identity is shared but is not a number: an ICAO address, an MMSI, a
+callsign and a node hash are different identity spaces, so a track is
+identified by the pair of protocol and value and nothing can collide. Position
+reassembly is not shared at all; only ADS-B has compact position reporting, so
+the CPR machinery hangs off that path and none of the others touches it.
+Ageing and plausibility are shared but not constant: an aircraft silent for a
+minute is gone, a vessel lasts ten, a vehicle half an hour and a station an
+hour.
+
+A kind decides how a thing is drawn and how long it is remembered. AIS says
+which it is by message type; APRS says it with a symbol, so an APRS station
+reporting itself as a balloon is drawn as an aircraft rather than as a car.
+
+The tile layer is ours rather than a map crate's: slippy tiles are a URL
+template and a Mercator projection, and `crates/app/src/map.rs` does that in
+under four hundred lines over the HTTP client, runtime and PNG decoder the app
+already had, rather than taking on a widget's own camera, cache and layer
+model. Tiles are cached under `$XDG_CACHE_HOME/waveshark/tiles` and fetched on
+a two worker background runtime, two requests in flight because that is what
+the tile usage policy asks for. A failure is said out loud on the map rather
+than left looking like empty sky.
+
+A position drawn hollow came from a single frame read against the station
+position, which is right for anything in ordinary range and a whole latitude
+zone out beyond about 180 nm. It is shown because it is usually right and it
+appears immediately, but it never joins a trail and is never used to resolve
+the next frame. A solid mark has been confirmed by a pair of frames, which
+needs no reference and so cannot inherit anyone's mistake.
+
+Zoom is continuous and anchored to the pointer; the tile level is only where
+the pictures come from. Range rings are drawn around the station, not around
+the middle of the window, because a ring says how far a thing is from the
+antenna and that does not change when the map is dragged. The station is set
+by right-clicking the map or typing coordinates above it, and is remembered in
+the session file.
+
+Once the map is zoomed in past about level nine, airports appear as amber
+markers under the aircraft, their ident codes labelled as the view narrows
+(large fields first, then medium, then small) and dropping where they would
+cover one another. Hovering a marker shows a card with the airport's name,
+code and elevation and its air traffic frequencies, primary ones first. The
+airports and their frequencies are the OurAirports files, whole world, fetched
+and cached by `crates/datasets` and revalidated a day apart; only heliports,
+seaplane bases, balloonports and closed fields are dropped. An earlier build
+shipped a filtered slice of northern Europe in the binary, which made a release
+the only way to fix a wrong frequency and left a receiver anywhere else looking
+at an empty map. `--fetch-data` warms that cache before going somewhere without
+a connection.
+
+## The packet log settings
+
+On the SETTINGS button in the packet list: whether packets are written at all,
+where they go, whether unrecognised bursts are shown in the list, and how much
+the whole folder may take. The limit is a runaway guard rather than a budget:
+1090 MHz with a feed attached writes a few hundred megabytes an hour, a quiet
+ISM band a few. The oldest days are deleted to keep the folder under it, so the
+log rolls rather than stopping. It stops only when a single day's file is over
+the limit on its own; it says so, and raising the limit starts it again without
+a restart.
+
+## Feeds
+
+Another receiver's frames, over TCP, added in the packet log settings. A feed
+is a source node with no input of its own, so it sits beside the radio at the
+head of the graph and its packets join the bus with everything the local front
+ends produced: they appear in the packet list, go into the log, and reach the
+tracker without any view knowing where they came from.
+
+A format is a row in `FEED_KINDS` in `crates/nodes/src/feed_nodes.rs`: a name,
+a port, a band and a function that takes frames off the front of a buffer.
+Beast binary and AVR hex are the first two. Nothing outside that file knows one
+from the other, so adding a format is adding a row and a parser rather than
+touching the settings, the session file and the node. What belongs there is
+anything carrying frames; BaseStation CSV on port 30003 does not, since it
+sends fields somebody else decoded.
+
+Because the tracker is a consumer of the bus, a feed brings aircraft with it on
+a band where this receiver demodulates nothing of the sort. Tuned to 433.92 MHz
+for weather sensors, with a Beast feed attached, the map fills from the rooftop
+receiver while the ISM decoders run locally.
+
+## Views not built yet
 
 ### Image pane, for APT, LRPT, SSTV and HRIT
 
@@ -109,124 +228,16 @@ has no frame to log.
 
 Any protocol with a numeric field and a stable identity: temperature, humidity,
 tyre pressure, battery voltage. Reads `fields` and needs nothing else, which
-makes it the cheapest of the three and the best first proof that the bus works.
-The Fine Offset decoder already produces everything it needs.
+makes it the cheapest of the three. The Fine Offset decoder already produces
+everything it needs.
 
 ### More into the message view
 
-The message view exists and takes any decode with a text field, so FLEX, ACARS
-and AIS safety messages join it by naming their fields the way POCSAG, M17,
-TETRA and APRS already do. What it does not yet take is a payload that is text
-without being a field: `media_type` of `text/plain` with the words in `bytes`
-should be read as the message body.
+The message view takes any decode with a text field, so FLEX, ACARS and AIS
+safety messages join it by naming their fields the way POCSAG, M17, TETRA and
+APRS already do. What it does not yet take is a payload that is text without
+being a field: `media_type` of `text/plain` with the words in `bytes` should be
+read as the message body.
 
-## What the bus needs before it grows
-
-The current implementation is a `Vec<Logged>` in the app, capped at 500
-records, filtered by one flag. That is enough for two views and will not carry
-five. Three things have to change, in this order, and only when a second real
-view exists to force them:
-
-1. **Retention per view.** A map wants the last position of every aircraft seen
-   in the last ten minutes; the list wants the last 500 packets whatever they
-   are. One capped vector cannot serve both. The store should keep packets by
-   age and let each view take what it wants.
-
-2. **Indexing by identity.** Every view except the list groups by device:
-   aircraft, meter, sensor. Scanning 500 records per frame to rebuild those
-   groups is affordable now and will not be with a busy band and a map open.
-
-3. **Recording and replay.** Half done: `--record` writes the IQ of every
-   burst and an `index.jsonl` describing it, and `--replay` runs captures back
-   through the scanner. What is missing is replaying into the *bus* rather than
-   into a printed list, which is what would let a view be tested without a
-   radio.
-
-### Map
-
-Aircraft from ADS-B on 1090 MHz, vessels and navigation marks from AIS on
-162 MHz, and vehicles and stations from APRS on 144.800, all on OpenStreetMap
-tiles.
-
-Three protocols, one tracker, and the differences between them are where the
-design is. Identity is shared but is not a number: an ICAO address, an MMSI
-and a callsign are three identity spaces, so a track is identified by the pair
-of protocol and value and nothing can collide. Position reassembly is not
-shared at all; only ADS-B has compact position reporting, so the CPR machinery
-hangs off that path and neither of the others touches it. Ageing and
-plausibility are shared but not constant: an aircraft silent for a minute is
-gone, a Class B vessel reports every thirty seconds, and an APRS station
-beacons every few minutes.
-
-A kind decides how a thing is drawn and how long it is remembered. AIS says
-which it is by message type; APRS says it with a symbol, so an APRS station
-reporting itself as a balloon is drawn as an aircraft rather than as a car. The tile layer is ours
-rather than a map crate's: slippy tiles are a URL template and a Mercator
-projection, and every map widget for egui brings a HTTP stack, an async
-runtime and an image pipeline to do what `crates/app/src/map.rs` does in two
-hundred lines against the PNG decoder the app already had. Tiles are cached
-under `$XDG_CACHE_HOME/waveshark/tiles`, fetched on one thread, and a
-failure is said out loud on the map rather than left looking like empty sky.
-
-A position drawn hollow came from a single frame read against the station
-position, which is right for anything in ordinary range and a whole latitude
-zone out beyond about 180 nm. It is shown because it is usually right and it
-appears immediately, but it never joins a trail and is never used to resolve
-the next frame. A solid mark has been confirmed by a pair of frames, which
-needs no reference and so cannot inherit anyone's mistake.
-
-Zoom is continuous and anchored to the pointer; the tile level is only where
-the pictures come from. Range rings are drawn around the station, not around
-the middle of the window, because a ring says how far a thing is from the
-antenna and that does not change when the map is dragged. The station is set
-by right-clicking the map or typing coordinates above it, and is remembered in
-the session file.
-
-Once the map is zoomed in past about level nine, airports appear as amber
-markers under the aircraft, their ident codes labelled as the view narrows
-(large fields first, then medium, then small) and dropping where they would
-cover one another. Hovering a marker shows a card with the airport's name,
-code and elevation and its air traffic frequencies, primary ones first. The
-airports and frequencies come from `crates/app/data/airports.tsv` and
-`frequencies.tsv`, a slice of the public-domain OurAirports dataset covering
-Ireland, Britain, northern France, the Low Countries, Germany, Scandinavia and
-Iceland, read once at startup and held.
-
-The packet log settings, on the `SETTINGS` button in the packet list, control
-whether packets are written at all, where they go, and the size at which a
-day's file stops growing. The limit is a runaway guard rather than a budget:
-1090 MHz with a feed attached writes a few hundred megabytes an hour, a quiet
-ISM band a few. A log that has stopped because it hit the limit says so, and
-raising the limit starts it again without a restart.
-
-### Feeds
-
-Another receiver's frames, over TCP, added in the packet log settings. A feed
-is a source node with no input of its own, so it sits beside the radio at the
-head of the graph and its packets join the bus with everything the local front
-ends produced: they appear in the packet list, go into the log, and reach the
-flight list without any view knowing where they came from.
-
-A format is a row in `FEED_KINDS` in `crates/nodes/src/feed_nodes.rs`: a name,
-a port, a band and a function that takes frames off the front of a buffer.
-Beast binary and AVR hex are the first two. Nothing outside that file knows one
-from the other, so adding a format is adding a row and a parser rather than
-touching the settings, the session file and the node. What belongs there is
-anything carrying frames; BaseStation CSV on port 30003 does not, since it
-sends fields somebody else decoded.
-
-Because the flight list is a consumer of the bus, a feed brings aircraft with
-it on a band where this receiver demodulates nothing of the sort. Tuned to
-433.92 MHz for weather sensors, with a Beast feed attached, the flight list
-fills from the rooftop receiver while the ISM banks run locally.
-
-The bus itself now exists as a node: every front end feeds `packet_bus`, it
-writes the packet log on the way through, and consumers attach to its output.
-The flight list reads it, and so does `packet_decode`, which runs the protocol
-tables once over everything and produces the rows the packet list shows. A map,
-a chart or an alert would attach the same way, with one input and nothing to
-say about which demodulator was involved.
-
-None of that is worth building before the second view exists. The point of
-writing it down is that the shape of the first view should not make any of it
-harder.
+The shape has held so far. Every view added since the first attaches to the bus
+with one input and nothing to say about which demodulator was involved.

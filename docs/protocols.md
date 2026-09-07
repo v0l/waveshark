@@ -1,7 +1,8 @@
 # Protocols
 
 The target is the union of what rtl_433, a Flipper Zero, a PortaPack running
-Mayhem and SDRangel can do, in one receiver, and transmit for the same set. This file lists those protocols, what each one costs to add, and which
+Mayhem and SDRangel can do, in one receiver, and transmit for the same set.
+This file lists those protocols, what each one costs to add, and which
 direction is realistic for it.
 
 The point of the list is to make the cost visible before starting, because
@@ -18,10 +19,16 @@ that turns radio into symbols, and there are only a few of those.
 | buffered envelope, `ask_detect` | mark/gap timings from shallow ASK | yes | no |
 | discriminator, `fsk_detect` | mark/gap timings from two-level FSK | yes | no |
 | pilot PLL, `wfm` | stereo audio, RDS | yes | no |
-| discriminator, `c4fm_detect` | 4-FSK level symbols | yes | no |
-| discriminator plus sync correlation, `m17` | M17 frames | yes | no |
-| coherent PSK/GMSK with timing recovery | soft symbols | no | no |
-| chirp correlator (dechirp then FFT), `lora` | LoRa symbols | yes | no |
+| discriminator, `dsp::c4fm` | 4-FSK level symbols | yes | no |
+| discriminator plus sync correlation, `dsp::m17` | M17 frames | yes | no |
+| discriminator plus three bit clocks, `dsp::pocsag` | NRZ FSK bits at 512, 1200 or 2400 | yes | no |
+| discriminator plus Bell 202, `dsp::afsk` | 1200 baud bits over FM | yes | no |
+| GMSK with timing recovery, `dsp::ais` | 9600 baud bits | yes | no |
+| 100 kchip/s FSK, 3-of-6 and NRZ, `dsp::wmbus` | meter frame bits | yes | no |
+| pulse-position at 1 Mbit/s, `dsp::modes` | Mode S frames | yes | no |
+| differential PSK on a training sequence, `dsp::tetra` | soft symbols | yes | no |
+| coherent PSK with carrier recovery | soft symbols | no | no |
+| chirp correlator (dechirp then FFT), `dsp::lora` | LoRa symbols | yes | no |
 | OFDM (FFT, pilots, equaliser) | subcarrier symbols | no | no |
 | DSSS despreader | chip-synchronised symbols | no | no |
 
@@ -39,8 +46,10 @@ with silence either side; a voice transmission is a continuous carrier that
 can last minutes and whose clock has to hold for all of it. M17 puts a 16 bit
 sync burst in front of every 40 ms frame, so `dsp::m17` correlates for the
 next sync and reads the 184 symbols behind it, and never holds a clock for
-longer than one frame. DMR, P25 and NXDN are framed the same way and would be
-read the same way; what stops them is the vocoder, not the demodulator.
+longer than one frame. DMR is read that way now, in `nodes::dmr_nodes`. P25 and
+NXDN are framed the same and would be read the same; the vocoder is no longer
+what stops them, since `crates/mbe` decodes both IMBE and AMBE behind the
+`ambe` feature.
 
 Which front end runs is measured rather than configured. Each channel gates a
 burst once and `dsp::classify` measures it: envelope levels and how long each
@@ -52,16 +61,18 @@ the measurement will not name it, which is what every channel used to do with
 every burst. Scored against rtl_433's recordings, whose devices and therefore
 modulations are known, it puts 46 of 52 in the right family;
 `crates/decode/tests/classify_corpus.rs` prints the confusion matrix and lists
-the six by name. The classes it can name but not yet read (MSK, BPSK, QPSK,
-chirp, noise-like, bare carrier) are labels on the burst rather than routes to
-anything.
+the six by name. MSK routes to the FSK front end, and a chirp verdict is what
+places LoRa on a source. The rest of what it can name (BPSK, QPSK, DQPSK, OFDM,
+DSSS, noise-like, bare carrier) are labels on the burst rather than routes:
+DQPSK has a demodulator in `dsp::tetra`, which the router does not dispatch to,
+and the others have none.
 
 A protocol whose symbols reach the mark/gap layer costs a timing table and a
 payload parser, and nothing else: the slicers (PWM, PPM, Manchester, NRZ), the
 CRC helpers, the unknown-burst analyser and the packet list already exist.
 Everything else costs a demodulator first.
 
-Transmit inverts the same layers and none of it is written yet. See
+Transmit inverts the same layers, and the bottom of that stack is built: see
 [Transmit](#transmit) below.
 
 The second constraint is width, and it is no longer a constraint on the
@@ -80,8 +91,10 @@ span covers the frequency.
 Sources cost what is transmitting: an empty band is one FFT, and each source
 that opens is a mixer and two decimators for as long as it lasts, plus the
 frame decoders where the width warrants them. At 2.4 MS/s on an empty band
-that measures about 9x real time on a 48 core machine against the 6.1x the
-four bank tiers took, in `radio::tests::the_scanner_keeps_up_with_the_stream`.
+that measures about 40x real time on a 48 core machine, in
+`radio::tests::the_scanner_keeps_up_with_the_stream`. The four bank tiers
+measured 6.1x when they were the default, a number that now lives only as the
+comment on `scanners::DEFAULT_WIDTHS`.
 Scored on rtl_433's corpus by `crates/nodes/tests/source_corpus.rs`, the node
 recovers 53 of the 57 reference decodes against the tiers' 48, and loses
 ground on no capture. The tiers remain a front end a scanner block can ask
@@ -94,6 +107,8 @@ The third is hardware.
 | RTL-SDR | 24-1766 MHz | 2.4 MS/s | receive only |
 | HackRF One | 1 MHz-6 GHz | 20 MS/s | half duplex, transmit and receive |
 | PortaPack | a HackRF with a screen | as HackRF | as HackRF |
+| LimeSDR USB / Mini | 100 kHz-3.8 GHz | 61.44 MS/s on USB3 | full duplex, two receive and two transmit channels on a USB board |
+| iqstream server | whatever feeds it | whatever feeds it | receive only, and its tuning is a reading rather than a setting |
 
 Out of scope whatever the ambition: a Flipper's 125 kHz RFID, its 13.56 MHz
 NFC, its infrared and its iButton are near-field or optical, not radio an SDR
@@ -105,7 +120,11 @@ Momentum's sub-GHz protocol list has no shelf label in it at all.
 
 Receive:
 
-- **done**: decoding now, verified against a recording
+- **done**: decoding now, verified against a recording another implementation
+  also decoded
+- **off air**: decoding now, verified against a recording this project made,
+  where the evidence is what the transmission itself says (a callsign, a CRC,
+  a signature) rather than a second decoder's opinion
 - **synthetic**: decoding now, but only checked against frames this project
   built itself from rtl_433's published layout. The parser is exercised; the
   timings and the front end in front of it are not
@@ -143,17 +162,23 @@ reporting a passing integrity check may claim a burst rtl_433 read as something
 else. A receiver meant to identify unknown signals is not helped by a decoder
 that finds the right sensor and three imaginary ones.
 
-Known gaps, listed in the test so that closing one fails until the note is
-removed:
+Known gaps, listed in `KNOWN_GAPS` in that test so that closing one fails until
+the note is removed:
 
-- Two sensors transmitting inside one burst yield one decode, because a
-  protocol returns the first frame it finds in a package. rtl_433 reads its
-  rows separately and reports both.
-- The THR228N is reported as a THN132N. They share a sensor id and a frame
-  layout, and rtl_433 tells them apart by message length, which is not
-  measurable here: a burst runs one copy straight into the preamble of the
-  next, and that preamble unpacks as valid Manchester pairs, so the frame never
-  ends where the transmitter stopped. Both sensors report the same fields.
+- The Acurite 5n1 numbers its three repeats and rtl_433 prints each of them. A
+  protocol here returns the first frame it finds in a package, so only the
+  first sequence number is reported. The reading is the same in all three.
+- One Honeywell 5816 capture was recorded at close range with the gain control
+  never settling, so the burst arrives saturated and the envelope reads nearly
+  all of it as one mark. The same family decodes from the 2Gig and RE208
+  recordings.
+
+Not in that list but worth knowing: the THR228N is reported as a THN132N. They
+share a sensor id and a frame layout, and rtl_433 tells them apart by message
+length, which is not measurable here: a burst runs one copy straight into the
+preamble of the next, and that preamble unpacks as valid Manchester pairs, so
+the frame never ends where the transmitter stopped. Both sensors report the
+same fields.
 
 ## ISM sensors, remotes and telemetry
 
@@ -167,8 +192,8 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | Fine Offset WH51 soil moisture | 433.92/868/915 MHz | FSK 58 us | 125 kHz | done | table | CRC8 and a checksum, moisture as a raw AD count and a percentage |
 | PT2262 / EV1527 / HS1527 fixed code | 315/433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Garage doors, doorbells, cheap sensors. The most common thing on 433. No integrity check at all, so a burst is only claimed when it is exactly one frame long |
 | Princeton, Holtek, CAME 12/24, Ansonic, Bett, Nice Flo, Linear, Holtek HT12x, Linear Delta3 | 315/433.92 MHz | OOK PWM | 31 kHz | synthetic | table | Flipper's fixed-code gate remotes, ported from Momentum-Firmware. No checksum, so a frame is only claimed when it repeats or the package is plainly one frame, and degenerate all-0/all-1 frames are refused. On rtl_433's recordings several of them still claim bursts belonging to weather sensors, reporting no integrity check as they do so. Not verified: the corpus has no capture of one of these remotes that rtl_433 itself reads as more than an unknown code |
-| KeeLoq (HCS200/HCS301) | 433.92 MHz | OOK PWM, 3 × 400 us per bit | 8 kHz | off air | a remote on 433.889 MHz pressed every few seconds, its burst in the decoder's test | Microchip's rolling-code encoder inside most gate, garage and car remotes that are not fixed-code: twelve preamble pulses, a 4 ms header, then 66 bits least significant bit first, a 32-bit hopping code that is ciphertext and changes every press, a 28-bit serial, four button bits, a low-battery flag and a repeat flag. Nothing can be checked, so the frame's shape is the evidence: exactly 66 bits on a row of their own behind a row of ones, which noise and other protocols do not fall into. The hopping code is reported as it arrived; decrypting it needs the manufacturer's key |
-| Wireless M-Bus (EN 13757-4) | 868.95 MHz | 2-FSK 100 kchip/s, modes T and C | 250 kHz | off air | four meters from rtl_433's corpus, mode T | Utility meters: a Diehl and a Techem water meter, a BMeters water meter and an Itron component behind a repeater. Mode T spreads bytes over the 3-of-6 code, mode C sends them raw; both frame in blocks of at most sixteen bytes under a CRC-16, so a frame that passes is a frame. What reports without the key is who sent it and what it is, the manufacturer, meter number, version and type, since a utility's readings are AES-encrypted with a key it holds. Mode C's frame layout is decoded and its CRC checked, but the C recordings do not yet demodulate here and mode S is unhandled: both wait on a slicer this demodulator lacks |
+| KeeLoq (HCS200/HCS301) | 433.92 MHz | OOK PWM, 3 × 400 us per bit | 8 kHz | off air | table | Verified against a remote on 433.889 MHz pressed every few seconds, its burst kept in the decoder's test. Microchip's rolling-code encoder inside most gate, garage and car remotes that are not fixed-code: twelve preamble pulses, a 4 ms header, then 66 bits least significant bit first, a 32-bit hopping code that is ciphertext and changes every press, a 28-bit serial, four button bits, a low-battery flag and a repeat flag. Nothing can be checked, so the frame's shape is the evidence: exactly 66 bits on a row of their own behind a row of ones, which noise and other protocols do not fall into. The hopping code is reported as it arrived; decrypting it needs the manufacturer's key |
+| Wireless M-Bus (EN 13757-4) | 868.95 MHz | 2-FSK 100 kchip/s, modes T and C | 250 kHz | done | table | Verified against four meters from rtl_433's corpus in mode T. Utility meters: a Diehl and a Techem water meter, a BMeters water meter and an Itron component behind a repeater. Mode T spreads bytes over the 3-of-6 code, mode C sends them raw; both frame in blocks of at most sixteen bytes under a CRC-16, so a frame that passes is a frame. What reports without the key is who sent it and what it is, the manufacturer, meter number, version and type, since a utility's readings are AES-encrypted with a key it holds. Mode C's frame layout is decoded and its CRC checked, but the C recordings do not yet demodulate here and mode S is unhandled: both wait on a slicer this demodulator lacks |
 | Chamberlain / Security+ 1.0 and 2.0 | 310/315/390 MHz | OOK PWM | 31 kHz | table | table | Rolling code: readable, not cloneable |
 | Somfy RTS | 433.42 MHz | OOK Manchester 604 us | 31 kHz | done | table | Rolling code: readable, not cloneable. The sync word lives in the half-symbol stream and its odd length breaks naive pairing, so the decoder searches the raw halves for the sync and only then pairs, the way rtl_433 does. 56 bits, descrambled by XOR with the previous byte, guarded by a nibble-XOR checksum |
 | KeeLoq, FAAC SLH, Star Line | 433.42/433.92 MHz | OOK PWM/Manchester | 31 kHz | table | table | Frames read fine; the payload is encrypted, so a replay is all a transmitter can do with one. No captures yet, so these wait on real RF before being ported rather than shipping an unverifiable decoder |
@@ -194,6 +219,7 @@ existing pulse front end. Lowest marginal cost, highest coverage gain.
 | EnOcean | 868.3 MHz | ASK | 31 kHz | table | table | Self-powered switches |
 | Itron / ERT smart meters | 902-928 MHz | OOK/FSK Manchester | 125 kHz | table | table | The rtlamr target |
 | X10 RF | 310/433.92 MHz | OOK | 31 kHz | done | table | House code, unit and state, guarded by parity |
+| Unidentified 868 MHz alarm link | 868.1/868.5 MHz | 2-FSK 19.6 kbaud NRZ | 125 kHz | off air | no | Sync `47 4F`, a 16-bit id, then 17 to 19 bytes of block-encrypted body with no integrity check outside the cipher. Heard continuously in Ireland, a hub and a repeater relaying one another. The framing is read; nothing inside it is. Nobody has published the sync word, so the name says what was measured rather than whose it is |
 | Homematic | 868.3 MHz | GFSK 10 kbps | 125 kHz | framing | mod | Sync word plus whitening |
 | Radiosondes (RS41, DFM, M10) | 400-406 MHz | GFSK 4800 bps | 125 kHz | framing | mod | Reed-Solomon, and a GPS position worth having |
 | nRF24 ShockBurst | 2.4 GHz | GFSK 1-2 Mbps | 2 MHz | demod | mod | HackRF only. Flipper does this with a separate module |
@@ -223,9 +249,9 @@ inside it is the vendor's and mostly is not.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| Wireless M-Bus mode T | 868.95 MHz | 2-FSK 100 kbps, 3-of-6 | 125 kHz | framing | table | Very common on 868. Block CRCs, payloads often encrypted |
-| Wireless M-Bus mode S | 868.3 MHz | 2-FSK 32.768 kbps, Manchester | 125 kHz | framing | table | |
-| Wireless M-Bus mode C | 868.95 MHz | 2-FSK 100 kbps NRZ | 125 kHz | framing | table | |
+| Wireless M-Bus mode T | 868.95 MHz | 2-FSK 100 kbps, 3-of-6 | 125 kHz | done | table | Very common on 868. `dsp::wmbus` demodulates it, `decode::wmbus` reads the blocks and their CRCs, and the auto node places the front end by bandwidth. Verified field for field against rtl_433's four meter recordings: manufacturer, meter number, version and type. The readings inside are AES encrypted with the utility's key |
+| Wireless M-Bus mode S | 868.3 MHz | 2-FSK 32.768 kbps, Manchester | 125 kHz | demod | table | Nothing has recorded it here |
+| Wireless M-Bus mode C | 868.95 MHz | 2-FSK 100 kbps NRZ | 125 kHz | framing | table | The frame layout and CRC are read, but the C recordings do not demodulate here yet: the slicer for raw NRZ at this rate is missing |
 | Wireless M-Bus mode N | 169 MHz | 4-GFSK 2.4/4.8 kbps | 31 kHz | demod | mod | Four levels, so the two-level slicer does not apply |
 | Z-Wave R1 | 868.42/908.42 MHz | FSK 9.6 kbps, Manchester | 125 kHz | framing | table | Preamble, sync byte, checksum |
 | Z-Wave R2/R3 | 868.42/908.42 MHz | FSK 40/100 kbps | 125 kHz | framing | table | |
@@ -237,9 +263,10 @@ inside it is the vendor's and mostly is not.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` is placed on a source once the burst front end has named a burst of it a chirp, fed the source's samples so far from that front end's ring, and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against two off-air Meshtastic transmissions at SF11 over 250 kHz, from different nodes 128 seconds apart, both giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
-| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | framing | mod | The PHY is read; what is missing is the MAC layout on top of it. Payloads are AES encrypted, the metadata is still worth logging |
-| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | done | mod | The 0x2B sync word names it and the sixteen byte packet header is read: who transmitted, who for, the packet id, and how many hops it has left of how many it started with. The payload behind that is AES encrypted with the channel key, so it is reported as bytes |
+| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` is placed on a source once the burst front end has named a burst of it a chirp, fed the source's samples so far from that front end's ring, and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against three off-air Meshtastic packets, two at SF11 over 250 kHz from the same node 128 seconds apart and a third tuned 525 kHz off channel at 2.4 MS/s, and against a MeshCore advert at SF8 over 62.5 kHz, each giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
+| LoRaWAN | as LoRa | as LoRa | 125-500 kHz | synthetic | mod | `decode::lorawan` reads what is in the clear: a join request whole (JoinEUI, DevEUI, nonce), and a data frame's DevAddr, frame counter, port, ACK and ADR flags. A join accept is ciphertext, and so is `FRMPayload`, under a key per device |
+| Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | off air | mod | The 0x2B sync word names it and the sixteen byte packet header is read: who transmitted, who for, the packet id, and how many hops it has left of how many it started with. The payload is AES encrypted with the channel key. The default and public keys are built in and tried on every packet, and an operator can add more in the keys pane, so an ordinary LongFast message reads as its text; anything under a private key reports as bytes |
+| MeshCore | 433/868/915 MHz | LoRa | 62.5-250 kHz | off air | mod | `decode::meshcore` reads the routing in the clear: the one byte header, whether the packet is flooding or routed, and the path of node hashes it has taken. An advert is not enciphered at all and carries the node's Ed25519 public key, signature, role, name and position, so a receiver learns the mesh from one packet. Verified off air against a node advert at SF8 over 62.5 kHz, signature checked |
 | Sigfox uplink | 868.13 MHz | DBPSK 100 bps (600 US) | 100 Hz | demod | mod | Ultra narrowband, coherent detection, very narrow channel |
 | Sigfox downlink | 869.525 MHz | GFSK 600 bps | 31 kHz | framing | mod | |
 
@@ -259,7 +286,7 @@ inside it is the vendor's and mostly is not.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| AIS | 161.975/162.025 MHz | GMSK 9600 bps | 25 kHz | framing | mod | NRZI, HDLC bit stuffing, CRC16. The discriminator output is usable directly, so this is the cheapest of the "real" protocols |
+| AIS | 161.975/162.025 MHz | GMSK 9600 bps | 25 kHz | synthetic | mod | `dsp::ais` demodulates both channels, `dsp::hdlc` does NRZI, the flags, the bit destuffing and the CRC, and `decode::ais` reads the message tables. The auto node runs it span-wide wherever the span covers 162 MHz, since two channels stations alternate between are not something a spectrogram finds reliably. Checked on synthetic RF only: no recording of real traffic yet |
 | DSC | 156.525 MHz, HF | FSK 1200 baud | 25 kHz | framing | table | Distress calls, so anything transmitted here reaches a coastguard watch room |
 | NAVTEX | 518 kHz | FSK 100 baud SITOR-B | 1 kHz | chain | table | Needs HF hardware |
 
@@ -280,12 +307,17 @@ codewords the message text can be read back out of.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| DMR | 136-174, 400-470 MHz | 4-FSK 4800 baud | 12.5 kHz | demod | mod | Four-level slicer, then AMBE, which is patent encumbered |
+| DMR | 136-174, 400-470 MHz | 4-FSK 4800 baud | 12.5 kHz | off air | mod | `nodes::dmr_nodes` recovers the clock with a Gardner loop, correlates the 48-bit syncs and holds a burst clock through a superframe; `decode::dmr` undoes the Golay(20,8) slot type, the BPTC(196,96) full link control, the QR(16,7,6) EMB and the BPTC(128,72) embedded LC, so who called whom on which talkgroup is read from the header, the terminator and the embedded LC. Verified against an off-air hotspot capture whose own link control names talkgroup 9 and radio ID 1234567 four ways that agree. `decode::dmr_bp` undoes Motorola Basic Privacy. Speech is AMBE, in `crates/mbe` behind the `ambe` feature, off by default because the codec is patent encumbered. Slot 2 is not yet separated from slot 1 |
 | P25 phase 1 | 700-900 MHz | C4FM | 12.5 kHz | demod | mod | As DMR, plus IMBE |
 | NXDN, dPMR | 400-470 MHz | 4-FSK | 6.25/12.5 kHz | demod | mod | |
-| M17 | amateur bands | 4-FSK 4800 baud | 12.5 kHz | synthetic | mod | Link setup, stream and packet frames, in `dsp::m17` and `decode::m17`. Reports who called whom, the channel access number, whether the stream is encrypted or signed, and the position, text or repeater callsigns the metadata carries. Packet mode is reassembled and CRC checked, so an SMS packet reports its message. A receiver that missed the link setup rebuilds it from six stream frames through the link information channel, which is what that channel is for. Frames are verified against the M17 project's own C library symbol for symbol, in `the_frames_match_the_reference_implementation`, which is a stronger check than **synthetic** usually means: an encoder and a decoder written together agree with each other whatever they both misread, and this one agrees with somebody else's. The demodulator in front of them has met synthetic RF and not yet a radio, which is why the status is not **done**. Voice payloads are carried but not decoded: Codec 2 at 3200 bits per second is the last piece missing, and unlike AMBE or IMBE it is free to implement |
-| TETRA | 380-400, 410-430 MHz | pi/4-DQPSK 36 kbps | 25 kHz | partial | mod | Control channels read off the air: `dsp::tetra` demodulates by differential detection, resynchronising timing and carrier on every burst's training sequence, then runs the downlink coding stack (scrambling, interleaving, RCPC Viterbi, CRC, and the (30,14) block code of the access assign field), and `decode::tetra` reads the PDUs. A carrier is logged as who it is (SYNC and SYSINFO: MCC, MNC, colour code, location area, main carrier) and what it knows (D-NWRK-BROADCAST: the neighbouring cells by carrier and location area). Signalling to a party is read from the MAC header even when enciphered: the address, the encryption mode, any usage marker and channel allocation. In clear, the CMCE call control PDUs (D-SETUP, D-CONNECT, D-TX GRANTED, D-RELEASE and the rest) give the parties, the call identifier and group or private, and D-SDS-DATA gives text. The access assign field of every slot is followed for traffic, so a call becomes a start row and an end row with its airtime, by usage marker and by the party the marker was given to. Verified against a recorded Irish downlink for everything but the clear-mode PDUs, which that network encrypts; those are tested on synthetic bits. Not read: traffic itself, and voice, which is ACELP and patent encumbered the way AMBE is |
+| M17 | amateur bands | 4-FSK 4800 baud | 12.5 kHz | off air | mod | Link setup, stream and packet frames, in `dsp::m17` and `decode::m17`. Reports who called whom, the channel access number, whether the stream is encrypted or signed, and the position, text or repeater callsigns the metadata carries. Packet mode is reassembled and CRC checked, so an SMS packet reports its message. A receiver that missed the link setup rebuilds it from six stream frames through the link information channel, which is what that channel is for. Frames are verified against the M17 project's own C library symbol for symbol, in `the_frames_match_the_reference_implementation`, which is a stronger check than **synthetic** usually means: an encoder and a decoder written together agree with each other whatever they both misread, and this one agrees with somebody else's. Verified off air against an OpenRTX handheld: the capture in `testdata/fixtures.toml` decodes to the callsign the transmission carries, asserted through the same path the live radio runs. Voice decodes too, Codec 2 at 3200 bits per second through the `codec2` crate, onto the voice bus |
+| TETRA | 380-400, 410-430 MHz | pi/4-DQPSK 36 kbps | 25 kHz | partial | mod | Control channels read off the air: `dsp::tetra` demodulates by differential detection, resynchronising timing and carrier on every burst's training sequence, then runs the downlink coding stack (scrambling, interleaving, RCPC Viterbi, CRC, and the (30,14) block code of the access assign field), and `decode::tetra` reads the PDUs. A carrier is logged as who it is (SYNC and SYSINFO: MCC, MNC, colour code, location area, main carrier) and what it knows (D-NWRK-BROADCAST: the neighbouring cells by carrier and location area). Signalling to a party is read from the MAC header even when enciphered: the address, the encryption mode, any usage marker and channel allocation. In clear, the CMCE call control PDUs (D-SETUP, D-CONNECT, D-TX GRANTED, D-RELEASE and the rest) give the parties, the call identifier and group or private, and D-SDS-DATA gives text. The access assign field of every slot is followed for traffic, so a call becomes a start row and an end row with its airtime, by usage marker and by the party the marker was given to. Verified against a recorded Irish downlink for everything but the clear-mode PDUs, which that network encrypts; those are tested on synthetic bits. Traffic is read as well: `dsp::tetra::speech` recovers the two STEC frames a slot carries, `decode::voice` deciphers them, and `decode::vocoder` is a reimplementation of the ETSI EN 300 395-2 fixed-point speech decoder, in progress. Under the `tea` feature the slot keystream is `decode::tea` (TEA1 and TEA2), so an enciphered network's traffic decrypts with a key entered in the keys pane; without one, TEA1's 32-bit fold is brute forced by `decode::recover` on the CPU or `decode::gpu` on a GPU, and TA61 identities are recovered by `decode::ta61`, so the parties can still be named. A stock build has none of that. Not read: anything on a network whose key is unknown and unrecoverable |
 | FM with CTCSS/DCS | any | FM plus subaudible tone | 12.5 kHz | table | mod | Trivial next to the rest: a Goertzel on the discriminator output |
+
+What turns an identifier into a name is `crates/datasets`, which fetches and
+caches the DMR and NXDN registries, the repeater and reflector lists, the
+airports with their air traffic frequencies, and the Artemis signal database.
+A DMR radio ID is a number until one of those says whose it is.
 
 ## Broadcast
 
@@ -314,9 +346,9 @@ codewords the message text can be read back out of.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| APRS / AX.25 1200 | 144.39/144.8 MHz | AFSK over FM | 12.5 kHz | framing | mod | Discriminator, Bell 202 tones, HDLC, CRC16. A good first framing target |
+| APRS / AX.25 1200 | 144.39/144.8/144.64 MHz | AFSK over FM | 16 kHz | synthetic | mod | `dsp::afsk` reads Bell 202 off the discriminator, `dsp::hdlc` does NRZI, destuffing and the CRC, and `decode::ax25` and `decode::aprs` read the frame and the position in all three encodings, uncompressed, compressed and Mic-E. Placed by the auto node on any source whose channel it fits. Checked on synthetic RF only |
 | Packet 9600 (G3RUH) | 144-440 MHz | direct FSK 9600 | 25 kHz | framing | mod | Scrambled NRZI |
-| Morse (CW) | any | OOK | 500 Hz | table | table | The envelope path already produces the timings, and keying a carrier is the simplest transmit case there is |
+| Morse (CW) | any | OOK | 500 Hz | synthetic | done | `decode::morse` reads the same table in both directions, and `morse_tx` is the one protocol that transmits end to end: text into timings into a keyed carrier, checked by a round trip through a file sink in `crates/nodes/tests/morse_round_trip.rs` |
 | RTTY | HF, VHF | FSK 45.45 baud | 1 kHz | framing | mod | Baudot, and the same two-tone shape as everything else here |
 | PSK31 | HF | BPSK 31.25 baud | 100 Hz | demod | mod | Varicode, coherent |
 | SSTV | HF, 144 MHz | FM subcarrier | 3 kHz | framing | mod | Image, like APT |
@@ -340,8 +372,9 @@ codewords the message text can be read back out of.
 
 ## Transmit
 
-Nothing goes on air yet, and the gap is structural rather than protocol by
-protocol. The device layer is in place; three things above it are missing.
+Two things go on air: a keyed carrier and narrowband FM from a microphone or a
+tone. The rest of the gap is structural rather than protocol by protocol. The
+device layer is in place; three things above it are missing.
 
 The device layer, done: `Device::start_tx` returns a `TxStream`, which takes
 blocks and reports the transfers the radio sent as zeros because nothing was
@@ -368,9 +401,12 @@ and `tx_time` for the same reasons.
 
 Half duplex is the driver's problem, not the receiver's. Keying does not tear
 the receive stream down: the HackRF driver takes the reader away, feeds the
-stream a noise floor about 90 dB down at the same rate and centre for the
-length of the over, and puts the radio back when the transmit stream is
-dropped. The receive graph runs throughout, so the spectrum's averaging,
+stream a floor three bits of the eight bit converter wide, about 33 dB down,
+at the same rate and centre for the length of the over, and puts the radio back
+when the transmit stream is dropped. That level is what this radio's own floor
+measures with the front end running, and it is deliberately not lower: at 90 dB
+down every sample lands on the same value and the ADC health check reports a
+starved converter for the length of every over. The receive graph runs throughout, so the spectrum's averaging,
 every channel's squelch and every part-built frame survive an over, and the
 waterfall shows the gap instead of stopping. `RxStream::silent` says which it
 is. A LimeSDR is 2x2 and full duplex, so it needs none of that: `crates/limesdr`
@@ -431,19 +467,22 @@ Cheapest first, by value per unit of work:
    decoder that exists: a parser and a CRC each.
 3. **TPMS.** Short frames, plenty of them near any road, and the OOK and FSK
    variants exercise both banks.
-4. **AIS.** The first protocol needing real framing (NRZI, bit stuffing,
-   CRC16) but no new demodulator, and the results are immediately legible.
+4. ~~**AIS.**~~ Written and wired, on synthetic RF only. What it still needs is
+   a recording of real traffic.
 5. ~~**POCSAG.**~~ Done. The BCH(31,21) correction it added is reusable for
    FLEX, ERMES and the radiosondes.
 6. **Wireless M-Bus T and C.** Common on 868 in Europe, and the sync word plus
    block CRC work carries over to Z-Wave and Homematic.
 7. **The transmit path, ending in Morse.** Device, encoder, modulator,
    scheduler, proven end to end on the simplest possible protocol.
-8. **LoRaWAN.** The MAC layer on top of the LoRa PHY that is now read:
-   join requests, device addresses and frame counters, all of which are in
-   the clear even though the payload is not.
-9. **ADS-B.** Needs its own wideband chain rather than a bank channel, so it
-   is a structural change: a scanner tier at 2 MS/s.
+8. ~~**LoRaWAN.**~~ Done: join requests, device addresses and frame counters,
+   all of which are in the clear even though the payload is not.
+9. ~~**ADS-B.**~~ Done, on a wideband branch of its own rather than a bank
+   channel.
+10. **P25 and NXDN.** Framed like DMR, which is read now, and the vocoder they
+   need is already ported. What is missing is the framing layer for each.
+11. **A recording of real AIS and APRS traffic**, which is the only thing
+   standing between those two and a **done**.
 
 Everything below that (OFDM broadcast, trunked voice, cellular) is a project
 each rather than a decoder each, and should be judged on its own.
