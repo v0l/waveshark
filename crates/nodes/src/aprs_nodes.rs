@@ -165,8 +165,16 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         .then(|| aprs::parse(&frame.info, &frame.destination.call))
         .flatten();
 
+    let mut fix = None;
     let protocol = match &report {
         Some(aprs::Report::Position { position, comment }) => {
+            fix = Some(common::Position {
+                lat: position.lat,
+                lon: position.lon,
+                altitude_m: position.altitude_ft.map(|f| f64::from(f) * 0.3048),
+                speed_kt: position.speed_kt,
+                course_deg: position.course_deg,
+            });
             fields.push(("lat".into(), Value::Float(round(position.lat, 5))));
             fields.push(("lon".into(), Value::Float(round(position.lon, 5))));
             if let Some(v) = position.course_deg {
@@ -202,7 +210,8 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
     };
 
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .by(common::Identity::new("aprs", frame.source.to_string()))
         // The AX.25 addresses. A destination on APRS is usually a software
         // identifier rather than a station, which is why it is a group: it
         // is a label many senders share, not somebody listening.
@@ -215,7 +224,9 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         .with_modulation("AFSK")
         // Every frame here passed the X.25 frame check sequence in the
         // demodulator, which is a real integrity check.
-        .with_crc(Some(true))
+        .with_crc(Some(true));
+    d.position = fix;
+    d
 }
 
 fn round(v: f64, places: i32) -> f64 {

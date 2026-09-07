@@ -181,9 +181,13 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             None => pipeline::event::Party::broadcast(),
         }),
     };
+    let mut who = common::Identity::new("ble", adv.address.to_string());
+    who.name = adv.name.clone();
+    who.vendor = adv.company.and_then(pdu::company_name).map(str::to_string);
     Some(
         Decoded::bytes("BLE-Adv", center, 0.0, bytes.to_vec())
             .with_link(link)
+            .by(who)
             .with_detail(detail)
             .with_fields(fields)
             .with_modulation("GFSK")

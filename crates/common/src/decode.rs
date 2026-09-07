@@ -103,6 +103,69 @@ impl Link {
     }
 }
 
+/// Where a transmitter said it was.
+///
+/// What the map plots, from whichever protocol reported it. Only a position
+/// a decoder is sure of: ADS-B sends half a position per frame and needs two
+/// of them or a reference, so its reassembly stays with the tracker and this
+/// is filled in only once there is a place to put on a map.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Position {
+    pub lat: f64,
+    pub lon: f64,
+    pub altitude_m: Option<f64>,
+    /// Over the ground, in knots, because every protocol that reports one
+    /// reports it in knots.
+    pub speed_kt: Option<f64>,
+    pub course_deg: Option<f64>,
+}
+
+/// Who transmitted, as the device database rows on.
+///
+/// The identifier plus the space it lives in, because identifiers are only
+/// unique within a system: an ICAO address and an MMSI are both numbers and
+/// are not comparable, and an ISM sensor's id is eight bits chosen when the
+/// batteries went in, so two makes sharing one is ordinary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Identity {
+    pub space: String,
+    pub id: String,
+    /// What it called itself, where it says: a callsign, a vessel name, a
+    /// node name typed into a phone.
+    pub name: Option<String>,
+    pub vendor: Option<String>,
+}
+
+impl Identity {
+    pub fn new(space: impl Into<String>, id: impl Into<String>) -> Self {
+        Self { space: space.into(), id: id.into(), name: None, vendor: None }
+    }
+
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn made_by(mut self, vendor: impl Into<String>) -> Self {
+        self.vendor = Some(vendor.into());
+        self
+    }
+}
+
+/// How long a transmission held the channel, for the call list.
+///
+/// `voice` is the decoder asserting that speech was carried, which only a
+/// decoder that knows can say: a destination alone is not a call, or every
+/// short data message would be one.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Airtime {
+    pub seconds: f64,
+    pub voice: bool,
+    /// The transmission is still running, so a list can show it as live
+    /// rather than as one that ended the moment it was heard.
+    pub live: bool,
+}
+
 /// A successfully decoded frame from some protocol.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decoded {
@@ -169,6 +232,13 @@ pub struct Decoded {
     pub audio: Option<std::sync::Arc<crate::Speech>>,
     /// Who it was between, where the protocol names them. See [`Link`].
     pub link: Option<Link>,
+    /// Where the transmitter said it was. What the map plots.
+    pub position: Option<Position>,
+    /// Who transmitted. What the device database rows on.
+    pub identity: Option<Identity>,
+    /// How long it held the channel, and whether it carried speech. What the
+    /// call list measures.
+    pub airtime: Option<Airtime>,
 }
 
 impl Decoded {
@@ -191,6 +261,9 @@ impl Decoded {
             iq: None,
             audio: None,
             link: None,
+            position: None,
+            identity: None,
+            airtime: None,
         }
     }
 
@@ -198,6 +271,23 @@ impl Decoded {
     /// the links directory is built from.
     pub fn with_link(mut self, link: Link) -> Self {
         self.link = Some(link);
+        self
+    }
+
+    /// Where the transmitter said it was.
+    pub fn at_position(mut self, p: Position) -> Self {
+        self.position = Some(p);
+        self
+    }
+
+    /// Who transmitted, for the device database.
+    pub fn by(mut self, who: Identity) -> Self {
+        self.identity = Some(who);
+        self
+    }
+
+    pub fn with_airtime(mut self, a: Airtime) -> Self {
+        self.airtime = Some(a);
         self
     }
 

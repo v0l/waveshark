@@ -488,6 +488,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ("payload_len".into(), Value::Int(r.payload.len() as i64)),
     ];
 
+    let mut fix: Option<common::Position> = None;
     let mesh = r.meshtastic();
     if let Some(m) = &mesh {
         let dest = if m.is_broadcast() { "broadcast".to_string() } else { format!("{:08x}", m.destination) };
@@ -523,6 +524,13 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             }
             meshtastic::Message::Position(p) => {
                 if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
+                    fix = Some(common::Position {
+                        lat,
+                        lon,
+                        altitude_m: p.altitude.map(f64::from),
+                        speed_kt: None,
+                        course_deg: None,
+                    });
                     fields.push(("latitude".into(), Value::Float(lat)));
                     fields.push(("longitude".into(), Value::Float(lon)));
                 }
@@ -590,6 +598,13 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("name".into(), Value::Text(n.clone())));
             }
             if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+                fix = Some(common::Position {
+                    lat,
+                    lon,
+                    altitude_m: None,
+                    speed_kt: None,
+                    course_deg: None,
+                });
                 fields.push(("latitude".into(), Value::Float(lat)));
                 fields.push(("longitude".into(), Value::Float(lon)));
             }
@@ -786,6 +801,23 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_detail(detail)
         .with_fields(fields);
     d.link = link.or(core_link);
+    d.position = fix;
+    // A mesh node is a device: Meshtastic names itself in every header, and
+    // MeshCore in its advert, which is the packet a survey wants.
+    d.identity = mesh
+        .as_ref()
+        .map(|m| common::Identity::new("meshtastic", format!("{:08x}", m.source)))
+        .or_else(|| {
+            core.as_ref()
+                .and_then(|p| p.advert())
+                .map(|a| common::Identity::new("meshcore", format!("{:02x}", a.hash())))
+        });
+    if let (Some(who), Some(name)) = (
+        d.identity.as_mut(),
+        core.as_ref().and_then(|p| p.advert()).and_then(|a| a.name.clone()),
+    ) {
+        who.name = Some(name);
+    }
     Some(d)
 }
 

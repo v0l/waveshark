@@ -170,6 +170,7 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
                 None => format!("address={} tone only", m.address),
             };
             let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+                .by(common::Identity::new("pocsag", m.address.to_string()))
                 .with_link(pipeline::event::Link {
                     from: None,
                     to: Some(pipeline::event::Party::unit(m.address.to_string())),

@@ -441,6 +441,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         d = d.with_media(media::TEXT).with_text(t);
     }
     d.link = link;
+    d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
     Some(d)
 }
 

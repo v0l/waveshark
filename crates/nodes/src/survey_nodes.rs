@@ -47,28 +47,12 @@ use survey::{Db, Report, Sighting};
 /// Matched on the start of the protocol name because several decoders report
 /// a family: `APRS-Position` and `APRS-Status` are one radio, and `AIS-Static`
 /// and `AIS-Position` are one vessel.
-const IDENTITY: &[(&str, &str, &str)] = &[
-    // Protocol name prefix, field holding the identity, identity space.
-    ("BLE-Adv", "address", "ble"),
-    ("ADS-B", "icao", "adsb"),
-    ("Mode S", "icao", "adsb"),
-    ("AIS", "mmsi", "ais"),
-    ("APRS", "from", "aprs"),
-    ("AX25", "from", "ax25"),
-    ("M17", "src", "m17"),
-    ("DMR", "from", "dmr"),
-    ("POCSAG", "address", "pocsag"),
-    ("Meshtastic", "source", "meshtastic"),
-    ("MeshCore", "from", "meshcore"),
-    ("wM-Bus", "id", "wmbus"),
-    ("TPMS", "id", "tpms"),
-    ("Schrader", "id", "tpms"),
-    ("Toyota", "id", "tpms"),
-];
-
-/// Protocols whose `id` field is the sensor's own identity. The ISM device
-/// decoders are transcribed from rtl_433 and all use the same field name for
-/// it, so this is a list of decoders rather than a rule about field names.
+/// Protocols whose `id` field is the sensor's own identity.
+///
+/// The last of the name-keyed identity rules. The ISM device decoders are
+/// transcribed from rtl_433 and produce a `Report` rather than naming a
+/// transmitter, so until they say who sent a frame this reads their `id`
+/// field. Everything else says who it was: see [`common::Identity`].
 const ISM_ID: &[&str] = &[
     "Acurite", "LaCrosse", "Nexus", "Rubicson", "Bresser", "GT-WT", "FineOffset", "Oregon",
     "Honeywell", "EV1527", "Princeton", "KeeLoq", "Holtek", "Somfy", "X10",
@@ -76,39 +60,32 @@ const ISM_ID: &[&str] = &[
 
 /// What a decode says about who transmitted it.
 ///
-/// `None` for a decode that identifies nothing: an unclaimed burst, a pager
-/// page with no address, a frame whose protocol has no notion of a
-/// transmitter. Those are real receptions and they belong in the packet log,
-/// which has them; they are not devices.
+/// The decoder's own answer where it gave one, which is every protocol that
+/// names a transmitter. `None` for a decode that identifies nothing: an
+/// unclaimed burst, a frame whose protocol has no notion of a transmitter.
+/// Those are real receptions and they belong in the packet log, which has
+/// them; they are not devices.
 pub fn identity(d: &Decoded) -> Option<(String, String)> {
-    let field = |name: &str| {
-        d.fields.iter().find(|(k, _)| k == name).map(|(_, v)| match v {
-            common::Value::Text(s) => s.clone(),
-            other => other.to_string(),
-        })
-    };
-    for (prefix, key, space) in IDENTITY {
-        if d.protocol.starts_with(prefix) {
-            return field(key).filter(|s| !s.is_empty()).map(|v| ((*space).to_string(), v));
-        }
+    if let Some(who) = &d.identity {
+        return Some((who.space.clone(), who.id.clone()));
     }
     if ISM_ID.iter().any(|p| d.protocol.starts_with(p)) {
         // The model is part of the identity here. An ISM sensor's id is eight
         // bits chosen at random when the batteries go in, so two stations of
         // different makes sharing an id is ordinary, and merging them would
         // report one device that reads two temperatures.
-        return field("id").map(|v| (format!("ism:{}", d.protocol), v));
+        let id = d.fields.iter().find(|(k, _)| k == "id").map(|(_, v)| v.to_string())?;
+        return Some((format!("ism:{}", d.protocol), id));
     }
     None
 }
 
 /// A name a device gave for itself, where its decode carries one.
 fn name_of(d: &Decoded) -> Option<String> {
-    for key in ["name", "callsign", "node_name", "message"] {
-        if d.protocol.starts_with("POCSAG") && key == "message" {
-            // A page is what was said, not what the pager is called.
-            continue;
-        }
+    if let Some(n) = d.identity.as_ref().and_then(|w| w.name.clone()) {
+        return Some(n);
+    }
+    for key in ["name", "callsign", "node_name"] {
         if let Some((_, v)) = d.fields.iter().find(|(k, _)| k == key) {
             let s = v.to_string();
             if !s.is_empty() {
@@ -121,6 +98,9 @@ fn name_of(d: &Decoded) -> Option<String> {
 
 /// Who made it, where the decode says so.
 fn vendor_of(d: &Decoded) -> Option<String> {
+    if let Some(v) = d.identity.as_ref().and_then(|w| w.vendor.clone()) {
+        return Some(v);
+    }
     d.fields
         .iter()
         .find(|(k, _)| k == "vendor" || k == "operator" || k == "manufacturer")
@@ -271,18 +251,27 @@ mod tests {
         )
     }
 
+    /// The identity is the decoder's own statement now, whatever the
+    /// protocol: a table of "which field holds the identity for which
+    /// protocol name" is a table that goes stale the day a decoder is added.
     #[test]
     fn each_protocol_gives_up_the_identity_its_decoder_named() {
-        let cases: [(Decoded, &str, &str); 5] = [
-            (decoded("BLE-Adv", &[("address", "6C:70:CB:EF:72:4D")]), "ble", "6C:70:CB:EF:72:4D"),
-            (decoded("ADS-B-Position", &[("icao", "4ca1fb")]), "adsb", "4ca1fb"),
-            (decoded("AIS-Position", &[("mmsi", "235009802")]), "ais", "235009802"),
-            (decoded("APRS-Position", &[("from", "EI2ABC-9")]), "aprs", "EI2ABC-9"),
-            (decoded("POCSAG-Alpha", &[("address", "1234568")]), "pocsag", "1234568"),
+        let named = |protocol: &'static str, space: &str, id: &str| {
+            Decoded::bytes(protocol, Hz(2_426_000_000), 0.0, vec![])
+                .by(common::Identity::new(space, id))
+        };
+        let cases = [
+            (named("BLE-Adv", "ble", "6C:70:CB:EF:72:4D"), "ble", "6C:70:CB:EF:72:4D"),
+            (named("ADS-B-Position", "adsb", "4ca1fb"), "adsb", "4ca1fb"),
+            (named("AIS-Position", "ais", "235009802"), "ais", "235009802"),
+            (named("APRS-Position", "aprs", "EI2ABC-9"), "aprs", "EI2ABC-9"),
+            (named("POCSAG-Alpha", "pocsag", "1234568"), "pocsag", "1234568"),
         ];
         for (d, space, ident) in cases {
             assert_eq!(identity(&d), Some((space.into(), ident.into())), "{}", d.protocol);
         }
+        // A decode that names nobody is a reception, not a device.
+        assert_eq!(identity(&decoded("unknown", &[("baud", "1500")])), None);
     }
 
     /// A sensor's id is eight bits chosen when the batteries go in, so it is
