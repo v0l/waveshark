@@ -191,12 +191,27 @@ pub struct BleConfig {
     /// Shortest burst worth reading, in microseconds. The shortest legal
     /// advertising packet is 80 us of air time.
     pub min_burst_us: u32,
-    /// Longest burst held before it is read and dropped, in microseconds. An
-    /// uncoded packet is at most 376 us and a long range one carrying an Open
-    /// Drone ID message pack about 2.9 ms, since eight symbols there carry
-    /// one bit; anything longer is a carrier or a collision, and what is
-    /// inside it is still searched for an access address.
+    /// Longest burst held before it is read and dropped, in microseconds.
+    ///
+    /// An uncoded packet is at most 376 us. A long range one is eight times
+    /// slower at S=8, and the Open Drone ID message pack a drone sends is
+    /// about 130 bytes, so it runs to roughly 8.5 ms: measured against the
+    /// Holybro module, a cap of 4 ms cut every pack short and none of them
+    /// decoded, while the pointers on the primary channel decoded fine
+    /// because they are tiny. Anything longer than this is a carrier or a
+    /// collision, and what is inside it is still searched for an access
+    /// address.
     pub max_burst_us: u32,
+    /// Also read the 37 data channels, where a Bluetooth 5 advertiser puts
+    /// everything an extended advertisement actually carries.
+    ///
+    /// Off by default because it is expensive, one mixer and one decimator
+    /// per channel, and because a connection's packets there are whitened
+    /// under an access address a listener never saw. What it is for is
+    /// auxiliary advertising: an AUX_ADV_IND uses the same access address as
+    /// the primary channels and carries the whole payload, which for an
+    /// aircraft is the Open Drone ID message pack.
+    pub data_channels: bool,
     /// Whether to look for Bluetooth 5 Long Range packets in a burst that
     /// held no uncoded one.
     ///
@@ -213,7 +228,8 @@ impl Default for BleConfig {
             noise_threshold_ratio: 3.0,
             tau_us: 20.0,
             min_burst_us: 60,
-            max_burst_us: 4_000,
+            max_burst_us: 12_000,
+            data_channels: false,
             coded: true,
         }
     }
@@ -519,6 +535,18 @@ fn find_sync(bits: &[bool], from: usize, sync: &[bool; 40]) -> Option<usize> {
     (from..=bits.len() - 40).find(|&i| bits[i..i + 40] == sync[..])
 }
 
+/// The centre of a data channel, 0 to 36. They fill the band around the
+/// advertising channels, which is why an auxiliary packet can be anywhere in
+/// 80 MHz.
+pub fn data_channel_hz(index: u8) -> Option<f64> {
+    let i = f64::from(index);
+    match index {
+        0..=10 => Some(2_404e6 + i * 2e6),
+        11..=36 => Some(2_428e6 + (i - 11.0) * 2e6),
+        _ => None,
+    }
+}
+
 /// Both directions of one channel, and as many channels as the span covers.
 pub struct BleDetector {
     cfg: BleConfig,
@@ -534,11 +562,19 @@ impl BleDetector {
     /// one that reports three and hears one badly.
     pub fn new(rate: f64, center_hz: f64, cfg: BleConfig) -> Self {
         let edge = rate / 2.0 - PASSBAND_HZ;
-        let chans = ADV_CHANNELS
+        let mut chans: Vec<ChannelRx> = ADV_CHANNELS
             .iter()
             .filter(|(_, hz)| (hz - center_hz).abs() <= edge)
             .map(|&(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg))
             .collect();
+        if cfg.data_channels {
+            chans.extend(
+                (0..37u8)
+                    .filter_map(|ch| data_channel_hz(ch).map(|hz| (ch, hz)))
+                    .filter(|(_, hz)| (hz - center_hz).abs() <= edge)
+                    .map(|(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg)),
+            );
+        }
         Self { cfg, chans }
     }
 
