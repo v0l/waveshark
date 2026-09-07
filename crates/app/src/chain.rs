@@ -1243,22 +1243,19 @@ impl Receiver {
         self.video().and_then(|n| n.bus().watched().cloned())
     }
 
-    /// Every input of the video bus: which one, what it is called, and how
-    /// complete its last picture was.
-    pub fn video_inputs(&self) -> Vec<(usize, String, f32)> {
+    /// Every transmission the video bus has seen: what it is kept under,
+    /// what to call it, and how complete its last picture was.
+    pub fn video_inputs(&self) -> Vec<(String, String, f32)> {
         let Some(bus) = self.video().map(|n| n.bus()) else {
             return Vec::new();
         };
-        bus.thumbnails()
-            .map(|(k, f)| {
-                let label = match bus.strips().get(k).map(|s| s.label.as_str()) {
-                    Some(l) if !l.is_empty() => l.to_string(),
-                    _ => f
-                        .label
-                        .clone()
-                        .unwrap_or_else(|| format!("{:.3} MHz", f.channel_hz / 1e6)),
-                };
-                (k, label, f.completeness())
+        bus.channels()
+            .iter()
+            .filter(|c| c.live())
+            .filter_map(|c| {
+                c.last
+                    .as_ref()
+                    .map(|f| (c.key.clone(), c.label.clone(), f.completeness()))
             })
             .collect()
     }
@@ -3326,6 +3323,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "survey" => "Devices".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
+        "video_bus" => "Video".into(),
         "wfm_demod" => "WFM demod".into(),
         "ssb_demod" => "SSB demodulator".into(),
         "mode_s" => "1090 Mode S".into(),

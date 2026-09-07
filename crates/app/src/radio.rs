@@ -1298,7 +1298,7 @@ pub struct Status {
     video: parking_lot::Mutex<Option<common::VideoFrame>>,
     /// Every input of the video bus: which one, what it is called, and how
     /// complete its last picture was. What a pane offers to switch between.
-    video_inputs: parking_lot::Mutex<Vec<(usize, String, f32)>>,
+    video_inputs: parking_lot::Mutex<Vec<(String, String, f32)>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
     /// What each scope stage in the chain is seeing, by node id.
@@ -1774,11 +1774,11 @@ impl Status {
     }
 
     /// What the video bus is receiving, whether or not it is being watched.
-    pub fn video_inputs(&self) -> Vec<(usize, String, f32)> {
+    pub fn video_inputs(&self) -> Vec<(String, String, f32)> {
         self.video_inputs.lock().clone()
     }
 
-    fn set_video_inputs(&self, inputs: Vec<(usize, String, f32)>) {
+    fn set_video_inputs(&self, inputs: Vec<(String, String, f32)>) {
         let mut cur = self.video_inputs.lock();
         if *cur != inputs {
             *cur = inputs;
@@ -3355,9 +3355,9 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&buf, None).expect("a receiver");
         let _ = replay_blocks(&mut rx, &buf);
         let bus = rx.video().expect("a video bus");
-        let fed = bus.bus().strips().iter().filter(|s| s.is_fed()).count();
+        let fed = bus.bus().channels().iter().filter(|c| c.is_fed()).count();
         let picture = bus.bus().thumbnails().next().is_some();
-        assert!(picture, "no picture on the video bus; {fed} strips fed");
+        assert!(picture, "no picture on the video bus; {fed} channels fed");
     }
 
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
