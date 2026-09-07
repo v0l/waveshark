@@ -85,6 +85,16 @@ pub struct VideoBus {
     rules: Vec<Rule>,
     /// The picture published this block, if any.
     out: Option<VideoFrame>,
+    /// And the last one published, kept for whoever is looking.
+    ///
+    /// A field is one block in fifty: a camera sends fifty a second and the
+    /// graph runs a thousand blocks a second, so a view that polls this
+    /// between fields used to find nothing and the pane stayed empty while
+    /// the chain view showed fifteen fields a second arriving.
+    held: Option<VideoFrame>,
+    /// How long since one arrived, so a picture is not held on the screen
+    /// after the transmitter has gone.
+    since_s: f64,
 }
 
 impl Default for VideoBus {
@@ -100,6 +110,8 @@ impl VideoBus {
             strips: vec![Strip::default()],
             rules: vec![Rule::Everything],
             out: None,
+            held: None,
+            since_s: f64::INFINITY,
         }
     }
 
@@ -136,13 +148,37 @@ impl VideoBus {
             .as_ref()
             .is_none_or(|cur| f.completeness() > cur.completeness());
         if better {
-            self.out = Some(f);
+            self.out = Some(f.clone());
         }
+        let fresher = self
+            .held
+            .as_ref()
+            .is_none_or(|cur| self.since_s > 0.0 || f.completeness() >= cur.completeness());
+        if fresher {
+            self.held = Some(f);
+        }
+        self.since_s = 0.0;
     }
 
-    /// What should be shown, and from where.
+    /// What should be shown, or `None` when nothing has arrived lately.
+    ///
+    /// Held rather than published per block, because a viewer polls at the
+    /// screen's rate and a field arrives on one block in fifty. Dropped after
+    /// [`HOLD_S`] of silence: a still picture of a transmitter that has gone
+    /// away is the worst thing this bus could hand a view.
     pub fn watched(&self) -> Option<&VideoFrame> {
+        (self.since_s <= HOLD_S).then(|| self.held.as_ref()).flatten()
+    }
+
+    /// The picture to publish on the output port this block, which is only
+    /// the one that arrived.
+    pub fn published(&self) -> Option<&VideoFrame> {
         self.out.as_ref()
+    }
+
+    /// Time passing with nothing arriving.
+    pub fn idle(&mut self, seconds: f64) {
+        self.since_s += seconds.max(0.0);
     }
 
     /// The last field each input received, for a view of everything at once.
@@ -156,7 +192,19 @@ impl VideoBus {
     pub fn clear(&mut self) {
         self.out = None;
     }
+
+    /// Everything, for a receiver that has stopped or been retuned.
+    pub fn forget(&mut self) {
+        self.out = None;
+        self.held = None;
+        self.since_s = f64::INFINITY;
+    }
 }
+
+/// How long a picture is worth showing after the last field arrived. Long
+/// enough to ride a dropout on a fading link, short enough that nobody
+/// mistakes a still of a departed transmitter for a live picture.
+const HOLD_S: f64 = 0.5;
 
 /// The bus as a node.
 pub struct VideoBusNode {
@@ -238,12 +286,17 @@ impl pipeline::node::Node for VideoBusNode {
         outputs: &mut [Payload],
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        let mut arrived = false;
         for (k, p) in inputs.iter().enumerate() {
             for f in p.as_video().unwrap_or(&[]) {
                 self.bus.push(k, f.clone());
+                arrived = true;
             }
         }
-        if let Some(f) = self.bus.watched().cloned() {
+        if !arrived {
+            self.bus.idle(_ctx.block_seconds);
+        }
+        if let Some(f) = self.bus.published().cloned() {
             outputs[0].video_mut().push(f);
         }
         self.bus.clear();
@@ -251,7 +304,7 @@ impl pipeline::node::Node for VideoBusNode {
     }
 
     fn reset(&mut self) {
-        self.bus.clear();
+        self.bus.forget();
     }
 
     fn params(&self) -> Vec<Param> {
@@ -370,5 +423,36 @@ mod tests {
             latency: 0,
         };
         assert!(n.negotiate(&[audio]).is_err());
+    }
+
+    /// A field arrives on one block in fifty and a view polls between them,
+    /// so the bus holds the last picture rather than publishing it for the
+    /// single block it landed in. The pane was empty for exactly this reason
+    /// while the chain view showed fifteen fields a second going in.
+    #[test]
+    fn a_picture_is_still_there_between_fields() {
+        let mut bus = VideoBus::new();
+        bus.push(0, frame(5_865_000_000.0, "A1", 280));
+        assert!(bus.watched().is_some());
+        bus.clear();
+        for _ in 0..40 {
+            bus.idle(0.01);
+            assert!(bus.watched().is_some(), "the picture went between fields");
+        }
+    }
+
+    /// And it goes when the transmitter does. A still of something that has
+    /// left the air is the one thing a video pane must not show.
+    #[test]
+    fn a_picture_does_not_outlive_the_transmission() {
+        let mut bus = VideoBus::new();
+        bus.push(0, frame(5_865_000_000.0, "A1", 280));
+        // The block it arrived in publishes it on the port; later blocks
+        // publish nothing, and the held picture goes with the transmission.
+        assert!(bus.published().is_some());
+        bus.clear();
+        assert!(bus.published().is_none());
+        bus.idle(HOLD_S + 0.01);
+        assert!(bus.watched().is_none());
     }
 }
