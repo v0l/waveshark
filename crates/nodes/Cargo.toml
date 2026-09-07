@@ -9,6 +9,7 @@ common.workspace = true
 tracing.workspace = true
 audio.workspace = true
 dsp.workspace = true
+rustfft.workspace = true
 pipeline.workspace = true
 decode.workspace = true
 # AMBE/IMBE vocoder for the DMR node. Off by default: the algorithm is
