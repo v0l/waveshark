@@ -1,7 +1,9 @@
 # Protocols
 
 The target is the union of what rtl_433, a Flipper Zero, a PortaPack running
-Mayhem and SDRangel can do, in one receiver, and transmit for the same set.
+Mayhem and SDRangel can do, in one receiver, and transmit for the same set,
+plus the drone family under [Drones](#drones), which none of them reads and
+which announces itself in the clear.
 This file lists those protocols, what each one costs to add, and which
 direction is realistic for it.
 
@@ -263,7 +265,7 @@ inside it is the vendor's and mostly is not.
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
 |---|---|---|---|---|---|---|
-| LoRa | 433/868/915 MHz | CSS chirp SF7-12 | 125-500 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. `LoraNode` is placed on a source once the burst front end has named a burst of it a chirp, fed the source's samples so far from that front end's ring, and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against three off-air Meshtastic packets, two at SF11 over 250 kHz from the same node 128 seconds apart and a third tuned 525 kHz off channel at 2.4 MS/s, and against a MeshCore advert at SF8 over 62.5 kHz, each giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
+| LoRa | 433/868/915 MHz, and 2.4 GHz | CSS chirp SF5-12 | 62.5-812.5 kHz | done | mod | `dsp::lora` dechirps and `decode::lora` reads the frame: Gray, diagonal deinterleave, Hamming, dewhitening, header checksum and payload CRC. A source in the 2.4 GHz band is read the other way up and at SF5 to SF8, because LoRa there is an SX128x, which swaps I and Q against the SX127x convention and uses only those factors; a demodulator built for 868 MHz finds nothing at all on 2.4. `LoraNode` is placed on a source once the burst front end has named a burst of it a chirp, fed the source's samples so far from that front end's ring, and finds the spreading factor by trying, since dechirping at the wrong one gives no peak. Verified against three off-air Meshtastic packets, two at SF11 over 250 kHz from the same node 128 seconds apart and a third tuned 525 kHz off channel at 2.4 MS/s, and against a MeshCore advert at SF8 over 62.5 kHz, each giving a valid header checksum and the transmitter's own payload CRC. That is a different kind of evidence from the rtl_433 corpus and not a weaker one: the check comes from the transmitter rather than from a second decoder |
 | LoRaWAN | as LoRa | as LoRa | 125-500 kHz | synthetic | mod | `decode::lorawan` reads what is in the clear: a join request whole (JoinEUI, DevEUI, nonce), and a data frame's DevAddr, frame counter, port, ACK and ADR flags. A join accept is ciphertext, and so is `FRMPayload`, under a key per device |
 | Meshtastic | 433/868/915 MHz | LoRa | 250 kHz | off air | mod | The 0x2B sync word names it and the sixteen byte packet header is read: who transmitted, who for, the packet id, and how many hops it has left of how many it started with. The payload is AES encrypted with the channel key. The default and public keys are built in and tried on every packet, and an operator can add more in the keys pane, so an ordinary LongFast message reads as its text; anything under a private key reports as bytes |
 | MeshCore | 433/868/915 MHz | LoRa | 62.5-250 kHz | off air | mod | `decode::meshcore` reads the routing in the clear: the one byte header, whether the packet is flooding or routed, and the path of node hashes it has taken. An advert is not enciphered at all and carries the node's Ed25519 public key, signature, role, name and position, so a receiver learns the mesh from one packet. Verified off air against a node advert at SF8 over 62.5 kHz, signature checked |
@@ -281,6 +283,149 @@ inside it is the vendor's and mostly is not.
 | VDL Mode 2 | 136 MHz | D8PSK 31.5 kbps | 25 kHz | demod | mod | Differential 8-PSK, so a coherent chain |
 | VOR / ILS | 108-118 MHz | AM with 30 Hz subcarriers | 25 kHz | framing | mod | SDRangel decodes bearing from these; the maths is small |
 | HFDL | 2-22 MHz | PSK | 3 kHz | demod | mod | Needs HF hardware too |
+
+## Drones
+
+None of rtl_433, a Flipper, a PortaPack or SDRangel reads this family, so it is
+the one place in this file where the target is somebody else's work rather
+than a fourth copy of theirs: the Open Drone ID library, the RUB-SysSec
+DroneID receiver, ExpressLRS's own source, and the reverse engineering of the
+hobby control links that Deviation and MultiModule already carry.
+
+What makes it worth the trouble is that a drone announces itself. Remote ID is
+a legal requirement in the US and the EU and is transmitted in the clear, DJI
+broadcasts the same information plus the operator's own position whether or
+not Remote ID is on, and a control link that hops is still a fingerprint. The
+cost divides on two lines. Anything carried on Bluetooth advertising is nearly
+free, because `dsp::ble` is the front end and the payload is a published
+structure. Anything on OFDM (DJI's own link, Wi-Fi Remote ID, every digital
+video system) has no front end here at all, and 2.4 and 5.8 GHz mean HackRF or
+LimeSDR throughout: an RTL-SDR reaches none of this except the 433 and 868/915
+MHz control links.
+
+Hopping is the second structural problem and it is not solved by a wider span.
+ELRS at 500 Hz moves every 2 ms across most of a band, so a channel placed on
+one frequency sees one packet in fifty. Reading a hopping link properly means
+following the sequence, which is derived from the binding UID, so a receiver
+that has not seen the bind either brute forces the sequence or reads the band
+wide enough to catch every hop. Detection does not need any of that: a burst
+pattern at a known rate on a known channel plan is a classification, and
+saying "an ELRS transmitter at 500 Hz is up" is most of the operational value.
+
+| Protocol | Where | Modulation | Width | RX | TX | Notes |
+|---|---|---|---|---|---|---|
+| Open Drone ID over Bluetooth legacy | 2402/2426/2480 MHz | GFSK 1 Mbps, BLE advertising | 2 MHz | off air | mod | ASTM F3411 and EN 4709-002, the same message set in both. A legacy advertisement carries service UUID 0xFFFA, AD type 0x16, application code 0x0D and one 25 byte message: basic id (serial or session id and UA type), location (position, altitude, speed, track, timestamp), self id, system (the operator's position and the area a swarm covers) and operator id. `dsp::ble` reads the advertisement and `decode::ble` hands over the AD structures, so this cost a payload parser and nothing else: `decode::odid` reads a single message and a message pack, and `nodes::ble_nodes` names the row for the aircraft rather than for a Bluetooth device when one is present. Verified off air against a Holybro RemoteID module in `testdata/fixtures.toml`, whose 28 messages in six seconds decode to the identity it was shipped with and to a location message that marks its position absent because it has no fix. Unauthenticated by design: anything received is what the transmitter chose to say, and a field the specification marks absent (a position of exactly 0, an altitude of -1000 m) is reported as absent rather than as a position in the Atlantic |
+| Open Drone ID over Bluetooth 5 Long Range | 2402/2426/2480 MHz and the 37 data channels | GFSK 125 or 500 kbps, LE Coded PHY S=8 and S=2 | 2 MHz | off air | mod | The same messages as a message pack (type 0xF) on extended advertising, which regulators require alongside the legacy broadcast, so a receiver that reads only legacy still sees everything the aircraft says. `dsp::ble_coded` reads the PHY: the uncoded 80 symbol preamble, the rate 1/2 constraint length 4 convolutional code with a Viterbi over its eight states, the pattern mapper that makes eight symbols carry one bit at S=8, and the coding indicator that says which rate the body used. It runs as a second pass over a burst that held no uncoded packet, on the same symbols at the same rate, since even the access address is coded and the uncoded search cannot see it. Verified off air against the Holybro module in the same capture as the legacy row: six ADV_EXT_IND packets, CRC-24 checked. What those carry is a pointer rather than a payload, which is the specification working as intended: the message pack rides in an AUX_ADV_IND on a data channel chosen afresh each time, and `decode::ble` reports the pointer so a row says where the rest went instead of showing an empty advertisement. The packs themselves are read too, by parking on a stretch of data channels, which `BleConfig::data_channels` turns on: `odid_bt5lr_holybro_2474M_20000k.cs8` holds eleven of them at S=8 on channels 31 to 36, each carrying basic id, location, self id and operator id in one reception where the legacy transport spreads the same four over seconds |
+| Open Drone ID over Wi-Fi Beacon and NAN | 2.4 and 5.8 GHz, 20 MHz channels | 802.11 OFDM | 20 MHz | chain | chain | Vendor specific element under OUI 6A:5C:35 in a beacon, or a NAN service discovery frame. The payload parser is shared with the Bluetooth rows; what is missing is an 802.11 receiver |
+| DJI DroneID | 2.4 and 5.8 GHz | OFDM, LTE-like numerology, about 10 MHz occupied | 15.36 MS/s | demod | mod | Broadcast roughly twice a second by DJI aircraft independently of Remote ID, and it carries more: serial number, position, velocity, height, home position, device type and the operator's own position. Sent in the clear, which DJI described as encrypted until the NDSS 2023 paper showed it is not. The frame published there is nine OFDM symbols, two of them Zadoff-Chu sequences used for time and frequency correction, QPSK subcarriers, turbo coded and scrambled under a CRC. A working receiver exists to check against (`RUB-SysSec/DroneSecurity`), which is what makes this the most attackable of the OFDM entries despite being the most work |
+| DJI OcuSync and Lightbridge | 2.4 and 5.8 GHz | OFDM, 10/20/40 MHz | 20 MHz | chain | chain | The control and video link itself, AES encrypted both ways. Nothing inside is readable, so the realistic product is detection and classification: occupied bandwidth, hop behaviour and the DroneID frames riding alongside |
+| Digital video links: DJI O3/O4, Walksnail Avatar, HDZero | 5.65-5.95 GHz mostly | proprietary OFDM, 20 MHz and wider | 20 MHz | chain | chain | No layout is published for any of them. What a spectrum shows is a wide flat carrier keyed to the frame rate, which is enough to say a link is up and which system it is by width and duty cycle, and nothing beyond that without a large reversing effort. There is a Walksnail Avatar here, so its width, duty cycle and how the downlink and the uplink sit against each other can be measured rather than repeated from a forum post |
+| Analogue video links | 5.65-5.95 GHz, also 1.2 and 2.4 GHz | FM, composite video (PAL or NTSC) | 20 MHz | off air | mod | Not a protocol: a camera's composite video frequency modulated onto a carrier, with no framing, addressing or integrity check anywhere. Nothing in the decoding is specific to a model aircraft: `dsp::video` separates sync, assembles fields and demodulates PAL colour off the burst, `nodes::VideoNode` is that on the graph (measuring the standard from the line period rather than being told it) publishing whole fields on `PortKind::Video`, `app::videobus` is where they all end up, wired there the way voice ports are wired to the audio bus: the auto node publishes whatever front end it placed on a source on a video port of its own, and a source megahertz wide (nothing else here is: the widest is BLE at 2 MHz) gets one placed on it, so a camera in the span reaches the screen without anything being wired by hand. Width alone does not make something a picture, so the front end tests before it decodes: `dsp::video::find_lines` looks for a pulse train at a line rate and asks how well the gaps agree with each other, which the off-air capture scores 0.67 and a synthesised camera 0.99, while the WiFi, BLE and impulsive-noise captures in `testdata/offair` never reach the question. A source that fails is left alone for a second before being looked at again, so a wide carrier that is not a camera costs a twenty-fifth of a demodulation rather than all of it, and `decode::video_channels` is the 40 channel plan, reporting both names where two bands share a frequency because nothing in the signal says which the transmitter was set to. Verified off air against an AKK RaceRunner on A1: 181 fields from 3.6 seconds, most with all 288 lines, and a recognisable colour picture. Two things a reader should know. The line period is measured rather than configured, which is what tells PAL from NTSC, and the subcarrier phase has to free-run rather than restart each line: at 20 MS/s one sample of sync jitter is 80 degrees of subcarrier. The measured deviation was about 1 MHz rms and 4.6 MHz occupied, well inside a 20 MS/s span, so the pessimism about clipping was wrong. Audio sits on a 6.5 MHz subcarrier in the same baseband and is not read |
+| ExpressLRS 900 MHz | 433/868/915 MHz | LoRa, SF6-SF9 over 500 kHz | 500 kHz | framing | mod | `dsp::lora` demodulates it already. What is missing is that ELRS uses implicit header mode with a fixed 8 byte payload and no LoRa CRC, guarding the packet with its own 14 bit CRC seeded from the binding UID, and hops on every packet. The payload is CRSF: packed RC channels, or telemetry and link statistics on the return slot |
+| ExpressLRS 2.4 GHz | 2400.4-2479.4 MHz, 80 channels 1 MHz apart | LoRa SF5-SF8 over 812.5 kHz, or FLRC at 1 Mbps | 2 MHz | framing, demod for FLRC | mod | An SX1280. `decode::elrs` reads the link layer: the CRC-14 seeded from the binding UID, the four packet types, a sync packet's hop index, counter, rate and the two UID bytes it sends in the clear, the four ten bit channels an RC packet carries, and the hop sequence a UID generates, all from the firmware's own `src/lib/OTA` and `src/lib/FHSS`. Confirmed off air against a TX16S: SF7 over 812.5 kHz, sync word 0x12, on channel after channel of the hop set. Which of the ten rates is running is measured rather than configured, the way every other front end here decides things: the sweep the classifier reads off a burst gives the spreading factor (5.16e9 Hz/s over 812.5 kHz is SF7 and nothing else), and where that leaves two rates, the spacing between packets that stayed on one channel separates them, since the link keys on a fixed interval and hops every four packets. On the bench capture that measures 10.00 ms, which is 100 Hz Full, and the handset was set to 100 Hz Full. The SX1280 transmits with I and Q swapped against the SX127x convention, so the preamble is downchirps to this receiver and the samples have to be conjugated before `dsp::lora` sees anything; five captures read as an empty band before that was found. What is still missing above the dechirper is the SX1280's long interleaved coding rates, which are not the SX127x interleaver `decode::lora` implements, so the payload bytes it currently produces are not to be trusted, and hop following. [Getting the SX1280's coding out of an SX1280](#getting-the-sx1280s-coding-out-of-an-sx1280) is the procedure for closing that. FLRC is a coherent GFSK burst mode with its own coding and is a front end of its own |
+| TBS Crossfire | 868/915 MHz | LoRa, roughly 50 channel FHSS | 250 kHz | framing | mod | An SX1272 running LoRa with a proprietary framing and hop sequence on top, reversed publicly by g3gg0. Same shape of work as ELRS and the same CRSF payload underneath |
+| FrSky ACCST D16 and ACCESS | 2400-2480 MHz, 47 channels 1.5 MHz apart | GFSK 70 kbit/s, 57 kHz deviation, 9 ms frame | 500 kHz | synthetic | mod | `decode::frsky` reads the packet: the handset id, where it is in the hop sequence, how far the sequence steps, the receiver number and eight channels of stick positions as microseconds, all in the clear under a CRC-16 whose polynomial is checked against a packet dumped from a real handset. It also generates the hop sequence a given id produces, both the v1 and v2 tables and both regulatory variants. Stronger evidence than ExpressLRS gives: sixteen bits of CRC with no seed, so a burst that is not FrSky passes about one time in 65536, and the id is in the packet rather than in the CRC. The two id bytes in front of the CRC are outside it, since the CC2500 filters on them in hardware, so a reported id is corroborated by the packets around it rather than by the check itself. No front end yet, and nothing has met real RF |
+| FlySky AFHDS-2A | 2400-2480 MHz, 16 channels drawn from 164 | GFSK, A7105, 3.85 ms frame | 1 MHz | synthetic | mod | `decode::flysky` reads sticks, failsafe, settings, telemetry and bind packets: both ends' four byte ids in every packet, sixteen channels in microseconds, the receiver's battery voltage, RSSI and error rate, and on a bind packet the whole hop table, which is the link. The A7105 checks its CRC in hardware and does not put it in the buffer, so a listener demodulating the air has no check to make: `Packet::plausible` is structural instead (a defined type byte, channel values a servo pulse can take, hop entries in range) and one packet is a maybe where a run from the same ids is a fact. Nothing has met real RF |
+| Spektrum DSM2 and DSMX | 2400-2480 MHz | DSSS GFSK 1 Mbps, CYRF6936 | 2 MHz | demod | mod | Needs the despreader the 802.15.4 rows need |
+| Toy drone links: Bayang, Syma, Hubsan, E010 | 2400-2480 MHz, a megahertz a channel | GFSK 250 kbit/s or 1 Mbit/s, nRF24 or XN297 or A7105 | 2 MHz | synthetic | mod | `decode::nrf24` reads the XN297 frame, which is the one a listener can read at all: the chip sends a fixed 28 bit preamble (0xC710F55) before the address, so a packet announces itself, and the address, payload and CRC are scrambled with a published table rather than kept secret. Neither the address length nor the payload length is transmitted, so both are searched and the CRC-16 with its length dependent xorout decides. Two honest limits are in the code. The CRC covers address and payload together and its xorout is indexed by their sum, so where one ends and the other begins is not in the signal: five bytes is assumed because that is what toys use, `Packet::raw` is what is actually determined, and `split_is_a_guess` says so. And searching 192 combinations weakens a sixteen bit CRC to about one false accept in 341, measured in the tests. A plain nRF24 without the XN297 preamble stays unreadable without knowing the address first, which is the same problem an ExpressLRS UID poses. No front end yet |
+| MAVLink over a SiK radio | 433/868/915 MHz | GFSK 64-250 kbps, FHSS, Golay | 250 kHz | framing | mod | 3DR and RFD900 telemetry, in the clear unless the operator set a key: position, attitude, battery, flight mode and the parameter set. The FSK front end reaches the symbols; the framing is the SiK link layer under the MAVLink v1/v2 parser |
+
+### Getting the SX1280's coding out of an SX1280
+
+The payload of an ExpressLRS 2.4 GHz packet is coded at one of the SX1280's
+long interleaved rates, and nobody has published what those are. Semtech names
+them in the data sheet and describes nothing; ExpressLRS writes
+`SX1280_LORA_CR_LI_4_8` into a register and the modem does the rest, so
+neither the firmware nor any of the open LoRa decoders (gr-lora_sdr, gr-lora,
+LoRa-SDR, all SX127x) contains the layout. Every ExpressLRS receiver on the
+market, the RadioMaster RP series included, is a Semtech SX1280 or SX1281
+doing it in hardware.
+
+Guessing is not hopeless, because ExpressLRS supplies an oracle. Its CRC-16 is
+seeded with the binding UID and the packet counter, a CRC is linear in its
+seed, so any candidate decode can be solved for the seed that would make it
+valid. The counter is the low byte of that seed and the UID the high byte, and
+the UID does not change between packets: a wrong hypothesis scatters the
+solved high byte over all 256 values, and the right one repeats it.
+`crates/nodes/examples/elrs_crack.rs` is that test, and no binding phrase is
+needed to run it. Against thirty packets off the bench, every arrangement of
+the SX127x interleaver scored 0.13 or below where chance is 0.004 and a
+correct answer would be 1.0, which is the evidence that the coding really is
+something else.
+
+The cheap way to settle it is to make an SX1280 encode payloads we choose:
+
+1. Any SX1280 or SX1281 on an SPI bus. An Ebyte E28-2G4M12S on a spare ESP32
+   header, or a spare ExpressLRS receiver reflashed, since an RP1 is an
+   ESP8285 wired to an SX1281 and its pin map is in the ExpressLRS target
+   definitions. RadioLib drives the family and takes the long interleave flag
+   on `setCodingRate`, and `../sub-ghz-modem` already links RadioLib, so this
+   is a board variant rather than new protocol code.
+2. Configure it as the link does: SF7, 812.5 kHz, CR_LI 4/8, 12 symbol
+   preamble, implicit header, 13 byte payload.
+3. Transmit an all-zero payload first. Whatever comes back out of the dechirp
+   is the whitening sequence by definition, which is one unknown removed.
+4. Then transmit 104 payloads with exactly one bit set, walking the position.
+   Where each bit lands in the symbols is the interleaver and the Hamming
+   layout, read off rather than searched for.
+5. Record with the HackRF at 2.4 GHz and dechirp with
+   `crates/nodes/examples/elrs_crack.rs`, which already collects symbols per
+   packet. Check the answer against the oracle above on real link traffic
+   before believing it.
+
+### What we can verify here
+
+A bench with a Remote ID beacon, an ExpressLRS link, a 5.8 GHz video link and a
+DJI Mini 4K covers four of the rows above with real RF, which decides the
+order more than the cost estimates do. Open Drone ID over Bluetooth legacy is
+first: the front end exists, the beacon transmits it once a second, and the
+messages say a serial number and a position that can be checked against where
+the aircraft actually is.
+
+The beacon here is a Holybro RemoteID module on an S500, which is an ESP32
+running ArduRemoteID, and that is better than a black box for two reasons. It
+is configurable, so each transport can be switched on alone and a capture can
+be attributed with certainty rather than inferred: BT4 legacy by itself is the
+first fixture, and turning BT5 Long Range and Wi-Fi on afterwards says exactly
+which of them a decoder is missing. And the values it broadcasts are set by
+us, over MAVLink from the flight controller or in its own parameters, so a
+fixture can carry a serial number and a position chosen in advance. An
+expectation in `fixtures.toml` written against a number we configured is a
+real check, unlike one written against whatever the decoder happened to print. The Mini 4K then gives DroneID on the same bench,
+with a serial number printed on the airframe to check a decode against. It is
+on EU firmware, so it also broadcasts EN 4709-002 Direct Remote ID to keep its
+class marking, and the first measurement to make is which transport it uses
+for that: DJI has shipped both Bluetooth and Wi-Fi beacon across models and
+firmware versions, and nothing here should assume one until a capture says
+so. If it is Bluetooth, the same parser reads the drone and the Holybro module
+and a real aircraft reaches **off air** with no new front end; if it is Wi-Fi,
+DroneID is the only thing the Mini 4K can be read by until there is an 802.11
+receiver. ELRS gives a hopping
+link whose UID is known because we bound it, which is the difference between
+testing a decoder and guessing at one. Every capture that earns an assertion
+goes in `testdata/fixtures.toml`; a capture that only shows what a system
+looks like on air, an OcuSync link or a digital video carrier, goes in
+`testdata/offair.toml` as evidence for the classifier and nothing more.
+
+The Bluetooth 5 half needs a different capture from the legacy half, and this
+is the thing to get right. A long range advertiser sends almost nothing on the
+primary channels: an ADV_EXT_IND pointing at a data channel, on which the
+message pack follows a couple of milliseconds later. The pointer names the
+channel, and the ones seen here move around the band, so a span covering
+2402 to 2480 MHz would catch every one and no radio here reaches that. Two
+ways round it: capture the primary channel first, read the pointers, and take
+a second capture parked on the channel they name, which works because the
+module repeats; or park on a stretch of data channels and read the auxiliary
+packets alone, since `dsp::ble_coded` needs only the channel index for the
+whitening and an AUX_ADV_IND carries the whole message pack on its own.
+
+Two warnings about capturing this on a bench. Everything at 2.4 and 5.8 GHz
+here is transmitting metres away, so the front end will be saturated unless
+the gain is wound down and the antenna kept off, and a saturated capture is
+worthless: the Honeywell note under [How a status is earned](#how-a-status-is-earned)
+is exactly that failure. And a control link is a live aircraft's control link.
+Capture receive only; nothing in this section is a thing to transmit near
+something flying.
 
 ## Maritime
 
@@ -525,6 +670,16 @@ Cheapest first, by value per unit of work:
    need is already ported. What is missing is the framing layer for each.
 11. **A recording of real AIS and APRS traffic**, which is the only thing
    standing between those two and a **done**.
+12. ~~**Open Drone ID over Bluetooth, both transports.**~~ Done, off air
+   against the Holybro module: the legacy advertisement, and the Bluetooth 5
+   Long Range message pack behind the coded PHY and an auxiliary pointer.
+   Worth a third capture with a serial, an operator ID and self-ID text
+   configured, since both of the current ones carry only what the module
+   ships with.
+13. **DJI DroneID.** Expensive, an OFDM front end and a turbo decoder, but it
+   is the highest value thing in this file that is transmitted in the clear,
+   there is a working receiver to check against, and there is an aircraft here
+   that sends it.
 
 Everything below that (OFDM broadcast, trunked voice, cellular) is a project
 each rather than a decoder each, and should be judged on its own.

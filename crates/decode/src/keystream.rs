@@ -83,7 +83,12 @@ impl ReuseWatch {
             // A different payload at the same IV: the re-use we are after.
             Some(prev) if prev.tag != tag => {
                 let xor = xor(&prev.ct, &ct);
-                let reuse = Reuse { iv, a: prev.ct.clone(), b: ct.clone(), xor };
+                let reuse = Reuse {
+                    iv,
+                    a: prev.ct.clone(),
+                    b: ct.clone(),
+                    xor,
+                };
                 // Keep the newer one for the next round.
                 self.seen.insert(iv, Seen { ct, tag });
                 Some(reuse)
@@ -112,7 +117,13 @@ mod tests {
     use crate::tea::{keystream, Key};
 
     fn ts(frame: u8) -> Timestamp {
-        Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false }
+        Timestamp {
+            tn: 1,
+            frame,
+            multiframe: 30,
+            hyperframe: 110,
+            uplink: false,
+        }
     }
 
     /// A crib-drag: with the keystream cancelled, a known plaintext on one
@@ -144,7 +155,10 @@ mod tests {
         let mut w = ReuseWatch::new();
         let c = vec![1, 2, 3, 4];
         assert!(w.observe(&ts(6), c.clone(), 7).is_none());
-        assert!(w.observe(&ts(6), c.clone(), 7).is_none(), "same tag, not re-use");
+        assert!(
+            w.observe(&ts(6), c.clone(), 7).is_none(),
+            "same tag, not re-use"
+        );
     }
 
     /// Different IVs never collide, however similar the traffic.
@@ -152,6 +166,9 @@ mod tests {
     fn distinct_timestamps_do_not_collide() {
         let mut w = ReuseWatch::new();
         assert!(w.observe(&ts(6), vec![1, 2, 3, 4], 1).is_none());
-        assert!(w.observe(&ts(7), vec![5, 6, 7, 8], 2).is_none(), "different IV");
+        assert!(
+            w.observe(&ts(7), vec![5, 6, 7, 8], 2).is_none(),
+            "different IV"
+        );
     }
 }

@@ -65,7 +65,11 @@ impl FrameMeter {
         }
         let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
         self.peak_pow = self.peak_pow.max(pow);
-        self.floor_pow = if self.floor_pow.is_nan() { pow } else { pow.min(self.floor_pow * 1.01) };
+        self.floor_pow = if self.floor_pow.is_nan() {
+            pow
+        } else {
+            pow.min(self.floor_pow * 1.01)
+        };
         self.seen += iq.len() as u64;
         self.ring.extend_from_slice(iq);
         // Trimmed when it holds twice what is kept, not every block: moving
@@ -147,13 +151,22 @@ mod tests {
         m.feed(&vec![C32::new(0.5, 0.0); 1000]);
         let f = m.frame(vec![1, 2, 3]);
         // 0.5 of full scale is a quarter of the power: -6 dBFS.
-        assert!(f.rssi_dbfs > -7.0 && f.rssi_dbfs < -5.0, "rssi {}", f.rssi_dbfs);
+        assert!(
+            f.rssi_dbfs > -7.0 && f.rssi_dbfs < -5.0,
+            "rssi {}",
+            f.rssi_dbfs
+        );
         assert!(f.snr_db > 30.0, "snr {}", f.snr_db);
         assert_eq!(f.iq.as_ref().map(|q| q.samples.len()), Some(2000));
         assert_eq!(f.center_hz, 868_000_000);
         // The next frame measures its own transmission, not this one.
         m.feed(&vec![C32::new(0.05, 0.0); 1000]);
         let g = m.frame(vec![4]);
-        assert!(g.rssi_dbfs < f.rssi_dbfs - 10.0, "{} then {}", f.rssi_dbfs, g.rssi_dbfs);
+        assert!(
+            g.rssi_dbfs < f.rssi_dbfs - 10.0,
+            "{} then {}",
+            f.rssi_dbfs,
+            g.rssi_dbfs
+        );
     }
 }

@@ -39,11 +39,19 @@ impl BitBuffer {
     }
 
     pub fn with_capacity(bits: usize) -> Self {
-        Self { bytes: Vec::with_capacity(bits.div_ceil(8)), len: 0, rows: Vec::new() }
+        Self {
+            bytes: Vec::with_capacity(bits.div_ceil(8)),
+            len: 0,
+            rows: Vec::new(),
+        }
     }
 
     pub fn from_bytes(b: &[u8]) -> Self {
-        Self { bytes: b.to_vec(), len: b.len() * 8, rows: Vec::new() }
+        Self {
+            bytes: b.to_vec(),
+            len: b.len() * 8,
+            rows: Vec::new(),
+        }
     }
 
     /// Number of bits held.
@@ -130,7 +138,11 @@ impl BitBuffer {
         if pattern_bits == 0 || pattern_bits > self.len {
             return None;
         }
-        let pat = BitBuffer { bytes: pattern.to_vec(), len: pattern_bits, rows: Vec::new() };
+        let pat = BitBuffer {
+            bytes: pattern.to_vec(),
+            len: pattern_bits,
+            rows: Vec::new(),
+        };
         'outer: for start in 0..=(self.len - pattern_bits) {
             for i in 0..pattern_bits {
                 if self.get(start + i) != pat.get(i) {
@@ -194,7 +206,11 @@ pub fn crc8(data: &[u8], poly: u8, init: u8) -> u8 {
     for &b in data {
         crc ^= b;
         for _ in 0..8 {
-            crc = if crc & 0x80 != 0 { (crc << 1) ^ poly } else { crc << 1 };
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ poly
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -206,7 +222,11 @@ pub fn crc16(data: &[u8], poly: u16, init: u16) -> u16 {
     for &b in data {
         crc ^= (b as u16) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ poly } else { crc << 1 };
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ poly
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -250,7 +270,11 @@ pub fn lfsr_digest8_reflect(data: &[u8], gen: u8, key: u8) -> u8 {
             if byte >> i & 1 != 0 {
                 sum ^= key;
             }
-            key = if key & 0x80 != 0 { (key << 1) ^ gen } else { key << 1 };
+            key = if key & 0x80 != 0 {
+                (key << 1) ^ gen
+            } else {
+                key << 1
+            };
         }
     }
     sum
@@ -269,7 +293,11 @@ pub fn lfsr_digest8(data: &[u8], gen: u8, key: u8) -> u8 {
             if byte >> i & 1 != 0 {
                 sum ^= key;
             }
-            key = if key & 1 != 0 { (key >> 1) ^ gen } else { key >> 1 };
+            key = if key & 1 != 0 {
+                (key >> 1) ^ gen
+            } else {
+                key >> 1
+            };
         }
     }
     sum
@@ -284,7 +312,11 @@ pub fn crc8le(data: &[u8], poly: u8, init: u8) -> u8 {
     for &b in data {
         crc ^= b;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ poly } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ poly
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -372,7 +404,10 @@ mod tests {
     fn lfsr_digest_matches_rtl_433() {
         // Checked against rtl_433's own lfsr_digest8_reflect compiled and run
         // on the same input, with the LaCrosse TX141TH parameters.
-        assert_eq!(lfsr_digest8_reflect(&[0xd4, 0x22, 0xf5, 0x3b], 0x31, 0xf4), 0x5b);
+        assert_eq!(
+            lfsr_digest8_reflect(&[0xd4, 0x22, 0xf5, 0x3b], 0x31, 0xf4),
+            0x5b
+        );
     }
 
     #[test]

@@ -74,7 +74,9 @@ pub fn parse_key(s: &str) -> Option<Vec<u8>> {
     }
     let hex = s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit());
     let bytes = if hex {
-        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()).collect::<Option<Vec<u8>>>()?
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
+            .collect::<Option<Vec<u8>>>()?
     } else {
         base64_decode(s)?
     };
@@ -110,9 +112,15 @@ mod tests {
 
     #[test]
     fn a_key_reads_as_hex_or_base64() {
-        assert_eq!(parse_key("D7CA0CE2D3C78953"), Some(vec![0xd7, 0xca, 0x0c, 0xe2, 0xd3, 0xc7, 0x89, 0x53]));
+        assert_eq!(
+            parse_key("D7CA0CE2D3C78953"),
+            Some(vec![0xd7, 0xca, 0x0c, 0xe2, 0xd3, 0xc7, 0x89, 0x53])
+        );
         // The default key as the app shows it.
-        assert_eq!(parse_key("1PG7OiApB1nwvP+rz05pAQ=="), Some(crate::meshtastic::DEFAULT_KEY.to_vec()));
+        assert_eq!(
+            parse_key("1PG7OiApB1nwvP+rz05pAQ=="),
+            Some(crate::meshtastic::DEFAULT_KEY.to_vec())
+        );
         assert_eq!(parse_key("AQ=="), Some(vec![1]));
         assert_eq!(parse_key(""), None);
         assert_eq!(parse_key("x!z"), None);
@@ -136,16 +144,28 @@ mod off_air {
         let r = crate::lora::Received::parse(&bytes).expect("a LoRa frame");
         let m = r.meshtastic().expect("a Meshtastic envelope");
         assert_eq!(m.channel_hash, 0x5b);
-        assert!(r.meshtastic_message().is_none(), "the default key must not open it");
+        assert!(
+            r.meshtastic_message().is_none(),
+            "the default key must not open it"
+        );
         let psk = parse_key("71A225336644AF248D75339C2F416A16").unwrap();
-        let chan = crate::meshtastic::Channel { name: "waveshark".into(), psk: psk.clone() };
+        let chan = crate::meshtastic::Channel {
+            name: "waveshark".into(),
+            psk: psk.clone(),
+        };
         assert_eq!(chan.hash(), Some(0x4f));
-        set(vec![ChannelKey { system: System::Meshtastic, name: "waveshark".into(), key: psk }]);
+        set(vec![ChannelKey {
+            system: System::Meshtastic,
+            name: "waveshark".into(),
+            key: psk,
+        }]);
         assert!(r.meshtastic_message_on().is_none());
         set(Vec::new());
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
-        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap()).collect()
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
     }
 }

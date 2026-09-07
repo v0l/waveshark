@@ -223,6 +223,7 @@ impl App {
                                         View::Map,
                                         View::Calls,
                                         View::Messages,
+                                        View::Video,
                                         View::Links,
                                         View::Devices,
                                         View::Keys,

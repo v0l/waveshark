@@ -14,7 +14,12 @@ fn main() {
         .chunks_exact(2)
         .map(|c| C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
         .collect();
-    let mut g = build_chain(StreamSpec::iq(rate, common::Hz(centre as u64)), &[NodeSpec::new("auto")], &registry()).unwrap();
+    let mut g = build_chain(
+        StreamSpec::iq(rate, common::Hz(centre as u64)),
+        &[NodeSpec::new("auto")],
+        &registry(),
+    )
+    .unwrap();
     let mut burst = None;
     for b in iq.chunks(16_384) {
         g.feed_iq(b).unwrap();
@@ -40,7 +45,11 @@ fn main() {
         for c in 0..cols {
             let v = ((img[(n - 1 - r) * cols + c] - floor) / span).clamp(0.0, 1.0);
             let g = (v * 255.0) as u8;
-            out.extend_from_slice(&[(g as f32 * 0.9) as u8, (g as f32 * 0.8) as u8, (60.0 + (1.0 - v) * 40.0) as u8]);
+            out.extend_from_slice(&[
+                (g as f32 * 0.9) as u8,
+                (g as f32 * 0.8) as u8,
+                (60.0 + (1.0 - v) * 40.0) as u8,
+            ]);
         }
     }
     std::fs::write(&a[4], out).unwrap();

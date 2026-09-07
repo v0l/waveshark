@@ -95,6 +95,7 @@ fn kind_label(k: PortKind) -> &'static str {
         PortKind::Packets => "packets",
         PortKind::Sources => "sources",
         PortKind::Voice => "voice",
+        PortKind::Video => "video",
     }
 }
 

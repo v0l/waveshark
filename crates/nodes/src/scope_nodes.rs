@@ -121,8 +121,16 @@ impl ScopeNode {
     /// by the time it gets here, and a lowpass on a real signal made complex
     /// keeps the positive half, which is the half that is drawn.
     fn design(&mut self) {
-        let full = if self.real { self.rate / 2.0 } else { self.rate };
-        let want = if self.span_hz > 0.0 { self.span_hz.min(full) } else { full };
+        let full = if self.real {
+            self.rate / 2.0
+        } else {
+            self.rate
+        };
+        let want = if self.span_hz > 0.0 {
+            self.span_hz.min(full)
+        } else {
+            full
+        };
         // Twice the span of complex rate for IQ, since the span is the whole
         // width shown; a real stream shows only the top half of its
         // transform, so it needs twice that again.
@@ -209,7 +217,11 @@ impl Simple for ScopeNode {
         match input.spec.kind {
             PortKind::Iq => self.real = false,
             PortKind::Real => self.real = true,
-            _ => return Err(common::Error::other("scope looks at samples: IQ or real audio")),
+            _ => {
+                return Err(common::Error::other(
+                    "scope looks at samples: IQ or real audio",
+                ))
+            }
         }
         self.rate = input.spec.rate;
         self.center_hz = input.spec.center.as_f64();
@@ -227,7 +239,12 @@ impl Simple for ScopeNode {
         Ok(input.spec)
     }
 
-    fn process(&mut self, input: &Payload, output: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
         match input {
             Payload::Iq(iq) => {
                 output.iq_mut().extend_from_slice(iq);
@@ -279,14 +296,18 @@ impl Simple for ScopeNode {
             Param::float("refresh_hz", self.refresh_hz as f64, 1.0..=120.0)
                 .label("Refresh")
                 .unit("Hz"),
-            Param::float("span_hz", self.span_hz, 0.0..=50_000_000.0).label("Span (0 = all)").unit("Hz"),
+            Param::float("span_hz", self.span_hz, 0.0..=50_000_000.0)
+                .label("Span (0 = all)")
+                .unit("Hz"),
         ]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
             "fft_size" => {
-                let n = (value.as_i64().unwrap_or(1024).max(64) as usize).next_power_of_two().min(16_384);
+                let n = (value.as_i64().unwrap_or(1024).max(64) as usize)
+                    .next_power_of_two()
+                    .min(16_384);
                 if n != self.size {
                     self.size = n;
                     self.spec = Spectrum::new(n);
@@ -307,7 +328,9 @@ impl Simple for ScopeNode {
                 }
                 Ok(())
             }
-            _ => Err(common::Error::other(format!("scope: unknown parameter {name:?}"))),
+            _ => Err(common::Error::other(format!(
+                "scope: unknown parameter {name:?}"
+            ))),
         }
     }
 }
@@ -342,12 +365,22 @@ mod tests {
         let mut n = ScopeNode::new(1024);
         let spec = StreamSpec::iq(rate, common::Hz(1_000_000));
         let out = run(&mut n, spec, Payload::Iq(iq.clone()));
-        assert_eq!(out.as_iq().unwrap(), &iq[..], "the scope changed the stream");
+        assert_eq!(
+            out.as_iq().unwrap(),
+            &iq[..],
+            "the scope changed the stream"
+        );
         let (f, fresh) = n.frame();
         assert!(fresh);
         assert!(!f.real);
         assert_eq!(f.spectrum.len(), 1024);
-        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let peak = f
+            .spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
         // +6 kHz of a 48 kHz span: an eighth of the way up from the centre.
         assert!((peak as i64 - 640).abs() <= 1, "peak in bin {peak}");
         assert!((f.peak - 0.5).abs() < 0.01 && (f.rms - 0.5).abs() < 0.01);
@@ -356,8 +389,9 @@ mod tests {
     #[test]
     fn real_audio_gives_a_one_sided_spectrum_and_a_vu_reading() {
         let rate = 48_000.0;
-        let v: Vec<f32> =
-            (0..8192).map(|i| 0.25 * (std::f32::consts::TAU * 1_000.0 * i as f32 / rate as f32).sin()).collect();
+        let v: Vec<f32> = (0..8192)
+            .map(|i| 0.25 * (std::f32::consts::TAU * 1_000.0 * i as f32 / rate as f32).sin())
+            .collect();
         let mut n = ScopeNode::new(1024);
         let spec = StreamSpec {
             kind: PortKind::Real,
@@ -374,7 +408,13 @@ mod tests {
         // The default span on audio is 10 kHz, so the stream is brought
         // down to 24 kS/s and the half spectrum runs to 12 kHz.
         assert!((f.rate - 24_000.0).abs() < 1.0, "seen at {}", f.rate);
-        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let peak = f
+            .spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
         assert!((peak as i64 - 43).abs() <= 1, "peak in bin {peak}");
         assert!((f.peak - 0.25).abs() < 0.01);
         assert!((f.rms - 0.25 / 2f32.sqrt()).abs() < 0.01);
@@ -395,7 +435,14 @@ mod span_tests {
             .map(|i| 0.25 * (std::f32::consts::TAU * 2_000.0 * i as f32 / rate as f32).sin())
             .collect();
         let mut n = ScopeNode::new(1024);
-        let spec = StreamSpec { kind: PortKind::Real, rate, center: common::Hz(0), bandwidth: 0.0, flow: Flow::Rx, ..Default::default() };
+        let spec = StreamSpec {
+            kind: PortKind::Real,
+            rate,
+            center: common::Hz(0),
+            bandwidth: 0.0,
+            flow: Flow::Rx,
+            ..Default::default()
+        };
         Simple::negotiate(&mut n, &PortSpec { spec, latency: 0 }).unwrap();
         let mut out = Payload::Real(Vec::new());
         let (mut ev, mut tg) = (Vec::new(), Vec::new());
@@ -405,8 +452,17 @@ mod span_tests {
         let (f, _) = n.frame();
         assert!(f.rate < 30_000.0, "still looking at {} S/s", f.rate);
         let half = f.rate / 2.0;
-        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let peak = f
+            .spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
         let hz = peak as f64 / f.spectrum.len() as f64 * half;
-        assert!((hz - 2_000.0).abs() < half / f.spectrum.len() as f64 * 2.0, "tone read at {hz:.0} Hz");
+        assert!(
+            (hz - 2_000.0).abs() < half / f.spectrum.len() as f64 * 2.0,
+            "tone read at {hz:.0} Hz"
+        );
     }
 }

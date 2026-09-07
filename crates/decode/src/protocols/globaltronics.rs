@@ -55,7 +55,10 @@ impl Protocol for GtWt02 {
             b[0] != 0 && nibble_sum(b) == ((b[3] & 1) << 5) + (b[4] >> 3)
         })
         .ok_or(match bits.len() {
-            n if n < WT02_BITS => DecodeError::WrongLength { got: n, want: WT02_BITS },
+            n if n < WT02_BITS => DecodeError::WrongLength {
+                got: n,
+                want: WT02_BITS,
+            },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -88,10 +91,18 @@ impl Protocol for GtWt02 {
 /// Eight nibbles added together, modulo 64. The last nibble is only three bits
 /// wide because the fourth is the top bit of the checksum itself.
 fn nibble_sum(b: &[u8]) -> u8 {
-    let s: u16 = [b[0] >> 4, b[0] & 0x0f, b[1] >> 4, b[1] & 0x0f, b[2] >> 4, b[2] & 0x0f, b[3] >> 4]
-        .iter()
-        .map(|v| *v as u16)
-        .sum::<u16>()
+    let s: u16 = [
+        b[0] >> 4,
+        b[0] & 0x0f,
+        b[1] >> 4,
+        b[1] & 0x0f,
+        b[2] >> 4,
+        b[2] & 0x0f,
+        b[3] >> 4,
+    ]
+    .iter()
+    .map(|v| *v as u16)
+    .sum::<u16>()
         + (b[3] & 0x0e) as u16;
     (s & 0x3f) as u8
 }
@@ -117,7 +128,10 @@ impl Protocol for GtWt03 {
             b[..5].iter().any(|v| *v != 0) && roll_byte(&b[..4], 0x3100) ^ b[4] ^ 0x2d == 0
         })
         .ok_or(match bits.len() {
-            n if n < WT03_BITS => DecodeError::WrongLength { got: n, want: WT03_BITS },
+            n if n < WT03_BITS => DecodeError::WrongLength {
+                got: n,
+                want: WT03_BITS,
+            },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -178,7 +192,9 @@ fn humidity_pct(raw: u8, working: std::ops::RangeInclusive<u8>) -> Result<u8, De
         10 => Ok(0),
         110 => Ok(100),
         v if working.contains(&v) => Ok(v),
-        _ => Err(DecodeError::Implausible("humidity outside the sensor's range")),
+        _ => Err(DecodeError::Implausible(
+            "humidity outside the sensor's range",
+        )),
     }
 }
 
@@ -233,11 +249,17 @@ mod tests {
         // and it transmits them as 10 and 110. Reporting 110% would be worse
         // than reporting saturation.
         assert_eq!(
-            GtWt02.decode(&wt02(0x34, 0, 23.7, 110, false)).unwrap().get("humidity_pct"),
+            GtWt02
+                .decode(&wt02(0x34, 0, 23.7, 110, false))
+                .unwrap()
+                .get("humidity_pct"),
             Some(&Value::Int(100))
         );
         assert_eq!(
-            GtWt02.decode(&wt02(0x34, 0, 23.7, 10, false)).unwrap().get("humidity_pct"),
+            GtWt02
+                .decode(&wt02(0x34, 0, 23.7, 10, false))
+                .unwrap()
+                .get("humidity_pct"),
             Some(&Value::Int(0))
         );
     }
@@ -247,7 +269,11 @@ mod tests {
         let f = wt02(0x34, 0, 23.7, 35, false);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 18 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
+            broken.push(if i == 18 {
+                !f.get(i).unwrap()
+            } else {
+                f.get(i).unwrap()
+            });
         }
         assert_eq!(GtWt02.decode(&broken), Err(DecodeError::CrcFailed));
     }
@@ -287,7 +313,11 @@ mod tests {
         let f = wt03(0x17, 0, 26.1, 48, false);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 12 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
+            broken.push(if i == 12 {
+                !f.get(i).unwrap()
+            } else {
+                f.get(i).unwrap()
+            });
         }
         assert_eq!(GtWt03.decode(&broken), Err(DecodeError::CrcFailed));
     }
@@ -299,6 +329,9 @@ mod tests {
         assert_eq!(roll_byte(&[0x00, 0x00, 0x00, 0x00], 0x3100), 0x00);
         assert_eq!(roll_byte(&[0x80, 0x00, 0x00, 0x00], 0x3100), 0x00);
         assert_eq!(roll_byte(&[0x01, 0x00, 0x00, 0x00], 0x3100), 0x62);
-        assert_eq!(roll_byte(&[0xff, 0x00, 0x00, 0x00], 0x3100), 0x62 ^ 0xc4 ^ 0x88 ^ 0x10 ^ 0x20 ^ 0x40 ^ 0x80);
+        assert_eq!(
+            roll_byte(&[0xff, 0x00, 0x00, 0x00], 0x3100),
+            0x62 ^ 0xc4 ^ 0x88 ^ 0x10 ^ 0x20 ^ 0x40 ^ 0x80
+        );
     }
 }

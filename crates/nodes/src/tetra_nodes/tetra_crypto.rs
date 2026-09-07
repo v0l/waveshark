@@ -191,7 +191,9 @@ mod imp {
             colour: u8,
             time: TdmaTime,
         ) {
-            let Some(key) = self.keys.get(&colour).copied() else { return };
+            let Some(key) = self.keys.get(&colour).copied() else {
+                return;
+            };
             let ts = frame_timestamps(time, self.hyperframe.unwrap_or(0), false);
             for (frame, ts) in frames.iter_mut().zip(&ts) {
                 decrypt_frame(frame, &key, ts);
@@ -204,10 +206,14 @@ mod imp {
                 return Recovery::NotTea1;
             }
             if let Some((_, _, job)) = &self.recovery {
-                return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_, _)) };
+                return Recovery::Searching {
+                    gpu: matches!(job, RecoveryJob::Gpu(_, _)),
+                };
             }
             if !self.dead_sigs.is_empty() && self.collisions.is_empty() {
-                return Recovery::Exhausted { dropped: self.dead_sigs.len() };
+                return Recovery::Exhausted {
+                    dropped: self.dead_sigs.len(),
+                };
             }
             if let Some(most) = self.collisions.values().map(Vec::len).max() {
                 return Recovery::Gathering {
@@ -243,7 +249,9 @@ mod imp {
                 return;
             }
             let Some(cell) = self.rx.cell else { return };
-            let Some(secret) = self.crypto.id_secrets.get(&cell.colour) else { return };
+            let Some(secret) = self.crypto.id_secrets.get(&cell.colour) else {
+                return;
+            };
             let real = |esi: u32| decode::ta61::decrypt_id(secret, esi & 0xff_ffff);
             c.address = match c.address {
                 Address::Ssi(e) => Address::Ssi(real(e)),
@@ -275,16 +283,25 @@ mod imp {
             if self.crypto.id_secrets.contains_key(&cell.colour) {
                 return; // already de-anonymising this cell
             }
-            let Some(esi) = c.address.ssi().filter(|e| *e != 0 && *e != 0xff_ffff) else { return };
+            let Some(esi) = c.address.ssi().filter(|e| *e != 0 && *e != 0xff_ffff) else {
+                return;
+            };
             // Only a not-previously-seen ESI can be the one that follows the
             // registration just heard; a familiar ESI is unrelated traffic.
             if !self.crypto.seen_esi.insert(esi) {
                 return;
             }
-            let Some(ssi) = self.crypto.pending_ssi.take() else { return };
+            let Some(ssi) = self.crypto.pending_ssi.take() else {
+                return;
+            };
             // A pair whose SSI or ESI is already held would double-count; keep
             // the set distinct so three pairs are three real constraints.
-            if self.crypto.id_pairs.iter().any(|p| p.ssi == ssi || p.esi == esi) {
+            if self
+                .crypto
+                .id_pairs
+                .iter()
+                .any(|p| p.ssi == ssi || p.esi == esi)
+            {
                 return;
             }
             self.crypto.id_pairs.push(IdPair { ssi, esi });
@@ -320,7 +337,9 @@ mod imp {
             if !self.crypto.id_searched {
                 return None;
             }
-            let Some((colour, p)) = self.crypto.id_search.as_ref() else { return None };
+            let Some((colour, p)) = self.crypto.id_search.as_ref() else {
+                return None;
+            };
             let colour = *colour;
             match p.poll() {
                 std::task::Poll::Pending => None,
@@ -376,7 +395,9 @@ mod imp {
             if self.crypto.keys.contains_key(&cell.colour) {
                 return;
             }
-            let Some(time) = self.rx.time_at(slot) else { return };
+            let Some(time) = self.rx.time_at(slot) else {
+                return;
+            };
 
             // Advance the real hyperframe on a multiframe wrap, so the IV
             // stays right between the SYSINFO broadcasts that seed it. Only
@@ -396,7 +417,9 @@ mod imp {
             // judged when the real hyperframe is known, since it is most of
             // the IV. Tagged by the addressed party so a re-decode is not
             // mistaken for it.
-            let Some(hyperframe) = self.crypto.hyperframe else { return };
+            let Some(hyperframe) = self.crypto.hyperframe else {
+                return;
+            };
             let full_ts = Timestamp {
                 tn: time.tn,
                 frame: time.frame,
@@ -476,7 +499,9 @@ mod imp {
         /// The CPU form of the register search, used when the crypto worker
         /// reports no adapter.
         fn cpu_search(frames: Vec<Collision>) -> RecoveryJob {
-            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
             RecoveryJob::Cpu(Search::start(frames, threads))
         }
 
@@ -501,8 +526,7 @@ mod imp {
                     self.crypto.gpu_attempted = true;
                     match GpuSearch::spawn(frames.clone(), 0..1u64 << 32, 1 << 20) {
                         Some(p) => {
-                            self.crypto.recovery =
-                                Some((colour, sig, RecoveryJob::Gpu(frames, p)));
+                            self.crypto.recovery = Some((colour, sig, RecoveryJob::Gpu(frames, p)));
                         }
                         None => {
                             // The worker itself is gone: it can never answer.
@@ -540,12 +564,13 @@ mod imp {
                         _ => None,
                     };
                     match frames {
-                        Some(frames) =>
-                            self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames))),
+                        Some(frames) => {
+                            self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames)))
+                        }
                         None => {}
                     }
                     None
-                },
+                }
                 Progress::Found(reg) => {
                     self.crypto.keys.insert(colour, Key::Tea1(reg));
                     self.crypto.recovery = None;
@@ -567,8 +592,11 @@ mod imp {
                     }
                     // Hand the search slot to the next message at quorum.
                     if let Some(cell) = self.rx.cell {
-                        if let Some((&next, frames)) =
-                            self.crypto.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
+                        if let Some((&next, frames)) = self
+                            .crypto
+                            .collisions
+                            .iter()
+                            .find(|(_, f)| f.len() >= COLLISION_QUORUM)
                         {
                             let frames = frames.clone();
                             self.start_recovery(cell.colour, next, frames);
@@ -600,7 +628,12 @@ mod imp {
         /// TEA1.
         ///
         /// [`reuse_pairs`]: Self::reuse_pairs
-        pub fn apply_crib(&mut self, iv: u32, ciphertext: &[u8], known_plaintext: &[u8]) -> Vec<u8> {
+        pub fn apply_crib(
+            &mut self,
+            iv: u32,
+            ciphertext: &[u8],
+            known_plaintext: &[u8],
+        ) -> Vec<u8> {
             let ks = decode::keystream::keystream_from_known(ciphertext, known_plaintext);
             self.crypto.keystreams.insert(iv, ks.clone());
             ks

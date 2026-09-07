@@ -96,6 +96,47 @@ pub struct AdStructure {
     pub value: Vec<u8>,
 }
 
+/// Where the rest of an extended advertisement is: the secondary channel it
+/// will be sent on, how long from the end of this packet, and on which PHY.
+///
+/// A long range advertiser puts almost nothing in the packet on the primary
+/// channel and points at an auxiliary one. Following the pointer means being
+/// tuned to that channel at that moment, which a receiver watching one
+/// channel cannot do; what it can do is say that the advertiser exists, and
+/// where to look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuxPtr {
+    /// Data channel index, 0 to 36. Not an advertising channel.
+    pub channel: u8,
+    /// Microseconds from the start of the packet carrying this pointer.
+    pub offset_us: u32,
+    /// 0 is LE 1M, 1 is LE 2M, 2 is LE Coded.
+    pub phy: u8,
+}
+
+impl AuxPtr {
+    pub fn phy_name(&self) -> &'static str {
+        match self.phy {
+            0 => "LE 1M",
+            1 => "LE 2M",
+            2 => "LE Coded",
+            _ => "reserved",
+        }
+    }
+
+    /// The centre of the data channel it names. The data channels fill the
+    /// band between the advertising ones, which is why an auxiliary packet
+    /// can be anywhere in 80 MHz.
+    pub fn frequency_hz(&self) -> Option<u64> {
+        let ch = u64::from(self.channel);
+        match self.channel {
+            0..=10 => Some(2_404_000_000 + ch * 2_000_000),
+            11..=36 => Some(2_428_000_000 + (ch - 11) * 2_000_000),
+            _ => None,
+        }
+    }
+}
+
 /// A parsed advertising PDU.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Advertisement {
@@ -111,6 +152,8 @@ pub struct Advertisement {
     /// Advertised transmit power in dBm, which with the received level is the
     /// only distance evidence a packet carries.
     pub tx_power: Option<i8>,
+    /// Where the rest of an extended advertisement will be sent.
+    pub aux: Option<AuxPtr>,
 }
 
 /// Parse a PDU as `dsp::ble` hands it over: two header bytes, then payload.
@@ -143,6 +186,24 @@ pub fn parse(pdu: &[u8]) -> Option<Advertisement> {
     let mut name = None;
     let mut company = None;
     let mut tx_power = None;
+    let mut aux = None;
+    // An extended advertisement puts an address only if it wants to, behind a
+    // header of optional fields, so the six bytes read above as an address
+    // are the start of that header instead.
+    let (rest, address) = if pdu_type == PduType::AdvExtInd {
+        let body = &pdu[2..];
+        let (ext, adv_a, ptr) = parse_extended_header(body)?;
+        aux = ptr;
+        (
+            &body[ext..],
+            adv_a.unwrap_or(Address {
+                bytes: [0; 6],
+                random: false,
+            }),
+        )
+    } else {
+        (rest, address)
+    };
     let mut i = 0usize;
     while i < rest.len() {
         let len = rest[i] as usize;
@@ -175,7 +236,65 @@ pub fn parse(pdu: &[u8]) -> Option<Advertisement> {
         name,
         company,
         tx_power,
+        aux,
     })
+}
+
+/// Walk an extended header: its length, the flags that say which optional
+/// fields are present, then the fields in the order the specification fixes.
+///
+/// Returns how many bytes the header occupied, the advertiser's address when
+/// it sent one, and the auxiliary pointer when it sent one.
+fn parse_extended_header(body: &[u8]) -> Option<(usize, Option<Address>, Option<AuxPtr>)> {
+    if body.is_empty() {
+        return None;
+    }
+    let ext_len = usize::from(body[0] & 0x3f);
+    if ext_len == 0 {
+        // No header at all, which is legal: the packet is advertising data.
+        return Some((1, None, None));
+    }
+    if body.len() < 1 + ext_len {
+        return None;
+    }
+    let flags = body[1];
+    let mut at = 2usize;
+    let mut adv_a = None;
+    let mut aux = None;
+    let take = |n: usize, at: &mut usize| -> Option<&[u8]> {
+        let s = body.get(*at..*at + n)?;
+        *at += n;
+        Some(s)
+    };
+    if flags & 0x01 != 0 {
+        let a = take(6, &mut at)?;
+        adv_a = Some(Address {
+            bytes: a.try_into().ok()?,
+            // The extended header carries no address type bit of its own;
+            // the PDU header's TxAdd says which it is.
+            random: false,
+        });
+    }
+    if flags & 0x02 != 0 {
+        take(6, &mut at)?;
+    }
+    if flags & 0x04 != 0 {
+        take(1, &mut at)?;
+    }
+    if flags & 0x08 != 0 {
+        take(2, &mut at)?;
+    }
+    if flags & 0x10 != 0 {
+        let p = take(3, &mut at)?;
+        let units = if p[0] & 0x80 != 0 { 300 } else { 30 };
+        let offset = u16::from(p[1]) | (u16::from(p[2] & 0x1f) << 8);
+        aux = Some(AuxPtr {
+            channel: p[0] & 0x3f,
+            offset_us: u32::from(offset) * units,
+            phy: (p[2] >> 5) & 0x07,
+        });
+    }
+    Some((1 + ext_len, adv_a, aux))
 }
 
 impl Advertisement {
@@ -209,6 +328,17 @@ impl Advertisement {
         }
         if let Some(p) = self.tx_power {
             f.push(("tx_power_dbm".into(), Value::Int(i64::from(p))));
+        }
+        if let Some(a) = self.aux {
+            // Where the rest of this advertisement will be. A receiver
+            // watching one channel cannot follow it, so the row says where it
+            // went rather than pretending the advertisement was empty.
+            f.push(("aux_channel".into(), Value::Int(i64::from(a.channel))));
+            f.push(("aux_phy".into(), Value::Text(a.phy_name().into())));
+            f.push(("aux_offset_us".into(), Value::Int(i64::from(a.offset_us))));
+            if let Some(hz) = a.frequency_hz() {
+                f.push(("aux_hz".into(), Value::Int(hz as i64)));
+            }
         }
         f
     }
@@ -299,6 +429,45 @@ mod tests {
         let a = parse(&pdu).expect("a PDU");
         assert_eq!(a.data.len(), 1, "only the flags structure is complete");
         assert_eq!(a.name, None);
+    }
+
+    /// An extended advertisement on a primary channel usually carries no
+    /// data at all: a header, an address, and a pointer to where the rest
+    /// will be sent. Reading the six bytes after the PDU header as an address
+    /// the way a legacy advertisement does gives a device that does not
+    /// exist.
+    #[test]
+    fn an_extended_advertisement_points_at_where_the_rest_will_be() {
+        // ADV_EXT_IND: extended header of an address and an auxiliary
+        // pointer, then nothing.
+        let mut pdu = vec![0x07, 0x00];
+        pdu.push(0x0a); // header length 10, advertising mode 0
+        pdu.push(0x11); // flags: AdvA and AuxPtr
+        pdu.extend_from_slice(&[0x4d, 0x72, 0xef, 0xcb, 0x70, 0x6c]);
+        // Channel 17, offset units of 30 us, offset 200, LE Coded.
+        pdu.extend_from_slice(&[17, 200, 0x40]);
+        pdu[1] = (pdu.len() - 2) as u8;
+
+        let a = parse(&pdu).expect("a PDU");
+        assert_eq!(a.pdu_type, PduType::AdvExtInd);
+        assert_eq!(a.address.to_string(), "6C:70:CB:EF:72:4D");
+        let aux = a.aux.expect("an auxiliary pointer");
+        assert_eq!(aux.channel, 17);
+        assert_eq!(aux.offset_us, 6_000);
+        assert_eq!(aux.phy_name(), "LE Coded");
+        assert_eq!(aux.frequency_hz(), Some(2_440_000_000));
+    }
+
+    /// The data channels fill the band around the advertising ones, so a
+    /// pointer can send a receiver anywhere in 80 MHz.
+    #[test]
+    fn a_data_channel_index_names_a_frequency() {
+        let at = |channel| AuxPtr { channel, offset_us: 0, phy: 2 }.frequency_hz();
+        assert_eq!(at(0), Some(2_404_000_000));
+        assert_eq!(at(10), Some(2_424_000_000));
+        assert_eq!(at(11), Some(2_428_000_000));
+        assert_eq!(at(36), Some(2_478_000_000));
+        assert_eq!(at(37), None);
     }
 
     #[test]

@@ -56,6 +56,17 @@ pub enum PortKind {
     /// the call it belongs to. A port of this kind carries several channels
     /// at once, since a receiver hears more than one conversation.
     Voice,
+    /// Pictures as they are received, with what they were received from.
+    ///
+    /// The junction for anything that produces an image rather than packets:
+    /// analogue video today, weather satellite lines and SSTV when they are
+    /// written. Not [`PortKind::Real`] for the reason [`PortKind::Voice`] is
+    /// not: a field arrives fifty times a second in one lump at the camera's
+    /// rate, not sample by sample at the graph's, and it carries the channel
+    /// and how much of it actually arrived. A port of this kind carries
+    /// several sources at once, since a receiver can watch more than one
+    /// channel.
+    Video,
 }
 
 /// A reusable buffer. Stages write into the caller's buffer rather than
@@ -71,6 +82,7 @@ pub enum Payload {
     Packets(Vec<common::Packet>),
     Sources(Vec<SourceBlock>),
     Voice(Vec<common::Voice>),
+    Video(Vec<common::VideoFrame>),
 }
 
 impl Payload {
@@ -85,6 +97,7 @@ impl Payload {
             PortKind::Packets => Payload::Packets(Vec::new()),
             PortKind::Sources => Payload::Sources(Vec::new()),
             PortKind::Voice => Payload::Voice(Vec::new()),
+            PortKind::Video => Payload::Video(Vec::new()),
         }
     }
 
@@ -99,6 +112,7 @@ impl Payload {
             Payload::Packets(_) => PortKind::Packets,
             Payload::Sources(_) => PortKind::Sources,
             Payload::Voice(_) => PortKind::Voice,
+            Payload::Video(_) => PortKind::Video,
         }
     }
 
@@ -112,6 +126,7 @@ impl Payload {
             Payload::Packets(v) => v.len(),
             Payload::Sources(v) => v.len(),
             Payload::Voice(v) => v.len(),
+            Payload::Video(v) => v.len(),
         }
     }
 
@@ -130,6 +145,7 @@ impl Payload {
             Payload::Packets(v) => v.clear(),
             Payload::Sources(v) => v.clear(),
             Payload::Voice(v) => v.clear(),
+            Payload::Video(v) => v.clear(),
         }
     }
 
@@ -186,6 +202,23 @@ impl Payload {
         match self {
             Payload::Voice(v) => Some(v),
             _ => None,
+        }
+    }
+
+    pub fn as_video(&self) -> Option<&[common::VideoFrame]> {
+        match self {
+            Payload::Video(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn video_mut(&mut self) -> &mut Vec<common::VideoFrame> {
+        match self {
+            Payload::Video(v) => v,
+            other => {
+                *other = Payload::Video(Vec::new());
+                other.video_mut()
+            }
         }
     }
 

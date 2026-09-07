@@ -81,10 +81,7 @@ impl MType {
     pub fn is_uplink(self) -> bool {
         matches!(
             self,
-            MType::JoinRequest
-                | MType::UnconfirmedUp
-                | MType::ConfirmedUp
-                | MType::RejoinRequest
+            MType::JoinRequest | MType::UnconfirmedUp | MType::ConfirmedUp | MType::RejoinRequest
         )
     }
 
@@ -248,7 +245,10 @@ impl Frame {
 /// reverse of the order it travels in.
 pub fn format_eui(eui: u64) -> String {
     let b = eui.to_be_bytes();
-    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join("-")
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 #[cfg(test)]
@@ -256,7 +256,10 @@ mod tests {
     use super::*;
 
     fn unhex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     /// The published example from the `lora-packet` library's README, which
@@ -274,7 +277,9 @@ mod tests {
         let f = Frame::parse(&unhex("40F17DBE4900020001954378762B11FF0D")).expect("a frame");
         assert_eq!(f.mtype, MType::UnconfirmedUp);
         assert!(f.mtype.is_uplink());
-        let Body::Data(d) = f.body else { panic!("{:?}", f.body) };
+        let Body::Data(d) = f.body else {
+            panic!("{:?}", f.body)
+        };
         assert_eq!(d.dev_addr, 0x49be_7df1, "the address the README states");
         assert_eq!(d.f_cnt, 2);
         assert_eq!(d.f_port, Some(1));
@@ -300,7 +305,9 @@ mod tests {
 
         let f = Frame::parse(&v).expect("a frame");
         assert_eq!(f.mtype, MType::JoinRequest);
-        let Body::Join(j) = f.body else { panic!("{:?}", f.body) };
+        let Body::Join(j) = f.body else {
+            panic!("{:?}", f.body)
+        };
         assert_eq!(j.join_eui, 0x0807_0605_0403_0201);
         assert_eq!(j.dev_eui, 0x8877_6655_4433_2211);
         assert_eq!(j.dev_nonce, 0x1234);
@@ -347,7 +354,9 @@ mod tests {
         v.push(0x20);
         v.extend_from_slice(&[0x07, 0x00]);
         v.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
-        let Body::Data(a) = Frame::parse(&v).unwrap().body else { panic!() };
+        let Body::Data(a) = Frame::parse(&v).unwrap().body else {
+            panic!()
+        };
         assert!(a.ack && !a.adr, "{a:?}");
     }
 
@@ -359,7 +368,9 @@ mod tests {
         v.push(0x00);
         v.extend_from_slice(&[0x01, 0x00]);
         v.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
-        let Body::Data(d) = Frame::parse(&v).unwrap().body else { panic!() };
+        let Body::Data(d) = Frame::parse(&v).unwrap().body else {
+            panic!()
+        };
         assert_eq!(d.f_port, None);
         assert_eq!(d.payload_len, 0);
     }
@@ -374,7 +385,9 @@ mod tests {
         v.extend_from_slice(&[0x11, 0x22, 0x33]);
         v.push(0x02); // FPort
         v.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
-        let Body::Data(d) = Frame::parse(&v).unwrap().body else { panic!() };
+        let Body::Data(d) = Frame::parse(&v).unwrap().body else {
+            panic!()
+        };
         assert_eq!(d.f_opts_len, 3);
         assert_eq!(d.f_port, Some(2));
         assert_eq!(d.payload_len, 0);
@@ -402,7 +415,9 @@ mod tests {
         v.push(0x00); // FPort 0
         v.extend_from_slice(&[0x99, 0x88]);
         v.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
-        let Body::Data(d) = Frame::parse(&v).unwrap().body else { panic!() };
+        let Body::Data(d) = Frame::parse(&v).unwrap().body else {
+            panic!()
+        };
         assert!(d.is_mac_only());
     }
 }

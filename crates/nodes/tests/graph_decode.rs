@@ -45,7 +45,9 @@ fn chain_specs() -> Vec<NodeSpec> {
     vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", 10_000.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -56,7 +58,9 @@ fn specs_with_unknown() -> Vec<NodeSpec> {
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
         NodeSpec::new("real_decimate").i("factor", 20),
-        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", 10_000.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -98,30 +102,40 @@ fn the_graph_negotiates_rates_and_kinds_correctly() {
     let g = build_chain(spec, &chain_specs(), &registry()).unwrap();
 
     let names: Vec<&str> = g.order().map(|(_, n)| n).collect();
-    assert_eq!(names, vec!["decimate", "envelope", "pulse_detect", "protocol_decode"]);
+    assert_eq!(
+        names,
+        vec!["decimate", "envelope", "pulse_detect", "protocol_decode"]
+    );
     assert_eq!(g.output_spec().kind, pipeline::PortKind::Bytes);
 }
 
 #[test]
 fn a_misordered_chain_fails_at_build_with_an_actionable_message() {
     // Pulse detection before the envelope: the classic mistake.
-    let specs = vec![
-        NodeSpec::new("pulse_detect"),
-        NodeSpec::new("envelope"),
-    ];
+    let specs = vec![NodeSpec::new("pulse_detect"), NodeSpec::new("envelope")];
     let spec = StreamSpec::iq(250_000.0, Hz::mhz(433));
-    let err = build_chain(spec, &specs, &registry()).unwrap_err().to_string();
+    let err = build_chain(spec, &specs, &registry())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("pulse_detect"), "{err}");
-    assert!(err.contains("envelope"), "error should say how to fix it: {err}");
+    assert!(
+        err.contains("envelope"),
+        "error should say how to fix it: {err}"
+    );
 }
 
 #[test]
 fn an_unknown_node_type_lists_what_is_available() {
     let specs = vec![NodeSpec::new("magic_decoder")];
     let spec = StreamSpec::iq(250_000.0, Hz::mhz(433));
-    let err = build_chain(spec, &specs, &registry()).unwrap_err().to_string();
+    let err = build_chain(spec, &specs, &registry())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("magic_decoder"), "{err}");
-    assert!(err.contains("pulse_detect"), "should list known types: {err}");
+    assert!(
+        err.contains("pulse_detect"),
+        "should list known types: {err}"
+    );
 }
 
 #[test]
@@ -136,7 +150,9 @@ fn retuning_a_parameter_at_runtime_changes_behaviour() {
     let bad = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect").f("reset_us", 600.0).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", 600.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &bad, &registry()).unwrap();
@@ -177,7 +193,9 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
         // Decimating the envelope by 20 scales every pulse width by 20 and
         // makes the frame unmatchable.
         NodeSpec::new("real_decimate").i("factor", 20),
-        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", 10_000.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
@@ -190,10 +208,17 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
             _ => None,
         })
         .collect();
-    assert!(!packets.is_empty(), "an unknown burst must be reported: {events:?}");
+    assert!(
+        !packets.is_empty(),
+        "an unknown burst must be reported: {events:?}"
+    );
     for d in &packets {
         assert_eq!(d.protocol, "unknown", "nothing should have matched: {d:?}");
-        assert_eq!(d.modulation, Some("OOK"), "the modulation belongs in the report");
+        assert_eq!(
+            d.modulation,
+            Some("OOK"),
+            "the modulation belongs in the report"
+        );
         let detail = d.detail.as_deref().unwrap_or_default();
         // Enough to start reverse engineering from: a coding with its timings,
         // bits to compare between receptions, and how the signal was received.
@@ -236,8 +261,18 @@ fn turning_off_unknown_reporting_silences_them_without_touching_decodes() {
 fn the_registry_describes_every_node_for_a_ui() {
     let r = registry();
     let names: Vec<&str> = r.list().map(|d| d.name).collect();
-    for want in ["mixer", "decimate", "envelope", "fm_demod", "pulse_detect", "protocol_decode"] {
-        assert!(names.contains(&want), "registry is missing {want}: {names:?}");
+    for want in [
+        "mixer",
+        "decimate",
+        "envelope",
+        "fm_demod",
+        "pulse_detect",
+        "protocol_decode",
+    ] {
+        assert!(
+            names.contains(&want),
+            "registry is missing {want}: {names:?}"
+        );
     }
     // Categories let a UI group the palette without hard-coding node names.
     assert!(r.by_category("decode").count() >= 2);
@@ -268,7 +303,6 @@ fn every_node_exposes_its_parameters() {
     }
 }
 
-
 #[test]
 fn a_mistuned_detector_says_what_it_discarded_and_which_knob_to_turn() {
     // The failure mode that matters most in practice. A reset gap below Fine
@@ -280,7 +314,9 @@ fn a_mistuned_detector_says_what_it_discarded_and_which_knob_to_turn() {
     let specs = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect").f("reset_us", 600.0).i("min_pulses", 20),
+        NodeSpec::new("pulse_detect")
+            .f("reset_us", 600.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
@@ -295,7 +331,10 @@ fn a_mistuned_detector_says_what_it_discarded_and_which_knob_to_turn() {
         })
         .expect("a mistuned detector must not fail silently");
     assert!(msg.contains("discarded"), "{msg}");
-    assert!(msg.contains("min_pulses") || msg.contains("reset_us"), "must name a knob: {msg}");
+    assert!(
+        msg.contains("min_pulses") || msg.contains("reset_us"),
+        "must name a knob: {msg}"
+    );
 }
 
 #[test]
@@ -309,7 +348,9 @@ fn the_ask_detector_decodes_the_real_capture_too() {
     let specs = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("ask_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
+        NodeSpec::new("ask_detect")
+            .f("reset_us", 10_000.0)
+            .i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).expect("build chain");
@@ -373,8 +414,14 @@ fn an_unreadable_burst_is_still_reported() {
         "a burst with no front end produced no log entry: {events:?}"
     );
     let d = reported[0];
-    assert!(d.modulation.is_some(), "reported without naming the modulation");
-    assert!(d.detail.is_some(), "reported without saying why nothing read it");
+    assert!(
+        d.modulation.is_some(),
+        "reported without naming the modulation"
+    );
+    assert!(
+        d.detail.is_some(),
+        "reported without saying why nothing read it"
+    );
 
     // And the other direction: an entry is a claim somebody reads, so a
     // classifier that is unsure must stay quiet. Raising the bar above what
@@ -395,5 +442,8 @@ fn an_unreadable_burst_is_still_reported() {
         .iter()
         .filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unidentified"))
         .collect();
-    assert!(still.is_empty(), "reported despite the confidence bar: {still:?}");
+    assert!(
+        still.is_empty(),
+        "reported despite the confidence bar: {still:?}"
+    );
 }

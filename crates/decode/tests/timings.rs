@@ -20,7 +20,10 @@ use dsp::pulse::{Package, Pulse};
 
 fn package(pulses: Vec<(u32, u32)>) -> Package {
     Package {
-        pulses: pulses.into_iter().map(|(mark, gap)| Pulse { mark, gap }).collect(),
+        pulses: pulses
+            .into_iter()
+            .map(|(mark, gap)| Pulse { mark, gap })
+            .collect(),
         snr_db: 22.0,
         rssi_dbfs: -20.0,
         start_sample: 0,
@@ -30,20 +33,26 @@ fn package(pulses: Vec<(u32, u32)>) -> Package {
 }
 
 fn bits_of(bytes: &[u8], n: usize) -> Vec<bool> {
-    (0..n).map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0).collect()
+    (0..n)
+        .map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0)
+        .collect()
 }
 
 /// PPM: every mark the same, a short gap for 0 and a long one for 1.
 fn ppm(bits: &[bool], mark: u32, short: u32, long: u32, reset: u32) -> Package {
-    let mut p: Vec<(u32, u32)> =
-        bits.iter().map(|b| (mark, if *b { long } else { short })).collect();
+    let mut p: Vec<(u32, u32)> = bits
+        .iter()
+        .map(|b| (mark, if *b { long } else { short }))
+        .collect();
     p.push((mark, reset));
     package(p)
 }
 
 /// PWM: a short mark for 1 and a long one for 0, the gap being the complement.
 fn pwm(bits: &[bool], short: u32, long: u32) -> Vec<(u32, u32)> {
-    bits.iter().map(|b| if *b { (short, long) } else { (long, short) }).collect()
+    bits.iter()
+        .map(|b| if *b { (short, long) } else { (long, short) })
+        .collect()
 }
 
 #[test]
@@ -57,7 +66,11 @@ fn an_acurite_609txc_burst_decodes_from_its_timings() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x8f)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(30.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(56)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1, "claimed by more than one protocol");
+    assert_eq!(
+        Protocols::all().decode_all(&pkg).len(),
+        1,
+        "claimed by more than one protocol"
+    );
 }
 
 #[test]
@@ -114,9 +127,7 @@ fn a_lacrosse_it_burst_decodes_from_fsk_runs() {
     let mut pulses: Vec<(u32, u32)> = Vec::new();
     let mut i = 0;
     while i < bits.len() {
-        let run = |from: usize, want: bool| {
-            bits[from..].iter().take_while(|b| **b == want).count()
-        };
+        let run = |from: usize, want: bool| bits[from..].iter().take_while(|b| **b == want).count();
         if !bits[i] {
             // A run of zeros before any mark cannot be expressed as a gap, so
             // fold it onto the previous pulse.
@@ -156,7 +167,10 @@ fn a_nexus_burst_decodes_from_its_timings() {
     assert_eq!(r.get("channel"), Some(&Value::Int(2)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(19.4)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(62)));
-    assert_eq!(r.crc_valid, None, "a constant nibble is not an integrity check");
+    assert_eq!(
+        r.crc_valid, None,
+        "a constant nibble is not an integrity check"
+    );
 }
 
 #[test]
@@ -196,7 +210,10 @@ fn a_rubicson_burst_decodes_from_its_timings() {
 fn a_bresser_3ch_burst_decodes_from_its_timings() {
     // 68.0 F is 20.0 C. Frame travels inverted, behind 750 us sync marks.
     let mut f: [u8; 5] = [0x3d, 0x26, 0x2c, 0x33, 0x00];
-    f[4] = f[0].wrapping_add(f[1]).wrapping_add(f[2]).wrapping_add(f[3]);
+    f[4] = f[0]
+        .wrapping_add(f[1])
+        .wrapping_add(f[2])
+        .wrapping_add(f[3]);
     let inverted: Vec<u8> = f.iter().map(|b| !b).collect();
     let mut pulses = vec![(750, 750); 4];
     pulses.extend(pwm(&bits_of(&inverted, 40), 250, 500));
@@ -243,9 +260,7 @@ fn nrz(bits: &[bool], bit_us: u32) -> Package {
     let mut pulses: Vec<(u32, u32)> = Vec::new();
     let mut i = 0;
     while i < bits.len() {
-        let run = |from: usize, want: bool| {
-            bits[from..].iter().take_while(|b| **b == want).count()
-        };
+        let run = |from: usize, want: bool| bits[from..].iter().take_while(|b| **b == want).count();
         if !bits[i] {
             let n = run(i, false) as u32;
             match pulses.last_mut() {
@@ -297,7 +312,10 @@ fn a_wh51_soil_probe_decodes_from_fsk_runs() {
 fn an_oregon_v3_burst_decodes_from_manchester_timings() {
     // Preamble, sync, then nibble-reversed payload, at 488 us a half symbol.
     let mut msg: [u8; 9] = [0xf8, 0x24, 0x1a, 0x30, 0x71, 0x20, 0x84, 0x00, 0x00];
-    let sum: u16 = msg[..7].iter().map(|b| (b >> 4) as u16 + (b & 0x0f) as u16).sum();
+    let sum: u16 = msg[..7]
+        .iter()
+        .map(|b| (b >> 4) as u16 + (b & 0x0f) as u16)
+        .sum();
     let sum = ((sum + (msg[7] >> 4) as u16) & 0xff) as u8;
     msg[7] = sum & 0x0f;
     msg[8] = sum & 0xf0;

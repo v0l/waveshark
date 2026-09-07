@@ -63,7 +63,16 @@ impl Frame {
 
     /// The information field as text, when it is text.
     pub fn info_text(&self) -> String {
-        self.info.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect()
+        self.info
+            .iter()
+            .map(|&b| {
+                if (32..127).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect()
     }
 }
 
@@ -200,7 +209,12 @@ mod tests {
 
     #[test]
     fn a_digipeated_frame_keeps_its_path_in_order() {
-        let raw = build(("APRS", 0), ("EI2ABC", 9), &[("WIDE1", 1), ("WIDE2", 2)], b"x");
+        let raw = build(
+            ("APRS", 0),
+            ("EI2ABC", 9),
+            &[("WIDE1", 1), ("WIDE2", 2)],
+            b"x",
+        );
         let f = parse(&raw).unwrap();
         let path: Vec<String> = f.path.iter().map(|a| a.to_string()).collect();
         assert_eq!(path, vec!["WIDE1-1", "WIDE2-2"]);
