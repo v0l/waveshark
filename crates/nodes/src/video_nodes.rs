@@ -135,14 +135,17 @@ impl Simple for VideoNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
+        // Before the demodulation and not after it: this runs on the whole
+        // span, so a span with no camera in it would otherwise FM demodulate
+        // twenty megasamples a second to decide that again every block.
+        if self.sep.is_none() && self.backoff > 0 {
+            self.backoff = self.backoff.saturating_sub(iq.len());
+            return Ok(());
+        }
         self.base.clear();
         self.demod.process(iq, &mut self.base);
 
         if self.sep.is_none() {
-            if self.backoff > 0 {
-                self.backoff = self.backoff.saturating_sub(self.base.len());
-                return Ok(());
-            }
             // Two fields' worth before deciding, so the test has hundreds of
             // lines to judge rather than a handful.
             self.priming.extend_from_slice(&self.base);

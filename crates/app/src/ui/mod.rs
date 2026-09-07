@@ -1831,6 +1831,11 @@ impl App {
         self.view = View::Messages;
     }
 
+    /// Open on the video pane, for a receiver pointed at a camera.
+    pub fn show_video(&mut self) {
+        self.view = View::Video;
+    }
+
     pub fn show_links(&mut self) {
         self.view = View::Links;
     }

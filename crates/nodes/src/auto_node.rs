@@ -140,16 +140,9 @@ const RING_MAX_S: f64 = 2.0;
 /// spreading factor over the narrowest bandwidth.
 const IQ_KEEP_S: f64 = 0.25;
 
-/// How wide a source has to be before a video front end is placed on it.
-///
-/// The AKK transmitter measured here occupied about 4.6 MHz, and nothing else
-/// this receiver reads is anywhere near that: the widest is BLE at 2 MHz.
-/// Three is comfortably between them.
-const VIDEO_MIN_HZ: f64 = 3e6;
-
-/// And how fast the stream carrying it has to be. PAL luma reaches 5 MHz with
-/// the colour subcarrier at 4.43, so a slower stream cannot hold a picture
-/// whatever the source measured.
+/// How fast a span has to be before the video front end runs on it. PAL luma
+/// reaches 5 MHz with the colour subcarrier at 4.43, so a slower stream
+/// cannot be carrying a picture whatever else is in it.
 const VIDEO_MIN_RATE_HZ: f64 = 12e6;
 
 impl Member {
@@ -797,6 +790,14 @@ impl AutoNode {
     }
 
     fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
+        for m in &self.wide {
+            for t in &m.video {
+                let Some(v) = m.graph.buf(*t).and_then(|p| p.as_video()) else {
+                    continue;
+                };
+                out.extend(v.iter().cloned());
+            }
+        }
         for slot in &self.slots {
             for m in &slot.members {
                 for t in &m.video {
@@ -859,6 +860,33 @@ impl AutoNode {
         // standard put it rather than where a spectrogram finds it, and an
         // advertisement is 80 us of a hopping device that may never be heard
         // twice, which is not enough for a source to open around.
+        // Analogue video, across the whole span rather than on a source.
+        //
+        // A camera's carrier is not a channel a detector can cut out: FM
+        // video at 5.8 GHz occupies the best part of twenty megahertz, and
+        // what a detector measures is the few megahertz around the carrier
+        // that stand above the floor. Cut to that, the picture is gone: the
+        // front end was placed on the source, filtered to 4.2 MHz of a 20 MHz
+        // transmission, and found no line rate to lock to. So it runs on the
+        // span, where a receiver tuned to a camera has the whole of it, and
+        // decides for itself whether there is a picture; when there is not it
+        // backs off for a second rather than demodulating every block.
+        //
+        // Placed where the analogue channel plan reaches, the way AIS and
+        // Mode S are placed by their bands: a 20 MS/s span at 2.4 GHz is
+        // ordinarily Wi-Fi and Bluetooth, and demodulating all of it as FM to
+        // find out otherwise is a cost with no return.
+        let video_band = decode::video_channels::channels()
+            .iter()
+            .any(|ch| covers(ch.hz as f64 - 9e6, ch.hz as f64 + 9e6));
+        if self.rate >= VIDEO_MIN_RATE_HZ && video_band {
+            self.wide.push(Member::build(
+                "video",
+                spec,
+                NodeSpec::new("video"),
+                &self.reg,
+            )?);
+        }
         let bw = crate::ble_nodes::CHANNEL_WIDTH_HZ / 2.0;
         for (_, hz) in dsp::ble::ADV_CHANNELS {
             if self.rate >= 4_000_000.0 && covers(hz - bw, hz + bw) {
@@ -969,20 +997,6 @@ impl AutoNode {
             if let Ok(mut m) = Member::build("wmbus", spec, Self::place("wmbus", hz, w), &self.reg)
             {
                 m.channel_hz = w;
-                members.push(m);
-            }
-        }
-        // Analogue video, by width: a PAL carrier occupies megahertz where
-        // everything else here occupies kilohertz, so a source this wide is
-        // either video or nothing this receiver reads, and the front end
-        // costs an FM demodulation and a slicer. The picture only assembles
-        // if the sync pulses are really there, so a wide source that is not
-        // video produces no fields rather than a wrong picture.
-        if b.bandwidth_hz >= VIDEO_MIN_HZ && b.rate >= VIDEO_MIN_RATE_HZ {
-            if let Ok(mut m) =
-                Member::build("video", spec, Self::place("video", hz, b.bandwidth_hz), &self.reg)
-            {
-                m.channel_hz = b.bandwidth_hz;
                 members.push(m);
             }
         }
@@ -1716,24 +1730,25 @@ mod tests {
         opened
     }
 
-    /// A source megahertz wide is either analogue video or nothing this
-    /// receiver reads, so the front end is placed by width the way TETRA is
-    /// placed by band. The picture only assembles if the sync pulses are
-    /// really there, so a wide source that is not video costs a demodulation
-    /// and produces nothing.
+    /// The video front end runs on the span, not on a source.
+    ///
+    /// This test used to assert the opposite, and the opposite did not work:
+    /// a detector measures the few megahertz of a camera's carrier that stand
+    /// above the floor, the front end was placed on that, and filtering a
+    /// twenty megahertz FM transmission down to four leaves no line rate to
+    /// lock to. So the only question here is whether the span could be
+    /// carrying a picture at all.
     #[test]
-    fn a_source_wide_enough_to_be_a_picture_gets_a_video_front_end() {
-        let placed = |bandwidth_hz: f64, rate: f64| -> bool {
-            bandwidth_hz >= VIDEO_MIN_HZ && rate >= VIDEO_MIN_RATE_HZ
+    fn the_video_front_end_runs_where_a_picture_would_fit() {
+        let placed = |rate: f64| -> bool {
+            let mut n = AutoNode::new("auto", SourceConfig::default());
+            Node::negotiate(&mut n, &[spec(rate, Hz::mhz(5800))]).unwrap();
+            n.wide().contains(&"video")
         };
-        // A 5.8 GHz video carrier at 20 MS/s: the one measured here was
-        // 4.6 MHz wide.
-        assert!(placed(4.6e6, 20e6));
-        // BLE is the widest thing here that is not video, at 2 MHz.
-        assert!(!placed(2e6, 20e6));
-        // And a wide source on a span too slow to hold a picture is not one:
-        // PAL luma reaches 5 MHz with the subcarrier at 4.43.
-        assert!(!placed(4.6e6, 8e6));
+        assert!(placed(20e6), "a 20 MS/s span at 5.8 GHz reads no video");
+        // PAL luma reaches 5 MHz with the subcarrier at 4.43, so a slower
+        // span cannot be carrying a picture whatever else is in it.
+        assert!(!placed(8e6));
     }
 
     #[test]
