@@ -869,6 +869,17 @@ impl SourceDetector {
         self.events.clear();
     }
 
+    /// Let a block go by without looking at it.
+    ///
+    /// For a consumer that knows there is nothing to find: an analogue camera
+    /// holding the whole span, where every run inside the carrier is a piece
+    /// of the picture. Nothing is buffered, so the detector starts again from
+    /// the next block it is given rather than reading a stale one.
+    pub fn idle(&mut self, _samples: usize) {
+        self.pending.clear();
+        self.events.clear();
+    }
+
     /// Consume a block and return the sources that opened or closed in it.
     pub fn process(&mut self, input: &[C32]) -> &[SourceEvent] {
         self.events.clear();

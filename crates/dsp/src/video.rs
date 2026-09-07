@@ -262,7 +262,12 @@ pub struct SyncSeparator {
     /// which is nearly twenty times longer, and throws most of the noise
     /// away. Off air this was the difference between no fields and every
     /// field.
-    smooth: std::collections::VecDeque<f32>,
+    /// Ring of the last `smooth_len` samples, and where the next goes. A
+    /// plain array rather than a deque: this runs on every sample of a 20 MS/s
+    /// span, and the deque's bookkeeping was most of what the separator cost.
+    smooth: Vec<f32>,
+    smooth_at: usize,
+    smooth_filled: usize,
     smooth_sum: f32,
     smooth_len: usize,
     /// Where the last line started, so the picture can be cut out of it.
@@ -329,7 +334,9 @@ impl SyncSeparator {
             primed: false,
             hist: Vec::new(),
             low_run: 0,
-            smooth: std::collections::VecDeque::new(),
+            smooth: Vec::new(),
+            smooth_at: 0,
+            smooth_filled: 0,
             smooth_sum: 0.0,
             smooth_len: ((0.25e-6 * rate).round() as usize).max(1),
             line: Vec::new(),
@@ -393,17 +400,26 @@ impl SyncSeparator {
 
     /// One sample of the running mean.
     fn smoothed(&mut self, x: f32) -> f32 {
-        self.smooth.push_back(x);
-        self.smooth_sum += x;
-        if self.smooth.len() > self.smooth_len {
-            self.smooth_sum -= self.smooth.pop_front().unwrap_or(0.0);
+        if self.smooth.len() < self.smooth_len {
+            self.smooth = vec![0.0; self.smooth_len];
+            self.smooth_at = 0;
+            self.smooth_filled = 0;
+            self.smooth_sum = 0.0;
         }
-        self.smooth_sum / self.smooth.len() as f32
+        self.smooth_sum += x - self.smooth[self.smooth_at];
+        self.smooth[self.smooth_at] = x;
+        self.smooth_at = (self.smooth_at + 1) % self.smooth_len;
+        self.smooth_filled = (self.smooth_filled + 1).min(self.smooth_len);
+        self.smooth_sum / self.smooth_filled as f32
     }
 
     /// Feed demodulated baseband. Whole fields come back as they complete.
     pub fn process(&mut self, baseband: &[f32], out: &mut Vec<Field>) {
-        let filtered: Vec<f32> = baseband.iter().map(|&x| self.smoothed(x)).collect();
+        let mut filtered: Vec<f32> = Vec::with_capacity(baseband.len());
+        for &x in baseband {
+            let v = self.smoothed(x);
+            filtered.push(v);
+        }
         let raw = baseband;
         let baseband = &filtered[..];
         if !self.primed {
@@ -582,6 +598,24 @@ impl SyncSeparator {
         // the saturation, which off air looks like a camera with the colour
         // turned down rather than like a bug.
         let gain = (0.15 / 0.7) / amp;
+        // The reference, once per line, as a rotation rather than a sine per
+        // sample. Every output pixel integrates eight samples against it, so
+        // a 20 MS/s span was asking for seventy million sines a second and
+        // the separator cost nearly twice real time on its own. Seeded from
+        // the exact phase at the start of the line and advanced by one
+        // sample's rotation, which over a line is far inside the precision
+        // the burst itself is measured to.
+        let need = (span + taps).min(raw.len().saturating_sub(start));
+        let (dc, ds) = ((w as f32).cos(), (w as f32).sin());
+        let mut osc: Vec<(f32, f32)> = Vec::with_capacity(need);
+        let p0 = phase_at(start) + theta;
+        let (mut c, mut sn) = (p0.cos(), p0.sin());
+        for _ in 0..need {
+            osc.push((c, sn));
+            let (nc, ns) = (c * dc - sn * ds, sn * dc + c * ds);
+            c = nc;
+            sn = ns;
+        }
         let mut out = Vec::with_capacity(self.width);
         for i in 0..self.width {
             let at = start + i * span / self.width.max(1);
@@ -589,9 +623,9 @@ impl SyncSeparator {
             let mut count = 0.0f32;
             for k in 0..taps {
                 let Some(&x) = raw.get(at + k) else { break };
-                let p = phase_at(at + k) + theta;
-                u += x * p.cos();
-                v += x * p.sin();
+                let Some(&(pc, ps)) = osc.get(at + k - start) else { break };
+                u += x * pc;
+                v += x * ps;
                 count += 1.0;
             }
             if count == 0.0 {

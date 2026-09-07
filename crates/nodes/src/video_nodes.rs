@@ -98,6 +98,18 @@ impl VideoNode {
 
 }
 
+impl VideoNode {
+    /// Whether it is reading a picture right now.
+    ///
+    /// Asked by the auto node: while a camera is locked, the span is that
+    /// camera, and every source the detector finds inside its carrier is a
+    /// piece of it. Opening those costs an extraction and a set of front ends
+    /// each, and produces rows for sensors that are not there.
+    pub fn locked(&self) -> bool {
+        self.sep.is_some() && self.lock.is_some()
+    }
+}
+
 impl Simple for VideoNode {
     fn name(&self) -> &str {
         "video"

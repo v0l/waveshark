@@ -430,6 +430,19 @@ impl Member {
 }
 
 /// Every output of a graph carrying a given kind.
+/// Whether the video front end is reading a picture off this span.
+fn watching_video(wide: &[Member]) -> bool {
+    wide.iter().filter(|m| m.name == "video").any(|m| {
+        m.graph
+            .order()
+            .find(|(_, n)| *n == "video")
+            .and_then(|(id, _)| m.graph.node(id))
+            .and_then(|n| n.as_any())
+            .and_then(|a| a.downcast_ref::<crate::video_nodes::VideoNode>())
+            .is_some_and(|v| v.locked())
+    })
+}
+
 fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
     // Every port, not only the first. A front end that carries speech
     // alongside its packets puts it on a second output, and a scan that
@@ -1251,8 +1264,22 @@ impl Node for AutoNode {
         let exclude = &self.exclude;
         let spur = self.spur_band;
         let block_s = c.block_seconds;
+        // While a camera is locked, the span is that camera and there is
+        // nothing to detect in it. Every run inside a 20 MHz FM carrier is a
+        // piece of the picture, and opening each one costs an extraction and
+        // a set of front ends that report sensors nobody transmitted.
+        // Measured on the AKK capture: detection, extraction and the front
+        // ends together ran at nearly four times real time on them, which is
+        // a receiver that cannot keep up rather than one that reads more. The
+        // picture going away puts all of it back.
+        let watching = watching_video(&self.wide);
         let t_detect = Instant::now();
-        let raw: Vec<SourceEvent> = d.process(iq).to_vec();
+        let raw: Vec<SourceEvent> = if watching {
+            d.idle(iq.len());
+            Vec::new()
+        } else {
+            d.process(iq).to_vec()
+        };
         let detect_us = t_detect.elapsed().as_micros() as u64;
         let others = d
             .live()
