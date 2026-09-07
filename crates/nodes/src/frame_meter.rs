@@ -123,22 +123,50 @@ impl FrameMeter {
         }))
     }
 
-    /// A frame at what the channel measured, carrying the samples it names
-    /// rather than everything since the last one.
+    /// Mean power of the samples a frame names, in dBFS.
+    ///
+    /// The frame's own level rather than the block's: a front end that reads
+    /// several bursts out of one block wants each measured where it sat.
+    pub fn power_dbfs_at(&self, start_sample: u64, len: usize) -> Option<f32> {
+        let from = start_sample.checked_sub(self.base)? as usize;
+        if from >= self.ring.len() || len == 0 {
+            return None;
+        }
+        let to = (from + len).min(self.ring.len());
+        let s = &self.ring[from..to];
+        if s.is_empty() {
+            return None;
+        }
+        let pow = s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
+        Some(10.0 * pow.max(1e-20).log10())
+    }
+
+    /// A frame at what its own samples measured, with those samples behind
+    /// it, and a signal to noise ratio the demodulator worked out.
     ///
     /// For a front end that says where its frame sat and can produce several
-    /// from one block. Taking the samples the other way empties the ring, so
-    /// the second frame of a block came out with nothing behind it.
-    pub fn frame_at(&mut self, bytes: Vec<u8>, start_sample: u64, len: usize) -> common::Frame {
-        let f = common::Frame {
+    /// from one block. It used to take the block's peak and then clear it,
+    /// so the second frame of a block reported -200 dBFS: a level of no
+    /// signal at all, on a burst that had just decoded. And the meter's own
+    /// noise floor is the quietest block it has seen, which on a carrier
+    /// that never stops transmitting is the carrier, so the ratio was
+    /// nought. A demodulator that equalises knows better than this does.
+    pub fn frame_measured(
+        &mut self,
+        bytes: Vec<u8>,
+        start_sample: u64,
+        len: usize,
+        snr_db: f32,
+    ) -> common::Frame {
+        common::Frame {
             bytes,
             center_hz: self.center_hz,
-            rssi_dbfs: self.rssi_dbfs(),
-            snr_db: self.snr_db(),
+            rssi_dbfs: self
+                .power_dbfs_at(start_sample, len)
+                .unwrap_or_else(|| self.rssi_dbfs()),
+            snr_db,
             iq: self.iq_at(start_sample, len),
-        };
-        self.peak_pow = 0.0;
-        f
+        }
     }
 
     /// A frame at what the channel measured, with the samples behind it.
