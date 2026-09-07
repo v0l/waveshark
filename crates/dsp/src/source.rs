@@ -603,6 +603,15 @@ struct Track {
 /// Watches a wideband stream as a spectrogram and reports sources.
 pub struct SourceDetector {
     cfg: SourceConfig,
+    /// Ranges, as offsets from the centre in hertz, where a front end is
+    /// already listening and no source may open.
+    ///
+    /// Filtering the events afterwards was not enough: the tracks still
+    /// existed, so the spectrum drew a dozen detections inside the channel
+    /// the BLE front end owns, and the receiver looked like it was ignoring
+    /// its own decision. A channel somebody is reading is not a place to go
+    /// looking for something to read.
+    locked: Vec<(f64, f64)>,
     /// Candidates refused because [`SourceConfig::max_open`] was reached,
     /// counted so a receiver can say it is dropping signal rather than
     /// silently reading less of the band.
@@ -710,6 +719,7 @@ impl SourceDetector {
 
         Self {
             cfg,
+            locked: Vec::new(),
             capped: 0,
             rate,
             n,
@@ -809,6 +819,12 @@ impl SourceDetector {
     }
 
     /// Sources currently open, in the order they opened.
+    /// Ranges a front end owns, as offsets from the centre. Nothing opens
+    /// inside one.
+    pub fn set_locked(&mut self, ranges: Vec<(f64, f64)>) {
+        self.locked = ranges;
+    }
+
     pub fn live(&self) -> impl Iterator<Item = &Source> {
         self.tracks.iter().filter(|t| t.open).map(|t| &t.src)
     }
@@ -1459,6 +1475,12 @@ impl SourceDetector {
             // transmitting on.
             if blanket && s.peak_db < self.cfg.open_db + BLANKET_CLEAR_DB {
                 continue;
+            }
+            if !self.locked.is_empty() {
+                let hz = (s.centroid + 0.5 - (n / 2) as f64) * bin_hz;
+                if self.locked.iter().any(|(lo, hi)| hz >= *lo && hz <= *hi) {
+                    continue;
+                }
             }
             if s.occ_hi + 1 - s.occ_lo < self.cfg.min_bins {
                 continue;

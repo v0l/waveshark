@@ -34,7 +34,14 @@
 //!           kind 2: [u8] * n
 //!           kind 3: measure, [u32 mark_us, u32 gap_us] * n
 //! iq     := f64 rate, u64 center_hz, u32 n, [i16 i, i16 q] * n
+//!        |  f64 rate, u64 center_hz, u32 (n | 0x8000_0000), u32 len,
+//!           [u8] * len          -- the same samples, zstd compressed
 //! ```
+//!
+//! The high bit of the sample count says the block is compressed, which is a
+//! compatible change rather than a version bump: a reader that does not know
+//! it asks for a count of two billion samples, does not find them, and
+//! reports the record without its burst rather than misreading one.
 //!
 //! The samples come after the body, from version 2. The body's length is
 //! fixed by the count in the header, so a reader of version 1 files takes
@@ -73,9 +80,20 @@ use common::{Packet, PacketBody, Pulse};
 /// the setting asks for, and the oldest days go to keep the folder under it.
 pub const DEFAULT_MAX_BYTES: u64 = 2 << 30;
 
-/// What a day's file is called after its date, and so which files in the
-/// folder the log owns and may delete.
+/// What a segment file is called after its date and sequence, and so which
+/// files in the folder the log owns and may delete.
 const EXT: &str = "wspkt";
+
+/// How large one segment grows before the next is started.
+///
+/// The log is trimmed by deleting whole files, so the segment size is how
+/// coarsely it can be trimmed and how much of the recent past a trim can
+/// take with it. A day was the unit until a busy 2.4 GHz session put 122 GB
+/// in one file: the cap could then only stop the log, because the one file
+/// over it was the one being written. At a quarter of a gigabyte a trim
+/// costs the oldest few minutes of a busy band, or the oldest week of a
+/// quiet one.
+const SEGMENT_BYTES: u64 = 256 << 20;
 
 const MAGIC: &[u8; 6] = b"WSPKT\0";
 const VERSION: u16 = 2;
@@ -136,15 +154,32 @@ const HEAD_LEN: usize = 1 + 1 + 2 + 8 + 8 + 4 + 4 + 4;
 /// Rate, centre and count in front of the samples.
 const IQ_HEAD_LEN: usize = 8 + 8 + 4;
 
-/// Samples a record may carry. A burst is the ring behind a front end, two
-/// seconds at most at the rate it was read at; this is well past that and
-/// well under what a length prefix can say.
-const IQ_MAX_SAMPLES: usize = 1 << 22;
+/// Samples a record may carry, which is the end of the burst when there are
+/// more.
+///
+/// Four million was "well past anything a burst can be", and on a 2.4 GHz
+/// source read at a couple of megasamples that is exactly what a burst was:
+/// sixteen megabytes a record, and a day's log of 122 GB. A quarter of a
+/// million samples is a megabyte before compression and a tenth of a second
+/// at 2.4 MS/s, which holds any packet this receiver decodes; a LoRa symbol
+/// at the highest spreading factor is the only thing that comes close.
+const IQ_MAX_SAMPLES: usize = 1 << 18;
+
+/// Compression level for the samples. Level 1: the samples are noise-like
+/// and do not compress far whatever is spent on them, and this runs at
+/// gigabytes a second, which a packet sink on the radio's thread needs.
+const IQ_ZSTD_LEVEL: i32 = 1;
+
+/// Marks a compressed sample block in the count field.
+const IQ_COMPRESSED: u32 = 0x8000_0000;
 
 pub struct PacketLog {
     dir: PathBuf,
     /// The day currently open, as `YYYY-MM-DD`, and its writer.
     open: Option<(String, std::io::BufWriter<std::fs::File>)>,
+    /// The segment being written, as `YYYY-MM-DD.NNN`, which is the one file
+    /// in the folder a trim may not delete.
+    segment: Option<String>,
     /// Bytes in the day's file.
     bytes: u64,
     /// Bytes in every other day's file, so the folder's total is this plus
@@ -173,6 +208,7 @@ impl PacketLog {
         Self {
             dir,
             open: None,
+            segment: None,
             bytes: 0,
             older: 0,
             full: false,
@@ -215,26 +251,28 @@ impl PacketLog {
             .sum()
     }
 
-    /// Delete whole days, oldest first, until the folder is back under its
-    /// limit. The day being written is never a candidate: it is the one with
-    /// the packets somebody is watching arrive.
+    /// Delete whole segments, oldest first, until the folder is back under
+    /// its limit. The segment being written is never a candidate: it is the
+    /// one with the packets somebody is watching arrive.
     ///
     /// Returns whether there is now room. When there is not, the only file
-    /// left is today's and it is over the limit on its own, so appending
-    /// stops rather than the log eating itself.
-    fn make_room(&mut self, today: &str) -> bool {
+    /// left is the open segment and it is over the limit on its own, so
+    /// appending stops rather than the log eating itself; a cap under
+    /// [`SEGMENT_BYTES`] is the only way to reach that.
+    fn make_room(&mut self, open: &str) -> bool {
         let Some(cap) = self.cap else { return true };
         if self.total() < cap {
             return true;
         }
         let Ok(entries) = std::fs::read_dir(&self.dir) else { return false };
-        // The name is the date, so alphabetical order is chronological.
+        // The name is the date and a sequence, so alphabetical order is
+        // chronological.
         let mut days: Vec<std::path::PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 p.extension().is_some_and(|x| x == EXT)
-                    && p.file_stem().is_some_and(|s| s != today)
+                    && p.file_stem().is_some_and(|s| s != open)
             })
             .collect();
         days.sort();
@@ -260,15 +298,16 @@ impl PacketLog {
             return None;
         }
         let day = day_of(at_us);
-        if self.open.as_ref().is_none_or(|(d, _)| *d != day) {
-            // The old day's buffer goes out before its writer does, or a
-            // midnight roll silently truncates the file it just closed.
+        let roll = self.bytes >= SEGMENT_BYTES;
+        if roll || self.open.as_ref().is_none_or(|(d, _)| *d != day) {
+            // The old segment's buffer goes out before its writer does, or a
+            // roll silently truncates the file it just closed.
             self.flush();
             if std::fs::create_dir_all(&self.dir).is_err() {
                 self.full = true;
                 return None;
             }
-            let path = self.dir.join(format!("{day}.{EXT}"));
+            let (name, path) = self.next_segment(&day);
             let fresh = !path.exists();
             let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
                 self.full = true;
@@ -276,11 +315,11 @@ impl PacketLog {
             };
             let mut w = std::io::BufWriter::with_capacity(BUF_BYTES, f);
             self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
-            self.older = self.measure(&day);
+            self.older = self.measure(&name);
             // A receiver started against a folder already over its limit
             // makes room before it writes, rather than on the record that
             // happens to cross the line.
-            if !self.make_room(&day) {
+            if !self.make_room(&name) {
                 self.full = true;
                 return None;
             }
@@ -292,8 +331,50 @@ impl PacketLog {
                 self.bytes += MAGIC.len() as u64 + 2;
             }
             self.open = Some((day, w));
+            self.segment = Some(name);
         }
         self.open.as_mut().map(|(_, w)| w)
+    }
+
+    /// The next segment for a day: the highest sequence already there, or a
+    /// new one when that segment is full.
+    ///
+    /// A restart continues the last segment rather than starting another, so
+    /// a receiver stopped and started ten times leaves ten minutes of log in
+    /// one file rather than ten files of a minute.
+    fn next_segment(&self, day: &str) -> (String, PathBuf) {
+        let mut last: Option<(u32, PathBuf)> = None;
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_none_or(|x| x != EXT) {
+                    continue;
+                }
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+                let Some((d, seq)) = stem.rsplit_once('.') else { continue };
+                if d != day {
+                    continue;
+                }
+                let Ok(seq) = seq.parse::<u32>() else { continue };
+                if last.as_ref().is_none_or(|(n, _)| seq > *n) {
+                    last = Some((seq, p));
+                }
+            }
+        }
+        let next = match last {
+            Some((seq, ref p)) => {
+                let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                if size >= SEGMENT_BYTES {
+                    seq + 1
+                } else {
+                    seq
+                }
+            }
+            None => 0,
+        };
+        let name = format!("{day}.{next:03}");
+        let path = self.dir.join(format!("{name}.{EXT}"));
+        (name, path)
     }
 
     fn append(&mut self, at_us: u64, rec: &[u8]) {
@@ -306,8 +387,8 @@ impl PacketLog {
         self.bytes += rec.len() as u64;
         self.written += 1;
         if self.cap.is_some_and(|c| self.total() >= c) {
-            let today = self.open.as_ref().map(|(d, _)| d.clone()).unwrap_or_default();
-            self.full = !self.make_room(&today);
+            let open = self.segment.clone().unwrap_or_default();
+            self.full = !self.make_room(&open);
         }
         self.flush_due();
     }
@@ -455,15 +536,33 @@ fn take_measure(body: &[u8]) -> Option<(common::Measure, &[u8])> {
 }
 
 /// The samples after the body, and the length prefix grown to cover them.
+///
+/// The tail of the burst rather than its head when there are too many: a
+/// packet ends where the front end stopped reading, so the last samples are
+/// the ones with the signal in them and the first are the silence before it.
 fn put_iq(mut rec: Vec<u8>, q: &common::IqBurst) -> Vec<u8> {
-    let n = q.samples.len().min(IQ_MAX_SAMPLES);
-    rec.reserve(IQ_HEAD_LEN + n * 4);
+    let from = q.samples.len().saturating_sub(IQ_MAX_SAMPLES);
+    let samples = &q.samples[from..];
+    let mut raw = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        for v in [s.re, s.im] {
+            raw.extend_from_slice(&((v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+        }
+    }
     rec.extend_from_slice(&q.rate.to_le_bytes());
     rec.extend_from_slice(&q.center_hz.to_le_bytes());
-    rec.extend_from_slice(&(n as u32).to_le_bytes());
-    for s in &q.samples[..n] {
-        for v in [s.re, s.im] {
-            rec.extend_from_slice(&((v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+    // Compressed only when it helps. A burst of full-scale noise does not
+    // compress, and a block that grew would cost the disk and the reader
+    // both.
+    match zstd::encode_all(&raw[..], IQ_ZSTD_LEVEL) {
+        Ok(z) if z.len() + 4 < raw.len() => {
+            rec.extend_from_slice(&((samples.len() as u32) | IQ_COMPRESSED).to_le_bytes());
+            rec.extend_from_slice(&(z.len() as u32).to_le_bytes());
+            rec.extend_from_slice(&z);
+        }
+        _ => {
+            rec.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+            rec.extend_from_slice(&raw);
         }
     }
     let len = (rec.len() - 4) as u32;
@@ -478,10 +577,18 @@ fn take_iq(tail: &[u8]) -> Option<std::sync::Arc<common::IqBurst>> {
     }
     let rate = f64::from_le_bytes(tail[0..8].try_into().ok()?);
     let center_hz = u64::from_le_bytes(tail[8..16].try_into().ok()?);
-    let n = u32::from_le_bytes(tail[16..20].try_into().ok()?) as usize;
-    let data = tail.get(IQ_HEAD_LEN..IQ_HEAD_LEN + n * 4)?;
-    let samples = data
+    let count = u32::from_le_bytes(tail[16..20].try_into().ok()?);
+    let n = (count & !IQ_COMPRESSED) as usize;
+    let raw: std::borrow::Cow<'_, [u8]> = if count & IQ_COMPRESSED != 0 {
+        let len = u32::from_le_bytes(tail.get(20..24)?.try_into().ok()?) as usize;
+        let z = tail.get(24..24 + len)?;
+        zstd::decode_all(z).ok()?.into()
+    } else {
+        tail.get(IQ_HEAD_LEN..IQ_HEAD_LEN + n * 4)?.into()
+    };
+    let samples = raw
         .chunks_exact(4)
+        .take(n)
         .map(|c| {
             let i = i16::from_le_bytes([c[0], c[1]]) as f32 / 32767.0;
             let q = i16::from_le_bytes([c[2], c[3]]) as f32 / 32767.0;
@@ -666,7 +773,7 @@ mod tests {
         nodes::PacketSink::write(&mut log, &p);
         nodes::PacketSink::write(&mut log, &q);
         log.flush();
-        let got = read(d.join(format!("{}.wspkt", day_of(AT)))).unwrap();
+        let got = read(d.join(format!("{}.000.wspkt", day_of(AT)))).unwrap();
         assert_eq!(got, vec![p, q]);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -699,12 +806,47 @@ mod tests {
         log.write(&p);
         log.flush();
 
-        let got = read(d.join("2026-08-31.wspkt")).unwrap();
+        let got = read(d.join("2026-08-31.000.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], p, "what came back is not what was heard");
         // And it is a package again, ready for a decoder that did not exist
         // when it was written.
         assert_eq!(got[0].package().map(|p| p.pulses.len()), Some(3));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_samples_are_compressed_and_bounded() {
+        // Two things a day's log depends on: a record carries the end of the
+        // burst rather than every sample a front end had, and what it does
+        // carry is compressed. A 2.4 GHz session wrote 122 GB in a day
+        // without either.
+        let d = dir("iqsize");
+        let mut log = PacketLog::new(d.clone());
+        let mut p = burst(868_300_000);
+        // A quiet channel with a burst at the end of it, which is the shape
+        // the ring behind a front end has.
+        let mut samples = vec![common::C32::new(0.0, 0.0); 400_000];
+        for (i, s) in samples.iter_mut().enumerate().skip(390_000) {
+            let ph = i as f32 * 0.7;
+            *s = common::C32::new(ph.cos() * 0.5, ph.sin() * 0.5);
+        }
+        p.iq = Some(std::sync::Arc::new(common::IqBurst {
+            rate: 1_000_000.0,
+            center_hz: 868_300_000,
+            samples,
+        }));
+        log.write(&p);
+        log.flush();
+        let path = d.join(format!("{}.000.wspkt", day_of(AT)));
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size < 200_000, "a record of {size} bytes for one burst");
+        let got = read(&path).unwrap();
+        let iq = got[0].iq.as_ref().expect("the samples came back");
+        assert_eq!(iq.samples.len(), IQ_MAX_SAMPLES, "kept {} samples", iq.samples.len());
+        // The end of the burst, which is where the signal was.
+        let last = iq.samples.last().unwrap();
+        assert!(last.norm() > 0.4, "the tail is silence: {last:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -729,7 +871,7 @@ mod tests {
         log.write(&p);
         log.write(&q);
         log.flush();
-        let got = read(d.join("2026-08-31.wspkt")).unwrap();
+        let got = read(d.join("2026-08-31.000.wspkt")).unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].frame(), p.frame());
         let (a, b) = (got[0].iq.as_ref().unwrap(), p.iq.as_ref().unwrap());
@@ -751,7 +893,7 @@ mod tests {
         log.write(&frame(AT, &bytes));
         log.flush();
 
-        let got = read(d.join("2026-08-31.wspkt")).unwrap();
+        let got = read(d.join("2026-08-31.000.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].frame(), Some(&bytes[..]));
         assert_eq!(got[0].center_hz, 1_090_000_000);
@@ -768,7 +910,7 @@ mod tests {
             log.write(&burst(868_300_000));
         }
         log.flush();
-        let path = d.join("2026-08-31.wspkt");
+        let path = d.join("2026-08-31.000.wspkt");
         let mut raw = std::fs::read(&path).unwrap();
         raw.truncate(raw.len() - 9);
         assert_eq!(parse(&raw).len(), 2, "a torn tail took a good record with it");
@@ -784,8 +926,8 @@ mod tests {
         tomorrow.at_us += 86_400_000_000;
         log.write(&tomorrow);
         log.flush();
-        assert!(d.join("2026-08-31.wspkt").exists());
-        assert!(d.join("2026-09-01.wspkt").exists());
+        assert!(d.join("2026-08-31.000.wspkt").exists());
+        assert!(d.join("2026-09-01.000.wspkt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -799,7 +941,7 @@ mod tests {
         let mut tomorrow = burst(433_920_000);
         tomorrow.at_us += 86_400_000_000;
         log.write(&tomorrow);
-        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1, "yesterday was lost");
+        assert_eq!(read(d.join("2026-08-31.000.wspkt")).unwrap().len(), 1, "yesterday was lost");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -811,7 +953,7 @@ mod tests {
         let mut log = PacketLog::new(d.clone());
         log.write(&burst(433_920_000));
         drop(log);
-        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1);
+        assert_eq!(read(d.join("2026-08-31.000.wspkt")).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -828,7 +970,7 @@ mod tests {
         // and the count on screen is still honest about what was accepted.
         assert_eq!(log.written(), 1000);
         log.flush();
-        assert_eq!(read(d.join("2026-08-31.wspkt")).unwrap().len(), 1000);
+        assert_eq!(read(d.join("2026-08-31.000.wspkt")).unwrap().len(), 1000);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -848,9 +990,9 @@ mod tests {
             log.write(&burst(868_300_000));
         }
         log.flush();
-        assert!(!d.join("2026-08-28.wspkt").exists(), "the oldest day was kept");
-        assert!(d.join("2026-08-30.wspkt").exists(), "a recent day was thrown away");
-        assert!(d.join("2026-08-31.wspkt").exists(), "today was not written");
+        assert!(!d.join("2026-08-28.wspkt").exists(), "the oldest segment was kept");
+        assert!(d.join("2026-08-30.wspkt").exists(), "a recent segment was thrown away");
+        assert!(d.join("2026-08-31.000.wspkt").exists(), "today was not written");
         assert!(!log.full(), "logging stopped although there was room to make");
         assert!(log.total() < 100_000, "the folder is {} bytes", log.total());
         let _ = std::fs::remove_dir_all(&d);

@@ -126,6 +126,14 @@ struct Member {
 /// Longest run of samples kept behind a packet, in seconds.
 const RING_MAX_S: f64 = 2.0;
 
+/// How much of that ring a packet leaves with.
+///
+/// The ring is long because a front end may need to look back; a packet only
+/// needs the transmission it was read from. A quarter of a second holds any
+/// burst this receiver decodes, including a LoRa packet at the highest
+/// spreading factor over the narrowest bandwidth.
+const IQ_KEEP_S: f64 = 0.25;
+
 impl Member {
     fn build(name: &'static str, spec: StreamSpec, settings: NodeSpec, reg: &Registry) -> Result<Self> {
         let graph = build_chain(spec, &[settings], reg)?;
@@ -186,10 +194,18 @@ impl Member {
         let mut attached = false;
         for p in &mut out[first..] {
             if p.iq.is_none() && !self.ring.is_empty() {
+                // The end of the ring, not all of it. A packet arrives when
+                // its burst ends, so the samples worth carrying are the last
+                // ones; the rest is however long the channel was quiet
+                // before it. Two seconds of a 2.4 MS/s source is sixteen
+                // megabytes a packet in the log, which is how a day's log
+                // reached 122 GB.
+                let keep = (IQ_KEEP_S * rate) as usize;
+                let from = self.ring.len().saturating_sub(keep.max(1));
                 p.iq = Some(std::sync::Arc::new(common::IqBurst {
                     rate,
                     center_hz: self.graph.input_spec().center.0,
-                    samples: self.ring.clone(),
+                    samples: self.ring[from..].to_vec(),
                 }));
                 attached = true;
             }
@@ -607,6 +623,23 @@ impl AutoNode {
         self.raster
     }
 
+    /// Hand the detector every channel a front end owns, so nothing opens
+    /// inside one. The span-wide fronts own theirs from the moment the span
+    /// reaches them; a remembered channel from the moment something decoded
+    /// on it.
+    fn apply_locked(&mut self) {
+        let c = self.center.as_f64();
+        let mut ranges: Vec<(f64, f64)> = self.exclude.clone();
+        ranges.extend(
+            self.sticky
+                .iter()
+                .map(|st| (st.center_hz - st.width_hz / 2.0, st.center_hz + st.width_hz / 2.0)),
+        );
+        if let Some(d) = self.detector.as_mut() {
+            d.set_locked(ranges.iter().map(|(lo, hi)| (lo - c, hi - c)).collect());
+        }
+    }
+
     fn apply_band(&mut self) {
         if let (Some(d), Some((lo, hi))) = (self.detector.as_mut(), self.band) {
             let c = self.center.as_f64();
@@ -778,6 +811,7 @@ impl AutoNode {
             }
         }
         self.apply_band();
+        self.apply_locked();
 
         let nominal = StreamSpec::iq(self.cfg.min_rate_hz, self.center);
         self.template = Some(crate::ism_decode_graph(nominal)?);
@@ -962,6 +996,7 @@ impl AutoNode {
         let id = SourceId(STICKY_ID_BASE + self.sticky.len() as u64);
         self.sticky.push(Sticky { id, name, center_hz, width_hz });
         self.pending_sticky.push(id);
+        self.apply_locked();
         Some(Event::Warning {
             stage: self.label.clone(),
             message: format!(
