@@ -43,27 +43,39 @@ impl std::fmt::Display for Lai {
 
 /// The channel numbers a frequency list holds.
 ///
-/// One format of several, and the only one seen on a live network so far:
-/// GSM 05.08's bit map 0, which is 124 bits, one per channel number, and
-/// covers the whole 900 band. The others encode ranges of channel numbers
-/// for the 1800 band, where 124 bits would not reach, and are refused rather
-/// than guessed at: a wrong frequency list reads as a neighbour that is not
-/// there, and nothing downstream can tell that from a cell that has gone off
-/// the air.
+/// Five formats, chosen by the top bits of the first octet. Bit map 0 is one
+/// bit per channel number and covers the 900 band, where 124 bits reach every
+/// channel. The 1800 band's numbers run to 1023, so a bit map would not fit
+/// in seventeen octets, and the other formats encode the list as a tree of
+/// differences instead: an origin, then a series of W values that each split
+/// a range in half.
 ///
-/// The layout is 3GPP TS 44.018 figure 10.5.2.1b.2.1: channel 124 is bit 4
-/// of the second octet, and channel 1 is bit 1 of the seventeenth.
+/// The tree decoding is transcribed from Wireshark's `f_k`, which is an
+/// independent implementation of 3GPP TS 44.018 section 10.5.2.13. It is
+/// worth saying where it came from: the encoding is a recursion nobody
+/// reproduces correctly from the prose, and a frequency list decoded wrongly
+/// reads as neighbours that are not there, which nothing downstream can tell
+/// from a cell that has gone off the air.
+///
+/// The bit map layout is figure 10.5.2.1b.2.1: channel 124 is bit 4 of the
+/// second octet, and channel 1 is bit 1 of the seventeenth.
 fn channels(ie: &[u8]) -> Option<Vec<u16>> {
     if ie.len() < 16 {
         return None;
     }
-    // Bits 8 and 7 of the first octet say which format this is; bit map 0
-    // is zero. Bits 6 and 5 are spare in a cell allocation and carry the
-    // extension and allocation sequence indicators in a neighbour list, so
-    // neither is looked at here.
-    if ie[0] & 0xC0 != 0 {
-        return None;
+    let format = ie[0];
+    match () {
+        _ if format & 0xC0 == 0x00 => Some(bitmap0(ie)),
+        _ if format & 0xC8 == 0x80 => range(ie, 1024),
+        _ if format & 0xCE == 0x88 => range(ie, 512),
+        _ if format & 0xCE == 0x8A => range(ie, 256),
+        _ if format & 0xCE == 0x8C => range(ie, 128),
+        _ if format & 0xCE == 0x8E => Some(variable_bitmap(ie)),
+        _ => None,
     }
+}
+
+fn bitmap0(ie: &[u8]) -> Vec<u16> {
     let mut out = Vec::new();
     for n in 1..=124u16 {
         // Counting down from channel 124, which is the top bit of the first
@@ -78,10 +90,124 @@ fn channels(ie: &[u8]) -> Option<Vec<u16>> {
             out.push(n);
         }
     }
+    out
+}
+
+/// A bit map that starts wherever the list says, rather than at channel 124.
+fn variable_bitmap(ie: &[u8]) -> Vec<u16> {
+    let origin = (u16::from(ie[0] & 0x01) << 9) | (u16::from(ie[1]) << 1) | u16::from(ie[2] >> 7);
+    let mut out = vec![origin % 1024];
+    let mut arfcn = origin;
+    // The origin's last bit took the top of the third octet, so the map
+    // starts with the seven bits under it.
+    let mut bits = 7;
+    for &octet in &ie[2..] {
+        for place in (0..bits).rev() {
+            arfcn += 1;
+            if octet >> place & 1 == 1 {
+                out.push(arfcn % 1024);
+            }
+        }
+        bits = 8;
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Read `n` bits from `at`, most significant first.
+fn bits(ie: &[u8], at: usize, n: usize) -> u32 {
+    let mut v = 0u32;
+    for i in 0..n {
+        let bit = at + i;
+        let byte = ie.get(bit / 8).copied().unwrap_or(0);
+        v = v << 1 | u32::from(byte >> (7 - bit % 8) & 1);
+    }
+    v
+}
+
+/// The tree formats: an origin and a series of W values, each of which
+/// splits what is left of the range.
+fn range(ie: &[u8], span: i32) -> Option<Vec<u16>> {
+    let (origin, mut wsize, imax, mut at) = match span {
+        1024 => (0i32, 10usize, 16usize, 6usize),
+        512 => (bits(ie, 7, 10) as i32, 9, 17, 17),
+        256 => (bits(ie, 7, 10) as i32, 8, 21, 17),
+        128 => (bits(ie, 7, 10) as i32, 7, 28, 17),
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    if span == 1024 {
+        // The spare bit before the W values says whether channel 0 is in the
+        // list, which no bit of the tree could otherwise reach.
+        if ie[0] >> 2 & 1 == 1 {
+            out.push(0);
+        }
+    } else {
+        out.push((origin % 1024) as u16);
+    }
+
+    let mut w = vec![0i32; imax + 1];
+    let mut used = imax;
+    // The W values shrink by a bit as they double in number: one of the
+    // first width, two of the next, four of the next.
+    let (mut nwi, mut jwi) = (1usize, 0usize);
+    for i in 1..=imax {
+        if (at + wsize).div_ceil(8) > ie.len() {
+            used = i - 1;
+            break;
+        }
+        w[i] = bits(ie, at, wsize) as i32;
+        at += wsize;
+        // A zero ends the list: the rest of the element is padding.
+        if used == imax && w[i] == 0 {
+            used = i - 1;
+        }
+        jwi += 1;
+        if jwi == nwi {
+            jwi = 0;
+            nwi <<= 1;
+            wsize -= 1;
+        }
+    }
+
+    for i in 1..=used {
+        out.push(((f_k(i, &w, span) + origin).rem_euclid(1024)) as u16);
+    }
+    out.sort_unstable();
+    out.dedup();
     Some(out)
 }
 
-/// Who a paging request is calling.
+fn power_of_two_at_or_below(idx: usize) -> usize {
+    let mut j = 1;
+    while j <= idx {
+        j <<= 1;
+    }
+    j >> 1
+}
+
+/// Walk back up the tree from the `k`th W value to the channel number it
+/// stands for. Transcribed from Wireshark's `f_k`.
+fn f_k(k: usize, w: &[i32], span: i32) -> i32 {
+    let mut idx = k;
+    let mut span = (span - 1) / power_of_two_at_or_below(idx) as i32;
+    let mut n = w[idx] - 1;
+    while idx > 1 {
+        let j = power_of_two_at_or_below(idx);
+        span = 2 * span + 1;
+        if 2 * idx < 3 * j {
+            idx -= j / 2;
+            n = (n + w[idx] - 1 + (span - 1) / 2 + 1).rem_euclid(span);
+        } else {
+            idx -= j;
+            n = (n + w[idx] - 1 + 1).rem_euclid(span);
+        }
+    }
+    (n + 1).rem_euclid(1024)
+}
+
+/// Who a paging request is calling./// Who a paging request is calling.
 ///
 /// A network pages by temporary identity almost always, which is the point
 /// of the temporary identity: it is reallocated, so a run of them says how
@@ -626,9 +752,40 @@ mod tests {
         ie[15] = 0b0000_0101; // channels 3 and 1
         assert_eq!(channels(&ie), Some(vec![1, 3, 120, 121, 124]));
 
-        // A format this does not read is refused rather than guessed at.
-        ie[0] |= 0b1000_0000;
+        // A format nothing defines is refused rather than guessed at.
+        ie[0] = 0b0100_0000;
         assert_eq!(channels(&ie), None);
+    }
+
+    /// The 1800 band cannot use a bit map, because its channel numbers run
+    /// past a thousand. The tree formats carry an origin and a series of
+    /// values that each split what is left of the range.
+    #[test]
+    fn a_range_list_walks_its_tree() {
+        // Range 1024, first value five and the rest absent, which is the
+        // simplest thing the recursion can be checked against by hand: the
+        // first value stands for itself.
+        let mut ie = [0u8; 16];
+        ie[0] = 0x80;
+        ie[1] = 5;
+        assert_eq!(channels(&ie), Some(vec![5]));
+
+        // The spare bit before the values says whether channel zero is in
+        // the list, which no branch of the tree can reach.
+        ie[0] |= 0x04;
+        assert_eq!(channels(&ie), Some(vec![0, 5]));
+    }
+
+    /// A bit map that starts where the list says rather than at 124, which
+    /// is how a short list high in the band is sent.
+    #[test]
+    fn a_variable_bit_map_starts_where_it_says() {
+        let mut ie = [0u8; 16];
+        ie[0] = 0x8E;
+        ie[1] = 0x02;
+        ie[2] = 0x80;
+        ie[3] = 0x80;
+        assert_eq!(channels(&ie), Some(vec![5, 13]));
     }
 
     /// A type 2 carries the neighbours a phone is told to measure, which is
