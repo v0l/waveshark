@@ -16,7 +16,7 @@
 //! not: the log holds evidence, and a conclusion stored without what it was
 //! drawn from cannot be checked or read again later.
 
-use common::{Error, Hz, Packet, PacketBody, Result};
+use common::{Error, Hz, Packet, Result};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind};
 use pipeline::StreamSpec;
@@ -301,18 +301,9 @@ fn read_loop(
         let at_us = now_us();
         for f in frames {
             state.frames.fetch_add(1, Ordering::Relaxed);
-            let packet = Packet {
-                at_us,
-                center_hz: spec.kind.center_hz,
-                bandwidth_hz: spec.kind.bandwidth_hz,
-                rssi_dbfs: f.rssi_dbfs,
-                snr_db: f32::NAN,
-                modulation: None,
-                body: PacketBody::Frame(f.bytes),
-                measure: None,
-                audio: None,
-                iq: None,
-            };
+            let mut frame = common::Frame::unmeasured(f.bytes).at(spec.kind.center_hz);
+            frame.rssi_dbfs = f.rssi_dbfs;
+            let packet = Packet::of_frame(at_us, spec.kind.bandwidth_hz, frame);
             if tx.send(packet).is_err() {
                 return;
             }
@@ -643,7 +634,7 @@ mod tests {
         }
         assert_eq!(got.len(), 3, "three frames sent, {} arrived", got.len());
         assert_eq!(got[0].frame().unwrap(), &LONG);
-        assert_eq!(got[0].center_hz, 1_090_000_000);
+        assert_eq!(got[0].center_hz(), 1_090_000_000);
         assert_eq!(node.frames(), 3);
     }
 }

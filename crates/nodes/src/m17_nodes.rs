@@ -297,20 +297,13 @@ impl Node for M17Node {
                 self.talking = None;
                 self.voice_stream = false;
             }
-            out.push(common::Packet {
-                at_us,
-                center_hz,
-                bandwidth_hz: CHANNEL_WIDTH_HZ as u32,
-                // A frame that reached here passed its checks; the front end
-                // measures no level per transmission.
-                rssi_dbfs: f32::NAN,
-                snr_db: f32::NAN,
-                modulation: Some("4FSK"),
-                body: common::PacketBody::Frame(e.to_bytes()),
-                iq: None,
-                audio: audio.clone(),
-                measure: None,
-            });
+            // A frame that reached here passed its checks; the front end
+            // measures no level per transmission, so the source's own is
+            // filled in above it.
+            let frame = common::Frame::unmeasured(e.to_bytes()).at(center_hz);
+            let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
+            p.audio = audio.clone();
+            out.push(p);
         }
         Ok(())
     }
@@ -521,7 +514,7 @@ mod tests {
                 let [packets, _] = out;
                 if let Payload::Packets(ps) = packets {
                     frames.extend(ps.into_iter().filter_map(|p| match p.body {
-                        common::PacketBody::Frame(b) => Some(b),
+                        common::PacketBody::Frame(f) => Some(f.bytes),
                         _ => None,
                     }));
                 }

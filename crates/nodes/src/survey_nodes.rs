@@ -29,9 +29,11 @@
 //! and the level at each; the beacon is somewhere near the strongest of them
 //! and this does not claim to know where.
 //!
-//! The fix comes from `gps` through [`SurveyNode::set_fix`] and goes stale on
-//! its own: a receiver that loses the sky records sightings with no position
-//! rather than attributing them all to the last place it saw the sky.
+//! The position comes through [`SurveyNode::set_station`] and is the station
+//! position the whole receiver works from, whether a GPS supplied it or an
+//! operator typed it in. A survey recorded only where a GPS said it was, so a
+//! fixed installation with its position entered by hand wrote every sighting
+//! blind.
 
 use common::{Packet, Result};
 use decode::Protocols;
@@ -131,10 +133,10 @@ fn vendor_of(d: &Decoded) -> Option<String> {
 pub struct SurveyNode {
     db: Option<Db>,
     protocols: Protocols,
-    /// Where the receiver is, and when that was last true. `None` while there
-    /// is no fix, which is a sighting with no position rather than no
-    /// sighting: what was heard is still evidence.
-    fix: Option<gps::Fix>,
+    /// Where the receiver is. `None` until somebody says, which is a sighting
+    /// with no position rather than no sighting: what was heard is still
+    /// evidence.
+    station: Option<gps::Fix>,
     heard: u64,
     failures: u64,
 }
@@ -153,7 +155,7 @@ impl SurveyNode {
         Self {
             db,
             protocols: Protocols::all(),
-            fix: None,
+            station: None,
             heard: 0,
             failures: 0,
         }
@@ -171,14 +173,14 @@ impl SurveyNode {
         self.db.as_ref()
     }
 
-    /// Where the receiver is now. Passing `None` says the fix went stale,
-    /// which is not the same as never having had one.
-    pub fn set_fix(&mut self, fix: Option<gps::Fix>) {
-        self.fix = fix;
+    /// Where the receiver is now, as the station position, carrying the
+    /// quality fields when a fix supplied it.
+    pub fn set_station(&mut self, at: Option<gps::Fix>) {
+        self.station = at;
     }
 
-    pub fn fix(&self) -> Option<gps::Fix> {
-        self.fix
+    pub fn station(&self) -> Option<gps::Fix> {
+        self.station
     }
 
     /// Receptions attributed to a device since the node was built, and writes
@@ -192,7 +194,7 @@ impl SurveyNode {
     }
 
     fn sighting(&self, p: &Packet, d: &Decoded) -> Sighting {
-        let fix = self.fix;
+        let fix = self.station;
         Sighting {
             at_us: p.at_us,
             lat: fix.map(|f| f.lat),
@@ -203,8 +205,8 @@ impl SurveyNode {
             // itself, so the product is a metre estimate honest enough for a
             // column that says how much to trust a row.
             accuracy_m: fix.and_then(|f| f.hdop).map(|h| h * 5.0),
-            rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs.is_finite().then_some(p.rssi_dbfs)),
-            snr_db: d.snr_db.or(p.snr_db.is_finite().then_some(p.snr_db)),
+            rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs())),
+            snr_db: d.snr_db.or(p.snr_db().is_finite().then_some(p.snr_db())),
             center_hz: d.center.0,
         }
     }
@@ -264,7 +266,7 @@ impl Simple for SurveyNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, PacketBody, Value};
+    use common::{Hz, Value};
 
     fn decoded(protocol: &'static str, fields: &[(&str, &str)]) -> Decoded {
         Decoded::bytes(protocol, Hz(2_426_000_000), 0.0, vec![]).with_fields(
@@ -313,18 +315,11 @@ mod tests {
     }
 
     fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
-        Packet {
-            at_us: 1_000_000,
-            center_hz,
-            bandwidth_hz: 2_000_000,
-            rssi_dbfs: -46.0,
-            snr_db: 20.0,
-            modulation: None,
-            body: PacketBody::Frame(bytes),
-            measure: None,
-            iq: None,
-            audio: None,
-        }
+        Packet::of_frame(
+            1_000_000,
+            2_000_000,
+            common::Frame::measured(bytes, -46.0, 20.0).at(center_hz),
+        )
     }
 
     fn run(node: &mut SurveyNode, packets: Vec<Packet>) {
@@ -342,7 +337,7 @@ mod tests {
     #[test]
     fn a_ble_advertisement_becomes_a_device_at_the_receivers_position() {
         let mut node = SurveyNode::new(Some(Db::in_memory().unwrap()));
-        node.set_fix(Some(gps::Fix {
+        node.set_station(Some(gps::Fix {
             lat: 53.6369,
             lon: -6.6528,
             hdop: Some(0.9),

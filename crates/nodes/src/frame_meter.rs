@@ -126,7 +126,7 @@ impl FrameMeter {
     pub fn frame(&mut self, bytes: Vec<u8>) -> common::Frame {
         let f = common::Frame {
             bytes,
-            center_hz: Some(self.center_hz),
+            center_hz: self.center_hz,
             rssi_dbfs: self.rssi_dbfs(),
             snr_db: self.snr_db(),
             iq: self.iq_since_last(),
@@ -150,7 +150,7 @@ mod tests {
         assert!(f.rssi_dbfs > -7.0 && f.rssi_dbfs < -5.0, "rssi {}", f.rssi_dbfs);
         assert!(f.snr_db > 30.0, "snr {}", f.snr_db);
         assert_eq!(f.iq.as_ref().map(|q| q.samples.len()), Some(2000));
-        assert_eq!(f.center_hz, Some(868_000_000));
+        assert_eq!(f.center_hz, 868_000_000);
         // The next frame measures its own transmission, not this one.
         m.feed(&vec![C32::new(0.05, 0.0); 1000]);
         let g = m.frame(vec![4]);

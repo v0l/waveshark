@@ -44,7 +44,7 @@ fn frames(path: &Path) -> Vec<(u64, Vec<u8>)> {
         g.feed_iq(block).expect("run");
         for p in g.output().as_packets().unwrap_or(&[]) {
             if let PacketBody::Frame(f) = &p.body {
-                out.push((p.center_hz, f.clone()));
+                out.push((p.center_hz(), f.bytes.clone()));
             }
         }
     }

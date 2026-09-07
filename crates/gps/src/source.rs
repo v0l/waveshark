@@ -28,6 +28,15 @@ pub enum Transport {
 }
 
 impl Transport {
+    /// The daemon a machine with a GPS on it is almost always already
+    /// running, on the loopback and on its own port.
+    ///
+    /// This is what a source reads when nobody named one, and finding it is
+    /// the reconnect loop rather than a probe: a refused connection costs a
+    /// syscall and is retried, so a gpsd started an hour after the receiver
+    /// is picked up without anybody being asked.
+    pub const LOCAL_GPSD: &'static str = "127.0.0.1:2947";
+
     /// Read a transport as an operator writes one: `gpsd:host:port`,
     /// `/dev/ttyACM0`, or `/dev/ttyUSB0@4800`.
     ///
@@ -52,6 +61,12 @@ impl Transport {
             return Some(Self::Serial { path, baud });
         }
         Some(Self::Gpsd(if s.contains(':') { s.to_string() } else { format!("{s}:2947") }))
+    }
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self::Gpsd(Self::LOCAL_GPSD.to_string())
     }
 }
 

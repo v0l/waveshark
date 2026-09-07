@@ -20,7 +20,7 @@ fn main() {
         g.feed_iq(b).unwrap();
         for p in g.output().as_packets().unwrap_or(&[]) {
             if let (common::PacketBody::Frame(f), Some(q)) = (&p.body, &p.iq) {
-                if nodes::lora_nodes::lora_decoded(&f[..], common::Hz(p.center_hz)).is_some() && burst.is_none() {
+                if nodes::lora_nodes::lora_decoded(&f.bytes, common::Hz(p.center_hz())).is_some() && burst.is_none() {
                     burst = Some(q.clone());
                 }
             }

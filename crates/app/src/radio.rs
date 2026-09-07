@@ -586,8 +586,9 @@ pub enum Cmd {
     /// on the packet bus, so like the packet log this is a command to the
     /// radio thread rather than a setting the interface keeps.
     Survey(Option<std::path::PathBuf>),
-    /// Read the receiver's own position from a GPS, or stop. A survey without
-    /// one records what was heard and no idea where from.
+    /// Read the receiver's own position from this GPS, or `None` for the
+    /// local gpsd, which is what the reader looks for on its own. There is no
+    /// off: a fix moves the station position, and no fix leaves it alone.
     Gps(Option<gps::Transport>),
     /// Log every burst the front ends detect to this directory, or stop.
     ///
@@ -2019,7 +2020,12 @@ fn run(
     let mut call_dir: Option<std::path::PathBuf> = None;
     // The GPS, and where the survey is written. Both outlive a rebuild: the
     // nodes are replaced with the graph and the settings are not.
-    let mut gps: Option<gps::Source> = None;
+    //
+    // The reader always runs. A machine with a GPS on it is running gpsd, and
+    // a reader that reconnects anyway costs one refused connection every five
+    // seconds on a machine that is not: cheaper than an operator finding out
+    // a week of survey rows have no position because a box was left empty.
+    let mut gps = gps::Source::start(gps::Config::new(gps::Transport::default()));
     let mut survey_path: Option<std::path::PathBuf> = None;
     let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
@@ -2385,9 +2391,9 @@ fn run(
                     // Dropping the old source stops its thread, so switching
                     // transports mid-run does not leave two readers fighting
                     // over one serial port.
-                    gps = transport.map(|t| gps::Source::start(gps::Config::new(t)));
-                    if gps.is_none() {
-                        rx.set_fix(None);
+                    let t = transport.unwrap_or_default();
+                    if *gps.transport() != t {
+                        gps = gps::Source::start(gps::Config::new(t));
                     }
                 }
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
@@ -2676,14 +2682,13 @@ fn run(
             // The fix is read at the display's rate rather than per block:
             // a GPS reports once a second and a block is seven milliseconds,
             // so asking per block is two hundred locks for one new number.
-            if let Some(g) = &gps {
-                let fix = g.fix();
-                status.gps_connected.store(g.connected(), Ordering::Relaxed);
-                status.gps_fixes.store(g.fixes(), Ordering::Relaxed);
-                *status.gps_fix.lock() = fix;
-                *status.gps_sky.lock() = g.sky();
-                rx.set_fix(fix);
-            }
+            let fix = gps.fix();
+            status.gps_connected.store(gps.connected(), Ordering::Relaxed);
+            status.gps_fixes.store(gps.fixes(), Ordering::Relaxed);
+            *status.gps_fix.lock() = fix;
+            *status.gps_sky.lock() = gps.sky();
+            // A fix moves the station; losing the sky leaves it where it was.
+            rx.set_fix(fix);
             if let Some((devices, sightings, heard)) = rx.survey_counts() {
                 status.survey_devices.store(devices, Ordering::Relaxed);
                 status.survey_sightings.store(sightings, Ordering::Relaxed);

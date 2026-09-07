@@ -448,7 +448,8 @@ impl nodes::PacketSink for PacketLog {
 
     fn write(&mut self, p: &Packet) {
         let rec = match &p.body {
-            PacketBody::Pulses(pulses) => {
+            PacketBody::Pulses(package) => {
+                let pulses = &package.pulses;
                 // A burst longer than this is not a packet; the count is
                 // capped rather than the record refused, so whatever it was
                 // is still on record with its level and frequency.
@@ -464,15 +465,15 @@ impl nodes::PacketSink for PacketLog {
                 }
                 rec
             }
-            PacketBody::Frame(bytes) => {
-                let n = bytes.len().min(u16::MAX as usize);
+            PacketBody::Frame(frame) => {
+                let n = frame.bytes.len().min(u16::MAX as usize);
                 let mut rec = Vec::with_capacity(4 + HEAD_LEN + n);
                 put_head(&mut rec, KIND_BYTES, n as u16, n, p);
-                rec.extend_from_slice(&bytes[..n]);
+                rec.extend_from_slice(&frame.bytes[..n]);
                 rec
             }
         };
-        let rec = match p.iq.as_deref() {
+        let rec = match p.samples().map(|q| q.as_ref()) {
             Some(q) if !q.samples.is_empty() => put_iq(rec, q),
             _ => rec,
         };
@@ -610,13 +611,13 @@ fn take_iq(tail: &[u8]) -> Option<std::sync::Arc<common::IqBurst>> {
 fn put_head(out: &mut Vec<u8>, kind: u8, count: u16, body_len: usize, p: &Packet) {
     out.extend_from_slice(&((HEAD_LEN + body_len) as u32).to_le_bytes());
     out.push(kind);
-    out.push(keying_code(p.modulation));
+    out.push(keying_code(p.modulation()));
     out.extend_from_slice(&count.to_le_bytes());
     out.extend_from_slice(&p.at_us.to_le_bytes());
-    out.extend_from_slice(&p.center_hz.to_le_bytes());
+    out.extend_from_slice(&p.center_hz().to_le_bytes());
     out.extend_from_slice(&p.bandwidth_hz.to_le_bytes());
-    out.extend_from_slice(&p.rssi_dbfs.to_le_bytes());
-    out.extend_from_slice(&p.snr_db.to_le_bytes());
+    out.extend_from_slice(&p.rssi_dbfs().to_le_bytes());
+    out.extend_from_slice(&p.snr_db().to_le_bytes());
 }
 
 /// Read a log back.
@@ -670,11 +671,30 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
                         gap: u32::from_le_bytes(body[o + 4..o + 8].try_into().unwrap()),
                     });
                 }
-                (PacketBody::Pulses(pulses), &body[n * 8..])
+                (
+                    PacketBody::Pulses(common::Package {
+                        pulses,
+                        snr_db: getf(28),
+                        rssi_dbfs: getf(24),
+                        start_sample: 0,
+                        center_hz: get64(12),
+                        modulation: keying_from_code(r[1]),
+                    }),
+                    &body[n * 8..],
+                )
             }
             KIND_BYTES => {
                 let n = count.min(body.len());
-                (PacketBody::Frame(body[..n].to_vec()), &body[n..])
+                (
+                    PacketBody::Frame(common::Frame {
+                        bytes: body[..n].to_vec(),
+                        center_hz: get64(12),
+                        rssi_dbfs: getf(24),
+                        snr_db: getf(28),
+                        iq: None,
+                    }),
+                    &body[n..],
+                )
             }
             // An unknown kind is skipped by its length rather than guessed
             // at, which is the whole reason the length comes first.
@@ -682,11 +702,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
         };
         out.push(Packet {
             at_us: get64(4),
-            center_hz: get64(12),
             bandwidth_hz: get32(20),
-            rssi_dbfs: getf(24),
-            snr_db: getf(28),
-            modulation: keying_from_code(r[1]),
             body: packet_body,
             measure,
             iq: take_iq(tail),
@@ -729,22 +745,22 @@ mod tests {
     }
 
     fn burst(center: u64) -> Packet {
-        Packet {
-            at_us: AT,
-            center_hz: center,
-            bandwidth_hz: 31_250,
-            rssi_dbfs: -21.25,
-            snr_db: 18.5,
-            modulation: Some("OOK"),
-            body: PacketBody::Pulses(vec![
-                Pulse { mark: 500, gap: 1500 },
-                Pulse { mark: 1500, gap: 500 },
-                Pulse { mark: 500, gap: 9000 },
-            ]),
-            measure: None,
-            iq: None,
-            audio: None,
-        }
+        Packet::of_pulses(
+            AT,
+            31_250,
+            common::Package {
+                pulses: vec![
+                    Pulse { mark: 500, gap: 1500 },
+                    Pulse { mark: 1500, gap: 500 },
+                    Pulse { mark: 500, gap: 9000 },
+                ],
+                snr_db: 18.5,
+                rssi_dbfs: -21.25,
+                start_sample: 0,
+                center_hz: center,
+                modulation: Some("OOK"),
+            },
+        )
     }
 
     #[test]
@@ -753,7 +769,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let mut log = PacketLog::new(d.clone());
         let mut p = burst(869_500_000);
-        p.body = PacketBody::Pulses(Vec::new());
+        if let PacketBody::Pulses(pkg) = &mut p.body {
+            pkg.pulses.clear();
+        }
         p.measure = Some(common::Measure {
             modulation: "chirp",
             confidence: 0.83,
@@ -788,18 +806,11 @@ mod tests {
     }
 
     fn frame(at_us: u64, bytes: &[u8]) -> Packet {
-        Packet {
+        Packet::of_frame(
             at_us,
-            center_hz: 1_090_000_000,
-            bandwidth_hz: 2_000_000,
-            rssi_dbfs: f32::NAN,
-            snr_db: f32::NAN,
-            modulation: None,
-            body: PacketBody::Frame(bytes.to_vec()),
-            measure: None,
-            iq: None,
-            audio: None,
-        }
+            2_000_000,
+            common::Frame::unmeasured(bytes.to_vec()).at(1_090_000_000),
+        )
     }
 
     /// 2026-08-31T12:00:00Z, in microseconds.
@@ -905,7 +916,7 @@ mod tests {
         let got = read(d.join("2026-08-31.000.wspkt")).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].frame(), Some(&bytes[..]));
-        assert_eq!(got[0].center_hz, 1_090_000_000);
+        assert_eq!(got[0].center_hz(), 1_090_000_000);
         let _ = std::fs::remove_dir_all(&d);
     }
 

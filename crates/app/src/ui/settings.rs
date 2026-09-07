@@ -62,73 +62,51 @@ impl App {
     /// The memory bank: what was saved, by group, and a way back to it.
     fn memory_pane(&mut self, ui: &mut egui::Ui) {
         if self.memory.list.is_empty() {
-            hint(
-                ui,
-                "Nothing saved yet. SAVE on a strip channel puts it here.",
-            );
+            hint(ui, "Nothing saved yet. SAVE on a strip channel puts it here.");
         }
         let mut recall: Option<crate::memory::Saved> = None;
         let mut remove: Option<usize> = None;
         let groups: Vec<String> = self.memory.groups().iter().map(|g| g.to_string()).collect();
-        egui::ScrollArea::vertical()
-            .max_height(420.0)
-            .show(ui, |ui| {
-                for g in &groups {
-                    egui::CollapsingHeader::new(legend(g))
-                        .id_salt(("memory", g))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let rows: Vec<(usize, crate::memory::Saved)> = self
-                                .memory
-                                .in_group(g)
-                                .map(|(i, s)| (i, s.clone()))
-                                .collect();
-                            for (i, s) in rows {
-                                ui.horizontal(|ui| {
-                                    let reach = (s.freq - self.center).abs() <= self.rate / 2.0;
-                                    let mut line = theme::Line::new()
-                                        .set(format!("{:.4}", s.freq / 1e6))
-                                        .gap(10.0)
-                                        .legend(&s.mode.label());
-                                    if let Some(bw) = s.bandwidth_hz {
-                                        line = line.gap(10.0).value(format!(
-                                            "{} kHz",
-                                            crate::scanners::num(bw / 1e3)
-                                        ));
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            for g in &groups {
+                egui::CollapsingHeader::new(legend(g))
+                    .id_salt(("memory", g))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let rows: Vec<(usize, crate::memory::Saved)> =
+                            self.memory.in_group(g).map(|(i, s)| (i, s.clone())).collect();
+                        for (i, s) in rows {
+                            ui.horizontal(|ui| {
+                                let reach = (s.freq - self.center).abs() <= self.rate / 2.0;
+                                let mut line = theme::Line::new()
+                                    .set(format!("{:.4}", s.freq / 1e6))
+                                    .gap(10.0)
+                                    .legend(&s.mode.label());
+                                if let Some(bw) = s.bandwidth_hz {
+                                    line = line.gap(10.0).value(format!("{} kHz", crate::scanners::num(bw / 1e3)));
+                                }
+                                if !s.label.is_empty() {
+                                    line = line.gap(12.0).words(&s.label);
+                                }
+                                line.show(ui);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("×").on_hover_text("forget this channel").clicked() {
+                                        remove = Some(i);
                                     }
-                                    if !s.label.is_empty() {
-                                        line = line.gap(12.0).words(&s.label);
+                                    let tip = if reach {
+                                        "put this channel on the strip"
+                                    } else {
+                                        "tune to this channel and put it on the strip"
+                                    };
+                                    if ui.small_button("RECALL").on_hover_text(tip).clicked() {
+                                        recall = Some(s.clone());
                                     }
-                                    line.show(ui);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui
-                                                .small_button("×")
-                                                .on_hover_text("forget this channel")
-                                                .clicked()
-                                            {
-                                                remove = Some(i);
-                                            }
-                                            let tip = if reach {
-                                                "put this channel on the strip"
-                                            } else {
-                                                "tune to this channel and put it on the strip"
-                                            };
-                                            if ui
-                                                .small_button("RECALL")
-                                                .on_hover_text(tip)
-                                                .clicked()
-                                            {
-                                                recall = Some(s.clone());
-                                            }
-                                        },
-                                    );
                                 });
-                            }
-                        });
-                }
-            });
+                            });
+                        }
+                    });
+            }
+        });
         if let Some(i) = remove {
             self.memory.remove(i);
             let _ = self.memory.save();
@@ -169,25 +147,16 @@ impl App {
         let (center, rate) = (self.center, self.rate);
         // Taken out of `self` so the closures below can borrow the rest of
         // it, and put back at the end.
-        let mut rows = self.scanner_edit.take().unwrap_or_else(|| {
-            self.scanners
-                .list
-                .iter()
-                .map(ScannerRow::from_scanner)
-                .collect()
-        });
+        let mut rows = self
+            .scanner_edit
+            .take()
+            .unwrap_or_else(|| self.scanners.list.iter().map(ScannerRow::from_scanner).collect());
 
         let live: Vec<crate::scanners::Scanner> =
             rows.iter().filter_map(ScannerRow::to_scanner).collect();
-        let table = crate::scanners::Scanners {
-            list: live,
-            version: crate::scanners::VERSION,
-        };
-        let active: Vec<String> = table
-            .active(center, rate)
-            .into_iter()
-            .map(|s| s.name.clone())
-            .collect();
+        let table = crate::scanners::Scanners { list: live, version: crate::scanners::VERSION };
+        let active: Vec<String> =
+            table.active(center, rate).into_iter().map(|s| s.name.clone()).collect();
 
         ui.horizontal(|ui| {
             let mut line = theme::Line::new()
@@ -213,135 +182,122 @@ impl App {
 
         let mut remove = None;
         let mut tune_to = None;
-        egui::ScrollArea::vertical()
-            .max_height(360.0)
-            .id_salt("scanrows")
-            .show(ui, |ui| {
-                for (i, r) in rows.iter_mut().enumerate() {
-                    let on = active.iter().any(|n| n == &r.name);
-                    // Running blocks are framed, so which of them the span covers
-                    // is visible without reading every range.
-                    let frame = egui::Frame::NONE
-                        .fill(if on { theme::WELL } else { theme::CHASSIS })
-                        .stroke(Stroke::new(
-                            1.0,
-                            if on { theme::TRACE } else { theme::ETCH },
-                        ))
-                        .inner_margin(egui::Margin::symmetric(8, 6))
-                        .corner_radius(2);
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // The switch that keeps a block in the table without
-                            // running it, so turning auto off after pinning a few
-                            // channels does not throw it away.
-                            ui.checkbox(&mut r.enabled, "").on_hover_text(if r.enabled {
-                                "running: click to switch off"
-                            } else {
-                                "off: click to run"
+        egui::ScrollArea::vertical().max_height(360.0).id_salt("scanrows").show(ui, |ui| {
+            for (i, r) in rows.iter_mut().enumerate() {
+                let on = active.iter().any(|n| n == &r.name);
+                // Running blocks are framed, so which of them the span covers
+                // is visible without reading every range.
+                let frame = egui::Frame::NONE
+                    .fill(if on { theme::WELL } else { theme::CHASSIS })
+                    .stroke(Stroke::new(1.0, if on { theme::TRACE } else { theme::ETCH }))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .corner_radius(2);
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // The switch that keeps a block in the table without
+                        // running it, so turning auto off after pinning a few
+                        // channels does not throw it away.
+                        ui.checkbox(&mut r.enabled, "")
+                            .on_hover_text(if r.enabled { "running: click to switch off" } else { "off: click to run" });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut r.name)
+                                .desired_width(112.0)
+                                .hint_text("name"),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(legend("front"));
+                        egui::ComboBox::from_id_salt(("front", i))
+                            .selected_text(r.front.label())
+                            .width(84.0)
+                            .show_ui(ui, |ui| {
+                                for f in crate::scanners::Front::all() {
+                                    let label = f.label();
+                                    // Keep the widths already typed when
+                                    // switching back to banks.
+                                    let pick = if matches!(f, crate::scanners::Front::Banks(_)) {
+                                        r.banks_with_current_widths()
+                                    } else {
+                                        f
+                                    };
+                                    if ui
+                                        .selectable_label(r.front.key() == pick.key(), label)
+                                        .clicked()
+                                    {
+                                        r.front = pick;
+                                    }
+                                }
                             });
-                            ui.add(
-                                egui::TextEdit::singleline(&mut r.name)
-                                    .desired_width(112.0)
-                                    .hint_text("name"),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(legend("front"));
-                            egui::ComboBox::from_id_salt(("front", i))
-                                .selected_text(r.front.label())
-                                .width(84.0)
-                                .show_ui(ui, |ui| {
-                                    for f in crate::scanners::Front::all() {
-                                        let label = f.label();
-                                        // Keep the widths already typed when
-                                        // switching back to banks.
-                                        let pick = if matches!(f, crate::scanners::Front::Banks(_))
-                                        {
-                                            r.banks_with_current_widths()
-                                        } else {
-                                            f
-                                        };
-                                        if ui
-                                            .selectable_label(r.front.key() == pick.key(), label)
-                                            .clicked()
-                                        {
-                                            r.front = pick;
-                                        }
-                                    }
-                                });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.small_button("REMOVE").clicked() {
-                                        remove = Some(i);
-                                    }
-                                    if ui.add_enabled(!on, egui::Button::new("TUNE")).clicked() {
-                                        tune_to = Some((r.lo_mhz + r.hi_mhz) / 2.0);
-                                    }
-                                },
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(legend("range"));
-                            mhz_field(ui, &mut r.lo_mhz);
-                            ui.label(legend("to"));
-                            mhz_field(ui, &mut r.hi_mhz);
-                            ui.label(legend("MHz"));
-                            ui.add_space(8.0);
-                            ui.label(legend("span"));
-                            ui.add(
-                                egui::DragValue::new(&mut r.span_khz)
-                                    .speed(10.0)
-                                    .range(1.0..=20_000.0)
-                                    .suffix(" kHz"),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            match &mut r.front {
-                                // A bank front end is defined by its channel
-                                // widths; everything else by the channels that
-                                // have to be inside the span.
-                                crate::scanners::Front::Banks(_) => {
-                                    ui.label(legend("widths"));
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut r.widths)
-                                            .desired_width(180.0)
-                                            .hint_text("31.25, 125 kHz"),
-                                    );
-                                    ui.label(legend("kHz"));
-                                }
-                                _ => {
-                                    ui.label(legend("channels"));
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut r.channels)
-                                            .desired_width(180.0)
-                                            // Not an example of a value: a hint
-                                            // that looks like data reads as data
-                                            // on a row that needs none.
-                                            .hint_text("none needed"),
-                                    );
-                                    ui.label(legend("MHz"));
-                                    ui.add_space(6.0);
-                                    ui.label(legend("margin"));
-                                    ui.add(
-                                        egui::DragValue::new(&mut r.margin_khz)
-                                            .speed(1.0)
-                                            .range(0.0..=1000.0)
-                                            .suffix(" kHz"),
-                                    );
-                                }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("REMOVE").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui.add_enabled(!on, egui::Button::new("TUNE")).clicked() {
+                                tune_to = Some((r.lo_mhz + r.hi_mhz) / 2.0);
                             }
                         });
-                        if r.to_scanner().is_none() {
-                            ui.label(
-                                egui::RichText::new("needs a name and a range that goes upwards")
-                                    .color(theme::FAULT)
-                                    .size(10.0),
-                            );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(legend("range"));
+                        mhz_field(ui, &mut r.lo_mhz);
+                        ui.label(legend("to"));
+                        mhz_field(ui, &mut r.hi_mhz);
+                        ui.label(legend("MHz"));
+                        ui.add_space(8.0);
+                        ui.label(legend("span"));
+                        ui.add(
+                            egui::DragValue::new(&mut r.span_khz)
+                                .speed(10.0)
+                                .range(1.0..=20_000.0)
+                                .suffix(" kHz"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        match &mut r.front {
+                            // A bank front end is defined by its channel
+                            // widths; everything else by the channels that
+                            // have to be inside the span.
+                            crate::scanners::Front::Banks(_) => {
+                                ui.label(legend("widths"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut r.widths)
+                                        .desired_width(180.0)
+                                        .hint_text("31.25, 125 kHz"),
+                                );
+                                ui.label(legend("kHz"));
+                            }
+                            _ => {
+                                ui.label(legend("channels"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut r.channels)
+                                        .desired_width(180.0)
+                                        // Not an example of a value: a hint
+                                        // that looks like data reads as data
+                                        // on a row that needs none.
+                                        .hint_text("none needed"),
+                                );
+                                ui.label(legend("MHz"));
+                                ui.add_space(6.0);
+                                ui.label(legend("margin"));
+                                ui.add(
+                                    egui::DragValue::new(&mut r.margin_khz)
+                                        .speed(1.0)
+                                        .range(0.0..=1000.0)
+                                        .suffix(" kHz"),
+                                );
+                            }
                         }
                     });
-                    ui.add_space(4.0);
-                }
-            });
+                    if r.to_scanner().is_none() {
+                        ui.label(
+                            egui::RichText::new("needs a name and a range that goes upwards")
+                                .color(theme::FAULT)
+                                .size(10.0),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+            }
+        });
 
         if let Some(i) = remove {
             rows.remove(i);
@@ -380,19 +336,10 @@ impl App {
                     );
                 }
                 if ui.add_enabled(dirty, egui::Button::new("REVERT")).clicked() {
-                    rows = self
-                        .scanners
-                        .list
-                        .iter()
-                        .map(ScannerRow::from_scanner)
-                        .collect();
+                    rows = self.scanners.list.iter().map(ScannerRow::from_scanner).collect();
                 }
                 if dirty {
-                    ui.label(
-                        egui::RichText::new("unsaved")
-                            .color(theme::READOUT)
-                            .size(11.0),
-                    );
+                    ui.label(egui::RichText::new("unsaved").color(theme::READOUT).size(11.0));
                 }
             });
         });
@@ -430,14 +377,8 @@ impl App {
         // having is always the one before somebody thought to press record.
         // What is settable is where it goes and how large it may get.
         let mut on = self.log.path.is_some();
-        if check_help(
-            ui,
-            &mut on,
-            "Write every packet to disk",
-            "Timings and frames as demodulated, a day per file, replayable.",
-        )
-        .changed()
-        {
+        let log_help = "Timings and frames as demodulated, a day per file, replayable.";
+        if check_help(ui, &mut on, "Write every packet to disk", log_help).changed() {
             let dir = if on {
                 self.log_dir
                     .clone()
@@ -454,14 +395,10 @@ impl App {
         // unrecognised burst is still reported, logged and replayable with
         // this off; it is only kept out of the table.
         let mut unknown = self.log.show_unknown;
-        if check_help(
-            ui,
-            &mut unknown,
-            "Show unrecognised bursts",
-            "Bursts that decoded to no known protocol. They are the point of scanning an unfamiliar band, and on a noisy one they bury the decodes.",
-        )
-        .changed()
-        {
+        let unknown_help = "Bursts that decoded to no known protocol. They are the point of \
+                            scanning an unfamiliar band, and on a noisy one they bury the \
+                            decodes.";
+        if check_help(ui, &mut unknown, "Show unrecognised bursts", unknown_help).changed() {
             self.log.show_unknown = unknown;
         }
         ui.add_space(8.0);
@@ -483,27 +420,23 @@ impl App {
             }
         });
 
-        row_help(
-            ui,
-            "folder limit",
-            "What the whole folder may take. The oldest days are deleted to keep it under, \
-             so the log rolls rather than stopping.",
-            |ui| {
-                let mut cap = self.log_cap_mb;
-                egui::ComboBox::from_id_salt("log_cap")
-                    .selected_text(size_label(cap))
-                    .width(160.0)
-                    .show_ui(ui, |ui| {
-                        for opt in [Some(512u64), Some(2048), Some(8192), Some(32_768), None] {
-                            ui.selectable_value(&mut cap, opt, size_label(opt));
-                        }
-                    });
-                if cap != self.log_cap_mb {
-                    self.log_cap_mb = cap;
-                    self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
-                }
-            },
-        );
+        let cap_help = "What the whole folder may take. The oldest days are deleted to keep it \
+                        under, so the log rolls rather than stopping.";
+        row_help(ui, "folder limit", cap_help, |ui| {
+            let mut cap = self.log_cap_mb;
+            egui::ComboBox::from_id_salt("log_cap")
+                .selected_text(size_label(cap))
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for opt in [Some(512u64), Some(2048), Some(8192), Some(32_768), None] {
+                        ui.selectable_value(&mut cap, opt, size_label(opt));
+                    }
+                });
+            if cap != self.log_cap_mb {
+                self.log_cap_mb = cap;
+                self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
+            }
+        });
         ui.add_space(10.0);
 
         reading(ui, "folder holds", human_bytes(bytes));
@@ -528,11 +461,7 @@ impl App {
         legend_help(ui, "feeds", "Packets from another receiver, over TCP.");
         ui.add_space(8.0);
 
-        let status = self
-            .radio
-            .as_ref()
-            .map(|r| r.status.feeds.lock().clone())
-            .unwrap_or_default();
+        let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
         for (i, f) in self.feeds.iter().enumerate() {
             let live = status.iter().find(|s| s.spec == *f);
@@ -547,19 +476,13 @@ impl App {
                         None => theme::ETCH,
                     },
                 );
-                theme::Line::new()
-                    .value(f.address())
-                    .size(11.0)
-                    .legend(f.kind.name)
-                    .show(ui);
+                theme::Line::new().value(f.address()).size(11.0).legend(f.kind.name).show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("REMOVE").clicked() {
                         remove = Some(i);
                     }
                     if let Some(s) = live {
-                        theme::Line::new()
-                            .legend(&format!("{} frames", s.frames))
-                            .show(ui);
+                        theme::Line::new().legend(&format!("{} frames", s.frames)).show(ui);
                     }
                 });
             });
@@ -665,11 +588,7 @@ impl App {
         // they are not the radio: which speaker the mix comes out of and
         // which microphone a keyed channel transmits from are properties of
         // this machine.
-        legend_help(
-            ui,
-            "Speaker",
-            "Where the mix, the calls and any replay come out.",
-        );
+        legend_help(ui, "Speaker", "Where the mix, the calls and any replay come out.");
         let mut out = self.audio_out.clone();
         if device_combo(ui, "app-audio-out", &mut out, audio::AudioPlayer::devices()) {
             self.audio_out = out;
@@ -677,19 +596,11 @@ impl App {
         }
         ui.add_space(10.0);
 
-        legend_help(
-            ui,
-            "Microphone",
-            "What a keyed channel transmits. Held open while a channel is set to MIC, so the \
-             meter moves before you key.",
-        );
+        let mic = "What a keyed channel transmits. Held open while a channel is set to MIC, so \
+                   the meter moves before you key.";
+        legend_help(ui, "Microphone", mic);
         let mut input = self.audio_in.clone();
-        if device_combo(
-            ui,
-            "app-audio-in",
-            &mut input,
-            audio::AudioCapture::devices(),
-        ) {
+        if device_combo(ui, "app-audio-in", &mut input, audio::AudioCapture::devices()) {
             self.audio_in = input;
             self.send_audio();
         }
@@ -749,32 +660,33 @@ impl App {
         legend_help(
             ui,
             "GPS",
-            "A serial receiver or a gpsd, which sets the station position instead of the box \
-             above. Type a device path such as /dev/ttyACM0, or gpsd:host.",
+            "A fix moves the station position, which is the position everything else works \
+             from. The reader always runs and looks for a gpsd on this machine, so nothing \
+             need be set here unless the receiver is a serial port or a daemon elsewhere: a \
+             device path such as /dev/ttyACM0, or gpsd:host.",
         );
         let mut set: Option<Option<gps::Transport>> = None;
         ui.horizontal(|ui| {
-            let text = self.survey.gps_edit.get_or_insert_with(|| {
-                self.survey
-                    .gps
-                    .as_ref()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default()
-            });
+            let text = self
+                .survey
+                .gps_edit
+                .get_or_insert_with(|| {
+                    self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default()
+                });
             let r = ui.add(
                 egui::TextEdit::singleline(text)
                     .desired_width(190.0)
-                    .hint_text("/dev/ttyACM0 or gpsd:localhost")
-                    .font(FontId::new(
-                        12.0,
-                        FontFamily::Name(theme::READOUT_FONT.into()),
-                    )),
+                        .hint_text(gps::Transport::LOCAL_GPSD)
+                    .font(FontId::new(12.0, FontFamily::Name(theme::READOUT_FONT.into()))),
             );
             let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if typed || ui.small_button("SET").clicked() {
+                // An empty box is the local gpsd rather than nothing: there
+                // is no off, since a receiver with no fix simply leaves the
+                // station where it was put.
                 set = Some(gps::Transport::parse(text));
             }
-            if self.survey.gps.is_some() && ui.small_button("OFF").clicked() {
+            if self.survey.gps.is_some() && ui.small_button("AUTO").clicked() {
                 text.clear();
                 set = Some(None);
             }
@@ -784,8 +696,8 @@ impl App {
             self.survey.gps_edit = None;
         }
         // What the link is doing, which is three different states an operator
-        // has to be able to tell apart: nothing configured, a receiver
-        // talking but with no sky, and a real fix.
+        // has to be able to tell apart: nothing listening on the other end, a
+        // receiver talking but with no sky, and a real fix.
         let line = match self.radio.as_ref() {
             None => "no radio running".to_string(),
             Some(r) => {
@@ -794,27 +706,22 @@ impl App {
                 let sky = *r.status.gps_sky.lock();
                 let connected = r.status.gps_connected.load(Ordering::Relaxed);
                 let fixes = r.status.gps_fixes.load(Ordering::Relaxed);
-                match (self.survey.gps.is_some(), connected, fix) {
-                    (false, _, _) => "off: the station position is whatever is typed above".into(),
-                    (true, _, Some(f)) => {
-                        let sats = f
-                            .sats
-                            .map(|n| format!(", {n} satellites"))
-                            .unwrap_or_default();
+                match (connected, fix) {
+                    (_, Some(f)) => {
+                        let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
                         format!("{:.5}, {:.5}{sats}, {fixes} fixes", f.lat, f.lon)
                     }
                     // Waiting says nothing on its own: an antenna indoors and
                     // an antenna unplugged look the same for the first
                     // minute, and the satellite counts tell them apart.
-                    (true, true, None) => match sky {
-                        Some(s) => format!(
-                            "connected, no fix yet: {} of {} satellites used",
-                            s.used, s.seen
-                        ),
+                    (true, None) => match sky {
+                        Some(s) => {
+                            format!("connected, no fix yet: {} of {} satellites used", s.used, s.seen)
+                        }
                         None => "connected, waiting for a fix".into(),
                     },
-                    (true, false, None) => {
-                        "not connected: check the port or that gpsd is up".into()
+                    (false, None) => {
+                        "nothing answering: the station position is whatever is set above".into()
                     }
                 }
             }
@@ -825,15 +732,9 @@ impl App {
         // The survey is what a position is for, and the switch belongs beside
         // it rather than three panes away.
         let mut on = self.survey.path.is_some();
-        if check_help(
-            ui,
-            &mut on,
-            "Record a device database",
-            "One row per transmitter heard, with the places it was heard from. The packet log \
-             keeps the transmissions; this keeps the transmitters.",
-        )
-        .changed()
-        {
+        let survey_help = "One row per transmitter heard, with the places it was heard from. \
+                           The packet log keeps the transmissions; this keeps the transmitters.";
+        if check_help(ui, &mut on, "Record a device database", survey_help).changed() {
             self.set_survey(!on, None);
         }
         if let Some(p) = self.survey.path.as_ref() {
@@ -913,19 +814,14 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all"))))
-                .clicked()
-            {
+            if ui.add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all")))).clicked() {
                 for w in crate::data::Which::ALL {
                     crate::data::refresh(w);
                 }
             }
             if let Some(dir) = crate::data::cache_dir() {
                 ui.label(
-                    egui::RichText::new(dir.display().to_string())
-                        .small()
-                        .color(theme::LEGEND),
+                    egui::RichText::new(dir.display().to_string()).small().color(theme::LEGEND),
                 );
             }
         });
@@ -933,8 +829,7 @@ impl App {
         // the pane has to come back and look, or a finished download stays
         // reading CHECKING until the pointer moves.
         if busy {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(400));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
         }
     }
 
@@ -945,9 +840,7 @@ impl App {
     /// where every other radio is chosen, because from the dial's point of
     /// view that is all it is.
     pub(super) fn remote_modal(&mut self, ctx: &egui::Context) {
-        let Some(mut edit) = self.remote.take() else {
-            return;
-        };
+        let Some(mut edit) = self.remote.take() else { return };
         let (mut close, mut add) = (false, false);
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
             .backdrop_color(Color32::from_black_alpha(150))
@@ -1000,7 +893,8 @@ impl App {
                 if let Some(e) = &edit.err {
                     ui.add_space(6.0);
                     ui.add(
-                        egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT)).wrap(),
+                        egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT))
+                            .wrap(),
                     );
                 }
 
@@ -1066,11 +960,7 @@ impl App {
     /// the receiver off the radio it is running.
     pub(super) fn rescan(&mut self, ctx: &egui::Context) {
         self.devices = crate::devices::list();
-        if self
-            .device
-            .as_ref()
-            .is_some_and(|c| !self.devices.iter().any(|d| d.label == c.label))
-        {
+        if self.device.as_ref().is_some_and(|c| !self.devices.iter().any(|d| d.label == c.label)) {
             self.device = None;
             self.radio = None;
         }
@@ -1123,22 +1013,15 @@ impl App {
                     if stage.auto {
                         let mut on = auto;
                         if ui.checkbox(&mut on, "Auto").changed() {
-                            let mode = if on {
-                                GainMode::Auto
-                            } else {
-                                GainMode::Manual(db)
-                            };
+                            let mode = if on { GainMode::Auto } else { GainMode::Manual(db) };
                             self.radio_settings.set_gain(&stage.name, mode);
                             changed = true;
                         }
                     }
                     // Under AUTO the number is the hardware's business and
                     // showing a stale one invites the operator to believe it.
-                    let text = if auto {
-                        "auto".to_string()
-                    } else {
-                        format!("{db:.1} dB")
-                    };
+                    let text =
+                        if auto { "auto".to_string() } else { format!("{db:.1} dB") };
                     ui.label(value(text).size(11.0));
                 });
             });
@@ -1148,8 +1031,7 @@ impl App {
             let slider = egui::Slider::new(&mut db, lo..=hi).show_value(false);
             if ui.add_enabled(!auto, slider).changed() {
                 let want = stage.quantise(db);
-                self.radio_settings
-                    .set_gain(&stage.name, GainMode::Manual(want));
+                self.radio_settings.set_gain(&stage.name, GainMode::Manual(want));
                 changed = true;
             }
             ui.add_space(10.0);
@@ -1175,10 +1057,7 @@ impl App {
                 });
             });
             let (lo, hi) = (*stage.range.start(), *stage.range.end());
-            if ui
-                .add(egui::Slider::new(&mut db, lo..=hi).show_value(false))
-                .changed()
-            {
+            if ui.add(egui::Slider::new(&mut db, lo..=hi).show_value(false)).changed() {
                 self.radio_settings.tx_gain_db = stage.quantise(db);
                 changed = true;
             }
@@ -1222,41 +1101,27 @@ impl App {
 
         ui.separator();
         ui.add_space(6.0);
-        row_help(
-            ui,
-            "Correction",
-            "The reference oscillator is a few tens of parts per million out on a cheap dongle, \
-             which is a kilohertz or two at 145 MHz and rather more higher up. Tune a known \
-             carrier and correct until it sits on its nominal frequency.",
-            |ui| {
-                let mut ppm = self.radio_settings.ppm;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut ppm)
-                            .speed(0.5)
-                            .range(-200.0..=200.0)
-                            .suffix(" ppm"),
-                    )
-                    .changed()
-                {
-                    self.radio_settings.ppm = ppm;
-                    changed = true;
-                }
-            },
-        );
+        let ppm_help = "The reference oscillator is a few tens of parts per million out on a \
+                        cheap dongle, which is a kilohertz or two at 145 MHz and rather more \
+                        higher up. Tune a known carrier and correct until it sits on its \
+                        nominal frequency.";
+        row_help(ui, "Correction", ppm_help, |ui| {
+            let mut ppm = self.radio_settings.ppm;
+            if ui
+                .add(egui::DragValue::new(&mut ppm).speed(0.5).range(-200.0..=200.0).suffix(" ppm"))
+                .changed()
+            {
+                self.radio_settings.ppm = ppm;
+                changed = true;
+            }
+        });
         ui.add_space(10.0);
 
         let mut dc = self.dc_block;
-        if check_help(
-            ui,
-            &mut dc,
-            "Remove the DC spur",
-            "A direct conversion receiver leaks its own local oscillator into the middle of the \
-             span, where it looks exactly like a carrier on the frequency you are tuned to. \
-             This measures the offset and subtracts it.",
-        )
-        .changed()
-        {
+        let dc_help = "A direct conversion receiver leaks its own local oscillator into the \
+                       middle of the span, where it looks exactly like a carrier on the \
+                       frequency you are tuned to. This measures the offset and subtracts it.";
+        if check_help(ui, &mut dc, "Remove the DC spur", dc_help).changed() {
             self.dc_block = dc;
             self.send(Cmd::DcBlock(dc));
         }
@@ -1282,10 +1147,10 @@ impl App {
         legend_help(
             ui,
             "raw capture",
-            "The whole span to one file, as it arrives. This is the recording to make when the \
-             receiver shows a transmission and reads nothing from it: replaying the file puts \
-             the same samples through the same graph, so a decoder can be changed and tried \
-             again.",
+            "The whole span to one file, as it arrives. This is the recording to \
+             make when the receiver shows a transmission and reads nothing from \
+             it: replaying the file puts the same samples through the same \
+             graph, so a decoder can be changed and tried again.",
         );
         ui.add_space(8.0);
 
@@ -1308,27 +1173,23 @@ impl App {
         }
         ui.add_space(6.0);
 
-        row_help(
-            ui,
-            "folder limit",
-            "What the whole folder may take. Nothing here is deleted: a capture is evidence of \
-             a signal that may not come again, so writing stops instead.",
-            |ui| {
-                let mut cap = self.capture_cap_mb;
-                egui::ComboBox::from_id_salt("capture_cap")
-                    .selected_text(size_label(cap))
-                    .width(160.0)
-                    .show_ui(ui, |ui| {
-                        for opt in [Some(1024u64), Some(4096), Some(16_384), Some(65_536), None] {
-                            ui.selectable_value(&mut cap, opt, size_label(opt));
-                        }
-                    });
-                if cap != self.capture_cap_mb {
-                    self.capture_cap_mb = cap;
-                    self.send(Cmd::CaptureCap(cap.map(|mb| mb << 20).unwrap_or(0)));
-                }
-            },
-        );
+        let cap_help = "What the whole folder may take. Nothing here is deleted: a capture is \
+                        evidence of a signal that may not come again, so writing stops instead.";
+        row_help(ui, "folder limit", cap_help, |ui| {
+            let mut cap = self.capture_cap_mb;
+            egui::ComboBox::from_id_salt("capture_cap")
+                .selected_text(size_label(cap))
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for opt in [Some(1024u64), Some(4096), Some(16_384), Some(65_536), None] {
+                        ui.selectable_value(&mut cap, opt, size_label(opt));
+                    }
+                });
+            if cap != self.capture_cap_mb {
+                self.capture_cap_mb = cap;
+                self.send(Cmd::CaptureCap(cap.map(|mb| mb << 20).unwrap_or(0)));
+            }
+        });
         ui.add_space(8.0);
 
         // The folder first: it is the number the limit above is about, and
@@ -1436,18 +1297,12 @@ impl Default for RemoteEdit {
 /// deliberately should keep it. Returns whether the selection changed.
 fn device_combo(ui: &mut egui::Ui, id: &str, current: &mut String, names: Vec<String>) -> bool {
     let mut changed = false;
-    let shown = if current.is_empty() {
-        "System default".to_string()
-    } else {
-        current.clone()
-    };
+    let shown = if current.is_empty() { "System default".to_string() } else { current.clone() };
     egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .width(ui.available_width())
         .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(current.is_empty(), "System default")
-                .clicked()
+            if ui.selectable_label(current.is_empty(), "System default").clicked()
                 && !current.is_empty()
             {
                 current.clear();

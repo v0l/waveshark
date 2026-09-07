@@ -57,7 +57,7 @@ fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
     for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
         let pk = g.output().as_packets().unwrap_or(&[]);
-        out.extend(pk.iter().filter_map(|p| p.package()));
+        out.extend(pk.iter().filter_map(|p| p.package().cloned()));
     }
     out
 }

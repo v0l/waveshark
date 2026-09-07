@@ -414,7 +414,7 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
     for p in &bursts {
         let secs = p.at_us / 1_000_000 % 86_400;
         let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
-        let mhz = p.center_hz as f64 / 1e6;
+        let mhz = p.center_hz() as f64 / 1e6;
         let Some(pkg) = p.package() else {
             let bytes = p.frame().unwrap_or_default();
             println!(
@@ -431,7 +431,7 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
             println!(
                 "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  unclaimed",
                 pkg.pulses.len(),
-                p.snr_db,
+                p.snr_db(),
             );
         }
         for r in reports {
@@ -439,7 +439,7 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
             println!(
                 "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  {:<22} {}",
                 pkg.pulses.len(),
-                p.snr_db,
+                p.snr_db(),
                 r.model,
                 r.fields_line(),
             );
@@ -833,7 +833,8 @@ fn m17_dump(path: &std::path::Path) {
     let mut runs: Vec<Vec<(u16, [u8; 16])>> = Vec::new();
     let mut setups = 0usize;
     for p in &packets {
-        let common::PacketBody::Frame(b) = &p.body else { continue };
+        let common::PacketBody::Frame(fr) = &p.body else { continue };
+        let b = &fr.bytes;
         match Event::parse(b) {
             Some(Event::LinkSetup { lsf, .. }) => {
                 setups += 1;
