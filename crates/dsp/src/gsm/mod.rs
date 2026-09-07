@@ -42,6 +42,8 @@
 //! burst rather than inventing a cell. An MLSE equaliser over an estimated
 //! impulse response is the next thing to add here, not a rewrite of it.
 
+pub mod bcch;
+pub mod coding;
 pub mod sch;
 
 pub use sch::Sch;
@@ -84,6 +86,26 @@ pub const SCH_TRAINING: [u8; 64] = [
 /// Where the training sequence sits in the burst: three tail bits and 39
 /// coded bits precede it.
 pub const TRAINING_AT: usize = 42;
+
+/// The eight training sequences a normal burst can carry, GSM 05.02 table
+/// 5.2.3a. Which one a cell uses on its broadcast and common control
+/// channels is not a choice: the standard requires it to equal the base
+/// station colour code, so a receiver that has read a synchronisation burst
+/// already knows which of these to correlate.
+pub const NORMAL_TRAINING: [[u8; 26]; 8] = [
+    [0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1],
+    [0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1],
+    [0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0],
+    [0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0],
+    [0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1],
+    [0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0],
+    [1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1],
+    [1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0],
+];
+
+/// Where that sequence sits in a normal burst: three tail bits, 57 data bits
+/// and the first stealing flag precede it.
+pub const NORMAL_TRAINING_AT: usize = 61;
 
 /// Gaussian filter bandwidth times symbol period, GSM 05.04.
 pub const BT: f64 = 0.3;
@@ -139,6 +161,38 @@ pub struct SchHit {
     pub samples: usize,
 }
 
+/// A control channel block that passed its Fire code: what the cell said on
+/// its broadcast or common control channel.
+#[derive(Clone, Debug)]
+pub struct BlockHit {
+    /// The 23 bytes, for `decode::gsm` to read.
+    pub bytes: [u8; bcch::BLOCK_BYTES],
+    /// The frame number of the first of the four bursts, which says which
+    /// channel the block came from.
+    pub frame_number: u32,
+    /// The training sequence correlation of the worst of the four bursts.
+    pub quality: f32,
+    pub start_sample: u64,
+    pub samples: usize,
+}
+
+impl BlockHit {
+    /// Which channel this was: the broadcast channel occupies four frames of
+    /// the control multiframe and the common control channel the rest.
+    pub fn is_bcch(&self) -> bool {
+        (2..=5).contains(&(self.frame_number % 51))
+    }
+}
+
+/// What the detector produces.
+#[derive(Clone, Debug)]
+pub enum Hit {
+    /// A synchronisation burst: the cell's identity and the frame number.
+    Sync(SchHit),
+    /// Four bursts of a control channel, decoded as a block.
+    Block(BlockHit),
+}
+
 /// One GSM carrier, watched for a frequency correction burst and the
 /// synchronisation burst that follows it.
 pub struct SchDetector {
@@ -163,6 +217,8 @@ pub struct SchDetector {
     run: Option<Run>,
     /// FCCH bursts whose SCH has not arrived yet.
     pending: Vec<Pending>,
+    /// Control channel blocks the frame numbers say are coming.
+    blocks: Vec<PendingBlock>,
     /// Where the samples added by the last call sit in `buf`, so a caller can
     /// measure the channel this cut out rather than the span it came from.
     last: std::ops::Range<usize>,
@@ -180,6 +236,18 @@ struct Pending {
     /// Absolute decimated index of the synchronisation burst's first symbol.
     sch_start: f64,
     freq_offset_hz: f64,
+}
+
+/// A control channel block whose bursts have not all arrived yet.
+#[derive(Clone, Copy, Debug)]
+struct PendingBlock {
+    /// Where the first of the four bursts starts, in the channel stream.
+    first: f64,
+    freq_offset_hz: f64,
+    /// The training sequence the cell uses, which is its own colour code.
+    tsc: usize,
+    /// The frame number of that first burst.
+    frame_number: u32,
 }
 
 /// Running mean and variance over a sliding window of phase advances.
@@ -254,6 +322,7 @@ impl SchDetector {
             win: WindowStats::new(window.max(8)),
             run: None,
             pending: Vec::new(),
+            blocks: Vec::new(),
             last: 0..0,
         }
     }
@@ -273,6 +342,7 @@ impl SchDetector {
         self.win.reset();
         self.run = None;
         self.pending.clear();
+        self.blocks.clear();
         self.last = 0..0;
     }
 
@@ -294,7 +364,7 @@ impl SchDetector {
 
     /// Feed a block of the span. Bursts whose parity held are appended to
     /// `out`.
-    pub fn process(&mut self, iq: &[C32], out: &mut Vec<SchHit>) {
+    pub fn process(&mut self, iq: &[C32], out: &mut Vec<Hit>) {
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
         let before = self.buf.len();
@@ -303,6 +373,7 @@ impl SchDetector {
         self.extend_dphi(before);
         self.search_tone();
         self.decode_pending(out);
+        self.decode_blocks(out);
         self.trim();
     }
 
@@ -387,62 +458,138 @@ impl SchDetector {
     }
 
     /// Demodulate the pending bursts whose samples have all arrived.
-    fn decode_pending(&mut self, out: &mut Vec<SchHit>) {
+    fn decode_pending(&mut self, out: &mut Vec<Hit>) {
         let end = self.base + self.buf.len() as u64;
         // A burst needs the search margin either side of where it is expected.
-        let need = (BURST_SYMBOLS + 8.0) * self.sps;
+        let need = (BURST_SYMBOLS + 20.0) * self.sps;
         let mut keep = Vec::new();
         for p in std::mem::take(&mut self.pending) {
             if (p.sch_start + need) as u64 >= end {
                 keep.push(p);
                 continue;
             }
-            if let Some(hit) = self.demod(&p) {
-                out.push(hit);
-            }
+            let Some((hit, at)) = self.demod(&p) else { continue };
+            self.schedule_blocks(&hit, at, p.freq_offset_hz);
+            out.push(Hit::Sync(hit));
         }
         self.pending = keep;
     }
 
-    /// Read the burst at a pending position, searching timing around it.
-    fn demod(&self, p: &Pending) -> Option<SchHit> {
-        let mut best: Option<(f32, [f32; sch::CODED_BITS])> = None;
-        let mut at = 0.0f64;
-        // Plus or minus six symbols in quarter symbol steps. The tone placed
-        // the frame to within a symbol or two, and the transmitter's Gaussian
-        // filter delays the burst by two more; the training sequence is what
-        // says exactly, so the search only has to be wide enough to contain
-        // the answer.
-        for step in -24i32..=24 {
-            let off = f64::from(step) * 0.25 * self.sps;
-            let Some((q, coded)) = self.read_burst(p.sch_start + off, p.freq_offset_hz) else {
+    /// The control channel blocks the frame number says are next.
+    ///
+    /// Timeslot zero of a beacon carrier repeats a 51 frame pattern, and the
+    /// synchronisation burst has just said where in it the receiver is. The
+    /// two blocks of four frames after each one are the broadcast channel
+    /// where the burst was frame 1 of the pattern, and the paging and access
+    /// grant channel everywhere else; both carry the same 23 byte blocks
+    /// coded the same way, so the same reader takes them.
+    ///
+    /// The training sequence is not a guess either: on the broadcast and
+    /// common control channels the standard requires it to be the cell's own
+    /// colour code, which the synchronisation burst just gave up.
+    fn schedule_blocks(&mut self, hit: &SchHit, at: f64, freq_offset_hz: f64) {
+        let frame = FRAME_SYMBOLS * self.sps;
+        for group in [1u32, 5] {
+            self.blocks.push(PendingBlock {
+                first: at + f64::from(group) * frame,
+                freq_offset_hz,
+                tsc: usize::from(hit.sch.bcc & 7),
+                frame_number: hit.sch.frame_number + group,
+            });
+        }
+    }
+
+    /// Read the blocks whose four bursts have all arrived.
+    fn decode_blocks(&mut self, out: &mut Vec<Hit>) {
+        let end = self.base + self.buf.len() as u64;
+        let frame = FRAME_SYMBOLS * self.sps;
+        // Three frames to the last burst, the burst itself, and room for the
+        // timing search either side of it: the search reaches six symbols
+        // out and the interpolator two samples past that.
+        let need = 3.0 * frame + (BURST_SYMBOLS + 20.0) * self.sps;
+        let mut keep = Vec::new();
+        for b in std::mem::take(&mut self.blocks) {
+            if (b.first + need) as u64 >= end {
+                keep.push(b);
                 continue;
-            };
-            if best.as_ref().is_none_or(|(b, _)| q > *b) {
-                best = Some((q, coded));
-                at = p.sch_start + off;
+            }
+            if let Some(hit) = self.demod_block(&b) {
+                out.push(Hit::Block(hit));
             }
         }
-        let (quality, coded) = best?;
-        if quality < self.cfg.min_quality {
-            return None;
+        self.blocks = keep;
+    }
+
+    /// Four consecutive normal bursts, deinterleaved and decoded as one
+    /// block.
+    fn demod_block(&self, b: &PendingBlock) -> Option<BlockHit> {
+        let frame = FRAME_SYMBOLS * self.sps;
+        let tsc = &NORMAL_TRAINING[b.tsc];
+        let mut soft = [[0.0f32; bcch::BURST_BITS]; bcch::BURSTS];
+        let mut quality = f32::INFINITY;
+        let mut start = 0.0f64;
+        for (n, dst) in soft.iter_mut().enumerate() {
+            let want = b.first + n as f64 * frame;
+            let (q, bits, at) = self.search(want, b.freq_offset_hz, tsc, NORMAL_TRAINING_AT)?;
+            if n == 0 {
+                start = at;
+            }
+            quality = quality.min(q);
+            // The two stealing flags either side of the training sequence
+            // are not data, and reading past them puts every bit of the
+            // second half one place out.
+            dst[..57].copy_from_slice(&bits[3..60]);
+            dst[57..].copy_from_slice(&bits[88..145]);
         }
+        let bytes = bcch::decode(&soft)?;
+        Some(BlockHit {
+            bytes,
+            frame_number: b.frame_number,
+            quality,
+            start_sample: start as u64,
+            samples: (3.0 * frame + BURST_SYMBOLS * self.sps) as usize,
+        })
+    }
+
+    /// Read the synchronisation burst at a pending position, and say where
+    /// it was: the frames after it are counted from there.
+    fn demod(&self, p: &Pending) -> Option<(SchHit, f64)> {
+        let (quality, soft, at) =
+            self.search(p.sch_start, p.freq_offset_hz, &SCH_TRAINING, TRAINING_AT)?;
+        let mut coded = [0.0f32; sch::CODED_BITS];
+        coded[..39].copy_from_slice(&soft[3..42]);
+        coded[39..].copy_from_slice(&soft[106..145]);
         let sch = sch::decode(&coded)?;
-        Some(SchHit {
+        Some((SchHit {
             sch,
             freq_offset_hz: p.freq_offset_hz,
             quality,
             start_sample: at as u64,
             samples: (BURST_SYMBOLS * self.sps) as usize,
-        })
+        }, at))
     }
 
-    /// Sample 148 symbols from `start`, correct the frequency error, derotate
-    /// and align on the training sequence. Returns how well the training
-    /// sequence matched and the 78 coded bits either side of it.
-    fn read_burst(&self, start: f64, foff_hz: f64) -> Option<(f32, [f32; sch::CODED_BITS])> {
-        let first = start.floor() as i64 - 2;
-        if first < 0 || (start + BURST_BITS as f64 * self.sps) as usize + 2 >= self.buf.len() {
+    /// Sample 148 symbols from `start`, correct the frequency error,
+    /// derotate and align on `tsc`, the training sequence sitting at
+    /// `tsc_at`. Returns how well that sequence matched and a soft bit per
+    /// symbol of the burst.
+    ///
+    /// One routine for both burst types, because they differ only in where
+    /// the training sequence is and how long it is: 64 bits in the middle of
+    /// a synchronisation burst, 26 in the middle of a normal one.
+    fn read_symbols(
+        &self,
+        start: f64,
+        foff_hz: f64,
+        tsc: &[u8],
+        tsc_at: usize,
+    ) -> Option<(f32, [f32; BURST_BITS])> {
+        // Positions are absolute and the buffer is not: the front of it has
+        // been thrown away as often as the detector has run. Comparing an
+        // absolute position against the buffer's length worked only until
+        // the first trim, and then every burst past it read as unreadable.
+        let rel = start - self.base as f64;
+        if rel < 2.0 || (rel + BURST_BITS as f64 * self.sps) as usize + 2 >= self.buf.len() {
             return None;
         }
         let mut sym = [C32::new(0.0, 0.0); BURST_BITS];
@@ -460,8 +607,8 @@ impl SchDetector {
         // magnitude says how much of the burst is really there.
         let mut corr = C32::new(0.0, 0.0);
         let mut power = 0.0f32;
-        for (i, &b) in SCH_TRAINING.iter().enumerate() {
-            let v = sym[TRAINING_AT + i];
+        for (i, &b) in tsc.iter().enumerate() {
+            let v = sym[tsc_at + i];
             corr += if b == 0 { v } else { -v };
             power += v.norm();
         }
@@ -470,18 +617,38 @@ impl SchDetector {
         }
         let quality = corr.norm() / power;
         let rot = corr.conj() / corr.norm();
+        let scale = tsc.len() as f32 / power;
+        let mut soft = [0.0f32; BURST_BITS];
+        for (k, s) in soft.iter_mut().enumerate() {
+            // A one is a negative symbol: the modulating value is 1-2d.
+            *s = -(sym[k] * rot).re * scale;
+        }
+        Some((quality, soft))
+    }
 
-        let mut coded = [0.0f32; sch::CODED_BITS];
-        let scale = SCH_TRAINING.len() as f32 / power;
-        let mut soft = |from: usize, to: usize| {
-            for k in 0..39 {
-                // A one is a negative symbol: the modulating value is 1-2d.
-                coded[from + k] = -(sym[to + k] * rot).re * scale;
+    /// The best timing for a burst near `start`, and the soft bits at it.
+    ///
+    /// Plus or minus six symbols in quarter symbol steps. The tone placed the
+    /// frame to within a symbol or two, and the transmitter's Gaussian filter
+    /// delays the burst by two more; the training sequence is what says
+    /// exactly, so the search only has to be wide enough to contain the
+    /// answer.
+    fn search(
+        &self,
+        start: f64,
+        foff_hz: f64,
+        tsc: &[u8],
+        tsc_at: usize,
+    ) -> Option<(f32, [f32; BURST_BITS], f64)> {
+        let mut best: Option<(f32, [f32; BURST_BITS], f64)> = None;
+        for step in -24i32..=24 {
+            let at = start + f64::from(step) * 0.25 * self.sps;
+            let Some((q, soft)) = self.read_symbols(at, foff_hz, tsc, tsc_at) else { continue };
+            if best.as_ref().is_none_or(|(b, _, _)| q > *b) {
+                best = Some((q, soft, at));
             }
-        };
-        soft(0, 3);
-        soft(39, 106);
-        Some((quality, coded))
+        }
+        best.filter(|(q, _, _)| *q >= self.cfg.min_quality)
     }
 
     /// Drop what no longer has to be kept: the samples before the earliest
@@ -492,6 +659,7 @@ impl SchDetector {
             .pending
             .iter()
             .map(|p| p.sch_start as u64)
+            .chain(self.blocks.iter().map(|b| b.first as u64))
             .min()
             .unwrap_or(end)
             .min(end.saturating_sub((FRAME_SYMBOLS * 1.5 * self.sps) as u64));
@@ -533,6 +701,20 @@ fn interpolate(buf: &[C32], at: f64) -> Option<C32> {
     let c = p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3;
     let d = p3 - p0 + (p1 - p2) * 3.0;
     Some((a + b * t + c * (t * t) + d * (t * t * t)) * 0.5)
+}
+
+/// The 148 bits a normal burst puts on the air: tail bits, 57 data bits, a
+/// stealing flag, the training sequence, the other flag and 57 more data
+/// bits.
+///
+/// The flags say whether the burst was stolen for signalling; on a broadcast
+/// channel they are not, so they go out as zeros.
+pub fn normal_burst_bits(data: &[u8; bcch::BURST_BITS], tsc: usize) -> [u8; BURST_BITS] {
+    let mut bits = [0u8; BURST_BITS];
+    bits[3..60].copy_from_slice(&data[..57]);
+    bits[NORMAL_TRAINING_AT..NORMAL_TRAINING_AT + 26].copy_from_slice(&NORMAL_TRAINING[tsc & 7]);
+    bits[88..145].copy_from_slice(&data[57..]);
+    bits
 }
 
 /// The 148 bits a synchronisation burst puts on the air: tail bits, the two
@@ -753,7 +935,25 @@ mod tests {
         for block in iq.chunks(8192) {
             det.process(block, &mut out);
         }
-        out
+        syncs(&out)
+    }
+
+    fn syncs(hits: &[Hit]) -> Vec<SchHit> {
+        hits.iter()
+            .filter_map(|h| match h {
+                Hit::Sync(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn blocks(hits: &[Hit]) -> Vec<BlockHit> {
+        hits.iter()
+            .filter_map(|h| match h {
+                Hit::Block(b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect()
     }
     /// The whole path: a synthesised beacon in a 2.4 MS/s span comes back as
     /// the cell that was transmitted.
@@ -823,6 +1023,64 @@ mod tests {
         assert!(hits.is_empty(), "{hits:?}");
     }
 
+    /// The whole beacon: the tone, the synchronisation burst, and the four
+    /// bursts of broadcast channel that follow it, read as the 23 byte block
+    /// the cell transmitted.
+    ///
+    /// This is the test that ties the frame number to the schedule. Nothing
+    /// marks a broadcast burst as one: the receiver knows where it is only
+    /// because the synchronisation burst said which frame it was in, and it
+    /// knows which training sequence to correlate only because the same
+    /// burst gave up the cell's colour code. Get either wrong and four
+    /// perfectly good bursts decode as nothing at all.
+    #[test]
+    fn the_broadcast_block_after_a_beacon_is_read() {
+        let sch = Sch { ncc: 5, bcc: 3, frame_number: 51 * 26 * 8 + 1 };
+        let block: [u8; 23] = {
+            let mut b = [0x2Bu8; 23];
+            b[..8].copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10]);
+            b
+        };
+        let rate = 2_400_000.0;
+        let iq = beacon_with_block(&sch, &block, rate);
+        let mut det = SchDetector::new(rate, 0.0, 0.0, GsmConfig::default());
+        let mut out = Vec::new();
+        for chunk in iq.chunks(8192) {
+            det.process(chunk, &mut out);
+        }
+        assert_eq!(syncs(&out).len(), 1, "the synchronisation burst");
+        let got = blocks(&out);
+        assert_eq!(got.len(), 1, "expected one block, got {got:?}");
+        assert_eq!(got[0].bytes, block);
+        assert!(got[0].is_bcch(), "frame {} is not a broadcast frame", got[0].frame_number);
+        assert_eq!(got[0].frame_number, sch.frame_number + 1);
+    }
+
+    /// A beacon with a broadcast block in the four frames after the
+    /// synchronisation burst, which is where the multiframe puts it.
+    fn beacon_with_block(sch: &Sch, block: &[u8; 23], rate: f64) -> Vec<C32> {
+        let sps = 8;
+        let work = SYMBOL_RATE * sps as f64;
+        let lead = 200.0;
+        let total = ((lead * 2.0 + 6.0 * FRAME_SYMBOLS) * sps as f64) as usize;
+        let mut base = vec![C32::new(0.0, 0.0); total];
+        let mut place = |at: f64, wave: &[C32]| {
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(wave);
+        };
+        place(lead, &modulate(&[0u8; BURST_BITS], sps));
+        place(lead + FRAME_SYMBOLS, &modulate(&sch_burst_bits(sch).unwrap(), sps));
+        let bursts = bcch::encode(block).unwrap();
+        for (n, data) in bursts.iter().enumerate() {
+            let bits = normal_burst_bits(data, usize::from(sch.bcc));
+            place(lead + (2.0 + n as f64) * FRAME_SYMBOLS, &modulate(&bits, sps));
+        }
+
+        let ratio = work / rate;
+        let n = (base.len() as f64 / ratio) as usize - 1;
+        (0..n).map(|i| base[(i as f64 * ratio) as usize]).collect()
+    }
+
     /// Channel numbers as they are configured and logged. The values are
     /// from the band plans in GSM 05.05 and are checked against what a cell
     /// on that channel actually transmits at.
@@ -860,6 +1118,7 @@ mod tests {
         for block in iq.chunks(997) {
             det.process(block, &mut out);
         }
+        let out = syncs(&out);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].sch, want);
     }

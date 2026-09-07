@@ -16,7 +16,7 @@
 //! cell where there is none.
 
 use common::Result;
-use dsp::gsm::{self, sch, GsmConfig, SchDetector, SchHit};
+use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -37,7 +37,7 @@ pub struct GsmNode {
     channel_hz: f64,
     det: SchDetector,
     meter: crate::FrameMeter,
-    hits: Vec<SchHit>,
+    hits: Vec<Hit>,
     accepted: u64,
 }
 
@@ -61,7 +61,7 @@ impl GsmNode {
         }
     }
 
-    /// Synchronisation bursts whose parity held since the node was built.
+    /// Bursts and blocks that passed their check since the node was built.
     pub fn accepted(&self) -> u64 {
         self.accepted
     }
@@ -109,13 +109,24 @@ impl Simple for GsmNode {
         self.meter.feed(self.det.channel());
         let out = o.frames_mut();
         for hit in &self.hits {
-            let Some(bytes) = sch::pack(&hit.sch) else { continue };
+            // Two kinds of evidence off one carrier: the synchronisation
+            // burst's 25 bit field, and the 23 byte blocks the broadcast and
+            // common control channels carry. Both are bytes on the bus and
+            // the length is what tells them apart, which is the same job the
+            // band does for everything else on it.
+            let (bytes, start, len) = match hit {
+                Hit::Sync(s) => {
+                    let Some(b) = sch::pack(&s.sch) else { continue };
+                    (b.to_vec(), s.start_sample, s.samples)
+                }
+                Hit::Block(b) => (b.bytes.to_vec(), b.start_sample, b.samples),
+            };
             self.accepted += 1;
             // The samples first: taking the frame empties the ring, and what
             // belongs on the row is the burst rather than the quarter second
             // of channel it arrived in.
-            let iq = self.meter.iq_at(hit.start_sample, hit.samples);
-            let mut frame = self.meter.frame(bytes.to_vec()).at(self.channel_hz as u64);
+            let iq = self.meter.iq_at(start, len);
+            let mut frame = self.meter.frame(bytes).at(self.channel_hz as u64);
             if iq.is_some() {
                 frame.iq = iq;
             }
@@ -151,12 +162,30 @@ impl Simple for GsmNode {
     }
 }
 
-/// The row a synchronisation burst becomes.
+/// The row a burst or a block becomes.
 ///
-/// Takes the bytes off the bus rather than a parsed burst, for the same
-/// reason the AIS one does: what travelled is the information field, and a
-/// consumer reads it for itself.
+/// Takes the bytes off the bus rather than a parsed message, for the same
+/// reason the AIS one does: what travelled is the field the cell
+/// transmitted, and a consumer reads it for itself. Which of the two kinds
+/// this is comes from the length, because that is what the front end put on
+/// the bus: four bytes is the synchronisation field, 23 is a control channel
+/// block.
 pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    match bytes.len() {
+        4 => sync_decoded(bytes, center),
+        gsm::bcch::BLOCK_BYTES => block_decoded(bytes, center),
+        _ => None,
+    }
+}
+
+/// The channel number, where the frequency names one.
+fn arfcn_field(center: common::Hz, fields: &mut Vec<(String, common::Value)>) -> Option<u16> {
+    let n = gsm::arfcn(center.as_f64())?;
+    fields.push(("arfcn".into(), common::Value::Int(i64::from(n))));
+    Some(n)
+}
+
+fn sync_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
     let sch = sch::unpack(bytes)?;
     let mut fields: Vec<(String, Value)> = vec![
@@ -165,10 +194,7 @@ pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ("bcc".into(), Value::Int(i64::from(sch.bcc))),
         ("frame".into(), Value::Int(i64::from(sch.frame_number))),
     ];
-    let arfcn = gsm::arfcn(center.as_f64());
-    if let Some(n) = arfcn {
-        fields.push(("arfcn".into(), Value::Int(i64::from(n))));
-    }
+    let arfcn = arfcn_field(center, &mut fields);
 
     // The cell, as it is written down: the colour code as two octal digits,
     // which is how a base station is configured and how a survey names it.
@@ -188,6 +214,53 @@ pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // Viterbi decoder's best guess at noise.
             .with_crc(Some(true)),
     )
+}
+
+fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    let msg = decode::gsm::parse(bytes)?;
+    let mut fields: Vec<(String, Value)> = vec![
+        ("message".into(), Value::Text(msg.name.into())),
+        ("message_type".into(), Value::Int(i64::from(msg.type_id))),
+    ];
+    let arfcn = arfcn_field(center, &mut fields);
+    if let Some(id) = msg.cell_id {
+        fields.push(("cell_id".into(), Value::Int(i64::from(id))));
+    }
+    if let Some(lai) = msg.lai {
+        fields.push(("mcc".into(), Value::Int(i64::from(lai.mcc))));
+        fields.push(("mnc".into(), Value::Int(i64::from(lai.mnc))));
+        fields.push(("lac".into(), Value::Int(i64::from(lai.lac))));
+        fields.push(("plmn".into(), Value::Text(lai.to_string())));
+    }
+
+    // A cell that names itself is a party worth tracking across sightings;
+    // one that does not is still a message from whatever carrier this is.
+    let mut detail = msg.name.to_string();
+    let mut party = None;
+    if let Some(lai) = msg.lai {
+        detail.push_str(&format!(" {lai} LAC {}", lai.lac));
+        if let Some(id) = msg.cell_id {
+            detail.push_str(&format!(" CI {id}"));
+            party = Some(format!("{lai}-{}-{id}", lai.lac));
+        }
+    }
+    if party.is_none() {
+        party = arfcn.map(|n| format!("ARFCN {n}"));
+    }
+
+    let protocol = if msg.name.starts_with("SI") { "GSM-SI" } else { "GSM-CCCH" };
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation("GMSK")
+        // Forty bits of Fire code held over the block before it left the
+        // demodulator.
+        .with_crc(Some(true));
+    if let Some(p) = party {
+        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(p)));
+    }
+    Some(d)
 }
 
 #[cfg(test)]
@@ -277,6 +350,30 @@ mod tests {
 
         let d = gsm_decoded(&f.bytes, Hz(f.center_hz)).expect("a row");
         assert_eq!(d.detail.as_deref(), Some("ARFCN 62 BSIC 26 frame 11965"));
+    }
+
+    /// The block a cell broadcasts becomes a row naming the operator, the
+    /// location area and the cell.
+    #[test]
+    fn a_broadcast_block_becomes_a_row_naming_the_operator() {
+        use common::Value;
+        let mut block = [0x2Bu8; 23];
+        block[..8].copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10]);
+        let d = gsm_decoded(&block, Hz(947_400_000)).expect("a row");
+        assert_eq!(d.protocol, "GSM-SI");
+        assert_eq!(d.crc_ok, Some(true));
+        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("message"), Some(Value::Text("SI3".into())));
+        assert_eq!(get("cell_id"), Some(Value::Int(0x1234)));
+        assert_eq!(get("plmn"), Some(Value::Text("262-01".into())));
+        assert_eq!(d.detail.as_deref(), Some("SI3 262-01 LAC 11051 CI 4660"));
+    }
+
+    /// A filler frame is not a row. A cell with nothing to say fills its
+    /// blocks with 0x2B, and every one of those passes the Fire code.
+    #[test]
+    fn padding_is_not_a_row() {
+        assert!(gsm_decoded(&[0x2Bu8; 23], Hz(947_400_000)).is_none());
     }
 
     /// A frequency correction burst and, one TDMA frame later, the

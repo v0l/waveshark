@@ -28,6 +28,8 @@
 //! no outer code; without the parity holding there is nothing separating a
 //! cell identity from a Viterbi decoder's best guess at noise.
 
+use super::coding::{self, crc, viterbi};
+
 /// Information bits in an SCH burst: BSIC and the reduced frame number.
 pub const INFO_BITS: usize = 25;
 
@@ -45,6 +47,11 @@ const PARITY_POLY: u16 = 0x175;
 /// carry a valid check: GSM 05.03 asks for a remainder of every bit set
 /// rather than of zero.
 const PARITY_INVERT: u16 = 0x3FF;
+
+/// The parity over the information bits, before the inversion.
+fn parity(bits: &[u8]) -> u16 {
+    crc(bits, u64::from(PARITY_POLY), PARITY_BITS as u32) as u16
+}
 
 /// What a decoded synchronisation burst says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,30 +85,6 @@ impl Sch {
     }
 }
 
-/// CRC over `bits`, most significant bit first, with the register starting at
-/// zero. The caller applies the inversion the standard asks for.
-fn parity(bits: &[u8]) -> u16 {
-    let mut reg = 0u16;
-    for &b in bits {
-        let feedback = (reg >> 9 & 1) ^ u16::from(b & 1);
-        reg = (reg << 1) & PARITY_INVERT;
-        if feedback == 1 {
-            reg ^= PARITY_POLY;
-        }
-    }
-    reg
-}
-
-/// The convolutional code's two outputs for an input bit and the four before
-/// it: G0 = 1 + D^3 + D^4 and G1 = 1 + D + D^3 + D^4.
-///
-/// `sr` holds those four with the most recent in bit 0.
-fn outputs(u: u8, sr: u8) -> (u8, u8) {
-    let g0 = u ^ (sr >> 2 & 1) ^ (sr >> 3 & 1);
-    let g1 = g0 ^ (sr & 1);
-    (g0, g1)
-}
-
 /// Build the 78 coded bits a burst carries for a given cell and frame number.
 ///
 /// The inverse of [`decode`], and here for the reason every decoder in this
@@ -117,13 +100,7 @@ pub fn encode(sch: &Sch) -> Option<[u8; CODED_BITS]> {
     }
 
     let mut out = [0u8; CODED_BITS];
-    let mut sr = 0u8;
-    for (k, &u) in d.iter().enumerate() {
-        let (g0, g1) = outputs(u, sr);
-        out[2 * k] = g0;
-        out[2 * k + 1] = g1;
-        sr = (sr << 1 | u) & 0xF;
-    }
+    coding::conv_encode(&d, &mut out);
     Some(out)
 }
 
@@ -137,14 +114,12 @@ pub fn decode(soft: &[f32]) -> Option<Sch> {
     if soft.len() < CODED_BITS {
         return None;
     }
-    let bits = viterbi(&soft[..CODED_BITS]);
+    let bits = viterbi(&soft[..CODED_BITS], INFO_BITS + PARITY_BITS + 4);
 
     // The four tail bits flushed the register, so anything after the parity
     // is the encoder emptying itself and carries nothing.
     let want = parity(&bits[..INFO_BITS]) ^ PARITY_INVERT;
-    let got = bits[INFO_BITS..INFO_BITS + PARITY_BITS]
-        .iter()
-        .fold(0u16, |v, &b| v << 1 | u16::from(b));
+    let got = coding::bits_to_u64(&bits[INFO_BITS..INFO_BITS + PARITY_BITS]) as u16;
     if got != want {
         return None;
     }
@@ -194,53 +169,6 @@ fn from_info(bits: &[u8]) -> Option<Sch> {
     Some(Sch { ncc, bcc, frame_number })
 }
 
-/// Soft decision Viterbi over the 39 step trellis, returning the input bits.
-///
-/// The encoder ends with four zero tail bits, so the path is known to finish
-/// in state zero and the traceback starts there rather than at whichever
-/// state happens to have the best metric.
-fn viterbi(soft: &[f32]) -> [u8; INFO_BITS + PARITY_BITS + 4] {
-    const STATES: usize = 16;
-    const STEPS: usize = INFO_BITS + PARITY_BITS + 4;
-
-    let mut metric = [f32::NEG_INFINITY; STATES];
-    metric[0] = 0.0;
-    let mut next = [f32::NEG_INFINITY; STATES];
-    let mut decisions = [0u16; STEPS];
-
-    for (k, step) in decisions.iter_mut().enumerate() {
-        let (s0, s1) = (soft[2 * k], soft[2 * k + 1]);
-        next.fill(f32::NEG_INFINITY);
-        let mut choice = 0u16;
-        for t in 0..STATES {
-            let u = (t & 1) as u8;
-            for from in [t >> 1, (t >> 1) | 8] {
-                if metric[from] == f32::NEG_INFINITY {
-                    continue;
-                }
-                let (g0, g1) = outputs(u, from as u8);
-                let m = metric[from]
-                    + if g0 == 1 { s0 } else { -s0 }
-                    + if g1 == 1 { s1 } else { -s1 };
-                if m > next[t] {
-                    next[t] = m;
-                    choice = choice & !(1 << t) | u16::from(from >= 8) << t;
-                }
-            }
-        }
-        *step = choice;
-        metric.copy_from_slice(&next);
-    }
-
-    let mut bits = [0u8; STEPS];
-    let mut state = 0usize;
-    for k in (0..STEPS).rev() {
-        bits[k] = (state & 1) as u8;
-        state = state >> 1 | usize::from(decisions[k] >> state & 1) << 3;
-    }
-    bits
-}
-
 /// The information field as bytes, which is what travels on the packet bus.
 ///
 /// Four bytes holding the 25 bits the burst carried, left aligned and in the
@@ -265,15 +193,10 @@ pub fn unpack(bytes: &[u8]) -> Option<Sch> {
     from_info(&bits)
 }
 
-/// Turn hard bits into the soft bits [`decode`] wants, for a caller that has
-/// only decisions to offer.
-pub fn soften(bits: &[u8]) -> Vec<f32> {
-    bits.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gsm::coding::soften;
 
     fn sch(ncc: u8, bcc: u8, frame_number: u32) -> Sch {
         Sch { ncc, bcc, frame_number }
