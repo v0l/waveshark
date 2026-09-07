@@ -3328,7 +3328,7 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
 
         let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SCH").collect();
-        assert_eq!(cells.len(), 1, "expected one cell, got {out:?}");
+        assert_eq!(cells.len(), 2, "expected both bursts, got {out:?}");
         let r = cells[0];
         assert_eq!(r.crc, Some(true), "the parity is what makes a burst a burst");
         assert!(r.detail.contains("ARFCN 62"), "read as {}", r.detail);
@@ -3353,23 +3353,30 @@ pub(crate) mod tests {
         let sps = 8;
         let work = gsm::SYMBOL_RATE * sps as f64;
         let lead = 200.0;
-        let total = ((lead * 2.0 + 6.0 * gsm::FRAME_SYMBOLS) * sps as f64) as usize;
+        let total = ((lead * 2.0 + 13.0 * gsm::FRAME_SYMBOLS) * sps as f64) as usize;
         let mut base = vec![common::C32::new(0.0, 0.0); total];
         let mut place = |at: f64, wave: &[common::C32]| {
             let at = (at * sps as f64) as usize;
             base[at..at + wave.len()].copy_from_slice(wave);
         };
-        place(lead, &gsm::modulate(&[0u8; gsm::BURST_BITS], sps));
-        place(
-            lead + gsm::FRAME_SYMBOLS,
-            &gsm::modulate(&gsm::sch_burst_bits(sch).unwrap(), sps),
-        );
-        // A system information type 3: the cell identity and the location
-        // area, which is what a receiver is here for.
+        // Two beacons ten frames apart, which is what the control multiframe
+        // holds and what the receiver needs: a synchronisation burst is
+        // reported only once a second one agrees with it about the time.
+        for n in 0..2u32 {
+            let at = lead + 10.0 * f64::from(n) * gsm::FRAME_SYMBOLS;
+            let this = gsm::Sch { frame_number: sch.frame_number + 10 * n, ..*sch };
+            place(at, &gsm::modulate(&[0u8; gsm::BURST_BITS], sps));
+            place(
+                at + gsm::FRAME_SYMBOLS,
+                &gsm::modulate(&gsm::sch_burst_bits(&this).unwrap(), sps),
+            );
+        }
+        // A system information type 3 on the broadcast channel, in the four
+        // frames after the first synchronisation burst: the cell identity
+        // and the location area, which is what a receiver is here for.
         let mut block = [0x2Bu8; 23];
-        block[..10].copy_from_slice(&[
-            0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10, 0x00, 0x64,
-        ]);
+        block[..10]
+            .copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10, 0x00, 0x64]);
         for (n, data) in gsm::bcch::encode(&block).unwrap().iter().enumerate() {
             let bits = gsm::normal_burst_bits(data, usize::from(sch.bcc));
             place(lead + (2.0 + n as f64) * gsm::FRAME_SYMBOLS, &gsm::modulate(&bits, sps));
@@ -3384,6 +3391,8 @@ pub(crate) mod tests {
             seed ^= seed << 5;
             (seed as f32 / u32::MAX as f32) - 0.5
         };
+        // A little noise, so the floor the level is measured against is a
+        // floor rather than a divide by zero.
         (0..n)
             .map(|i| base[(i as f64 * ratio) as usize] + common::C32::new(rand(), rand()) * 0.05)
             .collect()

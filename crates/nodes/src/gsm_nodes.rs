@@ -122,15 +122,11 @@ impl Simple for GsmNode {
                 Hit::Block(b) => (b.bytes.to_vec(), b.start_sample, b.samples),
             };
             self.accepted += 1;
-            // The samples first: taking the frame empties the ring, and what
-            // belongs on the row is the burst rather than the quarter second
-            // of channel it arrived in.
-            let iq = self.meter.iq_at(start, len);
-            let mut frame = self.meter.frame(bytes).at(self.channel_hz as u64);
-            if iq.is_some() {
-                frame.iq = iq;
-            }
-            out.push(frame);
+            // The burst's own samples rather than the quarter second of
+            // channel it arrived in, and without emptying the ring: a
+            // synchronisation burst and the block it announced can both come
+            // out of one block of samples.
+            out.push(self.meter.frame_at(bytes, start, len).at(self.channel_hz as u64));
         }
         Ok(())
     }
@@ -340,7 +336,7 @@ mod tests {
             }
         }
 
-        assert_eq!(frames.len(), 1, "expected one burst off the air");
+        assert_eq!(frames.len(), 2, "expected both bursts off the air");
         let f = &frames[0];
         // Every packet carries what it was heard at, measured on the channel
         // rather than on the span.
@@ -376,20 +372,29 @@ mod tests {
         assert!(gsm_decoded(&[0x2Bu8; 23], Hz(947_400_000)).is_none());
     }
 
-    /// A frequency correction burst and, one TDMA frame later, the
-    /// synchronisation burst for `sch`, in a span of noise.
+    /// Two beacons ten frames apart, which is what the control multiframe
+    /// holds: a frequency correction burst and the synchronisation burst one
+    /// frame after it, twice. Two rather than one because a synchronisation
+    /// burst is reported only once a second agrees with it about the time.
     fn beacon(sch: &Sch, rate: f64) -> Vec<C32> {
         let sps = 8;
         let work = gsm::SYMBOL_RATE * sps as f64;
         let lead = 200.0;
-        let fcch = gsm::modulate(&[0u8; gsm::BURST_BITS], sps);
-        let sync = gsm::modulate(&gsm::sch_burst_bits(sch).unwrap(), sps);
-        let total =
-            ((lead * 2.0 + gsm::FRAME_SYMBOLS + gsm::BURST_SYMBOLS) * sps as f64) as usize;
+        let total = ((lead * 2.0 + 12.0 * gsm::FRAME_SYMBOLS) * sps as f64) as usize;
         let mut base = vec![C32::new(0.0, 0.0); total];
-        base[(lead * sps as f64) as usize..][..fcch.len()].copy_from_slice(&fcch);
-        let at = ((lead + gsm::FRAME_SYMBOLS) * sps as f64) as usize;
-        base[at..][..sync.len()].copy_from_slice(&sync);
+        let mut place = |at: f64, wave: &[C32]| {
+            let at = (at * sps as f64) as usize;
+            base[at..at + wave.len()].copy_from_slice(wave);
+        };
+        for n in 0..2u32 {
+            let at = lead + 10.0 * f64::from(n) * gsm::FRAME_SYMBOLS;
+            let this = Sch { frame_number: sch.frame_number + 10 * n, ..*sch };
+            place(at, &gsm::modulate(&[0u8; gsm::BURST_BITS], sps));
+            place(
+                at + gsm::FRAME_SYMBOLS,
+                &gsm::modulate(&gsm::sch_burst_bits(&this).unwrap(), sps),
+            );
+        }
 
         let ratio = work / rate;
         let n = (base.len() as f64 / ratio) as usize - 1;
