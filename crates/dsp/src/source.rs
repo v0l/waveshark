@@ -1432,9 +1432,32 @@ impl SourceDetector {
             .filter(|(si, s)| assigned[*si].is_none() && off_centre(s.occ_lo, s.occ_hi))
             .map(|(_, s)| s.peak_db)
             .fold(dominant, f32::max);
+        // How much of the span is lit at once. A band with things
+        // transmitting on it has a few channels above the threshold; a band
+        // under a transmission far wider than anything here reads has most
+        // of it, and the spikes of that transmission's own spectrum are not
+        // sources. Measured in hertz rather than as a fraction of the span,
+        // because what it separates is "wider than anything readable" from
+        // "several readable channels", and both of those are widths: as a
+        // fraction, a 500 kHz LoRa channel fills a fifth of a 2.4 MS/s span
+        // and would read as a blanket.
+        let close_r = 10f32.powf(self.cfg.close_db / 10.0);
+        let lit_hz =
+            (self.bin_lo..=self.bin_hi).filter(|i| bins.ratio(*i) >= close_r).count() as f64
+                * self.bin_hz();
+        let blanket = lit_hz > BLANKET_HZ;
         let born = self.tracks.len();
         for (si, s) in self.segs.iter().enumerate() {
             if assigned[si].is_some() || s.peak_db < self.cfg.open_db {
+                continue;
+            }
+            // Under a blanket only something well clear of it is a
+            // transmitter worth following. Wi-Fi on 2.4 GHz lit four fifths
+            // of a 16 MHz span and its spikes stood 15 to 20 dB over the
+            // floor, which opened a new source every 40 ms, most of them a
+            // few tens of kilohertz wide, on frequencies nothing was
+            // transmitting on.
+            if blanket && s.peak_db < self.cfg.open_db + BLANKET_CLEAR_DB {
                 continue;
             }
             if s.occ_hi + 1 - s.occ_lo < self.cfg.min_bins {
@@ -1668,6 +1691,19 @@ impl SourceDetector {
     }
 
 }
+
+/// Spectrum lit at once beyond which a frame is taken to be under one wide
+/// transmission rather than to hold many narrow ones.
+///
+/// Wi-Fi is 20 MHz and nothing here reads anything over about half a
+/// megahertz, so a span with megahertz of it above the threshold is a span
+/// with something on it that cannot be read, whatever its spectrum's spikes
+/// look like.
+const BLANKET_HZ: f64 = 4_000_000.0;
+
+/// How far over the opening threshold a run must stand to be believed while
+/// the band is blanketed.
+const BLANKET_CLEAR_DB: f32 = 15.0;
 
 /// Frames over which a source's movement is measured before it is reopened.
 /// Four milliseconds at the default resolution: a chirp at the highest
@@ -2890,6 +2926,54 @@ mod tests {
         assert!(s.lo_hz < f0 && s.hi_hz > f1, "extent {}..{} misses a tone", s.lo_hz, s.hi_hz);
         let mid = (f0 + f1) / 2.0;
         assert!((s.center_hz - mid).abs() < 4.0 * d.bin_hz(), "centre {} for tones at {f0} and {f1}", s.center_hz);
+    }
+
+    #[test]
+    fn a_blanketed_band_does_not_sprout_narrow_sources() {
+        // Sixteen megasamples of 2.4 GHz with Wi-Fi on it: the whole span
+        // above the threshold, and a spectrum full of spikes 15 to 20 dB
+        // over the floor. Every one of those spikes used to be born as a
+        // candidate and most opened, so the band filled with narrow channels
+        // nothing was transmitting on. Only a run well clear of the blanket
+        // is a transmitter now.
+        const WIDE_RATE: f64 = 16_000_000.0;
+        let mut d = SourceDetector::new(WIDE_RATE, WIDE_RATE, cfg());
+        let mut x = noise(4_000_000, 0.02, 71);
+        // A 16 MHz blanket with a ragged top, as an OFDM burst's spectrum
+        // has, plus one narrow transmitter well above it.
+        let mut seed = 99u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for i in 500_000..3_500_000usize {
+            let n = C32::new(rnd() - 0.5, rnd() - 0.5);
+            x[i] += n * 0.35;
+        }
+        let mut ph = 0.0f64;
+        for i in 0..3_000_000usize {
+            ph += std::f64::consts::TAU * 3_000_000.0 / WIDE_RATE;
+            x[500_000 + i] += C32::new(0.9 * ph.cos() as f32, 0.9 * ph.sin() as f32);
+        }
+        let opened: Vec<Source> = x
+            .chunks(65_536)
+            .flat_map(|c| {
+                d.process(c)
+                    .iter()
+                    .filter_map(|e| match e {
+                        SourceEvent::Opened(s) => Some(*s),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(opened.len() <= 3, "{} sources under a blanket: {opened:?}", opened.len());
+        assert!(
+            opened.iter().any(|s| (s.center_hz - 3_000_000.0).abs() < 200_000.0),
+            "the one transmitter above it was missed: {opened:?}"
+        );
     }
 
     #[test]
