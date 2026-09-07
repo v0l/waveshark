@@ -92,18 +92,21 @@ impl Layer for StationLayer {
     }
 }
 
-/// Where one device was heard from, and how well.
+/// Where one device was heard from, and how well, and where that puts it.
 ///
 /// Every point is a place the *receiver* stood when it heard the device, so
 /// what is drawn is a trail along a road with a level at each point, not a
-/// pin on the transmitter. The brightest point is the closest approach, which
-/// is as near as a single receiver can honestly get to saying where something
-/// is; two receivers or a drive around the block is what it would take to say
-/// more, and neither is drawn as though it had happened.
+/// pin on the transmitter. The brightest point is the closest approach,
+/// which is where to start walking. Where the levels along the drive can
+/// say more, `survey::locate` says where the transmitter probably is, and
+/// that is drawn as a mark inside the region the levels fit about as well:
+/// a drive along one road gives a region that reaches across the road,
+/// because levels carry no bearing and cannot say which side.
 pub(super) struct SightingLayer<'a> {
     pub trail: &'a [survey::Sighting],
     /// The device the trail belongs to, for the status line.
     pub ident: Option<&'a str>,
+    pub estimate: Option<survey::Estimate>,
 }
 
 impl Layer for SightingLayer<'_> {
@@ -134,9 +137,15 @@ impl Layer for SightingLayer<'_> {
         for (at, rssi) in &points {
             // A sighting with no level still happened, and is drawn at the
             // dimmest end rather than dropped.
-            let strength = rssi.map(|r| ((r - lo) / span).clamp(0.0, 1.0)).unwrap_or(0.0);
+            let strength = rssi
+                .map(|r| ((r - lo) / span).clamp(0.0, 1.0))
+                .unwrap_or(0.0);
             let alpha = 0.25 + 0.75 * strength;
-            c.p.circle_filled(*at, 2.0 + 3.0 * strength, theme::TRACE.gamma_multiply(alpha));
+            c.p.circle_filled(
+                *at,
+                2.0 + 3.0 * strength,
+                theme::TRACE.gamma_multiply(alpha),
+            );
         }
         // The strongest point marked, because that is the one a person is
         // looking for: it is where to start walking.
@@ -144,12 +153,32 @@ impl Layer for SightingLayer<'_> {
             .iter()
             .zip(self.trail.iter())
             .filter(|(_, s)| s.rssi_dbfs.is_some())
-            .max_by(|a, b| {
-                a.1.rssi_dbfs.unwrap().total_cmp(&b.1.rssi_dbfs.unwrap())
-            })
+            .max_by(|a, b| a.1.rssi_dbfs.unwrap().total_cmp(&b.1.rssi_dbfs.unwrap()))
             .map(|(p, _)| p)
         {
             c.p.circle_stroke(*at, 8.0, Stroke::new(1.5, theme::TRACE));
+        }
+        // Where the levels put it: the region first, then the point, drawn
+        // in the readout colour rather than the trail's so a conclusion is
+        // not mistaken for a measurement.
+        if let Some(est) = &self.estimate {
+            let at = c.at(est.lat, est.lon);
+            let r = (est.radius_m / 1852.0 * c.nm_px_at(est.lat)) as f32;
+            c.p.circle_filled(at, r.max(4.0), theme::READOUT.gamma_multiply(0.10));
+            c.p.circle_stroke(
+                at,
+                r.max(4.0),
+                Stroke::new(1.0, theme::READOUT.gamma_multiply(0.6)),
+            );
+            let arm = 7.0;
+            c.p.line_segment(
+                [at - Vec2::new(arm, 0.0), at + Vec2::new(arm, 0.0)],
+                Stroke::new(1.5, theme::READOUT),
+            );
+            c.p.line_segment(
+                [at - Vec2::new(0.0, arm), at + Vec2::new(0.0, arm)],
+                Stroke::new(1.5, theme::READOUT),
+            );
         }
     }
 
@@ -158,10 +187,25 @@ impl Layer for SightingLayer<'_> {
         if n == 0 {
             return None;
         }
-        Some(match self.ident {
+        let mut s = match self.ident {
             Some(id) => format!("{id}: {n} sightings"),
             None => format!("{n} sightings"),
-        })
+        };
+        match &self.estimate {
+            Some(e) => s.push_str(&format!(
+                ", likely within {} of {:.5}, {:.5} (fit {:.1} dB)",
+                if e.radius_m >= 1000.0 {
+                    format!("{:.1} km", e.radius_m / 1000.0)
+                } else {
+                    format!("{:.0} m", e.radius_m)
+                },
+                e.lat,
+                e.lon,
+                e.residual_db
+            )),
+            None => s.push_str(", too few places to locate it from"),
+        }
+        Some(s)
     }
 }
 
@@ -223,7 +267,9 @@ impl Layer for TrackLayer<'_> {
 
     fn draw(&mut self, c: &Canvas) {
         for a in self.active {
-            let Some((lat, lon)) = a.position else { continue };
+            let Some((lat, lon)) = a.position else {
+                continue;
+            };
             // Faded by age against its own kind's memory: a minute of silence
             // means an aircraft is gone and means nothing at all for a vessel,
             // so fading both on the same clock would grey out half the
@@ -260,15 +306,21 @@ impl Layer for TrackLayer<'_> {
                 c.p.circle_stroke(at, 3.5, Stroke::new(1.0, col.gamma_multiply(0.7)));
             }
             let label = a.label.clone().unwrap_or_else(|| a.id.text());
-            c.label(Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
+            c.label(
+                Pos2::new(at.x + 9.0, at.y - 5.0),
+                &label,
+                theme::VALUE,
+                fade,
+            );
             // The second line is whatever that kind is measured by: an
             // aircraft by its altitude, a vessel by its speed. A station is
             // fixed and has neither.
             let under = match a.kind() {
                 crate::tracks::Kind::Aircraft => a.altitude_ft().map(|ft| format!("{ft} ft")),
-                crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => {
-                    a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
-                }
+                crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => a
+                    .speed_kt
+                    .filter(|v| *v > 0.0)
+                    .map(|kt| format!("{kt:.0} kt")),
                 crate::tracks::Kind::Station => None,
             };
             if let Some(t) = under {
@@ -510,7 +562,12 @@ fn track_mark(
     let rot = |x: f32, y: f32| Pos2::new(at.x + x * c + y * s, at.y + x * s - y * c);
     let shape = match kind {
         Kind::Aircraft => {
-            vec![rot(0.0, 6.0), rot(-4.0, -4.0), rot(0.0, -1.5), rot(4.0, -4.0)]
+            vec![
+                rot(0.0, 6.0),
+                rot(-4.0, -4.0),
+                rot(0.0, -1.5),
+                rot(4.0, -4.0),
+            ]
         }
         // Longer and narrower, with a squared stern: a hull rather than a
         // wing.
@@ -522,11 +579,16 @@ fn track_mark(
             rot(2.5, 2.0),
         ],
         // Short and blunt, which is neither of the other two at a glance.
-        _ => vec![rot(0.0, 4.5), rot(-3.0, 1.0), rot(-3.0, -3.0), rot(3.0, -3.0), rot(3.0, 1.0)],
+        _ => vec![
+            rot(0.0, 4.5),
+            rot(-3.0, 1.0),
+            rot(-3.0, -3.0),
+            rot(3.0, -3.0),
+            rot(3.0, 1.0),
+        ],
     };
     p.add(egui::Shape::convex_polygon(shape, col, Stroke::NONE));
 }
-
 
 /// Where each line of the airport card sits, and how big the card has to be
 /// to hold them all.
@@ -547,11 +609,7 @@ struct CardLayout {
 /// row was painted below a card measured without it. Measuring and drawing
 /// from one list is what stops that, and it can be checked without a font.
 fn card_layout(head: &[Vec2], rows: &[Vec2], pad: f32, sep: f32, rule_gap: f32) -> CardLayout {
-    let text_w = head
-        .iter()
-        .chain(rows)
-        .map(|s| s.x)
-        .fold(0.0f32, f32::max);
+    let text_w = head.iter().chain(rows).map(|s| s.x).fold(0.0f32, f32::max);
     let mut ys = Vec::with_capacity(head.len() + rows.len());
     let mut y = pad;
     for (i, s) in head.iter().enumerate() {

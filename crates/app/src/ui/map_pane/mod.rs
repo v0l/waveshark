@@ -26,6 +26,8 @@ pub(super) struct MapState {
 pub(super) struct Trail<'a> {
     pub points: &'a [survey::Sighting],
     pub ident: Option<&'a str>,
+    /// Where the sightings put the device, when they can say.
+    pub estimate: Option<survey::Estimate>,
 }
 
 /// The map, over where it is looking and what is on it.
@@ -82,8 +84,11 @@ impl Map<'_> {
                 let mut airports = AirportLayer::default();
                 let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now };
-                let mut sightings =
-                    SightingLayer { trail: self.trail.points, ident: self.trail.ident };
+                let mut sightings = SightingLayer {
+                    trail: self.trail.points,
+                    ident: self.trail.ident,
+                    estimate: self.trail.estimate,
+                };
                 let mut layers: [&mut dyn Layer; 5] =
                     [&mut rings, &mut airports, &mut station, &mut sightings, &mut tracks];
 
