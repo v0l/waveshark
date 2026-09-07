@@ -1336,7 +1336,11 @@ impl App {
 
     /// Draw the data links directory, and the link being followed.
     fn links_view(&mut self, ui: &mut egui::Ui) {
-        match (links_pane::LinksView { st: &mut self.links }).show(ui) {
+        // The packet list is where a followed link's packets come from, so
+        // the two views cannot disagree about a packet they have both seen.
+        let packets: Vec<crate::radio::DecodeRecord> =
+            self.log.decodes.iter().map(|l| l.rec.clone()).collect();
+        match (links_pane::LinksView { st: &mut self.links, packets: &packets }).show(ui) {
             Some(links_pane::Action::Clear) => self.links.list = crate::links::Links::new(),
             Some(links_pane::Action::LoadLog) => self.load_links_from_log(),
             None => {}
