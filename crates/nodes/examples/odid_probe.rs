@@ -38,7 +38,8 @@ fn main() {
     for chunk in iq.chunks(1 << 20) {
         det.process(chunk, &mut frames);
     }
-    eprintln!("{} packets passed CRC", frames.len());
+    let coded = frames.iter().filter(|f| f.coding.is_some()).count();
+    eprintln!("{} packets passed CRC, {coded} of them Bluetooth 5 Long Range", frames.len());
 
     let mut drones = 0usize;
     let mut keep: Vec<(u64, u64)> = Vec::new();
@@ -54,6 +55,12 @@ fn main() {
             .flatten()
             .collect();
         if msgs.is_empty() {
+            if f.coding.is_some() {
+                println!(
+                    "  LR pdu {}",
+                    f.pdu.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+            }
             continue;
         }
         drones += 1;
@@ -71,8 +78,13 @@ fn main() {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(" ");
+        let phy = match f.coding {
+            Some(dsp::ble_coded::Coding::S8) => " LR/S8",
+            Some(dsp::ble_coded::Coding::S2) => " LR/S2",
+            None => "",
+        };
         println!(
-            "ch{} {:.0} dBFS {} {}",
+            "ch{}{phy} {:.0} dBFS {} {}",
             f.channel, f.rssi_dbfs, adv.address, fields
         );
     }

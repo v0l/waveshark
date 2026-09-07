@@ -9,6 +9,7 @@ pub mod agc;
 pub mod ais;
 pub mod ask;
 pub mod ble;
+pub mod ble_coded;
 pub mod blend;
 pub mod c4fm;
 pub mod channelizer;

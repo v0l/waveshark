@@ -191,10 +191,19 @@ pub struct BleConfig {
     /// Shortest burst worth reading, in microseconds. The shortest legal
     /// advertising packet is 80 us of air time.
     pub min_burst_us: u32,
-    /// Longest burst held before it is read and dropped, in microseconds. A
-    /// packet is at most 376 us; anything longer is a carrier or a collision,
-    /// and what is inside it is still searched for an access address.
+    /// Longest burst held before it is read and dropped, in microseconds. An
+    /// uncoded packet is at most 376 us and a long range one carrying an Open
+    /// Drone ID message pack about 2.9 ms, since eight symbols there carry
+    /// one bit; anything longer is a carrier or a collision, and what is
+    /// inside it is still searched for an access address.
     pub max_burst_us: u32,
+    /// Whether to look for Bluetooth 5 Long Range packets in a burst that
+    /// held no uncoded one.
+    ///
+    /// On by default because the packets that matter most on this receiver
+    /// (an aircraft's Open Drone ID) are required to be sent this way, and
+    /// the search costs nothing on a burst with no coded preamble in it.
+    pub coded: bool,
 }
 
 impl Default for BleConfig {
@@ -204,7 +213,8 @@ impl Default for BleConfig {
             noise_threshold_ratio: 3.0,
             tau_us: 20.0,
             min_burst_us: 60,
-            max_burst_us: 2_000,
+            max_burst_us: 4_000,
+            coded: true,
         }
     }
 }
@@ -214,6 +224,10 @@ impl Default for BleConfig {
 pub struct BleFrame {
     /// Advertising channel index, 37, 38 or 39.
     pub channel: u8,
+    /// The coding it arrived under, or `None` for an ordinary uncoded
+    /// packet. A long range packet is the same PDU carried eight times as
+    /// slowly, so everything above this reads it the same way.
+    pub coding: Option<crate::ble_coded::Coding>,
     /// Header and payload, dewhitened, without the CRC.
     pub pdu: Vec<u8>,
     /// Where the burst started in the stream fed to the detector, counted in
@@ -333,7 +347,7 @@ impl ChannelRx {
         let burst = std::mem::take(&mut self.burst);
         let min_body = (cfg.min_burst_us as f64 * self.rate / 1e6) as usize;
         if burst.len().saturating_sub(self.body_start) >= min_body {
-            self.read(&burst, out);
+            self.read(&burst, cfg, out);
         }
         self.burst = burst;
         self.burst.clear();
@@ -341,7 +355,7 @@ impl ChannelRx {
 
     /// Discriminate, take the frequency offset out, and read whatever
     /// advertising packets are inside.
-    fn read(&mut self, burst: &[C32], out: &mut Vec<BleFrame>) {
+    fn read(&mut self, burst: &[C32], cfg: &BleConfig, out: &mut Vec<BleFrame>) {
         self.freq.clear();
         let mut prev = burst[0];
         for &s in &burst[1..] {
@@ -399,6 +413,7 @@ impl ChannelRx {
                 if let Some(pdu) = self.frame_at(found + 40) {
                     out.push(BleFrame {
                         channel: self.channel,
+                        coding: None,
                         pdu,
                         start_sample: self.burst_start * self.factor as u64,
                         freq_off_hz,
@@ -410,6 +425,44 @@ impl ChannelRx {
                     // are the same packet read half a symbol late.
                     return;
                 }
+            }
+        }
+
+        if !cfg.coded {
+            return;
+        }
+        // Nothing uncoded in this burst. A Bluetooth 5 Long Range packet is
+        // the same modulation at the same symbol rate, so the symbols are
+        // already here; what differs is that eight of them carry one bit.
+        // The uncoded search cannot find it because its access address is
+        // convolutionally coded, which is why this is a second pass rather
+        // than another sync word.
+        for phase in 0..offsets {
+            let mut syms: Vec<f32> = Vec::with_capacity(self.freq.len() / self.sps as usize);
+            let mut k = 0usize;
+            loop {
+                let at = phase as f64 + k as f64 * self.sps;
+                let i = at.round() as usize;
+                if i >= self.freq.len() {
+                    break;
+                }
+                syms.push(self.freq[i]);
+                k += 1;
+            }
+            if syms.len() < 80 + 300 {
+                continue;
+            }
+            if let Some(f) = crate::ble_coded::decode(&syms, self.channel) {
+                out.push(BleFrame {
+                    channel: self.channel,
+                    coding: Some(f.coding),
+                    pdu: f.pdu,
+                    start_sample: self.burst_start * self.factor as u64,
+                    freq_off_hz,
+                    rssi_dbfs,
+                    snr_db,
+                });
+                return;
             }
         }
     }
@@ -600,6 +653,43 @@ mod tests {
         assert_eq!(got.len(), 1, "expected one frame, got {}", got.len());
         assert_eq!(got[0].channel, 38);
         assert_eq!(got[0].pdu, pdu, "the PDU came back changed");
+    }
+
+    /// A long range packet through the whole path: the same modulation, the
+    /// same channel, eight symbols to the bit. The uncoded search cannot see
+    /// it because even the access address is coded, so this is what proves
+    /// the second pass runs.
+    #[test]
+    fn a_long_range_advertisement_comes_back_out_of_the_detector() {
+        let pdu = {
+            let mut p = vec![0x07, 0x00, 0x0a, 0x11];
+            p.extend_from_slice(&[0x4d, 0x72, 0xef, 0xcb, 0x70, 0x6c]);
+            p.extend_from_slice(&[17, 200, 0x40]);
+            p[1] = (p.len() - 2) as u8;
+            p
+        };
+        let bits = crate::ble_coded::encode_packet(38, &pdu, crate::ble_coded::Coding::S8);
+        let iq = modulate(&bits, 2_426_000_000.0, CENTER, 0.0);
+        let got = run(&iq, CENTER);
+        assert_eq!(got.len(), 1, "expected one frame, got {}", got.len());
+        assert_eq!(got[0].coding, Some(crate::ble_coded::Coding::S8));
+        assert_eq!(got[0].pdu, pdu, "the PDU came back changed");
+    }
+
+    /// And a receiver told not to look does not find one, which is what makes
+    /// the second pass a setting rather than a cost everybody pays.
+    #[test]
+    fn the_long_range_pass_can_be_turned_off() {
+        let pdu = vec![0x07, 0x08, 0x00, 0x00, 1, 2, 3, 4, 5, 6];
+        let bits = crate::ble_coded::encode_packet(38, &pdu, crate::ble_coded::Coding::S2);
+        let iq = modulate(&bits, 2_426_000_000.0, CENTER, 0.0);
+        let cfg = BleConfig { coded: false, ..Default::default() };
+        let mut det = BleDetector::new(RATE, CENTER, cfg);
+        let mut out = Vec::new();
+        det.process(&noise(20_000, 0.01), &mut out);
+        det.process(&iq, &mut out);
+        det.process(&noise(20_000, 0.01), &mut out);
+        assert!(out.is_empty());
     }
 
     /// The whitening carries the channel index, so a packet sent on 38 and
