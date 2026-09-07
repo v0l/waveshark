@@ -11,6 +11,12 @@ use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Ui, V
 
 /// Digits shown, from 1 GHz down to 1 Hz. Ten of them, because the tuner
 /// reaches 1766 MHz and nine would cap the dial at 999.999999 MHz.
+///
+/// The dial does not decide where the radio can go: it clamps at zero and
+/// nothing else, and what the tuner can reach is applied where the retune is
+/// sent, from the ranges the device itself reports. A ceiling here was 3 GHz
+/// for everybody, which a HackRF (6 GHz) and a LimeSDR (3.8 GHz) both have
+/// spectrum above.
 const DECADES: [i32; 10] = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 /// Where a gap is drawn, keyed by the decade to its right.
 const GROUP_AFTER: [i32; 2] = [6, 3];
@@ -142,7 +148,7 @@ impl Dial {
         if let Some(dec) = hot {
             let n = self.wheel.notches(ui);
             if n != 0 {
-                out = (hz + 10f64.powi(dec) * n as f64).clamp(0.0, 3e9);
+                out = (hz + 10f64.powi(dec) * n as f64).max(0.0);
                 changed = true;
             }
             if response.secondary_clicked() {
@@ -252,7 +258,7 @@ impl Dial {
         if let Some(dec) = hot {
             let n = self.wheel.notches(ui);
             if n != 0 {
-                out = (hz + 10f64.powi(dec) * n as f64).clamp(0.0, 3e9);
+                out = (hz + 10f64.powi(dec) * n as f64).max(0.0);
                 changed = true;
             }
             if response.secondary_clicked() {
@@ -326,8 +332,18 @@ mod tests {
     #[test]
     fn tuning_cannot_go_negative() {
         let hz: f64 = 5.0;
-        let out = (hz - 10f64.powi(6)).clamp(0.0, 3e9);
+        let out = (hz - 10f64.powi(6)).max(0.0);
         assert_eq!(out, 0.0);
+    }
+
+    /// And nothing else is capped here. The dial used to stop at 3 GHz
+    /// whatever was plugged in, so a HackRF could not be turned to 5.8 GHz
+    /// and a LimeSDR not to 3.5, though both tune there and the band plan
+    /// draws the allocations.
+    #[test]
+    fn the_dial_does_not_decide_where_the_tuner_reaches() {
+        let out = (5_800_000_000.0f64 + 10f64.powi(9)).max(0.0);
+        assert_eq!(out, 6_800_000_000.0);
     }
 
     #[test]
