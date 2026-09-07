@@ -534,6 +534,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     ];
 
     let mut fix: Option<common::Position> = None;
+    let mut media = pipeline::event::media::BYTES;
     let mut report = common::ReportDetail::Bare;
     let mesh = r.meshtastic();
     if let Some(m) = &mesh {
@@ -570,6 +571,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         match &d.message {
             meshtastic::Message::Text(t) => {
                 fields.push(("text".into(), Value::Text(t.clone())));
+                media = pipeline::event::media::TEXT;
             }
             meshtastic::Message::Position(p) => {
                 report = common::ReportDetail::Mesh {
@@ -714,6 +716,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("sender".into(), Value::Text(s.to_string())));
             }
             fields.push(("text".into(), Value::Text(body.to_string())));
+            media = pipeline::event::media::TEXT;
         }
     }
 
@@ -899,6 +902,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     d.link = link.or(core_link);
     d.position = fix;
     d.report = report;
+    d.media_type = media;
     // A mesh node is a device: Meshtastic names itself in every header, and
     // MeshCore in its advert, which is the packet a survey wants.
     d.identity = mesh

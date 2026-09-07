@@ -129,7 +129,16 @@ impl DecodeRecord {
     ///
     /// An empty string is not a message: a link setup frame with an empty
     /// metadata field is a voice transmission, not somebody writing nothing.
+    /// Only a decode that says it carries text. GSM names its blocks in a
+    /// field called `message` (`SI3`, `Paging1`) and Open Drone ID does the
+    /// same, so reading the field alone filled this view with a network
+    /// talking to handsets and a drone naming its own message types. What
+    /// belongs here is somebody writing to somebody, and the decoder that
+    /// read it is the thing that knows: it says so with `media::TEXT`.
     pub fn to_message(&self, at: Instant) -> Option<Message> {
+        if self.media_type != pipeline::event::media::TEXT {
+            return None;
+        }
         let body =
             text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
         Some(Message {
@@ -171,10 +180,20 @@ fn text(rec: &DecodeRecord, keys: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A decode that says it carries text, which is what this view reads.
     fn rec(model: &str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(freq, model);
         r.channel_hz = 12_500.0;
+        r.media_type = pipeline::event::media::TEXT;
         r.fields = fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        r
+    }
+
+    /// And one that does not: a decode whose fields happen to include a
+    /// `message` or a `text` but which is not somebody writing.
+    fn not_text(model: &str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+        let mut r = rec(model, freq, fields);
+        r.media_type = pipeline::event::media::BYTES;
         r
     }
 
@@ -310,5 +329,28 @@ mod tests {
         m.update(&to("15835885"), t(1));
         assert_eq!(m.recent().len(), 2);
     }
+    /// A network naming its own blocks is not a conversation. GSM calls its
+    /// field `message` and puts `SI3` or `Paging1` in it, and Open Drone ID
+    /// does the same with its message types, so this view filled with a
+    /// tower talking to handsets. What decides is what the decoder says it
+    /// carries, not what its fields are called.
+    #[test]
+    fn a_protocol_naming_its_own_blocks_is_not_a_message() {
+        let mut m = Messages::default();
+        assert!(!m.update(
+            &not_text("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
+            t(0)
+        ));
+        assert!(!m.update(
+            &not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
+            t(0)
+        ));
+        assert!(!m.update(
+            &not_text("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
+            t(0)
+        ));
+        assert!(m.recent().is_empty(), "{:?}", m.recent());
+    }
+
 }
 

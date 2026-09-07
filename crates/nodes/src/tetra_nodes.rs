@@ -1226,15 +1226,20 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(" ");
-    Some(
-        Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation("pi/4-DQPSK")
-            // Every block behind an event passed the CRC the standard puts
-            // on it; a burst that failed never became a block.
-            .with_crc(Some(true)),
-    )
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation("pi/4-DQPSK")
+        // Every block behind an event passed the CRC the standard puts
+        // on it; a burst that failed never became a block.
+        .with_crc(Some(true));
+    // Short data is somebody writing to somebody, which is what puts it in
+    // the message view. Said here rather than left to a reader to guess from
+    // a field called `text`.
+    if protocol == "TETRA-SDS" {
+        d = d.with_media(pipeline::event::media::TEXT);
+    }
+    Some(d)
 }
 
 #[cfg(test)]

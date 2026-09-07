@@ -1329,7 +1329,6 @@ impl App {
     fn message_view(&mut self, ui: &mut egui::Ui) {
         let act = messages_pane::Msgs { st: &mut self.messages }.show(ui);
         match act {
-            Some(messages_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(messages_pane::Action::Clear) => self.messages.list.clear(),
             None => {}
         }
@@ -1338,7 +1337,6 @@ impl App {
     /// Draw the data links directory, and the link being followed.
     fn links_view(&mut self, ui: &mut egui::Ui) {
         match (links_pane::LinksView { st: &mut self.links }).show(ui) {
-            Some(links_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(links_pane::Action::Clear) => self.links.list = crate::links::Links::new(),
             Some(links_pane::Action::LoadLog) => self.load_links_from_log(),
             None => {}
@@ -1374,7 +1372,6 @@ impl App {
                     _ => Vec::new(),
                 };
             }
-            Some(devices_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(devices_pane::Action::Export) => self.export_survey(),
             None => {}
         }

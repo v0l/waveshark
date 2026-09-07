@@ -80,6 +80,12 @@ claims what it can render.
   sends every page twice and TETRA retransmits until it is acknowledged.
   `crates/app/src/messages.rs`.
 
+  What reaches it is what a decoder says is text, `media::TEXT`, and not
+  whatever has a field called `message`. GSM names its own blocks in one
+  (`SI3`, `Paging1`) and Open Drone ID names its message types the same way,
+  so reading the field alone filled this view with a network talking to
+  handsets. A message is somebody writing to somebody.
+
   The reading itself is `DecodeRecord::to_message`, so anything holding a
   record can ask it for a message rather than repeating the field names:
   the packet log as it appends, a feed, or a view added later. It borrows and
@@ -150,6 +156,12 @@ claims what it can render.
   feature. `crates/app/src/ui/keys_pane.rs`.
 
 All of them are views by this definition. None knows anything about a protocol.
+
+A row in the messages, devices or links view does not tune the receiver.
+They are records of what has been heard, and a click that retuned took the
+receiver off the band it was surveying or the channel somebody was
+listening to, which is the opposite of what any of them is for. The calls
+view is the exception and keeps it: picking a call is asking to hear it.
 
 ## Where retention and identity live
 
