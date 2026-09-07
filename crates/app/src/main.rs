@@ -60,6 +60,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         // this can be run over ssh.
         muted: true,
         squelch_db: None,
+        voice: false,
         agc: true,
             tx: None,
     }]));
@@ -123,6 +124,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             volume: 1.0,
             muted: true,
             squelch_db: None,
+            voice: false,
             agc: true,
             tx: None,
         }]));

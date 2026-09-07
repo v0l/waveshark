@@ -314,6 +314,25 @@ codewords the message text can be read back out of.
 | TETRA | 380-400, 410-430 MHz | pi/4-DQPSK 36 kbps | 25 kHz | partial | mod | Control channels read off the air: `dsp::tetra` demodulates by differential detection, resynchronising timing and carrier on every burst's training sequence, then runs the downlink coding stack (scrambling, interleaving, RCPC Viterbi, CRC, and the (30,14) block code of the access assign field), and `decode::tetra` reads the PDUs. A carrier is logged as who it is (SYNC and SYSINFO: MCC, MNC, colour code, location area, main carrier) and what it knows (D-NWRK-BROADCAST: the neighbouring cells by carrier and location area). Signalling to a party is read from the MAC header even when enciphered: the address, the encryption mode, any usage marker and channel allocation. In clear, the CMCE call control PDUs (D-SETUP, D-CONNECT, D-TX GRANTED, D-RELEASE and the rest) give the parties, the call identifier and group or private, and D-SDS-DATA gives text. The access assign field of every slot is followed for traffic, so a call becomes a start row and an end row with its airtime, by usage marker and by the party the marker was given to. Verified against a recorded Irish downlink for everything but the clear-mode PDUs, which that network encrypts; those are tested on synthetic bits. Traffic is read as well: `dsp::tetra::speech` recovers the two STEC frames a slot carries, `decode::voice` deciphers them, and `decode::vocoder` is a reimplementation of the ETSI EN 300 395-2 fixed-point speech decoder, in progress. Under the `tea` feature the slot keystream is `decode::tea` (TEA1 and TEA2), so an enciphered network's traffic decrypts with a key entered in the keys pane; without one, TEA1's 32-bit fold is brute forced by `decode::recover` on the CPU or `decode::gpu` on a GPU, and TA61 identities are recovered by `decode::ta61`, so the parties can still be named. A stock build has none of that. Not read: anything on a network whose key is unknown and unrecoverable |
 | FM with CTCSS/DCS | any | FM plus subaudible tone | 12.5 kHz | table | mod | Trivial next to the rest: a Goertzel on the discriminator output |
 
+An analogue channel says nothing about itself, so the strip has a `voice`
+switch per channel and that is what turns one into a front end. Switched on,
+`nodes::VoiceChannelNode` ends an over where the squelch does, puts the whole
+transmission on the packet bus with its audio, and the call appears in the
+call list beside the digital ones. It takes two wires, the channel's IF and
+its audio, because what was said is in the audio and how strong it was is only
+in the IF: a level read off a demodulator's output is a level of the
+demodulator.
+
+What was said is read by `crates/stt`, a local Whisper model through candle,
+as `nodes::TranscribeNode` on the far side of the protocol decoder. It is
+behind the `stt` feature and needs a model directory
+(`~/.local/share/waveshark/models/whisper*`); without one the stage is in the
+graph and switched off. Any front end that carries speech is transcribed, not
+just analogue channels, so an M17 or DMR call gets the same treatment. The
+text arrives as a `transcript` field on the decode, with the model's own mean
+log probability beside it, and a call whose text the model does not believe
+keeps the audio and shows no words.
+
 What turns an identifier into a name is `crates/datasets`, which fetches and
 caches the DMR and NXDN registries, the repeater and reflector lists, the
 airports with their air traffic frequencies, and the Artemis signal database.

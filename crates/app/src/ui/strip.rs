@@ -67,6 +67,23 @@ impl Strip<'_> {
                 });
             });
         }
+        // What the channel carries, which the mode cannot say: the same NFM
+        // channel holds a repeater, a telemetry link and a paging tone. Told
+        // that it is speech, the channel puts each over on the packet bus
+        // with its audio, so it appears in the call list, is recorded, and is
+        // transcribed where a model is installed.
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("voice").show(ui);
+            let label = if ch.voice { "ON" } else { "OFF" };
+            if ui
+                .selectable_label(ch.voice, label)
+                .on_hover_text("List what is heard here as calls, with what was said")
+                .clicked()
+            {
+                ch.voice = !ch.voice;
+                changed = true;
+            }
+        });
         if let Some(default) = demod.default_squelch_db() {
             let (lo, hi, ratio) = demod.squelch_range();
             let mut db = ch.squelch_db.unwrap_or(default);
