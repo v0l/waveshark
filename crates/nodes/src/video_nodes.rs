@@ -108,6 +108,7 @@ impl VideoNode {
     pub fn locked(&self) -> bool {
         self.sep.is_some() && self.lock.is_some()
     }
+
 }
 
 impl Simple for VideoNode {

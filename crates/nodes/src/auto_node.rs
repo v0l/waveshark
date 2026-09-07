@@ -84,6 +84,11 @@ struct Member {
     /// must have somewhere to publish to without the auto node knowing which
     /// front end it was.
     video: Vec<Out>,
+    /// The band this front end owns, closed to the detector, when it owns
+    /// one. A span-wide front end owns the channel the standard put it on
+    /// from the moment the span reaches it; the video front end owns the
+    /// whole span, but only while it is reading a picture off it.
+    band: Option<(f64, f64)>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -174,6 +179,7 @@ impl Member {
             packets,
             voice,
             video,
+            band: None,
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
@@ -430,19 +436,6 @@ impl Member {
 }
 
 /// Every output of a graph carrying a given kind.
-/// Whether the video front end is reading a picture off this span.
-fn watching_video(wide: &[Member]) -> bool {
-    wide.iter().filter(|m| m.name == "video").any(|m| {
-        m.graph
-            .order()
-            .find(|(_, n)| *n == "video")
-            .and_then(|(id, _)| m.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<crate::video_nodes::VideoNode>())
-            .is_some_and(|v| v.locked())
-    })
-}
-
 fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
     // Every port, not only the first. A front end that carries speech
     // alongside its packets puts it on a second output, and a scan that
@@ -521,7 +514,6 @@ pub struct AutoNode {
     /// Decoders that watch the whole span, and the bands they own, in
     /// absolute hertz, where no source is opened.
     wide: Vec<Member>,
-    exclude: Vec<(f64, f64)>,
     /// The burst front end at a nominal rate, for the view and the
     /// parameters before any source has opened.
     template: Option<Graph>,
@@ -569,7 +561,6 @@ impl AutoNode {
             narrowband: Vec::new(),
             slots: Vec::new(),
             wide: Vec::new(),
-            exclude: Vec::new(),
             template: None,
             events: Vec::new(),
             blocks: Vec::new(),
@@ -600,8 +591,7 @@ impl AutoNode {
         let mut out: Vec<(&'static str, f64, f64)> = self
             .wide
             .iter()
-            .zip(self.exclude.iter())
-            .map(|(m, (lo, hi))| (m.name, (lo + hi) / 2.0, hi - lo))
+            .filter_map(|m| m.band.map(|(lo, hi)| (m.name, (lo + hi) / 2.0, hi - lo)))
             .collect();
         out.extend(self.remembered());
         out
@@ -659,7 +649,7 @@ impl AutoNode {
     /// on it.
     fn apply_locked(&mut self) {
         let c = self.center.as_f64();
-        let mut ranges: Vec<(f64, f64)> = self.exclude.clone();
+        let mut ranges: Vec<(f64, f64)> = self.wide.iter().filter_map(|m| m.band).collect();
         ranges.extend(
             self.sticky
                 .iter()
@@ -802,6 +792,47 @@ impl AutoNode {
         }
     }
 
+    /// Give the span to the video front end while it is reading a picture,
+    /// and take it back when the picture stops.
+    ///
+    /// A camera owns its channel the way every other front end owns one, and
+    /// its channel is the span: FM composite video at 5.8 GHz occupies the
+    /// best part of twenty megahertz. What a detector finds inside that is
+    /// pieces of the picture, and opening each as a source costs an
+    /// extraction and a set of front ends that report sensors nobody
+    /// transmitted. It is claimed on the lock rather than at build time,
+    /// because claiming it beforehand would turn the band off for everything
+    /// else on the chance that a camera turns up.
+    ///
+    /// Returns whether the span is the camera's, which is also when there is
+    /// nothing left for the detector to do.
+    fn claim_span_for_video(&mut self) -> bool {
+        let span = (
+            self.center.as_f64() - self.input_bw / 2.0,
+            self.center.as_f64() + self.input_bw / 2.0,
+        );
+        let mut changed = false;
+        let mut claimed = false;
+        for m in self.wide.iter_mut().filter(|m| m.name == "video") {
+            let locked = m
+                .graph
+                .order()
+                .find(|(_, n)| *n == "video")
+                .and_then(|(id, _)| m.graph.node(id))
+                .and_then(|n| n.as_any())
+                .and_then(|a| a.downcast_ref::<crate::video_nodes::VideoNode>())
+                .is_some_and(|v| v.locked());
+            let want = locked.then_some(span);
+            changed |= m.band != want;
+            m.band = want;
+            claimed |= locked;
+        }
+        if changed {
+            self.apply_locked();
+        }
+        claimed
+    }
+
     fn inner_video(&self, out: &mut Vec<common::VideoFrame>) {
         for m in &self.wide {
             for t in &m.video {
@@ -845,28 +876,22 @@ impl AutoNode {
         spec.bandwidth = self.input_bw;
         let c = self.center.as_f64();
         let half = self.input_bw / 2.0;
-        // Kept in step: every span-wide front end pushes the band it owns
-        // onto `exclude` as it is built, and `locked_channels` reads them as
-        // pairs.
+        // Each span-wide front end carries the band it owns, which is closed
+        // to the detector for as long as it owns it.
         self.wide.clear();
-        self.exclude.clear();
         let covers = |lo: f64, hi: f64| c - half <= lo && hi <= c + half;
         let modes = (1_089_000_000.0, 1_091_000_000.0);
         if self.rate >= 2_000_000.0 && covers(modes.0, modes.1) {
-            self.wide.push(Member::build(
-                "mode_s",
-                spec,
-                NodeSpec::new("mode_s"),
-                &self.reg,
-            )?);
-            self.exclude.push(modes);
+            let mut m = Member::build("mode_s", spec, NodeSpec::new("mode_s"), &self.reg)?;
+            m.band = Some(modes);
+            self.wide.push(m);
         }
         let w = crate::ais_nodes::CHANNEL_WIDTH_HZ;
         let ais = (dsp::ais::CHANNEL_HZ[0] - w, dsp::ais::CHANNEL_HZ[1] + w);
         if covers(ais.0, ais.1) {
-            self.wide
-                .push(Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?);
-            self.exclude.push(ais);
+            let mut m = Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?;
+            m.band = Some(ais);
+            self.wide.push(m);
         }
         // Bluetooth advertising, on whichever of the three channels the span
         // holds. Span-wide for the reason AIS is: the channel is where the
@@ -889,6 +914,11 @@ impl AutoNode {
         // Mode S are placed by their bands: a 20 MS/s span at 2.4 GHz is
         // ordinarily Wi-Fi and Bluetooth, and demodulating all of it as FM to
         // find out otherwise is a cost with no return.
+        //
+        // Unlike the others it owns its band only once it has a picture: a
+        // camera's carrier is the whole span, and claiming that before there
+        // is one would turn the band off for everything else on the chance a
+        // camera turns up.
         let video_band = decode::video_channels::channels()
             .iter()
             .any(|ch| covers(ch.hz as f64 - 9e6, ch.hz as f64 + 9e6));
@@ -903,9 +933,9 @@ impl AutoNode {
         let bw = crate::ble_nodes::CHANNEL_WIDTH_HZ / 2.0;
         for (_, hz) in dsp::ble::ADV_CHANNELS {
             if self.rate >= 4_000_000.0 && covers(hz - bw, hz + bw) {
-                self.wide
-                    .push(Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?);
-                self.exclude.push((hz - bw, hz + bw));
+                let mut m = Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?;
+                m.band = Some((hz - bw, hz + bw));
+                self.wide.push(m);
                 break;
             }
         }
@@ -1249,9 +1279,9 @@ impl Node for AutoNode {
     ) -> Result<()> {
         self.hits.clear();
         let iq = inputs[0].as_iq().unwrap_or(&[]);
-        let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
+        if self.detector.is_none() || self.extractor.is_none() {
             return Ok(());
-        };
+        }
         let at_us = now_us();
         let rate = c.inputs[0].spec.rate.max(1.0);
         let out = outputs[OUT_PACKETS].packets_mut();
@@ -1261,7 +1291,6 @@ impl Node for AutoNode {
         let mut events: Vec<Event> = Vec::new();
         self.events.clear();
         let c0 = self.center.as_f64();
-        let exclude = &self.exclude;
         let spur = self.spur_band;
         let block_s = c.block_seconds;
         // While a camera is locked, the span is that camera and there is
@@ -1272,7 +1301,11 @@ impl Node for AutoNode {
         // ends together ran at nearly four times real time on them, which is
         // a receiver that cannot keep up rather than one that reads more. The
         // picture going away puts all of it back.
-        let watching = watching_video(&self.wide);
+        let watching = self.claim_span_for_video();
+        let excluded: Vec<(f64, f64)> = self.wide.iter().filter_map(|m| m.band).collect();
+        let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
+            return Ok(());
+        };
         let t_detect = Instant::now();
         let raw: Vec<SourceEvent> = if watching {
             d.idle(iq.len());
@@ -1303,7 +1336,7 @@ impl Node for AutoNode {
                 return true;
             };
             let hz = c0 + s.center_hz;
-            if exclude.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz)) {
+            if excluded.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz)) {
                 return false;
             }
             if covered(hz, s.bandwidth_hz()) {
@@ -1972,4 +2005,35 @@ mod tests {
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
+    /// A camera owns the span while it is reading a picture, and gives it
+    /// back when the picture stops. Before this the detector opened the
+    /// pieces of the carrier as sources and every front end ran on each of
+    /// them, which cost more than the camera did.
+    #[test]
+    fn a_locked_camera_owns_the_span_and_lets_it_go_again() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(5865))]).unwrap();
+        assert!(
+            n.locked_channels().iter().all(|(name, ..)| *name != "video"),
+            "the span was claimed before there was a picture"
+        );
+        // The front end says it has one; the node claims the span for it.
+        for m in n.wide.iter_mut().filter(|m| m.name == "video") {
+            m.band = Some((5_855_000_000.0, 5_875_000_000.0));
+        }
+        let owned = n.locked_channels();
+        let (_, hz, w) = owned
+            .iter()
+            .find(|(name, ..)| *name == "video")
+            .expect("the camera owns nothing");
+        assert!((hz - 5_865_000_000.0).abs() < 1.0, "{hz}");
+        assert!((w - 20e6).abs() < 1.0, "{w}");
+        // And it is given back, since the claim follows the lock rather than
+        // being made once at build time.
+        for m in n.wide.iter_mut().filter(|m| m.name == "video") {
+            m.band = None;
+        }
+        assert!(n.locked_channels().iter().all(|(name, ..)| *name != "video"));
+    }
+
 }

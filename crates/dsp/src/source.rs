@@ -234,16 +234,6 @@ pub struct SourceConfig {
     pub bank_min_channels: usize,
 }
 
-/// Widest carrier opened when the stream is fast enough to hold a picture.
-/// The AKK transmitter measured here occupied 4.6 MHz; this leaves room for a
-/// wider one without approaching half a 20 MS/s span.
-const VIDEO_WIDTH_HZ: f64 = 8e6;
-
-/// And the rate at which that becomes possible: PAL luma reaches 5 MHz with
-/// colour at 4.43, so a slower stream cannot be carrying a picture whatever
-/// the run measures.
-const VIDEO_RATE_HZ: f64 = 12e6;
-
 impl Default for SourceConfig {
     fn default() -> Self {
         Self {
@@ -1305,24 +1295,6 @@ impl SourceDetector {
 
     /// Match this frame's runs to the sources being followed, open the
     /// candidates that have lasted, and close the sources that have not.
-    /// The widest run this stream could be carrying something readable in.
-    ///
-    /// `max_width_hz` is set for the narrowband world, where nothing read
-    /// here is wider than a 500 kHz LoRa channel and a run wider than that is
-    /// a saturated converter lighting the span. Analogue video breaks that:
-    /// an FM camera carrier is megahertz wide, and under the narrow cap it
-    /// never opened as one source, so the runs inside it opened separately
-    /// and a 5.8 GHz camera arrived as a packet log full of sensors that were
-    /// not there. A stream too slow to hold a picture keeps the narrow cap,
-    /// since nothing else needs the room.
-    fn max_width_hz(&self) -> f64 {
-        if self.rate >= VIDEO_RATE_HZ {
-            self.cfg.max_width_hz.max(VIDEO_WIDTH_HZ)
-        } else {
-            self.cfg.max_width_hz
-        }
-    }
-
     fn track(&mut self, bins: &Bins) {
         let guard = self.cfg.guard_bins;
         let n = self.n;
@@ -1610,7 +1582,7 @@ impl SourceDetector {
         let hang = self.hang_frames;
         let regrow = self.cfg.regrow;
         let integrate = self.cfg.integrate_frames.max(1);
-        let max_width = self.max_width_hz();
+        let max_width = self.cfg.max_width_hz;
         let max_open = self.cfg.max_open.max(1);
         let mut open_count = self.tracks.iter().filter(|t| t.open).count();
         let open_now = &mut open_count;
