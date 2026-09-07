@@ -24,7 +24,93 @@
 //!   thirty seconds and is still there ten minutes later. A limit that says
 //!   how far a thing can have moved is right for both, and the number is not.
 
-use decode::{adsb, ais, aprs, ax25};
+use decode::adsb;
+
+/// Which track a decode's identity names.
+///
+/// The identity spaces are the decoders' own, so this is the one place that
+/// maps them onto the tracker's ids. A space the map does not draw returns
+/// `None`, which is most of them: a meter and a pager are devices, not
+/// things on a map.
+fn track_id(who: &common::Identity) -> Option<TrackId> {
+    match who.space.as_str() {
+        "ais" => who.id.parse().ok().map(TrackId::Mmsi),
+        "aprs" => Some(TrackId::Call(who.id.clone())),
+        "meshtastic" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Mesh),
+        "meshcore" => {
+            let mut key = [0u8; 32];
+            if who.id.len() != 64 {
+                return None;
+            }
+            for (k, b) in key.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&who.id[k * 2..k * 2 + 2], 16).ok()?;
+            }
+            Some(TrackId::MeshCore(key))
+        }
+        _ => None,
+    }
+}
+
+/// Keep what a new report does not say.
+///
+/// A vessel's position report carries no ship type and its static report no
+/// heading, so the two have to merge rather than replace.
+fn merge_detail(into: &mut Detail, from: Detail) {
+    match (into, from) {
+        (
+            Detail::Vessel { heading_deg, nav_status, ship_type, destination, class_b },
+            Detail::Vessel {
+                heading_deg: h,
+                nav_status: n,
+                ship_type: st,
+                destination: dst,
+                class_b: c,
+            },
+        ) => {
+            *heading_deg = h.or(*heading_deg);
+            *nav_status = n.or(*nav_status);
+            *ship_type = st.or(*ship_type);
+            if dst.is_some() {
+                *destination = dst;
+            }
+            *class_b = c || *class_b;
+        }
+        (
+            Detail::Mesh {
+                long_name,
+                short_name,
+                battery_pct,
+                precision_bits,
+                temperature_c,
+                humidity_pct,
+                pressure_hpa,
+                ..
+            },
+            Detail::Mesh {
+                long_name: l,
+                short_name: sh,
+                battery_pct: b,
+                precision_bits: pb,
+                temperature_c: t,
+                humidity_pct: h,
+                pressure_hpa: pr,
+                ..
+            },
+        ) => {
+            *long_name = l.or(long_name.take());
+            *short_name = sh.or(short_name.take());
+            *battery_pct = b.or(*battery_pct);
+            *precision_bits = pb.or(*precision_bits);
+            *temperature_c = t.or(*temperature_c);
+            *humidity_pct = h.or(*humidity_pct);
+            *pressure_hpa = pr.or(*pressure_hpa);
+        }
+        (into @ Detail::Station { .. }, from @ Detail::Station { .. }) => *into = from,
+        (into @ Detail::Aprs { .. }, from @ Detail::Aprs { .. }) => *into = from,
+        (into @ Detail::MeshCore { .. }, from @ Detail::MeshCore { .. }) => *into = from,
+        _ => {}
+    }
+}
 
 /// Points kept per track. At a point every few seconds this is the last
 /// several minutes, which is a long enough line to read a turn from.
@@ -433,131 +519,125 @@ impl Tracks {
     /// Much shorter than the ADS-B path, and that is the point: an AIS
     /// position is absolute, so there is nothing to pair, nothing to resolve
     /// against a reference, and no way for it to be a zone out.
-    pub fn update_ais(&mut self, f: &ais::Frame, at: std::time::Instant) {
-        let id = TrackId::Mmsi(f.mmsi);
-        let detail = match &f.kind {
-            ais::Message::BaseStation { .. } => Detail::Station { aid: false },
-            ais::Message::AidToNavigation { .. } => Detail::Station { aid: true },
-            _ => Detail::Vessel {
-                heading_deg: None,
-                nav_status: None,
-                ship_type: None,
-                destination: None,
-                class_b: false,
-            },
-        };
-        let i = self.entry(id, detail, at);
-        let e = &mut self.seen[i];
-        e.track.messages += 1;
-        e.track.last = at;
-
-        match &f.kind {
-            ais::Message::Position(p) => {
-                e.track.speed_kt = p.sog_kt.or(e.track.speed_kt);
-                e.track.course_deg = p.cog_deg.or(e.track.course_deg);
-                if let Detail::Vessel { heading_deg, nav_status, class_b, .. } =
-                    &mut e.track.detail
-                {
-                    *heading_deg = p.heading_deg.or(*heading_deg);
-                    *nav_status = p.nav_status.map(ais::nav_status_name).or(*nav_status);
-                    *class_b = p.class_b;
-                }
-                if let Some(pos) = p.position {
-                    // Always confirmed: the frame check sequence passed and
-                    // the coordinates are absolute, so there is no reading of
-                    // this that could be a zone out.
-                    e.track.set_position(pos, at, true);
-                }
-            }
-            ais::Message::Static(s) => {
-                if s.name.is_some() {
-                    e.track.label = s.name.clone();
-                }
-                if let Detail::Vessel { ship_type, destination, .. } = &mut e.track.detail {
-                    *ship_type = s.ship_type.map(ais::ship_type_name).or(*ship_type);
-                    if s.destination.is_some() {
-                        *destination = s.destination.clone();
-                    }
-                }
-            }
-            ais::Message::BaseStation { position, .. } => {
-                if let Some(pos) = *position {
-                    e.track.set_position(pos, at, true);
-                }
-            }
-            ais::Message::AidToNavigation { name, position, .. } => {
-                if name.is_some() {
-                    e.track.label = name.clone();
-                }
-                if let Some(pos) = *position {
-                    e.track.set_position(pos, at, true);
-                }
-            }
-            // Counted, because a message from a station is evidence it is
-            // there even when this decoder cannot read it.
-            ais::Message::Unsupported { .. } => {}
-        }
-    }
-
-    /// Fold in one APRS frame.
+    /// Fold in what a decode said, whatever protocol said it.
     ///
-    /// Shorter than either of the others, because AX.25 carries the identity
-    /// in the frame header and APRS carries an absolute position in the
-    /// payload. There is nothing to pair and nothing to resolve. What it does
-    /// have that the others do not is a station saying in a symbol what sort
-    /// of thing it is, which is what decides how the map draws it.
-    pub fn update_aprs(&mut self, frame: &ax25::Frame, at: std::time::Instant) {
-        let id = TrackId::Call(frame.source.to_string());
-        // The destination is not only an address: Mic-E hides half its
-        // latitude in there, so the payload cannot be read without it.
-        let report = frame
-            .is_ui()
-            .then(|| aprs::parse(&frame.info, &frame.destination.call))
-            .flatten();
-
-        let detail = match &report {
-            Some(aprs::Report::Position { position, comment }) => Detail::Aprs {
-                symbol_table: position.symbol_table,
-                symbol_code: position.symbol_code,
-                altitude_ft: position.altitude_ft,
-                comment: comment.clone(),
-                fixed: aprs_is_fixed(position.symbol_code),
+    /// The tracker used to parse AIS, APRS and the two meshes for itself off
+    /// the raw bytes, which meant the map and the packet list could disagree
+    /// about the same frame. Now the protocols run once, on the bus, and this
+    /// reads their conclusions: an identity says which track, a position says
+    /// where it is, and the position's detail says what sort of thing it is.
+    ///
+    /// ADS-B is the exception and still has its own path below: it sends half
+    /// a position per frame, so what the tracker needs from it is the compact
+    /// position halves and the pairing state, not a place.
+    pub fn update_decoded(&mut self, d: &common::Decoded, at: std::time::Instant) -> bool {
+        let Some(who) = &d.identity else { return false };
+        let Some(id) = track_id(who) else { return false };
+        let detail = match &d.report {
+            common::ReportDetail::Vessel {
+                heading_deg,
+                nav_status,
+                ship_type,
+                destination,
+                class_b,
+            } => Detail::Vessel {
+                heading_deg: *heading_deg,
+                nav_status: *nav_status,
+                ship_type: *ship_type,
+                destination: destination.clone(),
+                class_b: *class_b,
             },
-            _ => Detail::Aprs {
-                symbol_table: '/',
-                symbol_code: '.',
+            common::ReportDetail::Station { aid } => Detail::Station { aid: *aid },
+            common::ReportDetail::Aprs { symbol_table, symbol_code, comment } => Detail::Aprs {
+                symbol_table: *symbol_table,
+                symbol_code: *symbol_code,
                 altitude_ft: None,
-                comment: None,
-                fixed: false,
+                comment: comment.clone(),
+                fixed: aprs_is_fixed(*symbol_code),
             },
+            common::ReportDetail::MeshCore { role, fixed } => {
+                Detail::MeshCore { role, fixed: *fixed }
+            }
+            common::ReportDetail::Mesh {
+                long_name,
+                short_name,
+                battery_pct,
+                precision_bits,
+                temperature_c,
+                humidity_pct,
+                pressure_hpa,
+            } => Detail::Mesh {
+                long_name: long_name.clone(),
+                short_name: short_name.clone(),
+                altitude_m: None,
+                battery_pct: *battery_pct,
+                precision_bits: *precision_bits,
+                temperature_c: *temperature_c,
+                humidity_pct: *humidity_pct,
+                pressure_hpa: *pressure_hpa,
+            },
+            common::ReportDetail::Bare => match id {
+                TrackId::Mesh(_) => Detail::Mesh {
+                    long_name: None,
+                    short_name: None,
+                    altitude_m: None,
+                    battery_pct: None,
+                    precision_bits: None,
+                    temperature_c: None,
+                    humidity_pct: None,
+                    pressure_hpa: None,
+                },
+                TrackId::Mmsi(_) => Detail::Vessel {
+                    heading_deg: None,
+                    nav_status: None,
+                    ship_type: None,
+                    destination: None,
+                    class_b: false,
+                },
+                // A place and nothing else, from something the map knows
+                // how to draw only because of what named it.
+                TrackId::Call(_) => Detail::Aprs {
+                    symbol_table: '/',
+                    symbol_code: '>',
+                    altitude_ft: None,
+                    comment: None,
+                    fixed: false,
+                },
+                _ => return false,
+            },
+            common::ReportDetail::Aircraft { .. } => return false,
         };
-        let i = self.entry(id, detail, at);
+        let i = self.entry(id, detail.clone(), at);
         let e = &mut self.seen[i];
         e.track.messages += 1;
         e.track.last = at;
-        // A callsign is a name, unlike an ICAO address, so a station has one
-        // from its first frame rather than waiting for an identification.
-        if e.track.label.is_none() {
-            e.track.label = Some(frame.source.to_string());
+        if let Some(name) = &who.name {
+            if !name.is_empty() {
+                e.track.label = Some(name.clone());
+            }
         }
-
-        // A status or a message is evidence the station is there and carries
-        // no position to move it to, so only a position report does anything
-        // beyond the message count above.
-        if let Some(aprs::Report::Position { position, comment }) = report {
-                e.track.speed_kt = position.speed_kt.or(e.track.speed_kt);
-                e.track.course_deg = position.course_deg.or(e.track.course_deg);
-                e.track.detail = Detail::Aprs {
-                    symbol_table: position.symbol_table,
-                    symbol_code: position.symbol_code,
-                    altitude_ft: position.altitude_ft,
-                    comment,
-                    fixed: aprs_is_fixed(position.symbol_code),
-                };
-                // Absolute, checked by the frame check sequence, and with no
-                // reading of it that could be a zone out.
-            e.track.set_position((position.lat, position.lon), at, true);
+        // A report that says what sort of thing it is replaces what was known
+        // before it; one that does not leaves it alone, which is how a
+        // vessel's static message keeps the ship type its position report
+        // never carried.
+        merge_detail(&mut e.track.detail, detail);
+        if let Some(p) = &d.position {
+            e.track.speed_kt = p.speed_kt.or(e.track.speed_kt);
+            e.track.course_deg = p.course_deg.or(e.track.course_deg);
+            if let (Detail::Aprs { altitude_ft, .. }, Some(m)) =
+                (&mut e.track.detail, p.altitude_m)
+            {
+                *altitude_ft = Some((m / 0.3048) as i32);
+            }
+            if let (Detail::Mesh { altitude_m, .. }, Some(m)) = (&mut e.track.detail, p.altitude_m)
+            {
+                *altitude_m = Some(m as i32);
+            }
+            // Absolute coordinates behind the protocol's own check, so there
+            // is no reading of them that could be a zone out.
+            e.track.set_position((p.lat, p.lon), at, true);
         }
+        true
     }
 
     /// Fold in one Meshtastic packet that was read against the default key.
@@ -566,106 +646,6 @@ impl Tracks {
     /// its battery is. A text message is evidence it is there and nothing
     /// more, and a packet whose payload did not open is not evidence of a
     /// position at all.
-    pub fn update_mesh(
-        &mut self,
-        source: u32,
-        message: &decode::meshtastic::Message,
-        at: std::time::Instant,
-    ) {
-        use decode::meshtastic::Message;
-        let id = TrackId::Mesh(source);
-        let i = self.entry(
-            id,
-            Detail::Mesh {
-                long_name: None,
-                short_name: None,
-                altitude_m: None,
-                battery_pct: None,
-                precision_bits: None,
-                temperature_c: None,
-                humidity_pct: None,
-                pressure_hpa: None,
-            },
-            at,
-        );
-        let e = &mut self.seen[i];
-        e.track.messages += 1;
-        e.track.last = at;
-        let Detail::Mesh {
-            long_name,
-            short_name,
-            altitude_m,
-            battery_pct,
-            precision_bits,
-            temperature_c,
-            humidity_pct,
-            pressure_hpa,
-        } = &mut e.track.detail
-        else {
-            return;
-        };
-        match message {
-            Message::Position(p) => {
-                if let Some(a) = p.altitude {
-                    *altitude_m = Some(a);
-                }
-                if p.precision_bits.is_some() {
-                    *precision_bits = p.precision_bits;
-                }
-                if let Some(v) = p.ground_speed {
-                    // Metres a second on the air; the table reads knots.
-                    e.track.speed_kt = Some(f64::from(v) * 1.943_844);
-                }
-                if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
-                    // Absolute, and behind the packet's own CRC.
-                    e.track.set_position((lat, lon), at, true);
-                }
-            }
-            Message::NodeInfo(u) => {
-                if !u.long_name.is_empty() {
-                    *long_name = Some(u.long_name.clone());
-                    e.track.label = Some(u.long_name.clone());
-                }
-                if !u.short_name.is_empty() {
-                    *short_name = Some(u.short_name.clone());
-                }
-            }
-            Message::Telemetry(t) => {
-                if let Some(b) = t.battery_level {
-                    *battery_pct = Some(b);
-                }
-                if t.temperature.is_some() {
-                    *temperature_c = t.temperature;
-                }
-                if t.relative_humidity.is_some() {
-                    *humidity_pct = t.relative_humidity;
-                }
-                if t.barometric_pressure.is_some() {
-                    *pressure_hpa = t.barometric_pressure;
-                }
-            }
-            Message::Text(_) | Message::Opaque => {}
-        }
-    }
-
-    /// Fold in a MeshCore advert.
-    pub fn update_meshcore(&mut self, a: &decode::meshcore::Advert, at: std::time::Instant) {
-        use decode::meshcore::NodeType;
-        let fixed = matches!(a.node_type, NodeType::Repeater | NodeType::RoomServer | NodeType::Sensor);
-        let id = TrackId::MeshCore(a.public_key);
-        let i = self.entry(id, Detail::MeshCore { role: a.node_type.name(), fixed }, at);
-        let e = &mut self.seen[i];
-        e.track.messages += 1;
-        e.track.last = at;
-        e.track.detail = Detail::MeshCore { role: a.node_type.name(), fixed };
-        if let Some(n) = &a.name {
-            e.track.label = Some(n.clone());
-        }
-        if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
-            e.track.set_position((lat, lon), at, true);
-        }
-    }
-
     /// Fold in one Mode S frame.
     pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
         let Some(icao) = frame.icao else { return };
@@ -860,30 +840,23 @@ impl pipeline::node::Simple for TracksNode {
         // seven millisecond block would be false precision.
         let at = std::time::Instant::now();
         for packet in i.as_packets().unwrap_or(&[]) {
-            let Some(bytes) = packet.frame() else { continue };
-            // Everything on the bus arrives here, including bursts from the
-            // ISM banks. Where a frame was received is what says which parser
-            // it belongs to; anything that is neither band fails its parse or
-            // its check and is dropped.
-            if dsp::ais::is_ais_band(packet.center_hz() as f64) {
-                if let Ok(f) = ais::parse(bytes) {
-                    self.tracks.update_ais(&f, at);
+            // What the packet decoded to, decided once on the bus. This used
+            // to be four parsers here, run on a guess from the frequency, so
+            // the map could disagree with the packet list about a frame they
+            // had both seen.
+            for d in &packet.decodes {
+                self.tracks.update_decoded(d, at);
+            }
+            // ADS-B still comes in as bytes: a frame carries half a position
+            // in compact form, and pairing two of them or resolving one
+            // against a reference is the tracker's own state rather than
+            // anything a single decode can report.
+            if let Some(bytes) = packet.frame() {
+                if packet.decodes.iter().any(|d| d.protocol.starts_with("ADSB")) {
+                    if let Ok(f) = adsb::parse(bytes) {
+                        self.tracks.update_adsb(&f, at);
+                    }
                 }
-            } else if dsp::afsk::is_packet_band(packet.center_hz() as f64) {
-                if let Ok(f) = ax25::parse(bytes) {
-                    self.tracks.update_aprs(&f, at);
-                }
-            } else if let Some(r) = decode::lora::Received::parse(bytes) {
-                // A LoRa frame is a LoRa frame on any band; what identifies
-                // a Meshtastic node is the envelope in front of its payload,
-                // and a MeshCore node its advert, which is in the clear.
-                if let (Some(m), Some((d, _))) = (r.meshtastic(), r.meshtastic_message_on()) {
-                    self.tracks.update_mesh(m.source, &d.message, at);
-                } else if let Some(a) = r.meshcore().filter(|p| p.corroborated()).and_then(|p| p.advert()) {
-                    self.tracks.update_meshcore(&a, at);
-                }
-            } else if let Ok(f) = adsb::parse(bytes) {
-                self.tracks.update_adsb(&f, at);
             }
         }
         Ok(())
@@ -899,6 +872,10 @@ impl pipeline::node::Simple for TracksNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The tests build frames with the protocol parsers and then feed the
+    // tracker what the decoders make of them, which is the path the receiver
+    // uses.
+    use decode::{ais, ax25};
 
     /// Real frames, from an hour of traffic over Ireland and the Irish Sea,
     /// with the times they arrived.
@@ -982,6 +959,19 @@ mod tests {
         ais::parse(payload).expect("an AIS message")
     }
 
+    /// Through the decoder the bus runs, which is the only way into the
+    /// tracker now: the map reads what the protocols concluded.
+    fn feed_ais(t: &mut Tracks, payload: &[u8], at: std::time::Instant) {
+        let f = ais_frame(payload);
+        let d = nodes::ais_nodes::ais_decoded(&f, payload, common::Hz(162_025_000));
+        assert!(t.update_decoded(&d, at), "the tracker refused an AIS decode");
+    }
+
+    fn feed_aprs(t: &mut Tracks, frame: &ax25::Frame, at: std::time::Instant) -> bool {
+        let d = nodes::aprs_nodes::aprs_decoded(frame, &[], common::Hz(144_800_000));
+        t.update_decoded(&d, at)
+    }
+
     /// The Le Havre position report, the payload every layer is tested on.
     fn ais_position() -> Vec<u8> {
         vec![
@@ -1034,7 +1024,7 @@ mod tests {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
         // Deliberately no reference set: an AIS fix must not need one.
-        t.update_ais(&ais_frame(&ais_position()), now);
+        feed_ais(&mut t, &ais_position(), now);
         let active = t.active(now);
         assert_eq!(active.len(), 1);
         let v = active[0];
@@ -1053,7 +1043,7 @@ mod tests {
     fn a_name_and_a_position_from_two_messages_become_one_vessel() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_ais(&ais_frame(&ais_position()), now);
+        feed_ais(&mut t, &ais_position(), now);
         // A static report for the same MMSI, built by hand: type 5 with the
         // name field filled in.
         let mut bits = vec![0u8; 424];
@@ -1073,7 +1063,7 @@ mod tests {
         for (i, b) in bits.iter().enumerate() {
             payload[i / 8] |= b << (7 - i % 8);
         }
-        t.update_ais(&ais_frame(&payload), now);
+        feed_ais(&mut t, &payload, now);
 
         let active = t.active(now);
         assert_eq!(active.len(), 1, "two messages, one vessel");
@@ -1106,7 +1096,7 @@ mod tests {
         for (i, b) in bits.iter().enumerate() {
             payload[i / 8] |= b << (7 - i % 8);
         }
-        t.update_ais(&ais_frame(&payload), now);
+        feed_ais(&mut t, &payload, now);
 
         let active = t.active(now);
         assert_eq!(active.len(), 2, "one identity collided with the other");
@@ -1122,7 +1112,7 @@ mod tests {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
         t.update_adsb(&ident(), now);
-        t.update_ais(&ais_frame(&ais_position()), now);
+        feed_ais(&mut t, &ais_position(), now);
         assert_eq!(t.active(now).len(), 2);
 
         let later = now + std::time::Duration::from_secs(120);
@@ -1146,7 +1136,7 @@ mod tests {
         ];
         let f = ais::parse(&payload).expect("a message");
         assert_eq!(f.msg_type, 4);
-        t.update_ais(&f, now);
+        feed_ais(&mut t, &payload, now);
         let s = t.active(now)[0];
         assert_eq!(s.kind(), Kind::Station);
         let (lat, lon) = s.position.expect("a surveyed position");
@@ -1176,10 +1166,7 @@ mod tests {
     fn one_aprs_frame_is_a_named_station_on_its_own() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_aprs(
-            &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>088/036on the road"),
-            now,
-        );
+        feed_aprs(&mut t, &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>088/036on the road"), now);
         let active = t.active(now);
         assert_eq!(active.len(), 1);
         let v = active[0];
@@ -1213,7 +1200,7 @@ mod tests {
         ] {
             let info = format!("!5338.00N/00615.00W{sym}");
             let mut t = Tracks::new();
-            t.update_aprs(&aprs_frame("EI2ABC", 0, info.as_bytes()), now);
+            feed_aprs(&mut t, &aprs_frame("EI2ABC", 0, info.as_bytes()), now);
             assert_eq!(t.active(now)[0].kind(), want, "symbol {sym}");
         }
     }
@@ -1225,8 +1212,8 @@ mod tests {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
         t.update_adsb(&ident(), now);
-        t.update_ais(&ais_frame(&ais_position()), now);
-        t.update_aprs(&aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>"), now);
+        feed_ais(&mut t, &ais_position(), now);
+        feed_aprs(&mut t, &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>"), now);
         let active = t.active(now);
         assert_eq!(active.len(), 3, "one protocol swallowed another");
         assert!(active.iter().any(|x| matches!(x.id, TrackId::Icao(_))));
@@ -1240,9 +1227,9 @@ mod tests {
     fn a_status_frame_does_not_move_a_station() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_aprs(&aprs_frame("EI2ABC", 0, b"!5338.00N/00615.00W>"), now);
+        feed_aprs(&mut t, &aprs_frame("EI2ABC", 0, b"!5338.00N/00615.00W>"), now);
         let before = t.active(now)[0].position;
-        t.update_aprs(&aprs_frame("EI2ABC", 0, b">just listening"), now);
+        feed_aprs(&mut t, &aprs_frame("EI2ABC", 0, b">just listening"), now);
         let after = t.active(now)[0];
         assert_eq!(after.position, before, "a status report moved the station");
         assert_eq!(after.messages, 2, "but it is still evidence it is there");
@@ -1307,7 +1294,16 @@ mod tests {
             name: Some("Balbriggan Repeater".into()),
         };
         let mut t = Tracks::new();
-        t.update_meshcore(&a, now);
+        let hex: String = a.public_key.iter().map(|b| format!("{b:02x}")).collect();
+        let d = common::Decoded::bytes("MeshCore", common::Hz(869_618_000), 0.0, vec![])
+            .by(common::Identity::new("meshcore", hex).named("Balbriggan Repeater"))
+            .at_position(common::Position {
+                lat: 53.608448,
+                lon: -6.684672,
+                ..Default::default()
+            })
+            .reporting(common::ReportDetail::MeshCore { role: "repeater", fixed: true });
+        assert!(t.update_decoded(&d, now));
         let list = t.active(now);
         let n = list.iter().find(|x| x.id == TrackId::MeshCore(key)).expect("a node");
         assert_eq!(n.id.text(), "22:7aa88f");
@@ -1328,35 +1324,39 @@ mod tests {
 
     #[test]
     fn a_meshtastic_node_is_placed_and_named() {
-        use decode::meshtastic::{Message, Position, User};
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_mesh(
-            0x050d_3664,
-            &Message::Position(Position {
-                latitude: Some(53.64),
-                longitude: Some(-6.65),
-                altitude: Some(80),
-                time: None,
-                sats_in_view: Some(7),
+        let node = || common::Identity::new("meshtastic", "050d3664");
+        let position = common::Decoded::bytes("Meshtastic", common::Hz(869_525_000), 0.0, vec![])
+            .by(node())
+            .at_position(common::Position {
+                lat: 53.64,
+                lon: -6.65,
+                altitude_m: Some(80.0),
+                ..Default::default()
+            })
+            .reporting(common::ReportDetail::Mesh {
+                long_name: None,
+                short_name: None,
+                battery_pct: None,
                 precision_bits: Some(32),
-                ground_speed: None,
-            }),
-            now,
-        );
-        t.update_mesh(
-            0x050d_3664,
-            &Message::NodeInfo(User {
-                id: "!050d3664".into(),
-                long_name: "Kitchen".into(),
-                short_name: "KTCH".into(),
-                hw_model: 0,
-                role: 0,
-                is_licensed: false,
-                has_public_key: false,
-            }),
-            now,
-        );
+                temperature_c: None,
+                humidity_pct: None,
+                pressure_hpa: None,
+            });
+        let info = common::Decoded::bytes("Meshtastic", common::Hz(869_525_000), 0.0, vec![])
+            .by(node().named("Kitchen"))
+            .reporting(common::ReportDetail::Mesh {
+                long_name: Some("Kitchen".into()),
+                short_name: Some("KTCH".into()),
+                battery_pct: None,
+                precision_bits: None,
+                temperature_c: None,
+                humidity_pct: None,
+                pressure_hpa: None,
+            });
+        assert!(t.update_decoded(&position, now));
+        assert!(t.update_decoded(&info, now));
         let n = t.active(now).into_iter().find(|x| x.id == TrackId::Mesh(0x050d_3664)).expect("a node");
         assert_eq!(n.id.text(), "!050d3664");
         assert_eq!(n.label.as_deref(), Some("Kitchen"));

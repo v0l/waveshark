@@ -1001,6 +1001,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         iq: None,
         audio: None,
         position: None,
+        report: common::ReportDetail::Bare,
         identity: None,
         // A traffic burst is 60 ms of one timeslot, and it says whether the
         // network had granted the channel for speech.

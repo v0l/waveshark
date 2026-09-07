@@ -109,7 +109,7 @@ impl Link {
 /// a decoder is sure of: ADS-B sends half a position per frame and needs two
 /// of them or a reference, so its reassembly stays with the tracker and this
 /// is filled in only once there is a place to put on a map.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Position {
     pub lat: f64,
     pub lon: f64,
@@ -118,6 +118,69 @@ pub struct Position {
     /// reports it in knots.
     pub speed_kt: Option<f64>,
     pub course_deg: Option<f64>,
+}
+
+/// What a report says about the thing that sent it, beyond where it is.
+///
+/// Beside the position rather than inside it, because plenty of reports carry
+/// one and not the other: an AIS static message names a ship's type and
+/// destination with no coordinates, mesh telemetry sends a battery level from
+/// a node that has not said where it is, and a base station reports a place
+/// and nothing else. It is an enum because none of these fields is shared:
+/// flattened into options on one struct, a vessel would carry a squawk and an
+/// aircraft a symbol code.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum ReportDetail {
+    #[default]
+    Bare,
+    Aircraft {
+        vertical_rate_fpm: Option<i32>,
+        /// Set by the crew in reply to a radar rather than broadcast, so an
+        /// aircraft has one only once something has interrogated it in
+        /// earshot.
+        squawk: Option<u16>,
+        /// Wind at the aircraft, in knots and degrees true.
+        wind: Option<(f64, f64)>,
+        temp_c: Option<f64>,
+    },
+    Vessel {
+        heading_deg: Option<f64>,
+        nav_status: Option<&'static str>,
+        ship_type: Option<&'static str>,
+        destination: Option<String>,
+        /// A smaller, lower powered transponder, usually leisure traffic.
+        class_b: bool,
+    },
+    /// A shore station or a navigation mark: something that reports a place
+    /// and does not move.
+    Station {
+        aid: bool,
+    },
+    /// APRS says what a station is with a symbol rather than with a message
+    /// type, and puts everything it has no field for in the comment.
+    Aprs {
+        symbol_table: char,
+        symbol_code: char,
+        comment: Option<String>,
+    },
+    Mesh {
+        long_name: Option<String>,
+        short_name: Option<String>,
+        battery_pct: Option<u32>,
+        /// Bits of the coordinates the node chose to send; fewer is a
+        /// deliberately blurred position.
+        precision_bits: Option<u32>,
+        temperature_c: Option<f32>,
+        humidity_pct: Option<f32>,
+        pressure_hpa: Option<f32>,
+    },
+    /// A MeshCore node from its advert. What it is decides how it is drawn:
+    /// a repeater, a room server or a sensor is installed somewhere, a chat
+    /// node is carried.
+    MeshCore {
+        role: &'static str,
+        fixed: bool,
+    },
 }
 
 /// Who transmitted, as the device database rows on.
@@ -234,6 +297,8 @@ pub struct Decoded {
     pub link: Option<Link>,
     /// Where the transmitter said it was. What the map plots.
     pub position: Option<Position>,
+    /// What the report says about the transmitter besides its place.
+    pub report: ReportDetail,
     /// Who transmitted. What the device database rows on.
     pub identity: Option<Identity>,
     /// How long it held the channel, and whether it carried speech. What the
@@ -262,6 +327,7 @@ impl Decoded {
             audio: None,
             link: None,
             position: None,
+            report: ReportDetail::Bare,
             identity: None,
             airtime: None,
         }
@@ -277,6 +343,12 @@ impl Decoded {
     /// Where the transmitter said it was.
     pub fn at_position(mut self, p: Position) -> Self {
         self.position = Some(p);
+        self
+    }
+
+    /// What the report says about the transmitter besides its place.
+    pub fn reporting(mut self, r: ReportDetail) -> Self {
+        self.report = r;
         self
     }
 
