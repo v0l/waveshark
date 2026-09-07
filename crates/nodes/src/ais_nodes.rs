@@ -120,6 +120,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
 
     let mut position = None;
     let mut name = None;
+    let mut report = common::ReportDetail::Bare;
     let protocol = match &frame.kind {
         Message::Position(p) => {
             if let Some((lat, lon)) = p.position {
@@ -130,6 +131,15 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
                     speed_kt: p.sog_kt,
                     course_deg: p.cog_deg,
                 });
+            }
+            report = common::ReportDetail::Vessel {
+                heading_deg: p.heading_deg,
+                nav_status: p.nav_status.map(ais::nav_status_name),
+                ship_type: None,
+                destination: None,
+                class_b: p.class_b,
+            };
+            {
             }
             if let Some((lat, lon)) = p.position {
                 fields.push(("lat".into(), Value::Float(round(lat, 5))));
@@ -154,6 +164,15 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
             }
         }
         Message::Static(s) => {
+            // No coordinates in a static message: what it carries is what the
+            // ship is and where it is going.
+            report = common::ReportDetail::Vessel {
+                heading_deg: None,
+                nav_status: None,
+                ship_type: s.ship_type.map(ais::ship_type_name),
+                destination: s.destination.clone(),
+                class_b: false,
+            };
             if let Some(n) = &s.name {
                 name = Some(n.clone());
                 fields.push(("name".into(), Value::Text(n.clone())));
@@ -172,18 +191,23 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
             }
             "AIS-Static"
         }
-        Message::BaseStation { position, .. } => {
-            if let Some((lat, lon)) = position {
+        Message::BaseStation { position: p, .. } => {
+            if let Some((lat, lon)) = p {
+                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
+                report = common::ReportDetail::Station { aid: false };
                 fields.push(("lat".into(), Value::Float(round(*lat, 5))));
                 fields.push(("lon".into(), Value::Float(round(*lon, 5))));
             }
             "AIS-BaseStation"
         }
-        Message::AidToNavigation { name, position, .. } => {
-            if let Some(n) = name {
+        Message::AidToNavigation { name: n, position: p, .. } => {
+            if let Some(n) = n {
+                name = Some(n.clone());
                 fields.push(("name".into(), Value::Text(n.clone())));
             }
-            if let Some((lat, lon)) = position {
+            if let Some((lat, lon)) = p {
+                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
+                report = common::ReportDetail::Station { aid: true };
                 fields.push(("lat".into(), Value::Float(round(*lat, 5))));
                 fields.push(("lon".into(), Value::Float(round(*lon, 5))));
             }
@@ -211,6 +235,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
         // plausibility argument.
         .with_crc(Some(true));
     d.position = position;
+    d.report = report;
     d
 }
 

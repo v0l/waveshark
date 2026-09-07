@@ -489,6 +489,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     ];
 
     let mut fix: Option<common::Position> = None;
+    let mut report = common::ReportDetail::Bare;
     let mesh = r.meshtastic();
     if let Some(m) = &mesh {
         let dest = if m.is_broadcast() { "broadcast".to_string() } else { format!("{:08x}", m.destination) };
@@ -523,6 +524,15 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("text".into(), Value::Text(t.clone())));
             }
             meshtastic::Message::Position(p) => {
+                report = common::ReportDetail::Mesh {
+                    long_name: None,
+                    short_name: None,
+                    battery_pct: None,
+                    precision_bits: p.precision_bits,
+                    temperature_c: None,
+                    humidity_pct: None,
+                    pressure_hpa: None,
+                };
                 if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
                     fix = Some(common::Position {
                         lat,
@@ -547,6 +557,15 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 }
             }
             meshtastic::Message::NodeInfo(u) => {
+                report = common::ReportDetail::Mesh {
+                    long_name: (!u.long_name.is_empty()).then(|| u.long_name.clone()),
+                    short_name: (!u.short_name.is_empty()).then(|| u.short_name.clone()),
+                    battery_pct: None,
+                    precision_bits: None,
+                    temperature_c: None,
+                    humidity_pct: None,
+                    pressure_hpa: None,
+                };
                 fields.push(("name".into(), Value::Text(u.long_name.clone())));
                 fields.push(("short_name".into(), Value::Text(u.short_name.clone())));
                 if u.is_licensed {
@@ -554,6 +573,15 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 }
             }
             meshtastic::Message::Telemetry(t) => {
+                report = common::ReportDetail::Mesh {
+                    long_name: None,
+                    short_name: None,
+                    battery_pct: t.battery_level,
+                    precision_bits: None,
+                    temperature_c: t.temperature,
+                    humidity_pct: t.relative_humidity,
+                    pressure_hpa: t.barometric_pressure,
+                };
                 if let Some(b) = t.battery_level {
                     fields.push(("battery".into(), Value::Int(i64::from(b))));
                 }
@@ -589,6 +617,15 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             fields.push(("encrypted".into(), Value::Bool(true)));
         }
         if let Some(a) = p.advert() {
+            report = common::ReportDetail::MeshCore {
+                role: a.node_type.name(),
+                fixed: matches!(
+                    a.node_type,
+                    decode::meshcore::NodeType::Repeater
+                        | decode::meshcore::NodeType::RoomServer
+                        | decode::meshcore::NodeType::Sensor
+                ),
+            };
             core_link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(
                 format!("{:02x}", a.hash()),
             )));
@@ -802,6 +839,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_fields(fields);
     d.link = link.or(core_link);
     d.position = fix;
+    d.report = report;
     // A mesh node is a device: Meshtastic names itself in every header, and
     // MeshCore in its advert, which is the packet a survey wants.
     d.identity = mesh
@@ -810,7 +848,12 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .or_else(|| {
             core.as_ref()
                 .and_then(|p| p.advert())
-                .map(|a| common::Identity::new("meshcore", format!("{:02x}", a.hash())))
+                .map(|a| {
+                    common::Identity::new(
+                        "meshcore",
+                        a.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    )
+                })
         });
     if let (Some(who), Some(name)) = (
         d.identity.as_mut(),

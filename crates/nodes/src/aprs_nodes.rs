@@ -160,13 +160,14 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 
     // The destination is not only an address: Mic-E hides half its latitude
     // in there, so the payload cannot be read without it.
-    let report = frame
+    let aprs_report = frame
         .is_ui()
         .then(|| aprs::parse(&frame.info, &frame.destination.call))
         .flatten();
 
     let mut fix = None;
-    let protocol = match &report {
+    let mut report = common::ReportDetail::Bare;
+    let protocol = match &aprs_report {
         Some(aprs::Report::Position { position, comment }) => {
             fix = Some(common::Position {
                 lat: position.lat,
@@ -175,6 +176,11 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
                 speed_kt: position.speed_kt,
                 course_deg: position.course_deg,
             });
+            report = common::ReportDetail::Aprs {
+                symbol_table: position.symbol_table,
+                symbol_code: position.symbol_code,
+                comment: comment.clone(),
+            };
             fields.push(("lat".into(), Value::Float(round(position.lat, 5))));
             fields.push(("lon".into(), Value::Float(round(position.lon, 5))));
             if let Some(v) = position.course_deg {
@@ -211,7 +217,10 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .by(common::Identity::new("aprs", frame.source.to_string()))
+        // A callsign is both the address and the name: there is nothing else
+        // to call an APRS station.
+        .by(common::Identity::new("aprs", frame.source.to_string())
+            .named(frame.source.to_string()))
         // The AX.25 addresses. A destination on APRS is usually a software
         // identifier rather than a station, which is why it is a group: it
         // is a label many senders share, not somebody listening.
@@ -226,6 +235,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         // demodulator, which is a real integrity check.
         .with_crc(Some(true));
     d.position = fix;
+    d.report = report;
     d
 }
 
