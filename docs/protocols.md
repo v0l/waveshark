@@ -1,7 +1,9 @@
 # Protocols
 
 The target is the union of what rtl_433, a Flipper Zero, a PortaPack running
-Mayhem and SDRangel can do, in one receiver, and transmit for the same set.
+Mayhem and SDRangel can do, in one receiver, and transmit for the same set,
+plus the drone family under [Drones](#drones), which none of them reads and
+which announces itself in the clear.
 This file lists those protocols, what each one costs to add, and which
 direction is realistic for it.
 
@@ -282,6 +284,94 @@ inside it is the vendor's and mostly is not.
 | VOR / ILS | 108-118 MHz | AM with 30 Hz subcarriers | 25 kHz | framing | mod | SDRangel decodes bearing from these; the maths is small |
 | HFDL | 2-22 MHz | PSK | 3 kHz | demod | mod | Needs HF hardware too |
 
+## Drones
+
+None of rtl_433, a Flipper, a PortaPack or SDRangel reads this family, so it is
+the one place in this file where the target is somebody else's work rather
+than a fourth copy of theirs: the Open Drone ID library, the RUB-SysSec
+DroneID receiver, ExpressLRS's own source, and the reverse engineering of the
+hobby control links that Deviation and MultiModule already carry.
+
+What makes it worth the trouble is that a drone announces itself. Remote ID is
+a legal requirement in the US and the EU and is transmitted in the clear, DJI
+broadcasts the same information plus the operator's own position whether or
+not Remote ID is on, and a control link that hops is still a fingerprint. The
+cost divides on two lines. Anything carried on Bluetooth advertising is nearly
+free, because `dsp::ble` is the front end and the payload is a published
+structure. Anything on OFDM (DJI's own link, Wi-Fi Remote ID, every digital
+video system) has no front end here at all, and 2.4 and 5.8 GHz mean HackRF or
+LimeSDR throughout: an RTL-SDR reaches none of this except the 433 and 868/915
+MHz control links.
+
+Hopping is the second structural problem and it is not solved by a wider span.
+ELRS at 500 Hz moves every 2 ms across most of a band, so a channel placed on
+one frequency sees one packet in fifty. Reading a hopping link properly means
+following the sequence, which is derived from the binding UID, so a receiver
+that has not seen the bind either brute forces the sequence or reads the band
+wide enough to catch every hop. Detection does not need any of that: a burst
+pattern at a known rate on a known channel plan is a classification, and
+saying "an ELRS transmitter at 500 Hz is up" is most of the operational value.
+
+| Protocol | Where | Modulation | Width | RX | TX | Notes |
+|---|---|---|---|---|---|---|
+| Open Drone ID over Bluetooth legacy | 2402/2426/2480 MHz | GFSK 1 Mbps, BLE advertising | 2 MHz | table | mod | ASTM F3411 and EN 4709-002, the same message set in both. A legacy advertisement carries service UUID 0xFFFA, AD type 0x16, application code 0x0D and one 25 byte message: basic id (serial or session id and UA type), location (position, altitude, speed, track, timestamp), self id, system (the operator's position and the area a swarm covers) and operator id. `dsp::ble` reads the advertisement today and `decode::ble` already hands over the AD structures, so this costs a payload parser and nothing else. Unauthenticated by design: anything received is what the transmitter chose to say |
+| Open Drone ID over Bluetooth 5 Long Range | 2402/2426/2480 MHz and the secondary channels | GFSK 125 kbps, LE Coded PHY S=8 | 2 MHz | demod | mod | The same messages as a message pack (type 0xF) on extended advertising, which regulators require alongside the legacy broadcast, so a receiver that reads only legacy still sees everything. The coded PHY is a different physical layer: a convolutional code, a pattern mapper and its own preamble, plus following an AUX pointer onto a secondary channel. That is a front end, not a parser |
+| Open Drone ID over Wi-Fi Beacon and NAN | 2.4 and 5.8 GHz, 20 MHz channels | 802.11 OFDM | 20 MHz | chain | chain | Vendor specific element under OUI 6A:5C:35 in a beacon, or a NAN service discovery frame. The payload parser is shared with the Bluetooth rows; what is missing is an 802.11 receiver |
+| DJI DroneID | 2.4 and 5.8 GHz | OFDM, LTE-like numerology, about 10 MHz occupied | 15.36 MS/s | demod | mod | Broadcast roughly twice a second by DJI aircraft independently of Remote ID, and it carries more: serial number, position, velocity, height, home position, device type and the operator's own position. Sent in the clear, which DJI described as encrypted until the NDSS 2023 paper showed it is not. The frame published there is nine OFDM symbols, two of them Zadoff-Chu sequences used for time and frequency correction, QPSK subcarriers, turbo coded and scrambled under a CRC. A working receiver exists to check against (`RUB-SysSec/DroneSecurity`), which is what makes this the most attackable of the OFDM entries despite being the most work |
+| DJI OcuSync and Lightbridge | 2.4 and 5.8 GHz | OFDM, 10/20/40 MHz | 20 MHz | chain | chain | The control and video link itself, AES encrypted both ways. Nothing inside is readable, so the realistic product is detection and classification: occupied bandwidth, hop behaviour and the DroneID frames riding alongside |
+| Digital FPV video: DJI O3/O4, Walksnail Avatar, HDZero | 5.65-5.95 GHz mostly | proprietary OFDM, 20 MHz and wider | 20 MHz | chain | chain | No layout is published for any of them. What a spectrum shows is a wide flat carrier keyed to the frame rate, which is enough to say a link is up and which system it is by width and duty cycle, and nothing beyond that without a large reversing effort. There is a Walksnail Avatar here, so its width, duty cycle and how the downlink and the uplink sit against each other can be measured rather than repeated from a forum post |
+| Analogue FPV video | 5.65-5.95 GHz, also 1.2 and 2.4 GHz | FM, composite video, about 6 MHz deviation, 20-30 MHz occupied | 20 MHz | framing | mod | An image rather than packets, like APT: the FM demodulator exists and the work is sync separation, line assembly and presentation. A HackRF at 20 MS/s clips the skirts of a channel keyed hard, so expect a soft picture rather than a clean one until something wider is on the bench. Channel plans (A, B, E, F/Airwave, R/Raceband) are a table, and identifying which channel is occupied is worth having on its own |
+| ExpressLRS 900 MHz | 433/868/915 MHz | LoRa, SF6-SF9 over 500 kHz | 500 kHz | framing | mod | `dsp::lora` demodulates it already. What is missing is that ELRS uses implicit header mode with a fixed 8 byte payload and no LoRa CRC, guarding the packet with its own 14 bit CRC seeded from the binding UID, and hops on every packet. The payload is CRSF: packed RC channels, or telemetry and link statistics on the return slot |
+| ExpressLRS 2.4 GHz | 2400-2480 MHz | LoRa over 800 kHz, or FLRC at 1 Mbps | 2 MHz | framing, demod for FLRC | mod | An SX1280. The LoRa modes reach the existing dechirper; FLRC is a coherent GFSK burst mode with its own coding and is a front end of its own |
+| TBS Crossfire | 868/915 MHz | LoRa, roughly 50 channel FHSS | 250 kHz | framing | mod | An SX1272 running LoRa with a proprietary framing and hop sequence on top, reversed publicly by g3gg0. Same shape of work as ELRS and the same CRSF payload underneath |
+| FrSky ACCST D16 and ACCESS | 2400-2480 MHz | GFSK, CC2500, 47 channel FHSS on a 9 ms frame | 500 kHz | framing | mod | The hop table is computed from the model id, and both the sequence and the packet layout are in Deviation and MultiModule. Cheap radios, so plenty of them in the air |
+| FlySky AFHDS-2A | 2400-2480 MHz | GFSK 500 kbps, A7105, 16 channel FHSS | 1 MHz | framing | mod | As FrSky: published layout, unpublished only in the sense that the vendor never wrote it down |
+| Spektrum DSM2 and DSMX | 2400-2480 MHz | DSSS GFSK 1 Mbps, CYRF6936 | 2 MHz | demod | mod | Needs the despreader the 802.15.4 rows need |
+| Toy drone links: Bayang, Syma, Hubsan, E010 | 2400-2480 MHz | GFSK 250 kbps-1 Mbps, nRF24 or XN297 or A7105 | 2 MHz | demod | mod | The nRF24 ShockBurst row above is the front end for most of these; XN297 adds its own scrambler over the same shape |
+| MAVLink over a SiK radio | 433/868/915 MHz | GFSK 64-250 kbps, FHSS, Golay | 250 kHz | framing | mod | 3DR and RFD900 telemetry, in the clear unless the operator set a key: position, attitude, battery, flight mode and the parameter set. The FSK front end reaches the symbols; the framing is the SiK link layer under the MAVLink v1/v2 parser |
+
+### What we can verify here
+
+A bench with a Remote ID beacon, an ExpressLRS link, an FPV video system and a
+DJI Mini 4K covers four of the rows above with real RF, which decides the
+order more than the cost estimates do. Open Drone ID over Bluetooth legacy is
+first: the front end exists, the beacon transmits it once a second, and the
+messages say a serial number and a position that can be checked against where
+the aircraft actually is.
+
+The beacon here is a Holybro RemoteID module on an S500, which is an ESP32
+running ArduRemoteID, and that is better than a black box for two reasons. It
+is configurable, so each transport can be switched on alone and a capture can
+be attributed with certainty rather than inferred: BT4 legacy by itself is the
+first fixture, and turning BT5 Long Range and Wi-Fi on afterwards says exactly
+which of them a decoder is missing. And the values it broadcasts are set by
+us, over MAVLink from the flight controller or in its own parameters, so a
+fixture can carry a serial number and a position chosen in advance. An
+expectation in `fixtures.toml` written against a number we configured is a
+real check, unlike one written against whatever the decoder happened to print. The Mini 4K then gives DroneID on the same bench,
+with a serial number printed on the airframe to check a decode against. It is
+on EU firmware, so it also broadcasts EN 4709-002 Direct Remote ID to keep its
+class marking, and the first measurement to make is which transport it uses
+for that: DJI has shipped both Bluetooth and Wi-Fi beacon across models and
+firmware versions, and nothing here should assume one until a capture says
+so. If it is Bluetooth, the same parser reads the drone and the Holybro module
+and a real aircraft reaches **off air** with no new front end; if it is Wi-Fi,
+DroneID is the only thing the Mini 4K can be read by until there is an 802.11
+receiver. ELRS gives a hopping
+link whose UID is known because we bound it, which is the difference between
+testing a decoder and guessing at one. Every capture that earns an assertion
+goes in `testdata/fixtures.toml`; a capture that only shows what a system
+looks like on air, an OcuSync link or a digital video carrier, goes in
+`testdata/offair.toml` as evidence for the classifier and nothing more.
+
+Two warnings about capturing this on a bench. Everything at 2.4 and 5.8 GHz
+here is transmitting metres away, so the front end will be saturated unless
+the gain is wound down and the antenna kept off, and a saturated capture is
+worthless: the Honeywell note under [How a status is earned](#how-a-status-is-earned)
+is exactly that failure. And a control link is a live aircraft's control link.
+Capture receive only; nothing in this section is a thing to transmit near
+something flying.
+
 ## Maritime
 
 | Protocol | Where | Modulation | Width | RX | TX | Notes |
@@ -484,6 +574,13 @@ Cheapest first, by value per unit of work:
    need is already ported. What is missing is the framing layer for each.
 11. **A recording of real AIS and APRS traffic**, which is the only thing
    standing between those two and a **done**.
+12. **Open Drone ID over Bluetooth legacy.** A payload parser on the BLE front
+   end that already works, against a beacon on the bench whose serial and
+   position are known, so it can reach **off air** in one sitting.
+13. **DJI DroneID.** Expensive, an OFDM front end and a turbo decoder, but it
+   is the highest value thing in this file that is transmitted in the clear,
+   there is a working receiver to check against, and there is an aircraft here
+   that sends it.
 
 Everything below that (OFDM broadcast, trunked voice, cellular) is a project
 each rather than a decoder each, and should be judged on its own.
