@@ -98,6 +98,10 @@ pub enum Front {
     /// channel for the same reason APRS does, and more so: M17 runs wherever
     /// an amateur puts it.
     M17(f64),
+    /// One BLE advertising channel: GFSK at 1 Mbit/s, dewhitened and checked.
+    /// Carries the channel because the three of them are 24 and 54 MHz apart
+    /// and no receiver here samples wide enough to hold two at once.
+    Ble(f64),
 }
 
 /// The amateur DAPNET channel, used until a block says otherwise. Amateur
@@ -112,6 +116,10 @@ pub const DEFAULT_APRS_HZ: f64 = 144_800_000.0;
 /// The M17 calling frequency in Region 1, used until a block says otherwise.
 pub const DEFAULT_M17_HZ: f64 = 433_475_000.0;
 
+/// Advertising channel 38, which sits in the gap between the Wi-Fi channels
+/// and is the one of the three least often buried.
+pub const DEFAULT_BLE_HZ: f64 = 2_426_000_000.0;
+
 impl Front {
     /// The word this front end is written as in the file.
     pub fn key(&self) -> &'static str {
@@ -123,6 +131,7 @@ impl Front {
             Front::Aprs(_) => "aprs",
             Front::Pocsag(_) => "pocsag",
             Front::M17(_) => "m17",
+            Front::Ble(_) => "ble",
         }
     }
 
@@ -136,11 +145,12 @@ impl Front {
             Front::Aprs(_) => "aprs",
             Front::Pocsag(_) => "pager",
             Front::M17(_) => "m17",
+            Front::Ble(_) => "ble",
         }
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 7] {
+    pub fn all() -> [Front; 8] {
         [
             Front::Auto,
             Front::ModeS,
@@ -148,6 +158,7 @@ impl Front {
             Front::Aprs(DEFAULT_APRS_HZ),
             Front::Pocsag(DEFAULT_POCSAG_HZ),
             Front::M17(DEFAULT_M17_HZ),
+            Front::Ble(DEFAULT_BLE_HZ),
             Front::Banks(DEFAULT_WIDTHS.to_vec()),
         ]
     }
@@ -159,7 +170,7 @@ impl Front {
     /// Mode S and AIS have one allocation each and find their own traffic
     /// inside it.
     pub fn per_channel(&self) -> bool {
-        matches!(self, Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_))
+        matches!(self, Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_))
     }
 
     /// The same front end moved to another channel.
@@ -168,6 +179,7 @@ impl Front {
             Front::Aprs(_) => Front::Aprs(hz),
             Front::Pocsag(_) => Front::Pocsag(hz),
             Front::M17(_) => Front::M17(hz),
+            Front::Ble(_) => Front::Ble(hz),
             other => other.clone(),
         }
     }
@@ -181,6 +193,7 @@ impl Front {
             "aprs" => Some(Front::Aprs(DEFAULT_APRS_HZ)),
             "pocsag" | "pager" => Some(Front::Pocsag(DEFAULT_POCSAG_HZ)),
             "m17" => Some(Front::M17(DEFAULT_M17_HZ)),
+            "ble" | "bluetooth" => Some(Front::Ble(DEFAULT_BLE_HZ)),
             _ => None,
         }
     }
@@ -756,6 +769,17 @@ range = 920 - 928 MHz
 span  = 250 kHz
 front = auto
 
+[BLE]
+# The three primary advertising channels, which is where a device says what it
+# is. They are 24 and 54 MHz apart, so a span holds one of them: whichever the
+# dial is nearest gets the front end and the other two blocks do not fit.
+# Reading one needs at least 4 MS/s, which is a HackRF rather than a stick.
+range    = 2401 - 2481 MHz
+span     = 8 MHz
+front    = ble
+channels = 2402 MHz, 2426 MHz, 2480 MHz
+margin   = 1 MHz
+
 [ISM 2.4]
 # Wi-Fi, Bluetooth, video links and RC. Crowded, wide, and mostly signals far
 # wider than the span a receiver samples, so expect measurements rather than
@@ -832,8 +856,8 @@ mod tests {
             names,
             [
                 "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 27", "ISM 40", "ISM 169",
-                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4",
-                "ISM 5.8"
+                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "BLE",
+                "ISM 2.4", "ISM 5.8"
             ]
         );
     }
