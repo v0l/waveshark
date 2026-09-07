@@ -21,6 +21,7 @@ Run it while a receiver records, then read the symbols out of the capture with
 
 import argparse
 import json
+import random
 import sys
 import time
 
@@ -53,6 +54,10 @@ def main():
     ap.add_argument("--gap", type=float, default=0.12, help="within a group")
     ap.add_argument("--group-gap", type=float, default=0.6, help="between groups")
     ap.add_argument("--bits", type=int, default=0, help="stop after N bits, 0 = all")
+    ap.add_argument("--random", type=int, default=0,
+                    help="send N random payloads instead of walking bits, to check"
+                         " a matrix against payloads it was not built from")
+    ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", default="walk.json")
     a = ap.parse_args()
 
@@ -62,16 +67,21 @@ def main():
     ser.reset_input_buffer()
 
     payloads = [bytes(a.bytes)]
-    nbits = a.bits or a.bytes * 8
-    for bit in range(nbits):
-        p = bytearray(a.bytes)
-        p[bit // 8] = 1 << (bit % 8)
-        payloads.append(bytes(p))
+    if a.random:
+        rng = random.Random(a.seed)
+        payloads += [bytes(rng.randrange(256) for _ in range(a.bytes))
+                     for _ in range(a.random)]
+    else:
+        nbits = a.bits or a.bytes * 8
+        for bit in range(nbits):
+            p = bytearray(a.bytes)
+            p[bit // 8] = 1 << (bit % 8)
+            payloads.append(bytes(p))
 
     t0 = time.time()
     groups = []
     for i, p in enumerate(payloads):
-        name = "zero" if i == 0 else f"bit{i - 1}"
+        name = "zero" if i == 0 else (f"rnd{i - 1}" if a.random else f"bit{i - 1}")
         start = time.time() - t0
         sent = 0
         for r in range(a.repeat):
