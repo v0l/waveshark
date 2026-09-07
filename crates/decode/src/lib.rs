@@ -26,8 +26,10 @@ pub(crate) mod crypto;
 pub mod dmr;
 pub mod dmr_bp;
 pub mod elrs;
+pub mod flysky;
 pub mod fpv;
 pub mod framing;
+pub mod frsky;
 #[cfg(feature = "tea")]
 pub mod gpu;
 #[cfg(feature = "tea")]
