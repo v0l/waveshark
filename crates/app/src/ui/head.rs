@@ -259,6 +259,8 @@ impl App {
                         });
                     });
 
+                    self.update_badge(ui);
+
                     // Pinned to the far end, and built like every other group
                     // on this row: a legend with its control under it. Floating
                     // loose against the right edge, it read as a lamp or a
@@ -285,6 +287,53 @@ impl App {
                     });
                 });
             });
+    }
+
+    /// The one thing the release check has to say up here: a newer version
+    /// exists.
+    ///
+    /// Drawn only then. A row that reads "up to date" every day teaches an
+    /// operator to stop looking at it, and the rest of the answer, which
+    /// release, which archive, how big, is in Setup where there is room for
+    /// it. Pressing this opens that pane rather than a browser: what to do
+    /// about an update is a decision, not a click.
+    fn update_badge(&mut self, ui: &mut egui::Ui) {
+        let mut open = false;
+        let state = crate::update::state();
+        // The check runs off its own thread and finishes seconds after the
+        // window opens, so a receiver sitting stopped would otherwise not
+        // repaint until the pointer moved.
+        if matches!(state, crate::update::State::Checking) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        let crate::update::State::Newer(r) = state else { return };
+        ui.add_space(18.0);
+        self.divider(ui);
+        ui.add_space(18.0);
+        ui.vertical(|ui| {
+            ui.label(legend("update"));
+            let text = value(format!("v{}", r.version)).color(theme::OK).size(13.0);
+            let hover = match &r.asset {
+                Some(a) => format!(
+                    "{} is out; this is {}. Open Setup for the release, or {}.",
+                    r.version,
+                    crate::update::running(),
+                    a.name
+                ),
+                None => format!(
+                    "{} is out; this is {}, and that release carries no {} archive.",
+                    r.version,
+                    crate::update::running(),
+                    crate::update::platform()
+                ),
+            };
+            if ui.button(text).on_hover_text(hover).clicked() {
+                open = true;
+            }
+        });
+        if open {
+            self.open = Some(Settings::App);
+        }
     }
 
     fn divider(&self, ui: &mut egui::Ui) {
