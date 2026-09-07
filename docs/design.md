@@ -29,18 +29,20 @@ the [README](../README.md).
 Named `common` rather than `core` because a workspace crate called `core`
 shadows the Rust sysroot crate.
 
-Two cargo features change what the receiver can do, both off by default
+Two cargo features change what the receiver can do
 (`crates/app/Cargo.toml`). `tea` is TETRA decryption, key recovery and the key
 manager: it turns on `decode/tea` and `nodes/tea`, which is what
 `decode::tea`, `decode::ta61`, `decode::recover` and `decode::gpu` are, the
-last of those a wgpu compute shader searching TEA1's 32-bit fold. A stock build
-links no TETRA cipher and no GPU stack, and its keys view is an encryption
-monitor with nothing to decrypt with. The mesh ciphers are not part of that:
-`decode` depends on AES unconditionally, which is how Meshtastic and MeshCore
-traffic decrypts in every build. `ambe` is DMR
-speech through `crates/mbe`. Both are off for the same kind of reason and not
-the same reason: the vocoder is patent encumbered, and the cipher work drags
-in a GPU stack most builds have no use for.
+last of those a wgpu compute shader searching TEA1's 32-bit fold. `ambe` is
+DMR speech through `crates/mbe`. Both are on when the workspace is built from
+source and neither is in a published binary, which is built with
+`--no-default-features --features limesdr,stt`: the vocoder is patent
+encumbered and the cipher is a cipher, and compiling one for yourself is not
+the same act as a project shipping it. A binary without them links no TETRA
+cipher and no GPU stack, and its keys view is an encryption monitor with
+nothing to decrypt with. The mesh ciphers are not part of that: `decode`
+depends on AES unconditionally, which is how Meshtastic and MeshCore traffic
+decrypts in every build.
 
 The other documents: [`protocols.md`](protocols.md) is what is decoded and
 what is not, [`views.md`](views.md) the contract a view uses on the packet

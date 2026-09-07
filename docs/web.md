@@ -52,8 +52,9 @@ browser build cannot be dropped onto a static host without them.
 **Most of what `app` is not drawing.** `crates/app` pulls in tokio, reqwest,
 `image`, `poll-promise` and `libc`. The map pane is built on the first four and
 is the largest non-DSP port in the tree; `shutdown.rs` is POSIX signal
-handling. The two optional features are the easy part of this: `tea` links wgpu
-and a GPU key search, `ambe` links the vocoder, and both are off by default.
+handling. The two switchable features are the easy part of this: `tea` links wgpu and a
+GPU key search, `ambe` links the vocoder, and a build can drop both with
+`--no-default-features`.
 
 ## Channel budget
 

@@ -21,6 +21,7 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            features: --no-default-features --features limesdr,stt
           # macOS is off: the build has not been run or fixed on it and a
           # permanently red job tells nobody anything. Put these back when
           # someone has a Mac to fix it on.
@@ -33,7 +34,7 @@ jobs:
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
-            features: --no-default-features
+            features: --no-default-features --features stt
 
     steps:
       - uses: actions/checkout@v4
@@ -78,9 +79,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # LimeSuite has no vcpkg port, so the Windows binary is built without
-      # the LimeSDR driver. Nothing else changes: the device simply never
-      # appears in the list.
+      # Every job names its features rather than taking the defaults. A build
+      # from source has TETRA decryption and the AMBE vocoder on, and neither
+      # goes into a published binary: the cipher and the vocoder are things a
+      # person may compile for themselves and not things this project ships.
+      # LimeSuite has no vcpkg port either, so the Windows binary is built
+      # without the LimeSDR driver, which only means the device never appears
+      # in the list.
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p app ${{ matrix.features }}
 

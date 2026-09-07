@@ -21,8 +21,8 @@ decoded or not.
 | Shipping | marine VHF | AIS positions and vessel identity on the same map |
 | APRS | 144.800, 144.390 US, 144.640 JP | packet stations and vehicle trackers, Mic-E included |
 | Pagers | wherever you point it | POCSAG at 512, 1200 and 2400 bit/s, message text in clear |
-| DMR | 136-174, 400-470 MHz | who called whom on which talkgroup, and speech with `--features ambe` |
-| TETRA | 390-400 MHz | the network, its cells and who is called, with decryption and key recovery under `--features tea` |
+| DMR | 136-174, 400-470 MHz | who called whom on which talkgroup, and speech through the `ambe` feature |
+| TETRA | 390-400 MHz | the network, its cells and who is called, with decryption and key recovery under the `tea` feature |
 | M17 | amateur VHF and UHF | who called whom, for how long, packet messages in full, and Codec 2 speech |
 | LoRa mesh | 433, 868, 915 MHz | LoRaWAN join requests and addresses, Meshtastic text under the public keys, MeshCore adverts |
 | Utility meters | 868.95 MHz | wireless M-Bus mode T: manufacturer, meter number, version and type |
@@ -60,17 +60,21 @@ sudo apt install librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
 cargo run --release -p app
 ```
 
-Two decoders are off by default and are turned on at build time:
+That build has everything, including two decoders the published binaries do
+not carry:
 
 ```sh
-cargo run --release -p app --features tea    # TETRA decryption and key recovery
-cargo run --release -p app --features ambe   # DMR speech through the AMBE vocoder
+cargo run --release -p app --no-default-features --features limesdr,stt
 ```
 
-`tea` links the TETRA ciphers and a wgpu key search. Without it the keys view
-is still there, listing enciphered channels and saying nothing can read them. `ambe` builds `crates/mbe`, a port of the AMBE and IMBE vocoders,
-whose algorithms are patent encumbered, so nothing compiles it unless you ask.
-Without it DMR still says who is talking and decodes no speech.
+is what the release workflow runs, and it leaves out `tea` and `ambe`. `tea`
+links the TETRA ciphers and a wgpu key search; without it the keys view is
+still there, listing enciphered channels and saying nothing can read them.
+`ambe` builds `crates/mbe`, a port of the AMBE and IMBE vocoders, whose
+algorithms are patent encumbered; without it DMR still says who is talking and
+decodes no speech. Compiling them for yourself is not the same act as a
+project distributing them, which is why the source turns them on and the
+downloads do not.
 
 ## Using it
 

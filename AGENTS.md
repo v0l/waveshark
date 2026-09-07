@@ -8,11 +8,14 @@ measurements behind the current shape, and the mistakes that produced it. Then
 What follows is the two rules that are easiest to break without noticing, and
 the procedure for adding a capture to the test corpus.
 
-Two cargo features change what builds: `--features tea` is TETRA decryption
-and key recovery, and `--features ambe` is DMR speech through
-`crates/mbe`. Neither is on by default, so a plain `cargo test` at the root
-never builds either path, and `crates/mbe` is not a default workspace member at
-all.
+Two cargo features change what builds: `tea` is TETRA decryption and key
+recovery, and `ambe` is DMR speech through `crates/mbe`. Both are on by
+default, so a plain `cargo test` at the root builds them and `crates/mbe` is
+compiled through the `ambe` feature, though it is still not a default
+workspace member and `cargo test -p mbe` has to be asked for by name. What the
+release workflow publishes is built with `--no-default-features --features
+limesdr,stt`, because a cipher and a patent-encumbered vocoder are things a
+person compiles for themselves rather than things this project ships.
 
 ## Everything the receiver does is in the graph
 
