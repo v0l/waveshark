@@ -24,6 +24,7 @@ pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
 pub struct AisNode {
     cfg: AisConfig,
     det: AisDetector,
+    meter: crate::FrameMeter,
     frames: Vec<AisFrame>,
     accepted: u64,
 }
@@ -40,6 +41,7 @@ impl AisNode {
             cfg,
             // Replaced at negotiation, when the real rate and centre are known.
             det: AisDetector::new(2_400_000.0, BAND_CENTER_HZ, cfg),
+            meter: crate::FrameMeter::new(2_400_000.0, BAND_CENTER_HZ as u64, 0.25),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -71,14 +73,13 @@ impl Simple for AisNode {
             ));
         }
         self.det = AisDetector::new(rate, center, self.cfg);
+        self.meter = crate::FrameMeter::new(rate, BAND_CENTER_HZ as u64, 0.25);
         // Frames rather than bytes, for the same reason Mode S says so: two
         // messages written into one buffer cannot be told apart afterwards.
         //
-        // The centre reported is the band rather than the channel a frame
-        // arrived on. Which of the two carried it is the demodulator's own
-        // knowledge, like the level it measured, and the bus carries evidence
-        // a log can hold per frame rather than what the front end happened to
-        // know while producing it.
+        // The centre reported on the port is the band; each frame carries
+        // the channel it actually arrived on, since the demodulator knows
+        // which of the two it read.
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.center = common::Hz(BAND_CENTER_HZ as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
@@ -87,17 +88,20 @@ impl Simple for AisNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
+        self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
         let out = o.frames_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(f.payload.clone());
+            let hz = CHANNEL_HZ[(f.channel as usize).min(CHANNEL_HZ.len() - 1)];
+            out.push(self.meter.frame(f.payload.clone()).at(hz as u64));
         }
         Ok(())
     }
 
     fn reset(&mut self) {
+        self.meter.reset();
         self.det.reset();
     }
 }
@@ -296,7 +300,7 @@ mod tests {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
             if let Payload::Frames(f) = out {
-                frames.extend(f);
+                frames.extend(f.into_iter().map(|x| x.bytes));
             }
         }
 

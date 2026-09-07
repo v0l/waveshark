@@ -193,6 +193,9 @@ impl Member {
                 }));
                 attached = true;
             }
+            if p.rssi_dbfs.is_nan() {
+                p.rssi_dbfs = 10.0 * self.peak_pow.max(1e-20).log10();
+            }
             if p.snr_db.is_nan() && self.noise_pow > 0.0 {
                 p.snr_db = 10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10();
             }
@@ -281,8 +284,16 @@ impl Member {
                         at_us,
                         center_hz,
                         bandwidth_hz,
+                        // Filled from the source's own level in `run`, which
+                        // is where the samples are; the classifier measures
+                        // the burst against the noise it found, and reports
+                        // nothing when it never found any.
                         rssi_dbfs: f32::NAN,
-                        snr_db: b.class.features.snr_db,
+                        snr_db: if b.class.features.snr_db > 0.0 {
+                            b.class.features.snr_db
+                        } else {
+                            f32::NAN
+                        },
                         modulation: None,
                         body: PacketBody::Pulses(Vec::new()),
                         measure: Some(m),
@@ -355,17 +366,27 @@ impl Member {
             let spec = self.graph.spec_of(*t);
             let Some(frames) = self.graph.buf(*t).and_then(|p| p.as_frames()) else { continue };
             for f in frames {
+                // What the front end measured, where it measured anything: it
+                // read the channel this frame came off, and the source's own
+                // level is the whole extraction. The fallbacks are here for a
+                // front end that has not been taught to measure yet.
+                let rssi = if f.rssi_dbfs.is_nan() {
+                    10.0 * self.peak_pow.max(1e-20).log10()
+                } else {
+                    f.rssi_dbfs
+                };
+                let snr = if f.snr_db.is_nan() { self.source_snr_db } else { f.snr_db };
                 out.push(Packet {
                     at_us,
-                    center_hz: spec.map(|s| s.center.0).unwrap_or(0),
+                    center_hz: f.center_hz.unwrap_or_else(|| spec.map(|s| s.center.0).unwrap_or(0)),
                     bandwidth_hz: spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(),
-                    snr_db: self.source_snr_db,
+                    rssi_dbfs: rssi,
+                    snr_db: snr,
                     modulation: None,
-                    body: PacketBody::Frame(f.clone()),
+                    body: PacketBody::Frame(f.bytes.clone()),
                     measure: None,
                     audio: None,
-                    iq: None,
+                    iq: f.iq.clone(),
                 });
             }
             // The page has left carrying the loudest block it was read

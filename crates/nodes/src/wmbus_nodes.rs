@@ -18,6 +18,7 @@ pub const CHANNEL_WIDTH_HZ: f64 = 250_000.0;
 
 pub struct WmbusNode {
     demod: Option<Demod>,
+    meter: crate::FrameMeter,
     frames: u64,
 }
 
@@ -29,7 +30,7 @@ impl Default for WmbusNode {
 
 impl WmbusNode {
     pub fn new() -> Self {
-        Self { demod: None, frames: 0 }
+        Self { demod: None, meter: crate::FrameMeter::new(1.0, 0, 0.05), frames: 0 }
     }
 
     /// Frames that passed their CRCs since the node was made.
@@ -56,6 +57,9 @@ impl Simple for WmbusNode {
             )));
         }
         self.demod = Some(d);
+        // A meter frame is a few milliseconds; fifty gives the burst and the
+        // quiet either side of it without keeping the band.
+        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.05);
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
@@ -63,17 +67,19 @@ impl Simple for WmbusNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let (Some(iq), Some(d)) = (i.as_iq(), self.demod.as_mut()) else { return Ok(()) };
+        self.meter.feed(iq);
         let rate = c.inputs[0].spec.rate.max(1.0);
         for f in d.process(iq) {
             self.frames += 1;
             c.emit(Event::Metric { name: "wmbus_mode", value: if f.mode == dsp::wmbus::Mode::T { 1.0 } else { 2.0 } });
             let _ = rate;
-            o.frames_mut().push(f.bytes.clone());
+            o.frames_mut().push(self.meter.frame(f.bytes.clone()));
         }
         Ok(())
     }
 
     fn reset(&mut self) {
+        self.meter.reset();
         if let Some(d) = &mut self.demod {
             d.reset();
         }

@@ -44,6 +44,7 @@ pub struct AprsNode {
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
+    meter: crate::FrameMeter,
     frames: Vec<Vec<u8>>,
     accepted: u64,
 }
@@ -66,6 +67,7 @@ impl AprsNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -103,6 +105,10 @@ impl Simple for AprsNode {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.afsk = AfskDemod::new(audio_rate, AfskConfig::default());
+        // Measured on the channel rather than on the span: a 16 kHz packet
+        // channel inside 2.4 MS/s of band is 0.7% of the power, so a level
+        // taken before the mixer is a level of everything else.
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.center = common::Hz(self.channel_hz as u64);
@@ -119,6 +125,7 @@ impl Simple for AprsNode {
         self.audio.clear();
         self.fm.process(&self.narrow, &mut self.audio);
 
+        self.meter.feed(&self.narrow);
         self.frames.clear();
         let audio = std::mem::take(&mut self.audio);
         self.afsk.process(&audio, &mut self.frames);
@@ -127,7 +134,7 @@ impl Simple for AprsNode {
         let out = o.frames_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(f.clone());
+            out.push(self.meter.frame(f.clone()));
         }
         Ok(())
     }
@@ -279,7 +286,7 @@ mod tests {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
             if let Payload::Frames(f) = out {
-                frames.extend(f);
+                frames.extend(f.into_iter().map(|x| x.bytes));
             }
         }
 

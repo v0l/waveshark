@@ -41,6 +41,7 @@ pub struct PocsagNode {
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
+    meter: crate::FrameMeter,
     sends: Vec<Transmission>,
     accepted: u64,
 }
@@ -63,6 +64,7 @@ impl PocsagNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
             sends: Vec::new(),
             accepted: 0,
         }
@@ -100,6 +102,7 @@ impl Simple for PocsagNode {
         // nominal 38.4 kHz, since the decimation factor has to be an integer
         // and the span decides what that leaves.
         self.demod = PocsagDemod::new(audio_rate, PocsagConfig::default());
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.center = common::Hz(self.channel_hz as u64);
@@ -116,6 +119,7 @@ impl Simple for PocsagNode {
         self.audio.clear();
         self.fm.process(&self.narrow, &mut self.audio);
 
+        self.meter.feed(&self.narrow);
         self.sends.clear();
         let audio = std::mem::take(&mut self.audio);
         self.demod.process(&audio, &mut self.sends);
@@ -124,7 +128,7 @@ impl Simple for PocsagNode {
         let out = o.frames_mut();
         for t in &self.sends {
             self.accepted += 1;
-            out.push(t.to_bytes());
+            out.push(self.meter.frame(t.to_bytes()));
         }
         Ok(())
     }
@@ -243,7 +247,7 @@ mod tests {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
             if let Payload::Frames(f) = out {
-                frames.extend(f);
+                frames.extend(f.into_iter().map(|x| x.bytes));
             }
         }
 

@@ -497,16 +497,16 @@ impl pipeline::node::Node for PacketBusNode {
                     for f in frames.iter() {
                         out.push(common::Packet {
                             at_us,
-                            center_hz,
+                            // A front end that read one channel out of a span
+                            // says which; the rest take the port's centre.
+                            center_hz: f.center_hz.unwrap_or(center_hz),
                             bandwidth_hz,
-                            // A byte demodulator hands over a frame it has
-                            // already accepted, with no level to report.
-                            rssi_dbfs: f32::NAN,
-                            snr_db: f32::NAN,
+                            rssi_dbfs: f.rssi_dbfs,
+                            snr_db: f.snr_db,
                             modulation: None,
-                            body: common::PacketBody::Frame(f.clone()),
+                            body: common::PacketBody::Frame(f.bytes.clone()),
                             measure: None,
-                            iq: None,
+                            iq: f.iq.clone(),
                             audio: None,
                         });
                     }

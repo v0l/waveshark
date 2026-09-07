@@ -46,8 +46,10 @@ pub fn channel_of(center_hz: f64) -> Option<u8> {
 }
 
 pub struct BleNode {
+    rate: f64,
     cfg: BleConfig,
     det: BleDetector,
+    meter: crate::FrameMeter,
     frames: Vec<BleFrame>,
     accepted: u64,
 }
@@ -61,12 +63,21 @@ impl Default for BleNode {
 impl BleNode {
     pub fn new(cfg: BleConfig) -> Self {
         Self {
+            rate: 16_000_000.0,
             cfg,
             // Replaced at negotiation, when the real rate and centre are known.
             det: BleDetector::new(16_000_000.0, ADV_CHANNELS[1].1, cfg),
+            // Two milliseconds at 16 MS/s: an advertisement is 80 to 400 us,
+            // so a frame's own samples are in there without keeping a ring
+            // the size of the span.
+            meter: crate::FrameMeter::new(16_000_000.0, ADV_CHANNELS[1].1 as u64, 0.002),
             frames: Vec::new(),
             accepted: 0,
         }
+    }
+
+    fn meter_rate(&self) -> f64 {
+        self.rate
     }
 
     /// Packets that passed CRC since the node was built.
@@ -106,6 +117,8 @@ impl Simple for BleNode {
             _ => BAND_CENTER_HZ,
         };
         self.det = det;
+        self.meter = crate::FrameMeter::new(rate, hz as u64, 0.002);
+        self.rate = rate;
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
@@ -114,17 +127,33 @@ impl Simple for BleNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
+        self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
         let out = o.frames_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(f.pdu.clone());
+            // The detector measured this burst against the floor either side
+            // of it, which is a better number than a block mean; what it
+            // does not keep is the samples, and the channel a span holding
+            // more than one advertising channel cannot get from the port.
+            let hz = ADV_CHANNELS
+                .iter()
+                .find(|(c, _)| *c == f.channel)
+                .map(|(_, hz)| *hz as u64)
+                .unwrap_or(BAND_CENTER_HZ as u64);
+            let mut out_frame = common::Frame::measured(f.pdu.clone(), f.rssi_dbfs, f.snr_db).at(hz);
+            // A frame is 8 preamble bits plus the PDU at one bit a
+            // microsecond, with room either side for the ramp.
+            let len = ((f.pdu.len() + 12) * 8) as f64 * 1e-6 * self.meter_rate();
+            out_frame.iq = self.meter.iq_at(f.start_sample, len as usize);
+            out.push(out_frame);
         }
         Ok(())
     }
 
     fn reset(&mut self) {
+        self.meter.reset();
         self.det.reset();
     }
 }
