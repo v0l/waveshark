@@ -67,6 +67,33 @@ nothing to be wired to. If you find yourself summing audio anywhere but on
 the bus, or keeping a level anywhere but as one of its parameters, you are
 adding that back.
 
+## Every packet carries what it was heard at
+
+A row in the packet list is evidence, and evidence that does not say how
+strong it was is half a row. **Every packet reaching the bus has a finite
+`rssi_dbfs`, a finite `snr_db`, and the samples it was read from in `iq`.**
+Not most of them, not the ones whose front end happens to measure: all of
+them. Without those three a row cannot be sorted by strength, a fade cannot
+be told from a decoder that broke, a weak decode cannot be judged, and there
+is nothing to look at when the bytes are wrong.
+
+The front end measures, because the front end is the only thing holding the
+samples the frame came from. A level taken later is a level of something
+else: a 16 kHz packet channel inside 2.4 MS/s of band is 0.7% of the power,
+so a reading from the span says what the band was doing, not what the
+transmitter was. Where a demodulator already measures, as Mode S does off its
+preamble and BLE does off the floor either side of the burst, that number is
+the one to carry; where it does not, `nodes::FrameMeter` measures the
+channel and keeps a short ring so the frame gets its own samples back.
+
+This has been rediscovered more than once because it is easy to break at a
+port boundary rather than in a decoder. `Payload::Frames` carried
+`Vec<Vec<u8>>` for a year, which quietly threw away the measurements of every
+front end that produced frames instead of pulses; the fix was to make the
+port carry `common::Frame`. If you add a payload kind, a bus, a feed or a
+sink, ask what happens to the level and the samples as they cross it.
+A `f32::NAN` in a level is a bug, not a value.
+
 ## The graph is the same graph in both modes
 
 Manual mode is a lock on editing and nothing else. The receiver draws its
