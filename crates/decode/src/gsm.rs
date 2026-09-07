@@ -547,8 +547,6 @@ fn parse_l3(b: &[u8]) -> Option<Message> {
     Some(m)
 }
 
-/// Read a block off a dedicated channel.
-
 /// Read a signalling channel block a cell has assigned to a phone.
 ///
 /// The blocks are the same 23 bytes and the same coding, but a dedicated
