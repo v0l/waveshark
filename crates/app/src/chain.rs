@@ -4463,7 +4463,7 @@ mod tests {
 
     /// The marks the interface would draw for a plan, for tests about them.
     fn scan_marks_of(p: &Plan) -> Vec<ScanMark> {
-        let mut s = crate::scanners::Scanners { list: Vec::new() };
+        let mut s = crate::scanners::Scanners { list: Vec::new(), version: crate::scanners::VERSION };
         s.list.push(crate::scanners::Scanner {
             name: "ISM 433".into(),
             lo: 433.05e6,

@@ -724,6 +724,19 @@ impl AutoNode {
             self.wide.push(Member::build("ais", spec, NodeSpec::new("ais"), &self.reg)?);
             self.exclude.push(ais);
         }
+        // Bluetooth advertising, on whichever of the three channels the span
+        // holds. Span-wide for the reason AIS is: the channel is where the
+        // standard put it rather than where a spectrogram finds it, and an
+        // advertisement is 80 us of a hopping device that may never be heard
+        // twice, which is not enough for a source to open around.
+        let bw = crate::ble_nodes::CHANNEL_WIDTH_HZ / 2.0;
+        for (_, hz) in dsp::ble::ADV_CHANNELS {
+            if self.rate >= 4_000_000.0 && covers(hz - bw, hz + bw) {
+                self.wide.push(Member::build("ble", spec, NodeSpec::new("ble"), &self.reg)?);
+                self.exclude.push((hz - bw, hz + bw));
+                break;
+            }
+        }
         self.apply_band();
 
         let nominal = StreamSpec::iq(self.cfg.min_rate_hz, self.center);
@@ -1604,5 +1617,14 @@ mod tests {
         assert_eq!(n.wide(), ["ais"]);
         Node::negotiate(&mut n, &[spec(250_000.0, Hz::mhz(1090))]).unwrap();
         assert!(n.wide().is_empty(), "Mode S needs 2 MS/s");
+        // Bluetooth advertising is one of these and not a scanner block:
+        // the three channels are where the standard put them, and this is
+        // the only thing that places the front end on them.
+        Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2426))]).unwrap();
+        assert_eq!(n.wide(), ["ble"]);
+        Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2450))]).unwrap();
+        assert!(n.wide().is_empty(), "no advertising channel inside that span");
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
+        assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
 }

@@ -294,10 +294,22 @@ impl Scanner {
     }
 }
 
+/// Which shipped table a file was written from.
+///
+/// Bumped whenever a block is added to [`DEFAULT_TEXT`], so that a receiver
+/// somebody has been running since before a protocol landed picks the new
+/// block up. Without it the file is written once, on the first run, and a
+/// front end added later never runs for anybody who already had one: BLE
+/// shipped, and every existing installation quietly had no Bluetooth.
+pub const VERSION: u32 = 1;
+
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Scanners {
     pub list: Vec<Scanner>,
+    /// The version the file carried, or zero for one written before this
+    /// existed.
+    pub version: u32,
 }
 
 impl Default for Scanners {
@@ -315,14 +327,21 @@ impl Scanners {
         Some(base.join("waveshark").join("scanners"))
     }
 
-    /// Load, writing the defaults out first if there is no file yet.
+    /// Load, writing the defaults out first if there is no file yet, and
+    /// taking in any block a later version added.
     ///
     /// Writing them is the point: a table nobody can see is not configurable,
     /// and the shipped blocks are the worked examples for adding another.
     pub fn load() -> Self {
         let Some(path) = Self::path() else { return Self::default() };
         match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text),
+            Ok(text) => {
+                let mut t = Self::parse(&text);
+                if t.take_new_blocks() {
+                    let _ = t.save();
+                }
+                t
+            }
             Err(_) => {
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -331,6 +350,29 @@ impl Scanners {
                 Self::default()
             }
         }
+    }
+
+    /// Add every shipped block this file has never seen, and say whether
+    /// anything changed.
+    ///
+    /// By name, and only when the file is older than the shipped table, so a
+    /// block the operator edited keeps their version and one they deleted
+    /// stays deleted from the next load on. A block deleted before the file
+    /// carried a version comes back once, which is the price of not having
+    /// recorded the deletion.
+    pub fn take_new_blocks(&mut self) -> bool {
+        if self.version >= VERSION {
+            return false;
+        }
+        self.version = VERSION;
+        for sc in Self::default().list {
+            if !self.list.iter().any(|s| s.name == sc.name) {
+                self.list.push(sc);
+            }
+        }
+        // Written back even when no block was missing, so the version is
+        // recorded and the next load has nothing to do.
+        true
     }
 
     /// Every scanner the span covers, in file order.
@@ -401,6 +443,7 @@ impl Scanners {
     /// which is the price of the table being editable in two places.
     pub fn render(&self) -> String {
         let mut s = String::from(HEADER);
+        s.push_str(&format!("\nversion = {VERSION}\n"));
         for sc in &self.list {
             s.push_str(&format!("\n[{}]\n", sc.name));
             s.push_str(&format!(
@@ -448,6 +491,7 @@ impl Scanners {
     /// a config written by a later version has to load in an earlier one.
     pub fn parse(text: &str) -> Self {
         let mut list = Vec::new();
+        let mut version = 0u32;
         let mut cur: Option<Scanner> = None;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -471,7 +515,14 @@ impl Scanners {
                 });
                 continue;
             }
-            let (Some(s), Some((k, v))) = (cur.as_mut(), line.split_once('=')) else { continue };
+            let Some((k, v)) = line.split_once('=') else { continue };
+            if cur.is_none() {
+                if k.trim() == "version" {
+                    version = v.trim().parse().unwrap_or(0);
+                }
+                continue;
+            }
+            let Some(s) = cur.as_mut() else { continue };
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "range" => {
@@ -509,7 +560,7 @@ impl Scanners {
             s.settle();
             list.push(s);
         }
-        Self { list }
+        Self { list, version }
     }
 }
 
@@ -610,13 +661,15 @@ pub const HEADER: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | m17 | banks
+#   front     auto | modes | ais | aprs | pocsag | m17 | ble | banks
 #   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
 #             one demodulator per channel, and run for each channel the span
 #             covers; ais needs both of its, so it runs only when the span
 #             holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
+#   version   which shipped table this file was written from; blocks added
+#             by a later one are taken in on load
 ";
 
 /// The defaults, written out when there is no file.
@@ -634,13 +687,15 @@ pub const DEFAULT_TEXT: &str = "\
 #   range     the band this block is about; with no channels, any overlap
 #             with the span runs it
 #   span      narrowest span the front end works in
-#   front     auto | modes | ais | aprs | pocsag | m17 | banks
+#   front     auto | modes | ais | aprs | pocsag | m17 | ble | banks
 #   channels  frequencies to demodulate (optional). aprs, pocsag and m17 are
 #             one demodulator per channel, and run for each channel the span
 #             covers; ais needs both of its, so it runs only when the span
 #             holds both
 #   margin    how far inside the span edge they must fall (optional)
 #   widths    channel widths, for front = banks
+#   version   which shipped table this file was written from; blocks added
+#             by a later one are taken in on load
 #
 # `auto` finds and decodes everything in the block's band on its own: sources
 # wherever something transmits, each measured for centre and width and read
@@ -769,21 +824,12 @@ range = 920 - 928 MHz
 span  = 250 kHz
 front = auto
 
-[BLE]
-# The three primary advertising channels, which is where a device says what it
-# is. They are 24 and 54 MHz apart, so a span holds one of them: whichever the
-# dial is nearest gets the front end and the other two blocks do not fit.
-# Reading one needs at least 4 MS/s, which is a HackRF rather than a stick.
-range    = 2401 - 2481 MHz
-span     = 8 MHz
-front    = ble
-channels = 2402 MHz, 2426 MHz, 2480 MHz
-margin   = 1 MHz
-
 [ISM 2.4]
 # Wi-Fi, Bluetooth, video links and RC. Crowded, wide, and mostly signals far
 # wider than the span a receiver samples, so expect measurements rather than
-# decodes.
+# decodes. Bluetooth advertising needs no block of its own: `auto` runs it
+# across the span wherever one of the three advertising channels is inside
+# it, the same way it runs Mode S and AIS.
 range = 2400 - 2483.5 MHz
 span  = 250 kHz
 front = auto
@@ -805,6 +851,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_file_from_before_a_block_shipped_takes_it_in() {
+        // A table written by an older build: no version line, and none of
+        // the ISM blocks. Every receiver in the field has a file like this,
+        // and until the merge a block added after their first run never
+        // reached them.
+        let old = "[ADS-B]\nrange = 1089.9 - 1090.1 MHz\nspan = 2000 kHz\nfront = modes\n";
+        let mut t = Scanners::parse(old);
+        assert_eq!(t.version, 0);
+        assert_eq!(t.list.len(), 1);
+        assert!(t.take_new_blocks());
+        assert_eq!(t.version, VERSION);
+        assert!(t.list.iter().any(|s| s.name == "ISM 2.4"), "nothing added: {:?}", t.list);
+        // The operator's own block keeps its place at the front.
+        assert_eq!(t.list[0].name, "ADS-B");
+        // And a second pass has nothing to do, so a block deleted now stays
+        // deleted.
+        let mut again = Scanners::parse(&t.render());
+        assert_eq!(again.version, VERSION);
+        again.list.retain(|s| s.name != "ISM 2.4");
+        assert!(!again.take_new_blocks());
+        assert!(!again.list.iter().any(|s| s.name == "ISM 2.4"));
+    }
 
     #[test]
     fn a_disabled_block_does_not_run_but_survives_the_file() {
@@ -856,7 +926,7 @@ mod tests {
             names,
             [
                 "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 27", "ISM 40", "ISM 169",
-                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "BLE",
+                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920",
                 "ISM 2.4", "ISM 5.8"
             ]
         );
@@ -1077,7 +1147,11 @@ mod tests {
     #[test]
     fn the_table_round_trips_through_the_file_it_writes() {
         let s = Scanners::default();
-        assert_eq!(Scanners::parse(&s.render()), s);
+        // The blocks, not the version: what is written is always this
+        // build's, which is how the file records that it has seen the
+        // shipped table.
+        assert_eq!(Scanners::parse(&s.render()).list, s.list);
+        assert_eq!(Scanners::parse(&s.render()).version, VERSION);
     }
 
     #[test]
@@ -1087,7 +1161,7 @@ mod tests {
              widths = 20 kHz\n[Weather]\nrange = 868 - 869 MHz\nspan = 250 kHz\n\
              front = ais\nchannels = 868.3 MHz\nmargin = 12.5 kHz\n",
         );
-        assert_eq!(Scanners::parse(&s.render()), s);
+        assert_eq!(Scanners::parse(&s.render()).list, s.list);
         assert_eq!(s.list.len(), 2);
     }
 
