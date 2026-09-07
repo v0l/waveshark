@@ -1,7 +1,6 @@
 //! Which decoders a source gets, and when.
 
-use common::{Hz, Packet, Result, SourceBlock, SourceId, C32};
-use pipeline::event::Event;
+use common::{Hz, Result, SourceBlock, SourceId, C32};
 use pipeline::port::StreamSpec;
 use pipeline::registry::Settings;
 use pipeline::ParamValue;
@@ -137,16 +136,10 @@ impl AutoNode {
     /// front end classifies every burst anyway. What it costs is latency,
     /// since a burst is named when it ends or half a second in, and the ring
     /// is what pays that back: a short packet is read whole from it after
-    /// the fact, and a long one is caught up and then followed live.
-    pub(super) fn place_on_verdict(
-        &mut self,
-        k: usize,
-        at_us: u64,
-        closed: bool,
-        ev: &mut Vec<Event>,
-        pk: &mut Vec<Packet>,
-        heard: &mut Vec<(&'static str, f64)>,
-    ) {
+    /// the fact, and a long one is caught up and then followed live. The
+    /// catching up is spread over the blocks that follow rather than done
+    /// here; see [`Member::catch_up`].
+    pub(super) fn place_on_verdict(&mut self, k: usize, closed: bool) {
         let reg = &self.reg;
         let slot = &mut self.slots[k];
         let Some(router) = slot.members.iter().find(|m| m.router.is_some()) else {
@@ -186,20 +179,12 @@ impl AutoNode {
                 let Ok(mut m) = Member::place(*p, slot.spec, at, &slot.origin, reg) else {
                     continue;
                 };
-                let before = pk.len();
-                // The samples the source has produced so far, in the blocks
-                // the live path would have handed over, then the flush if
-                // it has already closed.
-                for chunk in history.chunks(16_384) {
-                    ev.extend(m.run(chunk, at_us, pk));
-                }
+                // The samples the source has produced so far, then the
+                // flush if it has already closed.
+                m.catch_up(history);
                 if closed {
                     let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * slot.spec.rate) as usize];
-                    ev.extend(m.run(&quiet, at_us, pk));
-                }
-                if pk.len() > before {
-                    slot.heard = true;
-                    heard.push((m.name, m.channel_hz));
+                    m.catch_up(&quiet);
                 }
                 slot.members.push(m);
             }

@@ -551,8 +551,20 @@ impl Node for AutoNode {
                     .par_iter_mut()
                     .enumerate()
                     .filter_map(|(k, slot)| {
-                        let b = blocks.iter().find(|b| b.id == slot.id)?;
-                        let closed = b.state == SourceState::Closed;
+                        // A source with no block this time is one that has
+                        // closed; its decoders run on only while one of
+                        // them is still reading history.
+                        let b = blocks.iter().find(|b| b.id == slot.id);
+                        if b.is_none() && !slot.members.iter().any(|m| m.behind()) {
+                            return None;
+                        }
+                        let (samples, rate, state) = match b {
+                            Some(b) => (&b.samples[..], b.rate, b.state),
+                            None => (&[][..], slot.spec.rate, SourceState::Closed),
+                        };
+                        // The flush is fed once, on the block that closed
+                        // the source, not on every block after it.
+                        let closed = b.is_some() && state == SourceState::Closed;
                         let per: Vec<(
                             Vec<Event>,
                             Vec<Packet>,
@@ -564,10 +576,10 @@ impl Node for AutoNode {
                             .map(|m| {
                                 let mut pk = Vec::new();
                                 let t = Instant::now();
-                                let mut ev = m.run(&b.samples, at_us, &mut pk);
+                                let mut ev = m.run(samples, at_us, &mut pk);
                                 if closed {
                                     let quiet =
-                                        vec![C32::new(0.0, 0.0); (m.flush_s * b.rate) as usize];
+                                        vec![C32::new(0.0, 0.0); (m.flush_s * rate) as usize];
                                     ev.extend(m.run(&quiet, at_us, &mut pk));
                                 }
                                 let us = t.elapsed().as_micros() as u64;
@@ -596,8 +608,11 @@ impl Node for AutoNode {
                                     && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
                             });
                         }
-                        let done = matches!(b.state, SourceState::Closed | SourceState::Superseded);
-                        if b.state == SourceState::Superseded {
+                        // Done once the source has closed and nothing is
+                        // still catching up on it.
+                        let done = matches!(state, SourceState::Closed | SourceState::Superseded)
+                            && !slot.members.iter().any(|m| m.behind());
+                        if state == SourceState::Superseded {
                             // A wider stream for the same transmitter takes over
                             // from its start. Whatever this one made of the sliver it
                             // had is half a burst, and half a burst is not evidence.
@@ -639,7 +654,7 @@ impl Node for AutoNode {
             self.phase(&format!("{name} cpu"), us, block_s);
         }
         let mut closed = Vec::new();
-        for (k, mut ev, mut pk, done, mut heard, _) in results {
+        for (k, ev, pk, done, heard, _) in results {
             let center = Hz(self.slots[k].center_hz);
             let named = !self.slots[k].remembered
                 && self.slots[k]
@@ -647,7 +662,7 @@ impl Node for AutoNode {
                     .iter()
                     .any(|m| m.verdicts.len() > self.slots[k].verdicts_seen);
             if named {
-                self.place_on_verdict(k, at_us, done, &mut ev, &mut pk, &mut heard);
+                self.place_on_verdict(k, done);
             }
             for (name, width) in &heard {
                 if let Some(e) = self.remember(name, center.as_f64(), *width) {
@@ -717,7 +732,10 @@ impl Node for AutoNode {
                 seen.push(key);
                 true
             }));
-            if done {
+            // A decoder placed this block on a source that has already
+            // closed still has the history to read; the slot stays until
+            // it has.
+            if done && !self.slots[k].members.iter().any(|m| m.behind()) {
                 closed.push(self.slots[k].id);
             }
         }
