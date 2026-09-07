@@ -315,6 +315,8 @@ dependencies = [
  "poll-promise",
  "reqwest",
  "rtlsdr",
+ "serde",
+ "serde_json",
  "sources",
  "survey",
  "tokio",
