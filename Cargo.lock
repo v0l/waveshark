@@ -2733,6 +2733,7 @@ dependencies = [
  "pipeline",
  "poll-promise",
  "rayon",
+ "rustfft",
  "sources",
  "tracing",
 ]
