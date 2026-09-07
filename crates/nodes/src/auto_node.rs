@@ -1698,7 +1698,8 @@ mod tests {
         let placed = |bandwidth_hz: f64, rate: f64| -> bool {
             bandwidth_hz >= VIDEO_MIN_HZ && rate >= VIDEO_MIN_RATE_HZ
         };
-        // An FPV carrier at 20 MS/s: the AKK transmitter measured 4.6 MHz.
+        // A 5.8 GHz video carrier at 20 MS/s: the one measured here was
+        // 4.6 MHz wide.
         assert!(placed(4.6e6, 20e6));
         // BLE is the widest thing here that is not video, at 2 MHz.
         assert!(!placed(2e6, 20e6));

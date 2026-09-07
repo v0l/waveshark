@@ -2,10 +2,10 @@
 //!
 //! Wiring only, like `ble_nodes`: the sync separation, the field assembly and
 //! the colour demodulation are `dsp::video`, and it knows nothing about
-//! pipelines. Nothing here is specific to a model aircraft's camera; what is
-//! specific to that is the 5.8 GHz channel plan in `decode::fpv`, which names
-//! a frequency when the band has a naming convention and leaves the label
-//! empty when it does not.
+//! pipelines. The one thing here that is specific to a band rather than to
+//! video is the 5.8 GHz channel plan in `decode::video_channels`, which names
+//! a frequency where that band has a naming convention and leaves the label
+//! empty where it does not.
 //!
 //! What the node adds is what the receiver needs and a demodulator does not
 //! have: the FM demodulator in front, the standard measured from the line
@@ -171,7 +171,7 @@ impl Simple for VideoNode {
 
         let mut fields = Vec::new();
         sep.process(&self.base, &mut fields);
-        let label = decode::fpv::name_at(self.center_hz as u64, 3_000_000);
+        let label = decode::video_channels::name_at(self.center_hz as u64, 3_000_000);
         let out = o.video_mut();
         for f in fields {
             self.fields += 1;

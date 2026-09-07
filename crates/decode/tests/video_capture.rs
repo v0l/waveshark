@@ -15,7 +15,7 @@
 use common::C32;
 use dsp::video::{Standard, SyncSeparator};
 
-const FIXTURE: &str = "../../testdata/fpv_pal_akk_5865M_20000k.cs8";
+const FIXTURE: &str = "../../testdata/pal_camera_5865M_20000k.cs8";
 const RATE: f64 = 20e6;
 
 fn baseband() -> Option<Vec<f32>> {
@@ -112,7 +112,7 @@ fn the_fields_lock_and_carry_a_picture() {
 #[test]
 fn the_channel_plan_names_where_this_came_from() {
     assert_eq!(
-        decode::fpv::name_at(5_865_000_000, 1_000_000).as_deref(),
+        decode::video_channels::name_at(5_865_000_000, 1_000_000).as_deref(),
         Some("A1 or B8")
     );
 }

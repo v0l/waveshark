@@ -338,7 +338,7 @@ data_channels = [31, 32, 33, 34, 35, 36]
 uas_id = "123"
 
 [[capture]]
-name = "fpv_pal_akk_5865M_20000k.cs8"
+name = "pal_camera_5865M_20000k.cs8"
 sha256 = "48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59"
 url = "https://nostr.download/48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59.xz"
 compression = "xz"
@@ -346,8 +346,9 @@ center_hz = 5_865_000_000
 rate_sps = 20_000_000
 format = "cs8"
 description = """
-Analogue FPV video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
-which the channel plan names A1 or B8 because two bands share that frequency.
+Analogue video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
+which the 5.8 GHz channel plan names A1 or B8 because two bands share that
+frequency.
 HackRF at 20 MS/s, 240 ms cut out of a 3.6 second recording, holding six
 fields of which three carry all 288 lines. The camera is looking at a room
 with a window, so the picture has both a saturated highlight and dark
