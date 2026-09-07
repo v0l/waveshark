@@ -62,12 +62,22 @@ fn main() {
     let got = rate / factor as f64;
     let step = got / (bw * dsp::lora::OVERSAMPLE as f64);
 
-    let mut phase = 0.0f64;
+    // A rotating phasor rather than a sine and a cosine per sample: the trig
+    // was most of the runtime over a quarter of a billion samples. Renormalised
+    // every 1024 steps, since repeated complex multiplication drifts in
+    // magnitude.
+    let dphi = -std::f64::consts::TAU * (signal - center) / rate;
+    let rot = C32::new(dphi.cos() as f32, dphi.sin() as f32);
+    let mut ph = C32::new(1.0, 0.0);
     let mixed: Vec<C32> = iq
         .iter()
-        .map(|&x| {
-            phase -= std::f64::consts::TAU * (signal - center) / rate;
-            x * C32::new(phase.cos() as f32, phase.sin() as f32)
+        .enumerate()
+        .map(|(i, &x)| {
+            ph *= rot;
+            if i % 1024 == 0 {
+                ph /= ph.norm();
+            }
+            x * ph
         })
         .collect();
     let mut decim = dsp::FirDecim::design_hz(rate, factor, bw * 0.62, 60.0);
