@@ -12,11 +12,26 @@
 # `family` is the label, and it is only ever what the capture demonstrates. See
 # crates/decode/tests/classify_offair.rs for why an unverified label is worse
 # than none.
+#
+# Most of these are cut down from what the radio wrote, with
+# `cargo run --release -p sources --example cut`: to the bursts themselves
+# where the capture is packets, and to the first fraction of a second where it
+# is something continuous. A recording is of a real band at a real place and
+# time, and the parts no test looks at are the parts nobody has looked at, so
+# they are not published. Each entry says what was kept and why that much.
+#
+# Two things a cut does not remove, and they are properties of these captures
+# rather than accidents. `meshcore_advert` decodes to a node named "Kieran" and
+# its position, and `gfsk_ble` carries the hardware addresses of whatever was
+# advertising in the room, one of which crates/app's survey test asserts by
+# name along with the receiver's own coordinates. Both are what makes them
+# evidence; treat them as published, not as private data that happens to be in
+# a test fixture.
 
 [[capture]]
 name = "fm_broadcast_95.8M_2000k.cs16"
-sha256 = "5666de52cd4031c71a0e5c41bfa61ffe29d7def894bd3833c6f604f051bf7fde"
-url = "https://nostr.download/5666de52cd4031c71a0e5c41bfa61ffe29d7def894bd3833c6f604f051bf7fde.xz"
+sha256 = "972691eeffcb6a3067134d1ad733b0eae03aabb4c60ddcf2d2b5cc41d2a0097a"
+url = "https://nostr.download/972691eeffcb6a3067134d1ad733b0eae03aabb4c60ddcf2d2b5cc41d2a0097a.xz"
 compression = "xz"
 center_hz = 95_800_000
 rate_sps = 2_000_000
@@ -31,12 +46,16 @@ FM produces.
 
 Weak, at 6 to 8 dB over the local floor, because the antenna on this receiver
 is cut for 868 MHz. Usable as an FM example and not much else.
+
+One second of a three second recording. A carrier that never stops has nothing
+to cut around, so the only question is how much of it says the same thing, and
+one second holds the pilot, the subcarrier and the RDS.
 """
 
 [[capture]]
 name = "fsk_sensor_868.3M_2000k.cs16"
-sha256 = "1d14d5b165e6aa6f23feaf0267aeda1a308a37d550dc8f714bfa33877aedc0e4"
-url = "https://nostr.download/1d14d5b165e6aa6f23feaf0267aeda1a308a37d550dc8f714bfa33877aedc0e4.xz"
+sha256 = "9eaf4247d78849d41d5b17e3bcff8f960bcae7775f358fdc8020bcdff03261c5"
+url = "https://nostr.download/9eaf4247d78849d41d5b17e3bcff8f960bcae7775f358fdc8020bcdff03261c5.xz"
 compression = "xz"
 center_hz = 868_300_000
 rate_sps = 2_000_000
@@ -47,13 +66,14 @@ description = """
 An unidentified 868 MHz sensor, one 11.8 ms burst keyed between two tones 54
 kHz apart. Nothing here decodes it, so the device is unknown and only the
 modulation is labelled. Cut from a 30 second dwell in which it was the only
-transmission.
+transmission, and cut again to the burst with 20 ms of band either side, which
+is 5% of the two seconds that were uploaded before and reads the same.
 """
 
 [[capture]]
 name = "gfsk_ble_2426M_20000k.cs8"
-sha256 = "76e9ad30ef850287433d3a8aef472cb066c7f9eb6d5cecf5be0de8fec42d96fb"
-url = "https://nostr.download/76e9ad30ef850287433d3a8aef472cb066c7f9eb6d5cecf5be0de8fec42d96fb.xz"
+sha256 = "32d16c504a6adb01f237eab48b407acd76e091a29865ea2c332603e89c216b34"
+url = "https://nostr.download/32d16c504a6adb01f237eab48b407acd76e091a29865ea2c332603e89c216b34.xz"
 compression = "xz"
 center_hz = 2_426_000_000
 rate_sps = 20_000_000
@@ -77,12 +97,20 @@ The same signal at twenty megasamples measures 996 kbaud, 467 kHz and h =
 0.47, and is read as MSK. A capture rate that is fine for seeing a signal is
 not automatically fine for measuring one, and an evaluation set that does not
 distinguish those two tests the recording instead of the code.
+
+Cut to the fourteen bursts in those two seconds with 4 ms of band either side,
+which is 6% of the recording and holds all eleven packets and all eight
+advertisements the receiver reads. The margin is measured rather than chosen:
+at 2 ms the classifier reads six of eleven as MSK instead of five, because the
+floor it takes from the tenth percentile of the file moves when the silence
+goes. A cut that changes what a capture is evidence of is not a cut, so keep
+enough band around a burst that the numbers do not move.
 """
 
 [[capture]]
 name = "impulsive_noise_474M_12000k.cs16"
-sha256 = "f8d5ababad01b55dd0126c4269483a10e9784c5d3539b9450b322c0fbab64d6f"
-url = "https://nostr.download/f8d5ababad01b55dd0126c4269483a10e9784c5d3539b9450b322c0fbab64d6f.xz"
+sha256 = "c5f87be71246b55750e5376a8553b88232cdbba13b955ecbd7b5ebdc5e01c3f4"
+url = "https://nostr.download/c5f87be71246b55750e5376a8553b88232cdbba13b955ecbd7b5ebdc5e01c3f4.xz"
 compression = "xz"
 center_hz = 474_000_000
 rate_sps = 12_000_000
@@ -97,6 +125,10 @@ structure at any DVB-T mode or guard interval.
 
 A classifier that has never been shown broadband noise with structure in it
 will confidently call this something.
+
+A quarter second of the two that were recorded. Not cut to its bursts: the
+quiet between the impulses is half of what a detector has to not fire on, so
+the whole window is kept and only its length is reduced.
 """
 
 [[capture]]
@@ -115,6 +147,9 @@ kHz, one 641 ms packet from a node in the same building. The parameters are
 known rather than inferred, because the transmitter was configured by hand, and
 a dechirp against SF11/BW250 returns a peak-to-mean of 3319 where noise gives
 under 60.
+
+Not cut. The packet is 641 ms of a 1.2 second recording, so there is little
+but packet in it, and what is left is the floor the detector needs.
 
 Energy detection never found this. LoRa is built to decode below the noise
 floor and the excursion inside the LoRa bandwidth stayed under 10 dB, so two
@@ -205,7 +240,8 @@ span by a dozen dB while this packet lasts, without clipping, and the
 extent measured against the smoothed peak took in the lifted floor and
 grew to 566 kHz; the extent is now measured under the raw peak when the
 band has flooded. Cut from 2.6 s before the packet, because with 0.6 s the
-floor was not learned and the same packet measured 338 kHz wide.
+floor was not learned and the same packet measured 338 kHz wide, which is
+also why this one is not cut any further.
 """
 
 [capture.expect]
@@ -219,8 +255,8 @@ type = "advert"
 
 [[capture]]
 name = "ofdm_lte_762M_12000k.cs16"
-sha256 = "f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510"
-url = "https://nostr.download/f1d9a72bbb306b4a51e25723b132d3cdddbc3b70883d2c89db37001a208a7510.xz"
+sha256 = "0e7400115fb688cf2f446ec2e94283fddef4a3e16ae90d97b37b94af75f77d04"
+url = "https://nostr.download/0e7400115fb688cf2f446ec2e94283fddef4a3e16ae90d97b37b94af75f77d04.xz"
 compression = "xz"
 center_hz = 762_000_000
 rate_sps = 12_000_000
@@ -232,6 +268,11 @@ LTE band 28 downlink, a continuous cell rather than a burst. Real-part
 kurtosis 3.30 and a cyclic-prefix peak of 1.23 to 1.28 at the LTE symbol
 period. Weaker and less clean than the Wi-Fi capture, which is why both are
 here: one OFDM signal is not evidence that a model learned OFDM.
+
+Three quarters of a second of an eight second recording. The cell transmits
+throughout, so the windows the classifier scores are slices of the same thing
+and more of them add little; six is what this length gives, and at half a
+second it falls to three, which is too few to mean much.
 """
 
 [[capture]]
@@ -274,8 +315,8 @@ burst_us = [20, 200]
 # and must fill at least half the span, which is what separates an 802.11
 # frame from a Bluetooth hop of the same length in the same recording.
 occupancy_min = 0.25
-sha256 = "f9b51116cba27a78cffd0fcf16b4bf31a1d43aa595b201fb25cd6fc1a93407be"
-url = "https://nostr.download/f9b51116cba27a78cffd0fcf16b4bf31a1d43aa595b201fb25cd6fc1a93407be.xz"
+sha256 = "ebbf4a5b2c91eeb2fd819676fa7878f632ef050a546e75e52495c1c9683ee684"
+url = "https://nostr.download/ebbf4a5b2c91eeb2fd819676fa7878f632ef050a546e75e52495c1c9683ee684.xz"
 compression = "xz"
 center_hz = 2_462_000_000
 rate_sps = 20_000_000
@@ -293,7 +334,10 @@ afternoon finding out why. The forty-one verified frames were cut out of a
 longer recording into their own file; this one is kept for the open-set case
 and for the beacons, and scored against nothing.
 
-802.11 on channel 11, three seconds holding 49 bursts. The 51 us ones are
+802.11 on channel 11. Three seconds holding 49 bursts were recorded; what is
+uploaded is the first half second of that, cut to its twenty bursts with 2 ms
+either side, which is a seventh of the original and still holds both kinds and
+five beacon intervals. The 51 us bursts are
 OFDM and say so twice over: Gaussian sample statistics (real-part kurtosis 3.1
 to 3.25) and a cyclic-prefix correlation peak of 1.37 to 1.48 at the 802.11
 symbol of 4 us with an 0.8 us guard.
@@ -306,8 +350,8 @@ as open-set material rather than labelled on a guess.
 
 [[capture]]
 name = "quiet_ism_869.525M_2000k.cs16"
-sha256 = "5f06cd92331bdc2b2dda4774463540f0654da3af99838e80f446f861ec645a13"
-url = "https://nostr.download/5f06cd92331bdc2b2dda4774463540f0654da3af99838e80f446f861ec645a13.xz"
+sha256 = "4b053b1b2a84d4655d74c401acff64c0e6a3653397b0a4e637731315a2c47cea"
+url = "https://nostr.download/4b053b1b2a84d4655d74c401acff64c0e6a3653397b0a4e637731315a2c47cea.xz"
 compression = "xz"
 center_hz = 869_525_000
 rate_sps = 2_000_000
@@ -315,7 +359,8 @@ format = "cs16"
 family = "noise"
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
-Two seconds of the 869 MHz band with nothing transmitting, from the same
+One second of the 869 MHz band with nothing transmitting, from the same
 session and the same gain setting as the LoRa captures. The receiver's own
-noise floor and spurs, which is what a burst detector has to not fire on.
+noise floor and spurs, which is what a burst detector has to not fire on. Half
+of the two seconds recorded, and there is nothing in either half.
 """

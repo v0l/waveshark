@@ -65,15 +65,18 @@ pilot_snr_db_min = 30.0
 
 [[capture]]
 name = "rds_92.4M_1024k.cu8"
-sha256 = "97e34827e2f219d671393c0604de0bf1a04cf7248e6419f8c415ceb84105b306"
-url = "https://nostr.download/97e34827e2f219d671393c0604de0bf1a04cf7248e6419f8c415ceb84105b306.xz"
+sha256 = "8ce11d7d31bfa4208de002090f34a1f5a99447744eedfbe1922c8c35ff65a7d3"
+url = "https://nostr.download/8ce11d7d31bfa4208de002090f34a1f5a99447744eedfbe1922c8c35ff65a7d3.xz"
 compression = "xz"
 center_hz = 92_400_000
 rate_sps = 1_024_000
 format = "cu8"
 description = """
-Twenty seconds of Spirit Radio on 92.4 MHz, carrying RDS. RTL-SDR with an R820T
-tuner at 40.2 dB gain, telescopic antenna.
+Eighteen seconds of Spirit Radio on 92.4 MHz, carrying RDS. RTL-SDR with an
+R820T tuner at 40.2 dB gain, telescopic antenna. The first eighteen seconds of
+a forty second recording, which is what a radiotext cycle needs: at twelve
+seconds the text has not come round in full and the assertion below fails, so
+the length is a measurement and not a preference.
 
 This exists because the earlier FM fixture does not. Development against
 95.8 MHz spent a long time on a decoder that appeared broken, when measuring
@@ -106,6 +109,13 @@ Four seconds of 1090 MHz, RTL-SDR at 49.6 dB gain on a telescopic antenna
 indoors, so the aircraft are the loud ones and the rest of the band is noise.
 That is the useful property: a Mode S demodulator that only works on strong
 signals looks fine on a clean capture, and this one has marginal frames in it.
+
+Not cut to its bursts, unlike most of the corpus, and deliberately so. 1090
+MHz is dense with Mode A/C replies as well as Mode S, so an energy cut keeps
+27% of the file at best, and cutting closer manufactured a frame dump1090
+never saw: a Mode S preamble made out of a splice between two bursts. The
+reference decode also comes from dump1090 run over the whole file, and there
+is no dump1090 here to regenerate it with.
 
 The reference decode in adsb_1090M_2400k.dump1090.hex comes from dump1090-rb
 1.0.15 run over this exact file, so agreement is evidence from an independent
@@ -158,14 +168,14 @@ frames_min = 20
 
 [[capture]]
 name = "tetra_downlink_391.5M_2400k.cu8"
-sha256 = "07561095d12f3a8605ce0acf6ef2b5dde093d366806b65e6b87af56e8b7c9df8"
-url = "https://nostr.download/07561095d12f3a8605ce0acf6ef2b5dde093d366806b65e6b87af56e8b7c9df8.xz"
+sha256 = "db00a32871adb721fa84ebb1b23d2f803068de5ab9534371e7438d090018d2cd"
+url = "https://nostr.download/db00a32871adb721fa84ebb1b23d2f803068de5ab9534371e7438d090018d2cd.xz"
 compression = "xz"
 center_hz = 391_500_000
 rate_sps = 2_400_000
 format = "cu8"
 description = """
-Twelve seconds of the TETRA downlink band, HackRF One at 52 dB of tuner gain,
+Eight seconds of the TETRA downlink band, HackRF One at 52 dB of tuner gain,
 holding two base station carriers: 391.181 MHz and 391.7045 MHz, both about 16
 kHz wide and both transmitting for every frame of the capture. Measured with an
 independent FFT rather than by this code, they sit 30 to 33 dB over the median
@@ -189,6 +199,13 @@ Recorded 2026-09-03 near the receiver in docs/design.md, DC blocker on, at a
 gain chosen so the peak sits 20 dB below full scale with no clipping. An
 earlier attempt at the default 32 dB put the carriers at under one ADC code
 and is not what is uploaded here.
+
+What is uploaded is seconds 4 to 12 of a twelve second recording, cut with
+`cargo run -p sources --example cut -- <file> <out> --skip 4 --seconds 8`. The
+window is not arbitrary and is worth leaving alone: the group addresses below
+arrive late, so a cut ending before eight seconds has no call rows in it at
+all, and the sync and network broadcast are each expected exactly once across
+the two halves the test replays, which a different split does not give.
 """
 
 [capture.expect]
