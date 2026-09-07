@@ -38,29 +38,25 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 /// Data rather than a closure, for the reason the audio bus's rules are: the
 /// set is edited in the interface, saved with the session, and has to be
 /// comparable so a rebuild can tell whether anything changed.
+///
+/// Two rules, because two are what the interface offers. The audio bus grew
+/// rules for a caller, a group and a system because an operator following a
+/// conversation needs them; a viewer chooses a picture by pointing at it, and
+/// a rule set nobody can reach from the screen is a rule set nobody has
+/// tested.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rule {
-    /// Whatever is being received, wherever.
+    /// Whatever is being received, wherever: the bus then shows the most
+    /// complete picture it has.
     Everything,
-    /// One system: every analogue camera, every weather satellite pass.
-    System(String),
-    /// One channel, to within its own width.
-    Channel(f64),
-    /// One named channel, as the plan names it: "F4", "A1 or B8".
-    Label(String),
     /// One input of the bus, whatever it carries.
     Input(usize),
 }
 
 impl Rule {
-    pub fn matches(&self, input: usize, f: &VideoFrame) -> bool {
+    pub fn matches(&self, input: usize, _f: &VideoFrame) -> bool {
         match self {
             Rule::Everything => true,
-            Rule::System(s) => f.system.eq_ignore_ascii_case(s),
-            // Half a megahertz, which is a rounding rather than a channel:
-            // the tightest plan here spaces channels 5 MHz apart.
-            Rule::Channel(hz) => (f.channel_hz - hz).abs() < 500e3,
-            Rule::Label(l) => f.label.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(l)),
             Rule::Input(k) => *k == input,
         }
     }
@@ -111,23 +107,8 @@ impl VideoBus {
         &self.strips
     }
 
-    pub fn rules(&self) -> &[Rule] {
-        &self.rules
-    }
-
     pub fn set_rules(&mut self, rules: Vec<Rule>) {
         self.rules = rules;
-    }
-
-    /// Make room for `n` fed inputs plus the spare.
-    pub fn resize(&mut self, n: usize) {
-        self.strips.resize_with(n + 1, Strip::default);
-    }
-
-    pub fn label(&mut self, k: usize, label: &str) {
-        if let Some(s) = self.strips.get_mut(k) {
-            s.label = label.into();
-        }
     }
 
     /// Take a field that arrived on one input.
@@ -333,7 +314,6 @@ mod tests {
     #[test]
     fn the_bus_keeps_the_last_picture_from_every_input() {
         let mut bus = VideoBus::new();
-        bus.resize(2);
         bus.push(0, frame(5_800e6, "F4", 288));
         bus.push(1, frame(5_865e6, "A1 or B8", 288));
         assert_eq!(bus.thumbnails().count(), 2);
@@ -346,7 +326,6 @@ mod tests {
     #[test]
     fn a_fragment_does_not_displace_a_whole_picture() {
         let mut bus = VideoBus::new();
-        bus.resize(2);
         bus.push(0, frame(5_800e6, "F4", 288));
         bus.push(1, frame(5_865e6, "A1 or B8", 60));
         let w = bus.watched().expect("something watched");
@@ -357,18 +336,13 @@ mod tests {
     #[test]
     fn a_subscription_decides_what_is_watched() {
         let mut bus = VideoBus::new();
-        bus.resize(2);
-        bus.set_rules(vec![Rule::Label("A1 or B8".into())]);
+        // The chosen input wins even though the other picture is more
+        // complete, which is the point: an operator watching one channel is
+        // not asking for the best signal.
+        bus.set_rules(vec![Rule::Input(1)]);
         bus.push(0, frame(5_800e6, "F4", 288));
         bus.push(1, frame(5_865e6, "A1 or B8", 200));
         assert_eq!(bus.watched().and_then(|f| f.label.as_deref()), Some("A1 or B8"));
-
-        // And a channel rule reaches the same picture by frequency.
-        bus.clear();
-        bus.set_rules(vec![Rule::Channel(5_865e6)]);
-        bus.push(0, frame(5_800e6, "F4", 288));
-        bus.push(1, frame(5_865e6, "A1 or B8", 200));
-        assert_eq!(bus.watched().map(|f| f.channel_hz), Some(5_865e6));
     }
 
     /// A muted input is still received and still shows a thumbnail: muting
@@ -376,11 +350,10 @@ mod tests {
     #[test]
     fn a_muted_input_is_still_received() {
         let mut bus = VideoBus::new();
-        bus.resize(2);
         bus.strips[0].muted = true;
         bus.push(0, frame(5_800e6, "F4", 288));
-        assert!(bus.watched().is_none());
-        assert_eq!(bus.thumbnails().count(), 1);
+        assert!(bus.watched().is_none(), "a muted input is not shown");
+        assert_eq!(bus.thumbnails().count(), 1, "but it is still received");
         assert_eq!(bus.strips()[0].fields, 1);
     }
 
