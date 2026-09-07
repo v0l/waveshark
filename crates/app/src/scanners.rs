@@ -102,6 +102,11 @@ pub enum Front {
     /// Carries the channel because the three of them are 24 and 54 MHz apart
     /// and no receiver here samples wide enough to hold two at once.
     Ble(f64),
+    /// One GSM carrier: the frequency correction tone, then the cell identity
+    /// and frame number in the synchronisation burst after it. Carries the
+    /// channel because a beacon is wherever the operator put it, and there
+    /// are 174 of them in the 900 downlink alone.
+    Gsm(f64),
 }
 
 /// The amateur DAPNET channel, used until a block says otherwise. Amateur
@@ -120,6 +125,11 @@ pub const DEFAULT_M17_HZ: f64 = 433_475_000.0;
 /// and is the one of the three least often buried.
 pub const DEFAULT_BLE_HZ: f64 = 2_426_000_000.0;
 
+/// The middle of the E-GSM 900 downlink, used until a block says otherwise.
+/// A beacon has no frequency worth compiling in: which carriers a network
+/// uses is licensed per operator and per country.
+pub const DEFAULT_GSM_HZ: f64 = nodes::gsm_nodes::DEFAULT_HZ;
+
 impl Front {
     /// The word this front end is written as in the file.
     pub fn key(&self) -> &'static str {
@@ -132,6 +142,7 @@ impl Front {
             Front::Pocsag(_) => "pocsag",
             Front::M17(_) => "m17",
             Front::Ble(_) => "ble",
+            Front::Gsm(_) => "gsm",
         }
     }
 
@@ -146,11 +157,12 @@ impl Front {
             Front::Pocsag(_) => "pager",
             Front::M17(_) => "m17",
             Front::Ble(_) => "ble",
+            Front::Gsm(_) => "gsm",
         }
     }
 
     /// Every front end, for a control that offers a choice of them.
-    pub fn all() -> [Front; 8] {
+    pub fn all() -> [Front; 9] {
         [
             Front::Auto,
             Front::ModeS,
@@ -159,6 +171,7 @@ impl Front {
             Front::Pocsag(DEFAULT_POCSAG_HZ),
             Front::M17(DEFAULT_M17_HZ),
             Front::Ble(DEFAULT_BLE_HZ),
+            Front::Gsm(DEFAULT_GSM_HZ),
             Front::Banks(DEFAULT_WIDTHS.to_vec()),
         ]
     }
@@ -170,7 +183,10 @@ impl Front {
     /// Mode S and AIS have one allocation each and find their own traffic
     /// inside it.
     pub fn per_channel(&self) -> bool {
-        matches!(self, Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_))
+        matches!(
+            self,
+            Front::Aprs(_) | Front::Pocsag(_) | Front::M17(_) | Front::Ble(_) | Front::Gsm(_)
+        )
     }
 
     /// The same front end moved to another channel.
@@ -180,6 +196,7 @@ impl Front {
             Front::Pocsag(_) => Front::Pocsag(hz),
             Front::M17(_) => Front::M17(hz),
             Front::Ble(_) => Front::Ble(hz),
+            Front::Gsm(_) => Front::Gsm(hz),
             other => other.clone(),
         }
     }
@@ -194,6 +211,7 @@ impl Front {
             "pocsag" | "pager" => Some(Front::Pocsag(DEFAULT_POCSAG_HZ)),
             "m17" => Some(Front::M17(DEFAULT_M17_HZ)),
             "ble" | "bluetooth" => Some(Front::Ble(DEFAULT_BLE_HZ)),
+            "gsm" | "gsm-sch" => Some(Front::Gsm(DEFAULT_GSM_HZ)),
             _ => None,
         }
     }
@@ -743,6 +761,23 @@ front    = pocsag
 channels = 439.9875 MHz
 margin   = 12.5 kHz
 
+[GSM]
+# One GSM carrier's beacon: the frequency correction tone, and the cell
+# identity and frame number in the synchronisation burst a frame later. Both
+# are broadcast in the clear; everything above them is ciphered.
+#
+# Off by default, and pointed at nothing in particular, because a beacon has
+# no frequency worth shipping: carriers are licensed per operator and per
+# country, and this front end reads one at a time. Find a carrier first, with
+# `front = auto` over 925 to 960 MHz or a phone's engineering screen, then put
+# its frequency here. The 900 downlink raster starts at 935.2 MHz and steps
+# 200 kHz; E-GSM starts at 925.2.
+range    = 925 - 960 MHz
+span     = 2 MHz
+front    = gsm
+channels = 947.4 MHz
+enabled  = false
+
 [TETRA]
 # Base station downlinks, which is the half of a TETRA network a listener
 # hears: 390 to 400 MHz across Europe for the emergency services, with the
@@ -926,11 +961,16 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "TETRA", "ISM 27", "ISM 40", "ISM 169",
-                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920",
-                "ISM 2.4", "ISM 5.8"
+                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "TETRA", "ISM 27", "ISM 40",
+                "ISM 169", "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915",
+                "ISM 920", "ISM 2.4", "ISM 5.8"
             ]
         );
+        // The GSM block ships off: it names a carrier nobody can know from
+        // here, so it is a place to put one rather than a place one is.
+        let gsm = s.list.iter().find(|x| x.name == "GSM").unwrap();
+        assert!(!gsm.enabled);
+        assert_eq!(gsm.front, Front::Gsm(947_400_000.0));
     }
 
     /// Every licence-free allocation the ribbon draws has a block that scans
