@@ -217,6 +217,16 @@ pub struct SourceConfig {
     /// since nothing this receiver reads is wider than a 500 kHz LoRa
     /// channel. Set it above the widest signal a front end reads.
     pub max_width_hz: f64,
+    /// Most sources open at once.
+    ///
+    /// Every open source costs an extraction and a front end on every block
+    /// for as long as it lasts, so a band that never goes quiet costs
+    /// without bound: 2.4 GHz opened 26 at once on Wi-Fi and the burst
+    /// router alone ran at ten times real time, which is a receiver that
+    /// stops answering rather than one that reads more. At the cap the
+    /// quietest open source is closed to make room for a louder candidate,
+    /// so what is dropped is what a listener would have dropped.
+    pub max_open: usize,
     /// Channel width the shared extraction bank aims for, in hertz, and the
     /// fewest channels worth running it with. See [`Bank`]. Zero channels
     /// disables it.
@@ -252,6 +262,7 @@ impl Default for SourceConfig {
             regrow: 1.5,
             history_s: 0.3,
             max_width_hz: 600_000.0,
+            max_open: 12,
             bank_channel_hz: BANK_CHANNEL_HZ,
             bank_min_channels: BANK_MIN_CHANNELS,
         }
@@ -592,6 +603,10 @@ struct Track {
 /// Watches a wideband stream as a spectrogram and reports sources.
 pub struct SourceDetector {
     cfg: SourceConfig,
+    /// Candidates refused because [`SourceConfig::max_open`] was reached,
+    /// counted so a receiver can say it is dropping signal rather than
+    /// silently reading less of the band.
+    capped: u64,
     rate: f64,
     n: usize,
     hop: usize,
@@ -695,6 +710,7 @@ impl SourceDetector {
 
         Self {
             cfg,
+            capped: 0,
             rate,
             n,
             hop,
@@ -1511,6 +1527,20 @@ impl SourceDetector {
         let regrow = self.cfg.regrow;
         let integrate = self.cfg.integrate_frames.max(1);
         let max_width = self.cfg.max_width_hz;
+        let max_open = self.cfg.max_open.max(1);
+        let mut open_count = self.tracks.iter().filter(|t| t.open).count();
+        let open_now = &mut open_count;
+        let capped = &mut self.capped;
+        // The quietest thing currently open, which is what a louder
+        // candidate takes the place of when the cap is reached.
+        let weakest = self
+            .tracks
+            .iter()
+            .filter(|t| t.open)
+            .map(|t| (t.src.id, t.src.peak_snr_db))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut displace: Option<SourceId> = None;
+        let displaced = &mut displace;
         let events = &mut self.events;
         let next_id = &mut self.next_id;
         self.tracks.retain_mut(|t| {
@@ -1572,7 +1602,28 @@ impl SourceDetector {
                     // source of their own, and opens if it narrows.
                     let fits = hi_hz - lo_hz <= max_width;
                     let moved = t.peak_hi - t.peak_lo >= steady_db;
-                    if fits && t.hits >= min_frames && (moved || t.born >= fixture_until) {
+                    // Room for it, or louder than the quietest thing already
+                    // open, which is then closed. Reported as closed rather
+                    // than dropped, so a front end reading it is torn down
+                    // the same way it would be at the end of a transmission.
+                    // Room, or louder by a clear margin than the quietest
+                    // thing open, which is then closed to make room. Without
+                    // the margin a pair of sources within a decibel of each
+                    // other would take turns evicting one another.
+                    let mut room = *open_now < max_open;
+                    if !room {
+                        if let Some((id, db)) = weakest {
+                            if displaced.is_none() && t.peak_hi > db + 3.0 {
+                                *displaced = Some(id);
+                                room = true;
+                            }
+                        }
+                        if !room {
+                            *capped += 1;
+                        }
+                    }
+                    if room && fits && t.hits >= min_frames && (moved || t.born >= fixture_until) {
+                        *open_now += 1;
                         t.open = true;
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = (c + 0.5 - (n / 2) as f64) * bin_hz;
@@ -1597,6 +1648,23 @@ impl SourceDetector {
             }
             true
         });
+        if let Some(id) = displace {
+            let hop = self.hop as u64;
+            let n = self.n;
+            self.tracks.retain_mut(|t| {
+                if t.src.id != id {
+                    return true;
+                }
+                t.src.end_sample = Some(frame_start(t.last_frame, hop) + n as u64);
+                self.events.push(SourceEvent::Closed(t.src));
+                false
+            });
+        }
+    }
+
+    /// Candidates refused because the cap on open sources was reached.
+    pub fn capped(&self) -> u64 {
+        self.capped
     }
 
 }
@@ -2822,6 +2890,41 @@ mod tests {
         assert!(s.lo_hz < f0 && s.hi_hz > f1, "extent {}..{} misses a tone", s.lo_hz, s.hi_hz);
         let mid = (f0 + f1) / 2.0;
         assert!((s.center_hz - mid).abs() < 4.0 * d.bin_hz(), "centre {} for tones at {f0} and {f1}", s.center_hz);
+    }
+
+    #[test]
+    fn only_so_many_sources_open_at_once() {
+        // Four transmitters at once, far enough apart not to be read as one,
+        // and room for two. A band that never goes quiet costs an extraction
+        // and a front end per source on every block, which is what made
+        // 2.4 GHz unusable: the cap is what bounds that.
+        let mut c = cfg();
+        c.max_open = 2;
+        let mut d = SourceDetector::new(RATE, RATE, c);
+        let mut x = noise(1_000_000, 0.02, 51);
+        for (k, hz) in [-400_000.0f64, -150_000.0, 100_000.0, 350_000.0].iter().enumerate() {
+            let amp = 0.05 + 0.02 * k as f32;
+            let mut ph = 0.0f64;
+            for i in 0..400_000usize {
+                ph += std::f64::consts::TAU * hz / RATE;
+                x[300_000 + i] += C32::new(amp * ph.cos() as f32, amp * ph.sin() as f32);
+            }
+        }
+        // Counted between blocks, not between events: a candidate that takes
+        // the place of the quietest source opens before that one is closed.
+        let mut open: Vec<SourceId> = Vec::new();
+        let mut most = 0usize;
+        for chunk in x.chunks(8192) {
+            for e in d.process(chunk) {
+                match e {
+                    SourceEvent::Opened(s) => open.push(s.id),
+                    SourceEvent::Closed(s) | SourceEvent::Superseded(s) => open.retain(|id| *id != s.id),
+                }
+            }
+            most = most.max(open.len());
+        }
+        assert!(most <= 2, "{most} sources open at once, cap is 2");
+        assert!(d.capped() > 0, "nothing was refused, so the cap was never reached");
     }
 
     #[test]
