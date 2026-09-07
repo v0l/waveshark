@@ -511,6 +511,8 @@ struct Slot {
     /// Protocols that wait for the classifier's verdict and have had it
     /// for this source: placed, or ruled out.
     tried: Vec<&'static str>,
+    /// How many verdicts had been considered when they were last asked.
+    verdicts_seen: usize,
     /// A channel remembered from earlier, which runs the one decoder that
     /// earned it and nothing else.
     remembered: bool,
@@ -974,6 +976,7 @@ impl AutoNode {
                 spec,
                 signal_hz: b.signal_hz,
                 tried: Vec::new(),
+                verdicts_seen: 0,
                 remembered: true,
             });
         }
@@ -1013,6 +1016,7 @@ impl AutoNode {
             spec,
             signal_hz: b.signal_hz,
             tried: Vec::new(),
+            verdicts_seen: 0,
             remembered: false,
         })
     }
@@ -1046,6 +1050,7 @@ impl AutoNode {
             return;
         };
         let verdicts = router.verdicts.clone();
+        slot.verdicts_seen = verdicts.len();
         let hz = slot.center_hz as f64;
         let snr = slot.members.first().map_or(f32::NAN, |m| m.source_snr_db);
         let mut history: Option<Vec<C32>> = None;
@@ -1550,7 +1555,10 @@ impl Node for AutoNode {
         for (k, mut ev, mut pk, done, mut heard, _) in results {
             let center = Hz(self.slots[k].center_hz);
             let named = !self.slots[k].remembered
-                && self.slots[k].members.iter().any(|m| !m.verdicts.is_empty());
+                && self.slots[k]
+                    .members
+                    .iter()
+                    .any(|m| m.verdicts.len() > self.slots[k].verdicts_seen);
             if named {
                 self.place_on_verdict(k, at_us, done, &mut ev, &mut pk, &mut heard);
             }
