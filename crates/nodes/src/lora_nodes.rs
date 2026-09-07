@@ -71,6 +71,12 @@ const OUTSIDE_RATIO: f32 = 1.5;
 /// same buffer and a far longer packet than anyone sends.
 const HOLD_SECONDS: f64 = 6.5;
 
+/// Whether a centre is in the 2.4 GHz ISM band, where LoRa is an SX128x and
+/// therefore inverted.
+fn is_2g4(center_hz: f64) -> bool {
+    (2_400e6..=2_500e6).contains(&center_hz)
+}
+
 pub struct LoraNode {
     /// Channel bandwidth in hertz, or zero to take it from the source.
     bandwidth_hz: f64,
@@ -252,11 +258,28 @@ impl Simple for LoraNode {
         self.pending.clear();
         self.bandwidth_hz = bw;
         self.center_hz = i.spec.center.as_f64();
-        self.demods = match self.sf {
-            0 => dsp::lora::SCANNED_SPREADING_FACTORS
-                .map(|sf| Demod::new(dsp::lora::Config::for_sf(sf)))
+        // Every LoRa transmitter on 2.4 GHz is an SX128x, and that family
+        // sends with I and Q swapped against the SX127x convention, so a
+        // demodulator built for 868 MHz finds nothing there at all. The band
+        // decides it, because nothing else on 2.4 GHz chirps this way and a
+        // node that tried both ways up would cost twice as much on every
+        // source to read a transmitter that does not exist.
+        let inverted = is_2g4(self.center_hz);
+        let cfg = |sf: u8| {
+            if inverted {
+                dsp::lora::Config::inverted_for_sf(sf)
+            } else {
+                dsp::lora::Config::for_sf(sf)
+            }
+        };
+        self.demods = match (self.sf, inverted) {
+            // The SX128x rates use SF5 to SF8, and scanning 9 to 12 there
+            // would be scanning for something no chip in the band sends.
+            (0, true) => (5..=8u8).map(|sf| Demod::new(cfg(sf))).collect(),
+            (0, false) => dsp::lora::SCANNED_SPREADING_FACTORS
+                .map(|sf| Demod::new(cfg(sf)))
                 .collect(),
-            sf => vec![Demod::new(dsp::lora::Config::for_sf(sf))],
+            (sf, _) => vec![Demod::new(cfg(sf))],
         };
         self.scanned = vec![0; self.demods.len()];
         self.held.clear();
@@ -846,6 +869,27 @@ mod tests {
             spec: s,
             latency: 0,
         }
+    }
+
+    /// A source on 2.4 GHz is an SX128x, so the node reads it the other way
+    /// up and looks only at the spreading factors that family uses. Getting
+    /// this wrong is not a degradation: an ExpressLRS handset sending a
+    /// hundred packets a second reads as an empty band.
+    #[test]
+    fn a_source_on_2g4_is_read_the_way_an_sx128x_transmits() {
+        assert!(is_2g4(2_440_400_000.0));
+        assert!(!is_2g4(869_525_000.0));
+
+        let mut n = LoraNode::new(812_500.0);
+        let mut s = StreamSpec::iq(4_000_000.0, Hz(2_440_400_000));
+        s.bandwidth = 812_500.0;
+        n.negotiate(&PortSpec { spec: s, latency: 0 }).expect("a 2.4 GHz source");
+        assert_eq!(n.demods.len(), 4, "SF5 to SF8, which is what the band uses");
+        assert!(n.demods.iter().all(|d| d.inverted()));
+
+        let mut n = LoraNode::new(250_000.0);
+        n.negotiate(&spec(2_000_000.0, 250_000.0)).expect("an 868 MHz source");
+        assert!(n.demods.iter().all(|d| !d.inverted()));
     }
 
     #[test]
