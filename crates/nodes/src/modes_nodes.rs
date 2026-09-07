@@ -19,6 +19,8 @@
 //! pipelines. This node is the wiring, exactly as `PulseDetectNode` is the
 //! wiring around `dsp::OokDetector`.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
 use decode::bds;
@@ -410,6 +412,35 @@ fn commb_fields(r: &bds::Report, fields: &mut Vec<(String, common::Value)>) {
         bds::Report::Capability { subnetwork_version } => {
             fields.push(("subnetwork".into(), Value::Int(*subnetwork_version as i64)));
         }
+    }
+}
+
+
+/// Mode S as the auto node and the tables know it: the 1090 MHz allocation,
+/// read off the span because a reply is shorter than a detector frame.
+pub struct ModeS;
+
+impl Protocol for ModeS {
+    fn id(&self) -> &'static str {
+        "mode_s"
+    }
+    fn label(&self) -> &'static str {
+        "mode s"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Channels(vec![1_090_000_000.0])
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[2_000_000.0],
+            // Its bits are a microsecond wide; the detector refuses slower.
+            min_rate_hz: 2_000_000.0,
+            span_wide: true,
+            families: &[],
+        }
+    }
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("mode_s")]
     }
 }
 

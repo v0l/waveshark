@@ -11,6 +11,8 @@
 //! frame that passed a check sequence, this carries a run of codewords that
 //! passed theirs.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{PocsagConfig, PocsagDemod, Transmission, DEVIATION_HZ};
@@ -190,6 +192,32 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
             d
         })
         .collect()
+}
+
+
+pub struct Pocsag;
+
+impl Protocol for Pocsag {
+    fn id(&self) -> &'static str {
+        "pocsag"
+    }
+    fn label(&self) -> &'static str {
+        "pager"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: CHANNEL_WIDTH_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("pocsag").f("channel_hz", at.center_hz)]
+    }
 }
 
 #[cfg(test)]

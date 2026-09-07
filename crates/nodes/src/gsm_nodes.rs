@@ -15,6 +15,8 @@
 //! a front end that quietly follows the tuning is one that says it heard a
 //! cell where there is none.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
 use pipeline::event::Decoded;
@@ -446,6 +448,32 @@ fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
         return rows;
     }
     vec![d]
+}
+
+
+pub struct Gsm;
+
+impl Protocol for Gsm {
+    fn id(&self) -> &'static str {
+        "gsm"
+    }
+    fn label(&self) -> &'static str {
+        "gsm"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Bands(gsm::DOWNLINK_BANDS.to_vec())
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: CHANNEL_WIDTH_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("gsm").f("channel_hz", at.center_hz)]
+    }
 }
 
 #[cfg(test)]

@@ -25,6 +25,8 @@
 //! sync word the first sixteen bytes of the payload are read as its packet
 //! header, which is as far as anyone without the channel key gets.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::{Result, C32};
 use decode::lora::{self, Received};
 use decode::lorawan;
@@ -932,6 +934,43 @@ fn now_us() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+
+/// LoRa as the auto node knows it: placed on the classifier's verdict, not
+/// on width, because it is the dearest decoder to run and a chirp is the
+/// one thing the classifier names reliably. On a band of hard-keyed sensors
+/// most sources measure over 44 kHz from their splatter, and dechirping six
+/// spreading factors on each of them was the largest line on a busy span.
+pub struct Lora;
+
+impl Protocol for Lora {
+    fn id(&self) -> &'static str {
+        "lora"
+    }
+    fn label(&self) -> &'static str {
+        "lora"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Anywhere
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &BANDWIDTHS_HZ,
+            min_rate_hz: 0.0,
+            span_wide: false,
+            families: &[dsp::Modulation::Chirp],
+        }
+    }
+    fn accepts_width(&self, source_width_hz: f64) -> bool {
+        !bandwidths_for(source_width_hz).is_empty()
+    }
+    fn widths_for(&self, source_width_hz: f64) -> Vec<f64> {
+        bandwidths_for(source_width_hz)
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("lora").f("bandwidth_hz", at.width_hz)]
+    }
 }
 
 #[cfg(test)]

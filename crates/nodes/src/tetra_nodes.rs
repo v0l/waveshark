@@ -16,6 +16,8 @@
 //! registration or a data session, and only a row that carries `voice`
 //! reaches the call list.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::tetra::{
     Address, CallPdu, Event, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, RESOURCE,
@@ -1240,6 +1242,47 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         d = d.with_media(pipeline::event::media::TEXT);
     }
     Some(d)
+}
+
+
+/// TETRA as the auto node knows it: placed by band, not width. Unlike the
+/// amateur channels its carriers live in licensed downlink allocations, and
+/// its hunt correlates continuously, not worth paying on every 433 MHz
+/// burst.
+pub struct Tetra;
+
+impl Protocol for Tetra {
+    fn id(&self) -> &'static str {
+        "tetra"
+    }
+    fn label(&self) -> &'static str {
+        "tetra"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Bands(dsp::tetra::DOWNLINK_BANDS.to_vec())
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: MIN_RATE_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    /// A carrier is on all day and measures however wide the tuner's
+    /// splatter makes it; the band decides, not the width.
+    fn accepts_width(&self, _source_width_hz: f64) -> bool {
+        true
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("tetra").f("channel_hz", at.center_hz)]
+    }
+    fn dedupe_key(&self, p: &common::Packet) -> Option<Vec<u8>> {
+        let common::PacketBody::Frame(f) = &p.body else {
+            return None;
+        };
+        decode::tetra::Event::identity_key(&f.bytes)
+    }
 }
 
 #[cfg(test)]

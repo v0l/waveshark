@@ -15,6 +15,8 @@
 //! channel is read and the port carries the band instead, because a frame
 //! cannot then be placed by the port alone.
 
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::NodeSpec;
 use common::Result;
 use decode::ble as pdu;
 use dsp::ble::{BleConfig, BleDetector, BleFrame, ADV_CHANNELS};
@@ -217,6 +219,39 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // from plausibility.
             .with_crc(Some(true)),
     )
+}
+
+
+/// BLE advertising as the auto node and the tables know it: whichever of
+/// the three channels the span holds, read off the span because an
+/// advertisement is 80 us of a hopping device that may never be heard
+/// twice, which is not enough for a source to open around.
+pub struct Ble;
+
+impl Protocol for Ble {
+    fn id(&self) -> &'static str {
+        "ble"
+    }
+    fn label(&self) -> &'static str {
+        "ble"
+    }
+    fn placement(&self) -> Placement {
+        Placement::Channels(ADV_CHANNELS.iter().map(|(_, hz)| *hz).collect())
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            // At 1 Mbit/s the bit centres have to be found in the samples
+            // themselves, and four a symbol is where the packet count stops
+            // moving.
+            min_rate_hz: 4_000_000.0,
+            span_wide: true,
+            families: &[],
+        }
+    }
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("ble")]
+    }
 }
 
 #[cfg(test)]
