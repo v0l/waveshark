@@ -31,6 +31,7 @@ mod head;
 mod keys_pane;
 mod map_pane;
 mod mapview;
+mod links_pane;
 mod messages_pane;
 mod packets;
 mod scope;
@@ -65,6 +66,7 @@ pub struct App {
     map: map_pane::MapState,
     calls: state::CallsState,
     messages: state::MessagesState,
+    links: state::LinksState,
     #[allow(dead_code)]
     keys: state::KeysState,
     audio: state::AudioState,
@@ -211,6 +213,7 @@ enum View {
     Map,
     Calls,
     Messages,
+    Links,
     Keys,
 }
 
@@ -222,10 +225,15 @@ impl View {
             View::Map => "Map",
             View::Calls => "Calls",
             View::Messages => "Messages",
+            View::Links => "Data links",
             View::Keys => "Keys",
         }
     }
 }
+
+/// Log segments a load reads back, newest first. At 256 MB each this is a
+/// bounded amount of reading for a directory that is meant to open at once.
+const LINK_LOG_SEGMENTS: usize = 2;
 
 /// Packets kept in the log. About a screenful of scrollback at any plausible
 /// reading speed, and bounded memory on a band that never goes quiet.
@@ -359,6 +367,7 @@ impl Default for App {
             rt: background_runtime(),
             calls: state::CallsState::default(),
             messages: state::MessagesState::default(),
+            links: state::LinksState::default(),
             keys: state::KeysState::default(),
             audio: state::AudioState::default(),
             cmds: Vec::new(),
@@ -1004,6 +1013,10 @@ impl App {
             // Text outlives the log for the same reason a call does: a page
             // read half an hour later is still the page that was sent.
             self.messages.list.update(&rec, rec.at);
+            // And a transmission that names an end is a link, whether or not
+            // anybody spoke or wrote: a meter, an advertiser and a pager
+            // capcode all belong in the directory.
+            self.links.list.update(&rec, rec.at);
             let id = self.log.next_packet;
             self.log.next_packet += 1;
             self.log.decodes.push(Logged { id, rec });
@@ -1195,6 +1208,41 @@ impl App {
             Some(messages_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(messages_pane::Action::Clear) => self.messages.list.clear(),
             None => {}
+        }
+    }
+
+    /// Draw the data links directory, and the link being followed.
+    fn links_view(&mut self, ui: &mut egui::Ui) {
+        match (links_pane::LinksView { st: &mut self.links }).show(ui) {
+            Some(links_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
+            Some(links_pane::Action::Clear) => self.links.list = crate::links::Links::new(),
+            Some(links_pane::Action::LoadLog) => self.load_links_from_log(),
+            None => {}
+        }
+    }
+
+    /// Read the packet log back into the links directory.
+    ///
+    /// Newest segments first and bounded, because a folder holds gigabytes
+    /// and the directory is a view: what an operator wants on opening it is
+    /// the recent past, not the whole disk.
+    fn load_links_from_log(&mut self) {
+        let Some(dir) = crate::packetlog::PacketLog::default_dir() else {
+            self.links.error = Some("no packet log folder".into());
+            return;
+        };
+        let segments = crate::links::segments(&dir);
+        let recent: Vec<_> = segments.iter().rev().take(LINK_LOG_SEGMENTS).rev().collect();
+        if recent.is_empty() {
+            self.links.error = Some(format!("no log segments in {}", dir.display()));
+            return;
+        }
+        self.links.error = None;
+        for path in recent {
+            match crate::links::from_log(path) {
+                Ok(l) => self.links.list.absorb(l),
+                Err(e) => self.links.error = Some(format!("{}: {e}", path.display())),
+            }
         }
     }
 
@@ -1435,6 +1483,7 @@ impl eframe::App for App {
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
                     View::Messages => self.message_view(ui),
+                    View::Links => self.links_view(ui),
                     View::Keys => self.keys_view(ui),
                 });
         }
@@ -1551,6 +1600,10 @@ impl App {
 
     pub fn show_messages(&mut self) {
         self.view = View::Messages;
+    }
+
+    pub fn show_links(&mut self) {
+        self.view = View::Links;
     }
 
     /// Point the receiver at a frequency without opening a channel on it.

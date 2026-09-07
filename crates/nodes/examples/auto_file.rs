@@ -83,7 +83,6 @@ fn main() {
     let wall = t0.elapsed().as_secs_f64();
     let secs = iq.len() as f64 / rate;
     if std::env::var_os("PHASES").is_some() {
-        use pipeline::node::Node;
         for (id, name) in g.order() {
             if let Some(node) = g.node(id) {
                 for (phase, cost) in node.phases() {

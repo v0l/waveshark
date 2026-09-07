@@ -440,6 +440,20 @@ pub(super) struct MessagesState {
     pub filter: String,
 }
 
+/// The data links view: who is talking to whom, and which link is being
+/// followed.
+#[derive(Default)]
+pub(super) struct LinksState {
+    pub list: crate::links::Links,
+    /// What the operator typed in the filter box.
+    pub filter: String,
+    /// The link being followed, by its title, so the choice survives the
+    /// directory being rebuilt every frame.
+    pub chosen: Option<String>,
+    /// Why the last load from the log failed, when it did.
+    pub error: Option<String>,
+}
+
 /// The key manager: the keys known, and what the operator is typing. The
 /// store exists only with the `tea` feature (there is no key material to keep
 /// without it); the view itself is always present as an encryption monitor.

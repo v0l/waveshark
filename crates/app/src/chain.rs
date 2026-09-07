@@ -3420,6 +3420,12 @@ pub fn scan_marks(
     out
 }
 
+/// A decode as the packet list holds it. Public because a directory rebuilt
+/// from the log has to make the same rows the live receiver makes.
+pub fn record_of(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
+    record(at, d)
+}
+
 fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
     // Mode S occupies the whole band it is transmitted in; there is no
     // channel to speak of, and nothing else is near enough to be confused

@@ -12,6 +12,7 @@ mod devices;
 mod i18n;
 mod icons;
 mod keystore;
+mod links;
 mod meshnode;
 mod locale;
 mod dial;
@@ -659,6 +660,10 @@ struct Args {
     #[arg(long)]
     messages: bool,
 
+    /// Open on the data links: who is talking to whom, and what passed
+    #[arg(long)]
+    links: bool,
+
     /// Tune here, in MHz, without opening a channel on it
     #[arg(long, value_name = "MHZ")]
     center: Option<f64>,
@@ -998,6 +1003,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.messages {
                 app.show_messages();
+            }
+            if args.links {
+                app.show_links();
             }
             app.soak = args.soak;
             Ok(Box::new(app))
