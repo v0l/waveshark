@@ -20,7 +20,7 @@ pub use device::{
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
 pub use decode::{
-    media, Airtime, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
+    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
 };
 pub use pulse::{Frame, IqBurst, Measure, Package, Packet, PacketBody, Pulse, Speech, Voice};
 pub use source::{SourceBlock, SourceId, SourceState};

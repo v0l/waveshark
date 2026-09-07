@@ -165,6 +165,9 @@ impl Simple for ModeSNode {
 pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
     use common::Value;
     let mut fields: Vec<(String, Value)> = Vec::new();
+    // What the map needs, typed, so nothing downstream parses these bytes a
+    // second time to find it.
+    let mut air = Air::default();
     if let Some(icao) = frame.icao {
         fields.push(("icao".into(), Value::Text(format!("{icao:06x}"))));
     }
@@ -175,6 +178,8 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
             "ADSB-Identification"
         }
         Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
+            air.altitude_ft = *altitude_ft;
+            air.cpr = Some(common::Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr });
             if let Some(alt) = altitude_ft {
                 fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
             }
@@ -187,12 +192,19 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
             "ADSB-Position"
         }
         Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
+            // On the ground, so the altitude that goes with this position is
+            // zero and not whatever it was reporting on the way down.
+            air.altitude_ft = Some(0);
+            air.cpr = Some(common::Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr });
             fields.push(("cpr_odd".into(), Value::Bool(*odd)));
             fields.push(("lat_cpr".into(), Value::Int(*lat_cpr as i64)));
             fields.push(("lon_cpr".into(), Value::Int(*lon_cpr as i64)));
             "ADSB-Surface"
         }
         Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
+            air.ground_speed_kt = Some(*ground_speed_kt);
+            air.track_deg = Some(*track_deg);
+            air.vertical_rate_fpm = Some(*vertical_rate_fpm);
             fields.push(("ground_speed_kt".into(), Value::Float(round1(*ground_speed_kt))));
             fields.push(("track_deg".into(), Value::Float(round1(*track_deg))));
             fields.push(("vertical_rate_fpm".into(), Value::Int(*vertical_rate_fpm as i64)));
@@ -206,6 +218,18 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
         // wind and temperature go out in answer to an interrogation and never
         // in a broadcast.
         Message::CommB { altitude_ft, squawk, report } => {
+            air.altitude_ft = *altitude_ft;
+            air.squawk = *squawk;
+            if let Some(bds::Report::Meteo(m)) = report {
+                if let (Some(kt), Some(deg)) = (m.wind_kt, m.wind_dir_deg) {
+                    air.wind = Some((kt, deg));
+                }
+                air.temp_c = Some(m.temp_c);
+            }
+            if let Some(bds::Report::TrackTurn { track_deg, ground_speed_kt, .. }) = report {
+                air.ground_speed_kt = *ground_speed_kt;
+                air.track_deg = *track_deg;
+            }
             if let Some(alt) = altitude_ft {
                 fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
             }
@@ -245,19 +269,55 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
         // Only the extended squitters carry a CRC of their own. A short reply
         // is believed because its address is one an ADS-B frame proved, which
         // is corroboration rather than an integrity check.
-        .with_crc(matches!(frame.df, 17 | 18).then_some(true));
+        .with_crc(matches!(frame.df, 17 | 18).then_some(true))
+        .reporting(air.into());
     if let Some(icao) = frame.icao {
         let id = format!("{icao:06x}");
         d.link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(id.clone())));
         let mut who = common::Identity::new("adsb", id);
         // The callsign is the aircraft naming itself, which is what a device
         // list shows next to the address nobody can read.
-        if let Message::Identification { callsign, .. } = &frame.kind {
-            who.name = Some(callsign.clone());
+        match &frame.kind {
+            Message::Identification { callsign, .. } => who.name = Some(callsign.clone()),
+            // A Comm-B identification register is the same aircraft naming
+            // itself, in answer to a radar rather than in a broadcast, and it
+            // is the only name some aircraft ever give.
+            Message::CommB { report: Some(bds::Report::Identification { callsign }), .. } => {
+                who.name = Some(callsign.clone())
+            }
+            _ => {}
         }
         d.identity = Some(who);
     }
     d
+}
+
+/// The aircraft fields as they are collected, before they become a report.
+#[derive(Default)]
+struct Air {
+    altitude_ft: Option<i32>,
+    ground_speed_kt: Option<f64>,
+    track_deg: Option<f64>,
+    vertical_rate_fpm: Option<i32>,
+    squawk: Option<u16>,
+    wind: Option<(f64, f64)>,
+    temp_c: Option<f64>,
+    cpr: Option<common::Cpr>,
+}
+
+impl From<Air> for common::ReportDetail {
+    fn from(a: Air) -> Self {
+        common::ReportDetail::Aircraft {
+            altitude_ft: a.altitude_ft,
+            ground_speed_kt: a.ground_speed_kt,
+            track_deg: a.track_deg,
+            vertical_rate_fpm: a.vertical_rate_fpm,
+            squawk: a.squawk,
+            wind: a.wind,
+            temp_c: a.temp_c,
+            cpr: a.cpr,
+        }
+    }
 }
 
 fn round1(v: f64) -> f64 {

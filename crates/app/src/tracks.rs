@@ -34,6 +34,7 @@ use decode::adsb;
 /// things on a map.
 fn track_id(who: &common::Identity) -> Option<TrackId> {
     match who.space.as_str() {
+        "adsb" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Icao),
         "ais" => who.id.parse().ok().map(TrackId::Mmsi),
         "aprs" => Some(TrackId::Call(who.id.clone())),
         "meshtastic" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Mesh),
@@ -57,6 +58,22 @@ fn track_id(who: &common::Identity) -> Option<TrackId> {
 /// heading, so the two have to merge rather than replace.
 fn merge_detail(into: &mut Detail, from: Detail) {
     match (into, from) {
+        (
+            Detail::Aircraft { altitude_ft, vertical_rate_fpm, squawk, wind, temp_c },
+            Detail::Aircraft {
+                altitude_ft: alt,
+                vertical_rate_fpm: vr,
+                squawk: sq,
+                wind: w,
+                temp_c: t,
+            },
+        ) => {
+            *altitude_ft = alt.or(*altitude_ft);
+            *vertical_rate_fpm = vr.or(*vertical_rate_fpm);
+            *squawk = sq.or(*squawk);
+            *wind = w.or(*wind);
+            *temp_c = t.or(*temp_c);
+        }
         (
             Detail::Vessel { heading_deg, nav_status, ship_type, destination, class_b },
             Detail::Vessel {
@@ -514,11 +531,6 @@ impl Tracks {
         self.seen.len() - 1
     }
 
-    /// Fold in one AIS message.
-    ///
-    /// Much shorter than the ADS-B path, and that is the point: an AIS
-    /// position is absolute, so there is nothing to pair, nothing to resolve
-    /// against a reference, and no way for it to be a zone out.
     /// Fold in what a decode said, whatever protocol said it.
     ///
     /// The tracker used to parse AIS, APRS and the two meshes for itself off
@@ -527,9 +539,10 @@ impl Tracks {
     /// reads their conclusions: an identity says which track, a position says
     /// where it is, and the position's detail says what sort of thing it is.
     ///
-    /// ADS-B is the exception and still has its own path below: it sends half
-    /// a position per frame, so what the tracker needs from it is the compact
-    /// position halves and the pairing state, not a place.
+    /// Mode S is the same road with one extra step: it sends half a position
+    /// per frame, so the decode carries the compact halves and the pairing
+    /// happens here, where what this aircraft was doing a second ago is
+    /// known.
     pub fn update_decoded(&mut self, d: &common::Decoded, at: std::time::Instant) -> bool {
         let Some(who) = &d.identity else { return false };
         let Some(id) = track_id(who) else { return false };
@@ -577,6 +590,7 @@ impl Tracks {
                 pressure_hpa: *pressure_hpa,
             },
             common::ReportDetail::Bare => match id {
+                TrackId::Icao(_) => Detail::new_aircraft(),
                 TrackId::Mesh(_) => Detail::Mesh {
                     long_name: None,
                     short_name: None,
@@ -605,7 +619,20 @@ impl Tracks {
                 },
                 _ => return false,
             },
-            common::ReportDetail::Aircraft { .. } => return false,
+            common::ReportDetail::Aircraft {
+                altitude_ft,
+                vertical_rate_fpm,
+                squawk,
+                wind,
+                temp_c,
+                ..
+            } => Detail::Aircraft {
+                altitude_ft: *altitude_ft,
+                vertical_rate_fpm: *vertical_rate_fpm,
+                squawk: *squawk,
+                wind: *wind,
+                temp_c: *temp_c,
+            },
         };
         let i = self.entry(id, detail.clone(), at);
         let e = &mut self.seen[i];
@@ -621,6 +648,10 @@ impl Tracks {
         // vessel's static message keeps the ship type its position report
         // never carried.
         merge_detail(&mut e.track.detail, detail);
+        if let common::ReportDetail::Aircraft { ground_speed_kt, track_deg, .. } = &d.report {
+            e.track.speed_kt = ground_speed_kt.or(e.track.speed_kt);
+            e.track.course_deg = track_deg.or(e.track.course_deg);
+        }
         if let Some(p) = &d.position {
             e.track.speed_kt = p.speed_kt.or(e.track.speed_kt);
             e.track.course_deg = p.course_deg.or(e.track.course_deg);
@@ -637,139 +668,67 @@ impl Tracks {
             // is no reading of them that could be a zone out.
             e.track.set_position((p.lat, p.lon), at, true);
         }
+        // Half a position, which is all Mode S sends: pairing the halves, or
+        // resolving one against what this aircraft was doing a second ago,
+        // is the map's own state and needs the whole entry.
+        if let common::ReportDetail::Aircraft { cpr: Some(half), .. } = &d.report {
+            let reference = self.reference;
+            place_aircraft(&mut self.seen[i], *half, reference, at);
+        }
         true
     }
+}
 
-    /// Fold in one Meshtastic packet that was read against the default key.
-    ///
-    /// A position moves the node; node info names it; telemetry says how
-    /// its battery is. A text message is evidence it is there and nothing
-    /// more, and a packet whose payload did not open is not evidence of a
-    /// position at all.
-    /// Fold in one Mode S frame.
-    pub fn update_adsb(&mut self, frame: &adsb::Frame, at: std::time::Instant) {
-        let Some(icao) = frame.icao else { return };
-        let i = self.entry(TrackId::Icao(icao), Detail::new_aircraft(), at);
-        let reference = self.reference;
-        let e = &mut self.seen[i];
-        e.track.messages += 1;
-        e.track.last = at;
+/// Put an aircraft where its latest compact half-position says it is.
+///
+/// Mode S sends a latitude and longitude with the high bits stripped and an
+/// alternating odd or even flag, so a frame on its own is not a place. The
+/// three ways out are tried in the order that keeps a track smooth.
+fn place_aircraft(
+    e: &mut Entry,
+    half: common::Cpr,
+    reference: Option<(f64, f64)>,
+    at: std::time::Instant,
+) {
+    let cpr = (half.lat, half.lon);
+    if half.odd {
+        e.cpr.odd = Some((cpr, at));
+    } else {
+        e.cpr.even = Some((cpr, at));
+    }
 
-        let (cpr, odd) = match &frame.kind {
-            adsb::Message::Identification { callsign, .. } => {
-                e.track.label = Some(callsign.clone());
+    // A position already established, and recent enough that the aircraft
+    // cannot have left the zone it was in, resolves this frame exactly. This
+    // is the smooth path: one frame, one instant, no blending, and it cannot
+    // inherit a mistake because only a pair can confirm a position in the
+    // first place.
+    let own = e.track.position.filter(|_| {
+        e.track.confirmed
+            && e.track.pos_at.is_some_and(|t| at.saturating_duration_since(t) < REFERENCE_AGE)
+    });
+    if let Some(seed) = own {
+        e.track.set_position(adsb::cpr_local(seed, cpr, half.odd), at, true);
+        return;
+    }
+
+    // Otherwise a matching pair, which needs no reference at all. Second
+    // rather than first because its two halves are up to ten seconds apart
+    // and an airliner covers a mile and a half in that: preferring it would
+    // make every fix wobble between where the aircraft is and where it was.
+    if let (Some((even, te)), Some((odd_cpr, to))) = (e.cpr.even, e.cpr.odd) {
+        if te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW {
+            if let Some(p) = adsb::cpr_global(even, odd_cpr, to > te) {
+                e.track.set_position(p, at, true);
                 return;
             }
-            adsb::Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
-                e.track.speed_kt = Some(*ground_speed_kt);
-                e.track.course_deg = Some(*track_deg);
-                if let Detail::Aircraft { vertical_rate_fpm: v, .. } = &mut e.track.detail {
-                    *v = Some(*vertical_rate_fpm);
-                }
-                return;
-            }
-            adsb::Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
-                if let (Some(alt), Detail::Aircraft { altitude_ft: a, .. }) =
-                    (altitude_ft, &mut e.track.detail)
-                {
-                    *a = Some(*alt);
-                }
-                ((*lat_cpr, *lon_cpr), *odd)
-            }
-            adsb::Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
-                // On the ground, so the altitude shown should not be whatever
-                // it was reporting on the way down.
-                if let Detail::Aircraft { altitude_ft, .. } = &mut e.track.detail {
-                    *altitude_ft = Some(0);
-                }
-                ((*lat_cpr, *lon_cpr), *odd)
-            }
-            // A reply to a radar. It carries no position, but its altitude is
-            // as good as a broadcast one and its callsign register names an
-            // aircraft that may never broadcast an identification at all.
-            adsb::Message::CommB { altitude_ft, squawk, report } => {
-                if let Detail::Aircraft { altitude_ft: a, squawk: s, wind, temp_c, .. } =
-                    &mut e.track.detail
-                {
-                    if let Some(alt) = altitude_ft {
-                        *a = Some(*alt);
-                    }
-                    if let Some(code) = squawk {
-                        *s = Some(*code);
-                    }
-                    // The weather this aircraft is flying through, which
-                    // nothing else on the band reports.
-                    if let Some(decode::bds::Report::Meteo(m)) = report {
-                        if let (Some(kt), Some(deg)) = (m.wind_kt, m.wind_dir_deg) {
-                            *wind = Some((kt, deg));
-                        }
-                        *temp_c = Some(m.temp_c);
-                    }
-                }
-                match report {
-                    Some(decode::bds::Report::Identification { callsign }) => {
-                        e.track.label = Some(callsign.clone());
-                    }
-                    Some(decode::bds::Report::TrackTurn {
-                        track_deg,
-                        ground_speed_kt,
-                        ..
-                    }) => {
-                        if let Some(v) = ground_speed_kt {
-                            e.track.speed_kt = Some(*v);
-                        }
-                        if let Some(v) = track_deg {
-                            e.track.course_deg = Some(*v);
-                        }
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            adsb::Message::Unsupported { .. } | adsb::Message::ShortReply => return,
-        };
+        }
+    }
 
-        if odd {
-            e.cpr.odd = Some((cpr, at));
-        } else {
-            e.cpr.even = Some((cpr, at));
-        }
-        // A position already established, and recent enough that the aircraft
-        // cannot have left the zone it was in, resolves this frame exactly.
-        // This is the smooth path: one frame, one instant, no blending, and it
-        // cannot inherit a mistake because only a pair can confirm a position
-        // in the first place.
-        let own = e.track.position.filter(|_| {
-            e.track.confirmed
-                && e.track.pos_at.is_some_and(|t| {
-                    at.saturating_duration_since(t) < REFERENCE_AGE
-                })
-        });
-        if let Some(seed) = own {
-            e.track.set_position(adsb::cpr_local(seed, cpr, odd), at, true);
-            return;
-        }
-
-        // Otherwise a matching pair, which needs no reference at all. Second
-        // rather than first because its two halves are up to ten seconds apart
-        // and an airliner covers a mile and a half in that: preferring it
-        // would make every fix wobble between where the aircraft is and where
-        // it was.
-        if let (Some((even, te)), Some((odd_cpr, to))) = (e.cpr.even, e.cpr.odd) {
-            if te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW {
-                if let Some(p) = adsb::cpr_global(even, odd_cpr, to > te) {
-                    e.track.set_position(p, at, true);
-                    return;
-                }
-            }
-        }
-
-        // Nothing to refine from, so the receiver's own position gives a
-        // provisional answer: right for anything in ordinary range, and
-        // replaced by the first pair that arrives.
-        if let Some(r) = reference {
-            e.track.set_position(adsb::cpr_local(r, cpr, odd), at, false);
-        }
+    // Nothing to refine from, so the receiver's own position gives a
+    // provisional answer: right for anything in ordinary range, and replaced
+    // by the first pair that arrives.
+    if let Some(r) = reference {
+        e.track.set_position(adsb::cpr_local(r, cpr, half.odd), at, false);
     }
 }
 
@@ -841,22 +800,11 @@ impl pipeline::node::Simple for TracksNode {
         let at = std::time::Instant::now();
         for packet in i.as_packets().unwrap_or(&[]) {
             // What the packet decoded to, decided once on the bus. This used
-            // to be four parsers here, run on a guess from the frequency, so
+            // to be five parsers here, run on a guess from the frequency, so
             // the map could disagree with the packet list about a frame they
             // had both seen.
             for d in &packet.decodes {
                 self.tracks.update_decoded(d, at);
-            }
-            // ADS-B still comes in as bytes: a frame carries half a position
-            // in compact form, and pairing two of them or resolving one
-            // against a reference is state that belongs to the map, since it
-            // is the thing that knows where this aircraft was a second ago.
-            // Which band it arrived on says it is Mode S, the same evidence
-            // the decoder uses; a decode's protocol name is not a rule.
-            if dsp::modes::is_modes_band(packet.center_hz() as f64) {
-                if let Some(Ok(f)) = packet.frame().map(adsb::parse) {
-                    self.tracks.update_adsb(&f, at);
-                }
             }
         }
         Ok(())
@@ -909,7 +857,7 @@ mod tests {
         for (offset, bytes) in &frames {
             let Ok(fr) = adsb::parse(bytes) else { continue };
             let at = t0 + *offset;
-            fl.update_adsb(&fr, at);
+            feed_adsb(&mut fl, &fr, at);
             let Some(icao) = fr.icao else { continue };
             let id = TrackId::Icao(icao);
             let Some(a) = fl.active(at).iter().find(|t| t.id == id).cloned().cloned() else {
@@ -933,10 +881,19 @@ mod tests {
     }
 
     fn frame(hex: &str) -> adsb::Frame {
-        let bytes: Vec<u8> = (0..hex.len() / 2)
+        adsb::parse(&hex_bytes(hex)).expect("a frame")
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len() / 2)
             .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
-            .collect();
-        adsb::parse(&bytes).expect("a frame")
+            .collect()
+    }
+
+    /// Through the Mode S decoder, the way the bus feeds the map.
+    fn feed_adsb(t: &mut Tracks, f: &adsb::Frame, at: std::time::Instant) {
+        let d = nodes::modes_nodes::adsb_decoded(f, &f.raw, common::Hz(1_090_000_000));
+        t.update_decoded(&d, at);
     }
 
     fn ident() -> adsb::Frame {
@@ -984,8 +941,8 @@ mod tests {
     fn frames_from_one_aircraft_become_one_row() {
         let now = std::time::Instant::now();
         let mut f = Tracks::new();
-        f.update_adsb(&ident(), now);
-        f.update_adsb(&ident(), now);
+        feed_adsb(&mut f, &ident(), now);
+        feed_adsb(&mut f, &ident(), now);
         let active = f.active(now);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].label.as_deref(), Some("KLM1023"));
@@ -997,9 +954,9 @@ mod tests {
     fn a_pair_of_position_frames_resolves_without_a_reference() {
         let now = std::time::Instant::now();
         let mut f = Tracks::new();
-        f.update_adsb(&pos_even(), now);
+        feed_adsb(&mut f, &pos_even(), now);
         assert!(f.active(now)[0].position.is_none(), "one parity says nothing");
-        f.update_adsb(&pos_odd(), now + std::time::Duration::from_millis(500));
+        feed_adsb(&mut f, &pos_odd(), now + std::time::Duration::from_millis(500));
         let (lat, lon) = f.active(now)[0].position.expect("a position");
         assert!((lat - 52.2657).abs() < 0.01, "latitude {lat}");
         assert!((lon - 3.9389).abs() < 0.01, "longitude {lon}");
@@ -1009,7 +966,7 @@ mod tests {
     fn velocity_and_altitude_land_on_the_same_row() {
         let now = std::time::Instant::now();
         let mut f = Tracks::new();
-        f.update_adsb(&velocity(), now);
+        feed_adsb(&mut f, &velocity(), now);
         let a = &f.active(now)[0];
         assert_eq!(a.id, TrackId::Icao(0x485020));
         assert!((a.speed_kt.unwrap() - 159.2).abs() < 0.5);
@@ -1078,7 +1035,7 @@ mod tests {
     fn an_icao_and_an_mmsi_with_the_same_value_are_different_tracks() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_adsb(&ident(), now);
+        feed_adsb(&mut t, &ident(), now);
         let icao = match t.active(now)[0].id {
             TrackId::Icao(v) => v,
             _ => panic!(),
@@ -1111,7 +1068,7 @@ mod tests {
     fn each_kind_is_forgotten_on_its_own_schedule() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_adsb(&ident(), now);
+        feed_adsb(&mut t, &ident(), now);
         feed_ais(&mut t, &ais_position(), now);
         assert_eq!(t.active(now).len(), 2);
 
@@ -1211,7 +1168,7 @@ mod tests {
     fn the_three_protocols_do_not_share_an_identity_space() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_adsb(&ident(), now);
+        feed_adsb(&mut t, &ident(), now);
         feed_ais(&mut t, &ais_position(), now);
         feed_aprs(&mut t, &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>"), now);
         let active = t.active(now);
@@ -1257,8 +1214,8 @@ mod tests {
         // altitude, and this is the only place a wind reading comes from.
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        t.update_adsb(&frame("A0001692185BD5CF400000DFC696"), now);
-        t.update_adsb(&frame("A0001838201584F23468207CDFA5"), now);
+        feed_adsb(&mut t, &frame("A0001692185BD5CF400000DFC696"), now);
+        feed_adsb(&mut t, &frame("A0001838201584F23468207CDFA5"), now);
         let list = t.active(now);
         let a = list
             .iter()
@@ -1318,7 +1275,7 @@ mod tests {
     fn packets_that_are_not_tracks_are_ignored() {
         let now = std::time::Instant::now();
         let mut f = Tracks::new();
-        f.update_adsb(&frame("5D4007FB3E0376"), now);
+        feed_adsb(&mut f, &frame("5D4007FB3E0376"), now);
         assert!(f.active(now).is_empty());
     }
 
