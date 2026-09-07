@@ -22,7 +22,15 @@ default = []
 # a receiver should not reach the network to decode what it heard.
 hub = ["dep:hf-hub"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
+# Metal is not a choice on a Mac, it is what the GPU is called, and the crates
+# behind it refuse to compile anywhere else. As a feature it broke
+# `--all-features` on Linux, since that turns on every feature a package
+# declares whether or not the platform can build it.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+candle-core = { version = "0.11", features = ["metal"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+candle-transformers = { version = "0.11", features = ["metal"] }
 
 [dev-dependencies]
 hound = "3"
