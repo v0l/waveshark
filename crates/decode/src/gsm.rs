@@ -41,6 +41,46 @@ impl std::fmt::Display for Lai {
     }
 }
 
+/// The channel numbers a frequency list holds.
+///
+/// One format of several, and the only one seen on a live network so far:
+/// GSM 05.08's bit map 0, which is 124 bits, one per channel number, and
+/// covers the whole 900 band. The others encode ranges of channel numbers
+/// for the 1800 band, where 124 bits would not reach, and are refused rather
+/// than guessed at: a wrong frequency list reads as a neighbour that is not
+/// there, and nothing downstream can tell that from a cell that has gone off
+/// the air.
+///
+/// The layout is 3GPP TS 44.018 figure 10.5.2.1b.2.1: channel 124 is bit 4
+/// of the second octet, and channel 1 is bit 1 of the seventeenth.
+fn channels(ie: &[u8]) -> Option<Vec<u16>> {
+    if ie.len() < 16 {
+        return None;
+    }
+    // Bits 8 and 7 of the first octet say which format this is; bit map 0
+    // is zero. Bits 6 and 5 are spare in a cell allocation and carry the
+    // extension and allocation sequence indicators in a neighbour list, so
+    // neither is looked at here.
+    if ie[0] & 0xC0 != 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for n in 1..=124u16 {
+        // Counting down from channel 124, which is the top bit of the first
+        // octet's low nibble; the four that fit there come first and the
+        // rest fill the fifteen octets after it from the top bit down.
+        let from_top = usize::from(124 - n);
+        let (byte, place) = match from_top {
+            0..=3 => (ie[0], 3 - from_top),
+            t => (ie[1 + (t - 4) / 8], 7 - (t - 4) % 8),
+        };
+        if byte >> place & 1 == 1 {
+            out.push(n);
+        }
+    }
+    Some(out)
+}
+
 /// A message off the broadcast channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -53,6 +93,15 @@ pub struct Message {
     /// The cell, where the message carries it.
     pub cell_id: Option<u16>,
     pub lai: Option<Lai>,
+    /// The channel numbers the message lists. Empty where it carries none,
+    /// or carries them in a format this does not read.
+    pub channels: Vec<u16>,
+    /// What that list is. A type 1 carries the cell's own allocation, which
+    /// is the set of frequencies it hops over; a type 2 carries the
+    /// neighbours a phone is told to measure, which is where the rest of the
+    /// network is. Confusing the two would put a scanner on the serving
+    /// cell's own hopping set and call it the neighbourhood.
+    pub channels_are_neighbours: bool,
 }
 
 /// Read a block off the broadcast or common control channel.
@@ -75,28 +124,31 @@ pub fn parse(block: &[u8]) -> Option<Message> {
     let type_id = block[2];
     let body = &block[3..(3 + len.saturating_sub(1)).min(block.len())];
 
-    let (name, ident) = match type_id {
-        0x19 => ("SI1", Ident::None),
-        0x1A => ("SI2", Ident::None),
-        0x02 => ("SI2bis", Ident::None),
-        0x03 => ("SI2ter", Ident::None),
-        0x07 => ("SI2quater", Ident::None),
+    // Where a message opens with a 16 octet frequency list: the cell's own
+    // allocation in a type 1, and the neighbours to measure in the types
+    // that describe a BCCH allocation.
+    let (name, ident, has_list) = match type_id {
+        0x19 => ("SI1", Ident::None, true),
+        0x1A => ("SI2", Ident::None, true),
+        0x02 => ("SI2bis", Ident::None, true),
+        0x03 => ("SI2ter", Ident::None, true),
+        0x07 => ("SI2quater", Ident::None, false),
         // The two that carry the cell's own identity, and the reason this
         // file exists: type 3 on the broadcast channel, type 6 on the slow
         // associated channel of a call in progress.
-        0x1B => ("SI3", Ident::CellAndArea),
-        0x1E => ("SI6", Ident::CellAndArea),
-        0x1C => ("SI4", Ident::AreaOnly),
-        0x1D => ("SI5", Ident::None),
-        0x05 => ("SI5bis", Ident::None),
-        0x06 => ("SI5ter", Ident::None),
-        0x00 => ("SI13", Ident::None),
-        0x21 => ("Paging1", Ident::None),
-        0x22 => ("Paging2", Ident::None),
-        0x24 => ("Paging3", Ident::None),
-        0x3F => ("ImmediateAssign", Ident::None),
-        0x39 => ("ImmediateAssignExt", Ident::None),
-        0x3A => ("ImmediateAssignReject", Ident::None),
+        0x1B => ("SI3", Ident::CellAndArea, false),
+        0x1E => ("SI6", Ident::CellAndArea, false),
+        0x1C => ("SI4", Ident::AreaOnly, false),
+        0x1D => ("SI5", Ident::None, true),
+        0x05 => ("SI5bis", Ident::None, true),
+        0x06 => ("SI5ter", Ident::None, true),
+        0x00 => ("SI13", Ident::None, false),
+        0x21 => ("Paging1", Ident::None, false),
+        0x22 => ("Paging2", Ident::None, false),
+        0x24 => ("Paging3", Ident::None, false),
+        0x3F => ("ImmediateAssign", Ident::None, false),
+        0x39 => ("ImmediateAssignExt", Ident::None, false),
+        0x3A => ("ImmediateAssignReject", Ident::None, false),
         _ => return None,
     };
 
@@ -108,7 +160,15 @@ pub fn parse(block: &[u8]) -> Option<Message> {
         }
         Ident::AreaOnly => (None, body.get(..5).and_then(lai)),
     };
-    Some(Message { name, type_id, cell_id, lai })
+    let list = has_list.then(|| channels(body)).flatten().unwrap_or_default();
+    Some(Message {
+        name,
+        type_id,
+        cell_id,
+        lai,
+        channels: list,
+        channels_are_neighbours: type_id != 0x19,
+    })
 }
 
 enum Ident {
@@ -194,6 +254,47 @@ mod tests {
         assert_eq!(m.name, "SI4");
         assert_eq!(m.cell_id, None);
         assert_eq!(m.lai.unwrap().lac, 100);
+    }
+
+    /// The frequency list, against the figure in 44.018: channel 124 is bit
+    /// 4 of the first octet of the element and channel 1 is bit 1 of the
+    /// last, so a list is read from the top down.
+    #[test]
+    fn a_frequency_list_reads_from_the_top_channel_down() {
+        let mut ie = [0u8; 16];
+        ie[0] = 0b0000_1001; // channels 124 and 121
+        ie[1] = 0b1000_0000; // channel 120
+        ie[15] = 0b0000_0101; // channels 3 and 1
+        assert_eq!(channels(&ie), Some(vec![1, 3, 120, 121, 124]));
+
+        // A format this does not read is refused rather than guessed at.
+        ie[0] |= 0b1000_0000;
+        assert_eq!(channels(&ie), None);
+    }
+
+    /// A type 2 carries the neighbours a phone is told to measure, which is
+    /// the list that says where the rest of the network is.
+    #[test]
+    fn a_type_two_lists_the_neighbours() {
+        let mut b = vec![0x59, 0x06, 0x1A];
+        // Bit map 0, no extension, allocation sequence 1, then channels 65,
+        // 63, 58 and 57 as a live cell listed them.
+        b.extend_from_slice(&[
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ]);
+        b.resize(23, 0x2B);
+        let m = parse(&b).unwrap();
+        assert_eq!(m.name, "SI2");
+        assert_eq!(m.channels, vec![57, 58, 63, 65]);
+    }
+
+    /// A type 3 has no frequency list, and reading one out of its cell
+    /// identity would invent a network's worth of neighbours.
+    #[test]
+    fn a_type_three_lists_no_channels() {
+        let m = parse(&si3(0x1234, [0x62, 0xF2, 0x10, 0x11, 0x22])).unwrap();
+        assert!(m.channels.is_empty());
     }
 
     #[test]
