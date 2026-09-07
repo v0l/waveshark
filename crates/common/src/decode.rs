@@ -134,6 +134,9 @@ pub enum ReportDetail {
     #[default]
     Bare,
     Aircraft {
+        altitude_ft: Option<i32>,
+        ground_speed_kt: Option<f64>,
+        track_deg: Option<f64>,
         vertical_rate_fpm: Option<i32>,
         /// Set by the crew in reply to a radar rather than broadcast, so an
         /// aircraft has one only once something has interrogated it in
@@ -142,6 +145,8 @@ pub enum ReportDetail {
         /// Wind at the aircraft, in knots and degrees true.
         wind: Option<(f64, f64)>,
         temp_c: Option<f64>,
+        /// Half a position, in the compact form the frame carried it.
+        cpr: Option<Cpr>,
     },
     Vessel {
         heading_deg: Option<f64>,
@@ -181,6 +186,20 @@ pub enum ReportDetail {
         role: &'static str,
         fixed: bool,
     },
+}
+
+/// Half a position, as Mode S sends it.
+///
+/// A frame carries a latitude and longitude with the high bits stripped, and
+/// which half of an alternating pair it is. Turning that into a place needs
+/// either the other half or a position to resolve against, so it is state
+/// held by whatever is tracking the aircraft, and a decoder that reported a
+/// place here would be inventing one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cpr {
+    pub odd: bool,
+    pub lat: u32,
+    pub lon: u32,
 }
 
 /// Who transmitted, as the device database rows on.

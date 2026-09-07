@@ -155,11 +155,15 @@ Aircraft from ADS-B on 1090 MHz, vessels and navigation marks from AIS on
 Meshtastic and MeshCore, all on OpenStreetMap tiles.
 
 Five sources, one tracker, and the differences between them are where the
-design is. Identity is shared but is not a number: an ICAO address, an MMSI, a
-callsign and a node hash are different identity spaces, so a track is
-identified by the pair of protocol and value and nothing can collide. Position
-reassembly is not shared at all; only ADS-B has compact position reporting, so
-the CPR machinery hangs off that path and none of the others touches it.
+design is. The tracker parses none of them: the protocols run once on the bus
+and it reads what they concluded, an identity saying which track and a report
+saying what sort of thing it is. Identity is shared but is not a number: an
+ICAO address, an MMSI, a callsign and a node hash are different identity
+spaces, so a track is identified by the pair of space and value and nothing
+can collide. Position reassembly is not shared at all; only Mode S has compact
+position reporting, so the decode carries the halves it received and the CPR
+machinery here pairs them, which it can do because it knows where that
+aircraft was a second ago and one frame does not.
 Ageing and plausibility are shared but not constant: an aircraft silent for a
 minute is gone, a vessel lasts ten, a vehicle half an hour and a station an
 hour.
