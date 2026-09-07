@@ -53,6 +53,11 @@ const IDENTITY: &[(&str, &str, &str)] = &[
     ("ADS-B", "icao", "adsb"),
     ("Mode S", "icao", "adsb"),
     ("AIS", "mmsi", "ais"),
+    // A cell, by the identity it is known by everywhere: operator, location
+    // area and cell number. Only the messages that carry the whole of it
+    // become devices; a synchronisation burst names a colour code, which is
+    // reused a few streets away and is not an identity.
+    ("GSM-SI", "cell", "gsm"),
     ("APRS", "from", "aprs"),
     ("AX25", "from", "ax25"),
     ("M17", "src", "m17"),
@@ -368,6 +373,24 @@ mod tests {
         assert_eq!((s.lat, s.lon), (Some(53.6369), Some(-6.6528)));
         assert_eq!(s.rssi_dbfs, Some(-46.0));
         assert_eq!(s.accuracy_m, Some(4.5), "HDOP times the receiver's own error");
+    }
+
+    /// A cell becomes a device, by the identity it is known by everywhere
+    /// rather than by the channel it was heard on: a network moves a cell to
+    /// another carrier without it becoming a different cell.
+    #[test]
+    fn a_broadcast_block_becomes_a_cell_in_the_survey() {
+        let mut node = SurveyNode::new(Some(Db::in_memory().unwrap()));
+        // A system information type 3 for the test network 001-01, location
+        // area 1, cell 1.
+        let mut block = vec![0x49, 0x06, 0x1B, 0x00, 0x01, 0x00, 0xF1, 0x10, 0x00, 0x01];
+        block.resize(23, 0x2B);
+        run(&mut node, vec![packet(block, 947_400_000)]);
+        let db = node.db().expect("a database");
+        let rows = db.devices(survey::Query::default()).unwrap();
+        assert_eq!(rows.len(), 1, "expected one cell, got {rows:?}");
+        assert_eq!(rows[0].protocol, "gsm");
+        assert_eq!(rows[0].ident, "001-01-1-1");
     }
 
     /// Indoors, or before the first lock, there is no position. What was

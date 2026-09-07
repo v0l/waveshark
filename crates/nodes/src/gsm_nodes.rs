@@ -248,6 +248,21 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             fields.push(("paged_by_identity".into(), Value::Int(permanent as i64)));
         }
     }
+    if let Some(g) = msg.grant {
+        fields.push(("channel_type".into(), Value::Text(g.kind.into())));
+        fields.push(("timeslot".into(), Value::Int(i64::from(g.timeslot))));
+        fields.push(("tsc".into(), Value::Int(i64::from(g.tsc))));
+        if let Some(n) = g.arfcn {
+            fields.push(("granted_arfcn".into(), Value::Int(i64::from(n))));
+        }
+        if let Some((maio, hsn)) = g.hopping {
+            fields.push(("hopping".into(), Value::Text(format!("MAIO {maio} HSN {hsn}"))));
+        }
+        // The timing advance is how long the phone's burst took to arrive,
+        // so it is a range to it and worth a field of its own.
+        fields.push(("timing_advance".into(), Value::Int(i64::from(g.timing_advance))));
+        fields.push(("range_m".into(), Value::Int(i64::from(g.distance_m()))));
+    }
     if let Some(lai) = msg.lai {
         fields.push(("mcc".into(), Value::Int(i64::from(lai.mcc))));
         fields.push(("mnc".into(), Value::Int(i64::from(lai.mnc))));
@@ -263,7 +278,12 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         detail.push_str(&format!(" {lai} LAC {}", lai.lac));
         if let Some(id) = msg.cell_id {
             detail.push_str(&format!(" CI {id}"));
-            party = Some(format!("{lai}-{}-{id}", lai.lac));
+            // Operator, area and cell: the identity a cell is known by
+            // everywhere, so two receivers in different places agree about
+            // which one they heard and a survey can accumulate it.
+            let cell = format!("{lai}-{}-{id}", lai.lac);
+            fields.push(("cell".into(), Value::Text(cell.clone())));
+            party = Some(cell);
         }
     }
     if !msg.channels.is_empty() {
@@ -271,6 +291,15 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     }
     for p in &msg.pages {
         detail.push_str(&format!(" {p}"));
+    }
+    if let Some(g) = msg.grant {
+        detail.push_str(&format!(" {} sub {} TS {}", g.kind, g.subchannel, g.timeslot));
+        match (g.arfcn, g.hopping) {
+            (Some(n), _) => detail.push_str(&format!(" ARFCN {n}")),
+            (_, Some((maio, hsn))) => detail.push_str(&format!(" MAIO {maio} HSN {hsn}")),
+            _ => {}
+        }
+        detail.push_str(&format!(" {} m away", g.distance_m()));
     }
     if party.is_none() {
         party = arfcn.map(|n| format!("ARFCN {n}"));
