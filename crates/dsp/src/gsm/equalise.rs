@@ -105,6 +105,45 @@ fn solve(mut a: [[f64; TAPS]; TAPS], mut b: [f64; TAPS]) -> Option<[f64; TAPS]> 
     Some(x)
 }
 
+/// What is left of the frequency error, in radians a symbol, measured on the
+/// training sequence alone.
+///
+/// The tone one frame earlier places the carrier to a couple of kilohertz,
+/// which is close enough to hear the burst and not close enough to read it:
+/// the channel estimate absorbs a constant phase, so the training sequence
+/// in the middle of the burst fits well while the bits at each end have
+/// rotated away. Two kilohertz turns the phase a full turn across a burst.
+///
+/// So the sequence is halved and a channel estimated from each. Both describe
+/// the same path, so what differs between them is the phase the carrier
+/// drifted through in between, and that divided by the gap is the error.
+/// Unambiguous to about ten kilohertz, which is well beyond what survives the
+/// tone.
+pub fn residual(y: &[C32], known: &[f32], at: usize) -> Option<f32> {
+    let half = known.len() / 2;
+    if half <= TAPS {
+        return None;
+    }
+    let first = estimate(y, &known[..half], at)?;
+    let second = estimate(y, &known[half..], at + half)?;
+    // The taps are compared as one vector rather than one at a time, so a
+    // weak tap contributes little and a dominant one decides.
+    let mut sum = C32::new(0.0, 0.0);
+    for (a, b) in second.iter().zip(first.iter()) {
+        sum += a * b.conj();
+    }
+    Some(sum.arg() / half as f32)
+}
+
+/// Turn the burst by a fixed amount per symbol, undoing what [`residual`]
+/// measured.
+pub fn derotate(y: &mut [C32], per_symbol: f32) {
+    for (k, s) in y.iter_mut().enumerate() {
+        let ph = -per_symbol * k as f32;
+        *s *= C32::new(ph.cos(), ph.sin());
+    }
+}
+
 /// How much of the burst the channel estimate explains, from zero to one.
 ///
 /// One means the training sequence arrived exactly as the estimate predicts,

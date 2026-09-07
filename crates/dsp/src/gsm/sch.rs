@@ -127,7 +127,30 @@ pub fn decode(soft: &[f32]) -> Option<Sch> {
     from_info(&bits[..INFO_BITS])
 }
 
-/// The 25 information bits, in the order GSM 04.08 puts them on the air.
+/// Where each field's bits sit in the 25, most significant first.
+///
+/// Not in order, and this is the thing about the synchronisation channel that
+/// nothing local can catch. GSM writes layer 3 fields into octets least
+/// significant bit first, so a field spanning an octet boundary comes out of
+/// the bit stream in pieces and in the other order: the network colour code
+/// is the eighth, seventh and sixth bits transmitted, and the frame number's
+/// most significant part is split across three places.
+///
+/// Read as a plain sequence of fields, which is what this file did at first,
+/// every burst decodes, the parity holds, the colour codes come out stable
+/// because the bits behind them are stable, and the frame number is nonsense.
+/// It took a recording of a live cell to see it: the frame numbers of
+/// consecutive bursts disagreed with the time between them, and with this
+/// order they agree exactly, on all 337 bursts in the capture.
+/// The layout is 3GPP TS 44.018 section 9.1.30, and matches `gr-gsm`'s
+/// `decode_sch`.
+const NCC_BITS: [usize; 3] = [7, 6, 5];
+const BCC_BITS: [usize; 3] = [4, 3, 2];
+const T1_BITS: [usize; 11] = [1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 23];
+const T2_BITS: [usize; 5] = [22, 21, 20, 19, 18];
+const T3P_BITS: [usize; 3] = [17, 16, 24];
+
+/// The 25 information bits, in the order they go on the air.
 fn info_bits(sch: &Sch) -> Option<[u8; INFO_BITS]> {
     let t1 = sch.frame_number / 1326;
     let t2 = sch.frame_number % 26;
@@ -136,26 +159,27 @@ fn info_bits(sch: &Sch) -> Option<[u8; INFO_BITS]> {
         return None;
     }
     let mut d = [0u8; INFO_BITS];
-    let mut put = |at: usize, value: u32, width: usize| {
-        for i in 0..width {
-            d[at + i] = (value >> (width - 1 - i) & 1) as u8;
+    let mut put = |where_: &[usize], value: u32| {
+        let width = where_.len();
+        for (i, &at) in where_.iter().enumerate() {
+            d[at] = (value >> (width - 1 - i) & 1) as u8;
         }
     };
-    put(0, u32::from(sch.ncc), 3);
-    put(3, u32::from(sch.bcc), 3);
-    put(6, t1, 11);
-    put(17, t2, 5);
-    put(22, t3 / 10, 3);
+    put(&NCC_BITS, u32::from(sch.ncc));
+    put(&BCC_BITS, u32::from(sch.bcc));
+    put(&T1_BITS, t1);
+    put(&T2_BITS, t2);
+    put(&T3P_BITS, t3 / 10);
     Some(d)
 }
 
 /// The reverse: the fields, and the frame number they add up to.
 fn from_info(bits: &[u8]) -> Option<Sch> {
-    let take = |at: usize, width: usize| -> u32 {
-        (0..width).fold(0u32, |v, i| v << 1 | u32::from(bits[at + i]))
+    let take = |where_: &[usize]| -> u32 {
+        where_.iter().fold(0u32, |v, &at| v << 1 | u32::from(bits[at]))
     };
-    let (ncc, bcc) = (take(0, 3) as u8, take(3, 3) as u8);
-    let (t1, t2, t3p) = (take(6, 11), take(17, 5), take(22, 3));
+    let (ncc, bcc) = (take(&NCC_BITS) as u8, take(&BCC_BITS) as u8);
+    let (t1, t2, t3p) = (take(&T1_BITS), take(&T2_BITS), take(&T3P_BITS));
     // T2 counts a 26 frame multiframe in five bits, and T3' counts the five
     // control multiframe positions an SCH can occupy in three, so both fields
     // can hold values no transmitter sends. The parity has already held here,

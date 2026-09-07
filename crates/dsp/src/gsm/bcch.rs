@@ -12,6 +12,16 @@
 //! channels; what a cell broadcasts about itself has to be readable by a
 //! phone that has not registered yet, so it is readable by anything.
 //!
+//! # Octets go out least significant bit first
+//!
+//! GSM writes an octet onto the air low bit first, all the way up the stack,
+//! so the first bit of a block is bit 0 of its first byte rather than bit 7.
+//! Packed the other way round every block still passes its Fire code, because
+//! the check runs over the bit stream and never sees the packing, and every
+//! message above reads as an unknown type. What caught it was a recording:
+//! the second byte of every block came out as 0x60, which is the radio
+//! resource protocol discriminator 0x06 with its bits reversed.
+//!
 //! # The Fire code is what makes a block a block
 //!
 //! Forty bits of check over 184, and a real one: it is the only thing
@@ -70,7 +80,7 @@ pub fn encode(bytes: &[u8]) -> Option<[[u8; BURST_BITS]; BURSTS]> {
     }
     let mut d = [0u8; DATA_BITS + PARITY_BITS + 4];
     for i in 0..DATA_BITS {
-        d[i] = bytes[i / 8] >> (7 - i % 8) & 1;
+        d[i] = bytes[i / 8] >> (i % 8) & 1;
     }
     let p = crc(&d[..DATA_BITS], FIRE_POLY, PARITY_BITS as u32) ^ FIRE_INVERT;
     for i in 0..PARITY_BITS {
@@ -106,7 +116,7 @@ pub fn decode(bursts: &[[f32; BURST_BITS]; BURSTS]) -> Option<[u8; BLOCK_BYTES]>
 
     let mut out = [0u8; BLOCK_BYTES];
     for i in 0..DATA_BITS {
-        out[i / 8] |= bits[i] << (7 - i % 8);
+        out[i / 8] |= bits[i] << (i % 8);
     }
     Some(out)
 }
