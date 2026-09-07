@@ -381,7 +381,16 @@ impl Grant {
 /// Read the channel description and what follows it, 3GPP TS 44.018 sections
 /// 10.5.2.5 and 9.1.18.
 fn grant(body: &[u8]) -> Option<Grant> {
-    let d = body.get(1..4)?;
+    // Page mode octet, channel description, request reference, then the
+    // timing advance.
+    let mut g = channel_description(body.get(1..4)?)?;
+    g.timing_advance = body.get(7).copied().unwrap_or(0);
+    Some(g)
+}
+
+/// The three octets that name a channel: what kind, which timeslot, which
+/// training sequence, and either a carrier or a hopping sequence.
+fn channel_description(d: &[u8]) -> Option<Grant> {
     // The first octet is the same layout the A-bis interface uses for a
     // channel number: a variable length type field with the timeslot in the
     // low three bits.
@@ -404,9 +413,7 @@ fn grant(body: &[u8]) -> Option<Grant> {
         // Four bits of the offset in the second octet and two in the third,
         // then the hopping sequence number.
         hopping: hopping.then(|| ((d[1] & 0x0F) << 2 | d[2] >> 6, d[2] & 0x3F)),
-        // Page mode octet, channel description, request reference, then the
-        // timing advance.
-        timing_advance: body.get(7).copied().unwrap_or(0),
+        timing_advance: 0,
     })
 }
 
@@ -535,7 +542,15 @@ fn parse_l3(b: &[u8]) -> Option<Message> {
         (0x06, 0x35) => Message::named("CipheringModeCommand", type_id),
         (0x06, 0x32) => Message::named("CipheringModeComplete", type_id),
         (0x06, 0x0D) => Message::named("ChannelRelease", type_id),
-        (0x06, 0x2E) => Message::named("AssignmentCommand", type_id),
+        // The move from a signalling channel to a traffic one. It names the
+        // channel the call is about to happen on, which is worth following
+        // even though the speech on it is ciphered: the slow channel beside
+        // it keeps reporting how far away the phone is.
+        (0x06, 0x2E) => {
+            let mut m = Message::named("AssignmentCommand", type_id);
+            m.grant = body.get(..3).and_then(channel_description);
+            m
+        }
         (0x06, 0x29) => Message::named("AssignmentComplete", type_id),
         (0x06, 0x2B) => Message::named("HandoverCommand", type_id),
         (0x06, 0x15) => Message::named("ClassmarkChange", type_id),

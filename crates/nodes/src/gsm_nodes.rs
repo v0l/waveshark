@@ -130,11 +130,20 @@ impl Simple for GsmNode {
                     // of the transaction happens. Following it is the only
                     // way to see a channel a cell hands out: nothing on the
                     // air says one is in use.
-                    if b.timeslot == 0 {
-                        if let Some(g) = decode::gsm::parse(&b.bytes).and_then(|m| m.grant) {
-                            if g.arfcn == Some(self.arfcn) && g.timeslot != 0 {
-                                self.det.follow(g.timeslot);
-                            }
+                    // Signalling channels only, and the reason is not that a
+                    // traffic channel is uninteresting. Its slow channel is
+                    // laid out on a 26 frame multiframe rather than a 51
+                    // frame one, so the blocks are in different places; and
+                    // by the time a call reaches it the ciphering mode
+                    // command has been sent, so those blocks are ciphered
+                    // anyway. Scheduling them would be work spent on frames
+                    // that cannot decode.
+                    let msg = decode::gsm::parse(&b.bytes)
+                        .or_else(|| decode::gsm::parse_dedicated(&b.bytes));
+                    if let Some(g) = msg.and_then(|m| m.grant) {
+                        let signalling = g.kind.starts_with("SDCCH");
+                        if signalling && g.arfcn == Some(self.arfcn) && g.timeslot != 0 {
+                            self.det.follow(g.timeslot);
                         }
                     }
                     (b.bytes.to_vec(), b.start_sample, b.samples)
