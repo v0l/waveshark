@@ -3186,6 +3186,61 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
+    /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
+    /// so the packets are read across the tuner's own DC spike.
+    fn ble_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/gfsk_ble_2426M_20000k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// Bluetooth advertising, through the whole receiver: the scanner table
+    /// puts a BLE front end on channel 38 because the span covers it, the
+    /// front end finds the packets, and what comes back is what the devices
+    /// in the room were saying.
+    ///
+    /// Every packet counted here passed the link layer's CRC-24, so a run
+    /// that produces the wrong number is a demodulator that got worse rather
+    /// than a threshold that moved.
+    #[test]
+    fn bluetooth_advertising_is_found_and_read() {
+        let Some(buf) = ble_fixture() else {
+            eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        // The shipped table rather than whatever is in this machine's config:
+        // a block the operator deleted should not fail the corpus.
+        let fronts =
+            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        assert!(
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Ble(2_426_000_000.0)),
+            "the table put no BLE front end on a span covering channel 38: {fronts:?}"
+        );
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = fronts;
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "BLE-Adv").collect();
+        assert!(
+            ble.len() >= 6,
+            "read {} advertisements, expected the 8 in the capture",
+            ble.len()
+        );
+        for r in &ble {
+            assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
+            assert!(
+                (r.freq - 2_426_000_000.0).abs() < 1e6,
+                "reported at {} Hz rather than on channel 38",
+                r.freq
+            );
+            assert!(r.detail.contains("channel=38"), "read as {}", r.detail);
+            assert!(r.detail.contains("address="), "no address in {}", r.detail);
+        }
+    }
+
     fn tetra_fixture() -> Option<common::IqBuf> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/tetra_downlink_391.5M_2400k.cu8");

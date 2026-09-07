@@ -7,6 +7,7 @@
 //! reconfiguration rather than a recompile.
 
 pub mod ais_nodes;
+pub mod ble_nodes;
 pub mod auto_node;
 pub mod aprs_nodes;
 pub mod bank;
@@ -38,6 +39,7 @@ pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
 };
 pub use ais_nodes::AisNode;
+pub use ble_nodes::BleNode;
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
 pub use m17_nodes::M17Node;
@@ -251,6 +253,15 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "ble",
+            summary: "One BLE advertising channel: GFSK at 1 Mbit/s, dewhitening and CRC-24",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(BleNode::default()) as Box<dyn Node>),
     );
 
     r.register(
