@@ -1,6 +1,6 @@
 //! Out-of-band results produced by stages.
 
-use common::{Hz, Value};
+use common::Hz;
 
 // The decode types live in `common` because a packet carries them; named
 // from here because that is where every stage already looks for them.

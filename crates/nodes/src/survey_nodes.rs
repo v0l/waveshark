@@ -36,7 +36,6 @@
 //! blind.
 
 use common::{Packet, Result};
-use decode::Protocols;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -132,7 +131,6 @@ fn vendor_of(d: &Decoded) -> Option<String> {
 /// The device database on the bus.
 pub struct SurveyNode {
     db: Option<Db>,
-    protocols: Protocols,
     /// Where the receiver is. `None` until somebody says, which is a sighting
     /// with no position rather than no sighting: what was heard is still
     /// evidence.
@@ -154,7 +152,6 @@ impl SurveyNode {
     pub fn new(db: Option<Db>) -> Self {
         Self {
             db,
-            protocols: Protocols::all(),
             station: None,
             heard: 0,
             failures: 0,
@@ -228,20 +225,24 @@ impl Simple for SurveyNode {
         if self.db.is_none() {
             return Ok(());
         }
+        // What the packet already decoded to, rather than a second run of
+        // the same tables: this node used to decode every packet again, so a
+        // decoder fix reached the packet list and left the device database
+        // reporting last week's conclusions.
+        //
         // One burst can decode as more than one protocol, and a survey wants
         // the transmitter rather than the ambiguity: the first decode that
         // names one is taken and the rest of that packet is left to the
         // packet list, which does report all of them.
-        let opts = crate::packet_nodes::Options { report_all: false, report_unknown: false };
         for p in i.as_packets().unwrap_or(&[]) {
-            for d in crate::packet_nodes::decode_packet(&self.protocols, opts, p) {
-                let Some((protocol, ident)) = identity(&d) else { continue };
+            for d in p.decodes.iter() {
+                let Some((protocol, ident)) = identity(d) else { continue };
                 let report = Report {
                     protocol,
                     ident,
-                    name: name_of(&d),
+                    name: name_of(d),
                     vendor: vendor_of(&d),
-                    sighting: self.sighting(p, &d),
+                    sighting: self.sighting(p, d),
                 };
                 self.heard += 1;
                 if let Some(db) = self.db.as_mut() {
@@ -318,7 +319,20 @@ mod tests {
         )
     }
 
+    /// Through the protocols first, as the graph runs it: the survey reads
+    /// what a packet decoded to, so a test that hands it bare packets is
+    /// testing nothing the receiver does.
+    fn annotated(mut packets: Vec<Packet>) -> Vec<Packet> {
+        let mut d = crate::PacketDecodeNode::default();
+        d.decode_all(&packets);
+        for (p, hits) in packets.iter_mut().zip(d.per_packet()) {
+            p.decodes = hits.to_vec();
+        }
+        packets
+    }
+
     fn run(node: &mut SurveyNode, packets: Vec<Packet>) {
+        let packets = annotated(packets);
         let mut s = pipeline::StreamSpec::iq(0.0, Hz(2_426_000_000));
         s.kind = PortKind::Packets;
         let ins = [PortSpec { spec: s, latency: 0 }];
