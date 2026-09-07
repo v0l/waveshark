@@ -331,7 +331,71 @@ saying "an ELRS transmitter at 500 Hz is up" is most of the operational value.
 | Toy drone links: Bayang, Syma, Hubsan, E010 | 2400-2480 MHz, a megahertz a channel | GFSK 250 kbit/s or 1 Mbit/s, nRF24 or XN297 or A7105 | 2 MHz | synthetic | mod | `decode::nrf24` reads the XN297 frame, which is the one a listener can read at all: the chip sends a fixed 28 bit preamble (0xC710F55) before the address, so a packet announces itself, and the address, payload and CRC are scrambled with a published table rather than kept secret. Neither the address length nor the payload length is transmitted, so both are searched and the CRC-16 with its length dependent xorout decides. Two honest limits are in the code. The CRC covers address and payload together and its xorout is indexed by their sum, so where one ends and the other begins is not in the signal: five bytes is assumed because that is what toys use, `Packet::raw` is what is actually determined, and `split_is_a_guess` says so. And searching 192 combinations weakens a sixteen bit CRC to about one false accept in 341, measured in the tests. A plain nRF24 without the XN297 preamble stays unreadable without knowing the address first, which is the same problem an ExpressLRS UID poses. No front end yet |
 | MAVLink over a SiK radio | 433/868/915 MHz | GFSK 64-250 kbps, FHSS, Golay | 250 kHz | framing | mod | 3DR and RFD900 telemetry, in the clear unless the operator set a key: position, attitude, battery, flight mode and the parameter set. The FSK front end reaches the symbols; the framing is the SiK link layer under the MAVLink v1/v2 parser |
 
-### Getting the SX1280's coding out of an SX1280
+### The SX1280's long interleaved coding, measured
+
+**CR_LI 4/8 at SF7 is the ordinary LoRa Hamming(8,4) under a different
+interleaver, and the interleaver is a stride across the whole packet rather
+than a diagonal within a block.** Measured on the bench from a RadioMaster RP2
+driven by `../sub-ghz-modem`, verified against payloads it was not built from,
+and written down here because nobody else has published it.
+
+For a payload of `K` nibbles the coded stream is `8K` bits: `4K` systematic
+followed by `4K` parity. Payload bit `i = 4n + j`, meaning bit `j` of nibble
+`n`, is at systematic position `n + Kj`, and the parity bits of that nibble sit
+at `4K + n + Kj` under the same Hamming equations the SX127x uses
+(`p0 = d0^d1^d2`, `p1 = d1^d2^d3`, `p2 = d0^d1^d3`, `p3 = d0^d2^d3`). Where
+the SX127x interleaves inside each block of `4 + cr` symbols, this spreads one
+nibble across the entire packet, which is what the name says and what makes it
+worth a rate of its own: a burst that destroys a symbol costs one bit from each
+of several nibbles rather than several bits from one.
+
+The stream is then packed into symbols that are not all the same width. The
+first eight carry `SF - 2` bits each and the rest carry `SF`, in implicit
+header mode with no header to justify it: at SF7, a 13 byte payload is
+8x5 + 24x7 = 208 bits, exactly `8K` for `K = 26` with nothing spare, and an 8
+byte payload is 8x5 + 13x7 = 131 bits for 128 needed, the last three unused.
+A symbol's codeword is `gray_encode((bin - 1) mod 2^SF) >> (SF - width)`,
+which was searched for rather than assumed: under it every payload bit moves
+each symbol it touches by exactly one bit, and under the alternatives it does
+not.
+
+The payload is whitened before coding, with
+`ff fe fc f8 f0 e1 c2 85 0b 17 2f 5e bc` for thirteen bytes and the first eight
+of those for eight. It is an LFSR run, and the two lengths agreeing on their
+common prefix is the evidence that it is one sequence rather than a function of
+the length. That the offset turned out to be a codeword at all is what says the
+whitening happens to the payload and not to the coded stream.
+
+What is measured is one configuration: SF7, CR_LI 4/8, both ExpressLRS payload
+lengths. SF5, SF6 and SF8, and the 4/5 and 4/6 long rates, each need their own
+walk, which is minutes of bench time with the tooling below. Do not assume the
+symbol width split or the whitening carries across without measuring it.
+
+`testdata/sx1280_cr_li_4_8_sf7_map.json` and its 13 byte sibling hold the
+measurement itself: the offset and, for every payload bit, the coded positions
+it reaches.
+
+#### How it was measured
+
+Everything between payload bits and symbol bits is linear over GF(2), so the
+encoder is `s = Mp + c`. An all-zero payload gives `c`, and a payload with one
+bit set gives that bit's column of `M`. `tools/bitwalk.py` walks the payload
+over a serial link while the HackRF records,
+`crates/nodes/examples/lora_symbols.rs` dechirps and prints the symbols of
+every packet, and `tools/bitwalk_read.py` pairs the two by time. Both walks
+came out full rank, 64 of 64 and 104 of 104, so the map inverts; twenty random
+payloads then decoded byte-exact, which is the check that the matrix was not
+merely fitted to its own inputs.
+
+The measurement is cheap and worth repeating rather than trusting: 105 groups
+of six transmissions is three minutes of air time. Two things to get right.
+Repeat each payload and take a majority, because one misread symbol silently
+corrupts a column rather than announcing itself, and fifty of the 105 groups
+had a repeat disagree. And check determinism first by sending the same payload
+twice: if a chip seeded its whitening per packet none of this would work, and
+that is a property to establish rather than hope for.
+
+#### The oracle, which is still how to check it against a real link
 
 The payload of an ExpressLRS 2.4 GHz packet is coded at one of the SX1280's
 long interleaved rates, and nobody has published what those are. Semtech names
@@ -354,7 +418,7 @@ the SX127x interleaver scored 0.13 or below where chance is 0.004 and a
 correct answer would be 1.0, which is the evidence that the coding really is
 something else.
 
-The cheap way to settle it is to make an SX1280 encode payloads we choose:
+The way it was settled was to make an SX1280 encode payloads we chose:
 
 1. Any SX1280 or SX1281 on an SPI bus. An Ebyte E28-2G4M12S on a spare ESP32
    header, or a spare ExpressLRS receiver reflashed, since an RP1 is an
@@ -370,9 +434,10 @@ The cheap way to settle it is to make an SX1280 encode payloads we choose:
    Where each bit lands in the symbols is the interleaver and the Hamming
    layout, read off rather than searched for.
 5. Record with the HackRF at 2.4 GHz and dechirp with
-   `crates/nodes/examples/elrs_crack.rs`, which already collects symbols per
-   packet. Check the answer against the oracle above on real link traffic
-   before believing it.
+   `crates/nodes/examples/lora_symbols.rs`. Check the answer against the oracle
+   above on real link traffic before believing it: that check has not been run
+   yet, and until it has, what is established is how an SX1280 encodes and not
+   yet that an ExpressLRS transmitter agrees.
 
 ### What we can verify here
 
