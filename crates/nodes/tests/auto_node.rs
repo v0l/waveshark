@@ -34,7 +34,7 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
                     rssi_dbfs: f32::NAN,
                     snr_db: f32::NAN,
                     modulation: None,
-                    body: PacketBody::Frame(f.clone()),
+                    body: PacketBody::Frame(f.bytes.clone()),
                     measure: None,
                     audio: None,
                     iq: None,

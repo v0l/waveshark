@@ -30,7 +30,9 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 
 pub struct ModeSNode {
     cfg: ModeSConfig,
+    rate: f64,
     det: ModeSDetector,
+    meter: crate::FrameMeter,
     book: AddressBook,
     frames: Vec<ModeSFrame>,
     /// Frames accepted since the node was built.
@@ -48,7 +50,12 @@ impl ModeSNode {
         Self {
             cfg,
             // Replaced at negotiation, when the real sample rate is known.
+            rate: 2_400_000.0,
             det: ModeSDetector::new(2_400_000.0, cfg),
+            // A Mode S frame is 120 us at most, so a millisecond holds one
+            // whole with room either side, at any rate a receiver reads
+            // 1090 MHz with.
+            meter: crate::FrameMeter::new(2_400_000.0, 1_090_000_000, 0.001),
             book: AddressBook::new(),
             frames: Vec::new(),
             accepted: 0,
@@ -81,6 +88,8 @@ impl Simple for ModeSNode {
             ));
         }
         self.det = ModeSDetector::new(rate, self.cfg);
+        self.rate = rate;
+        self.meter = crate::FrameMeter::new(rate, i.spec.center.0, 0.001);
         // Frames rather than bytes: two short replies written into one
         // buffer are indistinguishable from one long frame, and a reply's
         // length is what says which kind of reply it is.
@@ -114,6 +123,7 @@ impl Simple for ModeSNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
+        self.meter.feed(iq);
         self.frames.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
@@ -132,7 +142,12 @@ impl Simple for ModeSNode {
             };
             let Ok(frame) = adsb::parse(&bytes) else { continue };
             self.accepted += 1;
-            out.push(bytes.clone());
+            // 8 us of preamble and 56 or 112 us of data at 1 Mbit/s, with a
+            // little either side.
+            let len = ((bytes.len() * 8 + 16) as f64 * 1e-6 * self.rate) as usize;
+            let mut f2 = common::Frame::measured(bytes.clone(), f.rssi_dbfs, self.meter.snr_db());
+            f2.iq = self.meter.iq_at(f.at_sample, len);
+            out.push(f2);
             // Not emitted as a decode here. The frame goes on the bus and
             // the decoder attached to it turns every packet into a row,
             // whichever front end produced it.
@@ -144,10 +159,9 @@ impl Simple for ModeSNode {
 
 /// The decode a Mode S frame becomes.
 ///
-/// Takes the bytes rather than the demodulator's own frame record, because
-/// what travels on the packet bus is the bytes: a consumer draws its own
-/// conclusions from the evidence, and a level measured at the demodulator is
-/// not evidence a log can carry per frame.
+/// Takes the bytes rather than the demodulator's own frame record: what
+/// travels on the packet bus is the bytes, with the level and the samples the
+/// demodulator measured carried alongside them on the frame.
 pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
     use common::Value;
     let mut fields: Vec<(String, Value)> = Vec::new();

@@ -67,7 +67,7 @@ pub enum Payload {
     Soft(Vec<f32>),
     Bytes(Vec<u8>),
     Pulses(Vec<Package>),
-    Frames(Vec<Vec<u8>>),
+    Frames(Vec<common::Frame>),
     Packets(Vec<common::Packet>),
     Sources(Vec<SourceBlock>),
     Voice(Vec<common::Voice>),
@@ -161,7 +161,7 @@ impl Payload {
         }
     }
 
-    pub fn as_frames(&self) -> Option<&[Vec<u8>]> {
+    pub fn as_frames(&self) -> Option<&[common::Frame]> {
         match self {
             Payload::Frames(v) => Some(v),
             _ => None,
@@ -210,7 +210,7 @@ impl Payload {
         }
     }
 
-    pub fn frames_mut(&mut self) -> &mut Vec<Vec<u8>> {
+    pub fn frames_mut(&mut self) -> &mut Vec<common::Frame> {
         match self {
             Payload::Frames(v) => v,
             _ => panic!("payload is {:?}, not Frames", self.kind()),

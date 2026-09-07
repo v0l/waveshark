@@ -3239,6 +3239,26 @@ pub(crate) mod tests {
             assert!(r.detail.contains("channel=38"), "read as {}", r.detail);
             assert!(r.detail.contains("address="), "no address in {}", r.detail);
         }
+        every_row_carries_its_measurements(&ble);
+    }
+
+    /// The rule every row in the list obeys, whichever front end made it: a
+    /// level, a signal to noise ratio, and the samples it was read from.
+    ///
+    /// Without these a row cannot be sorted by strength, a fade cannot be
+    /// told from a decoder that broke, and there is nothing to look at when
+    /// the bytes are wrong. Frames used to lose all three at the port
+    /// boundary, which carried bytes and nothing else, so every front end
+    /// that produces frames rather than pulses reported NaN.
+    fn every_row_carries_its_measurements(rows: &[&DecodeRecord]) {
+        assert!(!rows.is_empty(), "nothing to check");
+        for r in rows {
+            assert!(r.rssi_dbfs.is_finite(), "{} has no level: {:?}", r.model, r.rssi_dbfs);
+            assert!(r.snr_db.is_finite(), "{} has no SNR: {:?}", r.model, r.snr_db);
+            let iq = r.iq.as_ref().unwrap_or_else(|| panic!("{} kept no samples", r.model));
+            assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.model);
+            assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.model);
+        }
     }
 
     fn tetra_fixture() -> Option<common::IqBuf> {

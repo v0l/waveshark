@@ -232,6 +232,53 @@ pub struct IqBurst {
     pub samples: Vec<C32>,
 }
 
+/// One demodulated frame, with what it was heard at.
+///
+/// The bytes alone were what this port used to carry, and every front end
+/// that produces frames rather than pulses lost its level, its noise and its
+/// samples at that boundary: a Mode S frame arrives from a demodulator that
+/// measured the preamble, a BLE advertisement from one that measured the
+/// burst and the floor either side of it, and both reached the packet list
+/// reading NaN. A frame is evidence, and evidence carries how strong it was
+/// and what it looked like.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub bytes: Vec<u8>,
+    /// Where it was received, when the front end knows better than the port
+    /// it publishes on: one advertising channel out of a span holding three,
+    /// one meter's carrier out of a source.
+    pub center_hz: Option<u64>,
+    pub rssi_dbfs: f32,
+    pub snr_db: f32,
+    /// The samples it was read from, when the front end kept them.
+    pub iq: Option<std::sync::Arc<IqBurst>>,
+}
+
+impl Frame {
+    /// A frame whose level the front end has not measured yet.
+    ///
+    /// Every caller of this is a front end with a measurement to make, so
+    /// treat it as a to-do rather than as the normal case: what it produces
+    /// is a row in the list reading NaN.
+    pub fn unmeasured(bytes: Vec<u8>) -> Self {
+        Self { bytes, center_hz: None, rssi_dbfs: f32::NAN, snr_db: f32::NAN, iq: None }
+    }
+
+    pub fn measured(bytes: Vec<u8>, rssi_dbfs: f32, snr_db: f32) -> Self {
+        Self { bytes, center_hz: None, rssi_dbfs, snr_db, iq: None }
+    }
+
+    pub fn at(mut self, center_hz: u64) -> Self {
+        self.center_hz = Some(center_hz);
+        self
+    }
+
+    pub fn with_iq(mut self, iq: std::sync::Arc<IqBurst>) -> Self {
+        self.iq = Some(iq);
+        self
+    }
+}
+
 /// What a burst was measured to be, before any decoder read it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Measure {

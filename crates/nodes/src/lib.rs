@@ -24,6 +24,7 @@ pub mod pocsag_nodes;
 pub mod scope_nodes;
 pub mod bank_node;
 pub mod filter_nodes;
+pub mod frame_meter;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod wfm;
@@ -39,6 +40,7 @@ pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
 };
 pub use ais_nodes::AisNode;
+pub use frame_meter::FrameMeter;
 pub use ble_nodes::BleNode;
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
