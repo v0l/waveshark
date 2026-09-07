@@ -788,7 +788,8 @@ mod tests {
     #[test]
     fn a_full_resolution_packet_checks_and_reads() {
         let mut p = [0u8; PACKET_LEN_FULL];
-        p[0] = 0b00 | (0b101 << 3) | 0x80; // rc, power 5, armed
+        // Type 0 (rc) in the low two bits, uplink power 5, armed.
+        p[0] = (0b101 << 3) | 0x80;
         for (i, b) in p[1..11].iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(37);
         }
