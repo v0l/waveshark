@@ -45,7 +45,7 @@ cheaper of the two ports and the sensible one to attempt first.
 
 **Threads.** `rayon` is a dependency of `dsp`, `nodes` and `pipeline`:
 `dsp/channelizer.rs`, `dsp/detect.rs`, `dsp/source.rs`, `pipeline/graph.rs`,
-and `nodes/bank.rs`, `nodes/source_nodes.rs` and `nodes/auto_node.rs`. In wasm that means `wasm-bindgen-rayon`, Web Workers and
+and `nodes/bank.rs`, `nodes/source_nodes.rs` and `nodes/auto/`. In wasm that means `wasm-bindgen-rayon`, Web Workers and
 `SharedArrayBuffer`, which in turn means serving with COOP and COEP headers. A
 browser build cannot be dropped onto a static host without them.
 
