@@ -192,6 +192,13 @@ pub struct LiveSource {
     pub center_hz: f64,
     pub bandwidth_hz: f64,
     pub snr_db: f32,
+    /// The front end that owns this channel for the rest of the session,
+    /// or `None` for a source the detector has open right now.
+    ///
+    /// The two are different things and the spectrum draws them
+    /// differently: a detection is a measurement that lasts as long as the
+    /// transmission, and a locked channel is a decision that outlives it.
+    pub locked_to: Option<&'static str>,
 }
 
 pub struct Receiver {
@@ -1302,7 +1309,18 @@ impl Receiver {
                     center_hz: c + s.center_hz,
                     bandwidth_hz: s.bandwidth_hz(),
                     snr_db: s.peak_snr_db,
+                    locked_to: None,
                 });
+            }
+            if let Some(n) = downcast::<nodes::AutoNode>(&self.graph, id) {
+                for (name, center_hz, width_hz) in n.remembered() {
+                    out.push(LiveSource {
+                        center_hz,
+                        bandwidth_hz: width_hz,
+                        snr_db: f32::NAN,
+                        locked_to: Some(name),
+                    });
+                }
             }
         }
         out

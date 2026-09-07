@@ -2705,9 +2705,13 @@ fn run(
                 e.live = false;
             }
             for s in rx.live_sources() {
+                // Matched within kind: a locked channel and a detection can
+                // sit on the same frequency, and they are two different
+                // statements about it.
                 let same = seen.iter_mut().find(|e| {
-                    (e.source.center_hz - s.center_hz).abs()
-                        < e.source.bandwidth_hz.max(s.bandwidth_hz) / 2.0
+                    e.source.locked_to == s.locked_to
+                        && (e.source.center_hz - s.center_hz).abs()
+                            < e.source.bandwidth_hz.max(s.bandwidth_hz) / 2.0
                 });
                 match same {
                     Some(e) => {

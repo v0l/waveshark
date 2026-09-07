@@ -298,6 +298,41 @@ impl Scope<'_> {
         seen.sort_by(|a, b| a.source.center_hz.partial_cmp(&b.source.center_hz).unwrap());
         let now = std::time::Instant::now();
         let mut rows: Vec<f32> = Vec::new();
+        // A channel a front end has taken for the session is drawn as a
+        // channel, down the plot like the ones on the strip, and not as a
+        // detection: it is where the receiver has decided to listen, and it
+        // is there whether or not anything is transmitting this second.
+        for e in seen.iter().filter(|e| e.source.locked_to.is_some()) {
+            let s = &e.source;
+            let half = s.bandwidth_hz / 2.0;
+            let (x0, x1) = (self.x_of(plot, s.center_hz - half), self.x_of(plot, s.center_hz + half));
+            if x1 < plot.left() || x0 > plot.right() {
+                continue;
+            }
+            let (cx0, cx1) = (x0.max(plot.left()), x1.min(plot.right()));
+            let (cx0, cx1) = if cx1 - cx0 < 2.0 { (cx0 - 1.0, cx0 + 1.0) } else { (cx0, cx1) };
+            let lock = theme::OK;
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(cx0, plot.top()), Pos2::new(cx1, plot.bottom())),
+                0.0,
+                Color32::from_rgba_unmultiplied(lock.r(), lock.g(), lock.b(), 22),
+            );
+            for ex in [cx0, cx1] {
+                p.line_segment(
+                    [Pos2::new(ex, plot.top()), Pos2::new(ex, plot.bottom())],
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(lock.r(), lock.g(), lock.b(), 130)),
+                );
+            }
+            let name = s.locked_to.unwrap_or("");
+            p.text(
+                Pos2::new(cx0 + 2.0, plot.bottom() - 22.0),
+                Align2::LEFT_TOP,
+                format!("{name} {:.4} MHz", s.center_hz / 1e6),
+                font.clone(),
+                Color32::from_rgba_unmultiplied(lock.r(), lock.g(), lock.b(), 220),
+            );
+        }
+        seen.retain(|e| e.source.locked_to.is_none());
         for e in &seen {
             let s = &e.source;
             // A source still open is drawn full; one that closed fades over
