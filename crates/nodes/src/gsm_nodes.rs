@@ -223,6 +223,15 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(id) = msg.cell_id {
         fields.push(("cell_id".into(), Value::Int(i64::from(id))));
     }
+    // The neighbours a cell tells phones to measure are where the rest of
+    // the network is: a scan that reads one cell has been handed the channel
+    // numbers of the others. Its own allocation is a different list and says
+    // where its traffic hops, so the two are not run together.
+    let list = msg.channels.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+    let list_name = if msg.channels_are_neighbours { "neighbours" } else { "allocation" };
+    if !msg.channels.is_empty() {
+        fields.push((list_name.into(), Value::Text(list.clone())));
+    }
     if let Some(lai) = msg.lai {
         fields.push(("mcc".into(), Value::Int(i64::from(lai.mcc))));
         fields.push(("mnc".into(), Value::Int(i64::from(lai.mnc))));
@@ -240,6 +249,9 @@ fn block_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             detail.push_str(&format!(" CI {id}"));
             party = Some(format!("{lai}-{}-{id}", lai.lac));
         }
+    }
+    if !msg.channels.is_empty() {
+        detail.push_str(&format!(" {list_name} {list}"));
     }
     if party.is_none() {
         party = arfcn.map(|n| format!("ARFCN {n}"));

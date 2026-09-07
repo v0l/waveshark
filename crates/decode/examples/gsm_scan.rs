@@ -107,7 +107,11 @@ fn main() {
                 None => continue,
             };
             if !seen.contains(&name) {
-                eprintln!("  {name}");
+                if std::env::var("GSM_RAW").is_ok() {
+                    eprintln!("  {name}  {:02x?}", b.bytes);
+                } else {
+                    eprintln!("  {name}");
+                }
                 seen.push(name);
             }
         }
@@ -188,6 +192,13 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
     }
     if let Some(id) = m.cell_id {
         s.push_str(&format!(" CI {id}"));
+    }
+    if !m.channels.is_empty() {
+        s.push_str(&format!(
+            " {} {}",
+            if m.channels_are_neighbours { "neighbours" } else { "allocation" },
+            m.channels.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",")
+        ));
     }
     Some(s)
 }
