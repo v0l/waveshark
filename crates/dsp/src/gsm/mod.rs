@@ -176,6 +176,10 @@ pub struct BlockHit {
     /// The frame number of the first of the four bursts, which says which
     /// channel the block came from.
     pub frame_number: u32,
+    /// Which timeslot it was read on. Zero is the beacon's own, carrying the
+    /// broadcast and common control channels; anything else is a channel the
+    /// cell handed to a phone.
+    pub timeslot: u8,
     /// The training sequence correlation of the worst of the four bursts.
     pub quality: f32,
     pub start_sample: u64,
@@ -186,7 +190,7 @@ impl BlockHit {
     /// Which channel this was: the broadcast channel occupies four frames of
     /// the control multiframe and the common control channel the rest.
     pub fn is_bcch(&self) -> bool {
-        (2..=5).contains(&(self.frame_number % 51))
+        self.timeslot == 0 && (2..=5).contains(&(self.frame_number % 51))
     }
 }
 
@@ -228,6 +232,10 @@ pub struct SchDetector {
     pending: Vec<Pending>,
     /// Control channel blocks the frame numbers say are coming.
     blocks: Vec<PendingBlock>,
+    /// Timeslots to read besides the beacon's own, as a bit per timeslot.
+    /// A cell hands a phone a channel on one of these, and following it is
+    /// how a receiver sees what happens next.
+    following: u8,
     /// The last synchronisation burst decoded but not yet reported, and where
     /// it sat. Held back until a second one agrees with it about what time it
     /// is; see `corroborate`.
@@ -261,6 +269,7 @@ struct PendingBlock {
     tsc: usize,
     /// The frame number of that first burst.
     frame_number: u32,
+    timeslot: u8,
 }
 
 /// A sliding window over those products: their sum, which is a vector whose
@@ -366,6 +375,7 @@ impl SchDetector {
             run: None,
             pending: Vec::new(),
             blocks: Vec::new(),
+            following: 0,
             held: None,
             last: 0..0,
         }
@@ -389,6 +399,25 @@ impl SchDetector {
         self.blocks.clear();
         self.held = None;
         self.last = 0..0;
+    }
+
+    /// Read this timeslot as well as the beacon's own, as a channel a cell
+    /// has assigned to somebody.
+    ///
+    /// The caller decides: an immediate assignment names the timeslot, and
+    /// reading the assignment is the layer above's job. Watching all eight
+    /// on the chance that something is there costs eight times the work for
+    /// seven timeslots that are usually a phone's traffic, which is
+    /// ciphered.
+    pub fn follow(&mut self, timeslot: u8) {
+        if timeslot < 8 {
+            self.following |= 1 << timeslot;
+        }
+    }
+
+    /// Stop reading a timeslot.
+    pub fn unfollow(&mut self, timeslot: u8) {
+        self.following &= !(1u8 << (timeslot & 7));
     }
 
     /// The channel as the last call to [`Self::process`] filtered it: one
@@ -620,13 +649,43 @@ impl SchDetector {
     /// colour code, which the synchronisation burst just gave up.
     fn schedule_blocks(&mut self, hit: &SchHit, at: f64, freq_offset_hz: f64) {
         let frame = FRAME_SYMBOLS * self.sps;
+        let tsc = usize::from(hit.sch.bcc & 7);
         for group in [1u32, 5] {
             self.blocks.push(PendingBlock {
                 first: at + f64::from(group) * frame,
                 freq_offset_hz,
-                tsc: usize::from(hit.sch.bcc & 7),
+                tsc,
                 frame_number: hit.sch.frame_number + group,
+                timeslot: 0,
             });
+        }
+
+        // A timeslot the cell has assigned to somebody carries eight
+        // signalling channels in the 51 frames of its own multiframe: four
+        // frames each, starting every fourth frame up to frame 47, with the
+        // last three idle. Which of the eight a block belongs to follows
+        // from its frame number, so the receiver does not have to be told.
+        //
+        // Only the ten frames up to the next synchronisation burst are
+        // scheduled here, because there will be another one by then and
+        // scheduling further would queue the same block twice.
+        for slot in 1..8u8 {
+            if self.following >> slot & 1 == 0 {
+                continue;
+            }
+            for n in 1..=10u32 {
+                let fnum = hit.sch.frame_number + n;
+                if fnum % 51 % 4 != 0 || fnum % 51 >= 48 {
+                    continue;
+                }
+                self.blocks.push(PendingBlock {
+                    first: at + f64::from(n) * frame + f64::from(slot) * BURST_SYMBOLS * self.sps,
+                    freq_offset_hz,
+                    tsc,
+                    frame_number: fnum,
+                    timeslot: slot,
+                });
+            }
         }
     }
 
@@ -676,6 +735,7 @@ impl SchDetector {
         Some(BlockHit {
             bytes,
             frame_number: b.frame_number,
+            timeslot: b.timeslot,
             quality,
             start_sample: start as u64,
             samples: (3.0 * frame + BURST_SYMBOLS * self.sps) as usize,

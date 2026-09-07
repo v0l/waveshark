@@ -78,9 +78,27 @@ fn main() {
         survey(*arfcn, *hz, &buf);
         let mut det = SchDetector::new(rate, center, *hz, GsmConfig::default());
         let mut out: Vec<Hit> = Vec::new();
+        let mut seen_hits = 0usize;
         for block in buf.samples.chunks(65536) {
             det.process(block, &mut out);
+            // Follow what the cell assigns, as the receiver does: an
+            // immediate assignment names a timeslot, and reading it is the
+            // only way to know one is in use.
+            for h in &out[seen_hits..] {
+                if let Hit::Block(b) = h {
+                    if b.timeslot != 0 {
+                        continue;
+                    }
+                    if let Some(g) = decode::gsm::parse(&b.bytes).and_then(|m| m.grant) {
+                        if g.arfcn == Some(*arfcn) && g.timeslot != 0 {
+                            det.follow(g.timeslot);
+                        }
+                    }
+                }
+            }
+            seen_hits = out.len();
         }
+        // Follow whatever the cell assigns, as the receiver does.
         let syncs = out.iter().filter(|h| matches!(h, Hit::Sync(_))).count();
         let blocks: Vec<_> = out
             .iter()
@@ -123,6 +141,13 @@ fn main() {
         for b in &blocks {
             if let Some(g) = decode::gsm::parse(&b.bytes).and_then(|m| m.grant) {
                 grants.push(g);
+            }
+        }
+        if std::env::var("GSM_GRANTS").is_ok() {
+            let mut seen: Vec<String> = Vec::new();
+            for g in &grants {
+                let k = format!("{} TS {} ARFCN {:?} hop {:?}", g.kind, g.timeslot, g.arfcn, g.hopping);
+                if !seen.contains(&k) { eprintln!("    {k}"); seen.push(k); }
             }
         }
         if !grants.is_empty() {
@@ -222,7 +247,7 @@ fn survey(arfcn: u16, hz: f64, buf: &common::IqBuf) {
 
 /// The message a block holds/// The message a block holds, rendered the way the packet list would.
 fn decode_name(bytes: &[u8]) -> Option<String> {
-    let m = decode::gsm::parse(bytes)?;
+    let m = decode::gsm::parse(bytes).or_else(|| decode::gsm::parse_dedicated(bytes))?;
     let mut s = m.name.to_string();
     if let Some(lai) = m.lai {
         s.push_str(&format!(" {lai} LAC {}", lai.lac));
@@ -241,6 +266,9 @@ fn decode_name(bytes: &[u8]) -> Option<String> {
     }
     for p in &m.pages {
         s.push_str(&format!(" {p}"));
+    }
+    if let Some(id) = &m.identity {
+        s.push_str(&format!(" {id}"));
     }
     if !m.channels.is_empty() {
         s.push_str(&format!(
