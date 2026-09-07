@@ -20,6 +20,7 @@ pub mod aprs;
 pub mod ax25;
 pub mod analyze;
 pub mod bds;
+pub mod ble;
 pub mod bits;
 pub mod channel_keys;
 pub mod dmr;
