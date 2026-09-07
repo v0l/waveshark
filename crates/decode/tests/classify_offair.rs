@@ -70,16 +70,6 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
          frequency-keyed hypothesis scores. Refused rather than misrouted",
     ),
     (
-        "ble_adv_ch38_2430.0M_16000k.cs8",
-        "the same advertising channel as the entry below, recorded 4 MHz off \
-         centre at 16 MS/s, where a packet is a megahertz of a sixteen \
-         megahertz span and sits nowhere near DC. Four of thirty-two read as \
-         MSK. Nothing depends on it: a BLE front end is placed by the scanner \
-         table from the frequency, and `dsp::ble` reads all thirty-one packets \
-         off this capture without the classifier having an opinion. It is here \
-         because a classifier that improves should be seen to improve",
-    ),
-    (
         "gfsk_ble_2426M_20000k.cs8",
         "reads MSK on five advertising packets of eleven and refuses the rest. \
          The parameters are right at this sample rate, 996 kbaud and h = 0.47, \

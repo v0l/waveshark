@@ -1882,8 +1882,7 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             let w = nodes::ble_nodes::CHANNEL_WIDTH_HZ;
             // The demodulator refuses anything under 4 MS/s: at 1 Mbit/s the
             // bit centres have to be found in the samples themselves, and
-            // four of them a symbol is where the ch38 capture stops losing
-            // packets.
+            // four of them a symbol is where the packet count stops moving.
             Some(((hz - w, hz + w), 8_000_000.0))
         }
         Front::Banks(widths) => {

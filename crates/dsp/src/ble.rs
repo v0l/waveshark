@@ -21,8 +21,8 @@
 //! 2.4 GHz is twenty parts per million out, which is 50 kHz. Slicing the
 //! discriminator at zero rather than at the burst's own centre therefore
 //! throws away a fifth of the eye before any noise is involved. Measured on
-//! the ch38 capture in `testdata/offair.toml`: 149 packets pass CRC with the
-//! per-burst offset removed, and none at all without it.
+//! thirteen seconds of channel 38: 149 packets pass CRC with the per-burst
+//! offset removed, and none at all without it.
 //!
 //! # Why the burst is not read as pulse timings
 //!
@@ -30,7 +30,7 @@
 //! `decode::slicer`, and BLE could be read that way: it is NRZ, one bit is one
 //! microsecond. It costs about half the packets. `common::Pulse` measures in
 //! whole microseconds, which at 1 Mbit/s is one whole bit of quantisation on
-//! every run, and the same capture that yields 89 packets through bit-centre
+//! every run, and the recording that yields 89 packets through bit-centre
 //! sampling yields 51 through microsecond run lengths. The CRC hides none of
 //! that: what is lost is lost silently.
 //!
@@ -70,8 +70,8 @@ pub const ADV_CHANNELS: [(u8, f64); 3] = [
 /// at the neighbour.
 const PASSBAND_HZ: f64 = 700_000.0;
 
-/// Samples per symbol aimed for after decimation. Four is where the capture
-/// stops losing packets: 87 against 89 at sixteen, and 51 through the
+/// Samples per symbol aimed for after decimation. Four is where the packet
+/// count stops moving: 87 against 89 at sixteen, and 51 through the
 /// microsecond pulse path.
 const TARGET_SPS: f64 = 4.0;
 
@@ -88,8 +88,10 @@ const MIN_PAYLOAD: usize = 6;
 /// `FirDecim::design_hz` places its stopband where the first alias folds
 /// down, which for a factor of four here is 3.3 MHz and leaves the passband
 /// edge at 2 MHz: three times wider than the signal, so three times the noise
-/// reaches the discriminator. The weakest advertiser in the ch38 capture is
-/// lost with that filter and read with this one.
+/// reaches the discriminator. Measured on thirteen seconds of channel 38 that
+/// filter reads 90 packets and this one reads 341, and what it loses is a
+/// whole advertiser: the weakest of the five failed every CRC while the
+/// strong ones still read, so the front end looked like it worked.
 fn channel_filter(rate: f64, factor: usize) -> Vec<f32> {
     let taps = (64 * factor) | 1;
     lowpass(taps, PASSBAND_HZ / rate, 60.0)
