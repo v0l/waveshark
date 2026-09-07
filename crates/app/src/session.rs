@@ -109,6 +109,10 @@ pub struct Session {
     /// the default, and a limit set once should not need setting again.
     pub log_cap_mb: Option<u64>,
     pub capture_cap_mb: Option<u64>,
+    /// Where the receiver's own position is read from, as it was written on
+    /// the command line: a serial port or a gpsd address. A survey started
+    /// once should not need its GPS naming again at every start.
+    pub gps: String,
     /// How the spectrum and the waterfall are drawn.
     ///
     /// Kept here with the rest of it because they are settings in the same
@@ -190,6 +194,7 @@ impl Default for Session {
             audio_in: String::new(),
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
             capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
+            gps: String::new(),
             view: ViewPrefs::default(),
             feeds: Vec::new(),
             streams: Vec::new(),
@@ -309,6 +314,7 @@ impl Session {
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
             capture_cap_mb: cap(kv.get("capture_cap_mb").copied(), d.capture_cap_mb),
+            gps: kv.get("gps").map(|v| v.to_string()).unwrap_or_default(),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
                     as f32,
@@ -352,6 +358,7 @@ impl Session {
             ("band_plan", &self.band_plan),
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
+            ("gps", &self.gps),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -465,6 +472,7 @@ mod tests {
             dc_block: false,
             decode_on: false,
             volume: 0.25,
+            gps: "/dev/ttyACM0@9600".into(),
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             view: ViewPrefs {

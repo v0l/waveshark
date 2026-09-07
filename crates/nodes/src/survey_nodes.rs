@@ -1,0 +1,391 @@
+//! The device database, as a consumer of the packet bus.
+//!
+//! A survey is a different question from a packet list. The list asks what
+//! was transmitted; this asks what is out there, once per thing, with the
+//! places it was heard from. Everything it knows comes off the bus, so it
+//! behaves the same on live packets and on a day of the packet log replayed
+//! through the same graph.
+//!
+//! # Identity is what a decode already says
+//!
+//! Nothing new is parsed here. Every protocol that can name a transmitter
+//! already puts that name in its decoded fields: `icao` for an aircraft,
+//! `mmsi` for a vessel, `address` for a BLE advertiser or a pager, `from` for
+//! an amateur callsign or a DMR radio, `id` for the ISM sensors. So the table
+//! below is a list of which field carries the identity for which protocol,
+//! and adding a protocol to the survey is adding a row to it.
+//!
+//! That is deliberately not "any field called id". A field name means what
+//! its decoder meant by it, and treating a sensor's rolling four-bit channel
+//! number as an identity would invent a new device every time a battery was
+//! changed. What goes in the database is a field a decoder chose as the
+//! transmitter's own identifier.
+//!
+//! # Where the receiver was
+//!
+//! A sighting carries the position of the *receiver*, not of the device, and
+//! the difference matters enough to be worth repeating wherever this is read.
+//! A survey driving past a beacon records a line of positions along a road
+//! and the level at each; the beacon is somewhere near the strongest of them
+//! and this does not claim to know where.
+//!
+//! The fix comes from `gps` through [`SurveyNode::set_fix`] and goes stale on
+//! its own: a receiver that loses the sky records sightings with no position
+//! rather than attributing them all to the last place it saw the sky.
+
+use common::{Packet, Result};
+use decode::Protocols;
+use pipeline::event::Decoded;
+use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::port::{Payload, PortKind, StreamSpec};
+use survey::{Db, Report, Sighting};
+
+/// Which decoded field carries the transmitter's identity, per protocol
+/// prefix, and what to call that identity space in the database.
+///
+/// Matched on the start of the protocol name because several decoders report
+/// a family: `APRS-Position` and `APRS-Status` are one radio, and `AIS-Static`
+/// and `AIS-Position` are one vessel.
+const IDENTITY: &[(&str, &str, &str)] = &[
+    // Protocol name prefix, field holding the identity, identity space.
+    ("BLE-Adv", "address", "ble"),
+    ("ADS-B", "icao", "adsb"),
+    ("Mode S", "icao", "adsb"),
+    ("AIS", "mmsi", "ais"),
+    ("APRS", "from", "aprs"),
+    ("AX25", "from", "ax25"),
+    ("M17", "src", "m17"),
+    ("DMR", "from", "dmr"),
+    ("POCSAG", "address", "pocsag"),
+    ("Meshtastic", "source", "meshtastic"),
+    ("MeshCore", "from", "meshcore"),
+    ("wM-Bus", "id", "wmbus"),
+    ("TPMS", "id", "tpms"),
+    ("Schrader", "id", "tpms"),
+    ("Toyota", "id", "tpms"),
+];
+
+/// Protocols whose `id` field is the sensor's own identity. The ISM device
+/// decoders are transcribed from rtl_433 and all use the same field name for
+/// it, so this is a list of decoders rather than a rule about field names.
+const ISM_ID: &[&str] = &[
+    "Acurite", "LaCrosse", "Nexus", "Rubicson", "Bresser", "GT-WT", "FineOffset", "Oregon",
+    "Honeywell", "EV1527", "Princeton", "KeeLoq", "Holtek", "Somfy", "X10",
+];
+
+/// What a decode says about who transmitted it.
+///
+/// `None` for a decode that identifies nothing: an unclaimed burst, a pager
+/// page with no address, a frame whose protocol has no notion of a
+/// transmitter. Those are real receptions and they belong in the packet log,
+/// which has them; they are not devices.
+pub fn identity(d: &Decoded) -> Option<(String, String)> {
+    let field = |name: &str| {
+        d.fields.iter().find(|(k, _)| k == name).map(|(_, v)| match v {
+            common::Value::Text(s) => s.clone(),
+            other => other.to_string(),
+        })
+    };
+    for (prefix, key, space) in IDENTITY {
+        if d.protocol.starts_with(prefix) {
+            return field(key).filter(|s| !s.is_empty()).map(|v| ((*space).to_string(), v));
+        }
+    }
+    if ISM_ID.iter().any(|p| d.protocol.starts_with(p)) {
+        // The model is part of the identity here. An ISM sensor's id is eight
+        // bits chosen at random when the batteries go in, so two stations of
+        // different makes sharing an id is ordinary, and merging them would
+        // report one device that reads two temperatures.
+        return field("id").map(|v| (format!("ism:{}", d.protocol), v));
+    }
+    None
+}
+
+/// A name a device gave for itself, where its decode carries one.
+fn name_of(d: &Decoded) -> Option<String> {
+    for key in ["name", "callsign", "node_name", "message"] {
+        if d.protocol.starts_with("POCSAG") && key == "message" {
+            // A page is what was said, not what the pager is called.
+            continue;
+        }
+        if let Some((_, v)) = d.fields.iter().find(|(k, _)| k == key) {
+            let s = v.to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Who made it, where the decode says so.
+fn vendor_of(d: &Decoded) -> Option<String> {
+    d.fields
+        .iter()
+        .find(|(k, _)| k == "vendor" || k == "operator" || k == "manufacturer")
+        .map(|(_, v)| v.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The device database on the bus.
+pub struct SurveyNode {
+    db: Option<Db>,
+    protocols: Protocols,
+    /// Where the receiver is, and when that was last true. `None` while there
+    /// is no fix, which is a sighting with no position rather than no
+    /// sighting: what was heard is still evidence.
+    fix: Option<gps::Fix>,
+    heard: u64,
+    failures: u64,
+}
+
+impl Default for SurveyNode {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl SurveyNode {
+    /// A survey writing to `db`, or one that records nothing when there is
+    /// none. A node with no database still sits in the graph: turning the
+    /// survey on is opening a file, not rebuilding the receiver.
+    pub fn new(db: Option<Db>) -> Self {
+        Self {
+            db,
+            protocols: Protocols::all(),
+            fix: None,
+            heard: 0,
+            failures: 0,
+        }
+    }
+
+    pub fn set_db(&mut self, db: Option<Db>) {
+        self.db = db;
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.db.is_some()
+    }
+
+    pub fn db(&self) -> Option<&Db> {
+        self.db.as_ref()
+    }
+
+    /// Where the receiver is now. Passing `None` says the fix went stale,
+    /// which is not the same as never having had one.
+    pub fn set_fix(&mut self, fix: Option<gps::Fix>) {
+        self.fix = fix;
+    }
+
+    pub fn fix(&self) -> Option<gps::Fix> {
+        self.fix
+    }
+
+    /// Receptions attributed to a device since the node was built, and writes
+    /// the database refused.
+    pub fn heard(&self) -> u64 {
+        self.heard
+    }
+
+    pub fn failures(&self) -> u64 {
+        self.failures
+    }
+
+    fn sighting(&self, p: &Packet, d: &Decoded) -> Sighting {
+        let fix = self.fix;
+        Sighting {
+            at_us: p.at_us,
+            lat: fix.map(|f| f.lat),
+            lon: fix.map(|f| f.lon),
+            alt_m: fix.and_then(|f| f.alt_m),
+            // HDOP is a multiplier on the receiver's own ranging error, not a
+            // distance. Five metres is the figure a consumer GPS quotes for
+            // itself, so the product is a metre estimate honest enough for a
+            // column that says how much to trust a row.
+            accuracy_m: fix.and_then(|f| f.hdop).map(|h| h * 5.0),
+            rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs.is_finite().then_some(p.rssi_dbfs)),
+            snr_db: d.snr_db.or(p.snr_db.is_finite().then_some(p.snr_db)),
+            center_hz: d.center.0,
+        }
+    }
+}
+
+impl Simple for SurveyNode {
+    fn name(&self) -> &str {
+        "survey"
+    }
+
+    fn is_sink(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Packets {
+            return Err(common::Error::other("survey reads the packet bus"));
+        }
+        Ok(i.spec)
+    }
+
+    fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        if self.db.is_none() {
+            return Ok(());
+        }
+        // One burst can decode as more than one protocol, and a survey wants
+        // the transmitter rather than the ambiguity: the first decode that
+        // names one is taken and the rest of that packet is left to the
+        // packet list, which does report all of them.
+        let opts = crate::packet_nodes::Options { report_all: false, report_unknown: false };
+        for p in i.as_packets().unwrap_or(&[]) {
+            for d in crate::packet_nodes::decode_packet(&self.protocols, opts, p) {
+                let Some((protocol, ident)) = identity(&d) else { continue };
+                let report = Report {
+                    protocol,
+                    ident,
+                    name: name_of(&d),
+                    vendor: vendor_of(&d),
+                    sighting: self.sighting(p, &d),
+                };
+                self.heard += 1;
+                if let Some(db) = self.db.as_mut() {
+                    if db.record(&report).is_err() {
+                        // A survey that cannot write is a survey that stops
+                        // recording, not a receiver that stops receiving. The
+                        // count is what the interface shows.
+                        self.failures += 1;
+                    }
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{Hz, PacketBody, Value};
+
+    fn decoded(protocol: &'static str, fields: &[(&str, &str)]) -> Decoded {
+        Decoded::bytes(protocol, Hz(2_426_000_000), 0.0, vec![]).with_fields(
+            fields.iter().map(|(k, v)| ((*k).to_string(), Value::Text((*v).to_string()))).collect(),
+        )
+    }
+
+    #[test]
+    fn each_protocol_gives_up_the_identity_its_decoder_named() {
+        let cases: [(Decoded, &str, &str); 5] = [
+            (decoded("BLE-Adv", &[("address", "6C:70:CB:EF:72:4D")]), "ble", "6C:70:CB:EF:72:4D"),
+            (decoded("ADS-B-Position", &[("icao", "4ca1fb")]), "adsb", "4ca1fb"),
+            (decoded("AIS-Position", &[("mmsi", "235009802")]), "ais", "235009802"),
+            (decoded("APRS-Position", &[("from", "EI2ABC-9")]), "aprs", "EI2ABC-9"),
+            (decoded("POCSAG-Alpha", &[("address", "1234568")]), "pocsag", "1234568"),
+        ];
+        for (d, space, ident) in cases {
+            assert_eq!(identity(&d), Some((space.into(), ident.into())), "{}", d.protocol);
+        }
+    }
+
+    /// A sensor's id is eight bits chosen when the batteries go in, so it is
+    /// only an identity together with the model that read it.
+    #[test]
+    fn an_ism_sensor_is_identified_by_its_model_and_id_together() {
+        let a = decoded("Acurite-Tower", &[("id", "163")]);
+        let b = decoded("Nexus-TH", &[("id", "163")]);
+        assert_ne!(identity(&a), identity(&b), "two makes sharing an id are two devices");
+        assert_eq!(identity(&a), Some(("ism:Acurite-Tower".into(), "163".into())));
+    }
+
+    /// A burst nothing claimed is a reception, not a device.
+    #[test]
+    fn a_decode_that_names_nobody_is_not_a_device() {
+        assert_eq!(identity(&decoded("unknown", &[("coding", "PWM")])), None);
+        assert_eq!(identity(&decoded("BLE-Adv", &[])), None, "a protocol without its field");
+    }
+
+    /// What a pager said is not what the pager is called.
+    #[test]
+    fn a_page_is_not_a_name() {
+        let d = decoded("POCSAG-Alpha", &[("address", "1234568"), ("message", "CALL BASE")]);
+        assert_eq!(name_of(&d), None);
+        let ble = decoded("BLE-Adv", &[("address", "AA:BB"), ("name", "EVCS")]);
+        assert_eq!(name_of(&ble).as_deref(), Some("EVCS"));
+    }
+
+    fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
+        Packet {
+            at_us: 1_000_000,
+            center_hz,
+            bandwidth_hz: 2_000_000,
+            rssi_dbfs: -46.0,
+            snr_db: 20.0,
+            modulation: None,
+            body: PacketBody::Frame(bytes),
+            measure: None,
+            iq: None,
+            audio: None,
+        }
+    }
+
+    fn run(node: &mut SurveyNode, packets: Vec<Packet>) {
+        let mut s = pipeline::StreamSpec::iq(0.0, Hz(2_426_000_000));
+        s.kind = PortKind::Packets;
+        let ins = [PortSpec { spec: s, latency: 0 }];
+        let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+        let mut out = Payload::Packets(Vec::new());
+        let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+        node.process(&Payload::Packets(packets), &mut out, &mut ctx).unwrap();
+    }
+
+    /// A real advertising PDU off the bus becomes a device with the position
+    /// the receiver was at when it heard it.
+    #[test]
+    fn a_ble_advertisement_becomes_a_device_at_the_receivers_position() {
+        let mut node = SurveyNode::new(Some(Db::in_memory().unwrap()));
+        node.set_fix(Some(gps::Fix {
+            lat: 53.6369,
+            lon: -6.6528,
+            hdop: Some(0.9),
+            ..Default::default()
+        }));
+        // A Samsung monitor's ADV_IND, dewhitened and CRC checked.
+        let pdu = vec![
+            0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff, 0xe1,
+            0x02, 0x10, 0x00, 0x26, 0xc0,
+        ];
+        run(&mut node, vec![packet(pdu, 2_426_000_000)]);
+        let db = node.db().expect("a database");
+        let rows = db.devices(survey::Query::default()).unwrap();
+        assert_eq!(rows.len(), 1, "expected one device, got {rows:?}");
+        assert_eq!(rows[0].protocol, "ble");
+        assert_eq!(rows[0].ident, "E8:31:CD:0A:F5:3A");
+        let s = &db.sightings(rows[0].id).unwrap()[0];
+        assert_eq!((s.lat, s.lon), (Some(53.6369), Some(-6.6528)));
+        assert_eq!(s.rssi_dbfs, Some(-46.0));
+        assert_eq!(s.accuracy_m, Some(4.5), "HDOP times the receiver's own error");
+    }
+
+    /// Indoors, or before the first lock, there is no position. What was
+    /// heard is still recorded.
+    #[test]
+    fn without_a_fix_a_sighting_is_still_recorded() {
+        let mut node = SurveyNode::new(Some(Db::in_memory().unwrap()));
+        let pdu = vec![
+            0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff, 0xe1,
+            0x02, 0x10, 0x00, 0x26, 0xc0,
+        ];
+        run(&mut node, vec![packet(pdu, 2_426_000_000)]);
+        let db = node.db().unwrap();
+        assert_eq!(db.counts().unwrap(), (1, 1));
+        assert_eq!(db.sightings(1).unwrap()[0].lat, None);
+    }
+
+    /// With no database the node is inert, and the graph is the same graph.
+    #[test]
+    fn a_survey_with_nowhere_to_write_records_nothing() {
+        let mut node = SurveyNode::default();
+        run(&mut node, vec![packet(vec![0x00, 0x11, 0x3a], 2_426_000_000)]);
+        assert!(!node.is_recording());
+        assert_eq!(node.heard(), 0);
+    }
+}

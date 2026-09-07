@@ -18,6 +18,8 @@ members = [
     "crates/datasets",
     "crates/app",
     "crates/audio",
+    "crates/gps",
+    "crates/survey",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
@@ -40,6 +42,8 @@ default-members = [
     "crates/datasets",
     "crates/app",
     "crates/audio",
+    "crates/gps",
+    "crates/survey",
 ]
 
 [workspace.package]
@@ -67,6 +71,8 @@ sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
 datasets = { path = "crates/datasets" }
 mbe = { path = "crates/mbe" }
+gps = { path = "crates/gps" }
+survey = { path = "crates/survey" }
 
 anyhow = "1.0"
 thiserror = "2.0"

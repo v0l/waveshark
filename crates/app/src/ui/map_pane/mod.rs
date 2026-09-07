@@ -9,7 +9,7 @@ mod layers;
 
 use super::mapview::{Layer, MapView};
 use super::*;
-use layers::{AirportLayer, RingLayer, StationLayer, TrackLayer};
+use layers::{AirportLayer, RingLayer, SightingLayer, StationLayer, TrackLayer};
 
 /// What the map pane remembers. Its own, and reachable from no other view:
 /// the camera and the tiles belong to the map widget, and the tracks are the
@@ -22,6 +22,12 @@ pub(super) struct MapState {
     pub tracks: Vec<crate::tracks::Track>,
 }
 
+/// One device's sightings, as the map is handed them.
+pub(super) struct Trail<'a> {
+    pub points: &'a [survey::Sighting],
+    pub ident: Option<&'a str>,
+}
+
 /// The map, over where it is looking and what is on it.
 pub(super) struct Map<'a> {
     pub st: &'a mut MapState,
@@ -30,6 +36,8 @@ pub(super) struct Map<'a> {
     /// The position being typed, while it is being typed. Kept apart from the
     /// real one so a half-finished latitude does not move the map.
     pub edit: &'a mut Option<String>,
+    /// The sightings of the device selected in the device list, if one is.
+    pub trail: Trail<'a>,
     /// Where tile fetches are run. The application owns the runtime; the pane
     /// is handed a handle for the frame.
     pub rt: tokio::runtime::Handle,
@@ -71,8 +79,10 @@ impl Map<'_> {
                 let mut airports = AirportLayer::default();
                 let mut station = StationLayer { home };
                 let mut tracks = TrackLayer { active: &active, now };
-                let mut layers: [&mut dyn Layer; 4] =
-                    [&mut rings, &mut airports, &mut station, &mut tracks];
+                let mut sightings =
+                    SightingLayer { trail: self.trail.points, ident: self.trail.ident };
+                let mut layers: [&mut dyn Layer; 5] =
+                    [&mut rings, &mut airports, &mut station, &mut sightings, &mut tracks];
 
                 map.switches(ui, &layers);
                 ui.add_space(6.0);

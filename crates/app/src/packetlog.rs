@@ -169,6 +169,15 @@ impl PacketLog {
         Some(base.join("waveshark").join("packets"))
     }
 
+    /// `$XDG_DATA_HOME/waveshark/survey.sqlite`, beside the packet log.
+    ///
+    /// One file rather than one a day, which is what the log does: a survey
+    /// is a table of things rather than a stream of events, and a device
+    /// heard yesterday and again today is one row in one file.
+    pub fn default_survey_path() -> Option<PathBuf> {
+        Self::default_dir().and_then(|d| d.parent().map(|p| p.join("survey.sqlite")))
+    }
+
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,

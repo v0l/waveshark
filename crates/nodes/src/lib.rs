@@ -26,6 +26,7 @@ pub mod bank_node;
 pub mod filter_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
+pub mod survey_nodes;
 pub mod wfm;
 pub mod lora_nodes;
 pub mod mod_nodes;
@@ -40,6 +41,7 @@ pub use decode_nodes::{
 };
 pub use ais_nodes::AisNode;
 pub use ble_nodes::BleNode;
+pub use survey_nodes::SurveyNode;
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
 pub use m17_nodes::M17Node;
@@ -253,6 +255,15 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "survey",
+            summary: "The device database: who was heard, from where, at what level",
+            category: "sink",
+        },
+        |_s: &Settings| Ok(Box::new(SurveyNode::default()) as Box<dyn Node>),
     );
 
     r.register(

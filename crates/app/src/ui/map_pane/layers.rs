@@ -77,6 +77,79 @@ impl Layer for StationLayer {
     }
 }
 
+/// Where one device was heard from, and how well.
+///
+/// Every point is a place the *receiver* stood when it heard the device, so
+/// what is drawn is a trail along a road with a level at each point, not a
+/// pin on the transmitter. The brightest point is the closest approach, which
+/// is as near as a single receiver can honestly get to saying where something
+/// is; two receivers or a drive around the block is what it would take to say
+/// more, and neither is drawn as though it had happened.
+pub(super) struct SightingLayer<'a> {
+    pub trail: &'a [survey::Sighting],
+    /// The device the trail belongs to, for the status line.
+    pub ident: Option<&'a str>,
+}
+
+impl Layer for SightingLayer<'_> {
+    fn key(&self) -> &'static str {
+        "sightings"
+    }
+
+    fn label(&self) -> &'static str {
+        "HEARD"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        let points: Vec<(Pos2, Option<f32>)> = self
+            .trail
+            .iter()
+            .filter_map(|s| Some((c.at(s.lat?, s.lon?), s.rssi_dbfs)))
+            .collect();
+        if points.is_empty() {
+            return;
+        }
+        // The levels present, so the scale is the drive's own range rather
+        // than an absolute one: a survey in a city and one in a field have
+        // different floors and both want the strongest point to stand out.
+        let levels: Vec<f32> = points.iter().filter_map(|(_, r)| *r).collect();
+        let lo = levels.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = levels.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let span = (hi - lo).max(1.0);
+        for (at, rssi) in &points {
+            // A sighting with no level still happened, and is drawn at the
+            // dimmest end rather than dropped.
+            let strength = rssi.map(|r| ((r - lo) / span).clamp(0.0, 1.0)).unwrap_or(0.0);
+            let alpha = 0.25 + 0.75 * strength;
+            c.p.circle_filled(*at, 2.0 + 3.0 * strength, theme::TRACE.gamma_multiply(alpha));
+        }
+        // The strongest point marked, because that is the one a person is
+        // looking for: it is where to start walking.
+        if let Some((at, _)) = points
+            .iter()
+            .zip(self.trail.iter())
+            .filter(|(_, s)| s.rssi_dbfs.is_some())
+            .max_by(|a, b| {
+                a.1.rssi_dbfs.unwrap().total_cmp(&b.1.rssi_dbfs.unwrap())
+            })
+            .map(|(p, _)| p)
+        {
+            c.p.circle_stroke(*at, 8.0, Stroke::new(1.5, theme::TRACE));
+        }
+    }
+
+    fn status(&self) -> Option<String> {
+        let n = self.trail.iter().filter(|s| s.lat.is_some()).count();
+        if n == 0 {
+            return None;
+        }
+        Some(match self.ident {
+            Some(id) => format!("{id}: {n} sightings"),
+            None => format!("{n} sightings"),
+        })
+    }
+}
+
 /// Airports, in the map's amber so a fixed facility is not mistaken for the
 /// cyan of something in the air, with the frequency card for whichever one is
 /// hovered.
