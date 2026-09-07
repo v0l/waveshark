@@ -107,7 +107,9 @@ fn a_public_channel_message_from_openssl_becomes_a_readable_row() {
     assert_eq!(d.protocol, "MeshCore");
     assert_eq!(field(&d, "type").as_deref(), Some("group text"));
     assert_eq!(field(&d, "channel").as_deref(), Some("Public (default key)"));
-    assert_eq!(field(&d, "from").as_deref(), Some("kieran"));
+    // The name in the message is `sender`; `from` is the end of the link,
+    // which a group message does not name.
+    assert_eq!(field(&d, "sender").as_deref(), Some("kieran"));
     assert_eq!(field(&d, "text").as_deref(), Some("on my way"));
     assert_eq!(field(&d, "verified").as_deref(), Some("true"));
     let detail = d.detail.as_deref().unwrap_or_default();

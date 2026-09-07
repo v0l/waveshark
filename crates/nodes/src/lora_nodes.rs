@@ -498,16 +498,12 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
 
     let mesh = r.meshtastic();
     if let Some(m) = &mesh {
+        let dest = if m.is_broadcast() { "broadcast".to_string() } else { format!("{:08x}", m.destination) };
         fields.extend([
             ("source".into(), Value::Text(format!("{:08x}", m.source))),
-            (
-                "destination".into(),
-                Value::Text(if m.is_broadcast() {
-                    "broadcast".into()
-                } else {
-                    format!("{:08x}", m.destination)
-                }),
-            ),
+            ("destination".into(), Value::Text(dest.clone())),
+            ("from".into(), Value::Text(format!("{:08x}", m.source))),
+            ("to".into(), Value::Text(dest)),
             ("packet_id".into(), Value::Text(format!("{:08x}", m.packet_id))),
             ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
             ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
@@ -612,12 +608,13 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // channel key can write any name there; `text` is what was sent,
             // and `from` is only what it claims to be.
             //
-            // Named `from` and not `sender` because that is what the message
-            // view reads, and a field named anything else is a message with
-            // nobody's name on it. See `DecodeRecord::to_message`.
+            // Named `sender` and not `from`, because `from` is the end of a
+            // link and this is a name typed into a phone. The message view
+            // prefers this one; the links directory keys on the node hash,
+            // which is at least something the radio said.
             let (sender, body) = m.sender_and_body();
             if let Some(s) = sender {
-                fields.push(("from".into(), Value::Text(s.to_string())));
+                fields.push(("sender".into(), Value::Text(s.to_string())));
             }
             fields.push(("text".into(), Value::Text(body.to_string())));
         }

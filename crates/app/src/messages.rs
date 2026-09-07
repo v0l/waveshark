@@ -135,7 +135,11 @@ impl DecodeRecord {
         Some(Message {
             system: self.model.split('-').next().unwrap_or(&self.model).to_string(),
             channel_hz: self.freq,
-            from: text(self, &["from", "src", "source", "radio_id"])
+            // `sender` first: where a protocol carries a name somebody typed
+            // as well as the address the radio sent from, the name is what a
+            // message is from. It is also unauthenticated, which the message
+            // view says elsewhere.
+            from: text(self, &["sender", "from", "src", "source", "radio_id"])
                 .filter(|s| !s.is_empty()),
             to: text(
                 self,

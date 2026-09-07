@@ -94,10 +94,15 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_modulation("2-FSK")
         .with_crc(Some(true))
         .with_bandwidth(CHANNEL_WIDTH_HZ);
-    let fields: Vec<(String, common::Value)> =
+    let mut fields: Vec<(String, common::Value)> =
         r.fields.iter().filter(|(k, _)| k.as_str() != "data").map(|(k, v)| (k.clone(), v.clone())).collect();
     let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
     let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
+    if !id.is_empty() {
+        // A meter transmits to whoever is listening: the utility's collector
+        // is not named in the frame.
+        fields.push(("from".into(), common::Value::Text(format!("{m}-{id}"))));
+    }
     let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
     let enc = r.get("payload_encrypted").is_some();
     let text = format!(

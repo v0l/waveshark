@@ -184,6 +184,14 @@ impl Advertisement {
         let mut f: Vec<(String, Value)> = Vec::new();
         f.push(("type".into(), Value::Text(self.pdu_type.name().into())));
         f.push(("address".into(), Value::Text(self.address.to_string())));
+        // Who sent it and who for, under the names every protocol here uses
+        // for its parties, so a link between two of them can be followed
+        // without knowing which protocol they were speaking.
+        f.push(("from".into(), Value::Text(self.address.to_string())));
+        f.push((
+            "to".into(),
+            Value::Text(self.target.map(|t| t.to_string()).unwrap_or_else(|| "broadcast".into())),
+        ));
         f.push((
             "address_kind".into(),
             Value::Text(
