@@ -90,6 +90,28 @@ claims what it can render.
   that device's sightings on the map. `crates/app/src/ui/devices_pane.rs`,
   over `crates/survey`.
 
+- **Links**: who is talking to whom, on every protocol at once. Wireshark's
+  conversation list and follow-stream for radio: a table of links, most
+  recently heard first, and picking one opens the packets that link carried
+  underneath it, in order, with the payload where the protocol gives one in
+  the clear. A link is a pair of ends on one protocol, filled in by the
+  decoder that recovered the frame, because it is the only thing that knows:
+  DMR reads it off the link control, BLE off the advertiser and any directed
+  target, Meshtastic off the mesh header. A transmission that names one end,
+  which is most telemetry, is a link from that end to whoever is listening,
+  and that is a row worth having. Radio is mostly not a byte stream, so
+  following a link is the packets and their fields rather than a
+  concatenation. The directory is built from records, so the same code fills
+  it from the bus or from the packet log, and the pane can read the log back
+  to show what was heard before the receiver was started.
+  `crates/app/src/links.rs`, `crates/app/src/ui/links_pane.rs`.
+
+  Reading the ends out of the display fields was the first version and it was
+  wrong quietly: those strings are for a person, so a talkgroup, a callsign
+  and a MAC were all text, and `9` on DMR merged with `9` anywhere else. A
+  party is a kind and an identifier, and `broadcast` is a kind rather than a
+  word a device could be called.
+
 - **Keys**: a row per enciphered channel a front end reports, and what is known
   about the key for it. The view is always there as an encryption monitor; the
   key store, key entry and the TETRA decryption behind it need the `tea`
@@ -223,14 +245,17 @@ SQLite file with a table of devices and a table of sightings.
 
 Three rules shape it.
 
-**Identity is a pair.** `(protocol, ident)`, the way `tracks` learned to key
+**Identity is a pair.** `(space, ident)`, the way `tracks` learned to key
 identity when AIS arrived beside ADS-B: an ICAO address and an MMSI are both
 integers and are not comparable. The identifier is kept as text a person would
-recognise. Which field carries it is a table in the node, one row per
-protocol, and it is always a field the decoder chose as the transmitter's own
-identifier rather than anything named `id`. An ISM sensor's id is eight bits
-picked when the batteries go in, so for those the model is part of the
-identity: an Acurite and a Nexus sharing id 163 are two devices.
+recognise. The decoder says it, as `common::Identity` on the decode, and the
+node reads nothing else: a table here of which field each protocol keeps its
+identifier in was the last thing in the tree keyed on a protocol name, and it
+is gone. An ISM sensor's id is eight bits picked when the batteries go in, so
+for those the model is part of the space: an Acurite and a Nexus sharing id
+163 are two devices. That is `decode::Report::device`, filled from the `id`
+field because in that family of protocols `id` is what the sensor calls
+itself.
 
 **A sighting is where the receiver was, not where the device is.** It carries
 the time, the position from the GPS, the level and the frequency. A survey
