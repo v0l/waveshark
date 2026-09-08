@@ -30,7 +30,9 @@ pub mod modes;
 pub mod pocsag;
 pub mod pulse;
 pub mod rds;
+pub mod resample;
 pub mod route;
+pub mod slice;
 pub mod source;
 pub mod spectrum;
 pub mod squelch;
@@ -39,6 +41,7 @@ pub mod ssb;
 pub mod stereo;
 pub mod tetra;
 pub(crate) mod twolevel;
+pub mod wifi;
 pub mod window;
 pub mod wmbus;
 

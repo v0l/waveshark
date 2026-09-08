@@ -295,6 +295,15 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
         }
         return;
     }
+    // An 802.11 frame arrives tagged with the 20 MHz channel it was read
+    // on, and carries a CRC-32 over the whole of itself that the front end
+    // already checked.
+    if crate::wifi_nodes::is_wifi_channel(p.center_hz() as f64) {
+        if let Some(d) = crate::wifi_nodes::wifi_decoded(bytes, center) {
+            hits.push(d);
+            return;
+        }
+    }
     // A BLE advertisement arrives tagged with the advertising channel it
     // was received on, which is a frequency nothing else here transmits
     // a frame from.
