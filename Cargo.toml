@@ -21,6 +21,7 @@ members = [
     "crates/gps",
     "crates/survey",
     "crates/httpc",
+    "crates/orbit",
     "crates/stt",
 ]
 
@@ -50,6 +51,7 @@ default-members = [
     "crates/gps",
     "crates/survey",
     "crates/httpc",
+    "crates/orbit",
     "crates/stt",
 ]
 
@@ -82,6 +84,7 @@ mbe = { path = "crates/mbe" }
 gps = { path = "crates/gps" }
 survey = { path = "crates/survey" }
 httpc = { path = "crates/httpc" }
+orbit = { path = "crates/orbit" }
 
 anyhow = "1.0"
 thiserror = "2.0"

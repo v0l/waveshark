@@ -1,0 +1,15 @@
+[package]
+name = "orbit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The propagator itself. Pure Rust, no system library, and it takes the two
+# lines as published rather than a re-rendered set.
+sgp4 = "2.4"
+# The epoch crosses the boundary as a timestamp; sgp4 holds it as a
+# `chrono` datetime, which is the crate it already depends on.
+chrono = { version = "0.4", default-features = false }
+datasets.workspace = true
+tracing.workspace = true
