@@ -349,6 +349,7 @@ fn open_gpsd(addr: &str) -> std::io::Result<Box<dyn Read + Send>> {
 /// USB CDC device ignores the baud rate and works either way, which is why
 /// leaving it out appears to work; a real UART on a header does not, and
 /// comes back as line noise that fails every checksum.
+#[cfg(unix)]
 fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
@@ -384,6 +385,55 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
         tty.c_cc[libc::VMIN] = 0;
         tty.c_cc[libc::VTIME] = 100;
         if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(Box::new(file))
+}
+
+/// The same port on Windows: a DCB instead of a termios, and read timeouts
+/// set on the handle rather than in the terminal's control characters.
+///
+/// The state is read back before it is changed so that flow control stays
+/// whatever the driver was installed with; only the four things NMEA fixes
+/// are written, and a driver that wanted RTS/CTS keeps it.
+#[cfg(windows)]
+fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Devices::Communication::{
+        GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB,
+    };
+
+    // COM10 and above cannot be opened by name: only the first nine have a
+    // DOS device alias, and the rest need the device namespace prefix.
+    let name = if path.starts_with(r"\\.\") { path.to_string() } else { format!(r"\\.\{path}") };
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(&name)?;
+    let handle = file.as_raw_handle() as isize as _;
+    // SAFETY: `handle` is open for the lifetime of `file`, and both structs
+    // are valid for the calls to fill in or read.
+    unsafe {
+        let mut dcb: DCB = std::mem::zeroed();
+        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+        if GetCommState(handle, &mut dcb) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        dcb.BaudRate = baud;
+        dcb.ByteSize = 8;
+        dcb.Parity = 0; // NOPARITY
+        dcb.StopBits = 0; // ONESTOPBIT
+        if SetCommState(handle, &dcb) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Ten seconds of silence ends the read, as VTIME does on unix, so a
+        // port with nothing on it does not hang the thread forever.
+        let timeouts = COMMTIMEOUTS {
+            ReadIntervalTimeout: 0,
+            ReadTotalTimeoutMultiplier: 0,
+            ReadTotalTimeoutConstant: 10_000,
+            WriteTotalTimeoutMultiplier: 0,
+            WriteTotalTimeoutConstant: 0,
+        };
+        if SetCommTimeouts(handle, &timeouts) == 0 {
             return Err(std::io::Error::last_os_error());
         }
     }

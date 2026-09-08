@@ -439,8 +439,12 @@ fn auto_finds_lora_in_a_real_capture() {
         _ => None,
     }).collect();
     let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
-    eprintln!("auto: {} LoRa decoded, {} chirp rows, {} packets total", lora.len(), chirps, pk.len());
-    assert!(!lora.is_empty(), "auto placed no LoRa that decoded; {} packets, {chirps} chirps", pk.len());
+    // The one Meshtastic packet in the capture, out of the three rows the
+    // span produces. Pinned, because the way the verdict path breaks is a
+    // second row for the same packet or a decode replaced by a chirp
+    // measurement, and neither empties the list.
+    assert_eq!(lora.len(), 1, "{} LoRa decoded of {} packets, {chirps} chirps", lora.len(), pk.len());
+    assert_eq!(pk.len(), 3, "{} packets in all, {chirps} chirps", pk.len());
 }
 
 /// An ExpressLRS handset heard through the whole auto path: the source
@@ -472,7 +476,11 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
     let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
     // Fifteen packets on four channel visits; the first two of each visit
     // are what the link is recovered from and come out with it.
-    assert!(rows.len() >= 12, "{} ExpressLRS rows of {} packets, {chirps} chirps", rows.len(), pk.len());
+    // Fifteen of the eighteen rows the capture produces are the handset.
+    // Pinned exactly: the two that are lost to a floor or a splice are the
+    // ones a change would take next, and "twelve or more" would not say so.
+    assert_eq!(rows.len(), 15, "{} ExpressLRS rows of {} packets, {chirps} chirps", rows.len(), pk.len());
+    assert_eq!(pk.len(), 18, "{} packets in all", pk.len());
     for r in &rows {
         assert_eq!(r.identity.as_ref().map(|i| i.id.as_str()), Some("6f37"), "{r:?}");
         let detail = r.detail.as_deref().unwrap_or("");
@@ -482,7 +490,8 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
         assert!(!detail.contains("armed"), "{detail}");
     }
     let channels: std::collections::BTreeSet<u64> = rows.iter().map(|r| r.center.0 / 100_000).collect();
-    assert!(channels.len() >= 3, "read on {channels:?} only");
+    // The four channel visits in the capture, in hundreds of kilohertz.
+    assert_eq!(channels, [24084, 24114, 24125, 24224].into_iter().collect(), "{channels:?}");
 }
 
 /// A channel a front end has read is kept for the session. The Meshtastic
@@ -507,16 +516,29 @@ fn a_channel_that_decoded_is_remembered() {
     )
     .unwrap();
     let mut decoded = 0;
+    let mut rows = 0;
+    let mut measures = 0;
     for block in buf.samples.chunks(16_384) {
         g.feed_iq(block).unwrap();
         if let pipeline::Payload::Packets(p) = g.output() {
+            rows += p.len();
+            measures += p.iter().filter(|p| p.measure.is_some()).count();
             decoded += p
                 .iter()
                 .filter(|p| matches!(&p.body, PacketBody::Frame(f) if nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())).is_some()))
                 .count();
         }
     }
-    assert!(decoded >= 1, "nothing decoded");
+    // The one Meshtastic packet in the capture, the five rows the receiver
+    // puts out for it, and the four of those that carry the burst front
+    // end's measurement of what it saw. Pinned rather than left at "one or
+    // more" because the classifier now rides along on the remembered
+    // channel, and the way that goes wrong is a duplicate row or a row that
+    // lost its measurement, neither of which changes whether something
+    // decoded.
+    assert_eq!(decoded, 1, "{decoded} LoRa packets of {rows} rows");
+    assert_eq!(rows, 5, "rows: {rows}");
+    assert_eq!(measures, 4, "rows carrying a measurement: {measures}");
     let auto = g
         .order()
         .find_map(|(id, _)| g.node(id)?.as_any()?.downcast_ref::<nodes::AutoNode>())

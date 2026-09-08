@@ -111,6 +111,12 @@ fn thirty_bursting_devices_over_sixteen_megahertz() {
         "busy span: {x:.2}x real time on {} threads, {packets} packets",
         rayon::current_num_threads()
     );
-    assert!(packets > 0, "nothing came out of a busy band");
-    assert!(x > 0.5, "a busy 16 MS/s span ran at only {x:.2}x real time");
+    // What the synthesised band holds. A span that reads less than this is
+    // reading less, whatever it costs.
+    assert_eq!(packets, 116, "{packets} packets out of a busy band");
+    // A four core GitHub runner measured 0.50x on the same code this machine
+    // runs at 1.2x, so 0.5 was the bar and the reading at once. A quarter of
+    // real time still catches a cost gone linear in the source count, which
+    // halves this figure at the least.
+    assert!(x > 0.25, "a busy 16 MS/s span ran at only {x:.2}x real time");
 }
