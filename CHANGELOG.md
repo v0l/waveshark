@@ -15,6 +15,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 - Which mobile network an MCC and MNC belong to, and cell positions from
   OpenCelliD for the country set in Setup, which needs a download token of
   your own entered in the datasets window.
+- A CELLS layer on the map, drawing each cell in the export at the position
+  the crowd averaged for it, with the radius that position is good to and
+  the network it belongs to on hover.
 - Bluetooth LE advertising, including Bluetooth 5 Long Range, and Open
   Drone ID out of it or off a beacon.
 - GSM: a cell's identity off its synchronisation burst, the blocks it

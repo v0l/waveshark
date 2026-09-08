@@ -850,6 +850,23 @@ impl App {
                             .note(r.which.publisher())
                             .show(ui);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // The way to the publisher's own page, which is
+                            // where the terms, the credit and the contact
+                            // are. Never the fetch URL: the cell export's
+                            // carries the operator's token.
+                            if crate::icons::icon_button_sized(
+                                ui,
+                                crate::icons::Icon::Link,
+                                r.which.page(),
+                                true,
+                                false,
+                                20.0,
+                            )
+                            .clicked()
+                            {
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab(r.which.page().to_string()));
+                            }
                             // Disabled rather than hidden while it works: a
                             // button that vanishes under the pointer is a button
                             // that gets pressed twice.
@@ -887,6 +904,11 @@ impl App {
                         })
                         .size(12.0)
                         .show(ui);
+                    // The terms on the row, not in a document nobody opens.
+                    // OpenCelliD asks in writing for a visible credit and a
+                    // link, and a receiver that draws its masts while saying
+                    // nothing is not complying with that.
+                    hint(ui, r.which.terms());
                     if let Some(e) = &r.error {
                         ui.label(egui::RichText::new(e).small().color(theme::FAULT));
                     }

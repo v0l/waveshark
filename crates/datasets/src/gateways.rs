@@ -29,6 +29,10 @@ pub struct HostFile {
     pub publisher: &'static str,
     /// What the file is, for the pane that offers to download it.
     pub about: &'static str,
+    /// The page a person can read about the file, rather than the file.
+    pub page: &'static str,
+    /// The terms the publisher states, for the row that credits them.
+    pub terms: &'static str,
     /// Where to connect when the file publishes no port of its own. For the
     /// D-Star networks that is the port of the protocol itself, and a file
     /// listing it per reflector would be the same number 1500 times.
@@ -66,6 +70,8 @@ pub static M17: HostFile = HostFile {
     publisher: "m17project.org",
     about: "Every M17 reflector, with the modules each carries. The one \
      network here this receiver already decodes.",
+    page: "https://m17project.org/",
+    terms: "M17 Project host files",
     default_port: 17000,
     max_age: DAILY,
     parse: crate::m17::parse,
@@ -79,6 +85,8 @@ pub static DMR: HostFile = HostFile {
     about: "Every DMR master a hotspot can register with, as Pi-Star \
      publishes it. Speech there is AMBE, which needs a vocoder this \
      build may not have.",
+    page: "https://www.pistar.uk/downloads/",
+    terms: "Pi-Star host files",
     default_port: 62030,
     max_age: DAILY,
     parse: crate::pistar::dmr,
@@ -90,6 +98,8 @@ pub static DPLUS: HostFile = HostFile {
     url: "https://www.pistar.uk/downloads/DPlus_Hosts.txt",
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DPlus.",
+    page: "https://www.pistar.uk/downloads/",
+    terms: "Pi-Star host files",
     default_port: 20001,
     max_age: DAILY,
     parse: crate::pistar::dstar,
@@ -101,6 +111,8 @@ pub static DEXTRA: HostFile = HostFile {
     url: "https://www.pistar.uk/downloads/DExtra_Hosts.txt",
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DExtra.",
+    page: "https://www.pistar.uk/downloads/",
+    terms: "Pi-Star host files",
     default_port: 30001,
     max_age: DAILY,
     parse: crate::pistar::dstar,
@@ -112,6 +124,8 @@ pub static DCS: HostFile = HostFile {
     url: "https://www.pistar.uk/downloads/DCS_Hosts.txt",
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DCS.",
+    page: "https://www.pistar.uk/downloads/",
+    terms: "Pi-Star host files",
     default_port: 30051,
     max_age: DAILY,
     parse: crate::pistar::dstar,
