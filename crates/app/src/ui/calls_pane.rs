@@ -62,8 +62,10 @@ impl CallList<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             let live = calls.iter().filter(|c| c.live(now)).count();
-            let mut head =
-                theme::Line::new().legend("calls").value(format!("{} heard", calls.len())).size(11.0);
+            let mut head = theme::Line::new()
+                .legend("calls")
+                .value(format!("{} heard", calls.len()))
+                .size(11.0);
             if live > 0 {
                 head = head.value(format!("{live} on air")).tint(CRC_OK).size(11.0);
             }
@@ -98,7 +100,8 @@ impl CallList<'_> {
         let mut toggled: Vec<Rule> = Vec::new();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
             let p = ui.painter_at(rect);
             let mut x = rect.left() + 12.0;
             for (name, w) in COLS {
@@ -114,8 +117,7 @@ impl CallList<'_> {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (n, c) in calls.iter().enumerate() {
                     let h = widgets::ROW_H.max(20.0);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
@@ -140,12 +142,15 @@ impl CallList<'_> {
                     let group_rule = Rule::Group(c.to.clone());
                     let caller_rule = c.from.clone().map(Rule::Caller);
                     let mut on_group = subs.iter().any(|s| s.rule == group_rule);
-                    let mut on_caller = caller_rule
-                        .as_ref()
-                        .is_some_and(|r| subs.iter().any(|s| &s.rule == r));
+                    let mut on_caller =
+                        caller_rule.as_ref().is_some_and(|r| subs.iter().any(|s| &s.rule == r));
                     let box_at = |i: usize| {
-                        let x: f32 = rect.left() + 12.0 + COLS[..i].iter().map(|(_, w)| w).sum::<f32>();
-                        Rect::from_min_size(Pos2::new(x, rect.top() + 2.0), Vec2::new(28.0, h - 4.0))
+                        let x: f32 =
+                            rect.left() + 12.0 + COLS[..i].iter().map(|(_, w)| w).sum::<f32>();
+                        Rect::from_min_size(
+                            Pos2::new(x, rect.top() + 2.0),
+                            Vec2::new(28.0, h - 4.0),
+                        )
                     };
                     let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(box_at(0)));
                     if sub.checkbox(&mut on_group, "").changed() {
@@ -168,7 +173,8 @@ impl CallList<'_> {
                         // what it answers is whether this call is reaching
                         // the speaker, and a bar answers that at a glance.
                         if i == LEVEL_COL {
-                            let key = crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz, &c.to);
+                            let key =
+                                crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz, &c.to);
                             let peak = levels
                                 .iter()
                                 .find(|(k, _)| *k == key)
@@ -271,8 +277,7 @@ const LEVEL_COL: usize = 5;
 /// One row's text and colours, from the system column onwards.
 fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Color32)> {
     let party = if c.group { theme::TRACE } else { theme::READOUT };
-    let airtime =
-        if c.seconds > 0.0 { format!("{:.1} s", c.seconds) } else { "-".to_string() };
+    let airtime = if c.seconds > 0.0 { format!("{:.1} s", c.seconds) } else { "-".to_string() };
     vec![
         (c.system.clone(), theme::LEGEND),
         (format!("{:.4} MHz", c.channel_hz / 1e6), theme::VALUE),

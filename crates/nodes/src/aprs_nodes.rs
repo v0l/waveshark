@@ -233,7 +233,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
         ))
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("AFSK")
+        .with_modulation(common::Modulation::Afsk)
         // Every frame here passed the X.25 frame check sequence in the
         // demodulator, which is a real integrity check.
         .with_crc(Some(true));

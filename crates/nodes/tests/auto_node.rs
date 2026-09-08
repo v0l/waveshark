@@ -264,7 +264,7 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
     let measured: Vec<(u64, &common::Measure)> =
         pk.iter().filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz(), m))).collect();
-    let (hz, chirp) = measured.iter().find(|(_, m)| m.modulation == "chirp").unwrap_or_else(|| {
+    let (hz, chirp) = measured.iter().find(|(_, m)| m.modulation == common::Modulation::Chirp).unwrap_or_else(|| {
         panic!(
             "no chirp measurement among {:?}",
             measured.iter().map(|(_, m)| m.summary()).collect::<Vec<_>>()
@@ -438,7 +438,7 @@ fn auto_finds_lora_in_a_real_capture() {
         PacketBody::Frame(f) => nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())),
         _ => None,
     }).collect();
-    let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
+    let chirps = pk.iter().filter(|p| p.modulation() == Some(common::Modulation::Chirp)).count();
     // The one Meshtastic packet in the capture, out of the three rows the
     // span produces. Pinned, because the way the verdict path breaks is a
     // second row for the same packet or a decode replaced by a chirp
@@ -473,7 +473,7 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
             _ => None,
         })
         .collect();
-    let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
+    let chirps = pk.iter().filter(|p| p.modulation() == Some(common::Modulation::Chirp)).count();
     // Fifteen packets on four channel visits; the first two of each visit
     // are what the link is recovered from and come out with it.
     // Fifteen of the eighteen rows the capture produces are the handset.

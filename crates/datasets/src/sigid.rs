@@ -203,9 +203,9 @@ pub struct Query {
     pub center_hz: f64,
     /// Occupied width, when measured. Zero or absent otherwise.
     pub bandwidth_hz: Option<f64>,
-    /// The classifier's label: "2-FSK", "OOK", "chirp", "OFDM". Absent for
-    /// "unknown" and "noise-like", which constrain nothing.
-    pub modulation: Option<String>,
+    /// The classifier's verdict. Absent for the ones that constrain
+    /// nothing, which are `Unknown` and `NoiseLike`.
+    pub modulation: Option<common::Modulation>,
     /// Period of a repeating structure in microseconds, when found.
     pub period_us: Option<f64>,
 }
@@ -220,28 +220,28 @@ pub struct Match<'a> {
     pub why: String,
 }
 
-/// The wiki's tags for one of the classifier's labels. The wiki's are what
-/// contributors typed, so a label maps to every spelling that means the
+/// The wiki's tags for one of the classifier's verdicts. The wiki's are what
+/// contributors typed, so a verdict maps to every spelling that means the
 /// same keying and to the family it belongs to.
-pub fn wiki_modulations(label: &str) -> &'static [&'static str] {
-    match label {
-        "OOK" => &["OOK", "ASK", "PWM", "PPM", "Pulse", "CW"],
-        "ASK" => &["ASK", "OOK", "PAM", "MP\u{2011}DASK"],
-        "2-FSK" | "FSK" | "2FSK" => &["FSK", "GFSK", "2FSK", "AFSK", "CWFSK", "FFSK"],
-        "4-FSK" | "4FSK" => &["4FSK", "FSK", "GFSK", "C4FM"],
-        "C4FM" => &["C4FM", "4FSK"],
-        "MSK" => &["MSK", "GMSK"],
-        "GMSK" => &["GMSK", "MSK"],
-        "BPSK" => &["BPSK", "PSK", "DPSK", "SDPSK"],
-        "QPSK" => &["QPSK", "PSK", "OQPSK", "DQPSK"],
-        "pi/4-DQPSK" => &["DQPSK", "QPSK", "PSK"],
-        "8PSK" => &["8PSK", "D8PSK", "PSK"],
-        "chirp" => &["FMCW", "CSS", "LFM"],
-        "OFDM" => &["OFDM", "CP-OFDM", "SC-FDMA"],
-        "DSSS" => &["DSSS", "CDMA"],
-        "PPM" => &["PPM", "Pulse"],
-        "carrier" => &["CW", "AM", "FM"],
-        _ => &[],
+pub fn wiki_modulations(m: common::Modulation) -> &'static [&'static str] {
+    use common::Modulation as M;
+    match m {
+        M::Ook => &["OOK", "ASK", "PWM", "PPM", "Pulse", "CW"],
+        M::Ask => &["ASK", "OOK", "PAM", "MP\u{2011}DASK"],
+        M::Fsk2 | M::Afsk => &["FSK", "GFSK", "2FSK", "AFSK", "CWFSK", "FFSK"],
+        M::Gfsk => &["GFSK", "FSK", "2FSK"],
+        M::Fsk4 => &["4FSK", "FSK", "GFSK", "C4FM"],
+        M::Msk => &["MSK", "GMSK"],
+        M::Gmsk => &["GMSK", "MSK"],
+        M::Psk2 => &["BPSK", "PSK", "DPSK", "SDPSK"],
+        M::Psk4 => &["QPSK", "PSK", "OQPSK", "DQPSK"],
+        M::Dqpsk => &["DQPSK", "QPSK", "PSK"],
+        M::Chirp | M::Css => &["FMCW", "CSS", "LFM"],
+        M::Ofdm => &["OFDM", "CP-OFDM", "SC-FDMA"],
+        M::Dsss => &["DSSS", "CDMA"],
+        M::Ppm => &["PPM", "Pulse"],
+        M::Carrier | M::Fm => &["CW", "AM", "FM"],
+        M::NoiseLike | M::Unknown => &[],
     }
 }
 
@@ -279,8 +279,8 @@ fn score<'a>(s: &'a Signal, q: &Query) -> Option<Match<'a>> {
         format!("{} to {}", fmt_hz(lo), fmt_hz(hi))
     }];
 
-    if let Some(label) = q.modulation.as_deref() {
-        let tags = wiki_modulations(label);
+    if let Some(m) = q.modulation {
+        let tags = wiki_modulations(m);
         if !tags.is_empty() && !s.modulations.is_empty() {
             let hit = s.modulations.iter().find(|m| tags.iter().any(|t| t.eq_ignore_ascii_case(m)));
             match hit {
@@ -503,7 +503,7 @@ fn parse_unid(raw: &[u8]) -> Result<Vec<Signal>, Error> {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Observation {
     pub center_hz: f64,
-    pub modulation: Option<String>,
+    pub modulation: Option<common::Modulation>,
     pub bandwidth_hz: Option<f64>,
     pub baud: Option<f64>,
     pub duration_ms: Option<f64>,
@@ -522,7 +522,7 @@ impl Observation {
     pub fn artemis_issue_url(&self) -> String {
         let title = format!(
             "Unidentified {} signal at {}",
-            self.modulation.as_deref().unwrap_or("unknown"),
+            self.modulation.unwrap_or_default(),
             fmt_hz(self.center_hz)
         );
         format!(
@@ -545,8 +545,8 @@ impl Observation {
             url.push_str(&format!("&Unidentified_Signal%5B{}%5D={}", encode(k), encode(&v)));
         };
         field("Frequencies", fmt_hz(self.center_hz));
-        if let Some(m) = &self.modulation {
-            field("Modulation", wiki_modulations(m).first().unwrap_or(&m.as_str()).to_string());
+        if let Some(m) = self.modulation {
+            field("Modulation", wiki_modulations(m).first().unwrap_or(&m.label()).to_string());
         }
         if let Some(bw) = self.bandwidth_hz.filter(|b| *b > 0.0) {
             field("Bandwidth", fmt_hz(bw));
@@ -561,8 +561,8 @@ impl Observation {
     /// The observation as a markdown table with a sentence under it.
     pub fn markdown(&self) -> String {
         let mut rows: Vec<(&str, String)> = vec![("Frequency", fmt_hz(self.center_hz))];
-        if let Some(m) = &self.modulation {
-            rows.push(("Modulation", m.clone()));
+        if let Some(m) = self.modulation {
+            rows.push(("Modulation", m.label().into()));
         }
         if let Some(bw) = self.bandwidth_hz.filter(|b| *b > 0.0) {
             rows.push(("Bandwidth", fmt_hz(bw)));
@@ -599,7 +599,7 @@ impl Observation {
     }
 
     fn plain(&self) -> String {
-        let mut parts = vec![format!("{} at {}", self.modulation.as_deref().unwrap_or("unknown"), fmt_hz(self.center_hz))];
+        let mut parts = vec![format!("{} at {}", self.modulation.unwrap_or_default(), fmt_hz(self.center_hz))];
         if let Some(bw) = self.bandwidth_hz.filter(|b| *b > 0.0) {
             parts.push(format!("{} wide", fmt_hz(bw)));
         }
@@ -667,7 +667,7 @@ mod tests {
                 sig("HF thing", &[7_000_000], &["FSK"], &[3_000]),
             ],
         };
-        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some("2-FSK".into()), period_us: None };
+        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some(common::Modulation::Fsk2), period_us: None };
         let m = db.matches(&q);
         let names: Vec<&str> = m.iter().map(|m| m.signal.name.as_str()).collect();
         assert_eq!(names[0], "Keyfob", "{names:?}");
@@ -693,7 +693,7 @@ mod tests {
                 sig("LoRa", &[433_000_000, 863_000_000, 870_000_000, 915_000_000], &["CSS"], &[125_000]),
             ],
         };
-        let q = Query { center_hz: 868_100_000.0, bandwidth_hz: Some(125_000.0), modulation: Some("chirp".into()), period_us: None };
+        let q = Query { center_hz: 868_100_000.0, bandwidth_hz: Some(125_000.0), modulation: Some(common::Modulation::Chirp), period_us: None };
         assert_eq!(db.matches(&q)[0].signal.name, "LoRa");
     }
 
@@ -749,7 +749,7 @@ mod tests {
     fn a_report_carries_the_numbers_and_opens_the_right_places() {
         let o = Observation {
             center_hz: 868_100_000.0,
-            modulation: Some("2-FSK".into()),
+            modulation: Some(common::Modulation::Fsk2),
             bandwidth_hz: Some(28_000.0),
             baud: Some(19_600.0),
             duration_ms: Some(13.6),
@@ -799,7 +799,7 @@ mod network {
         eprintln!("{} signals, {} identified", db.len(), db.identified());
         assert!(db.identified() > 500);
         assert!(db.len() - db.identified() > 300);
-        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some("2-FSK".into()), period_us: None };
+        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some(common::Modulation::Fsk2), period_us: None };
         for m in db.matches(&q).iter().take(8) {
             eprintln!("{:.2} {} [{}] {}", m.score, m.signal.name, m.why, if m.signal.identified { "" } else { "UNID" });
         }

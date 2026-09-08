@@ -39,6 +39,9 @@ pub struct RadioSettings {
     /// List settings by driver name and the option chosen, such as which
     /// antenna port the cable is in.
     pub choices: Vec<(String, String)>,
+    /// Reference correction for the radio this applies to. Held here as one
+    /// number because the settings pane edits the radio in front of it; the
+    /// session keeps one of these per radio.
     pub ppm: f64,
     /// Transmit gain in dB, which the radio's transmit stages are set to
     /// when a channel is keyed.
@@ -79,7 +82,13 @@ pub struct Session {
     /// List settings by driver name and the option chosen, such as which
     /// antenna port the cable is in.
     pub choices: Vec<(String, String)>,
-    pub ppm: f64,
+    /// Reference correction in parts per million, by device label.
+    ///
+    /// Per radio rather than one number, because the correction is a property
+    /// of one crystal: a HackRF five ppm out and an RTL dongle sixty ppm out
+    /// are both plugged into the same receiver, and applying either one's
+    /// figure to the other puts it further off than leaving it alone.
+    pub ppm: BTreeMap<String, f64>,
     /// Transmit gain in dB, which the radio's own transmit stages are set to
     /// when a channel is keyed.
     pub tx_gain_db: f32,
@@ -97,6 +106,11 @@ pub struct Session {
     /// the settings rather than in the cache directory: deleting the cached
     /// data must not lose the credential that fetches it again.
     pub opencellid_token: String,
+    /// The Space-Track login, for the same reason: their catalogue query is
+    /// answered only while logged in, and a cache that has been cleared must
+    /// not take the account with it.
+    pub spacetrack_identity: String,
+    pub spacetrack_password: String,
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
@@ -200,13 +214,15 @@ impl Default for Session {
             gains: Vec::new(),
             toggles: Vec::new(),
             choices: Vec::new(),
-            ppm: 0.0,
+            ppm: BTreeMap::new(),
             tx_gain_db: 0.0,
             location: None,
             language: String::new(),
             country: String::new(),
             band_plan: String::new(),
             opencellid_token: String::new(),
+            spacetrack_identity: String::new(),
+            spacetrack_password: String::new(),
             dc_block: true,
             decode_on: true,
             volume: 0.5,
@@ -231,15 +247,22 @@ impl Default for Session {
 }
 
 impl Session {
-    /// The radio's part of the session.
-    pub fn radio(&self) -> RadioSettings {
+    /// The radio's part of the session, for the radio it is about to be
+    /// applied to.
+    pub fn radio(&self, device: Option<&str>) -> RadioSettings {
         RadioSettings {
             gains: self.gains.clone(),
             toggles: self.toggles.clone(),
             choices: self.choices.clone(),
-            ppm: self.ppm,
+            ppm: self.ppm_for(device),
             tx_gain_db: self.tx_gain_db,
         }
+    }
+
+    /// The saved correction for one radio, or none for a radio that has never
+    /// been calibrated. Never another radio's figure.
+    pub fn ppm_for(&self, device: Option<&str>) -> f64 {
+        device.and_then(|d| self.ppm.get(d)).copied().unwrap_or(0.0)
     }
 
     /// `$XDG_CONFIG_HOME/waveshark/session`, or `~/.config` when unset.
@@ -278,12 +301,15 @@ impl Session {
         let mut feeds = Vec::new();
         let mut streams = Vec::new();
         let mut map_layers = Vec::new();
+        let mut ppm: BTreeMap<String, f64> = BTreeMap::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let (k, v) = (k.trim(), v.trim());
             if let Some(name) = k.strip_prefix("gain.") {
                 if let Some(m) = parse_gain(v) {
@@ -295,6 +321,10 @@ impl Session {
                 choices.push((name.to_string(), v.to_string()));
             } else if let Some(name) = k.strip_prefix("map_layer.") {
                 map_layers.push((name.to_string(), v == "true"));
+            } else if let Some(name) = k.strip_prefix("ppm.") {
+                if let Ok(v) = v.parse() {
+                    ppm.insert(name.to_string(), v);
+                }
             } else if k == "feed" {
                 if let Some(f) = parse_feed(v) {
                     feeds.push(f);
@@ -303,9 +333,7 @@ impl Session {
                 // `host:port name of the receiver`, the name being everything
                 // after the first space and often absent.
                 match v.split_once(char::is_whitespace) {
-                    Some((addr, name)) => {
-                        streams.push((addr.to_string(), name.trim().to_string()))
-                    }
+                    Some((addr, name)) => streams.push((addr.to_string(), name.trim().to_string())),
                     None if !v.is_empty() => streams.push((v.to_string(), String::new())),
                     None => {}
                 }
@@ -315,8 +343,19 @@ impl Session {
         }
         let d = Session::default();
         let f = |k: &str, or: f64| kv.get(k).and_then(|v| v.parse().ok()).unwrap_or(or);
+        let device = kv.get("device").map(|v| v.to_string()).filter(|v| !v.is_empty());
+        // A file from before the correction was kept per radio has one bare
+        // `ppm`, which belongs to whichever radio was in use when it was
+        // written. Give it to that one rather than to all of them.
+        if let (true, Some(dev), Some(v)) =
+            (ppm.is_empty(), device.as_deref(), kv.get("ppm").and_then(|v| v.parse::<f64>().ok()))
+        {
+            if v != 0.0 {
+                ppm.insert(dev.to_string(), v);
+            }
+        }
         Session {
-            device: kv.get("device").map(|v| v.to_string()).filter(|v| !v.is_empty()),
+            device: device.clone(),
             center: f("center", d.center),
             rate: f("rate", d.rate),
             zoom: kv.get("zoom").and_then(|v| v.parse().ok()).unwrap_or(d.zoom),
@@ -324,7 +363,7 @@ impl Session {
             gains,
             toggles,
             choices,
-            ppm: f("ppm", d.ppm),
+            ppm,
             tx_gain_db: f("tx_gain_db", d.tx_gain_db as f64) as f32,
             location: match (kv.get("lat"), kv.get("lon")) {
                 (Some(a), Some(o)) => a.parse().ok().zip(o.parse().ok()),
@@ -334,6 +373,14 @@ impl Session {
             country: kv.get("country").map(|v| v.to_string()).unwrap_or_default(),
             band_plan: kv.get("band_plan").map(|v| v.to_string()).unwrap_or_default(),
             opencellid_token: kv.get("opencellid_token").map(|v| v.to_string()).unwrap_or_default(),
+            spacetrack_identity: kv
+                .get("spacetrack_identity")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            spacetrack_password: kv
+                .get("spacetrack_password")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
@@ -380,8 +427,10 @@ impl Session {
         s.push_str(&format!("rate = {:.0}\n", self.rate));
         s.push_str(&format!("zoom = {}\n", self.zoom));
         s.push_str(&format!("fft = {}\n", self.fft));
-        s.push_str(&format!("ppm = {}\n", self.ppm));
         s.push_str(&format!("tx_gain_db = {}\n", self.tx_gain_db));
+        for (device, v) in &self.ppm {
+            s.push_str(&format!("ppm.{device} = {v}\n"));
+        }
         if let Some((lat, lon)) = self.location {
             s.push_str(&format!("lat = {lat}\nlon = {lon}\n"));
         }
@@ -390,6 +439,8 @@ impl Session {
             ("country", &self.country),
             ("band_plan", &self.band_plan),
             ("opencellid_token", &self.opencellid_token),
+            ("spacetrack_identity", &self.spacetrack_identity),
+            ("spacetrack_password", &self.spacetrack_password),
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
             ("gps", &self.gps),
@@ -503,13 +554,13 @@ mod tests {
             rate: 2_048_000.0,
             zoom: 4,
             fft: 4096,
-            gains: vec![
-                ("tuner".into(), GainMode::Manual(29.7)),
-                ("lna".into(), GainMode::Auto),
-            ],
+            gains: vec![("tuner".into(), GainMode::Manual(29.7)), ("lna".into(), GainMode::Auto)],
             toggles: vec![("bias_tee".into(), true)],
             choices: vec![("antenna".into(), "LNAH".into())],
-            ppm: -3.5,
+            ppm: BTreeMap::from([
+                ("RTL2838 #00000001".into(), -3.5),
+                ("HackRF One 78d063dc".into(), 5.25),
+            ]),
             tx_gain_db: 12.0,
             location: Some((53.6369, -6.6528)),
             language: "en".into(),
@@ -518,6 +569,8 @@ mod tests {
             country: "IE".into(),
             band_plan: "europe".into(),
             opencellid_token: "pk.0123456789".into(),
+            spacetrack_identity: "someone@example.com".into(),
+            spacetrack_password: "hunter2".into(),
             dc_block: false,
             decode_on: false,
             volume: 0.25,
@@ -570,6 +623,28 @@ mod tests {
         let s = Session::parse("center = 868300000\nfuture_setting = 7\n");
         assert_eq!(s.center, 868_300_000.0);
         assert_eq!(s.rate, Session::default().rate);
+    }
+
+    #[test]
+    fn a_correction_belongs_to_one_radio_and_not_to_the_others() {
+        let s = Session::parse("ppm.RTL2838 #1 = -3.5\nppm.HackRF One 78d063dc = 5.25\n");
+        assert_eq!(s.ppm_for(Some("RTL2838 #1")), -3.5);
+        assert_eq!(s.ppm_for(Some("HackRF One 78d063dc")), 5.25);
+        // A radio nobody has calibrated is not off by somebody else's crystal.
+        assert_eq!(s.ppm_for(Some("Airspy R2")), 0.0);
+        assert_eq!(s.ppm_for(None), 0.0);
+    }
+
+    #[test]
+    fn an_older_files_single_correction_goes_to_the_radio_it_was_set_on() {
+        let s = Session::parse("device = RTL2838 #1\nppm = -3.5\n");
+        assert_eq!(s.ppm_for(Some("RTL2838 #1")), -3.5);
+        assert_eq!(s.ppm_for(Some("HackRF One 78d063dc")), 0.0);
+        // And it is written back per radio, so the migration happens once.
+        assert_eq!(Session::parse(&s.render()).ppm, s.ppm);
+        assert!(!s.render().contains("\nppm = "));
+        // Nothing to move when the radio it was set on is not recorded.
+        assert!(Session::parse("ppm = -3.5\n").ppm.is_empty());
     }
 
     #[test]

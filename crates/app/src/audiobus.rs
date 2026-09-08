@@ -379,7 +379,9 @@ impl AudioBus {
 
     /// Publish a block of speech. Returns whether any of it was mixed.
     pub fn push(&mut self, v: Voice<'_>) -> bool {
-        let Some(gain) = self.gain_for(&v) else { return false };
+        let Some(gain) = self.gain_for(&v) else {
+            return false;
+        };
         if v.pcm.is_empty() || gain <= 0.0 {
             return false;
         }
@@ -430,7 +432,9 @@ impl AudioBus {
     /// resampling here would resample twice for the ones that never do.
     pub fn tap_of(&self, k: usize, pcm: &[f32]) -> Option<common::Voice> {
         let strip = self.strips.get(k)?;
-        let Feed::Audio { channels, .. } = &strip.feed else { return None };
+        let Feed::Audio { channels, .. } = &strip.feed else {
+            return None;
+        };
         let ch = (*channels).max(1);
         let mono: Vec<f32> = if ch == 1 {
             pcm.to_vec()
@@ -448,9 +452,13 @@ impl AudioBus {
     }
 
     pub fn feed(&mut self, k: usize, pcm: &[f32]) {
-        let Some(strip) = self.strips.get_mut(k) else { return };
+        let Some(strip) = self.strips.get_mut(k) else {
+            return;
+        };
         let gain = strip.gain();
-        let Feed::Audio { channels, rs } = &mut strip.feed else { return };
+        let Feed::Audio { channels, rs } = &mut strip.feed else {
+            return;
+        };
         let ch = (*channels).max(1);
         if pcm.is_empty() {
             return;
@@ -634,9 +642,8 @@ pub fn write_wav(path: &Path, speech: &Speech) -> std::io::Result<()> {
 /// was decoded quietly and something later in the path lost it.
 pub fn levels_db(speech: &Speech) -> (f32, f32) {
     let peak = speech.pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-    let rms = (speech.pcm.iter().map(|v| v * v).sum::<f32>()
-        / speech.pcm.len().max(1) as f32)
-        .sqrt();
+    let rms =
+        (speech.pcm.iter().map(|v| v * v).sum::<f32>() / speech.pcm.len().max(1) as f32).sqrt();
     let db = |v: f32| if v > 0.0 { 20.0 * v.log10() } else { -120.0 };
     (db(peak), db(rms))
 }
@@ -889,14 +896,7 @@ mod tests {
     use super::*;
 
     fn voice<'a>(to: &'a str, from: &'a str, pcm: &'a [f32]) -> Voice<'a> {
-        Voice {
-            system: "M17",
-            channel_hz: 433_475_000.0,
-            to,
-            from: Some(from),
-            pcm,
-            rate: 8_000.0,
-        }
+        Voice { system: "M17", channel_hz: 433_475_000.0, to, from: Some(from), pcm, rate: 8_000.0 }
     }
 
     fn bus(rules: &[Rule]) -> AudioBus {
@@ -981,7 +981,11 @@ mod tests {
     fn a_muted_subscription_is_not_a_quiet_one() {
         let mut b = bus(&[Rule::Everything]);
         let pcm = vec![0.5f32; 160];
-        b.set_subscriptions(vec![Subscription { rule: Rule::Everything, volume: 0.8, muted: true }]);
+        b.set_subscriptions(vec![Subscription {
+            rule: Rule::Everything,
+            volume: 0.8,
+            muted: true,
+        }]);
         assert!(!b.push(voice("ALL", "M0ABC", &pcm)));
         assert!(!b.listening(), "a bus with only muted rules has nothing to decode for");
     }
@@ -1038,9 +1042,7 @@ mod tests {
     /// A tone at a given level, for feeding the gain control something with
     /// an envelope rather than a step.
     fn tone(level: f32, n: usize) -> Vec<f32> {
-        (0..n)
-            .map(|i| level * (i as f32 * 0.3).sin())
-            .collect()
+        (0..n).map(|i| level * (i as f32 * 0.3).sin()).collect()
     }
 
     #[test]

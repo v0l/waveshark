@@ -106,7 +106,7 @@ impl Simple for WmbusNode {
 pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let r = decode::wmbus::parse(bytes, None)?;
     let mut d = Decoded::bytes("Wireless-MBus", center, 0.0, bytes.to_vec())
-        .with_modulation("2-FSK")
+        .with_modulation(common::Modulation::Fsk2)
         .with_crc(Some(true))
         .with_bandwidth(CHANNEL_WIDTH_HZ);
     let fields: Vec<(String, common::Value)> = r

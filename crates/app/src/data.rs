@@ -160,6 +160,10 @@ pub struct Key {
     /// An example, as placeholder text. Never a real one.
     pub hint: &'static str,
     pub help: &'static str,
+    /// Whether what is typed is hidden as it is typed. A password is; a
+    /// user name is not, and masking it only stops an operator seeing which
+    /// account a refusal belongs to.
+    pub secret: bool,
 }
 
 /// A name to show and a page to open, for the credit drawn wherever data
@@ -313,7 +317,7 @@ impl Which {
         match self {
             Which::Airports => "ourairports.com",
             Which::Gateway(h) => h.publisher,
-            Which::Satellites(_) => "celestrak.org",
+            Which::Satellites(g) => g.publisher,
             Which::Transmitters => "db.satnogs.org",
             Which::CellOperators => "github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "opencellid.org",
@@ -332,7 +336,7 @@ impl Which {
         match self {
             Which::Airports => "https://ourairports.com/data/",
             Which::Gateway(h) => h.page,
-            Which::Satellites(_) => "https://celestrak.org/NORAD/elements/",
+            Which::Satellites(g) => g.page,
             Which::Transmitters => "https://db.satnogs.org/",
             Which::CellOperators => "https://github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "https://opencellid.org/",
@@ -348,30 +352,64 @@ impl Which {
     /// Declared here so the row asks for it. A token is not a preference:
     /// it is the one thing standing between that row and a download, and a
     /// field for it under the list reads as a setting of the pane.
-    pub fn key(self) -> Option<Key> {
+    pub fn keys(self) -> &'static [Key] {
         match self {
-            Which::CellTowers => Some(Key {
+            Which::CellTowers => &[Key {
                 label: "token",
                 hint: "pk.0123456789abcdef",
                 help: "An account at opencellid.org gives a download token. It goes in the \
                        URL of the export, so without one this row cannot be fetched.",
-            }),
-            _ => None,
+                secret: true,
+            }],
+            Which::Satellites(g) if g.needs_login() => &[
+                Key {
+                    label: "identity",
+                    hint: "you@example.com",
+                    help: "The e-mail a Space-Track account is registered under. The query \
+                           is answered only while logged in, so without an account this row \
+                           cannot be fetched.",
+                    secret: false,
+                },
+                Key {
+                    label: "password",
+                    hint: "the account's password",
+                    help: "Posted to Space-Track's login once per refresh and held in \
+                           memory and in the session file. Nothing else is done with it.",
+                    secret: true,
+                },
+            ],
+            _ => &[],
         }
     }
 
-    /// What is held for [`Self::key`], and where a new one is put. Empty for
-    /// a dataset that needs none.
-    pub fn key_value(self) -> String {
-        match self {
-            Which::CellTowers => opencellid_token(),
+    /// What is held for the key at `index`, and where a new one is put.
+    /// Empty for a dataset that needs none.
+    pub fn key_value(self, index: usize) -> String {
+        match (self, index) {
+            (Which::CellTowers, 0) => opencellid_token(),
+            (Which::Satellites(g), i) if g.needs_login() => {
+                let a = datasets::spacetrack::account().unwrap_or_default();
+                match i {
+                    0 => a.identity,
+                    _ => a.password,
+                }
+            }
             _ => String::new(),
         }
     }
 
-    pub fn set_key(self, value: &str) {
-        if self == Which::CellTowers {
-            set_opencellid_token(value);
+    pub fn set_key(self, index: usize, value: &str) {
+        match (self, index) {
+            (Which::CellTowers, 0) => set_opencellid_token(value),
+            (Which::Satellites(g), i) if g.needs_login() => {
+                let mut a = datasets::spacetrack::account().unwrap_or_default();
+                match i {
+                    0 => a.identity = value.trim().to_string(),
+                    _ => a.password = value.to_string(),
+                }
+                datasets::spacetrack::set_account(Some(a));
+            }
+            _ => {}
         }
     }
 
@@ -389,7 +427,7 @@ impl Which {
             Which::Artemis => ("Artemis-DB", "sigidwiki.com"),
             Which::SigIdUnid => ("sigidwiki.com", "contributors"),
             Which::Gateway(h) => (h.name, h.publisher),
-            Which::Satellites(_) => ("CelesTrak", "Dr. T.S. Kelso"),
+            Which::Satellites(g) => (g.credit_name, g.credit_licence),
             Which::Transmitters => ("SatNOGS DB", "CC BY-SA 4.0"),
             _ => ("radioid.net", "amateur use"),
         };
@@ -414,7 +452,7 @@ impl Which {
             Which::Artemis => "Artemis-DB, from the Signal Identification Wiki",
             Which::SigIdUnid => "sigidwiki.com contributors",
             Which::Gateway(h) => h.terms,
-            Which::Satellites(_) => "CelesTrak, credit Dr. T.S. Kelso and link celestrak.org",
+            Which::Satellites(g) => g.terms,
             Which::Transmitters => "CC BY-SA 4.0, credit the SatNOGS project",
             // radioid.net publishes the registry for amateur use and states
             // no licence, so the honest line is who it belongs to.
@@ -493,6 +531,12 @@ impl Which {
     /// Why this dataset cannot be fetched yet, for the pane to say instead of
     /// offering a refresh that would fail.
     pub fn blocked(self) -> Option<&'static str> {
+        if let Which::Satellites(g) = self {
+            return match g.needs_login() && !datasets::spacetrack::has_account() {
+                true => Some("needs a Space-Track login"),
+                false => None,
+            };
+        }
         if self != Which::CellTowers {
             return None;
         }
@@ -987,10 +1031,13 @@ mod tests {
             let w = Which::Satellites(g);
             assert!(Which::all().contains(&w), "{} has no dataset row", g.name);
             assert_eq!(w.sources().len(), 1);
-            assert_eq!(w.publisher(), "celestrak.org");
+            // The row says who published it, which is not always CelesTrak:
+            // a group naming them for a file fetched from somewhere else is
+            // a credit given to the wrong project.
+            assert_eq!(w.publisher(), g.publisher);
+            assert_eq!(w.page(), g.page);
         }
-        let files: Vec<usize> =
-            datasets::tle::GROUPS.iter().copied().map(group_index).collect();
+        let files: Vec<usize> = datasets::tle::GROUPS.iter().copied().map(group_index).collect();
         assert_eq!(files, (0..datasets::tle::GROUPS.len()).collect::<Vec<_>>());
     }
 
@@ -1008,5 +1055,33 @@ mod tests {
         assert_eq!(Which::CellTowers.blocked(), None);
         set_opencellid_token("");
         set_country("");
+    }
+
+    /// Space-Track answers nothing without a session, so the row asks for
+    /// both halves of a login and says so until it has them. Two fields
+    /// rather than one because an identity is an e-mail a person needs to
+    /// see and a password is not.
+    #[test]
+    fn the_catalogue_row_asks_for_a_login_and_says_so_until_it_has_one() {
+        let w = Which::Satellites(&datasets::tle::SPACE_TRACK);
+        let keys = w.keys();
+        assert_eq!(keys.len(), 2);
+        assert_eq!((keys[0].label, keys[0].secret), ("identity", false));
+        assert_eq!((keys[1].label, keys[1].secret), ("password", true));
+
+        datasets::spacetrack::set_account(None);
+        assert_eq!(w.blocked(), Some("needs a Space-Track login"));
+        w.set_key(0, "someone@example.com");
+        assert_eq!(w.blocked(), Some("needs a Space-Track login"), "half a login is none");
+        w.set_key(1, "hunter2");
+        assert_eq!(w.blocked(), None);
+        assert_eq!(w.key_value(0), "someone@example.com");
+        assert_eq!(w.key_value(1), "hunter2");
+
+        // A group anybody may fetch asks for nothing and is never blocked.
+        let open = Which::Satellites(&datasets::tle::AMATEUR);
+        assert!(open.keys().is_empty());
+        assert_eq!(open.blocked(), None);
+        datasets::spacetrack::set_account(None);
     }
 }

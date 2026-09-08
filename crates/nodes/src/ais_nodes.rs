@@ -237,7 +237,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
         .by(who)
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("GMSK")
+        .with_modulation(common::Modulation::Gmsk)
         // Every frame that reaches here passed the X.25 frame check sequence
         // in the demodulator, which is a real integrity check and not a
         // plausibility argument.

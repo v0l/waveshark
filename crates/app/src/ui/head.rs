@@ -55,9 +55,7 @@ impl App {
     pub(super) fn head(&mut self, ui: &mut egui::Ui) {
         Panel::top("head")
             .frame(
-                egui::Frame::NONE
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(14, 8)),
+                egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::symmetric(14, 8)),
             )
             .show(ui, |ui| {
                 // Top-aligned: the row is as tall as the receiver cell, and
@@ -117,11 +115,8 @@ impl App {
         let mut stop = false;
         let mut capture: Option<bool> = None;
         cell(ui, "receiver", DEVICE_W, |ui| {
-            let cur = self
-                .device
-                .as_ref()
-                .map(|d| d.label.clone())
-                .unwrap_or_else(|| "none".into());
+            let cur =
+                self.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "none".into());
             egui::ComboBox::from_id_salt("device").selected_text(cur).width(DEVICE_W).show_ui(
                 ui,
                 |ui| {
@@ -169,9 +164,10 @@ impl App {
             // controls at all, and the recording switch beside them read as
             // decoration.
             let on = self.radio.is_some();
-            let capturing = self.radio.as_ref().is_some_and(|r| {
-                r.status.capture_on.load(std::sync::atomic::Ordering::Relaxed)
-            });
+            let capturing = self
+                .radio
+                .as_ref()
+                .is_some_and(|r| r.status.capture_on.load(std::sync::atomic::Ordering::Relaxed));
             segment(ui, DEVICE_W, |ui| {
                 use crate::icons::{icon_button_sized, Icon};
                 let t = crate::i18n::t;
@@ -242,8 +238,7 @@ impl App {
                 ui,
                 |ui| {
                     for sp in &self.spans {
-                        let on =
-                            (self.rate - sp.effective()).abs() < 1.0 && self.zoom == sp.zoom;
+                        let on = (self.rate - sp.effective()).abs() < 1.0 && self.zoom == sp.zoom;
                         let text = if sp.zoom > 1 {
                             format!("{}  /{}", sp.label, sp.zoom)
                         } else {
@@ -259,9 +254,7 @@ impl App {
             // running at a quarter rate behaves differently enough to say so.
             if self.zoom > 1 {
                 ui.add_space(4.0);
-                ui.label(
-                    value(format!("/{} zoom", self.zoom)).color(theme::LEGEND).size(11.0),
-                );
+                ui.label(value(format!("/{} zoom", self.zoom)).color(theme::LEGEND).size(11.0));
             }
         });
         if let Some(sp) = pick {
@@ -395,7 +388,9 @@ impl App {
         if matches!(state, crate::update::State::Checking) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
-        let crate::update::State::Newer(r) = state else { return };
+        let crate::update::State::Newer(r) = state else {
+            return;
+        };
         self.rule(ui);
         cell(ui, "update", UPDATE_W, |ui| {
             let hover = match &r.asset {
@@ -436,10 +431,7 @@ impl App {
         ui.add_space(GAP);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, CELL_H - 6.0), Sense::hover());
         ui.painter().line_segment(
-            [
-                Pos2::new(rect.center().x, rect.top()),
-                Pos2::new(rect.center().x, rect.bottom()),
-            ],
+            [Pos2::new(rect.center().x, rect.top()), Pos2::new(rect.center().x, rect.bottom())],
             Stroke::new(1.0, theme::ETCH),
         );
         ui.add_space(GAP);

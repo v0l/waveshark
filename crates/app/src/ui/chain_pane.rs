@@ -44,10 +44,7 @@ impl Chain<'_> {
         // rather than floating over the graph: what a stage is set to is read
         // against where it sits in the chain, and a panel covering the chain
         // hides half of that.
-        let mut act = crate::chainview::Interaction {
-            selected: self.st.sel,
-            ..Default::default()
-        };
+        let mut act = crate::chainview::Interaction { selected: self.st.sel, ..Default::default() };
         if self.st.sel.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
@@ -67,9 +64,7 @@ impl Chain<'_> {
         Panel::left("chain-palette")
             .default_size(190.0)
             .frame(
-                egui::Frame::NONE
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(10, 10)),
+                egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 10)),
             )
             .show(ui, |ui| self.palette(ui));
         // Dragged, not only scrolled: the graph is wider and taller than the
@@ -112,7 +107,8 @@ impl Chain<'_> {
             }
             // Delete takes out whichever of the two is selected, which is
             // what the key does in every editor.
-            let del = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            let del = ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
             if del {
                 if let Some(to) = self.st.wire.take() {
                     self.st.edit(self.cmds, |p| p.disconnect(to));
@@ -121,9 +117,7 @@ impl Chain<'_> {
                     self.st.sel = None;
                 }
             }
-            if ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
-            }) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
                 self.st.undo(self.cmds);
             }
             if ui.input_mut(|i| {
@@ -172,19 +166,19 @@ impl Chain<'_> {
             // something is keyed: an empty pane behind a button that did
             // nothing would read as a fault rather than as an idle
             // transmitter.
-            let has_tx = self
-                .st
-                .topo
-                .as_ref()
-                .is_some_and(|t| t.nodes.iter().any(|n| n.kind == "radio_tx"));
+            let has_tx =
+                self.st.topo.as_ref().is_some_and(|t| t.nodes.iter().any(|n| n.kind == "radio_tx"));
             if !has_tx {
                 self.st.side = ChainSide::Rx;
             }
             for side in [ChainSide::Rx, ChainSide::Tx] {
                 let on = self.st.side == side;
                 let enabled = side == ChainSide::Rx || has_tx;
-                let w = egui::Button::new(side.label())
-                    .fill(if on { theme::READOUT } else { theme::WELL });
+                let w = egui::Button::new(side.label()).fill(if on {
+                    theme::READOUT
+                } else {
+                    theme::WELL
+                });
                 let r = ui.add_enabled(enabled, w);
                 let r = match side {
                     ChainSide::Rx => r.on_hover_text("The chain the receiver is running"),
@@ -289,7 +283,6 @@ impl Chain<'_> {
             self.st.wire = None;
         }
     }
-
 }
 
 /// One direction of a chain, on its own.
@@ -302,10 +295,7 @@ impl Chain<'_> {
 /// The stage that takes the receiver's clock carries both, and it belongs to
 /// the transmit side: it is where that chain begins, and on the receive side
 /// it is a stub with nothing after it.
-fn one_side(
-    topo: &pipeline::graph::Topology,
-    side: ChainSide,
-) -> pipeline::graph::Topology {
+fn one_side(topo: &pipeline::graph::Topology, side: ChainSide) -> pipeline::graph::Topology {
     let mut out = topo.clone();
     out.nodes.retain(|n| {
         let transmits = n.outputs.iter().any(|(_, s)| s.is_tx());

@@ -451,7 +451,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("4FSK")
+        .with_modulation(common::Modulation::Fsk4)
         // Every link setup here passed the CRC over its 28 bytes and every
         // packet the CRC over the whole of it; a transmission whose checks
         // failed never became an event.

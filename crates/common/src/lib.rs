@@ -8,6 +8,7 @@ pub mod decode;
 pub mod device;
 pub mod error;
 pub mod iq;
+pub mod modulation;
 pub mod pulse;
 pub mod source;
 pub mod value;
@@ -22,8 +23,9 @@ pub use iq::{IqBuf, SampleFormat, C32};
 pub use decode::{
     media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
 };
+pub use modulation::Modulation;
 pub use pulse::{
-    Frame, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse, Speech, VideoFrame, Voice,
+    Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse, Speech, VideoFrame, Voice,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;

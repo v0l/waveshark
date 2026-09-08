@@ -984,7 +984,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             0.0,
             r.payload.clone(),
         )
-        .with_modulation("CSS")
+        .with_modulation(common::Modulation::Css)
         .with_bandwidth(r.bandwidth_hz)
         .with_crc(r.crc_ok)
         .with_detail(detail)

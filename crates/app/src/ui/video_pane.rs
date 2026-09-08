@@ -92,11 +92,7 @@ impl VideoPane<'_> {
 
         let (Some(tex), Some(f)) = (st.texture.as_ref(), st.shown.as_ref()) else {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("no picture")
-                        .color(theme::LEGEND)
-                        .size(14.0),
-                );
+                ui.label(egui::RichText::new("no picture").color(theme::LEGEND).size(14.0));
             });
             return;
         };
@@ -117,11 +113,8 @@ impl VideoPane<'_> {
             // The ratio is told, not taken from the texture: `fit_to_exact_size`
             // still keeps the image's own proportions unless this is off, so a
             // 640 by 288 field was drawn at 20:9 whatever shape was asked for.
-            let r = ui.add(
-                egui::Image::new(tex)
-                    .maintain_aspect_ratio(false)
-                    .fit_to_exact_size(size),
-            );
+            let r =
+                ui.add(egui::Image::new(tex).maintain_aspect_ratio(false).fit_to_exact_size(size));
             // What it is, where it is, and what was actually received: the
             // grid it was sampled into, then the lines that arrived out of
             // the lines a field has. A picture assembled from a third of its
@@ -145,11 +138,7 @@ impl VideoPane<'_> {
                 egui::FontId::monospace(12.0),
                 // A partial picture is worth flagging: a fade looks like a
                 // picture until the count is read.
-                if f.completeness() > 0.9 {
-                    theme::READOUT
-                } else {
-                    theme::FAULT
-                },
+                if f.completeness() > 0.9 { theme::READOUT } else { theme::FAULT },
             );
         });
     }

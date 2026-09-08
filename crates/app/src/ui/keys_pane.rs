@@ -46,25 +46,23 @@ impl Keys<'_> {
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
-            egui::Frame::NONE
-                .inner_margin(egui::Margin::symmetric(12, 0))
-                .show(ui, |ui| {
-                    self.channel_keys(ui);
-                    ui.add_space(10.0);
-                    if live.is_empty() {
-                        ui.add_space(12.0);
-                        ui.vertical_centered(|ui| {
-                            hint(
-                                ui,
-                                "No enciphered cell heard yet. Tune one and it appears here with its \
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+                self.channel_keys(ui);
+                ui.add_space(10.0);
+                if live.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        hint(
+                            ui,
+                            "No enciphered cell heard yet. Tune one and it appears here with its \
                                  encryption mode and, where the build can, its key.",
-                            );
-                        });
-                    }
-                    for s in live.iter() {
-                        self.card(ui, s);
-                    }
-                });
+                        );
+                    });
+                }
+                for s in live.iter() {
+                    self.card(ui, s);
+                }
+            });
             ui.add_space(8.0);
         });
     }
@@ -211,7 +209,9 @@ impl Keys<'_> {
     /// Take in what a node sent, once it has.
     fn poll_node(&mut self) {
         use decode::channel_keys::{ChannelKey, System};
-        let Some(p) = self.st.node_fetch.take() else { return };
+        let Some(p) = self.st.node_fetch.take() else {
+            return;
+        };
         let done = match p.try_take() {
             Ok(r) => r,
             Err(p) => {

@@ -157,13 +157,7 @@ fn parse(body: &str) -> Result<Release, String> {
         .into_iter()
         .find(|a| a.name.starts_with(&format!("waveshark-{}", platform())))
         .map(|a| Asset { name: a.name, url: a.browser_download_url, bytes: a.size });
-    Ok(Release {
-        version,
-        tag: j.tag_name,
-        page: j.html_url,
-        asset,
-        published: j.published_at,
-    })
+    Ok(Release { version, tag: j.tag_name, page: j.html_url, asset, published: j.published_at })
 }
 
 /// The name the build workflow gives this platform's archive, which is what

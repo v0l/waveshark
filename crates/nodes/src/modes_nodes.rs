@@ -275,7 +275,7 @@ pub fn adsb_decoded(frame: &adsb::Frame, bytes: &[u8], center: common::Hz) -> De
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("PPM")
+        .with_modulation(common::Modulation::Ppm)
         // Only the extended squitters carry a CRC of their own. A short reply
         // is believed because its address is one an ADS-B frame proved, which
         // is corroboration rather than an integrity check.

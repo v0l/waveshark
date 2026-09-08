@@ -178,7 +178,7 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
                 })
                 .with_detail(detail)
                 .with_fields(fields)
-                .with_modulation("FSK")
+                .with_modulation(common::Modulation::Fsk2)
                 // Every codeword read here either verified against
                 // BCH(31,21) or was corrected by it, which is a real
                 // integrity check rather than a plausibility argument.

@@ -91,8 +91,8 @@ impl PacketDecodeNode {
                     // of them FSK.
                     let modulation = p.modulation().unwrap_or(match p.measure.as_ref() {
                         Some(m) => m.modulation,
-                        None if p.bandwidth_hz > 60_000 => "FSK",
-                        None => "OOK",
+                        None if p.bandwidth_hz > 60_000 => common::Modulation::Fsk2,
+                        None => common::Modulation::Ook,
                     });
                     self.decode_burst(p, pkg, modulation);
                 }
@@ -109,7 +109,7 @@ impl PacketDecodeNode {
         self.spans.iter().map(|(a, b)| &self.hits[*a..*b])
     }
 
-    fn decode_burst(&mut self, p: &Packet, pkg: &common::Package, modulation: &'static str) {
+    fn decode_burst(&mut self, p: &Packet, pkg: &common::Package, modulation: common::Modulation) {
         decode_burst_into(
             &self.protocols,
             Options { report_all: self.report_all, report_unknown: self.report_unknown },
@@ -152,8 +152,8 @@ pub fn decode_packet(protocols: &Protocols, opts: Options, p: &Packet) -> Vec<De
         PacketBody::Pulses(pkg) => {
             let modulation = p.modulation().unwrap_or(match p.measure.as_ref() {
                 Some(m) => m.modulation,
-                None if p.bandwidth_hz > 60_000 => "FSK",
-                None => "OOK",
+                None if p.bandwidth_hz > 60_000 => common::Modulation::Fsk2,
+                None => common::Modulation::Ook,
             });
             decode_burst_into(protocols, opts, p, pkg, modulation, &mut out);
         }
@@ -167,7 +167,7 @@ fn decode_burst_into(
     opts: Options,
     p: &Packet,
     pkg: &common::Package,
-    modulation: &'static str,
+    modulation: common::Modulation,
     hits: &mut Vec<Decoded>,
 ) {
     let center = common::Hz(p.center_hz());
@@ -195,7 +195,7 @@ fn decode_burst_into(
         // chirp or a carrier that no front end reads, or a burst it
         // could not name at all.
         let label = match p.measure.as_ref().map(|m| m.modulation) {
-            Some(l) if l != "unknown" => l,
+            Some(l) if l != common::Modulation::Unknown => l,
             _ => modulation,
         };
         hits.push(
@@ -539,9 +539,9 @@ mod tests {
             })
             .collect();
         let ook = run(&mut n, vec![burst(433_920_000, 31_250, pulses.clone())]);
-        assert_eq!(ook[0].modulation, Some("OOK"));
+        assert_eq!(ook[0].modulation, Some(common::Modulation::Ook));
         let fsk = run(&mut n, vec![burst(868_300_000, 125_000, pulses)]);
-        assert_eq!(fsk[0].modulation, Some("FSK"));
+        assert_eq!(fsk[0].modulation, Some(common::Modulation::Fsk2));
     }
 
     /// A pager transmission arrives as bytes like a Mode S frame does, and

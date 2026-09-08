@@ -16,9 +16,9 @@ the code is in the commit log; what a decoder can and cannot do is in
   rise time, with the peak elevation, which way to point, live az/el and
   Doppler for whatever is up now, and how stale the elements it was worked
   out from are.
-- Listening to a pass: one button on the card puts a channel on the
-  satellite's downlink, keeps it there as the pass moves, and closes it when
-  the satellite sets, so it does not
+- Listening to a pass: the listen button on a transmitter's row puts a
+  channel on that downlink, keeps it there as the pass moves, and closes it
+  when the satellite sets, so it does not
   drift out of the channel before the satellite is overhead. The strip names
   it after the satellite and the transmitter, says it is following, and its
   dial is locked while it is; the chain is the demodulator for the mode, or
@@ -36,6 +36,25 @@ the code is in the commit log; what a decoder can and cannot do is in
   fails on its own.
 - What each satellite transmits on, from the SatNOGS database, so a pass
   quotes the satellite's own downlink and tunes to it.
+- A selected pass lists every transmitter the satellite is still using as a
+  table of downlink, where it is arriving now, the Doppler on it, mode,
+  baud, uplink and what the channel is, beside the sky plot for the pass.
+  Listening is a button on the row, so it is asked for on the downlink it is
+  about. The ISS has forty-one live transmitters and only one was ever
+  quoted.
+- Listening to a satellite builds the chain its mode calls for: LoRa gets the
+  LoRa front end at the bandwidth SatNOGS quotes, packet AFSK gets the AX.25
+  one, DMR gets DMR, and voice and Morse get the demodulator. Only a mode
+  with no decoder here falls back to the auto front end.
+- A pass card says what the satellite is for in the words an operator uses,
+  such as VHF voice, SSTV, APRS and DVB, instead of leaving forty rows of
+  free text to be read.
+- Every catalogued object still in orbit, from Space-Track, for a satellite
+  no group has classified yet. It needs a free account of your own, entered
+  on the row in Datasets.
+- The satellites the TinyGS network tracks, as a group of their own: the
+  LoRa and FSK cubesats around 400 and 900 MHz, with the elements TinyGS
+  points its own stations by.
 - A cell you have decoded that the OpenCelliD export has no row for can be
   placed from beaconDB, drawn as a cross with the accuracy it came with.
   Off until switched on: asking says which cells this receiver has heard.
@@ -96,6 +115,14 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The keying column spells every modulation one way, so a pager and a meter
+  keyed the same both read `2-FSK` where one used to say `FSK` and the other
+  `2-FSK`.
+- The frequency correction is saved against the radio it was measured on
+  rather than shared by all of them, so plugging in a second receiver no
+  longer applies the first one's crystal error to it. A correction saved by
+  an earlier version moves to the radio that was in use when it was written.
+
 - A second transmitter sharing a channel with one already being read is
   found and given a decoder of its own. Two LoRa networks on one frequency
   at different bandwidths, such as Meshtastic on 250 kHz and MeshCore on
@@ -133,6 +160,10 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
+- Wi-Fi on a busy 2.4 GHz band costs a sixth of what it did. A hopping
+  transmitter held the preamble detector open and cost a training-symbol
+  search every 64 samples for as long as it lasted, which on one capture was
+  132,000 searches a second and read nothing.
 - The Windows build works again, and a GPS on a COM port is opened there the
   way it is on Linux: the serial settings are applied to the port instead of
   being left at whatever the driver came up with.

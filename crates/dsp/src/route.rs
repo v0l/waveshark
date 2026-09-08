@@ -103,7 +103,7 @@ pub struct RoutedBurst {
     pub class: BurstClass,
     /// Which front ends ran. Two of them means the classifier refused and the
     /// burst was tried both ways.
-    pub routed_to: &'static str,
+    pub routed_to: common::FrontEnd,
     /// Mark and gap timings, for the bursts that went to an amplitude or
     /// two-level front end.
     pub packages: Vec<Package>,
@@ -286,17 +286,17 @@ impl BurstRouter {
             Modulation::Ook => {
                 self.stats.to_ook += 1;
                 self.run_ook(&burst, &mut packages);
-                "ook"
+                common::FrontEnd::Ook
             }
             Modulation::Ask => {
                 self.stats.to_ask += 1;
                 self.run_ask(&burst, &mut packages);
-                "ask"
+                common::FrontEnd::Ask
             }
             Modulation::Fsk2 | Modulation::Msk => {
                 self.stats.to_fsk += 1;
                 self.run_fsk(&burst, &mut packages);
-                "fsk"
+                common::FrontEnd::Fsk
             }
             Modulation::Fsk4 => {
                 self.stats.to_c4fm += 1;
@@ -310,17 +310,17 @@ impl BurstRouter {
                 let mut det = C4fmDetector::new(self.rate, cfg);
                 det.process(&burst, &mut symbols);
                 det.flush(&mut symbols);
-                "c4fm"
+                common::FrontEnd::C4fm
             }
             Modulation::Unknown => {
                 self.stats.refused += 1;
                 self.run_ook(&burst, &mut packages);
                 self.run_fsk(&burst, &mut packages);
-                "ook+fsk"
+                common::FrontEnd::OokFsk
             }
             _ => {
                 self.stats.no_front_end += 1;
-                "none"
+                common::FrontEnd::None
             }
         };
 
@@ -342,7 +342,7 @@ impl BurstRouter {
         let from = out.len();
         det.process(&self.env, out);
         det.flush(out);
-        Self::stamp(&mut out[from..], self.burst_start, "OOK");
+        Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Ook);
     }
 
     fn run_ask(&mut self, burst: &[C32], out: &mut Vec<Package>) {
@@ -352,7 +352,7 @@ impl BurstRouter {
         let from = out.len();
         det.process(&self.env, out);
         det.flush(out);
-        Self::stamp(&mut out[from..], self.burst_start, "ASK");
+        Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Ask);
     }
 
     fn run_fsk(&mut self, burst: &[C32], out: &mut Vec<Package>) {
@@ -360,7 +360,7 @@ impl BurstRouter {
         let from = out.len();
         det.process(burst, out);
         det.flush(out);
-        Self::stamp(&mut out[from..], self.burst_start, "FSK");
+        Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Fsk2);
     }
 
     /// Put the package back on the stream's own timeline, and record which
@@ -371,7 +371,7 @@ impl BurstRouter {
     /// has ever seen. The modulation is stamped per front end rather than from
     /// the classification, so that a refused burst tried both ways still says
     /// which of the two produced the package.
-    fn stamp(pkgs: &mut [Package], start: u64, modulation: &'static str) {
+    fn stamp(pkgs: &mut [Package], start: u64, modulation: common::Modulation) {
         for p in pkgs.iter_mut() {
             p.start_sample += start;
             p.modulation = Some(modulation);
@@ -462,7 +462,7 @@ mod tests {
     fn an_on_off_burst_goes_to_the_pulse_front_end_and_comes_back_with_timings() {
         let (bursts, mut r) = route(&ook_burst(&pattern(120), 500));
         assert_eq!(bursts.len(), 1, "expected one burst, got {}", bursts.len());
-        assert_eq!(bursts[0].routed_to, "ook", "class was {:?}", bursts[0].class.modulation);
+        assert_eq!(bursts[0].routed_to, common::FrontEnd::Ook, "class was {:?}", bursts[0].class.modulation);
         assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
         assert_eq!(r.take_stats().to_ook, 1);
     }
@@ -471,7 +471,7 @@ mod tests {
     fn a_frequency_keyed_burst_goes_to_the_two_level_front_end() {
         let (bursts, mut r) = route(&fsk_burst(&pattern(120), 500));
         assert_eq!(bursts.len(), 1);
-        assert_eq!(bursts[0].routed_to, "fsk", "class was {:?}", bursts[0].class.modulation);
+        assert_eq!(bursts[0].routed_to, common::FrontEnd::Fsk, "class was {:?}", bursts[0].class.modulation);
         assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
         let s = r.take_stats();
         assert_eq!((s.to_fsk, s.to_ook), (1, 0));
@@ -494,7 +494,7 @@ mod tests {
         r.flush(&mut bursts);
         assert_eq!(bursts.len(), 1);
         assert_eq!(bursts[0].class.modulation, Modulation::Unknown);
-        assert_eq!(bursts[0].routed_to, "ook+fsk", "a refusal must not lose the burst");
+        assert_eq!(bursts[0].routed_to, common::FrontEnd::OokFsk, "a refusal must not lose the burst");
         assert_eq!(r.take_stats().refused, 1);
     }
 
@@ -517,8 +517,8 @@ mod tests {
         iq.extend(fsk_burst(&pattern(60), 500));
         let (bursts, _) = route(&iq);
         assert_eq!(bursts.len(), 2, "got {} bursts", bursts.len());
-        assert_eq!(bursts[0].routed_to, "ook");
-        assert_eq!(bursts[1].routed_to, "fsk");
+        assert_eq!(bursts[0].routed_to, common::FrontEnd::Ook);
+        assert_eq!(bursts[1].routed_to, common::FrontEnd::Fsk);
     }
 
     #[test]

@@ -300,10 +300,7 @@ pub enum Detail {
     /// A MeshCore node, from its advert, which is in the clear on every
     /// network. What it is decides how it is drawn: a repeater, a room
     /// server or a sensor is installed somewhere, a chat node is carried.
-    MeshCore {
-        role: &'static str,
-        fixed: bool,
-    },
+    MeshCore { role: &'static str, fixed: bool },
 }
 
 impl Detail {
@@ -327,7 +324,13 @@ impl Detail {
                 aprs_kind(*symbol_table, *symbol_code, *fixed)
             }
             Detail::Mesh { .. } => Kind::Vehicle,
-            Detail::MeshCore { fixed, .. } => if *fixed { Kind::Station } else { Kind::Vehicle },
+            Detail::MeshCore { fixed, .. } => {
+                if *fixed {
+                    Kind::Station
+                } else {
+                    Kind::Vehicle
+                }
+            }
         }
     }
 }
@@ -509,11 +512,7 @@ impl Tracks {
     /// second and the order of the last few changes constantly, so a list
     /// sorted that way reshuffles faster than it can be read.
     pub fn active(&self, now: std::time::Instant) -> Vec<&Track> {
-        self.seen
-            .iter()
-            .map(|e| &e.track)
-            .filter(|t| t.age(now) < t.kind().forget())
-            .collect()
+        self.seen.iter().map(|e| &e.track).filter(|t| t.age(now) < t.kind().forget()).collect()
     }
 
     /// Find or create the entry for an identity.
@@ -545,7 +544,9 @@ impl Tracks {
     /// known.
     pub fn update_decoded(&mut self, d: &common::Decoded, at: std::time::Instant) -> bool {
         let Some(who) = &d.identity else { return false };
-        let Some(id) = track_id(who) else { return false };
+        let Some(id) = track_id(who) else {
+            return false;
+        };
         let detail = match &d.report {
             common::ReportDetail::Vessel {
                 heading_deg,
@@ -655,8 +656,7 @@ impl Tracks {
         if let Some(p) = &d.position {
             e.track.speed_kt = p.speed_kt.or(e.track.speed_kt);
             e.track.course_deg = p.course_deg.or(e.track.course_deg);
-            if let (Detail::Aprs { altitude_ft, .. }, Some(m)) =
-                (&mut e.track.detail, p.altitude_m)
+            if let (Detail::Aprs { altitude_ft, .. }, Some(m)) = (&mut e.track.detail, p.altitude_m)
             {
                 *altitude_ft = Some((m / 0.3048) as i32);
             }
@@ -863,7 +863,9 @@ mod tests {
             let Some(a) = fl.active(at).iter().find(|t| t.id == id).cloned().cloned() else {
                 continue;
             };
-            let Some(p) = a.position.filter(|_| a.confirmed) else { continue };
+            let Some(p) = a.position.filter(|_| a.confirmed) else {
+                continue;
+            };
             if let Some((old, t)) = last.get(&icao) {
                 let hours = at.saturating_duration_since(*t).as_secs_f64() / 3600.0;
                 let nm = nm_between(*old, p);
@@ -1194,11 +1196,8 @@ mod tests {
 
     #[test]
     fn a_contradicted_position_drops_the_trail_rather_than_drawing_to_it() {
-        let mut a = Track::new(
-            TrackId::Icao(0x4ca748),
-            Detail::new_aircraft(),
-            std::time::Instant::now(),
-        );
+        let mut a =
+            Track::new(TrackId::Icao(0x4ca748), Detail::new_aircraft(), std::time::Instant::now());
         let t = std::time::Instant::now();
         a.set_position((53.4, -6.3), t, true);
         a.set_position((53.5, -6.4), t + std::time::Duration::from_secs(10), true);
@@ -1254,11 +1253,7 @@ mod tests {
         let hex: String = a.public_key.iter().map(|b| format!("{b:02x}")).collect();
         let d = common::Decoded::bytes("MeshCore", common::Hz(869_618_000), 0.0, vec![])
             .by(common::Identity::new("meshcore", hex).named("Balbriggan Repeater"))
-            .at_position(common::Position {
-                lat: 53.608448,
-                lon: -6.684672,
-                ..Default::default()
-            })
+            .at_position(common::Position { lat: 53.608448, lon: -6.684672, ..Default::default() })
             .reporting(common::ReportDetail::MeshCore { role: "repeater", fixed: true });
         assert!(t.update_decoded(&d, now));
         let list = t.active(now);
@@ -1314,7 +1309,8 @@ mod tests {
             });
         assert!(t.update_decoded(&position, now));
         assert!(t.update_decoded(&info, now));
-        let n = t.active(now).into_iter().find(|x| x.id == TrackId::Mesh(0x050d_3664)).expect("a node");
+        let n =
+            t.active(now).into_iter().find(|x| x.id == TrackId::Mesh(0x050d_3664)).expect("a node");
         assert_eq!(n.id.text(), "!050d3664");
         assert_eq!(n.label.as_deref(), Some("Kitchen"));
         let (lat, lon) = n.position.expect("placed");

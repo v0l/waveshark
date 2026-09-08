@@ -173,7 +173,8 @@ impl Calls {
     /// somebody else's business: a sensor reading, a pager message, an
     /// aircraft, a data call, a radio registering on a trunked network.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        if !rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("voice", Value::Bool(true)))) {
+        if !rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("voice", Value::Bool(true))))
+        {
             return false;
         }
         let Some(to) = text(rec, &["to", "dst", "destination", "talkgroup", "group"]) else {
@@ -194,7 +195,10 @@ impl Calls {
         let says_encryption = cipher.is_some()
             || rec.fields.iter().any(|(k, _)| k == "encryption" || k == "encrypted");
         let encrypted = cipher.as_deref().is_some_and(|t| !t.eq_ignore_ascii_case("decrypted"))
-            || rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("encrypted", Value::Bool(true))));
+            || rec
+                .fields
+                .iter()
+                .any(|(k, v)| matches!((k.as_str(), v), ("encrypted", Value::Bool(true))));
         let seconds = rec
             .fields
             .iter()
@@ -203,7 +207,8 @@ impl Calls {
             .unwrap_or(0.0);
         // A decode that says the transmission is still running is not an
         // over yet; the one that says it ended is.
-        let live = rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
+        let live =
+            rec.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
 
         // A channel is matched loosely: the same talkgroup found by two front
         // ends a few hundred hertz apart is one call, not two rows. And a
@@ -216,20 +221,18 @@ impl Calls {
                 && c.to == to
                 && (c.channel_hz - rec.freq).abs() < rec.channel_hz.max(1.0)
         };
-        let found = self
-            .seen
-            .iter()
-            .position(|c| same(c) && c.from == from)
-            .or_else(|| {
-                // The one most recently heard, since that is the call the
-                // unnamed traffic belongs to.
-                self.seen
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| same(c) && (c.from.is_none() || from.is_none()) && c.age(at) < LIVE)
-                    .max_by_key(|(_, c)| c.last)
-                    .map(|(i, _)| i)
-            });
+        let found = self.seen.iter().position(|c| same(c) && c.from == from).or_else(|| {
+            // The one most recently heard, since that is the call the
+            // unnamed traffic belongs to.
+            self.seen
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    same(c) && (c.from.is_none() || from.is_none()) && c.age(at) < LIVE
+                })
+                .max_by_key(|(_, c)| c.last)
+                .map(|(i, _)| i)
+        });
         if let Some(c) = found.map(|i| &mut self.seen[i]) {
             if c.from.is_none() {
                 c.from = from;
@@ -351,7 +354,10 @@ mod tests {
         // Most of what a receiver decodes is a sensor or a pager, and a call
         // list full of thermometers is not a call list.
         let mut c = Calls::new();
-        assert!(!c.update(&rec("Fineoffset-WHx080", 433.92e6, &[("temperature_c", Value::Float(8.0))]), t(0)));
+        assert!(!c.update(
+            &rec("Fineoffset-WHx080", 433.92e6, &[("temperature_c", Value::Float(8.0))]),
+            t(0)
+        ));
         assert!(c.is_empty());
     }
 
@@ -363,9 +369,24 @@ mod tests {
         // not a call list. Only a decoder that knows there is speech says so.
         let mut c = Calls::new();
         let addressed = [
-            rec("APRS", 144.8e6, &[("from", Value::Text("M0ABC-9".into())), ("to", Value::Text("APRS".into()))]),
-            rec("TETRA-SDS", 391.1e6, &[("to", Value::Text("10223295".into())), ("text", Value::Text("ok".into()))]),
-            rec("TETRA-Call", 391.1e6, &[("pdu", Value::Text("MAC-RESOURCE".into())), ("to", Value::Text("10223295".into()))]),
+            rec(
+                "APRS",
+                144.8e6,
+                &[("from", Value::Text("M0ABC-9".into())), ("to", Value::Text("APRS".into()))],
+            ),
+            rec(
+                "TETRA-SDS",
+                391.1e6,
+                &[("to", Value::Text("10223295".into())), ("text", Value::Text("ok".into()))],
+            ),
+            rec(
+                "TETRA-Call",
+                391.1e6,
+                &[
+                    ("pdu", Value::Text("MAC-RESOURCE".into())),
+                    ("to", Value::Text("10223295".into())),
+                ],
+            ),
         ];
         for r in &addressed {
             assert!(!c.update(r, t(0)), "{} earned a row", r.model);
@@ -404,8 +425,11 @@ mod tests {
         let over = voice(
             "M17-Voice",
             433.475e6,
-            &[("from", Value::Text("M0ABC".into())), ("to", Value::Text("ALL".into())),
-              ("seconds", Value::Float(2.0))],
+            &[
+                ("from", Value::Text("M0ABC".into())),
+                ("to", Value::Text("ALL".into())),
+                ("seconds", Value::Float(2.0)),
+            ],
         );
         c.update(&over, t(0));
         c.update(&over, t(600));
@@ -425,13 +449,19 @@ mod tests {
         let mut c = Calls::new();
         let to = ("to", Value::Text("2001".into()));
         c.update(&voice("TETRA-Voice", 391.7e6, &[to.clone()]), t(0));
-        c.update(&voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70311".into())), to.clone()]), t(1));
+        c.update(
+            &voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70311".into())), to.clone()]),
+            t(1),
+        );
         c.update(&voice("TETRA-Voice", 391.7e6, &[to.clone()]), t(2));
         let list = c.active(t(2));
         assert_eq!(list.len(), 1, "{list:?}");
         assert_eq!(list[0].from.as_deref(), Some("70311"));
         // A different named caller is still a different row.
-        c.update(&voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70312".into())), to.clone()]), t(3));
+        c.update(
+            &voice("TETRA-Call", 391.7e6, &[("from", Value::Text("70312".into())), to.clone()]),
+            t(3),
+        );
         assert_eq!(c.active(t(3)).len(), 2);
     }
 
@@ -441,8 +471,14 @@ mod tests {
         // the first.
         let mut c = Calls::new();
         let to = ("to", Value::Text("91".into()));
-        c.update(&voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345001".into())), to.clone()]), t(0));
-        c.update(&voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345002".into())), to.clone()]), t(1));
+        c.update(
+            &voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345001".into())), to.clone()]),
+            t(0),
+        );
+        c.update(
+            &voice("DMR-Voice", 446.1e6, &[("from", Value::Text("2345002".into())), to.clone()]),
+            t(1),
+        );
         let list = c.active(t(1));
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].from.as_deref(), Some("2345002"), "the newest is first");
@@ -511,14 +547,10 @@ mod tests {
         let grant = voice(
             "TETRA-Voice",
             393.9e6,
-            &[
-                ("to", Value::Text("marker 56".into())),
-                ("encryption", Value::Text("AIE-3".into())),
-            ],
+            &[("to", Value::Text("marker 56".into())), ("encryption", Value::Text("AIE-3".into()))],
         );
         c.update(&grant, t(0));
-        let traffic =
-            voice("TETRA-Voice", 393.9e6, &[("to", Value::Text("marker 56".into()))]);
+        let traffic = voice("TETRA-Voice", 393.9e6, &[("to", Value::Text("marker 56".into()))]);
         c.update(&traffic, t(1));
         let call = &c.active(t(1))[0];
         assert!(call.encrypted, "the row would have gone from red to blue");

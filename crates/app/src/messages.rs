@@ -94,10 +94,15 @@ impl Messages {
     ///
     /// Returns whether it did.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let Some(msg) = rec.to_message(at) else { return false };
+        let Some(msg) = rec.to_message(at) else {
+            return false;
+        };
 
         if let Some(m) = self.seen.iter_mut().find(|m| {
-            m.system == msg.system && m.text == msg.text && m.from == msg.from && m.to == msg.to
+            m.system == msg.system
+                && m.text == msg.text
+                && m.from == msg.from
+                && m.to == msg.to
                 && at.saturating_duration_since(m.last) < REPEAT
         }) {
             m.last = at;
@@ -139,8 +144,7 @@ impl DecodeRecord {
         if self.media_type != pipeline::event::media::TEXT {
             return None;
         }
-        let body =
-            text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
+        let body = text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
         Some(Message {
             system: self.model.split('-').next().unwrap_or(&self.model).to_string(),
             channel_hz: self.freq,
@@ -264,8 +268,11 @@ mod tests {
     #[test]
     fn a_decode_without_text_is_not_a_message() {
         let mut m = Messages::default();
-        assert!(!m.update(&rec("M17-Voice", 433.475e6, &[("from", Value::Text("M0ABC".into()))]), t(0)));
-        assert!(!m.update(&rec("M17-Packet", 433.475e6, &[("message", Value::Text("  ".into()))]), t(0)));
+        assert!(
+            !m.update(&rec("M17-Voice", 433.475e6, &[("from", Value::Text("M0ABC".into()))]), t(0))
+        );
+        assert!(!m
+            .update(&rec("M17-Packet", 433.475e6, &[("message", Value::Text("  ".into()))]), t(0)));
         assert!(m.is_empty());
     }
 
@@ -274,18 +281,38 @@ mod tests {
         // The point of the field names: this view is not a switch on protocol.
         let mut m = Messages::default();
         assert!(m.update(
-            &rec("TETRA-SDS", 391.1e6, &[("from", Value::Text("2001".into())),
-                 ("to", Value::Text("10223295".into())), ("text", Value::Text("on scene".into()))]),
+            &rec(
+                "TETRA-SDS",
+                391.1e6,
+                &[
+                    ("from", Value::Text("2001".into())),
+                    ("to", Value::Text("10223295".into())),
+                    ("text", Value::Text("on scene".into()))
+                ]
+            ),
             t(0),
         ));
         assert!(m.update(
-            &rec("M17-Packet", 433.475e6, &[("from", Value::Text("M0ABC".into())),
-                 ("to", Value::Text("M0XYZ".into())), ("message", Value::Text("hello".into()))]),
+            &rec(
+                "M17-Packet",
+                433.475e6,
+                &[
+                    ("from", Value::Text("M0ABC".into())),
+                    ("to", Value::Text("M0XYZ".into())),
+                    ("message", Value::Text("hello".into()))
+                ]
+            ),
             t(1),
         ));
         assert!(m.update(
-            &rec("POCSAG-Alpha", 153.35e6, &[("address", Value::Int(1234567)),
-                 ("message", Value::Text("CALL CONTROL".into()))]),
+            &rec(
+                "POCSAG-Alpha",
+                153.35e6,
+                &[
+                    ("address", Value::Int(1234567)),
+                    ("message", Value::Text("CALL CONTROL".into()))
+                ]
+            ),
             t(2),
         ));
         let list = m.recent();
@@ -341,16 +368,12 @@ mod tests {
             &not_text("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
             t(0)
         ));
-        assert!(!m.update(
-            &not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
-            t(0)
-        ));
+        assert!(!m
+            .update(&not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]), t(0)));
         assert!(!m.update(
             &not_text("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
             t(0)
         ));
         assert!(m.recent().is_empty(), "{:?}", m.recent());
     }
-
 }
-

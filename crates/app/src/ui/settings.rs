@@ -85,25 +85,34 @@ impl App {
                                     .gap(10.0)
                                     .legend(&s.mode.label());
                                 if let Some(bw) = s.bandwidth_hz {
-                                    line = line.gap(10.0).value(format!("{} kHz", crate::scanners::num(bw / 1e3)));
+                                    line = line
+                                        .gap(10.0)
+                                        .value(format!("{} kHz", crate::scanners::num(bw / 1e3)));
                                 }
                                 if !s.label.is_empty() {
                                     line = line.gap(12.0).words(&s.label);
                                 }
                                 line.show(ui);
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("×").on_hover_text("forget this channel").clicked() {
-                                        remove = Some(i);
-                                    }
-                                    let tip = if reach {
-                                        "put this channel on the strip"
-                                    } else {
-                                        "tune to this channel and put it on the strip"
-                                    };
-                                    if ui.small_button("RECALL").on_hover_text(tip).clicked() {
-                                        recall = Some(s.clone());
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button("×")
+                                            .on_hover_text("forget this channel")
+                                            .clicked()
+                                        {
+                                            remove = Some(i);
+                                        }
+                                        let tip = if reach {
+                                            "put this channel on the strip"
+                                        } else {
+                                            "tune to this channel and put it on the strip"
+                                        };
+                                        if ui.small_button("RECALL").on_hover_text(tip).clicked() {
+                                            recall = Some(s.clone());
+                                        }
+                                    },
+                                );
                             });
                         }
                     });
@@ -199,8 +208,11 @@ impl App {
                         // The switch that keeps a block in the table without
                         // running it, so turning auto off after pinning a few
                         // channels does not throw it away.
-                        ui.checkbox(&mut r.enabled, "")
-                            .on_hover_text(if r.enabled { "running: click to switch off" } else { "off: click to run" });
+                        ui.checkbox(&mut r.enabled, "").on_hover_text(if r.enabled {
+                            "running: click to switch off"
+                        } else {
+                            "off: click to run"
+                        });
                         ui.add(
                             egui::TextEdit::singleline(&mut r.name)
                                 .desired_width(112.0)
@@ -382,9 +394,7 @@ impl App {
         let log_help = "Timings and frames as demodulated, a day per file, replayable.";
         if check_help(ui, &mut on, "Write every packet to disk", log_help).changed() {
             let dir = if on {
-                self.log_dir
-                    .clone()
-                    .or_else(crate::packetlog::PacketLog::default_dir)
+                self.log_dir.clone().or_else(crate::packetlog::PacketLog::default_dir)
             } else {
                 None
             };
@@ -701,11 +711,13 @@ impl App {
                     .size(13.0)
                     .show(ui);
                 match &r.asset {
-                    Some(a) => hint(
+                    Some(a) => {
+                        hint(ui, &format!("{} ({})", a.name, crate::data::fmt_bytes(a.bytes)))
+                    }
+                    None => hint(
                         ui,
-                        &format!("{} ({})", a.name, crate::data::fmt_bytes(a.bytes)),
+                        &format!("No {} archive in that release.", crate::update::platform()),
                     ),
-                    None => hint(ui, &format!("No {} archive in that release.", crate::update::platform())),
                 }
                 if !r.page.is_empty() && ui.button(legend("OPEN THE RELEASE")).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(r.page.clone()));
@@ -740,16 +752,13 @@ impl App {
         );
         let mut set: Option<Option<gps::Transport>> = None;
         ui.horizontal(|ui| {
-            let text = self
-                .survey
-                .gps_edit
-                .get_or_insert_with(|| {
-                    self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default()
-                });
+            let text = self.survey.gps_edit.get_or_insert_with(|| {
+                self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default()
+            });
             let r = ui.add(
                 egui::TextEdit::singleline(text)
                     .desired_width(190.0)
-                        .hint_text(gps::Transport::LOCAL_GPSD)
+                    .hint_text(gps::Transport::LOCAL_GPSD)
                     .font(FontId::new(12.0, FontFamily::Name(theme::READOUT_FONT.into()))),
             );
             let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -774,16 +783,8 @@ impl App {
         let line = match (crate::station::connected(), crate::station::fix()) {
             (_, Some(f)) => {
                 let sats = f.sats.map(|n| format!(", {n} satellites")).unwrap_or_default();
-                let how = f
-                    .accuracy_m()
-                    .map(|m| format!(", ±{m:.0} m"))
-                    .unwrap_or_default();
-                format!(
-                    "{:.5}, {:.5}{sats}{how}, {} fixes",
-                    f.lat,
-                    f.lon,
-                    crate::station::fixes()
-                )
+                let how = f.accuracy_m().map(|m| format!(", ±{m:.0} m")).unwrap_or_default();
+                format!("{:.5}, {:.5}{sats}{how}, {} fixes", f.lat, f.lon, crate::station::fixes())
             }
             // Waiting says nothing on its own: an antenna indoors and an
             // antenna unplugged look the same for the first minute, and the
@@ -915,8 +916,8 @@ impl App {
                     if let Some(b) = r.blocked {
                         hint(ui, b);
                     }
-                    if let Some(k) = r.which.key() {
-                        self.key_field(ui, r.which, k);
+                    for (i, k) in r.which.keys().iter().enumerate() {
+                        self.key_field(ui, r.which, i, *k);
                     }
                 });
                 ui.add_space(4.0);
@@ -954,29 +955,44 @@ impl App {
     /// all: a token is not a preference, it is the one thing standing
     /// between that row and a download, and the link beside it goes to the
     /// page that hands one out.
-    fn key_field(&mut self, ui: &mut egui::Ui, which: crate::data::Which, k: crate::data::Key) {
-        let Some(slot) = self.key_slot(which) else { return };
+    fn key_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        which: crate::data::Which,
+        index: usize,
+        k: crate::data::Key,
+    ) {
+        let Some(slot) = self.key_slot(which, index) else {
+            return;
+        };
         let before = slot.clone();
         ui.horizontal(|ui| {
             theme::Line::new().legend(k.label).show(ui);
             ui.add(
                 egui::TextEdit::singleline(slot)
                     .desired_width(ui.available_width())
-                    .password(true)
+                    .password(k.secret)
                     .hint_text(k.hint),
             )
             .on_hover_text(k.help);
         });
         if *slot != before {
-            which.set_key(slot);
+            let value = slot.clone();
+            which.set_key(index, &value);
         }
     }
 
     /// Where this pane holds the credential for a dataset, so what is typed
     /// is what the session saves.
-    fn key_slot(&mut self, which: crate::data::Which) -> Option<&mut String> {
-        match which {
-            crate::data::Which::CellTowers => Some(&mut self.opencellid_token),
+    fn key_slot(&mut self, which: crate::data::Which, index: usize) -> Option<&mut String> {
+        match (which, index) {
+            (crate::data::Which::CellTowers, 0) => Some(&mut self.opencellid_token),
+            (crate::data::Which::Satellites(g), 0) if g.needs_login() => {
+                Some(&mut self.spacetrack_identity)
+            }
+            (crate::data::Which::Satellites(g), _) if g.needs_login() => {
+                Some(&mut self.spacetrack_password)
+            }
             _ => None,
         }
     }
@@ -1042,8 +1058,13 @@ impl App {
                 let donate_help = "Lets wigle.net licence what you upload commercially. Off \
                                    unless you say otherwise: they are your observations to \
                                    give away.";
-                if check_help(ui, &mut self.survey.wigle.donate, "Allow commercial use", donate_help)
-                    .changed()
+                if check_help(
+                    ui,
+                    &mut self.survey.wigle.donate,
+                    "Allow commercial use",
+                    donate_help,
+                )
+                .changed()
                 {
                     apply = true;
                 }
@@ -1222,7 +1243,9 @@ impl App {
     }
 
     pub(super) fn remote_modal(&mut self, ctx: &egui::Context) {
-        let Some(mut edit) = self.remote.take() else { return };
+        let Some(mut edit) = self.remote.take() else {
+            return;
+        };
         let (mut close, mut add) = (false, false);
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
             .backdrop_color(Color32::from_black_alpha(150))
@@ -1275,8 +1298,7 @@ impl App {
                 if let Some(e) = &edit.err {
                     ui.add_space(6.0);
                     ui.add(
-                        egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT))
-                            .wrap(),
+                        egui::Label::new(egui::RichText::new(e).small().color(theme::FAULT)).wrap(),
                     );
                 }
 
@@ -1402,8 +1424,7 @@ impl App {
                     }
                     // Under AUTO the number is the hardware's business and
                     // showing a stale one invites the operator to believe it.
-                    let text =
-                        if auto { "auto".to_string() } else { format!("{db:.1} dB") };
+                    let text = if auto { "auto".to_string() } else { format!("{db:.1} dB") };
                     ui.label(value(text).size(11.0));
                 });
             });
@@ -1486,14 +1507,15 @@ impl App {
         let ppm_help = "The reference oscillator is a few tens of parts per million out on a \
                         cheap dongle, which is a kilohertz or two at 145 MHz and rather more \
                         higher up. Tune a known carrier and correct until it sits on its \
-                        nominal frequency.";
+                        nominal frequency. Saved against this radio, so each one keeps its \
+                        own figure.";
         row_help(ui, "Correction", ppm_help, |ui| {
             let mut ppm = self.radio_settings.ppm;
             if ui
                 .add(egui::DragValue::new(&mut ppm).speed(0.5).range(-200.0..=200.0).suffix(" ppm"))
                 .changed()
             {
-                self.radio_settings.ppm = ppm;
+                self.set_ppm(ppm);
                 changed = true;
             }
         });
@@ -1662,12 +1684,7 @@ pub struct RemoteEdit {
 
 impl Default for RemoteEdit {
     fn default() -> Self {
-        Self {
-            kind: RemoteKind::IqStream,
-            host: String::new(),
-            label: String::new(),
-            err: None,
-        }
+        Self { kind: RemoteKind::IqStream, host: String::new(), label: String::new(), err: None }
     }
 }
 
@@ -1680,10 +1697,9 @@ impl Default for RemoteEdit {
 fn device_combo(ui: &mut egui::Ui, id: &str, current: &mut String, names: Vec<String>) -> bool {
     let mut changed = false;
     let shown = if current.is_empty() { "System default".to_string() } else { current.clone() };
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(shown)
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt(id).selected_text(shown).width(ui.available_width()).show_ui(
+        ui,
+        |ui| {
             if ui.selectable_label(current.is_empty(), "System default").clicked()
                 && !current.is_empty()
             {
@@ -1697,6 +1713,7 @@ fn device_combo(ui: &mut egui::Ui, id: &str, current: &mut String, names: Vec<St
                     changed = true;
                 }
             }
-        });
+        },
+    );
     changed
 }

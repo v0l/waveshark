@@ -159,10 +159,8 @@ impl VideoBus {
     /// Take a field, whichever input it arrived on.
     pub fn push(&mut self, _input: usize, frame: VideoFrame) {
         let key = key_of(&frame);
-        let label = frame
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("{:.3} MHz", frame.channel_hz / 1e6));
+        let label =
+            frame.label.clone().unwrap_or_else(|| format!("{:.3} MHz", frame.channel_hz / 1e6));
         let k = match self.channels.iter().position(|c| c.key == key) {
             Some(k) => k,
             None => {
@@ -193,10 +191,7 @@ impl VideoBus {
         // receiver watching two channels at once, and showing the one that
         // arrived last would flicker between them; showing the better of the
         // two is at least a decision.
-        let better = self
-            .out
-            .as_ref()
-            .is_none_or(|cur| f.completeness() > cur.completeness());
+        let better = self.out.as_ref().is_none_or(|cur| f.completeness() > cur.completeness());
         if better {
             self.out = Some(f.clone());
         }
@@ -243,9 +238,7 @@ impl VideoBus {
 
     /// The last field of every channel, for a view of everything at once.
     pub fn thumbnails(&self) -> impl Iterator<Item = (&str, &VideoFrame)> {
-        self.channels
-            .iter()
-            .filter_map(|c| c.last.as_ref().map(|f| (c.key.as_str(), f)))
+        self.channels.iter().filter_map(|c| c.last.as_ref().map(|f| (c.key.as_str(), f)))
     }
 
     pub fn clear(&mut self) {
@@ -387,7 +380,9 @@ impl pipeline::node::Node for VideoBusNode {
     fn params(&self) -> Vec<Param> {
         let mut p = vec![Param::int("inputs", self.inputs as i64, 1..=32).label("Inputs")];
         for c in self.bus.channels() {
-            p.push(Param::bool(&format!("mute:{}", c.key), c.muted).label(&format!("{} off", c.label)));
+            p.push(
+                Param::bool(&format!("mute:{}", c.key), c.muted).label(&format!("{} off", c.label)),
+            );
         }
         p
     }
@@ -494,11 +489,7 @@ mod tests {
         use pipeline::node::Node;
         let mut n = VideoBusNode::new();
         let audio = PortSpec {
-            spec: StreamSpec {
-                kind: PortKind::Real,
-                rate: 48_000.0,
-                ..Default::default()
-            },
+            spec: StreamSpec { kind: PortKind::Real, rate: 48_000.0, ..Default::default() },
             latency: 0,
         };
         assert!(n.negotiate(&[audio]).is_err());

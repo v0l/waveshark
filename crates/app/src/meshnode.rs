@@ -141,12 +141,16 @@ fn fields(b: &[u8]) -> Vec<(u32, Wire<'_>)> {
     let mut out = Vec::new();
     let mut at = 0;
     while at < b.len() {
-        let Some((key, next)) = varint(b, at) else { break };
+        let Some((key, next)) = varint(b, at) else {
+            break;
+        };
         at = next;
         let field = (key >> 3) as u32;
         match key & 7 {
             0 => {
-                let Some((v, next)) = varint(b, at) else { break };
+                let Some((v, next)) = varint(b, at) else {
+                    break;
+                };
                 at = next;
                 out.push((field, Wire::Varint(v)));
             }
@@ -155,8 +159,12 @@ fn fields(b: &[u8]) -> Vec<(u32, Wire<'_>)> {
                 out.push((field, Wire::Fixed));
             }
             2 => {
-                let Some((n, next)) = varint(b, at) else { break };
-                let Some(s) = b.get(next..next + n as usize) else { break };
+                let Some((n, next)) = varint(b, at) else {
+                    break;
+                };
+                let Some(s) = b.get(next..next + n as usize) else {
+                    break;
+                };
                 at = next + n as usize;
                 out.push((field, Wire::Bytes(s)));
             }

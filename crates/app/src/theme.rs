@@ -152,9 +152,7 @@ pub fn install(ctx: &egui::Context) {
     // of it. Eleven px is a size for a tick mark on an axis, not for two
     // sentences somebody has to read before choosing.
     style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
-    style
-        .text_styles
-        .insert(TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
+    style.text_styles.insert(TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
     ctx.set_style_of(egui::Theme::Dark, style.clone());
     ctx.set_style_of(egui::Theme::Light, style);
 }
@@ -173,9 +171,7 @@ pub fn legend(text: &str) -> RichText {
 
 /// A value shown next to a legend.
 pub fn value(text: impl Into<String>) -> RichText {
-    RichText::new(text)
-        .font(FontId::new(13.0, FontFamily::Name(READOUT_FONT.into())))
-        .color(VALUE)
+    RichText::new(text).font(FontId::new(13.0, FontFamily::Name(READOUT_FONT.into()))).color(VALUE)
 }
 
 /// Sizes the panel is set in. Two, so a line is either a caption or a
@@ -256,11 +252,7 @@ impl Line {
     pub fn note(self, text: impl Into<String>) -> Self {
         self.add(
             text,
-            TextFormat {
-                font_id: FontId::proportional(12.0),
-                color: LEGEND,
-                ..Default::default()
-            },
+            TextFormat { font_id: FontId::proportional(12.0), color: LEGEND, ..Default::default() },
         )
     }
 
@@ -323,8 +315,7 @@ impl Line {
         let size = galley.size();
         let lift = (LINE_BASELINE - baseline).max(0.0);
         let h = LINE_H.max(size.y + lift);
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(size.x, h), egui::Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(size.x, h), egui::Sense::hover());
         if ui.is_rect_visible(rect) {
             ui.painter().galley(egui::pos2(rect.left(), rect.top() + lift), galley, VALUE);
         }
@@ -338,7 +329,6 @@ impl Line {
         ui.add(egui::Label::new(self.job))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -439,4 +429,3 @@ mod tests {
         assert!(d > 40, "fault and readout differ by only {d} in green");
     }
 }
-

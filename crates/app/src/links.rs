@@ -165,7 +165,9 @@ impl Links {
     /// A decode with neither end named is not a link: an unknown burst has a
     /// frequency and a shape and nobody to attribute it to.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let Some(link) = rec.link.clone() else { return false };
+        let Some(link) = rec.link.clone() else {
+            return false;
+        };
         let (from, to) = (link.from, link.to);
         // Both ends, or it is not a link. A beacon names one end and
         // addresses everybody, and "somebody transmitted" is a reception
@@ -179,10 +181,8 @@ impl Links {
             return false;
         }
         let system = rec.model.split('-').next().unwrap_or(&rec.model).to_string();
-        let found = self
-            .seen
-            .iter_mut()
-            .find(|l| l.system == system && l.from == from && l.to == to);
+        let found =
+            self.seen.iter_mut().find(|l| l.system == system && l.from == from && l.to == to);
         match found {
             Some(l) => {
                 l.last = at;
@@ -319,7 +319,9 @@ pub fn from_log(path: &std::path::Path) -> std::io::Result<Links> {
 /// Every log segment in a folder, newest last, for a directory that wants
 /// more than the file being written.
 pub fn segments(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut v: Vec<std::path::PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -445,11 +447,19 @@ mod tests {
         // same end, which reading the display fields could not tell.
         let mut l = Links::new();
         l.update(
-            &rec("DMR-Voice", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::group("9")))),
+            &rec(
+                "DMR-Voice",
+                446.1e6,
+                Some(EventLink::between(Party::unit("1"), Party::group("9"))),
+            ),
             t(0),
         );
         l.update(
-            &rec("DMR-Voice", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::unit("9")))),
+            &rec(
+                "DMR-Voice",
+                446.1e6,
+                Some(EventLink::between(Party::unit("1"), Party::unit("9"))),
+            ),
             t(1),
         );
         assert_eq!(l.active(t(2)).len(), 2, "a group call and a private call are one link");
@@ -505,11 +515,19 @@ mod tests {
     fn one_end_can_be_looked_up_whichever_side_it_is_on() {
         let mut l = Links::new();
         l.update(
-            &rec("M17-Packet", 433.475e6, Some(EventLink::between(Party::unit("M0ABC"), Party::unit("M0XYZ")))),
+            &rec(
+                "M17-Packet",
+                433.475e6,
+                Some(EventLink::between(Party::unit("M0ABC"), Party::unit("M0XYZ"))),
+            ),
             t(0),
         );
         l.update(
-            &rec("M17-Packet", 433.475e6, Some(EventLink::between(Party::unit("M0XYZ"), Party::unit("M0ABC")))),
+            &rec(
+                "M17-Packet",
+                433.475e6,
+                Some(EventLink::between(Party::unit("M0XYZ"), Party::unit("M0ABC"))),
+            ),
             t(1),
         );
         // Two links, because a direction is worth keeping; both involve M0ABC.

@@ -50,7 +50,11 @@ impl Scope<'_> {
     /// has no legal raster, and a band that does still carries signals off it.
     pub(super) fn hz_at_snapped(&self, rect: &Rect, x: f32, ui: &egui::Ui) -> f64 {
         let hz = self.hz_at(rect, x);
-        if ui.input(|i| i.modifiers.shift) { bands::snap(hz) } else { hz }
+        if ui.input(|i| i.modifiers.shift) {
+            bands::snap(hz)
+        } else {
+            hz
+        }
     }
 
     pub(super) fn hz_at(&self, rect: &Rect, x: f32) -> f64 {
@@ -106,7 +110,8 @@ impl Scope<'_> {
         }
         let ribbon_h = 16.0;
         let usable = (full.height() - ribbon_h - SPLIT_GRIP_H).max(1.0);
-        let plot_h = usable * self.st.plot_frac.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
+        let plot_h =
+            usable * self.st.plot_frac.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
         let plot = Rect::from_min_max(full.min, Pos2::new(full.right(), full.top() + plot_h));
         let ribbon = Rect::from_min_max(
             Pos2::new(full.left(), plot.bottom()),
@@ -198,9 +203,8 @@ impl Scope<'_> {
             // threshold, which is about the same distance as the grab
             // tolerance, so by this point the pointer has already left the
             // marker it grabbed and every drag looked like a pan.
-            let origin = ui
-                .input(|i| i.pointer.press_origin())
-                .or_else(|| resp.interact_pointer_pos());
+            let origin =
+                ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
             self.st.splitting = origin.is_some_and(|pos| grip.contains(pos));
             self.st.drag_ch = origin.and_then(|pos| {
                 if plot_cog.contains(pos) || fall_cog.contains(pos) || grip.contains(pos) {
@@ -214,8 +218,7 @@ impl Scope<'_> {
                 // Follow the pointer rather than accumulating deltas, so the
                 // divider cannot drift away from the cursor over a long drag.
                 let f = (pos.y - full.top() - SPLIT_GRIP_H / 2.0) / usable;
-                self.st.plot_frac =
-                    f.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
+                self.st.plot_frac = f.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
             }
         } else if resp.dragged() {
             match self.st.drag_ch {
@@ -305,7 +308,8 @@ impl Scope<'_> {
         for e in seen.iter().filter(|e| e.source.locked_to.is_some()) {
             let s = &e.source;
             let half = s.bandwidth_hz / 2.0;
-            let (x0, x1) = (self.x_of(plot, s.center_hz - half), self.x_of(plot, s.center_hz + half));
+            let (x0, x1) =
+                (self.x_of(plot, s.center_hz - half), self.x_of(plot, s.center_hz + half));
             if x1 < plot.left() || x0 > plot.right() {
                 continue;
             }
@@ -320,7 +324,10 @@ impl Scope<'_> {
             for ex in [cx0, cx1] {
                 p.line_segment(
                     [Pos2::new(ex, plot.top()), Pos2::new(ex, plot.bottom())],
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(lock.r(), lock.g(), lock.b(), 130)),
+                    Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(lock.r(), lock.g(), lock.b(), 130),
+                    ),
                 );
             }
             let name = s.locked_to.unwrap_or("");
@@ -356,9 +363,19 @@ impl Scope<'_> {
             // At least two pixels, or a narrow sensor on a wide span vanishes.
             let (cx0, cx1) = if cx1 - cx0 < 2.0 { (cx0 - 1.0, cx0 + 1.0) } else { (cx0, cx1) };
             let label = if s.bandwidth_hz >= 1e6 {
-                format!("{:.4} MHz  {:.0} kHz  {:.0} dB", s.center_hz / 1e6, s.bandwidth_hz / 1e3, s.snr_db)
+                format!(
+                    "{:.4} MHz  {:.0} kHz  {:.0} dB",
+                    s.center_hz / 1e6,
+                    s.bandwidth_hz / 1e3,
+                    s.snr_db
+                )
             } else {
-                format!("{:.4} MHz  {:.1} kHz  {:.0} dB", s.center_hz / 1e6, s.bandwidth_hz / 1e3, s.snr_db)
+                format!(
+                    "{:.4} MHz  {:.1} kHz  {:.0} dB",
+                    s.center_hz / 1e6,
+                    s.bandwidth_hz / 1e3,
+                    s.snr_db
+                )
             };
             let width = label.len() as f32 * 5.6 + 6.0;
             let row = rows.iter().position(|end| *end < cx0).unwrap_or(rows.len());
@@ -368,11 +385,7 @@ impl Scope<'_> {
             rows[row] = cx0 + width;
             let y0 = plot.top() + 4.0 + row as f32 * 22.0;
             let y1 = y0 + 10.0;
-            p.rect_filled(
-                Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)),
-                1.0,
-                dim(90),
-            );
+            p.rect_filled(Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)), 1.0, dim(90));
             p.rect_stroke(
                 Rect::from_min_max(Pos2::new(cx0, y0), Pos2::new(cx1, y1)),
                 1.0,
@@ -551,10 +564,7 @@ impl Scope<'_> {
     /// having more than one.
     fn extra_plot(&self, p: &egui::Painter, r: &Rect, s: &crate::radio::Spectrum) {
         p.rect_filled(*r, 0.0, theme::WELL);
-        p.line_segment(
-            [r.left_top(), r.right_top()],
-            Stroke::new(1.0, theme::ETCH),
-        );
+        p.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, theme::ETCH));
         let plot = Rect::from_min_max(Pos2::new(r.left(), r.top() + 12.0), r.max);
         let span = (self.st.ceil - self.st.floor).max(1.0);
         let n = s.db.len();
@@ -570,18 +580,12 @@ impl Scope<'_> {
             }
             p.add(egui::Shape::line(pts, Stroke::new(1.0, theme::TRACE)));
         }
-        let name = self.patch
-            .stage(s.tag)
-            .map(|st| st.kind.clone())
-            .unwrap_or_else(|| "spectrum".into());
+        let name =
+            self.patch.stage(s.tag).map(|st| st.kind.clone()).unwrap_or_else(|| "spectrum".into());
         p.text(
             Pos2::new(r.left() + 6.0, r.top() + 1.0),
             egui::Align2::LEFT_TOP,
-            format!(
-                "{name}   {:.4} MHz   {:.3} MS/s",
-                s.center / 1e6,
-                s.rate / 1e6
-            ),
+            format!("{name}   {:.4} MHz   {:.3} MS/s", s.center / 1e6, s.rate / 1e6),
             FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
             theme::LEGEND,
         );
@@ -606,10 +610,7 @@ impl Scope<'_> {
                     self.st.adc.clipped * 100.0
                 )
             } else {
-                format!(
-                    "ADC STARVED  samples take {} values: raise the gain",
-                    self.st.adc.levels
-                )
+                format!("ADC STARVED  samples take {} values: raise the gain", self.st.adc.levels)
             });
         }
         if let Some(e) = self.err {
@@ -644,7 +645,9 @@ impl Scope<'_> {
         // the drag instead, which is where its data really is.
         let mut pts = Vec::with_capacity(cols);
         for c in 0..cols {
-            let Some((a, b)) = self.column_bins(plot, c, cols, n) else { continue };
+            let Some((a, b)) = self.column_bins(plot, c, cols, n) else {
+                continue;
+            };
             // Max, not mean: averaging hides the narrow carriers that matter.
             let v = self.st.db[a..b].iter().copied().fold(f32::MIN, f32::max);
             let t = ((v - self.st.floor) / span).clamp(0.0, 1.0);
@@ -660,12 +663,9 @@ impl Scope<'_> {
         let fill = Color32::from_rgba_unmultiplied(0x5C, 0xD0, 0xE8, 26);
         for w in pts.windows(2) {
             let i = mesh.vertices.len() as u32;
-            for v in [
-                w[0],
-                w[1],
-                Pos2::new(w[1].x, plot.bottom()),
-                Pos2::new(w[0].x, plot.bottom()),
-            ] {
+            for v in
+                [w[0], w[1], Pos2::new(w[1].x, plot.bottom()), Pos2::new(w[0].x, plot.bottom())]
+            {
                 mesh.colored_vertex(v, fill);
             }
             mesh.add_triangle(i, i + 1, i + 2);
@@ -684,7 +684,8 @@ impl Scope<'_> {
             if x1 - x0 < 1.0 {
                 continue;
             }
-            let cell = Rect::from_min_max(Pos2::new(x0, r.top() + 2.0), Pos2::new(x1, r.bottom() - 2.0));
+            let cell =
+                Rect::from_min_max(Pos2::new(x0, r.top() + 2.0), Pos2::new(x1, r.bottom() - 2.0));
             p.rect_filled(cell, 1.0, b.color);
             if x1 - x0 > 60.0 {
                 p.text(
@@ -721,13 +722,21 @@ impl Scope<'_> {
                 p.rect_filled(
                     band,
                     0.0,
-                    Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), if active { 34 } else { 18 }),
+                    Color32::from_rgba_unmultiplied(
+                        col.r(),
+                        col.g(),
+                        col.b(),
+                        if active { 34 } else { 18 },
+                    ),
                 );
                 for ex in [bx0, bx1] {
                     if full.x_range().contains(ex) {
                         p.line_segment(
                             [Pos2::new(ex, full.top()), Pos2::new(ex, full.bottom())],
-                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 120)),
+                            Stroke::new(
+                                1.0,
+                                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 120),
+                            ),
                         );
                     }
                 }

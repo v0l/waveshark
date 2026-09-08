@@ -447,7 +447,7 @@ pub fn decoded_event(
     report: &decode::Report,
     pkg: &common::Package,
     center: common::Hz,
-    modulation: &'static str,
+    modulation: common::Modulation,
 ) -> Decoded {
     let mut d = Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
         .with_text(report.to_string())
@@ -475,7 +475,7 @@ pub fn decoded_event(
 pub fn unmatched_event(
     pkg: &common::Package,
     center: common::Hz,
-    modulation: &'static str,
+    modulation: common::Modulation,
     measure: Option<&common::Measure>,
 ) -> Decoded {
     let at = pkg.start_sample as f64;
@@ -608,7 +608,7 @@ pub struct ProtocolDecodeNode {
     /// at, and the inferred bits are where reverse engineering starts.
     report_unknown: bool,
     /// How the pulses reaching this node were keyed, for the report.
-    modulation: &'static str,
+    modulation: common::Modulation,
 }
 
 impl ProtocolDecodeNode {
@@ -618,12 +618,12 @@ impl ProtocolDecodeNode {
             report_all: true,
             report_crc_failures: true,
             report_unknown: true,
-            modulation: "OOK",
+            modulation: common::Modulation::Ook,
         }
     }
 
-    /// Name the modulation feeding this decoder: "OOK", "FSK", "ASK".
-    pub fn with_modulation(mut self, m: &'static str) -> Self {
+    /// Name the modulation feeding this decoder.
+    pub fn with_modulation(mut self, m: common::Modulation) -> Self {
         self.modulation = m;
         self
     }
@@ -801,9 +801,9 @@ pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
     let f = &b.class.features;
     let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz).map(|m| m.label());
     common::Measure {
-        modulation: b.class.modulation.label(),
+        modulation: b.class.modulation,
         confidence: b.class.confidence,
-        front_end: common::Measure::front(b.routed_to),
+        front_end: b.routed_to,
         mode,
         duration_us: f.duration_us as u32,
         bandwidth_hz: f.bandwidth_hz,
@@ -888,7 +888,7 @@ impl Simple for BurstRouteNode {
             // chirp swept at 30 MHz per second is a more useful log line than
             // silence, and it is the line somebody starts from when they go
             // looking for a decoder to write.
-            if b.routed_to == "none"
+            if b.routed_to == common::FrontEnd::None
                 && b.class.confidence >= self.report_min_confidence
                 && b.class.modulation.is_named()
             {
@@ -930,7 +930,7 @@ impl Simple for BurstRouteNode {
                 );
                 let at = b.start_sample as f64 / c.inputs[0].spec.rate.max(1.0);
                 let mut d = Decoded::bytes("unidentified", common::Hz(center), at, Vec::new())
-                    .with_modulation(b.class.modulation.label())
+                    .with_modulation(b.class.modulation)
                     .with_fields(fields);
                 if f.bandwidth_hz > 0.0 {
                     d = d.with_bandwidth(f.bandwidth_hz as f64);

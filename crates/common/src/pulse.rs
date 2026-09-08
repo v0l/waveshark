@@ -58,7 +58,7 @@ pub struct Package {
     /// configuration. A guess from the channel width stands in there, and it
     /// is a guess: a 125 kHz channel holds an OOK sensor as readily as an FSK
     /// one.
-    pub modulation: Option<&'static str>,
+    pub modulation: Option<crate::Modulation>,
 }
 
 impl Package {
@@ -303,13 +303,12 @@ impl Frame {
 /// What a burst was measured to be, before any decoder read it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Measure {
-    /// The classifier's verdict, as its label: "OOK", "2-FSK", "chirp",
-    /// "carrier", "unknown".
-    pub modulation: &'static str,
+    /// The classifier's verdict.
+    pub modulation: crate::Modulation,
     /// How far that verdict stood above the runner-up, 0 to 1.
     pub confidence: f32,
-    /// Which front end the burst was sent to, or "none".
-    pub front_end: &'static str,
+    /// Which front end the burst was sent to.
+    pub front_end: FrontEnd,
     /// The mode the parameters place it in, when one is known: "LoRa SF9
     /// BW125".
     pub mode: Option<String>,
@@ -326,26 +325,49 @@ pub struct Measure {
     pub symbol_period_us: f32,
 }
 
-/// The classifier's labels, so a label read back from a file is the same
-/// static string the classifier uses.
-pub const MODULATION_LABELS: [&str; 14] = [
-    "OOK", "ASK", "2-FSK", "4-FSK", "MSK", "BPSK", "QPSK", "pi/4-DQPSK", "chirp", "OFDM", "DSSS",
-    "noise-like", "carrier", "unknown",
-];
-
 /// The front ends a burst can be sent to.
-pub const FRONT_ENDS: [&str; 6] = ["ook", "ask", "fsk", "c4fm", "ook+fsk", "none"];
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrontEnd {
+    Ook,
+    Ask,
+    Fsk,
+    C4fm,
+    /// Both the envelope and the discriminator path, for a burst that could
+    /// be either.
+    OokFsk,
+    /// Measured and sent nowhere.
+    #[default]
+    None,
+}
+
+impl FrontEnd {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ook => "ook",
+            Self::Ask => "ask",
+            Self::Fsk => "fsk",
+            Self::C4fm => "c4fm",
+            Self::OokFsk => "ook+fsk",
+            Self::None => "none",
+        }
+    }
+
+    /// What a stored label names, or `None` for one this does not know.
+    pub fn from_label(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|f| f.label() == s)
+    }
+
+    pub const ALL: [Self; 6] =
+        [Self::Ook, Self::Ask, Self::Fsk, Self::C4fm, Self::OokFsk, Self::None];
+}
+
+impl std::fmt::Display for FrontEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 impl Measure {
-    /// The label as one of [`MODULATION_LABELS`], or "unknown".
-    pub fn label(s: &str) -> &'static str {
-        MODULATION_LABELS.iter().copied().find(|l| *l == s).unwrap_or("unknown")
-    }
-
-    /// The front end as one of [`FRONT_ENDS`], or "none".
-    pub fn front(s: &str) -> &'static str {
-        FRONT_ENDS.iter().copied().find(|l| *l == s).unwrap_or("none")
-    }
 
     /// One line a list can show: what it was, how sure, and the numbers
     /// that identify it.
@@ -362,20 +384,21 @@ impl Measure {
         if self.bandwidth_hz > 0.0 {
             parts.push(format!("{:.1} kHz wide", self.bandwidth_hz / 1e3));
         }
+        use crate::Modulation as M;
         let keyed = matches!(
             self.modulation,
-            "OOK" | "ASK" | "2-FSK" | "4-FSK" | "MSK" | "BPSK" | "QPSK" | "pi/4-DQPSK"
+            M::Ook | M::Ask | M::Fsk2 | M::Fsk4 | M::Msk | M::Psk2 | M::Psk4 | M::Dqpsk
         );
         if keyed && self.baud > 0.0 {
             parts.push(format!("{:.0} baud", self.baud));
         }
-        if matches!(self.modulation, "2-FSK" | "4-FSK" | "MSK") && self.separation_hz > 0.0 {
+        if matches!(self.modulation, M::Fsk2 | M::Fsk4 | M::Msk) && self.separation_hz > 0.0 {
             parts.push(format!("tones {:.1} kHz apart", self.separation_hz / 1e3));
         }
-        if self.modulation == "chirp" && self.sweep_hz_s.abs() > 0.0 {
+        if self.modulation == M::Chirp && self.sweep_hz_s.abs() > 0.0 {
             parts.push(format!("sweep {:.1} MHz/s", self.sweep_hz_s / 1e6));
         }
-        if matches!(self.modulation, "OFDM" | "DSSS") && self.symbol_period_us > 0.0 {
+        if matches!(self.modulation, M::Ofdm | M::Dsss) && self.symbol_period_us > 0.0 {
             parts.push(format!("period {:.1} us", self.symbol_period_us));
         }
         parts.push(format!("{:.1} ms", self.duration_us as f64 / 1e3));
@@ -603,7 +626,7 @@ impl Packet {
     /// What the burst was measured to be keyed on. See
     /// [`Package::modulation`]. A frame comes from a front end chosen in
     /// advance, so its keying is the front end's and not a measurement.
-    pub fn modulation(&self) -> Option<&'static str> {
+    pub fn modulation(&self) -> Option<crate::Modulation> {
         match &self.body {
             PacketBody::Pulses(p) => p.modulation,
             PacketBody::Frame(_) => None,

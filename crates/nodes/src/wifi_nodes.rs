@@ -314,7 +314,7 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             .by(who)
             .with_detail(detail)
             .with_fields(fields)
-            .with_modulation("OFDM")
+            .with_modulation(common::Modulation::Ofdm)
             // Nothing reaches here without the frame check sequence, which
             // is a real CRC-32 over the whole frame.
             .with_crc(Some(true)),

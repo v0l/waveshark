@@ -374,7 +374,7 @@ pub fn elrs_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         elrs::Packet::Unknown(k) => format!("packet type {k}"),
     };
     let mut out = Decoded::bytes("ExpressLRS", center, 0.0, packet.to_vec())
-        .with_modulation("CSS")
+        .with_modulation(common::Modulation::Css)
         .with_bandwidth(f64::from(khz) * 1e3)
         .with_crc(Some(true))
         .with_detail(format!("SF{sf} {kind}: {detail} link {link_id}"))

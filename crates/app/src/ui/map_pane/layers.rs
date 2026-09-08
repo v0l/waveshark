@@ -119,11 +119,8 @@ impl Layer for SightingLayer<'_> {
     }
 
     fn draw(&mut self, c: &Canvas) {
-        let points: Vec<(Pos2, Option<f32>)> = self
-            .trail
-            .iter()
-            .filter_map(|s| Some((c.at(s.lat?, s.lon?), s.rssi_dbfs)))
-            .collect();
+        let points: Vec<(Pos2, Option<f32>)> =
+            self.trail.iter().filter_map(|s| Some((c.at(s.lat?, s.lon?), s.rssi_dbfs))).collect();
         if points.is_empty() {
             return;
         }
@@ -137,15 +134,9 @@ impl Layer for SightingLayer<'_> {
         for (at, rssi) in &points {
             // A sighting with no level still happened, and is drawn at the
             // dimmest end rather than dropped.
-            let strength = rssi
-                .map(|r| ((r - lo) / span).clamp(0.0, 1.0))
-                .unwrap_or(0.0);
+            let strength = rssi.map(|r| ((r - lo) / span).clamp(0.0, 1.0)).unwrap_or(0.0);
             let alpha = 0.25 + 0.75 * strength;
-            c.p.circle_filled(
-                *at,
-                2.0 + 3.0 * strength,
-                theme::TRACE.gamma_multiply(alpha),
-            );
+            c.p.circle_filled(*at, 2.0 + 3.0 * strength, theme::TRACE.gamma_multiply(alpha));
         }
         // The strongest point marked, because that is the one a person is
         // looking for: it is where to start walking.
@@ -165,11 +156,7 @@ impl Layer for SightingLayer<'_> {
             let at = c.at(est.lat, est.lon);
             let r = (est.radius_m / 1852.0 * c.nm_px_at(est.lat)) as f32;
             c.p.circle_filled(at, r.max(4.0), theme::READOUT.gamma_multiply(0.10));
-            c.p.circle_stroke(
-                at,
-                r.max(4.0),
-                Stroke::new(1.0, theme::READOUT.gamma_multiply(0.6)),
-            );
+            c.p.circle_stroke(at, r.max(4.0), Stroke::new(1.0, theme::READOUT.gamma_multiply(0.6)));
             let arm = 7.0;
             c.p.line_segment(
                 [at - Vec2::new(arm, 0.0), at + Vec2::new(arm, 0.0)],
@@ -306,9 +293,12 @@ impl<'a> CellLayer<'a> {
             return;
         }
         for d in self.heard.iter().filter(|d| d.protocol == "gsm") {
-            let Some(cell) = survey::beacondb::cell(&d.ident) else { continue };
-            let known = export
-                .is_some_and(|e| e.get(cell.mcc, &cell.mnc.to_string(), cell.lac, cell.cid).is_some());
+            let Some(cell) = survey::beacondb::cell(&d.ident) else {
+                continue;
+            };
+            let known = export.is_some_and(|e| {
+                e.get(cell.mcc, &cell.mnc.to_string(), cell.lac, cell.cid).is_some()
+            });
             if known {
                 continue;
             }
@@ -384,8 +374,7 @@ impl Layer for CellLayer<'_> {
         }
         self.draw_heard(c, near, cells.as_deref());
         if cells.is_none() && self.guessed.is_empty() {
-            self.quiet =
-                Some(crate::data::Which::CellTowers.blocked().unwrap_or("not downloaded"));
+            self.quiet = Some(crate::data::Which::CellTowers.blocked().unwrap_or("not downloaded"));
         }
     }
 
@@ -400,7 +389,9 @@ impl Layer for CellLayer<'_> {
             c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::TRACE, 1.0);
             return;
         }
-        let Some((at, cell)) = nearest_cell(&self.shown, pos) else { return };
+        let Some((at, cell)) = nearest_cell(&self.shown, pos) else {
+            return;
+        };
         // The network's name where the operator table has landed, and the
         // codes either way: a beacon gives numbers, and a card that shows
         // only a brand cannot be matched against what was decoded.
@@ -514,10 +505,7 @@ impl Layer for TrackLayer<'_> {
                     let along = (k as f32 + 1.0) / n;
                     c.p.line_segment(
                         [seg[0], seg[1]],
-                        Stroke::new(
-                            2.5,
-                            theme::TRACE.gamma_multiply((0.25 + 0.65 * along) * fade),
-                        ),
+                        Stroke::new(2.5, theme::TRACE.gamma_multiply((0.25 + 0.65 * along) * fade)),
                     );
                 }
             }
@@ -534,21 +522,15 @@ impl Layer for TrackLayer<'_> {
                 c.p.circle_stroke(at, 3.5, Stroke::new(1.0, col.gamma_multiply(0.7)));
             }
             let label = a.label.clone().unwrap_or_else(|| a.id.text());
-            c.label(
-                Pos2::new(at.x + 9.0, at.y - 5.0),
-                &label,
-                theme::VALUE,
-                fade,
-            );
+            c.label(Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
             // The second line is whatever that kind is measured by: an
             // aircraft by its altitude, a vessel by its speed. A station is
             // fixed and has neither.
             let under = match a.kind() {
                 crate::tracks::Kind::Aircraft => a.altitude_ft().map(|ft| format!("{ft} ft")),
-                crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => a
-                    .speed_kt
-                    .filter(|v| *v > 0.0)
-                    .map(|kt| format!("{kt:.0} kt")),
+                crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => {
+                    a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
+                }
                 crate::tracks::Kind::Station => None,
             };
             if let Some(t) = under {
@@ -678,11 +660,7 @@ fn airport_card(p: &egui::Painter, rect: Rect, anchor: Pos2, a: &datasets::airpo
     // a row that hangs off the bottom of the card.
     let mut rows: Vec<(std::sync::Arc<egui::Galley>, Color32)> = Vec::new();
     if a.freqs.is_empty() {
-        let g = p.layout_no_wrap(
-            "no published frequencies".to_string(),
-            font(10.0),
-            theme::LEGEND,
-        );
+        let g = p.layout_no_wrap("no published frequencies".to_string(), font(10.0), theme::LEGEND);
         rows.push((g, theme::LEGEND));
     } else {
         for f in a.freqs.iter().take(MAX_ROWS) {
@@ -712,11 +690,7 @@ fn airport_card(p: &egui::Painter, rect: Rect, anchor: Pos2, a: &datasets::airpo
         }
     }
 
-    let head = [
-        (name, theme::VALUE),
-        (meta, theme::LEGEND),
-        (ident, theme::READOUT),
-    ];
+    let head = [(name, theme::VALUE), (meta, theme::LEGEND), (ident, theme::READOUT)];
     let head_sizes: Vec<Vec2> = head.iter().map(|(g, _)| g.size()).collect();
     let row_sizes: Vec<Vec2> = rows.iter().map(|(g, _)| g.size()).collect();
     let l = card_layout(&head_sizes, &row_sizes, pad, sep, rule_gap);
@@ -790,30 +764,15 @@ fn track_mark(
     let rot = |x: f32, y: f32| Pos2::new(at.x + x * c + y * s, at.y + x * s - y * c);
     let shape = match kind {
         Kind::Aircraft => {
-            vec![
-                rot(0.0, 6.0),
-                rot(-4.0, -4.0),
-                rot(0.0, -1.5),
-                rot(4.0, -4.0),
-            ]
+            vec![rot(0.0, 6.0), rot(-4.0, -4.0), rot(0.0, -1.5), rot(4.0, -4.0)]
         }
         // Longer and narrower, with a squared stern: a hull rather than a
         // wing.
-        Kind::Vessel => vec![
-            rot(0.0, 7.0),
-            rot(-2.5, 2.0),
-            rot(-2.5, -5.0),
-            rot(2.5, -5.0),
-            rot(2.5, 2.0),
-        ],
+        Kind::Vessel => {
+            vec![rot(0.0, 7.0), rot(-2.5, 2.0), rot(-2.5, -5.0), rot(2.5, -5.0), rot(2.5, 2.0)]
+        }
         // Short and blunt, which is neither of the other two at a glance.
-        _ => vec![
-            rot(0.0, 4.5),
-            rot(-3.0, 1.0),
-            rot(-3.0, -3.0),
-            rot(3.0, -3.0),
-            rot(3.0, 1.0),
-        ],
+        _ => vec![rot(0.0, 4.5), rot(-3.0, 1.0), rot(-3.0, -3.0), rot(3.0, -3.0), rot(3.0, 1.0)],
     };
     p.add(egui::Shape::convex_polygon(shape, col, Stroke::NONE));
 }
@@ -857,12 +816,7 @@ fn card_layout(head: &[Vec2], rows: &[Vec2], pad: f32, sep: f32, rule_gap: f32) 
         ys.push(y);
         y += s.y;
     }
-    CardLayout {
-        size: Vec2::new(text_w + pad * 2.0, y + pad),
-        ys,
-        rule_y,
-        text_x: pad,
-    }
+    CardLayout { size: Vec2::new(text_w + pad * 2.0, y + pad), ys, rule_y, text_x: pad }
 }
 
 #[cfg(test)]
@@ -878,11 +832,7 @@ mod tests {
     #[test]
     fn the_airport_card_holds_every_line_it_draws() {
         let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
-        let head = [
-            Vec2::new(180.0, 15.0),
-            Vec2::new(90.0, 11.0),
-            Vec2::new(40.0, 13.0),
-        ];
+        let head = [Vec2::new(180.0, 15.0), Vec2::new(90.0, 11.0), Vec2::new(40.0, 13.0)];
         // Eleven rows: ten frequencies and the "+N more" that follows them.
         let rows: Vec<Vec2> = (0..11).map(|_| Vec2::new(150.0, 13.0)).collect();
         let l = card_layout(&head, &rows, pad, sep, rule_gap);
@@ -967,14 +917,14 @@ impl Layer for SatLayer {
         let Some(sky) = self.sky.clone() else { return };
         let station = self.home.map(|(lat, lon)| orbit::Station::new(lat, lon));
         for sat in sky.sats() {
-            let up = station
-                .and_then(|s| sat.look(s, self.now_s))
-                .is_some_and(|l| l.el_deg > 0.0);
+            let up = station.and_then(|s| sat.look(s, self.now_s)).is_some_and(|l| l.el_deg > 0.0);
             let picked = self.selected == Some(sat.norad);
             if !up && !picked {
                 continue;
             }
-            let Some((lat, lon, alt_km)) = sat.subpoint(self.now_s) else { continue };
+            let Some((lat, lon, alt_km)) = sat.subpoint(self.now_s) else {
+                continue;
+            };
             // One orbit, half of it behind and half ahead, so the path says
             // where it came from as well as where it is going.
             let period = sat.period_s() as i64;
@@ -1001,10 +951,7 @@ impl Layer for SatLayer {
                     if (at.x - last.x).abs() < c.world_px() / 2.0 {
                         let ahead = t >= self.now_s;
                         let fade = if ahead { 0.55 } else { 0.22 };
-                        c.p.line_segment(
-                            [last, at],
-                            Stroke::new(1.0, bright.gamma_multiply(fade)),
-                        );
+                        c.p.line_segment([last, at], Stroke::new(1.0, bright.gamma_multiply(fade)));
                     }
                 }
                 prev = Some(at);

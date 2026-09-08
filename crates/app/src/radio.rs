@@ -335,11 +335,7 @@ fn tx_plan_for(ch: &ChannelSpec, center: Hz) -> Option<crate::chain::TxPlan> {
     let tx = ch.tx?;
     let mode = tx_mode_for(&ch.mode)?;
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
-    Some(crate::chain::TxPlan {
-        spec: tx,
-        mode,
-        on_air,
-    })
+    Some(crate::chain::TxPlan { spec: tx, mode, on_air })
 }
 
 /// The transmit chain to draw, from the channels as they are now.
@@ -351,9 +347,7 @@ fn derive_tx(plan: &Plan, can_transmit: bool) -> Option<crate::chain::TxPlan> {
     if !can_transmit {
         return None;
     }
-    plan.channels
-        .iter()
-        .find_map(|c| tx_plan_for(c, plan.center))
+    plan.channels.iter().find_map(|c| tx_plan_for(c, plan.center))
 }
 
 fn key_up(
@@ -376,9 +370,7 @@ fn key_up(
         return Err(common::Error::TxUnsupported);
     }
     if !dev.info().covers_tx(on_air) {
-        return Err(common::Error::other(format!(
-            "{on_air} is outside what this radio transmits"
-        )));
+        return Err(common::Error::other(format!("{on_air} is outside what this radio transmits")));
     }
     // A half duplex radio has one synthesiser, so it is retuned for the over
     // and the receiver hears the transmit frequency while it lasts. A full
@@ -412,24 +404,15 @@ fn key_up(
     // it was set to MIC rather than when it was keyed: the meter has to move
     // before an operator can set a level against it.
     let src = match tx.source {
-        TxSource::Mic => Some(
-            mic.as_ref()
-                .ok_or_else(|| common::Error::other("no microphone is open"))?
-                .tap(),
-        ),
+        TxSource::Mic => {
+            Some(mic.as_ref().ok_or_else(|| common::Error::other("no microphone is open"))?.tap())
+        }
         TxSource::Tone => None,
     };
 
     Ok((
-        crate::chain::TxPlan {
-            spec: *tx,
-            mode,
-            on_air,
-        },
-        crate::chain::TxSinks {
-            stream: Some(dev.start_tx()?),
-            mic: src,
-        },
+        crate::chain::TxPlan { spec: *tx, mode, on_air },
+        crate::chain::TxSinks { stream: Some(dev.start_tx()?), mic: src },
     ))
 }
 
@@ -534,10 +517,7 @@ fn peak_of(pcm: &[f32]) -> f32 {
 
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
-    match std::env::var("SR_TUNE_GAP_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
+    match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
         Some(ms) => std::time::Duration::from_millis(ms),
         None => MIN_TUNE_GAP,
     }
@@ -740,9 +720,7 @@ impl ChannelSpec {
     pub fn bandwidth(&self) -> f64 {
         // A width below a hundred hertz is a mis-set control rather than a
         // channel, and it would design a filter with thousands of taps.
-        self.bandwidth_hz
-            .filter(|b| *b >= 100.0)
-            .unwrap_or_else(|| self.mode.bandwidth())
+        self.bandwidth_hz.filter(|b| *b >= 100.0).unwrap_or_else(|| self.mode.bandwidth())
     }
 
     /// The least span this channel can be built in, at its own width.
@@ -919,8 +897,8 @@ pub struct DecodeRecord {
     pub channel_hz: f64,
     /// Protocol name, or "unknown" for a burst nothing claimed.
     pub model: String,
-    /// How it was keyed: OOK, FSK, ASK.
-    pub modulation: &'static str,
+    /// How it was keyed.
+    pub modulation: common::Modulation,
     /// Fields for a decode, inferred coding and timings for an unknown.
     pub detail: String,
     /// The same fields, structured.
@@ -984,7 +962,7 @@ impl DecodeRecord {
             freq,
             channel_hz: 31_250.0,
             model: model.to_string(),
-            modulation: "OOK",
+            modulation: common::Modulation::Ook,
             detail: String::new(),
             fields: Vec::new(),
             media_type: pipeline::event::media::BYTES,
@@ -1039,8 +1017,7 @@ struct Dedupe {
 impl Dedupe {
     /// Whether a burst is new, remembering it if so.
     fn accept(&mut self, r: &DecodeRecord, now: std::time::Instant) -> bool {
-        self.recent
-            .retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
+        self.recent.retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
         if self.recent.iter().any(|k| same_burst(k, r)) {
             return false;
         }
@@ -1065,7 +1042,7 @@ struct Reported {
     at: std::time::Instant,
     freq: f64,
     channel_hz: f64,
-    modulation: &'static str,
+    modulation: common::Modulation,
     /// Whether a protocol claimed it.
     known: bool,
 }
@@ -1097,10 +1074,7 @@ pub(crate) fn replay_receiver(
     let plan = replay_plan(buf, rec.is_some());
     Ok(crate::chain::Receiver::build(
         &plan,
-        crate::chain::Sinks {
-            recorder: rec,
-            ..Default::default()
-        },
+        crate::chain::Sinks { recorder: rec, ..Default::default() },
     )?)
 }
 
@@ -1195,11 +1169,7 @@ pub(crate) fn replay_blocks(
         let mut found = rx.decodes(at);
         dedupe_neighbours(&mut found);
         let seen = out.len();
-        out.extend(
-            found
-                .into_iter()
-                .filter(|r| !r.model.is_empty() && dedupe.accept(r, at)),
-        );
+        out.extend(found.into_iter().filter(|r| !r.model.is_empty() && dedupe.accept(r, at)));
         if let Some(r) = rx.recorder_mut() {
             for d in &out[seen..] {
                 r.capture(d);
@@ -1282,7 +1252,7 @@ fn dedupe_neighbours(block: &mut [DecodeRecord]) {
         kb.0.cmp(&ka.0).then(kb.1.total_cmp(&ka.1))
     });
 
-    let mut kept: Vec<(f64, f64, &'static str, bool)> = Vec::new();
+    let mut kept: Vec<(f64, f64, common::Modulation, bool)> = Vec::new();
     for i in order {
         let dup = kept.iter().any(|(kf, kw, km, known)| {
             same_burst(
@@ -1290,7 +1260,7 @@ fn dedupe_neighbours(block: &mut [DecodeRecord]) {
                     at: block[i].at,
                     freq: *kf,
                     channel_hz: *kw,
-                    modulation: km,
+                    modulation: *km,
                     known: *known,
                 },
                 &block[i],
@@ -1553,12 +1523,7 @@ impl RadioControls {
                 (st.clone(), mode)
             })
             .collect();
-        let tx_stages = dev
-            .info()
-            .tx
-            .as_ref()
-            .map(|t| t.gain_stages.clone())
-            .unwrap_or_default();
+        let tx_stages = dev.info().tx.as_ref().map(|t| t.gain_stages.clone()).unwrap_or_default();
         Self {
             stages,
             tx_stages,
@@ -1675,10 +1640,7 @@ impl Status {
     /// The patch the receiver is running, the one it drew before the edits,
     /// and which revision they are.
     pub fn patch(&self) -> (u64, Option<(crate::patch::Patch, crate::patch::Patch)>) {
-        (
-            self.patch_rev.load(Ordering::Relaxed),
-            self.patch.lock().clone(),
-        )
+        (self.patch_rev.load(Ordering::Relaxed), self.patch.lock().clone())
     }
 
     /// The levels as the graph holds them, and a revision that moves only
@@ -1804,26 +1766,17 @@ impl Status {
 
     fn set_chain(&self, t: Option<pipeline::graph::Topology>, latency_ms: f64) {
         *self.chain.lock() = t;
-        self.chain_latency
-            .store((latency_ms as f32).to_bits(), Ordering::Relaxed);
+        self.chain_latency.store((latency_ms as f32).to_bits(), Ordering::Relaxed);
     }
 
     /// What one channel is receiving, or nothing when it is not decoding RDS.
     pub fn station_for(&self, id: u64) -> Option<StationInfo> {
-        self.stations
-            .lock()
-            .iter()
-            .find(|(k, _)| *k == id)
-            .map(|(_, s)| s.clone())
+        self.stations.lock().iter().find(|(k, _)| *k == id).map(|(_, s)| s.clone())
     }
 
     /// The first channel's station, for the headless probe, which runs one.
     pub fn station(&self) -> StationInfo {
-        self.stations
-            .lock()
-            .first()
-            .map(|(_, s)| s.clone())
-            .unwrap_or_default()
+        self.stations.lock().first().map(|(_, s)| s.clone()).unwrap_or_default()
     }
 
     fn set_station(&self, id: u64, s: &dsp::rds::Station, groups: u64, errors: u64, synced: bool) {
@@ -1917,22 +1870,16 @@ impl Radio {
         let handle = std::thread::Builder::new()
             .name("radio".into())
             .spawn(move || {
-                if let Err(e) = run(
-                    entry, center, rate, fft, cmd_rx, frame_tx, dec_tx, &st, repaint,
-                ) {
+                if let Err(e) =
+                    run(entry, center, rate, fft, cmd_rx, frame_tx, dec_tx, &st, repaint)
+                {
                     *st.error.lock() = Some(e.to_string());
                 }
                 st.running.store(false, Ordering::Relaxed);
             })
             .expect("spawn radio thread");
 
-        Self {
-            cmd: cmd_tx,
-            frames: frame_rx,
-            decodes: dec_rx,
-            status,
-            handle: Some(handle),
-        }
+        Self { cmd: cmd_tx, frames: frame_rx, decodes: dec_rx, status, handle: Some(handle) }
     }
 
     pub fn send(&self, c: Cmd) {
@@ -1958,12 +1905,10 @@ impl Drop for Radio {
         // handle is moved in, so abandoning it leaks a thread rather than
         // leaving a dangling join.
         let (tx, rx) = bounded::<()>(1);
-        let waiter = std::thread::Builder::new()
-            .name("radio-stop".into())
-            .spawn(move || {
-                let _ = h.join();
-                let _ = tx.send(());
-            });
+        let waiter = std::thread::Builder::new().name("radio-stop".into()).spawn(move || {
+            let _ = h.join();
+            let _ = tx.send(());
+        });
         if waiter.is_err() {
             return;
         }
@@ -2024,10 +1969,7 @@ impl Audio {
             tx: None,
         };
         let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
-        Self {
-            rx,
-            pcm: Vec::new(),
-        }
+        Self { rx, pcm: Vec::new() }
     }
 
     fn chan(&self) -> &crate::chain::Chan {
@@ -2065,8 +2007,7 @@ impl Audio {
         if self.rx.process(input).is_err() {
             return &self.pcm;
         }
-        self.pcm
-            .extend(self.rx.channel_audio(0).iter().map(|v| v * gain));
+        self.pcm.extend(self.rx.channel_audio(0).iter().map(|v| v * gain));
         &self.pcm
     }
 }
@@ -2200,9 +2141,7 @@ fn run(
     let mut mic: Option<audio::AudioCapture> = None;
     open_mic(&audio_in, &mut mic, status);
     rx.set_microphone(mic.as_ref().map(|m| m.tap()));
-    status
-        .can_transmit
-        .store(dev.info().can_transmit(), Ordering::Relaxed);
+    status.can_transmit.store(dev.info().can_transmit(), Ordering::Relaxed);
 
     loop {
         let batch: Vec<Cmd> = held.drain(..).chain(cmd.try_iter()).collect();
@@ -2231,9 +2170,8 @@ fn run(
                         // Dropping the old player first: a host that only
                         // allows one stream per device refuses the second one
                         // while the first is still open.
-                        let level = sink
-                            .as_ref()
-                            .map(|s: &audio::AudioSink| (s.volume(), s.muted()));
+                        let level =
+                            sink.as_ref().map(|s: &audio::AudioSink| (s.volume(), s.muted()));
                         _player = None;
                         sink = None;
                         let opened = match audio_out.is_empty() {
@@ -2257,9 +2195,7 @@ fn run(
                 }
                 Cmd::TxGain(db) => {
                     tx_gain_db = db.max(0.0);
-                    status
-                        .tx_gain_db
-                        .store(tx_gain_db.to_bits(), Ordering::Relaxed);
+                    status.tx_gain_db.store(tx_gain_db.to_bits(), Ordering::Relaxed);
                 }
                 // Unkeying while not keyed is what the interface sends when it
                 // loses the button, and it is not an error.
@@ -2807,9 +2743,7 @@ fn run(
             }
             blocks_since_key = blocks_since_key.wrapping_add(1);
             status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
-            status
-                .mic_clipped
-                .store(rx.keyed() && rx.mic_clipped(), Ordering::Relaxed);
+            status.mic_clipped.store(rx.keyed() && rx.mic_clipped(), Ordering::Relaxed);
         }
 
         // What is going out, drawn where a receiver would have heard it.
@@ -2912,12 +2846,7 @@ fn run(
             let extra = rx
                 .patch_spectra()
                 .into_iter()
-                .map(|(tag, db, center, rate)| Spectrum {
-                    tag,
-                    db,
-                    center,
-                    rate,
-                })
+                .map(|(tag, db, center, rate)| Spectrum { tag, db, center, rate })
                 .collect();
             let f = Frame {
                 db: rx.power_db().to_vec(),
@@ -2944,16 +2873,11 @@ fn run(
             rx.refresh_capture_folder();
             let cap = rx.capture();
             status.capture_on.store(rx.capturing(), Ordering::Relaxed);
+            status.capture_bytes.store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
             status
-                .capture_bytes
-                .store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
-            status.capture_folder.store(
-                cap.map(|c| c.folder_bytes()).unwrap_or(0),
-                Ordering::Relaxed,
-            );
-            status
-                .capture_full
-                .store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
+                .capture_folder
+                .store(cap.map(|c| c.folder_bytes()).unwrap_or(0), Ordering::Relaxed);
+            status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
             *status.capture_file.lock() =
                 cap.and_then(|c| c.path()).map(|p| p.display().to_string());
         }
@@ -2964,10 +2888,7 @@ fn run(
         status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
         status.log_full.store(rx.log_full(), Ordering::Relaxed);
         let chans = rx.bank_channels();
-        status.scan_channels.store(
-            chans.first().copied().unwrap_or(0) as u64,
-            Ordering::Relaxed,
-        );
+        status.scan_channels.store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
         status
             .scan_channels_wide
             .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
@@ -2993,11 +2914,7 @@ fn run(
                         e.last_seen = now;
                         e.live = true;
                     }
-                    None => seen.push(SeenSource {
-                        source: s,
-                        last_seen: now,
-                        live: true,
-                    }),
+                    None => seen.push(SeenSource { source: s, last_seen: now, live: true }),
                 }
             }
             seen.retain(|e| e.live || now.duration_since(e.last_seen) < SOURCE_LINGER);
@@ -3071,9 +2988,7 @@ fn run(
         if let Some(b) = rx.audio().map(|n| n.bus()) {
             Status::set_level(&status.call_level, b.voice_peak());
             *status.call_levels.lock() = b.levels();
-            status
-                .call_gain_db
-                .store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
+            status.call_gain_db.store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
             status.call_audio.store(b.listening(), Ordering::Relaxed);
             status.replaying.store(b.replaying(), Ordering::Relaxed);
             *status.call_heard.lock() = b.last_heard().map(str::to_string);
@@ -3104,9 +3019,7 @@ fn run(
             } else if !out.is_empty() {
                 Status::set_level(&status.out_level, peak_of(out) * plan.audio.master);
                 s.write_adaptive_stereo(out, rate);
-                status
-                    .audio_backlog
-                    .store(s.backlog().max(0) as u64, Ordering::Relaxed);
+                status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
             } else {
                 Status::set_level(&status.out_level, 0.0);
             }
@@ -3213,15 +3126,9 @@ pub(crate) mod tests {
     fn a_correction_offsets_the_request_and_reads_back_where_it_started() {
         let want = Hz(145_000_000);
         let hw = tuned(want, 20.0);
-        assert!(
-            hw.get() < want.get(),
-            "a fast reference is asked for a lower frequency"
-        );
+        assert!(hw.get() < want.get(), "a fast reference is asked for a lower frequency");
         let moved = want.get() - hw.get();
-        assert!(
-            (2_800..3_000).contains(&moved),
-            "20 ppm of 145 MHz moved {moved} Hz"
-        );
+        assert!((2_800..3_000).contains(&moved), "20 ppm of 145 MHz moved {moved} Hz");
         assert_eq!(untuned(hw, 20.0), want);
         assert_eq!(untuned(tuned(want, -7.5), -7.5), want);
         assert_eq!(tuned(want, 0.0), want);
@@ -3247,16 +3154,9 @@ pub(crate) mod tests {
             agc: true,
             tx: None,
         };
-        let outside = ChannelSpec {
-            id: 2,
-            offset_hz: -994_200_000.0,
-            ..inside.clone()
-        };
+        let outside = ChannelSpec { id: 2, offset_hz: -994_200_000.0, ..inside.clone() };
         assert!(inside.offset_hz.abs() <= rate / 2.0);
-        assert!(
-            outside.offset_hz.abs() > rate / 2.0,
-            "95.8 MHz is not inside a 1090 MHz span"
-        );
+        assert!(outside.offset_hz.abs() > rate / 2.0, "95.8 MHz is not inside a 1090 MHz span");
     }
 
     #[test]
@@ -3387,10 +3287,7 @@ pub(crate) mod tests {
             quiet.process(&quieter(&block(k)), 1.0);
         }
         let a = 20.0 * audio_rms(loud.process(&block(3), 1.0)).max(1e-9).log10();
-        let b = 20.0
-            * audio_rms(quiet.process(&quieter(&block(3)), 1.0))
-                .max(1e-9)
-                .log10();
+        let b = 20.0 * audio_rms(quiet.process(&quieter(&block(3)), 1.0)).max(1e-9).log10();
         assert!(
             (a - b).abs() < 6.0,
             "a 40 dB difference at the antenna came out as {:.1} dB of audio",
@@ -3410,10 +3307,7 @@ pub(crate) mod tests {
             cw.process(&ssb_signal(rate, offset, 0.0, k * N, N), 1.0);
         }
         let on = audio_rms(cw.process(&ssb_signal(rate, offset, 0.0, 3 * N, N), 1.0));
-        assert!(
-            on > 0.02,
-            "a carrier on the dial frequency produced {on:.4} of audio"
-        );
+        assert!(on > 0.02, "a carrier on the dial frequency produced {on:.4} of audio");
 
         // And a station 2 kHz away is outside a 500 Hz filter.
         let mut cw2 = Audio::new(offset, rate, Demod::Cw, 48_000.0);
@@ -3421,10 +3315,7 @@ pub(crate) mod tests {
             cw2.process(&ssb_signal(rate, offset, 2_000.0, k * N, N), 1.0);
         }
         let off = audio_rms(cw2.process(&ssb_signal(rate, offset, 2_000.0, 3 * N, N), 1.0));
-        assert!(
-            off < on / 10.0,
-            "a station 2 kHz away was audible at {off:.4} against {on:.4}"
-        );
+        assert!(off < on / 10.0, "a station 2 kHz away was audible at {off:.4} against {on:.4}");
     }
 
     fn fixture() -> Option<common::IqBuf> {
@@ -3472,16 +3363,8 @@ pub(crate) mod tests {
         // finds transmitters where they are, rather than a set of channel
         // grids at guessed widths.
         let rx = replay_receiver(&empty_buf(2_400_000.0, Hz::mhz(868)), None).unwrap();
-        let labels: Vec<String> = rx
-            .topology()
-            .nodes
-            .iter()
-            .map(|n| n.label.clone())
-            .collect();
-        assert!(
-            rx.has_sources(),
-            "no source detector on the 868 MHz band: {labels:?}"
-        );
+        let labels: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
+        assert!(rx.has_sources(), "no source detector on the 868 MHz band: {labels:?}");
         assert!(
             rx.bank_channels().is_empty(),
             "a bank tier is still running: {:?}",
@@ -3582,9 +3465,7 @@ pub(crate) mod tests {
         let fronts =
             crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
         assert!(
-            fronts
-                .iter()
-                .any(|f| f.front == crate::scanners::Front::Auto),
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 38: {fronts:?}"
         );
         let mut plan = replay_plan(&buf, false);
@@ -3592,17 +3473,9 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "BLE-Adv").collect();
-        assert!(
-            ble.len() >= 6,
-            "read {} advertisements, expected the 8 in the capture",
-            ble.len()
-        );
+        assert!(ble.len() >= 6, "read {} advertisements, expected the 8 in the capture", ble.len());
         for r in &ble {
-            assert_eq!(
-                r.crc,
-                Some(true),
-                "a packet without its CRC got through: {r:?}"
-            );
+            assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
             assert!(
                 (r.freq - 2_426_000_000.0).abs() < 1e6,
                 "reported at {} Hz rather than on channel 38",
@@ -3645,9 +3518,7 @@ pub(crate) mod tests {
         let fronts =
             crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
         assert!(
-            fronts
-                .iter()
-                .any(|f| f.front == crate::scanners::Front::Auto),
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 11: {fronts:?}"
         );
         let mut plan = replay_plan(&buf, false);
@@ -3657,11 +3528,7 @@ pub(crate) mod tests {
         let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
         assert!(wifi.len() >= 88, "read {} frames, expected 94", wifi.len());
         for r in &wifi {
-            assert_eq!(
-                r.crc,
-                Some(true),
-                "a frame without its FCS got through: {r:?}"
-            );
+            assert_eq!(r.crc, Some(true), "a frame without its FCS got through: {r:?}");
             assert!(
                 (r.freq - 2_462_000_000.0).abs() < 1e6,
                 "reported at {} Hz rather than on channel 11",
@@ -3670,11 +3537,7 @@ pub(crate) mod tests {
             assert!(r.detail.contains("channel=11"), "read as {}", r.detail);
         }
         // The two devices talking to each other, by their own addresses.
-        let all = wifi
-            .iter()
-            .map(|r| r.detail.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let all = wifi.iter().map(|r| r.detail.clone()).collect::<Vec<_>>().join(" ");
         assert!(
             wifi.iter().any(|r| {
                 r.link
@@ -3686,10 +3549,8 @@ pub(crate) mod tests {
         );
         // The 802.11n frames in the capture: MCS 7 with the short guard
         // interval, carried inside an aggregate.
-        let ht: Vec<&&DecodeRecord> = wifi
-            .iter()
-            .filter(|r| r.detail.contains("phy=MCS"))
-            .collect();
+        let ht: Vec<&&DecodeRecord> =
+            wifi.iter().filter(|r| r.detail.contains("phy=MCS")).collect();
         assert!(!ht.is_empty(), "no HT frame read");
         for r in &ht {
             assert!(r.detail.contains("aggregated=1"), "{}", r.detail);
@@ -3720,15 +3581,9 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
-        let beacons: Vec<&&DecodeRecord> = wifi
-            .iter()
-            .filter(|r| r.detail.contains("type=beacon"))
-            .collect();
-        assert!(
-            !beacons.is_empty(),
-            "no beacon read from {} frames",
-            wifi.len()
-        );
+        let beacons: Vec<&&DecodeRecord> =
+            wifi.iter().filter(|r| r.detail.contains("type=beacon")).collect();
+        assert!(!beacons.is_empty(), "no beacon read from {} frames", wifi.len());
         for b in &beacons {
             assert!(b.detail.contains("ssid=darknet"), "{}", b.detail);
             assert!(b.detail.contains("phy=1 Mbit/s"), "{}", b.detail);
@@ -3760,11 +3615,7 @@ pub(crate) mod tests {
     fn a_gsm_beacon_is_read_through_the_receiver() {
         let center = Hz(947_400_000);
         let rate = 2_400_000.0;
-        let want = dsp::gsm::Sch {
-            ncc: 5,
-            bcc: 3,
-            frame_number: 51 * 26 * 42 + 21,
-        };
+        let want = dsp::gsm::Sch { ncc: 5, bcc: 3, frame_number: 51 * 26 * 42 + 21 };
         let buf = common::IqBuf::new(gsm_beacon(&want), center, common::Sps(rate as u64), 0);
 
         let mut plan = replay_plan(&buf, false);
@@ -3778,11 +3629,7 @@ pub(crate) mod tests {
         let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SCH").collect();
         assert_eq!(cells.len(), 2, "expected both bursts, got {out:?}");
         let r = cells[0];
-        assert_eq!(
-            r.crc,
-            Some(true),
-            "the parity is what makes a burst a burst"
-        );
+        assert_eq!(r.crc, Some(true), "the parity is what makes a burst a burst");
         assert!(r.detail.contains("ARFCN 62"), "read as {}", r.detail);
         assert!(r.detail.contains("BSIC 53"), "read as {}", r.detail);
         assert!(r.detail.contains("frame 55713"), "read as {}", r.detail);
@@ -3791,11 +3638,7 @@ pub(crate) mod tests {
         // And the block the broadcast channel carried in the four frames
         // after it, which is the row that says whose cell this is.
         let si: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SI").collect();
-        assert_eq!(
-            si.len(),
-            1,
-            "expected one system information block, got {out:?}"
-        );
+        assert_eq!(si.len(), 1, "expected one system information block, got {out:?}");
         assert_eq!(si[0].detail, "SI3 262-01 LAC 100 CI 4660");
         every_row_carries_its_measurements(&si);
     }
@@ -3820,10 +3663,7 @@ pub(crate) mod tests {
         // reported only once a second one agrees with it about the time.
         for n in 0..2u32 {
             let at = lead + 10.0 * f64::from(n) * gsm::FRAME_SYMBOLS;
-            let this = gsm::Sch {
-                frame_number: sch.frame_number + 10 * n,
-                ..*sch
-            };
+            let this = gsm::Sch { frame_number: sch.frame_number + 10 * n, ..*sch };
             place(at, &gsm::modulate(&[0u8; gsm::BURST_BITS], sps));
             place(
                 at + gsm::FRAME_SYMBOLS,
@@ -3837,10 +3677,7 @@ pub(crate) mod tests {
         block[..10].copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10, 0x00, 0x64]);
         for (n, data) in gsm::bcch::encode(&block).unwrap().iter().enumerate() {
             let bits = gsm::normal_burst_bits(data, usize::from(sch.bcc));
-            place(
-                lead + (2.0 + n as f64) * gsm::FRAME_SYMBOLS,
-                &gsm::modulate(&bits, sps),
-            );
+            place(lead + (2.0 + n as f64) * gsm::FRAME_SYMBOLS, &gsm::modulate(&bits, sps));
         }
 
         let ratio = work / 2_400_000.0;
@@ -3862,27 +3699,11 @@ pub(crate) mod tests {
     fn every_row_carries_its_measurements(rows: &[&DecodeRecord]) {
         assert!(!rows.is_empty(), "nothing to check");
         for r in rows {
-            assert!(
-                r.rssi_dbfs.is_finite(),
-                "{} has no level: {:?}",
-                r.model,
-                r.rssi_dbfs
-            );
-            assert!(
-                r.snr_db.is_finite(),
-                "{} has no SNR: {:?}",
-                r.model,
-                r.snr_db
-            );
-            let iq =
-                r.iq.as_ref()
-                    .unwrap_or_else(|| panic!("{} kept no samples", r.model));
+            assert!(r.rssi_dbfs.is_finite(), "{} has no level: {:?}", r.model, r.rssi_dbfs);
+            assert!(r.snr_db.is_finite(), "{} has no SNR: {:?}", r.model, r.snr_db);
+            let iq = r.iq.as_ref().unwrap_or_else(|| panic!("{} kept no samples", r.model));
             assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.model);
-            assert!(
-                iq.rate > 0.0 && iq.center_hz > 0,
-                "{} samples with no stream",
-                r.model
-            );
+            assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.model);
         }
     }
 
@@ -3919,30 +3740,19 @@ pub(crate) mod tests {
 
         let _ = replay_blocks(&mut rx, &buf);
         let rows = rx.survey_devices(survey::Query::default());
-        assert!(
-            !rows.is_empty(),
-            "the capture decodes and nothing was recorded"
-        );
+        assert!(!rows.is_empty(), "the capture decodes and nothing was recorded");
         assert!(rows.iter().all(|d| d.protocol == "ble"), "{rows:?}");
         // The advertiser that dominates this capture.
         let d = rows
             .iter()
             .find(|d| d.ident == "6C:70:CB:EF:72:4D")
             .unwrap_or_else(|| panic!("the Samsung advertiser is missing: {rows:?}"));
-        assert!(
-            d.packets >= 4,
-            "only {} receptions attributed to it",
-            d.packets
-        );
+        assert!(d.packets >= 4, "only {} receptions attributed to it", d.packets);
         // A sighting says where the receiver was, not where the device is.
         let s = rx.survey_sightings(d.id);
         assert!(!s.is_empty());
         assert_eq!((s[0].lat, s[0].lon), (Some(53.6369), Some(-6.6528)));
-        assert_eq!(
-            d.best_lat,
-            Some(53.6369),
-            "the strongest sighting keeps its position"
-        );
+        assert_eq!(d.best_lat, Some(53.6369), "the strongest sighting keeps its position");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3962,11 +3772,7 @@ pub(crate) mod tests {
             'c' => "lora_sf11_meshtastic_c_869.0M_2400k.cu8",
             _ => "lora_sf11_meshtastic_a_869.525M_2000k.cs16",
         };
-        let name = if which == 'b' {
-            "lora_sf11_meshtastic_b_869.525M_2000k.cs16"
-        } else {
-            name
-        };
+        let name = if which == 'b' { "lora_sf11_meshtastic_b_869.525M_2000k.cs16" } else { name };
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../testdata/offair/{name}"));
         if !p.exists() {
@@ -4006,29 +3812,14 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("capture {which}: nothing read it: {rows:?}"));
             // The transmitter's CRC, not a plausibility argument.
             assert_eq!(r.crc, Some(true), "capture {which}: {r:?}");
-            assert!(
-                r.detail.contains("SF11 BW250k 4/5"),
-                "capture {which}: read as {}",
-                r.detail
-            );
+            assert!(r.detail.contains("SF11 BW250k 4/5"), "capture {which}: read as {}", r.detail);
             // Both captures are from a node addressing the whole mesh.
-            assert!(
-                r.detail.contains("to everyone"),
-                "capture {which}: read as {}",
-                r.detail
-            );
+            assert!(r.detail.contains("to everyone"), "capture {which}: read as {}", r.detail);
             let hz = r.freq;
-            assert!(
-                (hz - 869_525_000.0).abs() < 250_000.0,
-                "capture {which}: read at {hz} Hz"
-            );
+            assert!((hz - 869_525_000.0).abs() < 250_000.0, "capture {which}: read at {hz} Hz");
             if which == 'c' {
                 // What the node said, against the public default key.
-                assert!(
-                    r.detail.contains("050d3664 to everyone"),
-                    "capture c: {}",
-                    r.detail
-                );
+                assert!(r.detail.contains("050d3664 to everyone"), "capture c: {}", r.detail);
                 assert!(r.detail.contains("\"Hi\""), "capture c: {}", r.detail);
             }
         }
@@ -4062,20 +3853,10 @@ pub(crate) mod tests {
         assert_eq!(r.crc, Some(true), "{r:?}");
         assert!(r.detail.contains("SF8 BW63k 4/8"), "read as {}", r.detail);
         assert!(r.detail.contains("\"Kieran\""), "read as {}", r.detail);
-        assert!(
-            (r.freq - 869_618_000.0).abs() < 62_500.0,
-            "read at {} Hz",
-            r.freq
-        );
+        assert!((r.freq - 869_618_000.0).abs() < 62_500.0, "read at {} Hz", r.freq);
         // The packet carries what it was: its samples and its level.
-        assert!(
-            r.iq.as_ref().is_some_and(|q| !q.samples.is_empty()),
-            "no samples on the row"
-        );
-        assert!(
-            r.snr_db.is_finite() && r.rssi_dbfs.is_finite(),
-            "no level on the row"
-        );
+        assert!(r.iq.as_ref().is_some_and(|q| !q.samples.is_empty()), "no samples on the row");
+        assert!(r.snr_db.is_finite() && r.rssi_dbfs.is_finite(), "no level on the row");
     }
 
     /// Two TETRA base station downlinks, on for every one of the capture's
@@ -4093,23 +3874,14 @@ pub(crate) mod tests {
                 break;
             }
             for s in rx.live_sources() {
-                if !seen
-                    .iter()
-                    .any(|(hz, _)| (hz - s.center_hz).abs() < 12_500.0)
-                {
+                if !seen.iter().any(|(hz, _)| (hz - s.center_hz).abs() < 12_500.0) {
                     seen.push((s.center_hz, s.snr_db));
                 }
             }
         }
         let near = |hz: f64| seen.iter().any(|(c, _)| (c - hz).abs() < 12_500.0);
-        assert!(
-            near(391_181_000.0),
-            "391.181 MHz was never opened: {seen:?}"
-        );
-        assert!(
-            near(391_704_500.0),
-            "391.7045 MHz was never opened: {seen:?}"
-        );
+        assert!(near(391_181_000.0), "391.181 MHz was never opened: {seen:?}");
+        assert!(near(391_704_500.0), "391.7045 MHz was never opened: {seen:?}");
     }
 
     /// Finding the carriers is half of it. The scanner block promises that
@@ -4129,37 +3901,19 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).unwrap();
         let half = buf.samples.len() / 2;
         let first = common::IqBuf::new(buf.samples[..half].to_vec(), buf.center, buf.rate, 0);
-        let second = common::IqBuf::new(
-            buf.samples[half..].to_vec(),
-            buf.center,
-            buf.rate,
-            half as u64,
-        );
+        let second =
+            common::IqBuf::new(buf.samples[half..].to_vec(), buf.center, buf.rate, half as u64);
         let mut out = replay_blocks(&mut rx, &first);
         rx.rebuild(&plan).unwrap();
         out.extend(replay_blocks(&mut rx, &second));
         let rows: Vec<String> = out
             .iter()
-            .map(|r| {
-                format!(
-                    "{:.4} MHz {} {} {}",
-                    r.freq / 1e6,
-                    r.model,
-                    r.modulation,
-                    r.detail
-                )
-            })
+            .map(|r| format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.model, r.modulation, r.detail))
             .collect();
         for hz in [391_181_000.0, 391_704_500.0] {
-            let mine: Vec<&DecodeRecord> = out
-                .iter()
-                .filter(|r| (r.freq - hz).abs() < 12_500.0)
-                .collect();
-            assert!(
-                !mine.is_empty(),
-                "{:.4} MHz was never logged: {rows:?}",
-                hz / 1e6
-            );
+            let mine: Vec<&DecodeRecord> =
+                out.iter().filter(|r| (r.freq - hz).abs() < 12_500.0).collect();
+            assert!(!mine.is_empty(), "{:.4} MHz was never logged: {rows:?}", hz / 1e6);
             // Logged as the channel the plan lists, not as this tuner's
             // measurement of it: the band is on a 25 kHz raster and the
             // carrier was found a few kilohertz off it.
@@ -4188,24 +3942,12 @@ pub(crate) mod tests {
             let network: Vec<&&DecodeRecord> =
                 mine.iter().filter(|r| r.model == "TETRA-Network").collect();
             if hz == 391_181_000.0 {
-                assert!(
-                    !network.is_empty(),
-                    "{:.4} MHz: no network broadcast: {rows:?}",
-                    hz / 1e6
-                );
+                assert!(!network.is_empty(), "{:.4} MHz: no network broadcast: {rows:?}", hz / 1e6);
             }
-            assert!(
-                network.len() <= 8,
-                "{:.4} MHz: {} network rows",
-                hz / 1e6,
-                network.len()
-            );
+            assert!(network.len() <= 8, "{:.4} MHz: {} network rows", hz / 1e6, network.len());
             for r in &network {
-                let cells: Vec<&(String, common::Value)> = r
-                    .fields
-                    .iter()
-                    .filter(|(k, _)| k.starts_with("cell_"))
-                    .collect();
+                let cells: Vec<&(String, common::Value)> =
+                    r.fields.iter().filter(|(k, _)| k.starts_with("cell_")).collect();
                 assert!(!cells.is_empty(), "{:?}", r.fields);
                 for (_, v) in cells {
                     let text = v.to_string();
@@ -4230,9 +3972,9 @@ pub(crate) mod tests {
                 measured.len()
             );
             assert!(
-                measured
-                    .iter()
-                    .all(|r| r.modulation == "pi/4-DQPSK" && r.detail.contains("TETRA")),
+                measured.iter().all(
+                    |r| r.modulation == common::Modulation::Dqpsk && r.detail.contains("TETRA")
+                ),
                 "{:.4} MHz was measured as {:?}",
                 hz / 1e6,
                 measured
@@ -4261,20 +4003,12 @@ pub(crate) mod tests {
         let calls: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "TETRA-Call").collect();
         assert!(!calls.is_empty(), "no call rows from {} rows", out.len());
         let field = |r: &DecodeRecord, k: &str| {
-            r.fields
-                .iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.to_string())
+            r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
         };
         let groups: Vec<String> = calls.iter().filter_map(|r| field(r, "to")).collect();
+        assert!(groups.iter().any(|g| g == "10223295" || g == "15835885"), "addressed {groups:?}");
         assert!(
-            groups.iter().any(|g| g == "10223295" || g == "15835885"),
-            "addressed {groups:?}"
-        );
-        assert!(
-            calls
-                .iter()
-                .all(|r| field(r, "encryption").as_deref() == Some("AIE-3")),
+            calls.iter().all(|r| field(r, "encryption").as_deref() == Some("AIE-3")),
             "{:?}",
             calls
                 .iter()
@@ -4296,23 +4030,13 @@ pub(crate) mod tests {
         // registering or a data session. Those rows belong in the log and
         // not in a list of voice calls.
         let mut list = crate::calls::Calls::new();
-        for r in calls
-            .iter()
-            .filter(|r| field(r, "pdu").as_deref() == Some("MAC-RESOURCE"))
-        {
-            assert!(
-                !list.update(r, r.at),
-                "a bare MAC header earned a call row: {:?}",
-                r.fields
-            );
+        for r in calls.iter().filter(|r| field(r, "pdu").as_deref() == Some("MAC-RESOURCE")) {
+            assert!(!list.update(r, r.at), "a bare MAC header earned a call row: {:?}", r.fields);
         }
         assert!(
             list.is_empty(),
             "nothing here proved a voice call: {:?}",
-            calls
-                .iter()
-                .filter_map(|r| field(r, "pdu"))
-                .collect::<Vec<_>>()
+            calls.iter().filter_map(|r| field(r, "pdu")).collect::<Vec<_>>()
         );
     }
 
@@ -4334,11 +4058,7 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
 
         let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
-        assert!(
-            !m17.is_empty(),
-            "nothing read as M17 from {} rows",
-            out.len()
-        );
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         // The callsign is in the link setup frame that opens the
         // transmission and repeated across the link information channel, so
         // reading it back means the demodulator, the framing, the Golay and
@@ -4357,10 +4077,7 @@ pub(crate) mod tests {
         // source, reads three frames and loses it is the failure this capture
         // was recorded for.
         let voice = m17.iter().filter(|r| r.model == "M17-Voice").count();
-        assert!(
-            voice >= 20,
-            "only {voice} voice frames of a 2.5 second over"
-        );
+        assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
     }
 
     #[test]
@@ -4392,11 +4109,7 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
 
         let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
-        assert!(
-            !m17.is_empty(),
-            "nothing read as M17 from {} rows",
-            out.len()
-        );
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
             m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
             "no callsign: {:?}",
@@ -4436,11 +4149,7 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
 
         let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
-        assert!(
-            !m17.is_empty(),
-            "nothing read as M17 from {} rows",
-            out.len()
-        );
+        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
             m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
             "no callsign: {:?}",
@@ -4467,10 +4176,9 @@ pub(crate) mod tests {
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
         let bus = rx.audio_mut().expect("the bus is always there");
-        bus.bus_mut()
-            .set_subscriptions(vec![crate::audiobus::Subscription::new(
-                crate::audiobus::Rule::Everything,
-            )]);
+        bus.bus_mut().set_subscriptions(vec![crate::audiobus::Subscription::new(
+            crate::audiobus::Rule::Everything,
+        )]);
         bus.bus_mut().set_master(1.0, false);
 
         let mut pcm: Vec<f32> = Vec::new();
@@ -4481,17 +4189,10 @@ pub(crate) mod tests {
             }
             // One side of the stereo mix, which carries speech on both.
             pcm.extend(rx.audio_out().0.iter().step_by(2));
-            heard = heard.or_else(|| {
-                rx.audio()
-                    .and_then(|c| c.bus().last_heard())
-                    .map(str::to_string)
-            });
+            heard =
+                heard.or_else(|| rx.audio().and_then(|c| c.bus().last_heard()).map(str::to_string));
         }
-        assert_eq!(
-            heard.as_deref(),
-            Some("OPNRTX to BROADCAST"),
-            "nobody was heard"
-        );
+        assert_eq!(heard.as_deref(), Some("OPNRTX to BROADCAST"), "nobody was heard");
         // The bus resamples to its output rate, and the over is seconds
         // long. Half a second of it is enough to say the vocoder ran on live
         // frames and the mix reached the far end.
@@ -4514,10 +4215,7 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
 
-        assert!(
-            !out.is_empty(),
-            "nothing decoded from a capture that contains a packet"
-        );
+        assert!(!out.is_empty(), "nothing decoded from a capture that contains a packet");
         // Unrecognised bursts are reported too, so pick out the real one
         // rather than assuming it arrived first.
         let r = out
@@ -4529,39 +4227,24 @@ pub(crate) mod tests {
         // Structured, not just printed: a chart or a map has to be able to
         // read a field without parsing the summary line back apart.
         assert_eq!(
-            r.fields
-                .iter()
-                .find(|(k, _)| k == "temperature_c")
-                .map(|(_, v)| v.as_f64()),
+            r.fields.iter().find(|(k, _)| k == "temperature_c").map(|(_, v)| v.as_f64()),
             Some(Some(16.2))
         );
-        assert_eq!(r.modulation, "OOK");
+        assert_eq!(r.modulation, common::Modulation::Ook);
         // A real reception from a recording made near full scale: strong, and
         // well clear of the noise.
         assert!(r.snr_db > 6.0, "snr came out as {}", r.snr_db);
         // Referenced to full scale at the detector, so filter gain can put a
         // very strong packet slightly over zero. What matters is that it is a
         // real measurement rather than a placeholder.
-        assert!(
-            (-60.0..=6.0).contains(&r.rssi_dbfs),
-            "rssi came out as {} dB",
-            r.rssi_dbfs
-        );
+        assert!((-60.0..=6.0).contains(&r.rssi_dbfs), "rssi came out as {} dB", r.rssi_dbfs);
         // One row, not five: the FSK branch reads the same burst and the
         // neighbouring channels see its skirts, and all of that is one packet.
-        assert_eq!(
-            out.len(),
-            1,
-            "the same burst was logged more than once: {out:#?}"
-        );
+        assert_eq!(out.len(), 1, "the same burst was logged more than once: {out:#?}");
         // The frequency reported is the channel's, not the tuner's, which is
         // what makes a waterfall mark land on the signal.
         let off = (r.freq - buf.center.as_f64()).abs();
-        assert!(
-            off < buf.rate.as_f64() / 2.0,
-            "{} Hz is outside the span",
-            r.freq
-        );
+        assert!(off < buf.rate.as_f64() / 2.0, "{} Hz is outside the span", r.freq);
     }
 
     fn rec(freq: f64, model: &str, rssi: f32) -> DecodeRecord {
@@ -4570,7 +4253,7 @@ pub(crate) mod tests {
             freq,
             model: model.into(),
             channel_hz: 125_000.0,
-            modulation: "FSK",
+            modulation: common::Modulation::Fsk2,
             detail: String::new(),
             fields: Vec::new(),
             media_type: pipeline::event::media::BYTES,
@@ -4595,7 +4278,7 @@ pub(crate) mod tests {
             rec(868_100_000.0 + w, "unknown", -38.0),
             rec(868_100_000.0 - w, "unknown", -61.0),
         ];
-        assert_eq!(block[0].modulation, "FSK");
+        assert_eq!(block[0].modulation, common::Modulation::Fsk2);
         dedupe_neighbours(&mut block);
         let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
         assert_eq!(kept.len(), 1, "kept {kept:#?}");
@@ -4611,18 +4294,13 @@ pub(crate) mod tests {
         dedupe_neighbours(&mut block);
         let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
         assert_eq!(kept.len(), 1);
-        assert_eq!(
-            kept[0].model, "Fineoffset-WHx080",
-            "a CRC beats a stronger guess"
-        );
+        assert_eq!(kept[0].model, "Fineoffset-WHx080", "a CRC beats a stronger guess");
     }
 
     #[test]
     fn two_devices_far_apart_are_both_kept() {
-        let mut block = vec![
-            rec(868_100_000.0, "unknown", -40.0),
-            rec(869_000_000.0, "unknown", -50.0),
-        ];
+        let mut block =
+            vec![rec(868_100_000.0, "unknown", -40.0), rec(869_000_000.0, "unknown", -50.0)];
         dedupe_neighbours(&mut block);
         assert_eq!(block.iter().filter(|r| !r.model.is_empty()).count(), 2);
     }
@@ -4632,10 +4310,8 @@ pub(crate) mod tests {
         // Two bursts on one channel through one front end are two
         // transmissions, not one seen twice, and a sensor that sends its
         // reading three times should show three rows.
-        let mut block = vec![
-            rec(868_100_000.0, "unknown", -40.0),
-            rec(868_100_000.0, "unknown", -41.0),
-        ];
+        let mut block =
+            vec![rec(868_100_000.0, "unknown", -40.0), rec(868_100_000.0, "unknown", -41.0)];
         dedupe_neighbours(&mut block);
         assert_eq!(block.iter().filter(|r| !r.model.is_empty()).count(), 2);
     }
@@ -4645,7 +4321,7 @@ pub(crate) mod tests {
         // The OOK and FSK branches see the same channel, so a burst can be
         // decoded by one and guessed at by the other. That is one packet.
         let mut ook = rec(868_100_000.0, "Fineoffset-WHx080", -44.0);
-        ook.modulation = "OOK";
+        ook.modulation = common::Modulation::Ook;
         let mut block = vec![rec(868_100_000.0, "unknown", -30.0), ook];
         dedupe_neighbours(&mut block);
         let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
@@ -4656,7 +4332,7 @@ pub(crate) mod tests {
     fn ook_at(freq: f64, at: std::time::Instant) -> DecodeRecord {
         let mut r = rec(freq, "unknown", -30.0);
         r.channel_hz = OOK_CHANNEL_HZ;
-        r.modulation = "OOK";
+        r.modulation = common::Modulation::Ook;
         r.at = at;
         r
     }
@@ -4670,10 +4346,7 @@ pub(crate) mod tests {
         let t0 = std::time::Instant::now();
         let block = std::time::Duration::from_millis(7);
         let mut kept = 0;
-        for (n, freq) in [868_362_300.0, 868_393_400.0, 868_331_100.0]
-            .iter()
-            .enumerate()
-        {
+        for (n, freq) in [868_362_300.0, 868_393_400.0, 868_331_100.0].iter().enumerate() {
             let at = t0 + block * n as u32;
             if sc.accept(&ook_at(*freq, at), at) {
                 kept += 1;
@@ -4691,10 +4364,7 @@ pub(crate) mod tests {
         let t0 = std::time::Instant::now();
         for n in 0..3u32 {
             let at = t0 + std::time::Duration::from_millis(60) * n;
-            assert!(
-                sc.accept(&ook_at(868_362_300.0, at), at),
-                "repeat {n} was swallowed"
-            );
+            assert!(sc.accept(&ook_at(868_362_300.0, at), at), "repeat {n} was swallowed");
         }
     }
 
@@ -4705,18 +4375,12 @@ pub(crate) mod tests {
         assert!(sc.accept(&ook_at(868_362_300.0, t0), t0));
 
         let soon = t0 + std::time::Duration::from_millis(50);
-        assert!(
-            !sc.accept(&ook_at(868_393_400.0, soon), soon),
-            "a skirt slipped through"
-        );
+        assert!(!sc.accept(&ook_at(868_393_400.0, soon), soon), "a skirt slipped through");
 
         // Long enough later and it is a different burst that happens to be
         // next door, which is the whole reason the memory expires.
         let later = t0 + DEDUPE_WINDOW + std::time::Duration::from_millis(10);
-        assert!(
-            sc.accept(&ook_at(868_393_400.0, later), later),
-            "the memory never expired"
-        );
+        assert!(sc.accept(&ook_at(868_393_400.0, later), later), "the memory never expired");
     }
 
     #[test]
@@ -4741,14 +4405,8 @@ pub(crate) mod tests {
         let at = block_start(finished, 16_384, 250_000.0);
         // 16384 samples at 250 kS/s is 65.536 ms of signal.
         let back = finished.duration_since(at).as_secs_f64();
-        assert!(
-            (back - 0.065_536).abs() < 1e-9,
-            "stamped {back}s before the block ended"
-        );
-        assert!(
-            at < finished,
-            "the stamp must precede the block it came from"
-        );
+        assert!((back - 0.065_536).abs() < 1e-9, "stamped {back}s before the block ended");
+        assert!(at < finished, "the stamp must precede the block it came from");
         // A rate of zero must not divide by it.
         assert!(block_start(finished, 16_384, 0.0) < finished);
     }
@@ -4765,10 +4423,7 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
         let done = std::time::Instant::now();
         let rec = out.first().expect("a decode");
-        assert!(
-            rec.at < done,
-            "a decode is stamped after the replay that produced it"
-        );
+        assert!(rec.at < done, "a decode is stamped after the replay that produced it");
     }
 
     #[test]
@@ -4797,10 +4452,8 @@ pub(crate) mod tests {
             return;
         }
         // SCAN_RATE=16000000 asks the same question of a wideband span.
-        let rate = std::env::var("SCAN_RATE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2_400_000.0);
+        let rate =
+            std::env::var("SCAN_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(2_400_000.0);
         let mut rx = replay_receiver(&empty_buf(rate, Hz::mhz(868)), None).unwrap();
         let b = block(262_144);
         // One pass to warm the filters and the pool.
@@ -4841,10 +4494,7 @@ pub(crate) mod tests {
             cost(&mut a);
         }
         let later = cost(&mut a);
-        assert!(
-            later < first * 3.0,
-            "cost per block climbed from {first:.4}s to {later:.4}s"
-        );
+        assert!(later < first * 3.0, "cost per block climbed from {first:.4}s to {later:.4}s");
         assert!(a.pcm.len() <= b.len(), "audio output grew");
     }
 
@@ -4936,11 +4586,7 @@ pub(crate) mod tests {
         for mode in [Demod::Wfm, Demod::Nfm, Demod::Am, Demod::Usb, Demod::Cw] {
             let a = Audio::new(0.0, 2_304_000.0, mode, 48_000.0);
             let r = a.audio_rate();
-            assert!(
-                (r - 48_000.0).abs() < 12_000.0,
-                "{} gave {r} Hz",
-                mode.label()
-            );
+            assert!((r - 48_000.0).abs() < 12_000.0, "{} gave {r} Hz", mode.label());
         }
     }
 }
@@ -5026,10 +4672,7 @@ mod zoom_tests {
             let rate = native / zoom as f64;
             let bins_per_channel = 12_500.0 / (rate / fft as f64);
             if zoom == 1 {
-                assert!(
-                    bins_per_channel < 15.0,
-                    "{bins_per_channel:.1} bins already"
-                );
+                assert!(bins_per_channel < 15.0, "{bins_per_channel:.1} bins already");
             } else {
                 assert!(
                     bins_per_channel > 400.0,
@@ -5091,10 +4734,7 @@ mod zoom_tests {
             );
             // And a floor against the catastrophic case, loose enough that no
             // runner can trip it on contention alone.
-            assert!(
-                took < 1.0,
-                "narrowing by {zoom} took {took:.2} s for one second of signal"
-            );
+            assert!(took < 1.0, "narrowing by {zoom} took {took:.2} s for one second of signal");
         }
     }
 
@@ -5129,9 +4769,6 @@ mod zoom_tests {
         let tail = &out[out.len() / 2..];
         let leaked = tail.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
         let db = 20.0 * leaked.max(1e-12).log10();
-        assert!(
-            db < -60.0,
-            "a signal outside the span folded in at {db:.1} dBFS"
-        );
+        assert!(db < -60.0, "a signal outside the span folded in at {db:.1} dBFS");
     }
 }

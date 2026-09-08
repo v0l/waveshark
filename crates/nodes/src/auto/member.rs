@@ -367,7 +367,7 @@ impl Member {
                     // weak to be a packet, and one the classifier could not
                     // name is a gate opening on noise inside a stream; a
                     // list of those is a list of nothing.
-                    if b.routed_to != "none"
+                    if b.routed_to != common::FrontEnd::None
                         || b.class.confidence < 0.5
                         || !b.class.modulation.is_named()
                     {

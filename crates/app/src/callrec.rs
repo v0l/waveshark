@@ -51,16 +51,21 @@ impl CallRecorder {
     /// to, opening one if there is none; a record that says the transmission
     /// ended closes it. Returns whatever is now ready to write.
     pub fn feed(&mut self, r: &DecodeRecord, at: Instant, dir: &Path) -> Vec<Finished> {
-        let voice = r.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("voice", Value::Bool(true))));
+        let voice =
+            r.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("voice", Value::Bool(true))));
         if !voice && r.audio.is_none() {
             return Vec::new();
         }
         let system = r.model.split('-').next().unwrap_or(&r.model).to_string();
         let from = field(r, "from").unwrap_or_else(|| "unknown".into());
         let to = field(r, "to").unwrap_or_else(|| "unknown".into());
-        let live = r.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
+        let live =
+            r.fields.iter().any(|(k, v)| matches!((k.as_str(), v), ("live", Value::Bool(true))));
         let same = |o: &Open| {
-            o.system == system && o.from == from && o.to == to && (o.freq - r.freq).abs() < o.channel_hz.max(1.0)
+            o.system == system
+                && o.from == from
+                && o.to == to
+                && (o.freq - r.freq).abs() < o.channel_hz.max(1.0)
         };
         let i = match self.open.iter().position(same) {
             Some(i) => i,
@@ -115,7 +120,8 @@ impl CallRecorder {
         if o.pcm.is_empty() || o.rate <= 0.0 {
             return None;
         }
-        let name = format!("{}_{}_{}_{}.wav", o.started_secs, o.model, clean(&o.from), clean(&o.to));
+        let name =
+            format!("{}_{}_{}_{}.wav", o.started_secs, o.model, clean(&o.from), clean(&o.to));
         Some(Finished { path: dir.join(name), speech: Speech { pcm: o.pcm, rate: o.rate } })
     }
 }
@@ -138,7 +144,7 @@ mod tests {
             freq: 433_450_000.0,
             channel_hz: 12_500.0,
             model: model.into(),
-            modulation: "4FSK",
+            modulation: common::Modulation::Fsk4,
             detail: String::new(),
             fields,
             media_type: "",
@@ -182,7 +188,11 @@ mod tests {
     #[test]
     fn a_whole_over_in_one_record_is_one_file_at_once() {
         let mut c = CallRecorder::default();
-        let done = c.feed(&rec("M17-Voice", false, Some(vec![0.0; 800])), Instant::now(), Path::new("/tmp"));
+        let done = c.feed(
+            &rec("M17-Voice", false, Some(vec![0.0; 800])),
+            Instant::now(),
+            Path::new("/tmp"),
+        );
         assert_eq!(done.len(), 1);
     }
 }

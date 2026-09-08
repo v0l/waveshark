@@ -42,7 +42,9 @@ pub(super) fn mono(text: &str, col: Color32) -> egui::RichText {
 /// it was decoded either way, so nothing is lost by rounding the one on
 /// screen.
 fn field_value(v: &common::Value) -> String {
-    let common::Value::Float(f) = v else { return v.to_string() };
+    let common::Value::Float(f) = v else {
+        return v.to_string();
+    };
     // Small enough that six places would show zero, which would be a lie
     // rather than a rounding.
     if *f != 0.0 && f.abs() < 1e-5 {
@@ -95,7 +97,8 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
         Some(iq) => burst_view(ui, iq, h),
         None => {
             ui.label(legend("burst  no samples kept for this packet"));
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(200.0), h), Sense::hover());
+            let (rect, _) = ui
+                .allocate_exact_size(Vec2::new(ui.available_width().max(200.0), h), Sense::hover());
             ui.painter().rect_filled(rect, 2.0, theme::WELL);
         }
     }
@@ -149,11 +152,11 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
 /// What the burst was measured to be, in the wiki's terms.
 fn sigid_query(rec: &DecodeRecord) -> datasets::sigid::Query {
     let field = |k: &str| rec.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-    let unconstrained = matches!(rec.modulation, "unknown" | "noise-like" | "?" | "");
+    let named = rec.modulation.is_named();
     datasets::sigid::Query {
         center_hz: rec.freq,
         bandwidth_hz: (rec.channel_hz > 0.0).then_some(rec.channel_hz),
-        modulation: (!unconstrained).then(|| rec.modulation.to_string()),
+        modulation: named.then_some(rec.modulation),
         period_us: field("symbol_period_us").and_then(|v| v.as_f64()),
     }
 }
@@ -274,7 +277,8 @@ fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
         ui,
         Some(rail),
         |ui| {
-            let name = egui::RichText::new(&s.name).font(FontId::proportional(12.5)).color(theme::VALUE);
+            let name =
+                egui::RichText::new(&s.name).font(FontId::proportional(12.5)).color(theme::VALUE);
             if ui.link(name).on_hover_text(&s.url).clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(s.url.clone()));
             }
@@ -290,7 +294,14 @@ fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
         |ui| {
             let blurb = s.blurb();
             if !blurb.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(&blurb).font(FontId::proportional(11.0)).color(theme::LEGEND)).wrap());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&blurb)
+                            .font(FontId::proportional(11.0))
+                            .color(theme::LEGEND),
+                    )
+                    .wrap(),
+                );
             }
             let mut facts: Vec<String> = Vec::new();
             if !s.modulations.is_empty() {
@@ -404,20 +415,12 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
             pixels[dst + c] = crate::waterfall::colormap(v);
         }
     }
-    let image = ColorImage {
-        size: [cols, n],
-        pixels,
-        source_size: egui::Vec2::new(cols as f32, n as f32),
-    };
+    let image =
+        ColorImage { size: [cols, n], pixels, source_size: egui::Vec2::new(cols as f32, n as f32) };
     // Linear filtering fills the panel height smoothly from the transform's
     // rows, which reads as a spectrogram rather than a grid of cells.
     let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::LINEAR);
-    p.image(
-        tex.id(),
-        rect,
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    p.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
 
     let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
     p.text(
@@ -462,7 +465,12 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
             [Pos2::new(x, erect.bottom() - 1.0), Pos2::new(x, erect.bottom() - 1.0 - h)],
             Stroke::new(
                 1.0,
-                Color32::from_rgba_unmultiplied(theme::TRACE.r(), theme::TRACE.g(), theme::TRACE.b(), 150),
+                Color32::from_rgba_unmultiplied(
+                    theme::TRACE.r(),
+                    theme::TRACE.g(),
+                    theme::TRACE.b(),
+                    150,
+                ),
             ),
         );
     }
@@ -492,28 +500,25 @@ pub(super) fn hex_dump(ui: &mut egui::Ui, bytes: &[u8]) {
         ui.label(legend("no bits could be read from this burst"));
         return;
     }
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .id_salt("hex")
-        .show(ui, |ui| {
-            for (i, row) in bytes.chunks(16).enumerate() {
-                let hex: String = row
-                    .iter()
-                    .enumerate()
-                    .map(|(k, b)| if k == 7 { format!("{b:02x}  ") } else { format!("{b:02x} ") })
-                    .collect();
-                let ascii: String = row
-                    .iter()
-                    .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' })
-                    .collect();
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(mono(&format!("{:04x}", i * 16), theme::LEGEND));
-                    ui.label(mono(&format!("{hex:<49}"), theme::VALUE));
-                    ui.label(mono(&ascii, theme::TRACE));
-                });
-            }
-        });
+    egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("hex").show(ui, |ui| {
+        for (i, row) in bytes.chunks(16).enumerate() {
+            let hex: String = row
+                .iter()
+                .enumerate()
+                .map(|(k, b)| if k == 7 { format!("{b:02x}  ") } else { format!("{b:02x} ") })
+                .collect();
+            let ascii: String = row
+                .iter()
+                .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' })
+                .collect();
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(mono(&format!("{:04x}", i * 16), theme::LEGEND));
+                ui.label(mono(&format!("{hex:<49}"), theme::VALUE));
+                ui.label(mono(&ascii, theme::TRACE));
+            });
+        }
+    });
 }
 
 /// Group a large count so it can be read at a glance rather than counted.
