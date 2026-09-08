@@ -58,6 +58,7 @@ pub mod tetra;
 pub mod vocoder;
 pub mod voice;
 pub mod whiten;
+pub mod wifi;
 pub mod wmbus;
 
 pub use analyze::{analyze, Analysis};
