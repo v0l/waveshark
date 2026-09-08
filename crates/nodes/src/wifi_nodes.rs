@@ -60,6 +60,24 @@ pub fn channels() -> Vec<f64> {
     v
 }
 
+/// The channels a span starts on.
+///
+/// At 2.4 GHz the channels overlap on a 5 MHz grid, so reading all thirteen
+/// is reading each transmission three times over for three times the work.
+/// Access points sit on 1, 6, 11 and, where it is allowed, 13, and a network
+/// anywhere else announces where it is in every beacon it sends, which is
+/// heard on the neighbouring channels anyway. So: start on the four that
+/// cover the band, and open the others when something says to. The 5 GHz
+/// channels do not overlap and are all here.
+pub fn starting_channels() -> Vec<f64> {
+    let mut v: Vec<f64> = [1u8, 6, 11, 13, 14]
+        .iter()
+        .filter_map(|&n| dsp::wifi::channel_2ghz(n))
+        .collect();
+    v.extend(dsp::wifi::channels_5ghz());
+    v
+}
+
 /// The channel number a centre names, if it names one.
 ///
 /// Half a megahertz, which is tight because the bands are crowded: BLE's
@@ -88,6 +106,8 @@ pub struct WifiNode {
     meter: crate::FrameMeter,
     frames: Vec<WifiFrame>,
     accepted: u64,
+    /// Channels opened because a beacon said its network was there.
+    opened: u64,
 }
 
 impl Default for WifiNode {
@@ -104,12 +124,18 @@ impl WifiNode {
             meter: crate::FrameMeter::new(ofdm::RATE_HZ, DEFAULT_HZ as u64, KEEP_S),
             frames: Vec::new(),
             accepted: 0,
+            opened: 0,
         }
     }
 
     /// Frames that passed their FCS since the node was built.
     pub fn accepted(&self) -> u64 {
         self.accepted
+    }
+
+    /// The channels being read, which grows as beacons name their own.
+    pub fn channels(&self) -> Vec<f64> {
+        self.span.as_ref().map(|s| s.channels()).unwrap_or_default()
     }
 }
 
@@ -123,7 +149,7 @@ impl Simple for WifiNode {
             return Err(common::Error::other("wifi reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        let Some(span) = WifiSpan::new(rate, center, &channels(), self.cfg) else {
+        let Some(span) = WifiSpan::new(rate, center, &starting_channels(), self.cfg) else {
             return Err(common::Error::other(
                 "802.11 needs a whole 20 MHz channel inside the span",
             ));
@@ -152,6 +178,26 @@ impl Simple for WifiNode {
         self.meter.feed(iq);
         self.frames.clear();
         span.process(iq, &mut self.frames);
+        // A beacon says which channel its network is on. When that is a
+        // channel the span holds and nothing is reading, start reading it:
+        // a network on channel 3 is heard on 1 and 6 well enough to be
+        // announced, and not well enough to be read.
+        let claimed: Vec<f64> = self
+            .frames
+            .iter()
+            .filter(|f| f.fcs_ok)
+            .filter_map(|f| mac::parse(&f.psdu))
+            .filter_map(|m| m.network.and_then(|n| n.channel))
+            .filter_map(dsp::wifi::channel_2ghz)
+            .collect();
+        for hz in claimed {
+            if let Some(s) = self.span.as_mut() {
+                if s.open(hz, self.cfg) {
+                    self.opened += 1;
+                }
+            }
+        }
+
         let out = o.frames_mut();
         for f in &self.frames {
             if !f.fcs_ok {
@@ -461,6 +507,60 @@ mod tests {
         assert!(detail.contains("phy=MCS 7"), "{detail}");
         assert!(detail.contains("aggregated=1"), "{detail}");
         assert_eq!(d.detail.is_some(), true);
+    }
+
+    /// A span starts on the channels that cover the band, and opens another
+    /// when a beacon says its network is there.
+    #[test]
+    fn a_beacon_opens_the_channel_it_says_it_is_on() {
+        let mut n = WifiNode::default();
+        n.negotiate(&spec(61_440_000.0, 2_457_000_000.0)).unwrap();
+        let before = n.channels();
+        assert!(before.contains(&2_462_000_000.0), "{before:?}");
+        assert!(!before.contains(&2_452_000_000.0), "{before:?}");
+
+        // A beacon on channel 11 whose DS parameter set says channel 9.
+        let mut want = beacon();
+        // The DS parameter set's channel byte: behind the four byte check and
+        // the four byte security element.
+        let at = want.len() - 9;
+        assert_eq!(want[at], 6, "the beacon's channel is not where it was");
+        want[at] = 9;
+        let crc = dsp::wifi::crc32(&want[..want.len() - 4]);
+        want.truncate(want.len() - 4);
+        want.extend(crc.to_le_bytes());
+
+        let ratio = 61_440_000.0 / dsp::wifi::ofdm::RATE_HZ;
+        let frame = dsp::wifi::tx::frame(&want, 6, 0x5d);
+        let mut samples = vec![common::C32::default(); 2000];
+        let shift = 5_000_000.0f64 / 61_440_000.0;
+        samples.extend((0..(frame.len() as f64 * ratio) as usize).map(|i| {
+            let x = i as f64 / ratio;
+            let (a, f) = (x.floor() as usize, (x - x.floor()) as f32);
+            let v =
+                frame[a.min(frame.len() - 1)] * (1.0 - f) + frame[(a + 1).min(frame.len() - 1)] * f;
+            let ph = std::f32::consts::TAU * shift as f32 * (i + 2000) as f32;
+            v * common::C32::new(ph.cos(), ph.sin())
+        }));
+        samples.extend(vec![common::C32::default(); 40_000]);
+
+        let ins = [spec(61_440_000.0, 2_457_000_000.0)];
+        let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+        let mut output = Payload::Frames(Vec::new());
+        for block in samples.chunks(16_384) {
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            n.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx)
+                .unwrap();
+        }
+        assert!(
+            output.as_frames().map(|f| !f.is_empty()).unwrap_or(false),
+            "the beacon did not decode at all"
+        );
+        assert!(
+            n.channels().contains(&2_452_000_000.0),
+            "channel 9 was announced and not opened: {:?}",
+            n.channels()
+        );
     }
 
     #[test]

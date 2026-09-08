@@ -49,7 +49,7 @@ fn main() {
         let mut det = dsp::wifi::WifiSpan::new(
             rate,
             src.center().as_f64(),
-            &nodes::wifi_nodes::channels(),
+            &nodes::wifi_nodes::starting_channels(),
             cfg,
         )
         .expect("a channel in the span");
