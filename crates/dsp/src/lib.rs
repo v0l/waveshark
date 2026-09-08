@@ -30,6 +30,7 @@ pub mod modes;
 pub mod pocsag;
 pub mod pulse;
 pub mod rds;
+pub mod resample;
 pub mod route;
 pub mod slice;
 pub mod source;

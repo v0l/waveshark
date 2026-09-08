@@ -25,7 +25,7 @@ use crate::protocol::{Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
 use common::Result;
 use decode::wifi as mac;
-use dsp::wifi::{ofdm, WifiConfig, WifiDetector, WifiFrame};
+use dsp::wifi::{ofdm, WifiConfig, WifiFrame, WifiSpan};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -84,7 +84,7 @@ pub fn is_wifi_channel(center_hz: f64) -> bool {
 
 pub struct WifiNode {
     cfg: WifiConfig,
-    det: Option<WifiDetector>,
+    span: Option<WifiSpan>,
     meter: crate::FrameMeter,
     frames: Vec<WifiFrame>,
     accepted: u64,
@@ -100,7 +100,7 @@ impl WifiNode {
     pub fn new(cfg: WifiConfig) -> Self {
         Self {
             cfg,
-            det: None,
+            span: None,
             meter: crate::FrameMeter::new(ofdm::RATE_HZ, DEFAULT_HZ as u64, KEEP_S),
             frames: Vec::new(),
             accepted: 0,
@@ -123,25 +123,35 @@ impl Simple for WifiNode {
             return Err(common::Error::other("wifi reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        let Some(det) = WifiDetector::new(rate, self.cfg) else {
+        let Some(span) = WifiSpan::new(rate, center, &channels(), self.cfg) else {
             return Err(common::Error::other(
-                "802.11 needs a whole 20 MHz channel: a rate that is a multiple of 20 MS/s",
+                "802.11 needs a whole 20 MHz channel inside the span",
             ));
         };
-        self.det = Some(det);
+        // Where the port says the frames came from: the one channel when the
+        // span holds one, and the span itself when it holds several, because
+        // a frame cannot then be placed by the port alone. The same rule
+        // `ble_nodes` follows, and each frame carries its own channel.
+        let heard = span.channels();
+        let hz = match heard.as_slice() {
+            [one] => *one,
+            _ => center,
+        };
+        self.span = Some(span);
         self.meter = crate::FrameMeter::new(rate, center as u64, KEEP_S);
         let mut out = i.spec.with_kind(PortKind::Frames);
+        out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        let (Some(iq), Some(det)) = (i.as_iq(), self.det.as_mut()) else {
+        let (Some(iq), Some(span)) = (i.as_iq(), self.span.as_mut()) else {
             return Ok(());
         };
         self.meter.feed(iq);
         self.frames.clear();
-        det.process(iq, &mut self.frames);
+        span.process(iq, &mut self.frames);
         let out = o.frames_mut();
         for f in &self.frames {
             if !f.fcs_ok {
@@ -155,7 +165,8 @@ impl Simple for WifiNode {
                 f.rate.short_gi,
                 f.aggregated,
             );
-            let mut frame = common::Frame::measured(bytes, f.rssi_dbfs, f.snr_db);
+            let mut frame =
+                common::Frame::measured(bytes, f.rssi_dbfs, f.snr_db).at(f.center_hz as u64);
             // Preamble, headers and as much of the payload as the cap allows.
             let len =
                 (400 + (f.psdu.len() as f32 * 8.0 * 20.0 / f.rate.mbps) as usize).min(MAX_FRAME_IQ);
@@ -167,8 +178,8 @@ impl Simple for WifiNode {
 
     fn reset(&mut self) {
         self.meter.reset();
-        if let Some(d) = self.det.as_mut() {
-            d.reset();
+        if let Some(s) = self.span.as_mut() {
+            s.reset();
         }
     }
 }
@@ -375,9 +386,13 @@ mod tests {
         let mut n = WifiNode::default();
         assert!(n.negotiate(&spec(20_000_000.0, 2_437_000_000.0)).is_ok());
         assert!(n.negotiate(&spec(40_000_000.0, 5_180_000_000.0)).is_ok());
-        // An RTL-SDR's whole range, and a rate that is not a multiple.
+        // An RTL-SDR's whole range, and a span with no channel inside it.
         assert!(n.negotiate(&spec(2_400_000.0, 2_437_000_000.0)).is_err());
-        assert!(n.negotiate(&spec(30_000_000.0, 2_437_000_000.0)).is_err());
+        assert!(n.negotiate(&spec(20_000_000.0, 868_000_000.0)).is_err());
+        // A LimeSDR's widest, which holds a dozen channels and needs a rate
+        // no decimator reaches from it.
+        let out = n.negotiate(&spec(61_440_000.0, 2_457_000_000.0)).unwrap();
+        assert_eq!(out.center, Hz(2_457_000_000));
     }
 
     /// The receiver reads a frame out of samples the transmitter in `dsp`

@@ -46,7 +46,14 @@ fn main() {
         if let Ok(v) = std::env::var("DETECT") {
             cfg.detect = v.parse().unwrap();
         }
-        let mut det = dsp::wifi::WifiDetector::new(rate, cfg).expect("rate");
+        let mut det = dsp::wifi::WifiSpan::new(
+            rate,
+            src.center().as_f64(),
+            &nodes::wifi_nodes::channels(),
+            cfg,
+        )
+        .expect("a channel in the span");
+        println!("channels: {:?}", det.channels().iter().map(|c| c / 1e6).collect::<Vec<_>>());
         let mut frames = Vec::new();
         for block in samples.chunks(16_384) {
             det.process(block, &mut frames);
@@ -56,7 +63,8 @@ fn main() {
         for f in frames.iter().take(20) {
             let mac = decode::wifi::parse(&f.psdu);
             println!(
-                "  {:>10} {:>5} B fcs={} err={:.3} snr={:.1} rssi={:.1} off={:.0} Hz  {}",
+                "  {:>8.0} MHz {:>10} {:>5} B fcs={} err={:.3} snr={:.1} rssi={:.1} off={:.0} Hz  {}",
+                f.center_hz / 1e6,
                 f.rate.label(),
                 f.psdu.len(),
                 f.fcs_ok,
