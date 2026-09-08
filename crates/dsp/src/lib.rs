@@ -31,6 +31,7 @@ pub mod pocsag;
 pub mod pulse;
 pub mod rds;
 pub mod route;
+pub mod slice;
 pub mod source;
 pub mod spectrum;
 pub mod squelch;

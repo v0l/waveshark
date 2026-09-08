@@ -56,3 +56,6 @@ name = "split"
 
 [[example]]
 name = "wifi_probe"
+
+[[example]]
+name = "wifi_cost"
