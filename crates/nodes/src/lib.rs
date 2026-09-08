@@ -8,6 +8,7 @@
 
 pub mod ais_nodes;
 pub mod ble_nodes;
+pub mod wifi_nodes;
 pub mod auto;
 pub mod aprs_nodes;
 pub mod bank;
@@ -49,6 +50,7 @@ pub use decode_nodes::{
 pub use ais_nodes::AisNode;
 pub use frame_meter::FrameMeter;
 pub use ble_nodes::BleNode;
+pub use wifi_nodes::WifiNode;
 pub use survey_nodes::SurveyNode;
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
@@ -315,6 +317,15 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(BleNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "wifi",
+            summary: "One 20 MHz 802.11a/g channel: OFDM, the legacy rates, and the MAC frame",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(WifiNode::default()) as Box<dyn Node>),
     );
 
     r.register(

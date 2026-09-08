@@ -14,6 +14,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 - Bluetooth LE advertising, including Bluetooth 5 Long Range, and Open
   Drone ID out of it or off a beacon.
+- Wi-Fi: 802.11a/g frames off a 20 MHz channel, with the network name,
+  the addresses talking and whether one of them is randomised. Needs a
+  HackRF or a LimeSDR, since the channel is as wide as the span.
 - GSM: a cell's identity off its synchronisation burst, the blocks it
   broadcasts, who a page is calling, and the signalling channel a phone is
   sent to, on the beacon carrier or on another carrier timed from it.

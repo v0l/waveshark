@@ -75,8 +75,17 @@ pub fn pilot_polarity(symbol: usize) -> f32 {
     seq[symbol % 127]
 }
 
-/// Generator polynomials, 133 and 171 octal, most significant tap first.
-const G: [u8; 2] = [0o133, 0o171];
+/// The generator polynomials, as masks over the shift register below.
+///
+/// The standard's are 133 and 171 octal, written with the tap on the newest
+/// input bit at the top. The register here holds the newest bit at the
+/// bottom, so the masks are those two reversed: 155 and 117. That is not a
+/// cosmetic difference. Neither polynomial is a palindrome, so an encoder
+/// with the standard's numbers written straight into this register is a
+/// different code that decodes its own output perfectly and reads nothing
+/// off the air, which cost an afternoon and is why the loopback test is not
+/// on its own enough.
+const G: [u8; 2] = [0o155, 0o117];
 
 const fn parity(v: u8) -> u8 {
     (v.count_ones() & 1) as u8

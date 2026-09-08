@@ -123,14 +123,26 @@ pub struct WifiFrame {
 #[derive(Clone, Copy, Debug)]
 pub struct WifiConfig {
     /// Plateau height the short training field's autocorrelation has to reach.
-    /// One would be a noiseless repeat; 0.6 finds frames a few dB above the
-    /// floor without opening on every burst of noise.
+    /// One is a noiseless repeat.
     pub detect: f32,
-    /// How far above the tracked floor the burst has to be before its
-    /// autocorrelation is believed at all, in decibels. The metric is a
-    /// normalised correlation, so silence produces whatever the noise
-    /// happens to correlate to.
-    pub min_snr_db: f32,
+    /// How well the long training symbol has to match before the frame behind
+    /// it is read, as a normalised correlation.
+    ///
+    /// This is what stops the plateau detector's false alarms from costing
+    /// anything: on the 2462 MHz capture the training field correlates at 0.6
+    /// to 0.75 and noise reaches about 0.15, so the gate is not delicate.
+    pub lts: f32,
+    /// How far above the tracked noise floor a burst has to be before its
+    /// autocorrelation is believed at all, in decibels.
+    ///
+    /// This exists to keep the cost down rather than to judge a frame. The
+    /// plateau metric is a normalised correlation, so silence produces
+    /// whatever the noise happens to correlate to, and every false plateau
+    /// costs a training-symbol search. Nothing is rejected for being weak:
+    /// the frame check sequence decides that, and the frames this reads at
+    /// 20 dB below the strong ones are exactly the far-away stations worth
+    /// having.
+    pub min_level_db: f32,
     /// Largest PSDU accepted, in bytes. The standard's ceiling is 4095.
     pub max_psdu: usize,
 }
@@ -139,11 +151,17 @@ impl Default for WifiConfig {
     fn default() -> Self {
         Self {
             detect: 0.4,
-            min_snr_db: 3.0,
+            lts: 0.35,
+            min_level_db: 3.0,
             max_psdu: 4095,
         }
     }
 }
+
+/// How far past a rejected detection to carry on looking. Long enough that
+/// the same plateau is not found again, short enough that a frame starting
+/// inside a false alarm is still seen.
+const PAST: usize = 64;
 
 /// Samples one frame can occupy: 4095 bytes at 6 Mbit/s is 1366 symbols.
 const MAX_FRAME_SAMPLES: usize = 320 + SYMBOL * 1400;
@@ -154,13 +172,28 @@ pub struct WifiDetector {
     factor: usize,
     decim: Option<crate::fir::FirDecim>,
     fft: Arc<dyn Fft<f32>>,
+    /// The centre spur, tracked and taken out.
+    ///
+    /// Not a courtesy to whoever wired the graph. A direct conversion tuner's
+    /// offset is a constant, and a constant correlates perfectly with itself
+    /// at every lag, so the short training field's detector reads a plateau
+    /// across a silent band: measured on the 2462 MHz capture, whose offset
+    /// is about the size of its noise floor, that was six thousand detections
+    /// in three seconds and not one of them a frame.
+    dc: crate::dc::DcBlock,
     /// The long training symbol in the time domain, conjugated, for the
-    /// correlation that finds the symbol boundary.
+    /// correlation that finds the symbol boundary, and its energy, so that
+    /// correlation can be normalised into something a threshold applies to.
     lts_ref: Vec<C32>,
+    lts_energy: f32,
     buf: Vec<C32>,
     /// Working samples dropped from the front of `buf` since the start.
     base: u64,
-    /// Tracked noise power, updated on every block that holds no burst.
+    /// Tracked noise power: the quietest block seen, climbing a hundredth per
+    /// block so a long transmission cannot become the floor. The same
+    /// estimator `nodes::FrameMeter` uses, and for the same reason: a floor
+    /// taken only from blocks that held no detection stays wherever the first
+    /// block left it, and on this capture that threw away half the frames.
     floor: f32,
     scratch: Vec<C32>,
 }
@@ -187,6 +220,8 @@ impl WifiDetector {
             factor,
             decim,
             fft: FftPlanner::new().plan_fft_forward(FFT),
+            dc: crate::dc::DcBlock::new(ofdm::RATE_HZ),
+            lts_energy: lts_ref.iter().map(|x| x.norm_sqr()).sum(),
             lts_ref,
             buf: Vec::new(),
             base: 0,
@@ -199,10 +234,12 @@ impl WifiDetector {
         self.buf.clear();
         self.base = 0;
         self.floor = 1e-6;
+        self.dc.reset();
     }
 
     /// Read whatever frames are in `iq`, appending them to `out`.
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
+        let from = self.buf.len();
         match self.decim.as_mut() {
             Some(d) => {
                 self.scratch.clear();
@@ -211,6 +248,14 @@ impl WifiDetector {
             }
             None => self.buf.extend_from_slice(iq),
         }
+        self.dc.process(&mut self.buf[from..]);
+        let mean = self.buf[from..].iter().map(|x| x.norm_sqr()).sum::<f32>()
+            / (self.buf.len() - from).max(1) as f32;
+        self.floor = if mean < self.floor {
+            mean
+        } else {
+            self.floor * 1.01
+        };
 
         let mut at = 0usize;
         while let Some(start) = self.find(at) {
@@ -226,7 +271,7 @@ impl WifiDetector {
                         self.trim(start);
                         return;
                     }
-                    at = start + 16;
+                    at = start + PAST;
                 }
             }
         }
@@ -247,7 +292,7 @@ impl WifiDetector {
     /// correlation against itself rises to a plateau there and nowhere else.
     /// This is the only thing that runs on every sample, which is why it is
     /// four multiplies a sample and not a matched filter.
-    fn find(&mut self, at: usize) -> Option<usize> {
+    fn find(&self, at: usize) -> Option<usize> {
         const WIN: usize = 48;
         const LAG: usize = 16;
         if self.buf.len() < at + WIN + LAG + 320 {
@@ -256,17 +301,25 @@ impl WifiDetector {
         let end = self.buf.len() - WIN - LAG;
         let mut c = C32::default();
         let mut p = 0.0f32;
+        let mut q = 0.0f32;
         for k in 0..WIN {
             c += self.buf[at + k] * self.buf[at + k + LAG].conj();
             p += self.buf[at + k + LAG].norm_sqr();
+            q += self.buf[at + k].norm_sqr();
         }
+        let gate = self.floor * 10f32.powf(self.cfg.min_level_db / 10.0);
         let mut run = 0usize;
-        let mut quiet = 0.0f32;
-        let mut quiet_n = 0usize;
         for n in at..end {
-            let m = if p > 0.0 { c.norm_sqr() / (p * p) } else { 0.0 };
+            // Normalised against both windows rather than against the delayed
+            // one twice. A ratio that can exceed one is not a correlation,
+            // and this one reached twenty where the power stepped.
+            let m = if p > 0.0 && q > 0.0 {
+                c.norm() / (p * q).sqrt()
+            } else {
+                0.0
+            };
             let loud = p / WIN as f32;
-            if m > self.cfg.detect && loud > self.floor * 10f32.powf(self.cfg.min_snr_db / 10.0) {
+            if m > self.cfg.detect && loud > gate {
                 run += 1;
                 // Half the short field seen as a plateau is a frame; less
                 // than that is two symbols of something that rhymes.
@@ -275,17 +328,13 @@ impl WifiDetector {
                 }
             } else {
                 run = 0;
-                quiet += loud;
-                quiet_n += 1;
             }
             c -= self.buf[n] * self.buf[n + LAG].conj();
             p -= self.buf[n + LAG].norm_sqr();
+            q -= self.buf[n].norm_sqr();
             c += self.buf[n + WIN] * self.buf[n + WIN + LAG].conj();
             p += self.buf[n + WIN + LAG].norm_sqr();
-        }
-        if quiet_n > 64 {
-            let mean = quiet / quiet_n as f32;
-            self.floor = 0.9 * self.floor + 0.1 * mean;
+            q += self.buf[n + WIN].norm_sqr();
         }
         None
     }
@@ -302,13 +351,16 @@ impl WifiDetector {
             return None;
         }
         let coarse = self.coarse_cfo(start);
-        let (lts_at, fine) = self.sync(start, coarse)?;
+        // A plateau with no training symbol behind it was not a frame. That
+        // is a rejection and not a shortage of samples: treating it as one
+        // parks the receiver on the same sample for ever, which on an
+        // off-air capture meant the real frames a millisecond later were
+        // never reached.
+        let Some((lts_at, fine)) = self.sync(start, coarse) else {
+            return Some(start + PAST);
+        };
         let cfo = coarse + fine;
         let (csi, snr_db) = self.channel(lts_at, cfo);
-        // A channel estimate of nothing is a detection on noise.
-        if !snr_db.is_finite() || snr_db < self.cfg.min_snr_db {
-            return Some(start + 16);
-        }
 
         let sig_at = lts_at + 2 * FFT;
         let mut soft = Vec::with_capacity(48);
@@ -319,14 +371,14 @@ impl WifiDetector {
         // a noise detection names a rate and a length and asks for four
         // milliseconds of samples that are not a frame.
         if bits[..17].iter().sum::<u8>() & 1 != bits[17] || bits[18..].iter().any(|&b| b != 0) {
-            return Some(start + 16);
+            return Some(start + PAST);
         }
         let Some(rate) = ofdm::rate_of([bits[0], bits[1], bits[2], bits[3]]) else {
-            return Some(start + 16);
+            return Some(start + PAST);
         };
         let len = (0..12).fold(0usize, |a, i| a | usize::from(bits[5 + i]) << i);
         if len == 0 || len > self.cfg.max_psdu {
-            return Some(start + 16);
+            return Some(start + PAST);
         }
 
         let n_sym = (16 + 8 * len + 6).div_ceil(rate.dbps());
@@ -383,22 +435,31 @@ impl WifiDetector {
     /// carrier offset once the two long symbols are compared 64 samples
     /// apart, which resolves what the short field could not.
     fn sync(&self, start: usize, coarse: f32) -> Option<(usize, f32)> {
-        let from = start + 96;
-        let to = (start + 304).min(self.buf.len().saturating_sub(FFT));
+        let from = start;
+        // A quarter of a millisecond of slack. The plateau is found wherever
+        // the correlation happens to cross, which off air is anywhere in the
+        // eight microseconds of short training field and sometimes before it,
+        // so a window tight around where the preamble ought to be misses the
+        // long field entirely.
+        let to = (start + 448).min(self.buf.len().saturating_sub(FFT));
         if to <= from {
             return None;
         }
+        // Normalised, so the threshold means the same thing on a strong frame
+        // and a weak one.
         let mag: Vec<f32> = (from..to)
             .map(|n| {
                 let mut c = C32::default();
+                let mut p = 0.0f32;
                 for k in 0..FFT {
                     c += self.rot(n + k, coarse) * self.lts_ref[k];
+                    p += self.buf[n + k].norm_sqr();
                 }
-                c.norm_sqr()
+                c.norm() / (p.max(1e-20) * self.lts_energy).sqrt()
             })
             .collect();
         let peak = mag.iter().copied().fold(0.0f32, f32::max);
-        if peak <= 0.0 {
+        if peak < self.cfg.lts {
             return None;
         }
         // The long field is the same symbol twice, so it correlates twice
@@ -408,7 +469,8 @@ impl WifiDetector {
         // against the training field: at 48 kHz of crystal error that put
         // the estimate 100 kHz out and no frame decoded at all. The first
         // peak above a fraction of the tallest is the one that is meant.
-        let first = from + mag.iter().position(|&m| m >= 0.5 * peak).unwrap_or(0);
+        let gate = (0.75 * peak).max(self.cfg.lts);
+        let first = from + mag.iter().position(|&m| m >= gate).unwrap_or(0);
         if first + 2 * FFT > self.buf.len() {
             return None;
         }

@@ -3424,6 +3424,66 @@ pub(crate) mod tests {
         every_row_carries_its_measurements(&ble);
     }
 
+    fn wifi_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/ofdm_wifi_frames_2462M_20000k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// 802.11 through the whole receiver: the table puts `auto` on a 20 MHz
+    /// span, `auto` runs the Wi-Fi front end across it because channel 11 is
+    /// what the span is, and what comes back is the traffic between an access
+    /// point and one station.
+    ///
+    /// The capture was cut around forty-one frames identified by bandwidth
+    /// when it was recorded; the receiver reads eighty-one, because the
+    /// margin either side of each one holds traffic too. Every one of them
+    /// passed a CRC-32 over the whole frame, so the count is evidence rather
+    /// than a threshold: fewer is a receiver that got worse.
+    #[test]
+    fn wifi_frames_are_found_and_read() {
+        let Some(buf) = wifi_fixture() else {
+            eprintln!("skipping: ofdm_wifi_frames_2462M_20000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let fronts =
+            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        assert!(
+            fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
+            "the table put nothing on a span covering channel 11: {fronts:?}"
+        );
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = fronts;
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
+        assert!(wifi.len() >= 75, "read {} frames, expected 81", wifi.len());
+        for r in &wifi {
+            assert_eq!(r.crc, Some(true), "a frame without its FCS got through: {r:?}");
+            assert!(
+                (r.freq - 2_462_000_000.0).abs() < 1e6,
+                "reported at {} Hz rather than on channel 11",
+                r.freq
+            );
+            assert!(r.detail.contains("channel=11"), "read as {}", r.detail);
+        }
+        // The two devices talking to each other, by their own addresses.
+        let all = wifi.iter().map(|r| r.detail.clone()).collect::<Vec<_>>().join(" ");
+        assert!(
+            wifi.iter().any(|r| {
+                r.link
+                    .as_ref()
+                    .and_then(|l| l.from.as_ref())
+                    .is_some_and(|p| p.label().contains("70:03:9F:0D:A9:8D"))
+            }),
+            "the station that sent the data frames is not named: {all}"
+        );
+        every_row_carries_its_measurements(&wifi);
+    }
+
     /// The rule every row in the list obeys, whichever front end made it: a
     /// level, a signal to noise ratio, and the samples it was read from.
     ///
