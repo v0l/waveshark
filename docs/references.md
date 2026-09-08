@@ -30,6 +30,8 @@ holds the rows, the terms and the credit each is shown with.
 | Unidentified signals | sigidwiki.com contributors | wiki contributors | `sigidwiki.com/api.php?action=ask` |
 | Orbital elements | CelesTrak (Dr. T.S. Kelso) | [usage policy](https://celestrak.org/usage-policy.php): documented queries only, one download per update, stop on any non-200 | `celestrak.org/NORAD/elements/gp.php?GROUP=…&FORMAT=csv` |
 | Satellite transmitters | SatNOGS DB | CC BY-SA 4.0 | `db.satnogs.org/api/transmitters/?format=json` |
+| Satellites the TinyGS network tracks | TinyGS | open network, elements published for its own stations | `api.tinygs.com/v1/tinygs_supported.txt` |
+| Catalogue of objects in orbit | Space-Track (US Space Force) | their user agreement, an account of your own, no redistribution | `space-track.org/basicspacedata/query/class/gp/…`, logged in, fewer than 30 requests a minute |
 | Map tiles | OpenStreetMap contributors | ODbL, tile usage policy | `tile.openstreetmap.org` |
 
 Two things go out rather than come in. `api.wigle.net/api/v2/file/upload`
@@ -102,6 +104,16 @@ header is one a packager will miss.
 | `crates/decode/src/vocoder/` | a GPL reimplementation of the EN 300 395-2 reference decoder, not a copy: the ETSI source is under a copyright that cannot be vendored | GPL, written here |
 | `crates/decode/src/protocols/keyfob/` | Flipper Zero Momentum firmware subghz protocols | GPL |
 | `crates/orbit` | the `sgp4` crate, which implements the model in Vallado's *Revisiting Spacetrack Report #3* | MIT/Apache |
+
+TinyGS publishes one more thing this receiver wants and cannot fetch: the
+modem settings per satellite, spreading factor, bandwidth and coding rate,
+on `api.tinygs.com/v3/satellites`. That path is behind Cloudflare bot
+management and the block is on the TLS fingerprint rather than the user
+agent, so curl and ureq both hang with no answer at all while a browser is
+served in a moment. The supported list and `v1/tles.txt` beside it answer a
+plain client, which is why the group here carries elements and not
+parameters. Until TinyGS says otherwise, the LoRa decoder keeps finding the
+spreading factor by trying.
 
 ## Publisher rules this program is written around
 
