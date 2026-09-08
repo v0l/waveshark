@@ -28,6 +28,8 @@ pub(super) enum Action {
     Select(Option<i64>),
     /// Write the survey out as WiGLE CSV, beside the survey file.
     Export,
+    /// Open the wigle.net feed's settings.
+    Wigle,
 }
 
 impl Devices<'_> {
@@ -79,6 +81,19 @@ impl Devices<'_> {
                 ui.add_space(12.0);
                 if devices > 0 && ui.button("Export CSV").clicked() {
                     act = Some(Action::Export);
+                }
+                // What the feed is doing, said on the button rather than in a
+                // dialog nobody has open: an upload that has been failing all
+                // afternoon is worth noticing from the pane.
+                let w = self.st.wigle.status.as_ref();
+                let label = match (self.st.wigle.on, w) {
+                    (false, _) => "WiGLE".to_string(),
+                    (true, Some(s)) if s.error.is_some() => "WiGLE: failing".into(),
+                    (true, Some(s)) => format!("WiGLE: {} sent", s.sent_rows),
+                    (true, None) => "WiGLE: on".into(),
+                };
+                if ui.button(label).clicked() {
+                    act = Some(Action::Wigle);
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.st.filter)

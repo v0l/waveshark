@@ -40,7 +40,8 @@ zstd = { version = "0.13", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest.workspace = true
+httpc.workspace = true
 
 [dev-dependencies]
 hound = "3"

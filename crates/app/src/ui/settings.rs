@@ -958,6 +958,128 @@ impl App {
     /// is made rather than found: the address is the device. It is created
     /// where every other radio is chosen, because from the dial's point of
     /// view that is all it is.
+    /// The wigle.net feed: the account it uploads as, and what it has done.
+    ///
+    /// Its own dialog rather than a row in settings because it is the one
+    /// place in the program that holds a credential, and because what an
+    /// operator wants when they open it is not a switch but an answer: how
+    /// much is waiting, how much has gone, and what the last refusal said.
+    pub(super) fn wigle_modal(&mut self, ctx: &egui::Context) {
+        if !self.survey.wigle.open {
+            return;
+        }
+        let mut close = false;
+        let mut apply = false;
+        let r = egui::containers::Modal::new(egui::Id::new("wigle"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                modal_title(ui, "Feed wigle.net");
+                hint(
+                    ui,
+                    "Bluetooth devices and cells heard with a position are written as WiGLE \
+                     CSV and uploaded. Everything else the survey records stays on this \
+                     machine: the format has no type for an aircraft or a pager, and a row \
+                     filed under the wrong one cannot be taken back.",
+                );
+                ui.add_space(10.0);
+
+                legend_help(
+                    ui,
+                    "API name",
+                    "From wigle.net/account, where it is shown beside the token. It is not \
+                     the name you log in with.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.survey.wigle.name)
+                        .desired_width(ui.available_width())
+                        .hint_text("AID00000000000000000000000000000"),
+                );
+                ui.add_space(8.0);
+
+                legend_help(
+                    ui,
+                    "API token",
+                    "The token from the same page. It is stored in the session file in plain \
+                     text, so treat it as a password that lives on this machine.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.survey.wigle.token)
+                        .password(true)
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(10.0);
+
+                let donate_help = "Lets wigle.net licence what you upload commercially. Off \
+                                   unless you say otherwise: they are your observations to \
+                                   give away.";
+                if check_help(ui, &mut self.survey.wigle.donate, "Allow commercial use", donate_help)
+                    .changed()
+                {
+                    apply = true;
+                }
+                let on_help = "While this is on, every Bluetooth device and cell heard with a \
+                               position is spooled to disc and uploaded when there is a \
+                               network. A drive with no coverage sends when it gets home.";
+                if check_help(ui, &mut self.survey.wigle.on, "Upload while receiving", on_help)
+                    .changed()
+                {
+                    apply = true;
+                }
+                ui.add_space(10.0);
+
+                // What it is actually doing. Three numbers and the last
+                // refusal, which is everything an operator can act on.
+                match self.survey.wigle.status.as_ref() {
+                    Some(s) => {
+                        theme::Line::new()
+                            .legend("waiting")
+                            .value(format!("{} rows in {} files", s.queued_rows, s.queued_files))
+                            .legend("uploaded")
+                            .value(format!("{} rows in {} files", s.sent_rows, s.sent_files))
+                            .size(11.0)
+                            .show(ui);
+                        if let Some(t) = &s.transaction {
+                            hint(ui, &format!("last transaction {t}"));
+                        }
+                        hint(ui, &format!("spool {}", s.spool.display()));
+                        if let Some(e) = &s.error {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(e).small().color(theme::FAULT),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    }
+                    None => hint(ui, "no receiver running, so nothing is being collected"),
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(crate::i18n::t("ui.close")).clicked() {
+                            close = true;
+                        }
+                        if ui.button("APPLY").clicked() {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if apply {
+            self.apply_wigle();
+        }
+        if close {
+            self.survey.wigle.open = false;
+        }
+    }
+
     pub(super) fn remote_modal(&mut self, ctx: &egui::Context) {
         let Some(mut edit) = self.remote.take() else { return };
         let (mut close, mut add) = (false, false);

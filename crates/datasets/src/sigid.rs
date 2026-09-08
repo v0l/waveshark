@@ -43,7 +43,7 @@ pub fn unid_source() -> Source {
     Source::http("sigidwiki-unid.json", UNID_URL, MAX_AGE)
 }
 
-const AGENT: &str = concat!("WaveShark/", env!("CARGO_PKG_VERSION"), " (https://github.com/v0l/waveshark)");
+use httpc::USER_AGENT as AGENT;
 
 /// The latest Artemis release, reduced to the SQLite file inside its tar.
 ///

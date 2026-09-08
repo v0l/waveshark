@@ -366,6 +366,49 @@ receiver follow the car. The pane
 exports WiGLE CSV, which is what wardriving tools read; the survey file itself
 is the record, and the CSV is a copy shaped for other people's tools.
 
+### Feeding wigle.net
+
+The same rows can go straight to wigle.net while the drive is happening.
+`WigleNode` (`crates/nodes/src/wigle_nodes.rs`) is a second sink on the bus
+beside the survey, reading the same decodes and thinning them by the same
+rule, and `crates/survey/src/wigle` is the format and the one request that
+sends it.
+
+Three things decided its shape.
+
+**Only what the format has a type for.** A BLE or Bluetooth address, and a
+GSM cell that named itself, keyed the way WiGLE keys a cell:
+`MCCMNC_LAC_CID`, with the carrier as an ARFCN rather than as hertz.
+Aircraft, vessels, pagers and tyre sensors have no type here and are not
+filed under one that nearly fits: a row in the wrong bucket is wrong in
+somebody else's database forever, and nothing downstream can tell it from a
+real one. The export the pane writes follows the same rule.
+
+**A spool, not a request per sighting.** WiGLE takes files, and the roads
+worth driving have no coverage: that is why the survey exists. Rows go to a
+file under `$XDG_DATA_HOME/waveshark/wigle`, closed at two thousand rows or
+five minutes, and a thread sends closed files oldest first whenever there is a
+network, deleting each only once WiGLE has answered that it took it. A laptop
+that comes home to a wireless network sends the whole drive without being
+asked. Nothing is held in memory that a power cut would cost: the node writes
+what it has collected when it is dropped, which is what a retune does to it.
+
+**One uploader for the process.** A graph is rebuilt on every retune, so a
+node lives for seconds while an upload takes minutes. The uploader is a
+process-wide thread the node points at rather than something the node owns, so
+a rebuild mid-upload neither interrupts it nor lets a second thread send the
+same file again.
+
+The account is set in the WiGLE dialog off the devices pane: the API name and
+token from wigle.net/account, whether WiGLE may licence the rows on
+commercially (off unless it is asked for; they are the operator's
+observations to give away), and the switch. It is saved in the session file,
+token included, and the dialog says so. The dialog is also where the feed
+reports: how many rows are waiting, how many have gone, the last transaction
+id, and what the last refusal said. A refusal arrives as a 200 with
+`success: false`, so a file is deleted on what WiGLE said and not on the
+status code.
+
 ## Views not built yet
 
 ### Image pane, for APT, LRPT, SSTV and HRIT

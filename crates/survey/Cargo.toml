@@ -7,3 +7,9 @@ license.workspace = true
 [dependencies]
 common.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
+httpc.workspace = true
+reqwest.workspace = true
+# A GSM row is labelled by its ARFCN rather than by hertz, and `dsp::gsm`
+# already holds the band plan that converts one to the other.
+dsp.workspace = true

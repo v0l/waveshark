@@ -595,6 +595,10 @@ pub enum Cmd {
     /// on the packet bus, so like the packet log this is a command to the
     /// radio thread rather than a setting the interface keeps.
     Survey(Option<std::path::PathBuf>),
+    /// Upload what is heard to wigle.net as this account, or `None` to stop.
+    /// The feed is a node on the packet bus, so this is a command like the
+    /// survey rather than a setting the interface keeps to itself.
+    Wigle(Option<survey::Account>),
     /// Read the receiver's own position from this GPS, or `None` for the
     /// local gpsd, which is what the reader looks for on its own. There is no
     /// off: a fix moves the station position, and no fix leaves it alone.
@@ -1389,6 +1393,9 @@ pub struct Status {
     pub survey_devices: AtomicU64,
     pub survey_sightings: AtomicU64,
     pub survey_heard: AtomicU64,
+    /// What the WiGLE feed is doing: what is spooled, what has been sent, and
+    /// why the last attempt failed.
+    pub wigle: parking_lot::Mutex<Option<nodes::WigleStatus>>,
     /// Whether anything is subscribed on the call bus, whether a recorded
     /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
@@ -1540,6 +1547,7 @@ impl Default for Status {
             survey_devices: AtomicU64::new(0),
             survey_sightings: AtomicU64::new(0),
             survey_heard: AtomicU64::new(0),
+            wigle: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new((None, Vec::new())),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
@@ -2077,6 +2085,9 @@ fn run(
     // The same for the video bus: what is being watched outlives the node.
     let mut watching: Vec<crate::videobus::Rule> = vec![crate::videobus::Rule::Everything];
     let mut call_dir: Option<std::path::PathBuf> = None;
+    // Who the WiGLE feed uploads as, which outlives a rebuild for the same
+    // reason the survey path does.
+    let mut wigle_account: Option<survey::Account> = None;
     // Where the survey is written, which outlives a rebuild: the node is
     // replaced with the graph and the setting is not. The GPS is not here at
     // all; it runs for as long as the program does, in `crate::station`, and
@@ -2442,6 +2453,10 @@ fn run(
                     survey_path = path.clone();
                     rx.set_survey(path);
                 }
+                Cmd::Wigle(account) => {
+                    wigle_account = account.clone();
+                    rx.set_wigle(account);
+                }
                 Cmd::Gps(transport) => crate::station::set_source(transport),
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
@@ -2622,6 +2637,7 @@ fn run(
             status.logged.store(rx.logged(), Ordering::Relaxed);
             // A rebuild replaced the survey node with an empty one.
             rx.set_survey(survey_path.clone());
+            rx.set_wigle(wigle_account.clone());
             // The stage comes back switched off, as the derived graph draws
             // it. A capture running across a retune has to be switched on
             // again, and it starts a new file: the old one's name says which
@@ -2743,6 +2759,16 @@ fn run(
             // asking per block is two hundred locks for one new number.
             // A fix moves the station; losing the sky leaves it where it was.
             rx.set_fix(crate::station::fix());
+            {
+                // Read at the display's rate: the status counts spool files
+                // on disc, which is a directory listing and not a number
+                // worth taking per block.
+                let now = rx.wigle_status();
+                let mut held = status.wigle.lock();
+                if *held != now {
+                    *held = now;
+                }
+            }
             if let Some((devices, sightings, heard)) = rx.survey_counts() {
                 status.survey_devices.store(devices, Ordering::Relaxed);
                 status.survey_sightings.store(sightings, Ordering::Relaxed);

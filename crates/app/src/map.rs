@@ -16,14 +16,6 @@ use tokio::sync::Semaphore;
 /// Tile edge in pixels. Fixed by the tile scheme, not a choice.
 pub const TILE_PX: f64 = 256.0;
 
-/// OSM's tile usage policy asks for an identifying agent with contact
-/// information, and blocks clients that send a default or absent one.
-const AGENT: &str = concat!(
-    "WaveShark/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/v0l/waveshark)"
-);
-
 const URL: &str = "https://tile.openstreetmap.org";
 
 /// Tiles beyond this are not worth holding as GPU textures; the view shows a
@@ -77,11 +69,10 @@ impl Default for Tiles {
 
 impl Tiles {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent(AGENT)
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
+        // OSM's tile usage policy asks for an identifying agent with
+        // contact information, and blocks clients that send a default or
+        // absent one; `httpc` is where that name lives.
+        let http = httpc::client(std::time::Duration::from_secs(15)).unwrap_or_default();
         Self {
             slots: HashMap::new(),
             order: Vec::new(),

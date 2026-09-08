@@ -16,15 +16,6 @@ use std::time::Duration;
 
 const LATEST: &str = "https://api.github.com/repos/v0l/waveshark/releases/latest";
 
-/// GitHub rejects a request with no agent, and the tile fetcher's reason for
-/// naming itself applies here too: a request that cannot be attributed gets
-/// blocked rather than answered.
-const AGENT: &str = concat!(
-    "WaveShark/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/v0l/waveshark)"
-);
-
 /// What this binary was built as.
 pub fn running() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -119,11 +110,9 @@ pub fn check_now() {
 }
 
 async fn fetch() -> Result<Release, String> {
-    let http = reqwest::Client::builder()
-        .user_agent(AGENT)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // GitHub rejects a request with no agent, which is one of the reasons
+    // every client here is built the same way.
+    let http = httpc::client(Duration::from_secs(10)).map_err(|e| e.to_string())?;
     let body = http
         .get(LATEST)
         .header("Accept", "application/vnd.github+json")

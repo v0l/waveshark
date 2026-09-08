@@ -20,6 +20,7 @@ members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/httpc",
     "crates/stt",
 ]
 
@@ -48,6 +49,7 @@ default-members = [
     "crates/audio",
     "crates/gps",
     "crates/survey",
+    "crates/httpc",
     "crates/stt",
 ]
 
@@ -79,6 +81,7 @@ datasets = { path = "crates/datasets" }
 mbe = { path = "crates/mbe" }
 gps = { path = "crates/gps" }
 survey = { path = "crates/survey" }
+httpc = { path = "crates/httpc" }
 
 anyhow = "1.0"
 thiserror = "2.0"
@@ -109,6 +112,14 @@ ctr = "0.10"
 sha2 = "0.11"
 md-5 = "0.11"
 hmac = "0.13"
+# One client for the whole program, built through `httpc` so every request
+# carries the same user agent. rustls rather than the system OpenSSL, so a
+# release binary runs on a machine that has neither.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+    "multipart",
+] }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
