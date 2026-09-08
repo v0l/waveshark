@@ -16,6 +16,7 @@ pub mod capture_nodes;
 pub mod decode_nodes;
 pub mod dsp_nodes;
 pub mod dmr_nodes;
+pub mod elrs_nodes;
 pub mod m17_nodes;
 pub mod tetra_nodes;
 pub mod modes_nodes;
@@ -63,6 +64,7 @@ pub use packet_nodes::PacketDecodeNode;
 pub use auto::{AutoNode, AUTO_OPEN_DB};
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use lora_nodes::LoraNode;
+pub use elrs_nodes::ElrsNode;
 pub use wmbus_nodes::WmbusNode;
 pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX};
 pub use mod_nodes::{
@@ -433,6 +435,24 @@ pub fn registry() -> Registry {
             let sf = s.f64_or("sf", 0.0) as u8;
             if dsp::lora::SPREADING_FACTORS.contains(&sf) {
                 let _ = n.set_param("sf", pipeline::param::ParamValue::Float(sf as f64));
+            }
+            Ok(Box::new(n) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "elrs",
+            summary: "ExpressLRS 2.4 GHz: an SX1280's chirps read as the packets of a \
+                      control link, the link learned from its sync packet or given \
+                      as a binding phrase",
+            category: "decode",
+        },
+        |s: &Settings| {
+            let mut n = ElrsNode::new(elrs_nodes::parse_uid(s.str_or("uid", "")));
+            let phrase = s.str_or("phrase", "");
+            if !phrase.is_empty() {
+                let _ = n.set_param("phrase", pipeline::param::ParamValue::Text(phrase.into()));
             }
             Ok(Box::new(n) as Box<dyn Node>)
         },

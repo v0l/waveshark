@@ -628,6 +628,202 @@ pub fn fields(d: &Decoded) -> Vec<(String, Value)> {
     f
 }
 
+/// The seeds a packet's CRC could have been computed with, read back
+/// through the CRC rather than searched for.
+///
+/// A table-driven CRC is linear over GF(2) in its initial register, so for
+/// a fixed message `crc(m, init) = crc(m, 0) ^ crc(0, init)`, and the map
+/// from `init` to `crc(0, init)` is a matrix that depends only on the
+/// message length. Invert it and a packet gives up its seed in one step.
+/// The full packet's sixteen bit CRC gives one seed; the eight byte
+/// packet's fourteen bit CRC loses two bits and gives four candidates.
+///
+/// The seed is `crc_initializer(uid) ^ nonce` for everything but a sync
+/// packet, so one packet says nothing on its own (any high byte has a
+/// nonce that fits); see [`recover_link`] for what several say.
+pub fn seeds_of(packet: &[u8]) -> Vec<u16> {
+    if packet.len() >= PACKET_LEN_FULL {
+        let sent = u16::from_le_bytes([packet[11], packet[12]]);
+        let body = &packet[..FULL_CRC_LEN];
+        let want = sent ^ crc16(body, 0);
+        return solve(|init| crc16(&[0; FULL_CRC_LEN], init), 16, want)
+            .into_iter()
+            .collect();
+    }
+    if packet.len() >= PACKET_LEN {
+        let sent = ((u16::from(packet[0]) >> 2) << 8) | u16::from(packet[7]);
+        let mut body = [0u8; PACKET_LEN - 1];
+        body.copy_from_slice(&packet[..PACKET_LEN - 1]);
+        body[0] &= 0x03;
+        let want = sent ^ crc14(&body, 0);
+        return solve(|init| crc14(&[0; PACKET_LEN - 1], init), 14, want);
+    }
+    Vec::new()
+}
+
+/// Every 16 bit `init` with `t(init) == want`, for a linear `t` onto
+/// `bits` bits: Gaussian elimination over GF(2) on the matrix `t` builds
+/// from the basis vectors, then the null space enumerated.
+fn solve(t: impl Fn(u16) -> u16, bits: u32, want: u16) -> Vec<u16> {
+    // Rows are output bits, columns input bits, as an augmented system.
+    let cols: Vec<u16> = (0..16).map(|i| t(1 << i)).collect();
+    let mut rows: Vec<(u16, u8)> = (0..bits)
+        .map(|r| {
+            let mut row = 0u16;
+            for (i, c) in cols.iter().enumerate() {
+                if c >> r & 1 == 1 {
+                    row |= 1 << i;
+                }
+            }
+            (row, (want >> r & 1) as u8)
+        })
+        .collect();
+    // Reduced row echelon form.
+    let mut pivots: Vec<(usize, usize)> = Vec::new(); // (row, column)
+    let mut r = 0;
+    for c in 0..16 {
+        let Some(p) = (r..rows.len()).find(|&i| rows[i].0 >> c & 1 == 1) else { continue };
+        rows.swap(r, p);
+        let (pr, pv) = rows[r];
+        for i in 0..rows.len() {
+            if i != r && rows[i].0 >> c & 1 == 1 {
+                rows[i].0 ^= pr;
+                rows[i].1 ^= pv;
+            }
+        }
+        pivots.push((r, c));
+        r += 1;
+        if r == rows.len() {
+            break;
+        }
+    }
+    // An inconsistent system has a zero row wanting one.
+    if rows.iter().any(|(row, v)| *row == 0 && *v == 1) {
+        return Vec::new();
+    }
+    let free: Vec<usize> = (0..16).filter(|c| !pivots.iter().any(|(_, pc)| pc == c)).collect();
+    let mut out = Vec::new();
+    for k in 0..(1u32 << free.len()) {
+        let mut x = 0u16;
+        for (j, c) in free.iter().enumerate() {
+            if k >> j & 1 == 1 {
+                x |= 1 << c;
+            }
+        }
+        for &(row, c) in &pivots {
+            let (bits_, v) = rows[row];
+            // x_c = v ^ (sum of the free bits in this row)
+            let mut b = v;
+            for f in &free {
+                if bits_ >> f & 1 == 1 && x >> f & 1 == 1 {
+                    b ^= 1;
+                }
+            }
+            if b == 1 {
+                x |= 1 << c;
+            }
+        }
+        out.push(x);
+    }
+    out
+}
+
+/// What consecutive packets of one link say about the UID bytes its CRCs
+/// are seeded from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recovered {
+    pub uid4: u8,
+    /// Known only where the seed did not move between packets; see below.
+    pub uid5: Option<u8>,
+}
+
+/// What consecutive packets of one link say about it.
+///
+/// The seed of each packet is `crc_initializer(uid, version)`, with the
+/// packet counter mixed into the low byte on the firmwares that do that.
+/// Packets received back to back on one channel then have seeds whose high
+/// byte is the same and whose low bytes either agree or differ the way
+/// consecutive counters do. Where they agree, the seed is the initializer
+/// itself and both bytes are read off it: a RadioMaster TX16S on 4.x sends
+/// its thirteen byte packets that way, four in a row with one seed. Where
+/// they count, the counter could have started anywhere and `uid[5]` is
+/// not knowable, which is the same blindness [`validate`] has when it
+/// searches the counter. The high byte is `uid[4] ^ version`, and
+/// `version` is not something the packets can say. The eight byte packet's
+/// fourteen bit CRC also never sees the top two bits of the seed, so from
+/// those `uid[4]` is known in its low six bits and reported with the top
+/// two clear.
+pub fn recover_link(packets: &[&[u8]], ota_version: u8) -> Option<Recovered> {
+    if packets.len() < 2 {
+        return None;
+    }
+    let seeds: Vec<Vec<u16>> = packets.iter().map(|p| seeds_of(p)).collect();
+    if seeds.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    let short = packets.iter().any(|p| p.len() < PACKET_LEN_FULL);
+    let mask: u16 = if short { 0x3fff } else { 0xffff };
+    // One seed for every packet: the initializer, unmixed.
+    let steady: Vec<u16> = seeds[0]
+        .iter()
+        .copied()
+        .filter(|s| seeds.iter().skip(1).all(|c| c.iter().any(|t| t & mask == s & mask)))
+        .collect();
+    if let [seed] = steady[..] {
+        let init = (seed & mask) ^ (u16::from(ota_version) << 8);
+        return Some(Recovered { uid4: (init >> 8) as u8, uid5: Some(init as u8) });
+    }
+    // Or a high byte in common with low bytes that count.
+    let mut answer: Option<u16> = None;
+    for &first in &seeds[0] {
+        let hi = (first & mask) >> 8;
+        let fits = (0..=255u8).any(|n0| {
+            let x_lo = (first as u8) ^ n0;
+            seeds.iter().enumerate().skip(1).all(|(k, cands)| {
+                let n = n0.wrapping_add(k as u8);
+                cands.iter().any(|s| (s & mask) >> 8 == hi && (*s as u8) ^ n == x_lo)
+            })
+        });
+        if !fits {
+            continue;
+        }
+        if answer.is_some_and(|a| a != hi) {
+            return None;
+        }
+        answer = Some(hi);
+    }
+    let hi = answer? as u8;
+    Some(Recovered { uid4: hi ^ ota_version, uid5: None })
+}
+
+/// Build an eight byte packet the way the transmitter does: body first,
+/// then the CRC split across the top six bits of byte zero and the whole
+/// of byte seven. Here so a decoder can be tested against something other
+/// than itself.
+pub fn build(body: &[u8], uid: &[u8; 6], ota_version: u8, nonce: u8) -> [u8; PACKET_LEN] {
+    let mut p = [0u8; PACKET_LEN];
+    p[..PACKET_LEN - 1].copy_from_slice(&body[..PACKET_LEN - 1]);
+    p[0] &= 0x03;
+    let is_sync = PacketType::from_bits(p[0]) == PacketType::Sync;
+    let init = crc_initializer(uid, ota_version) ^ if is_sync { 0 } else { u16::from(nonce) };
+    let crc = crc14(&p[..PACKET_LEN - 1], init);
+    p[0] = (p[0] & 0x03) | ((crc >> 8) as u8) << 2;
+    p[PACKET_LEN - 1] = crc as u8;
+    p
+}
+
+/// The thirteen byte packet of a Full rate, built the same way: eleven
+/// bytes of body, then the CRC-16 in the last two.
+pub fn build_full(body: &[u8], uid: &[u8; 6], ota_version: u8, nonce: u8) -> [u8; PACKET_LEN_FULL] {
+    let mut p = [0u8; PACKET_LEN_FULL];
+    p[..FULL_CRC_LEN].copy_from_slice(&body[..FULL_CRC_LEN]);
+    let is_sync = PacketType::from_bits(p[0]) == PacketType::Sync;
+    let init = crc_initializer(uid, ota_version) ^ if is_sync { 0 } else { u16::from(nonce) };
+    let crc = crc16(&p[..FULL_CRC_LEN], init);
+    p[FULL_CRC_LEN..].copy_from_slice(&crc.to_le_bytes());
+    p
+}
+
 /// Check and read in one step, taking the packet length to mean which of the
 /// two formats this is: the rate decides it, and the demodulator was told the
 /// rate before it could produce bytes at all.
@@ -654,15 +850,7 @@ mod tests {
     /// split across the top six bits of byte zero and the whole of byte
     /// seven.
     fn build(body: &[u8; 7], uid: &[u8; 6], nonce: u8) -> [u8; 8] {
-        let mut p = [0u8; 8];
-        p[..7].copy_from_slice(body);
-        p[0] &= 0x03;
-        let is_sync = PacketType::from_bits(p[0]) == PacketType::Sync;
-        let init = crc_initializer(uid, OTA_VERSION) ^ if is_sync { 0 } else { u16::from(nonce) };
-        let crc = crc14(&p[..7], init);
-        p[0] = (p[0] & 0x03) | ((crc >> 8) as u8) << 2;
-        p[7] = crc as u8;
-        p
+        super::build(body, uid, OTA_VERSION, nonce)
     }
 
     const UID: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
@@ -693,6 +881,49 @@ mod tests {
         );
         assert!(validate_with_nonce(&p, &UID, OTA_VERSION, 42));
         assert!(!validate_with_nonce(&p, &neighbour, OTA_VERSION, 42));
+    }
+
+    /// A packet gives up the seed its CRC was made with, through the
+    /// CRC's own linearity, and three in a row give up the link.
+    #[test]
+    fn consecutive_packets_give_up_the_uid_bytes_and_the_counter() {
+        let bodies: [[u8; 7]; 3] =
+            [[0, 1, 2, 3, 4, 5, 0x80], [0, 9, 8, 7, 6, 5, 0x80], [0, 2, 2, 2, 2, 2, 0x80]];
+        let packets: Vec<[u8; 8]> =
+            (0..3).map(|k| build(&bodies[k], &UID, 200u8.wrapping_add(k as u8))).collect();
+        let init = crc_initializer(&UID, OTA_VERSION);
+        assert!(seeds_of(&packets[0]).contains(&(init ^ 200)));
+        let refs: Vec<&[u8]> = packets.iter().map(|p| &p[..]).collect();
+        // Fourteen bits of CRC cannot see the top two bits of uid[4].
+        assert_eq!(recover_link(&refs, OTA_VERSION), Some(Recovered { uid4: UID[4] & 0x3f, uid5: None }));
+
+        // The full packet's sixteen bits give the seed outright.
+        let full: Vec<[u8; 13]> = (0..3)
+            .map(|k| {
+                let mut body = [0u8; 11];
+                body[1] = k as u8 * 7;
+                build_full(&body, &UID, OTA_VERSION, 40 + k as u8)
+            })
+            .collect();
+        assert_eq!(seeds_of(&full[1]), vec![init ^ 41]);
+        let refs: Vec<&[u8]> = full.iter().map(|p| &p[..]).collect();
+        assert_eq!(recover_link(&refs, OTA_VERSION), Some(Recovered { uid4: UID[4], uid5: None }));
+        // A firmware that leaves the counter out of the seed gives both
+        // bytes away, since every packet then carries the same seed.
+        let steady: Vec<[u8; 13]> =
+            (0..3).map(|_| build_full(&[0; 11], &UID, OTA_VERSION, 0)).collect();
+        let refs: Vec<&[u8]> = steady.iter().map(|p| &p[..]).collect();
+        assert_eq!(recover_link(&refs, OTA_VERSION), Some(Recovered { uid4: UID[4], uid5: Some(UID[5]) }));
+        // And what was recovered checks the packets it came from, the way
+        // a sync packet's two bytes would.
+        let learned = [0, 0, 0, 0, UID[4], 0];
+        assert!(full.iter().all(|p| validate_full(p, &learned, OTA_VERSION).is_some()));
+
+        // Packets of two different links do not agree on a high byte.
+        let other = [0x11, 0x22, 0x33, 0x44, 0x99, 0x66];
+        let mixed = [build_full(&[0; 11], &UID, OTA_VERSION, 40), build_full(&[0; 11], &other, OTA_VERSION, 41)];
+        let refs: Vec<&[u8]> = mixed.iter().map(|p| &p[..]).collect();
+        assert_eq!(recover_link(&refs, OTA_VERSION), None);
     }
 
     /// The nonce is receiver state, so a listener that has just tuned in has

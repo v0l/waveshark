@@ -111,6 +111,18 @@ impl Param {
         }
     }
 
+    /// Free text: a name, a key, a binding phrase.
+    pub fn text(name: &str, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            label: String::new(),
+            unit: String::new(),
+            value: ParamValue::Text(value.into()),
+            range: ParamRange::None,
+            affects_rate: false,
+        }
+    }
+
     pub fn bool(name: &str, value: bool) -> Self {
         Self {
             name: name.into(),

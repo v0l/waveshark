@@ -280,6 +280,12 @@ fn frame_rows(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
         hits.push(d);
         return;
     }
+    // ExpressLRS is a chirp too, tagged by the front end that read it with
+    // the link it checked the packet against; the check is made again here.
+    if let Some(d) = crate::elrs_nodes::elrs_decoded(bytes, center) {
+        hits.push(d);
+        return;
+    }
     // A TETRA broadcast identifies itself twice over: it arrives from a
     // downlink band, and its bytes are a tagged PDU that had to pass the
     // standard's own CRC to exist at all.

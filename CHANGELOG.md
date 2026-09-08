@@ -23,9 +23,11 @@ the code is in the commit log; what a decoder can and cannot do is in
 - GSM: a cell's identity off its synchronisation burst, the blocks it
   broadcasts, who a page is calling, and the signalling channel a phone is
   sent to, on the beacon carrier or on another carrier timed from it.
-- ExpressLRS at 2.4 GHz, with the SX1280's long interleaved coding
-  measured off the air and a payload read through it, FrSky ACCST, FlySky
-  AFHDS-2A and XN297 remotes.
+- ExpressLRS at 2.4 GHz as a front end the auto node places and a strip
+  mode: the SX1280's long interleaved coding measured off the air, the
+  link learned from a sync packet or from the packets' own CRC seeds, and
+  the sticks read. FrSky ACCST, FlySky AFHDS-2A and XN297 remotes as
+  decoders.
 - LoRa at 2.4 GHz as the SX128x sends it, and inverted LoRa as a setting.
 - Analogue video: a camera's picture off the span, PAL or NTSC, with
   colour, on a video bus and pane of its own.
@@ -79,6 +81,11 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+
+- A burst of several packets with silence between them, which is what a
+  hopping link leaves on one channel, is classified from one of the
+  packets rather than as a keyed envelope; sources open as wide as the
+  widest channel any protocol reads rather than 600 kHz.
 
 - The dial no longer caps every radio at 3 GHz.
 - A loud keyed burst is not reopened around its own splatter, and no

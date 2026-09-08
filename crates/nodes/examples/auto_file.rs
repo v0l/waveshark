@@ -70,7 +70,9 @@ fn main() {
             }
             if let common::PacketBody::Frame(fr) = &p.body {
                 let b = &fr.bytes;
-                if let Some(d) = nodes::lora_nodes::lora_decoded(&b[..], common::Hz(p.center_hz())) {
+                if let Some(d) = nodes::lora_nodes::lora_decoded(&b[..], common::Hz(p.center_hz()))
+                    .or_else(|| nodes::elrs_nodes::elrs_decoded(&b[..], common::Hz(p.center_hz())))
+                {
                     eprintln!(
                         "LORA at {:.2}s: rssi {:.1} snr {:.1} iq {} @ {}: {:?}",
                         i as f64 * block as f64 / rate,
