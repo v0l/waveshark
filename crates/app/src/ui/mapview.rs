@@ -58,6 +58,17 @@ pub(super) trait Layer {
     fn status(&self) -> Option<String> {
         None
     }
+
+    /// Whose data this draws, for the credit in the corner. Empty for a
+    /// layer drawing what this receiver measured, which is nobody else's,
+    /// and more than one where a layer draws more than one publisher's.
+    ///
+    /// Answered by the layer rather than listed by the map: a layer added
+    /// later that draws somebody's data credits them by saying so here, and
+    /// the credit appears exactly while that data is on screen.
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        Vec::new()
+    }
 }
 
 /// Which layers are drawn, by key.
@@ -219,6 +230,10 @@ impl MapView {
             // Nothing is hovered while the map is being dragged: the pointer
             // is moving the world, not pointing at it.
             hover: resp.hover_pos().filter(|_| !resp.dragged()),
+            // A press that did not turn into a drag. A layer that draws
+            // things worth picking reads this; the map itself has no use for
+            // a left click, which is why one is free to mean "that one".
+            click: resp.clicked().then(|| resp.interact_pointer_pos()).flatten(),
         };
 
         let mut status = format!(
@@ -239,14 +254,21 @@ impl MapView {
         }
 
         canvas.label(Pos2::new(rect.left() + 8.0, rect.top() + 10.0), &status, theme::LEGEND, 1.0);
-        // Required by the tile usage policy, and by the licence the map data
-        // is under.
-        canvas.label(
-            Pos2::new(rect.right() - 150.0, rect.bottom() - 10.0),
-            "(c) OpenStreetMap contributors",
-            theme::LEGEND,
-            1.0,
-        );
+
+        // The tiles are somebody's, and so is anything a layer drew over
+        // them. Both licences ask to be named where the map is seen.
+        let mut credits = vec![crate::data::Credit {
+            name: "OpenStreetMap",
+            licence: "ODbL",
+            url: "https://www.openstreetmap.org/copyright",
+        }];
+        for c in on.iter().flat_map(|l| l.credits()) {
+            if !credits.contains(&c) {
+                credits.push(c);
+            }
+        }
+        let above_error = self.tiles.error().is_some();
+        Self::draw_credits(ui, &canvas.p, rect, &credits, above_error);
 
         // A map with no tiles under it still shows what is drawn over them,
         // and would quietly look like empty sky and empty sea. Say what
@@ -277,6 +299,75 @@ impl MapView {
             .flatten()
             .map(|pos| crate::map::screen_to_ll(center, zoom, offset(pos)));
         Drawn { picked }
+    }
+
+    /// Who the map belongs to, along the bottom right.
+    ///
+    /// One plate rather than a line of loose text: tiles are busy, and this
+    /// is a licence condition rather than decoration, so it has to stay
+    /// readable over a city. Each name is the publisher's page.
+    fn draw_credits(
+        ui: &mut egui::Ui,
+        p: &egui::Painter,
+        rect: Rect,
+        credits: &[crate::data::Credit],
+        raised: bool,
+    ) {
+        let name_font = FontId::new(10.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let small = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        // Laid out first and drawn second, because the plate has to be the
+        // size of the text and the text sits inside the plate.
+        let mut pieces: Vec<(std::sync::Arc<egui::Galley>, Option<&'static str>)> = Vec::new();
+        for (i, c) in credits.iter().enumerate() {
+            if i > 0 {
+                pieces.push((p.layout_no_wrap("·".into(), small.clone(), theme::ETCH), None));
+            }
+            pieces.push((
+                p.layout_no_wrap(c.name.into(), name_font.clone(), theme::VALUE),
+                Some(c.url),
+            ));
+            pieces.push((
+                p.layout_no_wrap(c.licence.into(), small.clone(), theme::LEGEND),
+                None,
+            ));
+        }
+        let gap = 5.0;
+        let w: f32 =
+            pieces.iter().map(|(g, _)| g.size().x).sum::<f32>() + gap * (pieces.len() - 1) as f32;
+        let h = pieces.iter().map(|(g, _)| g.size().y).fold(0.0, f32::max);
+        let pad = Vec2::new(7.0, 4.0);
+        let bottom = rect.bottom() - if raised { 38.0 } else { 8.0 };
+        let plate = Rect::from_min_max(
+            Pos2::new(rect.right() - 8.0 - w - pad.x * 2.0, bottom - h - pad.y * 2.0),
+            Pos2::new(rect.right() - 8.0, bottom),
+        );
+        p.rect_filled(plate, 3.0, Color32::from_black_alpha(205));
+        p.rect_stroke(plate, 3.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+
+        let mut x = plate.left() + pad.x;
+        for (g, link) in pieces {
+            let at = Pos2::new(x, plate.center().y - g.size().y / 2.0);
+            let size = g.size();
+            if let Some(url) = link {
+                let hit = Rect::from_min_size(at, size).expand2(Vec2::new(2.0, 3.0));
+                let r = ui.interact(hit, ui.id().with(("map-credit", url)), Sense::click());
+                if r.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    let y = at.y + size.y - 1.0;
+                    p.line_segment(
+                        [Pos2::new(at.x, y), Pos2::new(at.x + size.x, y)],
+                        Stroke::new(1.0, theme::READOUT),
+                    );
+                }
+                if r.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+                p.galley(at, g, if r.hovered() { theme::READOUT } else { theme::VALUE });
+            } else {
+                p.galley(at, g, theme::LEGEND);
+            }
+            x += size.x + gap;
+        }
     }
 
     /// Every tile the view touches, asked for as it is drawn.
@@ -338,13 +429,27 @@ pub(super) struct Canvas {
     zoom: f64,
     nm_px: f64,
     hover: Option<Pos2>,
+    click: Option<Pos2>,
 }
 
 impl Canvas {
     /// Where a position falls on screen.
     pub fn at(&self, lat: f64, lon: f64) -> Pos2 {
-        let (x, y) = crate::map::ll_to_screen(self.center, self.zoom, (lat, lon));
+        let (x, y) = crate::map::ll_to_screen(self.center, self.zoom, (lat, self.near(lon)));
         Pos2::new(self.mid.x + x as f32, self.mid.y + y as f32)
+    }
+
+    /// The same longitude, written as the copy of the world nearest the
+    /// view.
+    ///
+    /// The projection is absolute, so 170 east of a view centred on Ireland
+    /// lands a whole world to the right rather than just off the left edge,
+    /// where the tiles for it are drawn. Anything short, an airport or a
+    /// mast, is off screen either way; a line drawn between two points that
+    /// disagree about which copy they are on is a stroke across the map,
+    /// which is what a satellite's ground track looked like.
+    fn near(&self, lon: f64) -> f64 {
+        nearest_copy(lon, self.center.1)
     }
 
     pub fn zoom(&self) -> f64 {
@@ -362,6 +467,22 @@ impl Canvas {
     /// Where the pointer is, or `None` while the map is being dragged.
     pub fn hover(&self) -> Option<Pos2> {
         self.hover
+    }
+
+    /// Where the map was clicked this frame, for a layer whose marks can be
+    /// picked. Panning is a drag and does not report one.
+    pub fn click(&self) -> Option<Pos2> {
+        self.click
+    }
+
+    /// How wide the whole world is on screen, in pixels.
+    ///
+    /// What a layer joining two positions with a line needs in order to tell
+    /// a move from a wrap: at a zoom where the world is narrower than the
+    /// pane, a jump across the date line is shorter than the pane and a test
+    /// against the pane's width lets it through.
+    pub fn world_px(&self) -> f32 {
+        (crate::map::tile_scale(self.zoom) * f64::from(1u32 << crate::map::level(self.zoom))) as f32
     }
 
     /// The backing box a label would occupy, before it is drawn. Separate
@@ -384,5 +505,49 @@ impl Canvas {
 
     pub fn font() -> FontId {
         FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()))
+    }
+}
+
+/// A longitude written as the copy of the world nearest a centre. Free of
+/// the canvas so it can be tested without one.
+fn nearest_copy(lon: f64, centre: f64) -> f64 {
+    lon - 360.0 * ((lon - centre) / 360.0).round()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What broke the ground tracks: two points either side of the date line
+    /// projected a whole world apart, and the line between them crossed the
+    /// map.
+    #[test]
+    fn a_longitude_is_drawn_on_the_copy_of_the_world_nearest_the_view() {
+        // Nothing moves what is already near the centre.
+        assert!((nearest_copy(-6.0, -6.26) + 6.0).abs() < 1e-9);
+        // A point just past the date line, seen from Ireland, is off the
+        // left edge rather than a world to the right.
+        assert!((nearest_copy(179.0, -6.26) - -181.0).abs() < 1e-9);
+        assert!((nearest_copy(-179.0, -6.26) - -179.0).abs() < 1e-9);
+        // And the same the other way round, from a view near the date line.
+        assert!((nearest_copy(-179.0, 178.0) - 181.0).abs() < 1e-9);
+        // A step across the line is a step, not a stroke across the world.
+        let a = nearest_copy(179.5, 179.0);
+        let b = nearest_copy(-179.5, 179.0);
+        assert!((a - b).abs() < 1.5, "{a} to {b}");
+    }
+
+    /// Zoomed out, the whole world is narrower than the pane, so a line that
+    /// jumps a world is shorter than the pane: a wrap test measured against
+    /// the pane lets every one of them through, which is what put horizontal
+    /// strokes across the map.
+    #[test]
+    fn a_wrap_is_measured_against_the_world_and_not_against_the_pane() {
+        let world = |zoom: f64| {
+            crate::map::tile_scale(zoom) * f64::from(1u32 << crate::map::level(zoom))
+        };
+        assert!(world(2.0) < 1200.0, "{} px", world(2.0));
+        // And it doubles with every level, so the test has to scale too.
+        assert!((world(3.0) / world(2.0) - 2.0).abs() < 1e-9);
     }
 }

@@ -293,6 +293,7 @@ impl App {
                         View::Video,
                         View::Links,
                         View::Devices,
+                        View::Satellites,
                         View::Keys,
                     ] {
                         ui.selectable_value(&mut v, opt, opt.label());

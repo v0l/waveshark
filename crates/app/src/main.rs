@@ -22,6 +22,8 @@ mod transcripts;
 mod map;
 mod messages;
 mod data;
+mod sats;
+mod beacondb;
 mod packetlog;
 mod patch;
 mod chainview;

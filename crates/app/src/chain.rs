@@ -263,16 +263,24 @@ pub struct Receiver {
     log_dir: Option<PathBuf>,
     /// Size the packet log's folder may reach, or `None` for no limit.
     log_cap: Option<u64>,
+    /// What the log folder holds while nothing is writing to it, and when it
+    /// was last added up.
+    log_folder: u64,
+    log_measured: Option<std::time::Instant>,
     bus: Option<NodeId>,
     decode: Option<NodeId>,
     tracks: Option<NodeId>,
     transcripts: Option<NodeId>,
     survey: Option<NodeId>,
     wigle: Option<NodeId>,
+    beacondb: Option<NodeId>,
     /// Who the receiver uploads to wigle.net as, when it does. Kept beside
     /// the survey path and for the same reason: a rebuild replaces the node,
     /// and the setting is what survives it.
     wigle_account: Option<survey::Account>,
+    /// Whether the beaconDB feed is on. Kept beside the node for the same
+    /// reason the account is: the node is rebuilt and this is not.
+    beacondb_on: bool,
     /// Where the survey is written, if it is. Held as a path rather than an
     /// open database for the same reason the packet log holds a directory: a
     /// rebuild replaces the node, and what survives it is the setting.
@@ -479,13 +487,17 @@ impl Receiver {
             mic: None,
             log_dir: sinks.packet_log,
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
+            log_folder: 0,
+            log_measured: None,
             bus: None,
             decode: None,
             tracks: None,
             transcripts: None,
             survey: None,
             wigle: None,
+            beacondb: None,
             wigle_account: None,
+            beacondb_on: false,
             survey_path: None,
             station: None,
             logged: 0,
@@ -901,6 +913,7 @@ impl Receiver {
         let transcripts = of_kind("transcribe_live").first().copied();
         let survey = of_kind("survey").first().copied();
         let wigle = of_kind("wigle").first().copied();
+        let beacondb = of_kind("beacondb").first().copied();
 
         // The bus is the output: everything that is heard leaves through it.
         // Everything else that leaves the graph is read by the port it is
@@ -1022,7 +1035,9 @@ impl Receiver {
         self.transcripts = transcripts;
         self.survey = survey;
         self.wigle = wigle;
+        self.beacondb = beacondb;
         self.open_wigle();
+        self.open_beacondb();
         // A survey built fresh has to be reopened, and both it and a fresh
         // tracker have to be told where the receiver is: the tracker resolves
         // a position from a single frame with it, and without it a rebuild in
@@ -1836,11 +1851,32 @@ impl Receiver {
     }
 
     /// What the log has written, and whether it has given up.
+    ///
+    /// The reading is about the folder, so a receiver with nothing writing to
+    /// it, because the log is off or because no front end on this span
+    /// produces packets, still reports what is on the disk rather than zero.
     pub fn log_bytes(&self) -> u64 {
         self.bus
             .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+            .filter(|b| b.has_sink())
             .map(|b| b.sink_bytes())
-            .unwrap_or(0)
+            .unwrap_or(self.log_folder)
+    }
+
+    /// Add the log folder up again when nothing is writing to it. Throttled,
+    /// and skipped entirely while a sink is counting its own writes.
+    pub fn refresh_log_folder(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        let writing = self
+            .bus
+            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+            .is_some_and(|b| b.has_sink());
+        if writing || self.log_measured.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.log_measured = Some(std::time::Instant::now());
+        let dir = self.log_dir.clone().or_else(crate::packetlog::PacketLog::default_dir);
+        self.log_folder = dir.map(|d| crate::packetlog::folder_bytes(&d)).unwrap_or(0);
     }
 
     pub fn log_full(&self) -> bool {
@@ -1937,6 +1973,39 @@ impl Receiver {
         if let Some(n) = self.wigle_node_mut() {
             n.set_account(account);
         }
+    }
+
+    /// Start or stop feeding beacondb.net. The node stays in the graph
+    /// either way; what changes is whether it is collecting.
+    pub fn set_beacondb(&mut self, on: bool) {
+        self.beacondb_on = on;
+        self.open_beacondb();
+    }
+
+    pub fn beacondb_on(&self) -> bool {
+        self.beacondb_on
+    }
+
+    pub fn beacondb_status(&self) -> Option<nodes::BeaconDbStatus> {
+        Some(self.beacondb_node()?.status())
+    }
+
+    fn open_beacondb(&mut self) {
+        let on = self.beacondb_on;
+        if let Some(n) = self.beacondb_node_mut() {
+            n.set_on(on);
+        }
+    }
+
+    fn beacondb_node(&self) -> Option<&nodes::BeaconDbNode> {
+        self.beacondb.and_then(|id| downcast::<nodes::BeaconDbNode>(&self.graph, id))
+    }
+
+    fn beacondb_node_mut(&mut self) -> Option<&mut nodes::BeaconDbNode> {
+        self.beacondb
+            .and_then(|id| self.graph.node_mut(id))
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::BeaconDbNode>())
     }
 
     fn wigle_node(&self) -> Option<&nodes::WigleNode> {
@@ -2045,6 +2114,9 @@ impl Receiver {
             n.set_station(Some(at));
         }
         if let Some(n) = self.wigle_node_mut() {
+            n.set_station(Some(at));
+        }
+        if let Some(n) = self.beacondb_node_mut() {
             n.set_station(Some(at));
         }
     }
@@ -2270,6 +2342,8 @@ pub mod derived {
     pub const VIDEO: u64 = Patch::DERIVED_BASE + 16;
     /// The wardriving feed: what was heard, on its way to wigle.net.
     pub const WIGLE: u64 = Patch::DERIVED_BASE + 17;
+    /// The same, on its way to beacondb.net.
+    pub const BEACONDB: u64 = Patch::DERIVED_BASE + 18;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2631,6 +2705,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // way the survey's file is.
         let wigle = p.add_derived(derived::WIGLE, "wigle", Settings::new());
         p.connect(Source::Stage(decode, 0), (wigle, 0));
+
+        // beaconDB is a third consumer of the same decodes, drawn whether or
+        // not it is on for the same reason.
+        let beacondb = p.add_derived(derived::BEACONDB, "beacondb", Settings::new());
+        p.connect(Source::Stage(decode, 0), (beacondb, 0));
     }
 
     p
@@ -3392,6 +3471,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "transcribe_live" => "Transcribe".into(),
         "survey" => "Devices".into(),
         "wigle" => "WiGLE".into(),
+        "beacondb" => "beaconDB".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
         "video_bus" => "Video".into(),
@@ -4919,6 +4999,32 @@ mod tests {
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Packet log"));
         assert!(rx.topology().nodes.iter().any(|n| n.label == "Tracks"));
         assert_eq!(rx.logged(), 0, "nothing was asked to be written");
+    }
+
+    /// The size on screen is the folder's, not one sink's running total. A
+    /// span with no front end that produces packets has no bus and no sink,
+    /// and reported 0 B beside a limit of eight gigabytes and a folder
+    /// holding eight.
+    #[test]
+    fn the_log_folder_is_reported_with_nothing_writing_to_it() {
+        let d = std::env::temp_dir().join(format!("sr-logfolder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("2026-09-08.000.wspkt"), vec![0u8; 65_536]).unwrap();
+        let mut p = plan(2_400_000.0, Hz::mhz(2457));
+        p.fronts.clear();
+        let mut rx = Receiver::build(
+            &p,
+            Sinks {
+                packet_log: Some(d.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!rx.topology().nodes.iter().any(|n| n.label == "Packet log"), "a bus was drawn");
+        rx.refresh_log_folder();
+        assert_eq!(rx.log_bytes(), 65_536);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A bank over a scanner's own band, at the width that band asked for.

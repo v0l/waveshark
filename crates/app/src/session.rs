@@ -125,6 +125,13 @@ pub struct Session {
     pub wigle_token: String,
     pub wigle_donate: bool,
     pub wigle_on: bool,
+    /// Whether observations are submitted to beacondb.net. No credential:
+    /// beaconDB takes them from anybody, so this is the whole setting.
+    pub beacondb_on: bool,
+    /// Whether the map may ask beaconDB where a decoded cell is. Apart from
+    /// the feed: asking tells beaconDB which cells this receiver heard, and
+    /// giving is not the same decision as asking.
+    pub beacondb_lookup: bool,
     /// How the spectrum and the waterfall are drawn.
     ///
     /// Kept here with the rest of it because they are settings in the same
@@ -212,6 +219,8 @@ impl Default for Session {
             wigle_token: String::new(),
             wigle_donate: false,
             wigle_on: false,
+            beacondb_on: false,
+            beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
             streams: Vec::new(),
@@ -337,6 +346,8 @@ impl Session {
             wigle_token: kv.get("wigle_token").map(|v| v.to_string()).unwrap_or_default(),
             wigle_donate: kv.get("wigle_donate").map(|v| *v == "true").unwrap_or(false),
             wigle_on: kv.get("wigle_on").map(|v| *v == "true").unwrap_or(false),
+            beacondb_on: kv.get("beacondb_on").map(|v| *v == "true").unwrap_or(false),
+            beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
                     as f32,
@@ -411,6 +422,12 @@ impl Session {
         }
         if self.wigle_on {
             s.push_str("wigle_on = true\n");
+        }
+        if self.beacondb_on {
+            s.push_str("beacondb_on = true\n");
+        }
+        if self.beacondb_lookup {
+            s.push_str("beacondb_lookup = true\n");
         }
         for (name, mode) in &self.gains {
             s.push_str(&format!("gain.{name} = {}\n", render_gain(*mode)));
@@ -509,6 +526,8 @@ mod tests {
             wigle_token: "hunter2".into(),
             wigle_donate: true,
             wigle_on: true,
+            beacondb_on: true,
+            beacondb_lookup: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             view: ViewPrefs {
