@@ -66,11 +66,28 @@ pub struct Source {
     pub name: &'static str,
     pub from: Arc<dyn Fetch>,
     pub max_age: Duration,
+    /// Run on the head of a download before it replaces what is cached, so a
+    /// server that answers a refusal with 200 and a body cannot overwrite a
+    /// good file with its complaint. OpenCelliD does exactly that when the
+    /// day's two downloads are used up.
+    pub check: Option<Check>,
 }
+
+/// Reads the head of a download and says why it is not the dataset.
+pub type Check = fn(&[u8]) -> Result<(), String>;
+
+/// How much of a download [`Source::check`] is shown. Enough for a JSON
+/// error body or a magic number, and nowhere near an 85 MB dataset.
+const CHECK_BYTES: usize = 4096;
 
 impl Source {
     pub fn http(name: &'static str, url: impl Into<String>, max_age: Duration) -> Self {
-        Self { name, from: Arc::new(Http { url: url.into() }), max_age }
+        Self { name, from: Arc::new(Http { url: url.into() }), max_age, check: None }
+    }
+
+    pub fn checked(mut self, check: Check) -> Self {
+        self.check = Some(check);
+        self
     }
 }
 
@@ -120,6 +137,15 @@ impl Fetch for Http {
         let header = |k: &str| {
             resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string)
         };
+        // A publisher that redirects is telling us the URL is wrong, even
+        // though following it worked: CelesTrak says outright that a 301
+        // means a legacy query they will stop honouring. Nothing is failed
+        // over it, because the bytes are good, but it is said once where a
+        // person will find it rather than discovered when it turns into a
+        // 404.
+        if ureq::ResponseExt::get_uri(&resp).to_string() != self.url {
+            tracing::warn!(asked = %self.url, answered = %ureq::ResponseExt::get_uri(&resp), "dataset URL redirects");
+        }
         let seen = Seen { etag: header("etag"), last_modified: header("last-modified") };
         let mut body = resp.body_mut().with_config().limit(MAX_BYTES).reader();
         std::io::copy(&mut body, to).map_err(|e| fail(e.to_string()))?;
@@ -183,6 +209,16 @@ struct Meta {
     /// produced new bytes. This is what [`Source::max_age`] is measured
     /// against.
     checked: u64,
+    /// Why the last attempt was refused, when it was.
+    ///
+    /// A publisher that answers anything but a 200 is telling this program
+    /// to stop, and CelesTrak says so in writing: machine-to-machine
+    /// software that keeps asking after a 403 or a 404 ends up in their
+    /// firewall. So a refusal is remembered, and an automatic refresh is
+    /// skipped from then on. A person pressing refresh clears it, which is
+    /// the "report to a human" half of the same rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refused: Option<String>,
 }
 
 /// Whether a refresh is allowed to skip the round trip.
@@ -302,13 +338,31 @@ impl Cache {
     pub fn refresh(&self, src: &Source, when: When) -> Result<Option<PathBuf>, Error> {
         let meta = self.meta(src);
         if let Some(m) = &meta {
-            let due = now().saturating_sub(m.checked) >= src.max_age.as_secs();
-            if when == When::IfDue && !due && !m.seen.is_empty() {
-                return Ok(None);
+            if when == When::IfDue {
+                if let Some(why) = &m.refused {
+                    // Halted until somebody looks at it. Reported as an
+                    // error rather than as "nothing to do", or the pane
+                    // would show a dataset quietly frozen at whatever it
+                    // last held.
+                    return Err(Error::Fetch(src.name.into(), format!("halted: {why}")));
+                }
+                let due = now().saturating_sub(m.checked) >= src.max_age.as_secs();
+                if !due && !m.seen.is_empty() {
+                    return Ok(None);
+                }
             }
         }
         let seen = meta.map(|m| m.seen).unwrap_or_default();
-        let got = self.fetch(src, &seen)?;
+        let got = match self.fetch(src, &seen) {
+            Ok(got) => {
+                self.refused(src, None);
+                got
+            }
+            Err(e) => {
+                self.refused(src, Some(e.to_string()));
+                return Err(e);
+            }
+        };
         if got.is_none() {
             self.touch(src);
         }
@@ -340,13 +394,36 @@ impl Cache {
         out.flush().map_err(io(&tmp))?;
         let len = out.get_ref().metadata().map_err(io(&tmp))?.len();
         drop(out);
+        if let Some(check) = src.check {
+            let head = read_head(&tmp, CHECK_BYTES).map_err(io(&tmp))?;
+            if let Err(why) = check(&head) {
+                let _ = std::fs::remove_file(&tmp);
+                // Named by the dataset, not by the origin: the cell
+                // export's URL carries the operator's token.
+                return Err(Error::Parse(src.name.into(), why));
+            }
+        }
         std::fs::rename(&tmp, &path).map_err(io(&path))?;
-        let meta = Meta { seen, len, checked: now() };
+        let meta = Meta { seen, len, checked: now(), refused: None };
         let raw = serde_json::to_vec(&meta).unwrap_or_default();
         let mpath = self.meta_file(src);
         std::fs::write(&mpath, raw).map_err(io(&mpath))?;
         tracing::info!(dataset = src.name, bytes = len, from = %src.from.origin(), "dataset downloaded");
         Ok(Some(path))
+    }
+
+    /// Remember, or forget, why the far end refused. Only meaningful beside
+    /// a file that is already held; a source that has never landed has
+    /// nothing to hold the note against and is retried on its own merits.
+    fn refused(&self, src: &Source, why: Option<String>) {
+        let Some(mut meta) = self.meta(src) else { return };
+        if meta.refused == why {
+            return;
+        }
+        meta.refused = why;
+        if let Ok(raw) = serde_json::to_vec(&meta) {
+            let _ = std::fs::write(self.meta_file(src), raw);
+        }
     }
 
     /// Record that the file was revalidated and is still current, so the next
@@ -358,6 +435,13 @@ impl Cache {
             let _ = std::fs::write(self.meta_file(src), raw);
         }
     }
+}
+
+fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?.take(n as u64).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 fn now() -> u64 {
@@ -405,7 +489,7 @@ mod tests {
             tag: parking_lot::Mutex::new("v1".into()),
             fetches: AtomicUsize::new(0),
         });
-        let src = Source { name: "thing.txt", from: from.clone(), max_age };
+        let src = Source { name: "thing.txt", from: from.clone(), max_age, check: None };
         (Cache::new(dir), src, from)
     }
 
@@ -472,8 +556,62 @@ mod tests {
         let dir = tmpdir("failed");
         let (cache, src, _) = counted(&dir, Duration::ZERO);
         cache.read(&src).unwrap();
-        let broken = Source { name: src.name, from: Arc::new(Broken), max_age: Duration::ZERO };
+        let broken =
+            Source { name: src.name, from: Arc::new(Broken), max_age: Duration::ZERO, check: None };
         assert!(cache.refresh(&broken, When::Now).is_err());
+        assert_eq!(cache.read(&src).unwrap(), b"one");
+    }
+
+    /// A publisher that refuses is telling this program to stop. CelesTrak
+    /// says so in writing: software that keeps asking after a 403 or a 404
+    /// ends up in their firewall. So an automatic refresh after a refusal
+    /// does not go near the network, and a person pressing refresh clears
+    /// it.
+    #[test]
+    fn a_refusal_halts_automatic_refreshes_until_somebody_looks() {
+        struct Refused;
+        impl Fetch for Refused {
+            fn origin(&self) -> String {
+                "refused".into()
+            }
+            fn fetch(&self, _: &Seen, _: &mut dyn Write) -> Result<Option<Seen>, Error> {
+                Err(Error::Status("refused".into(), 403))
+            }
+        }
+        let dir = tmpdir("halted");
+        let (cache, src, from) = counted(&dir, Duration::ZERO);
+        cache.read(&src).unwrap();
+        let asked = from.fetches.load(Ordering::Relaxed);
+        let refusing =
+            Source { name: src.name, from: Arc::new(Refused), max_age: Duration::ZERO, check: None };
+        assert!(cache.refresh(&refusing, When::Now).is_err());
+        // Nothing is asked again on its own, and what was held is still
+        // held: a halted dataset is stale, not empty.
+        assert!(cache.refresh(&src, When::IfDue).is_err());
+        assert_eq!(from.fetches.load(Ordering::Relaxed), asked, "asked again after a refusal");
+        assert_eq!(cache.read(&src).unwrap(), b"one");
+        // A person pressing refresh is the report to a human, and clears it.
+        *from.tag.lock() = "two".into();
+        *from.body.lock() = b"two".to_vec();
+        assert!(cache.refresh(&src, When::Now).unwrap().is_some());
+        assert!(cache.refresh(&src, When::IfDue).is_ok());
+    }
+
+    /// OpenCelliD answers a used-up download allowance with 200 and a JSON
+    /// complaint, which without this check is stored as the dataset and
+    /// throws away the export that was already there.
+    #[test]
+    fn a_refusal_answered_with_success_does_not_replace_what_is_held() {
+        let dir = tmpdir("refused");
+        let (cache, src, from) = counted(&dir, Duration::ZERO);
+        let src = src.checked(|head| match head.starts_with(b"{") {
+            true => Err("refused".into()),
+            false => Ok(()),
+        });
+        assert_eq!(cache.read(&src).unwrap(), b"one");
+        *from.body.lock() = br#"{"message":"RATE_LIMITED"}"#.to_vec();
+        *from.tag.lock() = "two".into();
+        assert!(cache.refresh(&src, When::Now).is_err());
         assert_eq!(cache.read(&src).unwrap(), b"one");
     }
 
@@ -487,6 +625,7 @@ mod tests {
             name: "input.txt",
             from: Arc::new(File { path: src_path.clone() }),
             max_age: Duration::ZERO,
+            check: None,
         };
         assert_eq!(cache.read(&src).unwrap(), b"hello");
         assert!(cache.refresh(&src, When::Now).unwrap().is_none());

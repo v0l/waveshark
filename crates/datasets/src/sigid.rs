@@ -36,7 +36,12 @@ const UNID_URL: &str = "https://www.sigidwiki.com/api.php?action=ask&format=json
 %7C%3FSignal%20description%7C%3FPicture%7C%3FSignal%20file%7Climit%3D2000";
 
 pub fn artemis_source() -> Source {
-    Source { name: "artemis-sigid.sqlite", from: std::sync::Arc::new(Artemis), max_age: MAX_AGE }
+    Source {
+        name: "artemis-sigid.sqlite",
+        from: std::sync::Arc::new(Artemis),
+        max_age: MAX_AGE,
+        check: None,
+    }
 }
 
 pub fn unid_source() -> Source {
