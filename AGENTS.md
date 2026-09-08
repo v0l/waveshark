@@ -100,6 +100,36 @@ given asks for it (`pipeline::Request`: a claim, a channel beside it, a
 reshape, a release, a retune) rather than reaching for the detector; the
 auto node answers what it can and the receiver logs the rest.
 
+## A known set of values is an enum, not a string
+
+A string is what an outside source hands over and what a person reads. It is
+not how the code should carry a choice from a set it knows. **Parse it once,
+at the edge, into an enum, and match on that everywhere after.**
+
+A `match` on a string is a bug waiting for a spelling: the SatNOGS mode field
+was compared against `"FM"` in one place, `"fm"` in another and `"FMN"`
+nowhere, so a LoRa downlink was handed the auto front end because nothing had
+thought to write `"LoRa"`. The compiler cannot see any of that. It can see a
+missing arm of an enum.
+
+The rule in practice:
+
+- The type lives beside the thing that parses it, with one `parse` (or
+  `FromStr`) and no second opinion elsewhere.
+- Keep the original string beside the enum where it is displayed, since what
+  a source called something is worth showing. Display from the string, decide
+  from the enum.
+- An unknown value is a variant (`Other`, `Unknown`), not a fallback string
+  compared later.
+- Avoid `_ =>` where the set is closed: the wildcard is what stops a new
+  variant from failing the build in the places that must handle it.
+- The same goes for booleans in a row: three `bool` fields that cannot all be
+  true are one enum.
+
+The exception is an identifier that is genuinely open, such as a protocol id
+from the registry or a call sign. Where the set is fixed by a specification
+or by this code, it is a type.
+
 ## Every HTTP request goes out under the same name
 
 `crates/httpc` holds the user agent and builds every client, asynchronous or
