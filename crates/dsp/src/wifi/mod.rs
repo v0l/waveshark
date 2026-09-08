@@ -31,6 +31,7 @@
 //! response without the transmitter it belongs to is not evidence of
 //! anything: the address is in the MAC header.
 
+pub mod dsss;
 pub mod fec;
 pub mod ofdm;
 pub mod tx;
@@ -133,6 +134,9 @@ pub struct WifiFrame {
     pub fcs_ok: bool,
     /// Whether it arrived inside an aggregate rather than on its own.
     pub aggregated: bool,
+    /// Whether it was spread rather than carried on subcarriers: an 802.11b
+    /// frame, which is what a beacon still is on most access points.
+    pub dsss: bool,
     /// The channel it was read on, which in a span holding several is not the
     /// tuner's own centre. Zero until a [`WifiSpan`] fills it in.
     pub center_hz: f64,
@@ -201,6 +205,15 @@ impl Default for WifiConfig {
 /// inside a false alarm is still seen.
 const PAST: usize = 64;
 
+/// The longest run the direct sequence side will hold before reading it and
+/// moving on: ten milliseconds, where the longest legal 1 Mbit/s frame is
+/// about thirty-three. Past this it is a carrier, not a frame.
+const MAX_DSSS_SAMPLES: usize = 200_000;
+
+/// Samples the envelope gate watches before it will call anything a burst:
+/// a millisecond, which is five hundred time constants of the estimator.
+const WARMUP: usize = 20_000;
+
 /// Where an HT frame's data symbols start in the pilot polarity sequence.
 ///
 /// The sequence runs on through the preamble: the legacy SIGNAL field is at
@@ -239,6 +252,21 @@ pub struct WifiDetector {
     buf: Vec<C32>,
     /// Working samples dropped from the front of `buf` since the start.
     base: u64,
+    /// The direct sequence receiver, and how far through the buffer it has
+    /// looked.
+    dsss: Option<dsss::DsssRx>,
+    /// How far back the buffer must be kept for a burst still being gathered.
+    dsss_at: usize,
+    /// The envelope gate that says where a spread burst is, and what it has
+    /// found: burst spans in absolute sample indices, since the buffer is
+    /// trimmed under them.
+    env: f32,
+    noise: f32,
+    warm: usize,
+    in_burst: bool,
+    burst_from: Option<u64>,
+    quiet: usize,
+    bursts: Vec<(u64, u64)>,
     /// Per-sample products and powers the plateau detector slides its window
     /// over, kept between calls so the scan does not allocate.
     prod: Vec<C32>,
@@ -264,12 +292,13 @@ impl WifiDetector {
         if factor == 0 {
             return None;
         }
-        let decim = (factor > 1).then(|| {
-            // The channel is the whole working band, so the only job of this
-            // filter is to stop what folds in from outside it.
-            let taps = crate::fir::lowpass((32 * factor) | 1, 9.0e6 / rate, 60.0);
-            crate::fir::FirDecim::new(taps, factor)
-        });
+        // The channel is the whole working band, so the only job of this
+        // filter is to stop what folds into it. Designed from the frequencies
+        // rather than given a tap count: a fixed 97 taps at 61.44 MS/s is
+        // nowhere near 60 dB down by the first fold, and a beacon 35 MHz away
+        // then arrives inside the channel as a second copy of itself.
+        let decim =
+            (factor > 1).then(|| crate::fir::FirDecim::design_hz(rate, factor, 9.0e6, 60.0));
         let resamp = crate::resample::Rational::new(rate / factor as f64, ofdm::RATE_HZ, 4096)?;
         let mut lts_ref: Vec<C32> = tx::preamble()[192..192 + FFT].to_vec();
         for x in lts_ref.iter_mut() {
@@ -283,6 +312,15 @@ impl WifiDetector {
             resampled: Vec::new(),
             fft: FftPlanner::new().plan_fft_forward(FFT),
             dc: crate::dc::DcBlock::new(ofdm::RATE_HZ),
+            dsss: dsss::DsssRx::new(ofdm::RATE_HZ),
+            dsss_at: 0,
+            env: 0.0,
+            noise: 0.0,
+            warm: 0,
+            in_burst: false,
+            burst_from: None,
+            quiet: 0,
+            bursts: Vec::new(),
             prod: Vec::new(),
             pow: Vec::new(),
             lts_energy: lts_ref.iter().map(|x| x.norm_sqr()).sum(),
@@ -301,6 +339,139 @@ impl WifiDetector {
         self.floor = 1e-6;
         self.dc.reset();
         self.resamp.reset();
+        self.env = 0.0;
+        self.noise = 0.0;
+        self.warm = 0;
+        self.dsss_at = 0;
+        self.in_burst = false;
+        self.burst_from = None;
+        self.bursts.clear();
+    }
+
+    /// Read whatever 802.11b there is in the working buffer up to `end`.
+    ///
+    /// The direct sequence side is burst-driven rather than correlation
+    /// driven: despreading costs eleven multiply-accumulates a sample and
+    /// there is no cheap test for a Barker signal, so it runs only where the
+    /// level gate says something is transmitting. That is also why it cannot
+    /// share the OFDM detector's plateau, which a 1 Mbit/s beacon does not
+    /// produce.
+    fn read_dsss(&mut self, from: usize, out: &mut Vec<WifiFrame>) {
+        if self.dsss.is_none() {
+            return;
+        }
+        // One pass over the samples that just arrived, never over the same
+        // sample twice: the gate is a filter with state, so rescanning the
+        // buffer feeds it the same burst again and its noise estimate ends up
+        // wherever the rescan left it.
+        const QUIET: usize = 400;
+        // The envelope, smoothed over five microseconds, against a floor
+        // that falls to whatever the quietest envelope was and climbs back a
+        // little at a time. A spread burst is a steady envelope for its whole
+        // length, so what this has to survive is a busy band rather than a
+        // fading one: a floor that learns the burst shuts the gate partway
+        // through and a beacon arrives as eight fragments.
+        for i in from..self.buf.len() {
+            let v = self.buf[i].norm();
+            self.env += (v - self.env) * 0.01;
+            // The floor is seeded from the first millisecond rather than from
+            // the first sample. Seeding from one sample seeds from whatever
+            // the envelope estimator had reached, which at the start of a
+            // stream is nearly zero, and a floor of nearly zero means
+            // everything is a burst, one burst that never ends, and a buffer
+            // that grows until the machine gives up.
+            if self.warm < WARMUP {
+                self.warm += 1;
+                self.noise += self.env;
+                if self.warm == WARMUP {
+                    self.noise /= WARMUP as f32;
+                }
+                continue;
+            }
+            if self.env < self.noise {
+                self.noise = self.env.max(1e-9);
+            } else if !self.in_burst {
+                self.noise += (self.env - self.noise) * 1e-5;
+            }
+            let high = if self.in_burst {
+                self.env > self.noise * 2.0
+            } else {
+                self.env > self.noise * 3.5
+            };
+            let at = self.base + i as u64;
+            match (high, self.burst_from) {
+                (true, None) => {
+                    self.burst_from = Some(at.saturating_sub(100));
+                    self.in_burst = true;
+                    self.quiet = 0;
+                }
+                (true, Some(_)) => self.quiet = 0,
+                (false, Some(_)) => self.quiet += 1,
+                (false, None) => {}
+            }
+            // Ended, either because it went quiet or because it has run on
+            // longer than any frame can. The second is not optional: without
+            // it a gate held open by a carrier never closes, and everything
+            // behind it waits for ever.
+            if let Some(f) = self.burst_from {
+                if self.quiet >= QUIET || at - f > MAX_DSSS_SAMPLES as u64 {
+                    self.bursts.push((f, at));
+                    self.burst_from = None;
+                    self.in_burst = false;
+                    self.quiet = 0;
+                }
+            }
+        }
+
+        let margin = 40u64;
+        let mut done = Vec::new();
+        for &(f, t) in &self.bursts {
+            let (Some(lo), Some(hi)) = (
+                f.saturating_sub(margin).checked_sub(self.base),
+                (t + margin).checked_sub(self.base),
+            ) else {
+                done.push((f, t));
+                continue;
+            };
+            let hi = hi.min(self.buf.len() as u64) as usize;
+            let lo = lo as usize;
+            if hi <= lo || hi - lo < 400 {
+                done.push((f, t));
+                continue;
+            }
+            let burst = &self.buf[lo..hi];
+            let level = burst.iter().map(|c| c.norm()).sum::<f32>() / burst.len() as f32;
+            let noise = self.noise.max(1e-9);
+            let mut found = Vec::new();
+            if let Some(rx) = self.dsss.as_mut() {
+                rx.read(
+                    burst,
+                    ((self.base + lo as u64) as f64 * self.in_per_out) as u64,
+                    20.0 * level.max(1e-9).log10(),
+                    20.0 * (level / noise).log10(),
+                    &mut found,
+                );
+            }
+            out.extend(found.into_iter().map(WifiFrame::from));
+            done.push((f, t));
+        }
+        self.bursts.retain(|b| !done.contains(b));
+        // Whatever is still waiting for samples decides how far the buffer
+        // can be trimmed.
+        // A burst still being gathered holds the buffer too. Forgetting that
+        // was why nothing longer than one block ever decoded: the trim ran
+        // under the burst and its start was gone by the time it ended.
+        let oldest = self
+            .bursts
+            .first()
+            .map(|&(f, _)| f)
+            .into_iter()
+            .chain(self.burst_from)
+            .min();
+        self.dsss_at = oldest
+            .map(|f| (f.saturating_sub(margin).saturating_sub(self.base)) as usize)
+            .unwrap_or(self.buf.len())
+            .min(self.buf.len());
     }
 
     /// Read whatever frames are in `iq`, appending them to `out`.
@@ -332,6 +503,8 @@ impl WifiDetector {
             self.floor * 1.01
         };
 
+        self.read_dsss(from, out);
+
         let mut at = 0usize;
         while let Some(start) = self.find(at) {
             match self.read(start, out) {
@@ -351,14 +524,18 @@ impl WifiDetector {
             }
         }
         // Nothing pending: keep only what a detection straddling the block
-        // boundary would need.
-        let keep = self.buf.len().saturating_sub(512);
+        // boundary would need, and never less than the direct sequence side
+        // is still working through. A 1 Mbit/s beacon is 3.5 ms long, which
+        // is four blocks of a radio's, so trimming to the OFDM detector's
+        // needs alone threw away the start of every one of them.
+        let keep = self.buf.len().saturating_sub(512).min(self.dsss_at);
         self.trim(keep);
     }
 
     fn trim(&mut self, from: usize) {
         self.buf.drain(..from);
         self.base += from as u64;
+        self.dsss_at = self.dsss_at.saturating_sub(from);
     }
 
     /// The start of the next short training field at or after `at`.
@@ -672,6 +849,7 @@ impl WifiDetector {
         WifiFrame {
             fcs_ok: fcs_ok(&psdu),
             aggregated: false,
+            dsss: false,
             center_hz: 0.0,
             psdu,
             csi: occupied(rate.mcs.is_some())
@@ -897,6 +1075,9 @@ impl WifiDetector {
 pub struct WifiSpan {
     rxs: Vec<ChannelRx>,
     mixed: Vec<C32>,
+    /// Last block's frames, held so a copy heard a block later on another
+    /// channel can be recognised as the same transmission.
+    pending: Vec<WifiFrame>,
 }
 
 struct ChannelRx {
@@ -931,7 +1112,19 @@ impl WifiSpan {
         (!rxs.is_empty()).then_some(Self {
             rxs,
             mixed: Vec::new(),
+            pending: Vec::new(),
         })
+    }
+
+    /// Hand on whatever is still being held back for comparison with the
+    /// next block. For the end of a recording; a live receiver never needs
+    /// it, because there is always a next block.
+    pub fn flush(&mut self, out: &mut Vec<WifiFrame>) {
+        out.extend(
+            std::mem::take(&mut self.pending)
+                .into_iter()
+                .filter(|f| f.center_hz.is_finite()),
+        );
     }
 
     /// The channels being read, low first.
@@ -940,6 +1133,7 @@ impl WifiSpan {
     }
 
     pub fn reset(&mut self) {
+        self.pending.clear();
         for r in self.rxs.iter_mut() {
             r.det.reset();
             if let Some(m) = r.mixer.as_mut() {
@@ -950,6 +1144,7 @@ impl WifiSpan {
 
     /// Read every channel, appending what each one heard.
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
+        let first = out.len();
         for r in self.rxs.iter_mut() {
             let at = out.len();
             match r.mixer.as_mut() {
@@ -963,6 +1158,79 @@ impl WifiSpan {
             for f in out[at..].iter_mut() {
                 f.center_hz = r.center_hz;
             }
+        }
+        // Held for one block before being handed on, because the same
+        // transmission finishes in different blocks on different channels:
+        // the receivers do not run in step, and a copy that arrives a block
+        // late would otherwise be a row of its own.
+        let mut fresh: Vec<WifiFrame> = out.split_off(first);
+        let mut both = std::mem::take(&mut self.pending);
+        let held = both.len();
+        both.append(&mut fresh);
+        dedupe_neighbours(&mut both);
+        self.pending = both.split_off(held);
+        out.extend(both.into_iter().filter(|f| f.center_hz.is_finite()));
+        self.pending.retain(|f| f.center_hz.is_finite());
+    }
+}
+
+/// Drop the copies of a frame that other channels also heard.
+///
+/// The channels overlap: they are 5 MHz apart and 20 MHz wide, and an
+/// 802.11b transmission is 22 MHz of spreading, so a beacon on channel 11
+/// arrives in the receivers for 9, 10, 12 and 13 as well and every one of
+/// them decodes it. They are the same transmission and belong in one row, at
+/// the channel that heard it best. Marked rather than removed here, because
+/// the caller owns the buffer.
+fn dedupe_neighbours(frames: &mut [WifiFrame]) {
+    for i in 0..frames.len() {
+        for j in (i + 1)..frames.len() {
+            if !frames[i].center_hz.is_finite() || !frames[j].center_hz.is_finite() {
+                continue;
+            }
+            // The same bytes at the same moment are one transmission,
+            // whatever channel heard it. Two stations cannot send identical
+            // frames at once: the sequence number and, in a beacon, the
+            // timestamp differ.
+            let same = frames[i].psdu == frames[j].psdu
+                && frames[i].start_sample.abs_diff(frames[j].start_sample) < 20_000;
+            if !same {
+                continue;
+            }
+            let weaker = if frames[i].rssi_dbfs >= frames[j].rssi_dbfs {
+                j
+            } else {
+                i
+            };
+            frames[weaker].center_hz = f64::NAN;
+        }
+    }
+}
+
+impl From<dsss::DsssFrame> for WifiFrame {
+    fn from(f: dsss::DsssFrame) -> Self {
+        Self {
+            fcs_ok: f.fcs_ok,
+            aggregated: false,
+            dsss: true,
+            center_hz: 0.0,
+            psdu: f.psdu,
+            // A spread frame has no subcarriers and no coding to describe, so
+            // the rate says what it is and nothing else: 1 or 2 Mbit/s.
+            rate: ofdm::Rate {
+                mbps: f.mbps,
+                mcs: None,
+                bpsc: 1,
+                coding: (1, 1),
+                subcarriers: 0,
+                short_gi: f.short_preamble,
+            },
+            csi: Vec::new(),
+            start_sample: f.start_sample,
+            freq_off_hz: 0.0,
+            rssi_dbfs: f.rssi_dbfs,
+            snr_db: f.snr_db,
+            bit_err: 0.0,
         }
     }
 }
@@ -1206,7 +1474,15 @@ mod tests {
             (2_437_000_000.0f64, 6u8, 0x11u8),
             (2_462_000_000.0, 36, 0x7a),
         ] {
-            let frame = tx::frame(&psdu(), mbps, seed);
+            // Different bytes on each: two channels carrying identical bytes
+            // at the same instant is one transmission heard twice, and the
+            // receiver is right to report it once.
+            let mut body = psdu();
+            body[4] = mbps;
+            let crc = crc32(&body[..body.len() - 4]);
+            body.truncate(body.len() - 4);
+            body.extend(crc.to_le_bytes());
+            let frame = tx::frame(&body, mbps, seed);
             let shift = (ch - center) / rate;
             for (i, s) in span.iter_mut().enumerate().skip(20_000).take(200_000) {
                 let x = (i - 20_000) as f64 / ratio;
@@ -1234,11 +1510,12 @@ mod tests {
         for block in samples.chunks(16_384) {
             rx.process(block, &mut got);
         }
+        rx.flush(&mut got);
         assert_eq!(got.len(), 2, "{} frames", got.len());
         let mut heard: Vec<(f64, f32)> = got.iter().map(|f| (f.center_hz, f.rate.mbps)).collect();
         heard.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         assert_eq!(heard, vec![(2_437_000_000.0, 6.0), (2_462_000_000.0, 36.0)]);
-        assert!(got.iter().all(|f| f.fcs_ok && f.psdu == psdu()));
+        assert!(got.iter().all(|f| f.fcs_ok));
     }
 
     #[test]

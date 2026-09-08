@@ -244,3 +244,97 @@ pub fn ht_frame(psdu: &[u8], mcs: u8, short_gi: bool, aggregate: bool, seed: u8)
     }
     out
 }
+
+/// An 802.11b frame at baseband, 20 MS/s: the direct sequence preamble, the
+/// header, and the PSDU spread by the Barker sequence.
+///
+/// Long preamble only, which is what a beacon uses.
+pub fn dsss_frame(psdu: &[u8], mbps: f32, rate: f64) -> Vec<C32> {
+    use super::dsss::{self, BARKER, CHIP_RATE};
+
+    let mut bits: Vec<u8> = vec![1; 128];
+    // Least significant bit first, like every other field here.
+    let sfd: u16 = 0xf3a0;
+    for i in 0..16 {
+        bits.push((sfd >> i & 1) as u8);
+    }
+    let signal = if mbps == 1.0 { 0x0a } else { 0x14 };
+    let us = (psdu.len() as f32 * 8.0 / mbps).round() as u16;
+    let header = [signal, 0u8, (us & 0xff) as u8, (us >> 8) as u8];
+    for b in header {
+        for i in 0..8 {
+            bits.push(b >> i & 1);
+        }
+    }
+    let crc = dsss::header_crc(&header);
+    for i in (0..16).rev() {
+        bits.push((crc >> i & 1) as u8);
+    }
+    for &b in psdu {
+        for i in 0..8 {
+            bits.push(b >> i & 1);
+        }
+    }
+
+    // Scrambled with the same taps the receiver descrambles with, feeding
+    // the output back: that is what makes the descrambler self-synchronising.
+    let mut hist = [0u8; 7];
+    let scrambled: Vec<u8> = bits
+        .iter()
+        .map(|&b| {
+            let s = b ^ hist[3] ^ hist[6];
+            hist.rotate_right(1);
+            hist[0] = s;
+            s
+        })
+        .collect();
+
+    // Everything up to the end of the header is one bit a symbol; the payload
+    // may be two.
+    let head = 128 + 16 + 48;
+    let mut phase = 0i32;
+    let mut symbols: Vec<C32> = Vec::new();
+    let mut push = |phase: i32| {
+        let a = phase as f32 * std::f32::consts::FRAC_PI_2;
+        symbols.push(C32::new(a.cos(), a.sin()));
+    };
+    push(phase);
+    for &b in &scrambled[..head.min(scrambled.len())] {
+        phase = (phase + if b == 1 { 2 } else { 0 }) % 4;
+        push(phase);
+    }
+    if mbps > 1.0 {
+        for pair in scrambled[head..].chunks(2) {
+            let step = match (pair[0], *pair.get(1).unwrap_or(&0)) {
+                (0, 0) => 0,
+                (0, 1) => 1,
+                (1, 1) => 2,
+                _ => 3,
+            };
+            phase = (phase + step) % 4;
+            push(phase);
+        }
+    } else {
+        for &b in &scrambled[head..] {
+            phase = (phase + if b == 1 { 2 } else { 0 }) % 4;
+            push(phase);
+        }
+    }
+
+    // Spread at the chip rate, then stretch to the receiver's rate.
+    let chips: Vec<C32> = symbols
+        .iter()
+        .flat_map(|s| BARKER.iter().map(move |&b| *s * b))
+        .collect();
+    let ratio = rate / CHIP_RATE;
+    let n = (chips.len() as f64 * ratio) as usize;
+    (0..n)
+        .map(|i| {
+            let x = i as f64 / ratio;
+            let (a, f) = (x.floor() as usize, (x - x.floor()) as f32);
+            let p = chips[a.min(chips.len() - 1)];
+            let q = chips[(a + 1).min(chips.len() - 1)];
+            p * (1.0 - f) + q * f
+        })
+        .collect()
+}

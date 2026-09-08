@@ -58,6 +58,7 @@ fn main() {
         for block in samples.chunks(16_384) {
             det.process(block, &mut frames);
         }
+        det.flush(&mut frames);
         let ok = frames.iter().filter(|f| f.fcs_ok).count();
         println!("conj={conj}: {} frames, {ok} with a good FCS", frames.len());
         for f in frames.iter().take(20) {

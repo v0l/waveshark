@@ -19,6 +19,7 @@ fn main() {
     for block in buf.samples.chunks(16_384) {
         det.process(block, &mut frames);
     }
+    det.flush(&mut frames);
     let el = t.elapsed().as_secs_f64();
     println!(
         "{} frames, {:.3}s of air in {:.3}s = {:.2}x real time",
