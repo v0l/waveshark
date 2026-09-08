@@ -31,6 +31,7 @@ mod head;
 mod devices_pane;
 mod keys_pane;
 mod map_pane;
+mod sats_pane;
 mod mapview;
 mod links_pane;
 mod messages_pane;
@@ -70,6 +71,7 @@ pub struct App {
     log: state::LogState,
     survey: state::SurveyState,
     map: map_pane::MapState,
+    sats: state::SatsState,
     calls: state::CallsState,
     messages: state::MessagesState,
     links: state::LinksState,
@@ -230,6 +232,7 @@ enum View {
     Messages,
     Links,
     Devices,
+    Satellites,
     Video,
     Keys,
 }
@@ -244,6 +247,7 @@ impl View {
             View::Messages => "Messages",
             View::Links => "Data links",
             View::Devices => "Devices",
+            View::Satellites => "Satellites",
             View::Video => "Video",
             View::Keys => "Keys",
         }
@@ -383,6 +387,7 @@ impl Default for App {
             chain: state::ChainState::default(),
             log: state::LogState::default(),
             survey: state::SurveyState::default(),
+            sats: state::SatsState::default(),
             map: map_pane::MapState::default(),
             rt: background_runtime(),
             calls: state::CallsState::default(),
@@ -508,6 +513,10 @@ impl App {
         app.survey.wigle.token = s.wigle_token.clone();
         app.survey.wigle.donate = s.wigle_donate;
         app.survey.wigle.on = s.wigle_on;
+        app.survey.beacondb.on = s.beacondb_on;
+        app.survey.beacondb.lookup = s.beacondb_lookup;
+        crate::beacondb::set_lookup(s.beacondb_lookup);
+        crate::beacondb::start();
         app.radio_dirty = true;
         // What was changed about the graph, if anything was. Applied
         // whether or not manual mode is on: the mode only says whether the
@@ -563,6 +572,8 @@ impl App {
             wigle_token: self.survey.wigle.token.clone(),
             wigle_donate: self.survey.wigle.donate,
             wigle_on: self.survey.wigle.on,
+            beacondb_on: self.survey.beacondb.on,
+            beacondb_lookup: self.survey.beacondb.lookup,
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
             map_layers: self.map.map.layers.saved(),
@@ -807,6 +818,7 @@ impl App {
             agc: true,
             voice: speaks(&ChanMode::Audio(demod)),
             tx: None,
+            doppler: false,
         });
         self.audio.next_id += 1;
         self.listen(self.audio.channels.len() - 1);
@@ -871,6 +883,9 @@ impl App {
         }
         if self.survey.wigle.on {
             self.apply_wigle();
+        }
+        if self.survey.beacondb.on {
+            self.apply_beacondb();
         }
         // Same for the feeds and the station position: they belong to the
         // graph, and a new radio thread has built a new one.
@@ -1269,10 +1284,19 @@ impl App {
             accuracy_m: self.accuracy_m,
             edit: &mut edit,
             trail,
+            heard: &self.survey.rows,
+            sat: self.sats.selected,
+            sat_group: self.sats.group,
             rt,
         }
         .show(ui);
         self.station_edit = edit;
+        // Clicking a satellite selects it, and clicking it again lets it go:
+        // the selection is what draws its ground track and its footprint,
+        // and there has to be a way to stop drawing them.
+        if let Some(norad) = self.map.sat_hit {
+            self.sats.selected = (self.sats.selected != Some(norad)).then_some(norad);
+        }
         if let Some((lat, lon)) = place {
             self.set_location(lat, lon);
         }
@@ -1407,6 +1431,7 @@ impl App {
             }
             Some(devices_pane::Action::Export) => self.export_survey(),
             Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
+            Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
             None => {}
         }
     }
@@ -1486,6 +1511,18 @@ impl App {
         self.send(Cmd::Wigle(on.then_some(account)));
     }
 
+    /// Start or stop submitting to beaconDB.
+    ///
+    /// The switch goes to the radio thread rather than being kept here: the
+    /// feed is a node on the packet bus, and an interface holding a switch
+    /// the node had not been told about would be a switch that reports on.
+    fn apply_beacondb(&mut self) {
+        self.send(Cmd::BeaconDb(self.survey.beacondb.on));
+        // The lookup runs here rather than in the receiver: it answers the
+        // map, not the graph.
+        crate::beacondb::set_lookup(self.survey.beacondb.lookup);
+    }
+
     /// Write the survey out as WiGLE CSV, beside the survey file.
     fn export_survey(&mut self) {
         let (Some(path), Some(db)) = (self.survey.path.clone(), self.survey.db.as_ref()) else {
@@ -1515,6 +1552,97 @@ impl App {
             rt: self.rt.handle().clone(),
         }
         .show(ui);
+    }
+
+    /// The pass table, and what its buttons asked for.
+    fn sats_view(&mut self, ui: &mut egui::Ui) {
+        let acts = sats_pane::Sats {
+            st: &mut self.sats,
+            home: self.location,
+        }
+        .show(ui);
+        for a in acts {
+            match a {
+                sats_pane::Action::ShowOnMap => self.view = View::Map,
+                sats_pane::Action::Track(d) => self.listen_to_satellite(&d),
+                sats_pane::Action::Untrack => self.stop_tracking(),
+            }
+        }
+    }
+
+    /// Put a channel on a satellite's downlink and follow it down.
+    ///
+    /// Always following, because there is no useful other kind: a downlink
+    /// tuned once is off the transmission within the minute, so a control
+    /// that tuned without correcting would be a control that stops working
+    /// while you watch it.
+    ///
+    /// A channel of its own rather than moving whatever was being listened
+    /// to: the correction only makes sense on that one downlink, and moving
+    /// a channel somebody put on a repeater would be a control that eats
+    /// another one's work.
+    fn listen_to_satellite(&mut self, d: &sats_pane::Downlink) {
+        let shifted = self.doppler_at(d.norad, d.hz).unwrap_or(d.hz);
+        // The dial has to be able to reach it. A satellite channel is the
+        // one case where what to listen to is chosen before the receiver is
+        // pointed anywhere near it.
+        if !self.audio.channels.iter().any(|c| c.on)
+            || (shifted - self.center).abs() > self.rate / 2.0
+        {
+            self.set_center(shifted / 1e6);
+        }
+        self.push_channel(shifted, sat_mode(&d.mode), Some(sat_label(d)));
+        let Some(c) = self.audio.channels.last_mut() else { return };
+        c.doppler = true;
+        let channel = c.id;
+        self.sats.tracking =
+            Some(state::Tracking { norad: d.norad, downlink_hz: d.hz, channel, tuned_hz: shifted });
+        self.send_channels();
+    }
+
+    /// Stop following, and give the channel its dial back rather than
+    /// leaving one nobody is allowed to tune.
+    fn stop_tracking(&mut self) {
+        let Some(t) = self.sats.tracking.take() else { return };
+        if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == t.channel) {
+            c.doppler = false;
+        }
+    }
+
+    /// Where a satellite's downlink is arriving right now, or `None` when
+    /// there is no station, no elements, or it is below the horizon.
+    fn doppler_at(&self, norad: u64, downlink_hz: f64) -> Option<f64> {
+        let (lat, lon) = self.location?;
+        let sky = crate::sats::sky(self.sats.group)?;
+        let look = sky.get(norad)?.look(orbit::Station::new(lat, lon), crate::sats::now_s())?;
+        Some(look.doppler_hz(downlink_hz))
+    }
+
+    /// Move the tracking channel to where the downlink is now.
+    ///
+    /// Once a frame, which at any refresh rate is far oftener than the shift
+    /// changes by anything a receiver can act on, so the retune is gated on
+    /// a threshold rather than on a clock: a command per frame would be a
+    /// channel rebuilt sixty times a second for a few hertz.
+    fn follow_doppler(&mut self) {
+        let Some(t) = self.sats.tracking else { return };
+        // A channel the operator closed ends the tracking with it, rather
+        // than leaving a control that is following nothing.
+        if !self.audio.channels.iter().any(|c| c.id == t.channel) {
+            self.sats.tracking = None;
+            return;
+        }
+        let Some(now_hz) = self.doppler_at(t.norad, t.downlink_hz) else { return };
+        // A hundred hertz is inside the narrowest channel this receiver
+        // demodulates and is about a second of drift on a two-metre pass.
+        if (now_hz - t.tuned_hz).abs() < 100.0 {
+            return;
+        }
+        if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == t.channel) {
+            c.freq = now_hz;
+        }
+        self.sats.tracking = Some(state::Tracking { tuned_hz: now_hz, ..t });
+        self.send_channels();
     }
 
     /// Draw the scope, then do what it asked for.
@@ -1601,6 +1729,7 @@ impl App {
             squelch_db: None,
             agc: true,
             tx: None,
+            doppler: false,
         });
         self.audio.listening = Some(self.audio.channels.len() - 1);
         self.send_channels();
@@ -1712,6 +1841,36 @@ fn front_for(model: &str) -> Option<&'static str> {
     crate::chain::channel_fronts().iter().map(|(k, _)| *k).find(|k| *k == system)
 }
 
+/// What to build for a downlink, from the mode SatNOGS names it by.
+///
+/// The modes with a demodulator here get it. Everything else, the
+/// phase-keyed telemetry and the packet modes, gets the auto front end,
+/// which measures what is actually in the channel and places whatever reads
+/// it: better than guessing narrow FM and better than a fixed list here that
+/// would have to be kept in step with what the receiver can decode.
+fn sat_mode(mode: &str) -> ChanMode {
+    match mode.to_ascii_uppercase().as_str() {
+        "FM" | "FMN" | "NFM" => ChanMode::Audio(Demod::Nfm),
+        "AM" => ChanMode::Audio(Demod::Am),
+        "USB" => ChanMode::Audio(Demod::Usb),
+        "LSB" => ChanMode::Audio(Demod::Lsb),
+        "CW" => ChanMode::Audio(Demod::Cw),
+        _ => ChanMode::Auto,
+    }
+}
+
+/// What the strip calls a satellite channel: the satellite and which of its
+/// transmitters this is, because a bird with a voice repeater and a
+/// telemetry beacon is two channels that are otherwise identical.
+fn sat_label(d: &sats_pane::Downlink) -> String {
+    let what = match (d.what.is_empty(), d.mode.is_empty()) {
+        (false, _) => d.what.clone(),
+        (true, false) => d.mode.clone(),
+        (true, true) => format!("{:.3} MHz", d.hz / 1e6),
+    };
+    format!("{}:{what}", d.sat)
+}
+
 fn fmt_hz(hz: f64) -> String {
     if hz.abs() >= 1e6 {
         format!("{:.4} MHz", hz / 1e6)
@@ -1734,6 +1893,11 @@ impl eframe::App for App {
         // Read once a frame rather than where it is drawn: the pane's button
         // and the modal both show it, and only one of them is ever open.
         self.survey.wigle.status = self.radio.as_ref().and_then(|r| r.status.wigle.lock().clone());
+        self.survey.beacondb.status =
+            self.radio.as_ref().and_then(|r| r.status.beacondb.lock().clone());
+        // Whatever view is open: a pass does not stop moving because the
+        // operator went to look at the spectrum.
+        self.follow_doppler();
         if crate::shutdown::asked() {
             // Closing rather than exiting, so the session is saved and the
             // radio and the log are dropped the way a click on the close
@@ -1764,6 +1928,7 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
+                    View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),
                 });
@@ -1771,6 +1936,7 @@ impl eframe::App for App {
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
+        self.beacondb_modal(ui.ctx());
         self.flush_cmds();
         self.restore_radio_settings();
         self.save_session();
@@ -1932,6 +2098,42 @@ fn split_grip(p: &egui::Painter, r: &Rect, hot: bool) {
 mod tests {
     use super::*;
 
+    fn downlink(mode: &str, what: &str) -> sats_pane::Downlink {
+        sats_pane::Downlink {
+            norad: 25544,
+            sat: "ISS (ZARYA)".into(),
+            hz: 145_800_000.0,
+            mode: mode.into(),
+            what: what.into(),
+        }
+    }
+
+    /// A bird with a voice repeater and a telemetry beacon is two channels
+    /// that are otherwise identical, so the strip has to say which is which.
+    #[test]
+    fn a_satellite_channel_is_named_after_the_transmitter_not_the_satellite() {
+        assert_eq!(
+            sat_label(&downlink("FM", "Mode V/U FM voice")),
+            "ISS (ZARYA):Mode V/U FM voice"
+        );
+        // A transmitter SatNOGS has not described is named by its mode.
+        assert_eq!(sat_label(&downlink("BPSK", "")), "ISS (ZARYA):BPSK");
+        // And one with neither still says something a person can tell apart.
+        assert_eq!(sat_label(&downlink("", "")), "ISS (ZARYA):145.800 MHz");
+    }
+
+    /// A mode with a demodulator here gets it; anything else gets the auto
+    /// front end, which measures the channel rather than guessing at it.
+    #[test]
+    fn a_downlink_gets_a_demodulator_or_the_auto_front_end() {
+        assert_eq!(sat_mode("FM"), ChanMode::Audio(Demod::Nfm));
+        assert_eq!(sat_mode("usb"), ChanMode::Audio(Demod::Usb));
+        assert_eq!(sat_mode("CW"), ChanMode::Audio(Demod::Cw));
+        for digital in ["BPSK", "AFSK", "GMSK", "FSK", "", "LRPT"] {
+            assert_eq!(sat_mode(digital), ChanMode::Auto, "{digital}");
+        }
+    }
+
     fn app() -> App {
         let mut a = App {
             center: 100_000_000.0,
@@ -1962,6 +2164,7 @@ mod tests {
             agc: true,
             voice: false,
             tx: None,
+            doppler: false,
         });
     }
 
@@ -2163,7 +2366,8 @@ mod tests {
                 squelch_db: None,
                 agc: true,
                 voice: false,
-            tx: None,
+                tx: None,
+                doppler: false,
             });
         }
         a

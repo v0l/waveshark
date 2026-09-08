@@ -248,6 +248,16 @@ impl Layer for AirportLayer {
     fn status(&self) -> Option<String> {
         (!self.shown.is_empty()).then(|| format!("{} airports", self.shown.len()))
     }
+
+    /// Only while its markers are on screen. A credit for data that is not
+    /// being shown is noise in the corner, and the licence asks for a credit
+    /// where the data is used rather than everywhere it might be.
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        match self.shown.is_empty() {
+            true => Vec::new(),
+            false => vec![crate::data::Which::Airports.credit()],
+        }
+    }
 }
 
 /// Cells from the OpenCelliD export, at the position the crowd averaged for
@@ -258,8 +268,18 @@ impl Layer for AirportLayer {
 /// hidden: half these positions come from a phone in a car going past, and a
 /// dot alone would claim a street the export does not know.
 #[derive(Default)]
-pub(super) struct CellLayer {
+pub(super) struct CellLayer<'a> {
+    /// Cells this receiver decoded, from the survey. The export is what the
+    /// crowd knows; these are what was heard, and the ones the export has no
+    /// row for are what beaconDB is asked about.
+    pub heard: &'a [survey::Device],
     shown: Vec<(Pos2, datasets::cells::Cell)>,
+    /// Cells the export does not have, placed where beaconDB says a receiver
+    /// hearing them is, with the metres that is good to.
+    guessed: Vec<(Pos2, survey::beacondb::Cell, f64)>,
+    /// Why nothing was drawn, for the status line. A layer switched on and
+    /// silent is indistinguishable from a country with no masts in it.
+    quiet: Option<&'static str>,
 }
 
 /// Below this the export is a wall of dots over a whole city. Higher than
@@ -267,7 +287,62 @@ pub(super) struct CellLayer {
 /// of thousands of cells.
 const CELL_ZOOM: f64 = 12.0;
 
-impl Layer for CellLayer {
+impl<'a> CellLayer<'a> {
+    /// Around the cells the survey holds, which is what the beaconDB lookup
+    /// has anything to say about.
+    pub fn new(heard: &'a [survey::Device]) -> Self {
+        Self { heard, ..Default::default() }
+    }
+
+    /// Cells this receiver heard that the export has no row for, placed
+    /// where beaconDB says.
+    ///
+    /// Drawn as the accuracy it came with rather than as a mast: beaconDB
+    /// answers where a receiver seeing this cell probably is, which with one
+    /// cell and nothing else is that cell's own estimated position and worth
+    /// no more precision than the circle around it.
+    fn draw_heard(&mut self, c: &Canvas, near: Rect, export: Option<&datasets::cells::Cells>) {
+        if !crate::beacondb::lookup_on() {
+            return;
+        }
+        for d in self.heard.iter().filter(|d| d.protocol == "gsm") {
+            let Some(cell) = survey::beacondb::cell(&d.ident) else { continue };
+            let known = export
+                .is_some_and(|e| e.get(cell.mcc, &cell.mnc.to_string(), cell.lac, cell.cid).is_some());
+            if known {
+                continue;
+            }
+            let Some(crate::beacondb::Answer::At { lat, lon, accuracy_m }) =
+                crate::beacondb::position(cell)
+            else {
+                continue;
+            };
+            let at = c.at(lat, lon);
+            if !near.contains(at) {
+                continue;
+            }
+            let r = (accuracy_m / 1852.0 * c.nm_px_at(lat)) as f32;
+            if r > 3.0 {
+                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::TRACE.gamma_multiply(0.18)));
+            }
+            // A cross, not a dot: this is somebody's estimate of a place, and
+            // it must not read as a mast the export has a position for.
+            let arm = 3.5;
+            let dim = theme::TRACE.gamma_multiply(0.7);
+            c.p.line_segment(
+                [Pos2::new(at.x - arm, at.y), Pos2::new(at.x + arm, at.y)],
+                Stroke::new(1.0, dim),
+            );
+            c.p.line_segment(
+                [Pos2::new(at.x, at.y - arm), Pos2::new(at.x, at.y + arm)],
+                Stroke::new(1.0, dim),
+            );
+            self.guessed.push((at, cell, accuracy_m));
+        }
+    }
+}
+
+impl Layer for CellLayer<'_> {
     fn key(&self) -> &'static str {
         "cells"
     }
@@ -278,42 +353,58 @@ impl Layer for CellLayer {
 
     fn draw(&mut self, c: &Canvas) {
         self.shown.clear();
+        self.guessed.clear();
+        self.quiet = None;
         if c.zoom() < CELL_ZOOM {
+            self.quiet = Some("zoom in");
             return;
         }
+        let near = c.rect.expand(30.0);
         // Asking is what starts the download, so the layer being switched on
         // is what fetches the export rather than the receiver fetching it in
         // case somebody looks.
-        let Some(cells) = crate::data::cell_towers() else { return };
-        let near = c.rect.expand(30.0);
-        // A linear pass over the country's rows: they are sorted by identity
-        // rather than by position, and at this zoom the window is a few
-        // streets, so anything spatial would be an index built for a filter
-        // that already costs less than the draw.
-        for cell in cells.iter() {
-            let at = c.at(cell.lat, cell.lon);
-            if !near.contains(at) {
-                continue;
+        let cells = crate::data::cell_towers();
+        if let Some(cells) = &cells {
+            // A linear pass over the country's rows: they are sorted by
+            // identity rather than by position, and at this zoom the window
+            // is a few streets, so anything spatial would be an index built
+            // for a filter that already costs less than the draw.
+            for cell in cells.iter() {
+                let at = c.at(cell.lat, cell.lon);
+                if !near.contains(at) {
+                    continue;
+                }
+                let r = (f64::from(cell.range_m) / 1852.0 * c.nm_px_at(cell.lat)) as f32;
+                if r > 3.0 {
+                    c.p.circle_stroke(at, r, Stroke::new(1.0, theme::OK.gamma_multiply(0.22)));
+                }
+                c.p.circle_filled(at, 2.5, theme::OK.gamma_multiply(0.75));
+                self.shown.push((at, cell.clone()));
             }
-            let r = (f64::from(cell.range_m) / 1852.0 * c.nm_px_at(cell.lat)) as f32;
-            if r > 3.0 {
-                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::OK.gamma_multiply(0.22)));
-            }
-            c.p.circle_filled(at, 2.5, theme::OK.gamma_multiply(0.75));
-            self.shown.push((at, cell.clone()));
+        }
+        self.draw_heard(c, near, cells.as_deref());
+        if cells.is_none() && self.guessed.is_empty() {
+            self.quiet =
+                Some(crate::data::Which::CellTowers.blocked().unwrap_or("not downloaded"));
         }
     }
 
     fn over(&mut self, c: &Canvas) {
         let Some(pos) = c.hover() else { return };
+        if let Some((at, cell, accuracy_m)) = nearest_guess(&self.guessed, pos) {
+            let who = network_name(cell.mcc, &cell.mnc.to_string());
+            let line = format!(
+                "{}-{} LAC {} CI {} {} beaconDB estimate ±{:.0} m",
+                cell.mcc, cell.mnc, cell.lac, cell.cid, who, accuracy_m
+            );
+            c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::TRACE, 1.0);
+            return;
+        }
         let Some((at, cell)) = nearest_cell(&self.shown, pos) else { return };
         // The network's name where the operator table has landed, and the
         // codes either way: a beacon gives numbers, and a card that shows
         // only a brand cannot be matched against what was decoded.
-        let who = crate::data::cell_operators()
-            .and_then(|ops| ops.get(cell.mcc, &cell.mnc).map(|o| o.brand.clone()))
-            .filter(|b| !b.is_empty())
-            .unwrap_or_else(|| "unknown network".into());
+        let who = network_name(cell.mcc, &cell.mnc);
         let line = format!(
             "{} {}-{} LAC {} CI {} {} ±{} m, {} reports",
             cell.radio, cell.mcc, cell.mnc, cell.area, cell.cell, who, cell.range_m, cell.samples
@@ -322,11 +413,55 @@ impl Layer for CellLayer {
     }
 
     fn status(&self) -> Option<String> {
-        if self.shown.is_empty() {
-            return None;
+        if let Some(why) = self.quiet {
+            return Some(format!("cells: {why}"));
         }
-        Some(format!("{} cells", self.shown.len()))
+        match (self.shown.len(), self.guessed.len()) {
+            (0, 0) => None,
+            (n, 0) => Some(format!("{n} cells")),
+            (0, g) => Some(format!("{g} cells from beaconDB")),
+            (n, g) => Some(format!("{n} cells, {g} from beaconDB")),
+        }
     }
+
+    /// Asked for in writing by OpenCelliD: a visible credit and a link, for
+    /// as long as their masts are on the screen, and only then. beaconDB is
+    /// named on the same terms, while one of its estimates is drawn.
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        let mut out = Vec::new();
+        if !self.shown.is_empty() {
+            out.push(crate::data::Which::CellTowers.credit());
+        }
+        if !self.guessed.is_empty() {
+            out.push(crate::beacondb::CREDIT);
+        }
+        out
+    }
+}
+
+/// What subscribers call the network an MCC and MNC belong to, or a phrase
+/// saying nobody knows: a card showing only numbers is a card that cannot be
+/// read, and one showing only a brand cannot be matched against a decode.
+fn network_name(mcc: u16, mnc: &str) -> String {
+    crate::data::cell_operators()
+        .and_then(|ops| ops.get(mcc, mnc).map(|o| o.brand.clone()))
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "unknown network".into())
+}
+
+/// The beaconDB estimate under the pointer, within a marker's grabbing
+/// distance.
+fn nearest_guess(
+    shown: &[(Pos2, survey::beacondb::Cell, f64)],
+    pos: Pos2,
+) -> Option<(Pos2, survey::beacondb::Cell, f64)> {
+    const PX: f32 = 10.0;
+    shown
+        .iter()
+        .map(|(at, cell, acc)| (at.distance(pos), at, cell, acc))
+        .filter(|(d, ..)| *d <= PX)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, at, cell, acc)| (*at, *cell, *acc))
 }
 
 /// The cell under the pointer, within a marker's grabbing distance.
@@ -769,5 +904,196 @@ mod tests {
         // The rule sits between the head and the rows, not on top of either.
         assert!(l.rule_y > l.ys[head.len() - 1]);
         assert!(l.rule_y < l.ys[head.len()]);
+    }
+}
+
+/// Satellites: the path each one is on, and where it is now.
+///
+/// Drawn from the elements rather than from anything heard, so unlike a
+/// track it is a prediction and is drawn as one: a thin line for where the
+/// sub-point runs, brighter ahead of the satellite than behind it, and a
+/// ring at the place it is over at this instant.
+///
+/// Only what is being watched. Propagating a hundred objects a frame is
+/// cheap, but a hundred ground tracks drawn over each other is a map you
+/// cannot read, so the layer draws the selected satellite and whatever is
+/// above the horizon from here.
+pub(super) struct SatLayer {
+    pub sky: Option<std::sync::Arc<crate::sats::Sky>>,
+    /// Which group they came from, so the credit names the right row.
+    pub group: &'static datasets::tle::Group,
+    /// The one the pass table has selected, drawn whether or not it is up.
+    pub selected: Option<u64>,
+    pub home: Option<(f64, f64)>,
+    pub now_s: i64,
+    /// Where each drawn satellite ended up, for the hover card.
+    shown: Vec<(Pos2, String, f64, f64)>,
+    /// Catalogue numbers as drawn, beside `shown`, so a click can name what
+    /// it landed on.
+    ids: Vec<u64>,
+    /// What was clicked this frame, for the pane to select.
+    pub hit: Option<u64>,
+}
+
+impl SatLayer {
+    pub fn new(
+        sky: Option<std::sync::Arc<crate::sats::Sky>>,
+        group: &'static datasets::tle::Group,
+        selected: Option<u64>,
+        home: Option<(f64, f64)>,
+        now_s: i64,
+    ) -> Self {
+        Self { sky, group, selected, home, now_s, shown: Vec::new(), ids: Vec::new(), hit: None }
+    }
+}
+
+/// A minute a sample draws a low orbit to within a few kilometres of itself,
+/// which is finer than any zoom that fits a whole orbit on screen.
+const TRACK_STEP_S: i64 = 60;
+
+impl Layer for SatLayer {
+    fn key(&self) -> &'static str {
+        "satellites"
+    }
+
+    fn label(&self) -> &'static str {
+        "SATS"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        self.shown.clear();
+        self.ids.clear();
+        self.hit = None;
+        let Some(sky) = self.sky.clone() else { return };
+        let station = self.home.map(|(lat, lon)| orbit::Station::new(lat, lon));
+        for sat in sky.sats() {
+            let up = station
+                .and_then(|s| sat.look(s, self.now_s))
+                .is_some_and(|l| l.el_deg > 0.0);
+            let picked = self.selected == Some(sat.norad);
+            if !up && !picked {
+                continue;
+            }
+            let Some((lat, lon, alt_km)) = sat.subpoint(self.now_s) else { continue };
+            // One orbit, half of it behind and half ahead, so the path says
+            // where it came from as well as where it is going.
+            let period = sat.period_s() as i64;
+            let steps = (period / TRACK_STEP_S).clamp(8, 240) as usize;
+            let start = self.now_s - period / 2;
+            let track = sat.ground_track(start, TRACK_STEP_S, steps + 1);
+            let bright = if picked { theme::READOUT } else { theme::TRACE };
+            // Whether any of this satellite ends up on screen. A pass over
+            // the other side of the world is above the horizon and drawn
+            // nowhere, and counting it as drawn credited CelesTrak on a map
+            // showing none of their data.
+            let mut visible = false;
+            let mut prev: Option<Pos2> = None;
+            for (t, plat, plon) in track {
+                let at = c.at(plat, plon);
+                visible |= c.rect.contains(at);
+                if let Some(last) = prev {
+                    // A minute of flight is a short step on any map. One
+                    // that lands half a world away is the far edge of it
+                    // rather than a move, and drawing it would put a stroke
+                    // across everything. Measured against the world and not
+                    // against the pane: zoomed out, the whole world is
+                    // narrower than the pane and every wrap would pass.
+                    if (at.x - last.x).abs() < c.world_px() / 2.0 {
+                        let ahead = t >= self.now_s;
+                        let fade = if ahead { 0.55 } else { 0.22 };
+                        c.p.line_segment(
+                            [last, at],
+                            Stroke::new(1.0, bright.gamma_multiply(fade)),
+                        );
+                    }
+                }
+                prev = Some(at);
+            }
+            let at = c.at(lat, lon);
+            // The circle of ground that can see it, which is the question a
+            // map is being asked: whether the station at the other end of a
+            // contact is inside it. Only for the one that was picked: half a
+            // dozen circles two thousand kilometres across is a map of
+            // circles. Drawn from the sub-point, so it is a circle on the
+            // ground and not on the projection, at the scale of its centre.
+            if picked {
+                let r = (orbit::footprint_km(alt_km) / 1.852 * c.nm_px_at(lat)) as f32;
+                if r > 4.0 {
+                    // Filled as well as outlined. A hairline two thousand
+                    // kilometres across is a circle you have to look for,
+                    // and the answer it carries is which side of it a place
+                    // is on, which a wash says at a glance and a line does
+                    // not. Faint enough that the coastline under it still
+                    // reads.
+                    c.p.circle_filled(at, r, bright.gamma_multiply(0.06));
+                    c.p.circle_stroke(at, r, Stroke::new(1.0, bright.gamma_multiply(0.45)));
+                    // A footprint wide enough to cover the view is this
+                    // satellite's data on screen even when the satellite
+                    // itself is on the other side of the world, and it has
+                    // to be credited like anything else that is drawn.
+                    visible |= c.rect.distance_to_pos(at) <= r;
+                }
+            }
+            c.p.circle_stroke(at, 4.0, Stroke::new(1.5, bright));
+            c.p.circle_filled(at, 1.5, bright);
+            if !(visible || c.rect.contains(at)) {
+                continue;
+            }
+            self.shown.push((at, sat.name.clone(), lat, lon));
+            self.ids.push(sat.norad);
+        }
+    }
+
+    fn over(&mut self, c: &Canvas) {
+        // Picked by the same reach as the hover card, so what a click
+        // selects is what the pointer was naming.
+        if let Some(pos) = c.click() {
+            self.hit = self
+                .shown
+                .iter()
+                .zip(&self.ids)
+                .map(|((at, ..), id)| (at.distance(pos), *id))
+                .filter(|(d, _)| *d <= 12.0)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, id)| id);
+        }
+        let Some(pos) = c.hover() else { return };
+        let Some((at, name, lat, lon)) = self
+            .shown
+            .iter()
+            .map(|(at, name, lat, lon)| (at.distance(pos), *at, name.clone(), *lat, *lon))
+            .filter(|(d, ..)| *d <= 12.0)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, at, name, lat, lon)| (at, name, lat, lon))
+        else {
+            return;
+        };
+        let line = match self.home.map(|(hlat, hlon)| orbit::Station::new(hlat, hlon)) {
+            Some(s) => match self.sky.as_ref().and_then(|sky| {
+                sky.sats().iter().find(|x| x.name == name).and_then(|x| x.look(s, self.now_s))
+            }) {
+                Some(l) => format!(
+                    "{name}  {:.2}, {:.2}  az {:.0} el {:.0}  {:.0} km",
+                    lat, lon, l.az_deg, l.el_deg, l.range_km
+                ),
+                None => format!("{name}  {lat:.2}, {lon:.2}"),
+            },
+            None => format!("{name}  {lat:.2}, {lon:.2}"),
+        };
+        c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::VALUE, 1.0);
+    }
+
+    fn status(&self) -> Option<String> {
+        (!self.shown.is_empty()).then(|| match self.shown.len() {
+            1 => "1 satellite".into(),
+            n => format!("{n} satellites"),
+        })
+    }
+
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        match self.shown.is_empty() {
+            true => Vec::new(),
+            false => vec![crate::data::Which::Satellites(self.group).credit()],
+        }
     }
 }

@@ -915,13 +915,15 @@ impl App {
                     if let Some(b) = r.blocked {
                         hint(ui, b);
                     }
+                    if let Some(k) = r.which.key() {
+                        self.key_field(ui, r.which, k);
+                    }
                 });
                 ui.add_space(4.0);
             }
         });
 
         ui.add_space(6.0);
-        self.opencellid_row(ui);
 
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all")))).clicked() {
@@ -946,32 +948,37 @@ impl App {
         }
     }
 
-    /// The OpenCelliD download token.
+    /// The credential a dataset needs, on that dataset's row.
     ///
-    /// Kept here rather than in Setup because it is not a preference: it is
-    /// the credential one row in the list above needs, and it is meaningless
-    /// anywhere else. Free to get from opencellid.org, and the address is
-    /// spelled out because a token field with no idea where to get one is a
-    /// dead end.
-    fn opencellid_row(&mut self, ui: &mut egui::Ui) {
-        legend_help(
-            ui,
-            "OpenCelliD token",
-            "An account at opencellid.org gives a download token. It goes in the URL of the \
-             cell export, so without one that row cannot be fetched; the rest of the list \
-             needs nothing.",
-        );
-        let before = self.opencellid_token.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut self.opencellid_token)
-                .desired_width(ui.available_width())
-                .password(true)
-                .hint_text("pk.0123456789abcdef"),
-        );
-        if self.opencellid_token != before {
-            crate::data::set_opencellid_token(&self.opencellid_token);
+    /// On the row rather than in a field under the list, and not in Setup at
+    /// all: a token is not a preference, it is the one thing standing
+    /// between that row and a download, and the link beside it goes to the
+    /// page that hands one out.
+    fn key_field(&mut self, ui: &mut egui::Ui, which: crate::data::Which, k: crate::data::Key) {
+        let Some(slot) = self.key_slot(which) else { return };
+        let before = slot.clone();
+        ui.horizontal(|ui| {
+            theme::Line::new().legend(k.label).show(ui);
+            ui.add(
+                egui::TextEdit::singleline(slot)
+                    .desired_width(ui.available_width())
+                    .password(true)
+                    .hint_text(k.hint),
+            )
+            .on_hover_text(k.help);
+        });
+        if *slot != before {
+            which.set_key(slot);
         }
-        ui.add_space(8.0);
+    }
+
+    /// Where this pane holds the credential for a dataset, so what is typed
+    /// is what the session saves.
+    fn key_slot(&mut self, which: crate::data::Which) -> Option<&mut String> {
+        match which {
+            crate::data::Which::CellTowers => Some(&mut self.opencellid_token),
+            _ => None,
+        }
     }
 
     /// Create a radio that is not on this machine.
@@ -1099,6 +1106,118 @@ impl App {
         }
         if close {
             self.survey.wigle.open = false;
+        }
+    }
+
+    /// The beacondb.net feed: the switch, and what it has sent.
+    ///
+    /// Beside the WiGLE dialog rather than inside it because they are
+    /// different bargains. beaconDB takes no account and puts what it
+    /// collects into the public domain, so there is nothing to type and
+    /// nothing to log in to; what there is instead is a decision, which is
+    /// why this asks rather than defaulting to on.
+    pub(super) fn beacondb_modal(&mut self, ctx: &egui::Context) {
+        if !self.survey.beacondb.open {
+            return;
+        }
+        let mut close = false;
+        let mut apply = false;
+        let r = egui::containers::Modal::new(egui::Id::new("beacondb"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                modal_title(ui, "Feed beacondb.net");
+                hint(
+                    ui,
+                    "Bluetooth devices and cells heard with a position are submitted to \
+                     beaconDB, which is crowd-sourced, needs no account, and publishes what \
+                     it collects. Everything else the survey records stays on this machine: \
+                     there is no beacon type for an aircraft or a pager.",
+                );
+                ui.add_space(6.0);
+                hint(
+                    ui,
+                    "What is submitted is where this receiver was when it heard something, so \
+                     a drive is a track of where you have been. Levels are not sent: this \
+                     receiver measures dBFS and the field means dBm.",
+                );
+                ui.add_space(10.0);
+
+                let on_help = "While this is on, every Bluetooth device and cell heard with a \
+                               position is spooled to disc and submitted when there is a \
+                               network. A drive with no coverage sends when it gets home.";
+                if check_help(ui, &mut self.survey.beacondb.on, "Submit while receiving", on_help)
+                    .changed()
+                {
+                    apply = true;
+                }
+                let ask_help = "Draws a position for a cell you have decoded that the \
+                                OpenCelliD export has no row for, as a cross with the \
+                                accuracy beaconDB gives it. Asking tells beaconDB which \
+                                cells this receiver has heard, which is why it is separate \
+                                from submitting.";
+                if check_help(
+                    ui,
+                    &mut self.survey.beacondb.lookup,
+                    "Ask where a heard cell is",
+                    ask_help,
+                )
+                .changed()
+                {
+                    apply = true;
+                }
+                ui.add_space(10.0);
+
+                match self.survey.beacondb.status.as_ref() {
+                    Some(s) => {
+                        theme::Line::new()
+                            .legend("waiting")
+                            .value(format!(
+                                "{} observations in {} files",
+                                s.queued_items, s.queued_files
+                            ))
+                            .legend("submitted")
+                            .value(format!(
+                                "{} observations in {} files",
+                                s.sent_items, s.sent_files
+                            ))
+                            .size(11.0)
+                            .show(ui);
+                        hint(ui, &format!("spool {}", s.spool.display()));
+                        if let Some(e) = &s.error {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(e).small().color(theme::FAULT),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    }
+                    None => hint(ui, "no receiver running, so nothing is being collected"),
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(crate::i18n::t("ui.close")).clicked() {
+                            close = true;
+                        }
+                        if ui.button("APPLY").clicked() {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if apply {
+            self.apply_beacondb();
+        }
+        if close {
+            self.survey.beacondb.open = false;
         }
     }
 

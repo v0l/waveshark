@@ -9,17 +9,46 @@ mod layers;
 
 use super::mapview::{Layer, MapView};
 use super::*;
-use layers::{AirportLayer, CellLayer, RingLayer, SightingLayer, StationLayer, TrackLayer};
+use layers::{
+    AirportLayer, CellLayer, RingLayer, SatLayer, SightingLayer, StationLayer, TrackLayer,
+};
 
 /// What the map pane remembers. Its own, and reachable from no other view:
 /// the camera and the tiles belong to the map widget, and the tracks are the
 /// pane's copy of what the tracker in the graph is holding.
-#[derive(Default)]
+/// Share of the pane the map gets by default. The map is the view worth
+/// having; the table is what you read once something on it is interesting.
+const DEFAULT_MAP_FRAC: f32 = 0.55;
+/// How far the divider can be dragged. Neither half may be squeezed to
+/// nothing: a two pixel map is not a smaller map, it is a broken one.
+const MAP_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.15..=0.9;
+
 pub(super) struct MapState {
     pub map: MapView,
+    /// Where the divider between the map and the table sits.
+    pub map_frac: f32,
+    /// The satellite clicked on the map this frame, for the application to
+    /// select. Held here rather than returned because the layer that names
+    /// it lives inside the draw and the caller reads state, not layers.
+    pub sat_hit: Option<u64>,
+    /// Whether the divider is being dragged, so it stays lit and keeps the
+    /// drag even when the pointer runs ahead of it.
+    splitting: bool,
     /// Tracks, folded together from whatever on the bus reports a position:
     /// aircraft from ADS-B, vessels and marks from AIS.
     pub tracks: Vec<crate::tracks::Track>,
+}
+
+impl Default for MapState {
+    fn default() -> Self {
+        Self {
+            map: MapView::default(),
+            map_frac: DEFAULT_MAP_FRAC,
+            sat_hit: None,
+            splitting: false,
+            tracks: Vec::new(),
+        }
+    }
 }
 
 /// One device's sightings, as the map is handed them.
@@ -42,6 +71,13 @@ pub(super) struct Map<'a> {
     pub edit: &'a mut Option<String>,
     /// The sightings of the device selected in the device list, if one is.
     pub trail: Trail<'a>,
+    /// Devices the survey holds, for the layers that draw what was heard
+    /// rather than what somebody published.
+    pub heard: &'a [survey::Device],
+    /// The satellite the pass table has selected, drawn whether or not it is
+    /// above the horizon, and the group it was selected from.
+    pub sat: Option<u64>,
+    pub sat_group: &'static datasets::tle::Group,
     /// Where tile fetches are run. The application owns the runtime; the pane
     /// is handed a handle for the frame.
     pub rt: tokio::runtime::Handle,
@@ -64,13 +100,18 @@ impl Map<'_> {
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
         self.st.map.poll(ui.ctx());
         let mut place = None;
+        let mut sat_hit = None;
         let mut edit = self.edit.take();
+        let mut split = self.st.map_frac;
+        let splitting = &mut self.st.splitting;
         {
             let map = &mut self.st.map;
             let active: Vec<&crate::tracks::Track> = self.st.tracks.iter().collect();
             let home = self.home;
             let accuracy_m = self.accuracy_m;
             let rt = &self.rt;
+            let selected_sat = self.sat;
+            let sat_group = self.sat_group;
             let body = |ui: &mut egui::Ui| {
                 place = Self::station_row(ui, home, &mut edit);
                 ui.add_space(4.0);
@@ -82,37 +123,64 @@ impl Map<'_> {
                 // of what is in the air stays the brightest thing on screen.
                 let mut rings = RingLayer { home };
                 let mut airports = AirportLayer::default();
-                let mut cells = CellLayer::default();
+                let mut cells = CellLayer::new(self.heard);
                 let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now };
+                let mut sats = SatLayer::new(
+                    crate::sats::sky(sat_group),
+                    sat_group,
+                    selected_sat,
+                    home,
+                    crate::sats::now_s(),
+                );
                 let mut sightings = SightingLayer {
                     trail: self.trail.points,
                     ident: self.trail.ident,
                     estimate: self.trail.estimate,
                 };
-                let mut layers: [&mut dyn Layer; 6] = [
+                let mut layers: [&mut dyn Layer; 7] = [
                     &mut rings,
                     &mut cells,
                     &mut airports,
                     &mut station,
                     &mut sightings,
+                    &mut sats,
                     &mut tracks,
                 ];
 
                 map.switches(ui, &layers);
                 ui.add_space(6.0);
-                // Half the pane each, roughly: the map is the view worth
-                // having and the table is what you read once something on it
-                // is interesting.
-                let h = (ui.available_height() * 0.55).clamp(160.0, 1200.0);
+                // The table is the tracks layer read as text, so it goes
+                // with it: switching the layer off and leaving half the pane
+                // to a table of what is no longer drawn is a pane arguing
+                // with itself.
+                let listing = map.layers.on("tracks");
+                let top = ui.cursor().top();
+                let usable = match listing {
+                    true => (ui.available_height() - SPLIT_GRIP_H).max(200.0),
+                    false => ui.available_height().max(200.0),
+                };
+                let frac = match listing {
+                    true => split.clamp(*MAP_FRAC_RANGE.start(), *MAP_FRAC_RANGE.end()),
+                    false => 1.0,
+                };
                 let fallback = home.or_else(|| mean_position(&active));
-                let drawn = map.show(ui, h, fallback, rt, &mut layers);
+                let drawn = map.show(ui, usable * frac, fallback, rt, &mut layers);
                 place = place.or(drawn.picked);
-                ui.add_space(10.0);
-                Self::track_rows(ui, &active, now);
+                // A satellite clicked on the map is the same selection the
+                // pass table makes, so picking one here shows its track and
+                // its footprint and highlights its card.
+                sat_hit = sats.hit;
+                if listing {
+                    split = Self::divider(ui, top, usable, split, splitting);
+                    ui.add_space(4.0);
+                    Self::track_rows(ui, &active, now);
+                }
             };
             margin.show(ui, body);
         }
+        self.st.map_frac = split;
+        self.st.sat_hit = sat_hit;
         *self.edit = edit;
         if place.is_some() {
             *self.edit = None;
@@ -120,6 +188,47 @@ impl Map<'_> {
         place
     }
 
+
+    /// The handle between the map and the table, and the drag that moves it.
+    ///
+    /// The same grip the scope pane uses, because it is the same gesture: a
+    /// pane split two ways where which half matters changes with what is
+    /// being watched. Follows the pointer rather than accumulating deltas,
+    /// so a long drag cannot leave the divider behind the cursor.
+    fn divider(
+        ui: &mut egui::Ui,
+        top: f32,
+        usable: f32,
+        frac: f32,
+        splitting: &mut bool,
+    ) -> f32 {
+        let (grip, resp) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), SPLIT_GRIP_H),
+            Sense::click_and_drag(),
+        );
+        let hot = *splitting || resp.hovered();
+        split_grip(&ui.painter_at(grip), &grip, hot);
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if resp.drag_started() {
+            *splitting = true;
+        }
+        let mut frac = frac;
+        if *splitting {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let f = (pos.y - top - SPLIT_GRIP_H / 2.0) / usable;
+                frac = f.clamp(*MAP_FRAC_RANGE.start(), *MAP_FRAC_RANGE.end());
+            }
+        }
+        if resp.drag_stopped() {
+            *splitting = false;
+        }
+        if resp.double_clicked() {
+            frac = DEFAULT_MAP_FRAC;
+        }
+        frac
+    }
 
     /// The station position, shown and editable.
     ///
@@ -184,11 +293,6 @@ impl Map<'_> {
                 if n > 0 {
                     line = line.gap(16.0).legend(name).value(n.to_string()).size(12.0);
                 }
-            }
-            if active.is_empty() {
-                line = line
-                    .gap(16.0)
-                    .legend("tune to 1090 for aircraft, 162 for shipping, 144.8 for APRS");
             }
             line.show(ui);
         });

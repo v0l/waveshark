@@ -599,6 +599,9 @@ pub enum Cmd {
     /// The feed is a node on the packet bus, so this is a command like the
     /// survey rather than a setting the interface keeps to itself.
     Wigle(Option<survey::Account>),
+    /// Submit what is heard to beaconDB, or stop. Another node on the packet
+    /// bus, and a command for the same reason the WiGLE feed is one.
+    BeaconDb(bool),
     /// Read the receiver's own position from this GPS, or `None` for the
     /// local gpsd, which is what the reader looks for on its own. There is no
     /// off: a fix moves the station position, and no fix leaves it alone.
@@ -1396,6 +1399,8 @@ pub struct Status {
     /// What the WiGLE feed is doing: what is spooled, what has been sent, and
     /// why the last attempt failed.
     pub wigle: parking_lot::Mutex<Option<nodes::WigleStatus>>,
+    /// The same for the beaconDB feed.
+    pub beacondb: parking_lot::Mutex<Option<nodes::BeaconDbStatus>>,
     /// Whether anything is subscribed on the call bus, whether a recorded
     /// transmission is playing, and what the bus last passed through.
     pub call_audio: AtomicBool,
@@ -1548,6 +1553,7 @@ impl Default for Status {
             survey_sightings: AtomicU64::new(0),
             survey_heard: AtomicU64::new(0),
             wigle: parking_lot::Mutex::new(None),
+            beacondb: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new((None, Vec::new())),
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
@@ -2088,6 +2094,8 @@ fn run(
     // Who the WiGLE feed uploads as, which outlives a rebuild for the same
     // reason the survey path does.
     let mut wigle_account: Option<survey::Account> = None;
+    // The same for beaconDB, which is a switch rather than an account.
+    let mut beacondb_on = false;
     // Where the survey is written, which outlives a rebuild: the node is
     // replaced with the graph and the setting is not. The GPS is not here at
     // all; it runs for as long as the program does, in `crate::station`, and
@@ -2457,6 +2465,10 @@ fn run(
                     wigle_account = account.clone();
                     rx.set_wigle(account);
                 }
+                Cmd::BeaconDb(on) => {
+                    beacondb_on = on;
+                    rx.set_beacondb(on);
+                }
                 Cmd::Gps(transport) => crate::station::set_source(transport),
                 Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
                 Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
@@ -2638,6 +2650,7 @@ fn run(
             // A rebuild replaced the survey node with an empty one.
             rx.set_survey(survey_path.clone());
             rx.set_wigle(wigle_account.clone());
+            rx.set_beacondb(beacondb_on);
             // The stage comes back switched off, as the derived graph draws
             // it. A capture running across a retune has to be switched on
             // again, and it starts a new file: the old one's name says which
@@ -2769,6 +2782,13 @@ fn run(
                     *held = now;
                 }
             }
+            {
+                let now = rx.beacondb_status();
+                let mut held = status.beacondb.lock();
+                if *held != now {
+                    *held = now;
+                }
+            }
             if let Some((devices, sightings, heard)) = rx.survey_counts() {
                 status.survey_devices.store(devices, Ordering::Relaxed);
                 status.survey_sightings.store(sightings, Ordering::Relaxed);
@@ -2850,6 +2870,7 @@ fn run(
             *status.capture_file.lock() =
                 cap.and_then(|c| c.path()).map(|p| p.display().to_string());
         }
+        rx.refresh_log_folder();
         status.logged.store(rx.logged(), Ordering::Relaxed);
         status.set_video(rx.watched_video());
         status.set_video_inputs(rx.video_inputs());

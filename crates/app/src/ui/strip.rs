@@ -525,9 +525,14 @@ impl Strip<'_> {
                                     1.0,
                                     if active { theme::READOUT } else { theme::ETCH },
                                 );
+                                // As wide as what is left after the two
+                                // buttons on the right: a satellite channel
+                                // is named after its transmitter, and ninety
+                                // points cut that off mid-callsign.
+                                let room = (ui.available_width() - 130.0).max(90.0);
                                 ui.add(
                                     egui::TextEdit::singleline(&mut ch.label)
-                                        .desired_width(90.0)
+                                        .desired_width(room)
                                         .frame(egui::Frame::NONE),
                                 );
                                 ui.with_layout(
@@ -540,7 +545,15 @@ impl Strip<'_> {
                                         // here. The last group used is
                                         // offered, since channels are saved
                                         // in runs.
-                                        ui.menu_button("SAVE", |ui| {
+                                        // The same button as REMOVE beside
+                                        // it: `menu_button` is a full-sized
+                                        // one, and two buttons of different
+                                        // heights in a row read as two
+                                        // different kinds of control.
+                                        egui::containers::menu::MenuButton::from_button(
+                                            egui::Button::new("SAVE").small(),
+                                        )
+                                        .ui(ui, |ui| {
                                             ui.set_min_width(180.0);
                                             theme::Line::new().legend("group").show(ui);
                                             let r = ui.text_edit_singleline(self.memory_group);
@@ -563,11 +576,24 @@ impl Strip<'_> {
                             });
                             // Per-digit, like the main tuner: the wheel over a
                             // digit steps that decade, so tuning is repeatable
-                            // rather than depending on pointer speed.
-                            let d = self.st.dial.compact(ui, ch.freq, 23.0);
-                            if d.changed {
-                                ch.freq = d.hz;
-                                tune = Some(i);
+                            // rather than depending on pointer speed. Not on a
+                            // channel a satellite pass is tuning: a digit
+                            // typed there is overwritten within the second,
+                            // which is a control that appears to do nothing.
+                            ui.add_enabled_ui(!ch.doppler, |ui| {
+                                let d = self.st.dial.compact(ui, ch.freq, 23.0);
+                                if d.changed {
+                                    ch.freq = d.hz;
+                                    tune = Some(i);
+                                }
+                            });
+                            if ch.doppler {
+                                theme::Line::new()
+                                    .legend("doppler")
+                                    .value("following the pass")
+                                    .tint(theme::TRACE)
+                                    .size(11.0)
+                                    .show(ui);
                             }
                             // A channel the span does not cover is not built,
                             // and says so where the channel is rather than

@@ -30,6 +30,7 @@ pub(super) enum Action {
     Export,
     /// Open the wigle.net feed's settings.
     Wigle,
+    BeaconDb,
 }
 
 impl Devices<'_> {
@@ -94,6 +95,16 @@ impl Devices<'_> {
                 };
                 if ui.button(label).clicked() {
                     act = Some(Action::Wigle);
+                }
+                let b = self.st.beacondb.status.as_ref();
+                let label = match (self.st.beacondb.on, b) {
+                    (false, _) => "beaconDB".to_string(),
+                    (true, Some(s)) if s.error.is_some() => "beaconDB: failing".into(),
+                    (true, Some(s)) => format!("beaconDB: {} sent", s.sent_items),
+                    (true, None) => "beaconDB: on".into(),
+                };
+                if ui.button(label).clicked() {
+                    act = Some(Action::BeaconDb);
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.st.filter)

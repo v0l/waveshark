@@ -47,6 +47,10 @@ pub struct Channel {
     /// What this channel transmits when it is keyed, or `None` for a channel
     /// that only listens. Every channel starts that way.
     pub(super) tx: Option<crate::radio::TxSpec>,
+    /// Whether a satellite pass is tuning this channel. Its dial belongs to
+    /// the pass: a frequency typed in here would be overwritten within the
+    /// second, which is a control that appears to do nothing.
+    pub(super) doppler: bool,
 }
 
 impl Channel {
@@ -396,6 +400,67 @@ pub struct SurveyState {
     pub gps_edit: Option<String>,
     /// The feed to wigle.net: who it uploads as, and what it has sent.
     pub wigle: WigleState,
+    /// The feed to beacondb.net: whether it is on, and what it has sent.
+    pub beacondb: BeaconDbState,
+}
+
+/// The beaconDB feed, as the interface holds it.
+///
+/// No account, so there is nothing to type: what lives here is the switch
+/// and what the radio thread last reported.
+#[derive(Default)]
+pub struct BeaconDbState {
+    pub open: bool,
+    pub on: bool,
+    /// Whether the map may ask where a decoded cell is.
+    pub lookup: bool,
+    pub status: Option<nodes::BeaconDbStatus>,
+}
+
+/// The pass table, as the interface holds it. Everything in it is derived
+/// from the elements and the station, so nothing here is worth saving except
+/// what the operator chose.
+pub struct SatsState {
+    pub group: &'static datasets::tle::Group,
+    /// The least a pass has to reach to be listed.
+    pub min_el_deg: f64,
+    /// The catalogue number the table has selected, which is also what the
+    /// map draws a path for.
+    pub selected: Option<u64>,
+    /// The channel that is following a satellite down, if one is.
+    pub tracking: Option<Tracking>,
+}
+
+/// A listening channel tied to a satellite's downlink.
+///
+/// The correction is not a setting that can be applied once: a low pass
+/// moves several kilohertz in a minute, so a channel that is tuned when the
+/// operator clicks is off the transmission before the satellite is overhead.
+/// What is held is what it takes to keep tuning it: which satellite, what it
+/// transmits on, and which channel to move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tracking {
+    pub norad: u64,
+    /// As transmitted, before any shift.
+    pub downlink_hz: f64,
+    /// The channel being moved, by its own id rather than by position: the
+    /// strip is reordered when channels are added and removed.
+    pub channel: u64,
+    /// Where it was last put, so a shift smaller than the receiver can act
+    /// on does not become a command every frame.
+    pub tuned_hz: f64,
+}
+
+impl Default for SatsState {
+    fn default() -> Self {
+        // The amateur group is the one this receiver can actually hear.
+        Self {
+            group: &datasets::tle::AMATEUR,
+            min_el_deg: 10.0,
+            selected: None,
+            tracking: None,
+        }
+    }
 }
 
 /// The wardriving feed, as the interface holds it.
@@ -432,6 +497,7 @@ impl Default for SurveyState {
             refreshed: None,
             gps_edit: None,
             wigle: WigleState::default(),
+            beacondb: BeaconDbState::default(),
         }
     }
 }
