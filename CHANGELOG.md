@@ -12,6 +12,36 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- A Satellites view: every pass over the station in the next day, ordered by
+  rise time, with the peak elevation, which way to point, live az/el and
+  Doppler for whatever is up now, and how stale the elements it was worked
+  out from are.
+- Listening to a pass: one button on the card puts a channel on the
+  satellite's downlink and keeps it there as the pass moves, so it does not
+  drift out of the channel before the satellite is overhead. The strip names
+  it after the satellite and the transmitter, says it is following, and its
+  dial is locked while it is; the chain is the demodulator for the mode, or
+  the auto front end where this receiver has none.
+- A sky plot on the selected pass: the track across the sky with north at
+  the top, where it rises and where it sets, and where it is now.
+- Free-space loss, one-way delay and footprint radius on a pass in progress.
+- A SATS layer on the map, drawing the ground track of whatever is above the
+  horizon, brighter ahead of the satellite than behind, with the selected
+  one drawn whether or not it is up and its footprint circle with it.
+  Clicking a satellite on the map selects it, and clicking it again lets it
+  go.
+- Orbital elements from CelesTrak, as datasets of their own: amateur,
+  weather, CubeSats, space stations and GNSS, each a row that refreshes and
+  fails on its own.
+- What each satellite transmits on, from the SatNOGS database, so a pass
+  quotes the satellite's own downlink and tunes to it.
+- A cell you have decoded that the OpenCelliD export has no row for can be
+  placed from beaconDB, drawn as a cross with the accuracy it came with.
+  Off until switched on: asking says which cells this receiver has heard.
+- Feed beacondb.net: Bluetooth devices and cells heard with a position are
+  spooled and submitted, from the button beside WiGLE in the devices pane.
+  No account, off until it is switched on, and a drive with no coverage
+  sends when it gets home.
 - Which mobile network an MCC and MNC belong to, and cell positions from
   OpenCelliD for the country set in Setup, which needs a download token of
   your own entered in the datasets window.
@@ -53,6 +83,14 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- A second transmitter sharing a channel with one already being read is
+  found and given a decoder of its own. Two LoRa networks on one frequency
+  at different bandwidths, such as Meshtastic on 250 kHz and MeshCore on
+  125 kHz, both decode; before, whichever was heard first kept the channel
+  and the other was silent for the rest of the session.
+- The map credits what it is drawing, in one plate in the corner: the tiles
+  and every layer's data source, each name a link to the publisher, so
+  OpenCelliD's masts are credited while they are on screen.
 - The cached datasets have a window of their own, opened from the icon
   beside Setup, and each digital voice network is a row of its own that
   refreshes and fails on its own.
@@ -82,6 +120,27 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
+- The Windows build works again, and a GPS on a COM port is opened there the
+  way it is on Linux: the serial settings are applied to the port instead of
+  being left at whatever the driver came up with.
+- "Folder holds" in the packet log settings reports what is on the disk. It
+  showed 0 B until the log had written its first burst, and stayed at 0 B on
+  a span where nothing produces packets, beside gigabytes of captures.
+- A dataset a publisher refused is not asked for again until somebody presses
+  refresh. CelesTrak asks for this in writing and firewalls clients that keep
+  retrying.
+- The divider between the map and the tracks table can be dragged, and
+  double-clicked to put it back. Switching the TRACKS layer off hides the
+  table too and gives the map the whole pane.
+- The map's status line says why the cells layer is drawing nothing: zoomed
+  out past where it draws, or no export downloaded.
+- A refused cell tower download no longer throws away the export already
+  held. OpenCelliD answers a used-up daily allowance with a success and a
+  short complaint, which was being stored as the dataset.
+- The cell tower download no longer asks for a country that is already set.
+  It was waiting on the mobile networks list, which it now fetches itself,
+  and `--fetch-data` reads the country and token out of the saved settings
+  instead of skipping the export.
 - A burst of several packets with silence between them, which is what a
   hopping link leaves on one channel, is classified from one of the
   packets rather than as a keyed envelope; sources open as wide as the

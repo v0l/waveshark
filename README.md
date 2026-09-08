@@ -181,7 +181,9 @@ thirty-nine ISM decoders where the goal is hundreds, and the browser build
 
 [`docs/design.md`](docs/design.md) is how it works inside,
 [`docs/protocols.md`](docs/protocols.md) the protocol roadmap,
-[`docs/views.md`](docs/views.md) how a view attaches to the packet bus.
+[`docs/views.md`](docs/views.md) how a view attaches to the packet bus, and
+[`docs/references.md`](docs/references.md) everything this leans on that
+somebody else wrote.
 
 ## Licence
 
