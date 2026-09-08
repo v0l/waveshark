@@ -141,7 +141,6 @@ struct ChanKey {
     /// not a parameter: without this here a width set on the strip was
     /// applied as a level change and reached nothing.
     width_bits: u64,
-    offset_bits: u64,
     rate_bits: u64,
 }
 
@@ -150,7 +149,6 @@ impl ChanKey {
         Self {
             mode: spec.mode.key(),
             width_bits: spec.bandwidth().to_bits(),
-            offset_bits: spec.offset_hz.to_bits(),
             rate_bits: rate.to_bits(),
         }
     }
@@ -168,6 +166,13 @@ pub struct Chan {
     pub port: Option<usize>,
     agc: Option<NodeId>,
     squelch: Option<NodeId>,
+    /// The mixer that brings this channel to baseband. Kept so a change of
+    /// frequency is a number on it rather than a graph built again: a
+    /// rebuild throws away every filter's history, the AGC's gain and the
+    /// audio resampler's phase, which is a click. A pass being followed
+    /// down retunes every few seconds, and clicking at every step is not
+    /// listening to it.
+    mix: Option<NodeId>,
     wfm: Option<NodeId>,
     pub audio_rate: f64,
     pub channels: usize,
@@ -890,6 +895,7 @@ impl Receiver {
                 },
                 port,
                 agc: of("chan_agc"),
+                mix: of("chan_mix"),
                 squelch: of("chan_squelch"),
                 wfm: stereo.then(|| of("chan_demod")).flatten(),
                 audio_rate: AUDIO_HZ,
@@ -1162,6 +1168,8 @@ impl Receiver {
             db: Option<f32>,
             agc: Option<NodeId>,
             on: bool,
+            mix: Option<NodeId>,
+            shift_hz: f64,
         }
         let updates: Vec<Update> = self
             .chans
@@ -1171,6 +1179,8 @@ impl Receiver {
                 db: c.spec.squelch_db,
                 agc: c.agc,
                 on: c.spec.agc,
+                mix: c.mix,
+                shift_hz: chan_shift(&c.spec),
             })
             .collect();
         // The levels live on the bus, one strip per channel.
@@ -1197,7 +1207,16 @@ impl Receiver {
                 strip_settings(&mut st.settings, k, c.spec.volume, c.spec.muted, &c.spec.label);
             }
         }
-        for Update { squelch, db, agc, on } in updates {
+        for Update { squelch, db, agc, on, mix, shift_hz } in updates {
+            // The mixer keeps its phase across a change of step, so moving a
+            // channel is a shift of frequency and not a discontinuity.
+            if let Some(id) = mix {
+                let _ = self.set_node_param(
+                    id.0,
+                    "shift_hz",
+                    pipeline::ParamValue::Float(shift_hz),
+                );
+            }
             if let (Some(id), Some(db)) = (squelch, db) {
                 if let Some(sq) = self
                     .graph
@@ -3037,7 +3056,7 @@ fn auto_channel_stages(
     };
 
     let mut mix = Settings::new();
-    mix.insert("shift_hz".into(), V::Float(-hz));
+    mix.insert("shift_hz".into(), V::Float(chan_shift(spec)));
     let m = at(p, "chan_mix", "mixer", mix);
     p.connect(head, (m, 0));
 
@@ -3106,7 +3125,7 @@ fn decode_channel_stages(
     };
 
     let mut mix = Settings::new();
-    mix.insert("shift_hz".into(), V::Float(-hz));
+    mix.insert("shift_hz".into(), V::Float(chan_shift(spec)));
     let m = at(p, "chan_mix", "mixer", mix);
     p.connect(head, (m, 0));
 
@@ -3201,7 +3220,7 @@ fn audio_channel_stages(
     // CW is tuned low by the pitch so the dial reads the carrier rather than
     // the note; every other mode is tuned to what it listens to.
     let mut mix = Settings::new();
-    mix.insert("shift_hz".into(), V::Float(-(spec.offset_hz - mode.cw_pitch())));
+    mix.insert("shift_hz".into(), V::Float(chan_shift(spec)));
     let m = at(p, "chan_mix", "mixer", mix);
     p.connect(head, (m, 0));
 
@@ -3348,6 +3367,19 @@ fn audio_channel_stages(
 /// rather than saving work. The offset is not in it: that is the mixer's
 /// shift, a setting the stage is brought up to date with, and keying on it
 /// meant every channel was built afresh whenever the dial moved under it.
+/// What a channel's mixer is set to, in one place.
+///
+/// Written once because it is applied twice: when the chain is built and
+/// again whenever the channel moves without one. CW is tuned low by the
+/// pitch so the dial reads the carrier rather than the note.
+fn chan_shift(spec: &ChannelSpec) -> f64 {
+    let pitch = match &spec.mode {
+        ChanMode::Audio(m) => m.cw_pitch(),
+        _ => 0.0,
+    };
+    -(spec.offset_hz - pitch)
+}
+
 fn chan_stage_id(what: &str, spec: &ChannelSpec, rate: f64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -4482,9 +4514,9 @@ mod tests {
 
     #[test]
     fn changing_what_a_channel_listens_to_rebuilds_it() {
-        // Its mixer shift and every filter design follow from the offset and
-        // the mode, so reusing those nodes would leave a chain built for a
-        // frequency it is no longer on.
+        // A rebuild for another reason still gives a channel that moved a
+        // clean start: its station, its gain and its squelch floor belong to
+        // the frequency it was on.
         let mut p = plan(2_400_000.0, Hz::mhz(95));
         p.channels = vec![chan(1, 100_000.0, Demod::Wfm)];
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
@@ -4493,6 +4525,43 @@ mod tests {
         p.channels = vec![chan(1, 300_000.0, Demod::Wfm)];
         rx.rebuild(&p).unwrap();
         assert!(!rx.channels()[0].kept);
+    }
+
+    /// Moving a channel is a number on its mixer, not a graph built again.
+    ///
+    /// A rebuild throws away every filter's history, the AGC's gain and the
+    /// audio resampler's phase, which is heard as a click. A satellite pass
+    /// being followed down retunes every few seconds, and clicking at every
+    /// step is not listening to it.
+    #[test]
+    fn moving_a_channel_is_a_parameter_and_not_a_rebuild() {
+        let mut p = plan(2_400_000.0, Hz::mhz(145));
+        p.channels = vec![chan(1, 20_000.0, Demod::Nfm)];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        rx.process(&block(4096)).unwrap();
+
+        let mut moved = plan(2_400_000.0, Hz::mhz(145));
+        moved.channels = vec![chan(1, 23_500.0, Demod::Nfm)];
+        assert!(rx.params_only(&moved), "a retune was taken as a rebuild");
+        rx.apply_params(&moved);
+        // The mixer is where the frequency lives, and it has to have heard
+        // about it: the offset used to be applied only when the graph was
+        // built again.
+        let mix = rx.channels()[0].mix.expect("a channel has a mixer");
+        let shift = rx
+            .graph
+            .node(mix)
+            .and_then(|n| n.params().into_iter().find(|q| q.name == "shift_hz"))
+            .and_then(|q| q.value.as_f64())
+            .expect("the mixer's shift");
+        assert!((shift + 23_500.0).abs() < 0.5, "{shift}");
+        // And a width or a mode still is a rebuild: every filter in the
+        // chain was designed around those.
+        let mut wider = plan(2_400_000.0, Hz::mhz(145));
+        let mut w = chan(1, 23_500.0, Demod::Nfm);
+        w.bandwidth_hz = Some(6_250.0);
+        wider.channels = vec![w];
+        assert!(!rx.params_only(&wider), "a width change was taken as a retune");
     }
 
     #[test]
