@@ -413,6 +413,11 @@ mod tests {
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         n.process(&input, &mut output, &mut ctx).unwrap();
+        // A frame is held for one block before it is handed on, so that a
+        // copy of the same transmission heard a block later on an
+        // overlapping channel is recognised rather than reported twice.
+        let quiet = Payload::Iq(vec![common::C32::default(); 4096]);
+        n.process(&quiet, &mut output, &mut ctx).unwrap();
 
         let frames = output.as_frames().expect("frames");
         assert_eq!(frames.len(), 1);

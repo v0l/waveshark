@@ -305,10 +305,11 @@ actually held.
 Selection is by occupied bandwidth, not duration: the Bluetooth bursts overlap
 802.11 frames in length and never in bandwidth, 1 MHz against 16.
 
-The 802.11 front end reads 84 frames off this file, not 41: the four
+The 802.11 front end reads 94 frames off this file, not 41: the four
 milliseconds kept around each selected frame hold acknowledgements and data
-frames of their own, and three of the transmissions are 802.11n aggregates
-holding a QoS data frame each. Every one of the 84 passes its FCS, so the
+frames of their own, three of the transmissions are 802.11n aggregates
+holding a QoS data frame each, and the rest are 802.11b at 1 Mbit/s. Every
+one of the 94 passes its FCS, so the
 count is evidence about the receiver rather than a threshold, and `radio.rs`
 asserts it.
 """
@@ -349,10 +350,14 @@ OFDM and say so twice over: Gaussian sample statistics (real-part kurtosis 3.1
 to 3.25) and a cyclic-prefix correlation peak of 1.37 to 1.48 at the 802.11
 symbol of 4 us with an 0.8 us guard.
 
-The longer bursts in the same file, around 3.4 ms and 9.4 MHz wide, are not
-identified. They are not 802.11b DSSS as first assumed: the phase-step
-histogram is unimodal near zero rather than bimodal at 0 and pi. They are kept
-as open-set material rather than labelled on a guess.
+The longer bursts in the same file, around 3.4 ms and 9.4 MHz wide, are
+802.11b beacons at 1 Mbit/s after all. The phase-step histogram that argued
+against it was measured on the raw samples rather than on the despread ones:
+a Barker-spread signal steps phase at 11 Mchip/s, and only after despreading
+does the one step per microsecond that carries the bit appear. The receiver
+reads them, and `radio.rs` asserts the network name and the access point they
+carry. What was right in the original note is that they are not what the
+`ofdm` label meant.
 """
 
 [[capture]]
