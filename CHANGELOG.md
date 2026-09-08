@@ -51,6 +51,18 @@ the code is in the commit log; what a decoder can and cannot do is in
   the network it belongs to on hover.
 - Bluetooth LE advertising, including Bluetooth 5 Long Range, and Open
   Drone ID out of it or off a beacon.
+- Wi-Fi: 802.11a/g and single-stream 802.11n frames off a 20 MHz channel,
+  with the network name, the addresses talking, the rate each frame
+  arrived at and whether an address is randomised. Aggregated 802.11n
+  transmissions are listed as the frames inside them. A span wider than
+  one channel is read a channel at a time, so a LimeSDR at 61.44 MS/s
+  watches the whole 2.4 GHz band at once. 802.11b at 1 and 2 Mbit/s as
+  well, which is what every access point sends its beacon at, so networks
+  are listed by name with their access point and security. Needs a HackRF
+  or a LimeSDR, since one channel is 20 MHz wide. The channels are read in
+  parallel, a channel with nothing in it is skipped, and a channel is
+  opened when a beacon says its network is there, so a LimeSDR watching
+  the whole 2.4 GHz band keeps up with the radio.
 - GSM: a cell's identity off its synchronisation burst, the blocks it
   broadcasts, who a page is calling, and the signalling channel a phone is
   sent to, on the beacon carrier or on another carrier timed from it.

@@ -10,3 +10,6 @@ num-complex.workspace = true
 rustfft.workspace = true
 rayon.workspace = true
 wide.workspace = true
+
+[[example]]
+name = "slice_cost"
