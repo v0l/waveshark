@@ -32,6 +32,7 @@ pub mod gsm_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
+pub mod beacondb_nodes;
 pub mod wigle_nodes;
 pub mod voice_nodes;
 pub mod wfm;
@@ -52,6 +53,7 @@ pub use ais_nodes::AisNode;
 pub use frame_meter::FrameMeter;
 pub use ble_nodes::BleNode;
 pub use survey_nodes::SurveyNode;
+pub use beacondb_nodes::{BeaconDbNode, BeaconDbStatus};
 pub use wigle_nodes::{Account, WigleNode, WigleStatus};
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
@@ -308,6 +310,21 @@ pub fn registry() -> Registry {
                 p => std::path::PathBuf::from(p),
             };
             Ok(Box::new(WigleNode::new(dir)) as Box<dyn Node>)
+        },
+    );
+
+    r.register(
+        StageDesc {
+            name: "beacondb",
+            summary: "Feed what was heard to beacondb.net: observations, spooled and submitted",
+            category: "sink",
+        },
+        |s: &Settings| {
+            let dir = match s.str_or("spool", "") {
+                "" => beacondb_nodes::default_spool_dir(),
+                p => std::path::PathBuf::from(p),
+            };
+            Ok(Box::new(BeaconDbNode::new(dir)) as Box<dyn Node>)
         },
     );
 

@@ -49,6 +49,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 mod locate;
+pub mod beacondb;
 pub mod wigle;
 pub use locate::{locate, Estimate};
 pub use wigle::{write_wigle, Account, Receipt};
