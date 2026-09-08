@@ -124,6 +124,19 @@ the tag `vX.Y.Z` pushed. The release workflow takes its notes from that
 section and refuses a tag that has none; CI checks the file has an
 `[Unreleased]` section and that a tagged version has its own.
 
+## What is pushed is what somebody will read
+
+Before pushing, count what is going out: `git log --oneline @{u}..HEAD`.
+**More than ten commits is a branch to squash, not a branch to push.** Nobody
+reads forty commits, and a history of "fix", "wip" and "actually fix" costs
+every later reader the work of telling which one was the real change. Squash
+it into the few commits a person would want to bisect: one per change that
+stands on its own, each building and passing its tests on its own.
+
+What not to squash away: a commit somebody else has already pulled, and a
+merge that records two lines of work meeting. Rewriting either is worse than
+a long history.
+
 ## Every packet carries what it was heard at
 
 A row in the packet list is evidence, and evidence that does not say how
