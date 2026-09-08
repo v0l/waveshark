@@ -1171,6 +1171,36 @@ struct ChannelRx {
 }
 
 impl ChannelRx {
+    /// A receiver for one channel of a span, or `None` when the span does not
+    /// hold the whole channel.
+    fn new(rate: f64, span_hz: f64, center_hz: f64, cfg: WifiConfig) -> Option<Self> {
+        if (center_hz - span_hz).abs() + ofdm::CHANNEL_WIDTH_HZ / 2.0 > rate / 2.0 + 1.0 {
+            return None;
+        }
+        let det = WifiDetector::new(rate, cfg)?;
+        let shift = center_hz - span_hz;
+        // Which bins of the span's spectrum this channel occupies, for the
+        // energy test that decides whether to run it at all.
+        let bin = |hz: f64| -> usize {
+            let k = (hz / rate * POWER_FFT as f64).round() as i64;
+            k.rem_euclid(POWER_FFT as i64) as usize
+        };
+        Some(Self {
+            center_hz,
+            mixer: (shift.abs() > 0.5).then(|| crate::Mixer::new(-shift, rate)),
+            det,
+            mixed: Vec::new(),
+            band: (
+                bin(shift - ofdm::CHANNEL_WIDTH_HZ * 0.4),
+                bin(shift + ofdm::CHANNEL_WIDTH_HZ * 0.4),
+            ),
+            floor: 0.0,
+            active: true,
+            hangover: 0,
+            seen: 0,
+        })
+    }
+
     /// Mix this channel down if it is not already at the centre, and read it.
     fn feed(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
         match self.mixer.as_mut() {
@@ -1255,38 +1285,10 @@ impl WifiSpan {
     /// `None` when the span holds no whole channel, which is what a receiver
     /// too narrow for 802.11 gets.
     pub fn new(rate: f64, center_hz: f64, channels: &[f64], cfg: WifiConfig) -> Option<Self> {
-        let mut rxs = Vec::new();
-        for &c in channels {
-            // The channel has to be inside the span, and the receiver has to
-            // have a whole channel to work in once it is mixed down.
-            if (c - center_hz).abs() + ofdm::CHANNEL_WIDTH_HZ / 2.0 > rate / 2.0 + 1.0 {
-                continue;
-            }
-            let Some(det) = WifiDetector::new(rate, cfg) else {
-                continue;
-            };
-            let shift = c - center_hz;
-            // Which bins of the span's spectrum this channel occupies, for
-            // the energy test that decides whether to run it at all.
-            let bin = |hz: f64| -> usize {
-                let k = (hz / rate * POWER_FFT as f64).round() as i64;
-                k.rem_euclid(POWER_FFT as i64) as usize
-            };
-            rxs.push(ChannelRx {
-                center_hz: c,
-                mixer: (shift.abs() > 0.5).then(|| crate::Mixer::new(-shift, rate)),
-                det,
-                mixed: Vec::new(),
-                band: (
-                    bin(shift - ofdm::CHANNEL_WIDTH_HZ * 0.4),
-                    bin(shift + ofdm::CHANNEL_WIDTH_HZ * 0.4),
-                ),
-                floor: 0.0,
-                active: true,
-                hangover: 0,
-                seen: 0,
-            });
-        }
+        let rxs: Vec<ChannelRx> = channels
+            .iter()
+            .filter_map(|&c| ChannelRx::new(rate, center_hz, c, cfg))
+            .collect();
         (!rxs.is_empty()).then_some(Self {
             rxs,
             pending: Vec::new(),
@@ -1308,6 +1310,36 @@ impl WifiSpan {
                 .into_iter()
                 .filter(|f| f.center_hz.is_finite()),
         );
+    }
+
+    /// Start reading another channel, if the span holds it and it is not
+    /// already being read.
+    ///
+    /// For a receiver that has learned something: a beacon says which channel
+    /// its network is on, and that is worth acting on even when the beacon
+    /// was heard on a neighbour. Costs a receiver's worth of work from here
+    /// on, which is why it is not done for every channel the span covers.
+    pub fn open(&mut self, center_hz: f64, cfg: WifiConfig) -> bool {
+        if self
+            .rxs
+            .iter()
+            .any(|r| (r.center_hz - center_hz).abs() < 1.0)
+        {
+            return false;
+        }
+        let Some(mut rx) = ChannelRx::new(self.rate, self.center_hz, center_hz, cfg) else {
+            return false;
+        };
+        // Awake to begin with, like the ones the span opened with: it was
+        // opened because something is there.
+        rx.hangover = 8;
+        self.rxs.push(rx);
+        self.rxs.sort_by(|a, b| {
+            a.center_hz
+                .partial_cmp(&b.center_hz)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        true
     }
 
     /// The channels being read, low first.

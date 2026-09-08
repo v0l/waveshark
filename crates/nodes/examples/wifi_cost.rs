@@ -11,7 +11,7 @@ fn main() {
         src.center().as_f64(),
         &match std::env::var("WIFICH") {
             Ok(v) => v.split(',').filter_map(|c| c.parse().ok()).collect::<Vec<f64>>(),
-            Err(_) => nodes::wifi_nodes::channels(),
+            Err(_) => nodes::wifi_nodes::starting_channels(),
         },
         Default::default(),
     )
