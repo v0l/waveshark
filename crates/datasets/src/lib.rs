@@ -16,6 +16,8 @@ pub mod gateways;
 pub mod m17;
 pub mod pistar;
 pub mod radioid;
+pub mod satnogs;
 pub mod sigid;
+pub mod tle;
 
 pub use cache::{Cache, Error, Source, Status, When};

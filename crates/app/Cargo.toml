@@ -23,6 +23,7 @@ sources.workspace = true
 nodes.workspace = true
 gps.workspace = true
 survey.workspace = true
+orbit.workspace = true
 decode.workspace = true
 datasets.workspace = true
 pipeline.workspace = true
