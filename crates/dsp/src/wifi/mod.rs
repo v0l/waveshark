@@ -226,11 +226,17 @@ pub struct WifiDetector {
     /// The long training symbol in the time domain, conjugated, for the
     /// correlation that finds the symbol boundary, and its energy, so that
     /// correlation can be normalised into something a threshold applies to.
-    lts_ref: Vec<C32>,
+    /// Split by part, because that is the layout the vector units want.
+    lts_re: Vec<f32>,
+    lts_im: Vec<f32>,
     lts_energy: f32,
     buf: Vec<C32>,
     /// Working samples dropped from the front of `buf` since the start.
     base: u64,
+    /// Per-sample products and powers the plateau detector slides its window
+    /// over, kept between calls so the scan does not allocate.
+    prod: Vec<C32>,
+    pow: Vec<f32>,
     /// Tracked noise power: the quietest block seen, climbing a hundredth per
     /// block so a long transmission cannot become the floor. The same
     /// estimator `nodes::FrameMeter` uses, and for the same reason: a floor
@@ -263,8 +269,11 @@ impl WifiDetector {
             decim,
             fft: FftPlanner::new().plan_fft_forward(FFT),
             dc: crate::dc::DcBlock::new(ofdm::RATE_HZ),
+            prod: Vec::new(),
+            pow: Vec::new(),
             lts_energy: lts_ref.iter().map(|x| x.norm_sqr()).sum(),
-            lts_ref,
+            lts_re: lts_ref.iter().map(|x| x.re).collect(),
+            lts_im: lts_ref.iter().map(|x| x.im).collect(),
             buf: Vec::new(),
             base: 0,
             floor: 1e-6,
@@ -334,34 +343,51 @@ impl WifiDetector {
     /// correlation against itself rises to a plateau there and nowhere else.
     /// This is the only thing that runs on every sample, which is why it is
     /// four multiplies a sample and not a matched filter.
-    fn find(&self, at: usize) -> Option<usize> {
+    fn find(&mut self, at: usize) -> Option<usize> {
         const WIN: usize = 48;
         const LAG: usize = 16;
         if self.buf.len() < at + WIN + LAG + 320 {
             return None;
         }
         let end = self.buf.len() - WIN - LAG;
+        // Each sample's product with the one a lag ahead, and its power,
+        // computed once into a scratch run rather than twice inside the
+        // sliding sums: the window adds a product at one end and subtracts
+        // the same product at the other, 48 samples later. Straight-line
+        // arithmetic over a slice, which the compiler vectorises; the sums
+        // themselves are a recurrence and cannot be.
+        let span = end + WIN + LAG - at;
+        self.prod.clear();
+        self.prod.reserve(span);
+        self.pow.clear();
+        self.pow.reserve(span);
+        let w = &self.buf[at..at + span];
+        for i in 0..span - LAG {
+            self.prod.push(w[i] * w[i + LAG].conj());
+        }
+        self.prod.resize(span, C32::default());
+        self.pow.extend(w.iter().map(|x| x.norm_sqr()));
+
+        let (prod, pw) = (&self.prod, &self.pow);
         let mut c = C32::default();
         let mut p = 0.0f32;
         let mut q = 0.0f32;
         for k in 0..WIN {
-            c += self.buf[at + k] * self.buf[at + k + LAG].conj();
-            p += self.buf[at + k + LAG].norm_sqr();
-            q += self.buf[at + k].norm_sqr();
+            c += prod[k];
+            p += pw[k + LAG];
+            q += pw[k];
         }
-        let gate = self.floor * 10f32.powf(self.cfg.min_level_db / 10.0);
+        let gate = self.floor * 10f32.powf(self.cfg.min_level_db / 10.0) * WIN as f32;
+        // Squared, so the test is two multiplies where the correlation itself
+        // would be two square roots and a division on every sample of the
+        // band. The comparison is the same one.
+        let detect2 = self.cfg.detect * self.cfg.detect;
         let mut run = 0usize;
         for n in at..end {
             // Normalised against both windows rather than against the delayed
             // one twice. A ratio that can exceed one is not a correlation,
             // and this one reached twenty where the power stepped.
-            let m = if p > 0.0 && q > 0.0 {
-                c.norm() / (p * q).sqrt()
-            } else {
-                0.0
-            };
-            let loud = p / WIN as f32;
-            if m > self.cfg.detect && loud > gate {
+            if c.norm_sqr() > detect2 * p * q && p > gate {
                 run += 1;
                 // Half the short field seen as a plateau is a frame; less
                 // than that is two symbols of something that rhymes.
@@ -371,12 +397,10 @@ impl WifiDetector {
             } else {
                 run = 0;
             }
-            c -= self.buf[n] * self.buf[n + LAG].conj();
-            p -= self.buf[n + LAG].norm_sqr();
-            q -= self.buf[n].norm_sqr();
-            c += self.buf[n + WIN] * self.buf[n + WIN + LAG].conj();
-            p += self.buf[n + WIN + LAG].norm_sqr();
-            q += self.buf[n + WIN].norm_sqr();
+            let i = n - at;
+            c += prod[i + WIN] - prod[i];
+            p += pw[i + WIN + LAG] - pw[i + LAG];
+            q += pw[i + WIN] - pw[i];
         }
         None
     }
@@ -662,16 +686,32 @@ impl WifiDetector {
         if to <= from {
             return None;
         }
+        // The offset is taken out of the search window once, into a scratch
+        // buffer, rather than per sample inside the correlation.
+        //
+        // The correlation reads each sample 64 times, so rotating inside it
+        // was a sine and a cosine per read: 29,000 transcendental calls for
+        // every detection, and detections happen on noise too. Here it is one
+        // complex multiply per sample by a phasor advanced by a constant
+        // step, which is what `Mixer` does and is the same arithmetic the
+        // rest of the receiver uses.
+        let rotated = self.rotate(from, to + FFT - from, coarse);
+        // Split into real and imaginary runs so the correlation is four
+        // straight multiply-accumulates over eight lanes, and take the power
+        // from a running sum rather than adding sixty-four squares at every
+        // position.
+        let (re, im): (Vec<f32>, Vec<f32>) = rotated.iter().map(|x| (x.re, x.im)).unzip();
+        let mut cumulative = Vec::with_capacity(rotated.len() + 1);
+        cumulative.push(0.0f32);
+        for x in &rotated {
+            cumulative.push(cumulative[cumulative.len() - 1] + x.norm_sqr());
+        }
         // Normalised, so the threshold means the same thing on a strong frame
         // and a weak one.
-        let mag: Vec<f32> = (from..to)
+        let mag: Vec<f32> = (0..to - from)
             .map(|n| {
-                let mut c = C32::default();
-                let mut p = 0.0f32;
-                for k in 0..FFT {
-                    c += self.rot(n + k, coarse) * self.lts_ref[k];
-                    p += self.buf[n + k].norm_sqr();
-                }
+                let c = correlate(&re[n..n + FFT], &im[n..n + FFT], &self.lts_re, &self.lts_im);
+                let p = cumulative[n + FFT] - cumulative[n];
                 c.norm() / (p.max(1e-20) * self.lts_energy).sqrt()
             })
             .collect();
@@ -688,6 +728,7 @@ impl WifiDetector {
         // peak above a fraction of the tallest is the one that is meant.
         let gate = (0.75 * peak).max(self.cfg.lts);
         let first = from + mag.iter().position(|&m| m >= gate).unwrap_or(0);
+
         if first + 2 * FFT > self.buf.len() {
             return None;
         }
@@ -697,6 +738,31 @@ impl WifiDetector {
         }
         let fine = -c.im.atan2(c.re) / (std::f32::consts::TAU * FFT as f32);
         Some((first, fine))
+    }
+
+    /// A run of samples with the carrier offset taken out, from `at`.
+    ///
+    /// One multiply by a step phasor per sample. The phase is anchored to the
+    /// absolute sample index, so a rotation done in pieces is the same
+    /// rotation, which matters because the channel estimate and the symbols
+    /// after it are rotated separately and their phases have to agree.
+    fn rotate(&self, at: usize, len: usize, cfo: f32) -> Vec<C32> {
+        let step = -std::f32::consts::TAU * cfo;
+        let mut ph = C32::from_polar(1.0, step * at as f32);
+        let d = C32::from_polar(1.0, step);
+        let end = (at + len).min(self.buf.len());
+        self.buf[at..end]
+            .iter()
+            .map(|&x| {
+                let out = x * ph;
+                ph *= d;
+                // The recurrence drifts in amplitude over a long run, which
+                // is a gain error the equaliser would absorb but the level
+                // measurement would not.
+                ph /= ph.norm();
+                out
+            })
+            .collect()
     }
 
     /// A sample with the carrier offset taken out.
@@ -804,6 +870,30 @@ enum HtAttempt {
     Wait,
     /// Not an HT frame: read what follows as legacy.
     NotHt,
+}
+
+/// The complex dot product of a run of samples with the training symbol,
+/// eight lanes at a time.
+///
+/// Split real and imaginary rather than interleaved, so each of the four
+/// products is a straight multiply-accumulate with no shuffling. This runs
+/// once per sample of the search window for every detection, real or false,
+/// and is the front end's hot loop.
+fn correlate(re: &[f32], im: &[f32], hr: &[f32], hi: &[f32]) -> C32 {
+    use wide::f32x8;
+    let (mut ar, mut ai) = (f32x8::ZERO, f32x8::ZERO);
+    for k in (0..FFT).step_by(8) {
+        let (x, y) = (load(&re[k..]), load(&im[k..]));
+        let (u, v) = (load(&hr[k..]), load(&hi[k..]));
+        ar = x.mul_add(u, ar) - y * v;
+        ai = x.mul_add(v, ai) + y * u;
+    }
+    C32::new(ar.reduce_add(), ai.reduce_add())
+}
+
+#[inline(always)]
+fn load(v: &[f32]) -> wide::f32x8 {
+    wide::f32x8::from(<[f32; 8]>::try_from(&v[..8]).unwrap())
 }
 
 /// Every subcarrier a frame occupies, low first, DC skipped.
