@@ -250,6 +250,99 @@ impl Layer for AirportLayer {
     }
 }
 
+/// Cells from the OpenCelliD export, at the position the crowd averaged for
+/// each and with the radius that position is good to.
+///
+/// Somebody else's claim about where a mast is, so it is drawn dimmer than
+/// anything this receiver measured and the radius is drawn rather than
+/// hidden: half these positions come from a phone in a car going past, and a
+/// dot alone would claim a street the export does not know.
+#[derive(Default)]
+pub(super) struct CellLayer {
+    shown: Vec<(Pos2, datasets::cells::Cell)>,
+}
+
+/// Below this the export is a wall of dots over a whole city. Higher than
+/// the airports' threshold because a country has a hundred airports and tens
+/// of thousands of cells.
+const CELL_ZOOM: f64 = 12.0;
+
+impl Layer for CellLayer {
+    fn key(&self) -> &'static str {
+        "cells"
+    }
+
+    fn label(&self) -> &'static str {
+        "CELLS"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        self.shown.clear();
+        if c.zoom() < CELL_ZOOM {
+            return;
+        }
+        // Asking is what starts the download, so the layer being switched on
+        // is what fetches the export rather than the receiver fetching it in
+        // case somebody looks.
+        let Some(cells) = crate::data::cell_towers() else { return };
+        let near = c.rect.expand(30.0);
+        // A linear pass over the country's rows: they are sorted by identity
+        // rather than by position, and at this zoom the window is a few
+        // streets, so anything spatial would be an index built for a filter
+        // that already costs less than the draw.
+        for cell in cells.iter() {
+            let at = c.at(cell.lat, cell.lon);
+            if !near.contains(at) {
+                continue;
+            }
+            let r = (f64::from(cell.range_m) / 1852.0 * c.nm_px_at(cell.lat)) as f32;
+            if r > 3.0 {
+                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::OK.gamma_multiply(0.22)));
+            }
+            c.p.circle_filled(at, 2.5, theme::OK.gamma_multiply(0.75));
+            self.shown.push((at, cell.clone()));
+        }
+    }
+
+    fn over(&mut self, c: &Canvas) {
+        let Some(pos) = c.hover() else { return };
+        let Some((at, cell)) = nearest_cell(&self.shown, pos) else { return };
+        // The network's name where the operator table has landed, and the
+        // codes either way: a beacon gives numbers, and a card that shows
+        // only a brand cannot be matched against what was decoded.
+        let who = crate::data::cell_operators()
+            .and_then(|ops| ops.get(cell.mcc, &cell.mnc).map(|o| o.brand.clone()))
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "unknown network".into());
+        let line = format!(
+            "{} {}-{} LAC {} CI {} {} ±{} m, {} reports",
+            cell.radio, cell.mcc, cell.mnc, cell.area, cell.cell, who, cell.range_m, cell.samples
+        );
+        c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::VALUE, 1.0);
+    }
+
+    fn status(&self) -> Option<String> {
+        if self.shown.is_empty() {
+            return None;
+        }
+        Some(format!("{} cells", self.shown.len()))
+    }
+}
+
+/// The cell under the pointer, within a marker's grabbing distance.
+fn nearest_cell(
+    shown: &[(Pos2, datasets::cells::Cell)],
+    pos: Pos2,
+) -> Option<(Pos2, &datasets::cells::Cell)> {
+    const PX: f32 = 10.0;
+    shown
+        .iter()
+        .map(|(at, cell)| (at.distance(pos), at, cell))
+        .filter(|(d, _, _)| *d <= PX)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, at, cell)| (*at, cell))
+}
+
 /// Aircraft, vessels and stations, with the trail each one came along.
 pub(super) struct TrackLayer<'a> {
     pub active: &'a [&'a crate::tracks::Track],

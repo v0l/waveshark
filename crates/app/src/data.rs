@@ -248,6 +248,47 @@ impl Which {
         }
     }
 
+    /// The page the data comes from, for the link beside the row.
+    ///
+    /// A page a person can read rather than the file the fetch uses: the
+    /// terms, the credit and the contact are on the page, and the CSV is
+    /// not. Never the tower export's own URL, which carries the token.
+    pub fn page(self) -> &'static str {
+        match self {
+            Which::Airports => "https://ourairports.com/data/",
+            Which::Gateway(h) => h.page,
+            Which::CellOperators => "https://github.com/pbakondy/mcc-mnc-list",
+            Which::CellTowers => "https://opencellid.org/",
+            Which::Artemis => "https://github.com/AresValley/Artemis-DB",
+            Which::SigIdUnid => "https://www.sigidwiki.com/",
+            _ => "https://radioid.net/",
+        }
+    }
+
+    /// The terms the copy on this machine is held under, as the publisher
+    /// states them.
+    ///
+    /// Shown on every row rather than buried in a document, because two of
+    /// these require credit wherever the data is used and one of them says
+    /// so in writing: OpenCelliD asks for a visible "OpenCelliD" and a link
+    /// to opencellid.org. A receiver that draws somebody's masts on a map
+    /// and says nothing about where they came from is not complying with
+    /// that, and the person running it cannot comply either if the program
+    /// never told them.
+    pub fn terms(self) -> &'static str {
+        match self {
+            Which::Airports => "public domain (OurAirports)",
+            Which::CellOperators => "MIT (pbakondy/mcc-mnc-list)",
+            Which::CellTowers => "CC BY-SA 4.0, credit OpenCelliD and link opencellid.org",
+            Which::Artemis => "Artemis-DB, from the Signal Identification Wiki",
+            Which::SigIdUnid => "sigidwiki.com contributors",
+            Which::Gateway(h) => h.terms,
+            // radioid.net publishes the registry for amateur use and states
+            // no licence, so the honest line is who it belongs to.
+            _ => "radioid.net, for amateur radio use",
+        }
+    }
+
     /// What the dataset is for, so the pane says why it is being downloaded.
     pub fn about(self) -> &'static str {
         match self {

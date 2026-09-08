@@ -36,6 +36,8 @@ pub enum Icon {
     Transmit,
     /// The dataset cache: somebody else's files kept on this machine.
     Data,
+    /// Open the page a dataset comes from, in a browser.
+    Link,
 }
 
 /// Side of the clickable square, in points.
@@ -229,6 +231,29 @@ impl Icon {
                         .collect();
                     p.add(egui::Shape::line(pts, s));
                 }
+            }
+            Icon::Link => {
+                // Two rounded links of a chain on a diagonal, the shape a
+                // browser has meant by a link since it meant anything.
+                let d = b.width() * 0.16;
+                let len = b.width() * 0.30;
+                for side in [-1.0f32, 1.0] {
+                    let mid = Pos2::new(c.x + side * d, c.y - side * d);
+                    let dir = Vec2::new(0.62, -0.62);
+                    let a = mid - dir * len * 0.5;
+                    let z = mid + dir * len * 0.5;
+                    p.line_segment([a, z], s);
+                    p.circle_stroke(z, sw * 0.9, s);
+                }
+                // The bar between them, which is what makes it a chain
+                // rather than two ticks.
+                p.line_segment(
+                    [
+                        Pos2::new(c.x - d * 0.7, c.y + d * 0.7),
+                        Pos2::new(c.x + d * 0.7, c.y - d * 0.7),
+                    ],
+                    s,
+                );
             }
             Icon::Log => {
                 // Rows with a mark against each, which is what the log is.

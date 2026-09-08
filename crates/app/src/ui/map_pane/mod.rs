@@ -9,7 +9,7 @@ mod layers;
 
 use super::mapview::{Layer, MapView};
 use super::*;
-use layers::{AirportLayer, RingLayer, SightingLayer, StationLayer, TrackLayer};
+use layers::{AirportLayer, CellLayer, RingLayer, SightingLayer, StationLayer, TrackLayer};
 
 /// What the map pane remembers. Its own, and reachable from no other view:
 /// the camera and the tiles belong to the map widget, and the tracks are the
@@ -82,6 +82,7 @@ impl Map<'_> {
                 // of what is in the air stays the brightest thing on screen.
                 let mut rings = RingLayer { home };
                 let mut airports = AirportLayer::default();
+                let mut cells = CellLayer::default();
                 let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now };
                 let mut sightings = SightingLayer {
@@ -89,8 +90,14 @@ impl Map<'_> {
                     ident: self.trail.ident,
                     estimate: self.trail.estimate,
                 };
-                let mut layers: [&mut dyn Layer; 5] =
-                    [&mut rings, &mut airports, &mut station, &mut sightings, &mut tracks];
+                let mut layers: [&mut dyn Layer; 6] = [
+                    &mut rings,
+                    &mut cells,
+                    &mut airports,
+                    &mut station,
+                    &mut sightings,
+                    &mut tracks,
+                ];
 
                 map.switches(ui, &layers);
                 ui.add_space(6.0);
