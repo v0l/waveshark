@@ -27,6 +27,8 @@ pub struct HostFile {
     pub url: &'static str,
     /// Who publishes it, for the line under the name in the settings pane.
     pub publisher: &'static str,
+    /// What the file is, for the pane that offers to download it.
+    pub about: &'static str,
     /// Where to connect when the file publishes no port of its own. For the
     /// D-Star networks that is the port of the protocol itself, and a file
     /// listing it per reflector would be the same number 1500 times.
@@ -62,6 +64,8 @@ pub static M17: HostFile = HostFile {
     file: "m17-hosts.json",
     url: "https://m17-project.github.io/hostfiles/M17Hosts.json",
     publisher: "m17project.org",
+    about: "Every M17 reflector, with the modules each carries. The one \
+     network here this receiver already decodes.",
     default_port: 17000,
     max_age: DAILY,
     parse: crate::m17::parse,
@@ -72,6 +76,9 @@ pub static DMR: HostFile = HostFile {
     file: "pistar-dmr-hosts.txt",
     url: "https://www.pistar.uk/downloads/DMR_Hosts.txt",
     publisher: "pistar.uk",
+    about: "Every DMR master a hotspot can register with, as Pi-Star \
+     publishes it. Speech there is AMBE, which needs a vocoder this \
+     build may not have.",
     default_port: 62030,
     max_age: DAILY,
     parse: crate::pistar::dmr,
@@ -82,6 +89,7 @@ pub static DPLUS: HostFile = HostFile {
     file: "pistar-dplus-hosts.txt",
     url: "https://www.pistar.uk/downloads/DPlus_Hosts.txt",
     publisher: "pistar.uk",
+    about: "D-Star reflectors reachable over DPlus.",
     default_port: 20001,
     max_age: DAILY,
     parse: crate::pistar::dstar,
@@ -92,6 +100,7 @@ pub static DEXTRA: HostFile = HostFile {
     file: "pistar-dextra-hosts.txt",
     url: "https://www.pistar.uk/downloads/DExtra_Hosts.txt",
     publisher: "pistar.uk",
+    about: "D-Star reflectors reachable over DExtra.",
     default_port: 30001,
     max_age: DAILY,
     parse: crate::pistar::dstar,
@@ -102,6 +111,7 @@ pub static DCS: HostFile = HostFile {
     file: "pistar-dcs-hosts.txt",
     url: "https://www.pistar.uk/downloads/DCS_Hosts.txt",
     publisher: "pistar.uk",
+    about: "D-Star reflectors reachable over DCS.",
     default_port: 30051,
     max_age: DAILY,
     parse: crate::pistar::dstar,
@@ -183,6 +193,27 @@ impl Gateway {
 /// is not there yet.
 pub fn load(cache: &Cache) -> Result<Vec<Gateway>, Error> {
     read(cache)
+}
+
+/// One host file, downloaded if it is not cached yet.
+///
+/// The per-file pair is what the settings pane drives: five networks refreshed
+/// as one dataset meant a publisher being slow held up the other four, and a
+/// failure could only be reported against the whole set.
+pub fn load_one(cache: &Cache, h: &'static HostFile) -> Result<Vec<Gateway>, Error> {
+    cache.read(&h.source()).and_then(|raw| (h.parse)(h, &raw))
+}
+
+/// Check one host file. `None` means what is cached is still current.
+pub fn refresh_one(
+    cache: &Cache,
+    h: &'static HostFile,
+    when: When,
+) -> Result<Option<Vec<Gateway>>, Error> {
+    if cache.refresh(&h.source(), when)?.is_none() {
+        return Ok(None);
+    }
+    load_one(cache, h).map(Some)
 }
 
 /// Check every host file and reparse if any changed. `None` means what is

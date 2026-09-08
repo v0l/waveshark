@@ -45,8 +45,16 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 /// SF8), which arrived at 61 dB and was refused as no channel at all.
 pub const BANDWIDTHS_HZ: [f64; 4] = [62_500.0, 125_000.0, 250_000.0, 500_000.0];
 
+/// The bandwidth LoRa is used at on 2.4 GHz, where every transmitter is an
+/// SX128x: ExpressLRS's LoRa rates are all 812.5 kHz. The chip also does
+/// 1625 kHz, but what is sent that wide there is FLRC, which is not LoRa.
+pub const BANDWIDTHS_2G4_HZ: [f64; 1] = [812_500.0];
+
+/// Every bandwidth a LoRa channel is read at, for the registry.
+const ALL_BANDWIDTHS_HZ: [f64; 5] = [62_500.0, 125_000.0, 250_000.0, 500_000.0, 812_500.0];
+
 /// Widest channel, which is what decides whether a source is one at all.
-pub const CHANNEL_WIDTH_HZ: f64 = 500_000.0;
+pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
 
 /// A source narrower than this fraction of a bandwidth is not that channel.
 /// LoRa fills its channel by construction, so a signal well inside one is
@@ -84,6 +92,17 @@ pub struct LoraNode {
     bandwidth_hz: f64,
     /// Spreading factor to read, or zero to find it.
     sf: u8,
+    reader: ChirpReader,
+    decoded: u64,
+}
+
+/// The half of a LoRa front end that turns a stream into packets of
+/// symbols: bring the stream to two samples a chip, hold it, and ask each
+/// spreading factor's demodulator what it sees. What the symbols mean is
+/// the other half, and it differs: an explicit-header LoRa frame and an
+/// ExpressLRS packet are read by different nodes over the same reader.
+pub(crate) struct ChirpReader {
+    bandwidth_hz: f64,
     /// The one that has been answering, so the search is not repeated on
     /// every window of a source that already said what it is.
     locked_sf: Option<u8>,
@@ -118,7 +137,6 @@ pub struct LoraNode {
     held: Vec<C32>,
     /// Most samples held before the oldest are dropped.
     hold: usize,
-    decoded: u64,
     center_hz: f64,
     /// Power of the stream arriving and of the channel cut out of it, each
     /// smoothed over the last few blocks. Their ratio says whether what is
@@ -131,17 +149,19 @@ pub struct LoraNode {
     chan_pow: f32,
 }
 
-impl Default for LoraNode {
-    fn default() -> Self {
-        Self::new(0.0)
-    }
+/// One packet the reader found: its symbols, the samples it stood in and
+/// the level they had.
+pub(crate) struct Found {
+    pub packet: dsp::lora::Packet,
+    pub samples: Vec<C32>,
+    pub rssi_dbfs: f32,
+    pub snr_db: f32,
 }
 
-impl LoraNode {
-    pub fn new(bandwidth_hz: f64) -> Self {
+impl ChirpReader {
+    pub(crate) fn new() -> Self {
         Self {
-            bandwidth_hz,
-            sf: 0,
+            bandwidth_hz: 0.0,
             locked_sf: None,
             decim: None,
             resample_step: 1.0,
@@ -152,80 +172,39 @@ impl LoraNode {
             retry_at: 0,
             held: Vec::new(),
             hold: 0,
-            decoded: 0,
             center_hz: 0.0,
             in_pow: 0.0,
             chan_pow: 0.0,
         }
     }
 
-    /// Frames whose header checksum passed since the node was built.
-    pub fn decoded(&self) -> u64 {
-        self.decoded
+    pub(crate) fn bandwidth(&self) -> f64 {
+        self.bandwidth_hz
     }
 
-    /// The spreading factor the node settled on, once it has.
-    pub fn spreading_factor(&self) -> Option<u8> {
+    pub(crate) fn center_hz(&self) -> f64 {
+        self.center_hz
+    }
+
+    pub(crate) fn locked_sf(&self) -> Option<u8> {
         self.locked_sf
     }
 
-    fn bandwidth(&self) -> f64 {
-        self.bandwidth_hz
-    }
-}
-
-/// The nearest standard bandwidth to a measured width, when the width is
-/// close enough to one to mean it.
-pub fn bandwidth_for(width_hz: f64) -> Option<f64> {
-    BANDWIDTHS_HZ
-        .iter()
-        .copied()
-        .find(|bw| width_hz >= bw * FILL && width_hz <= bw * 1.4)
-}
-
-/// Every standard bandwidth a measured width could be, nearest first.
-///
-/// A width is a measurement of a strong signal's skirts as much as of its
-/// channel: a 62.5 kHz MeshCore packet at 59 dB measured 110 kHz and read
-/// as the 125 kHz channel, and dechirped nothing. Where the measurement
-/// sits between two channels both are offered, and whichever reads the
-/// packet is the one kept.
-pub fn bandwidths_for(width_hz: f64) -> Vec<f64> {
-    let mut out: Vec<f64> = BANDWIDTHS_HZ
-        .iter()
-        .copied()
-        .filter(|bw| width_hz >= bw * FILL && width_hz <= bw * 2.0)
-        .collect();
-    out.sort_by(|a, b| (a - width_hz).abs().total_cmp(&(b - width_hz).abs()));
-    out
-}
-
-impl Simple for LoraNode {
-    fn name(&self) -> &str {
-        "lora"
+    /// The rate the samples a packet leaves with are at.
+    pub(crate) fn sample_rate(&self) -> f64 {
+        self.bandwidth_hz * OVERSAMPLE as f64
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
-        if i.spec.kind != PortKind::Iq {
-            return Err(common::Error::other("lora reads complex baseband"));
-        }
-        let rate = i.spec.rate;
-        let bw = if self.bandwidth_hz > 0.0 {
-            self.bandwidth_hz
-        } else {
-            let width = if i.spec.bandwidth > 0.0 {
-                i.spec.bandwidth
-            } else {
-                rate
-            };
-            bandwidth_for(width).ok_or_else(|| {
-                common::Error::other(format!(
-                    "lora: {width:.0} Hz is not one of its channels, which fill \
-                     125, 250 or 500 kHz"
-                ))
-            })?
-        };
-
+    /// Design for a stream at `rate` centred on `center_hz`, reading a
+    /// channel `bw` wide at the spreading factors given.
+    pub(crate) fn design(
+        &mut self,
+        rate: f64,
+        center_hz: f64,
+        bw: f64,
+        sfs: impl IntoIterator<Item = u8>,
+        inverted: bool,
+    ) -> Result<()> {
         // Two samples a chip, exactly. The decimator divides by a whole
         // number and lands near the target; the last few percent is a
         // fractional resample here. It is not optional: the demodulator's
@@ -259,14 +238,7 @@ impl Simple for LoraNode {
         self.resample_pos = 0.0;
         self.pending.clear();
         self.bandwidth_hz = bw;
-        self.center_hz = i.spec.center.as_f64();
-        // Every LoRa transmitter on 2.4 GHz is an SX128x, and that family
-        // sends with I and Q swapped against the SX127x convention, so a
-        // demodulator built for 868 MHz finds nothing there at all. The band
-        // decides it, because nothing else on 2.4 GHz chirps this way and a
-        // node that tried both ways up would cost twice as much on every
-        // source to read a transmitter that does not exist.
-        let inverted = is_2g4(self.center_hz);
+        self.center_hz = center_hz;
         let cfg = |sf: u8| {
             if inverted {
                 dsp::lora::Config::inverted_for_sf(sf)
@@ -274,33 +246,36 @@ impl Simple for LoraNode {
                 dsp::lora::Config::for_sf(sf)
             }
         };
-        self.demods = match (self.sf, inverted) {
-            // The SX128x rates use SF5 to SF8, and scanning 9 to 12 there
-            // would be scanning for something no chip in the band sends.
-            (0, true) => (5..=8u8).map(|sf| Demod::new(cfg(sf))).collect(),
-            (0, false) => dsp::lora::SCANNED_SPREADING_FACTORS
-                .map(|sf| Demod::new(cfg(sf)))
-                .collect(),
-            (sf, _) => vec![Demod::new(cfg(sf))],
-        };
+        self.demods = sfs.into_iter().map(|sf| Demod::new(cfg(sf))).collect();
+        if self.demods.is_empty() {
+            return Err(common::Error::other("lora: no spreading factor to read"));
+        }
         self.scanned = vec![0; self.demods.len()];
         self.held.clear();
+        self.locked_sf = None;
         self.hold = (want * HOLD_SECONDS) as usize;
-
-        // Packets rather than frames, for the same reason M17 sends
-        // packets: what the front end knows about a transmission is more
-        // than its bytes, and a packet has somewhere to put the width it was
-        // heard through and how strong it was.
-        let mut out = i.spec.with_kind(PortKind::Packets);
-        out.bandwidth = bw;
-        out.rate = 0.0;
-        Ok(out)
+        Ok(())
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let (Some(iq), Some(decim)) = (i.as_iq(), self.decim.as_mut()) else {
-            return Ok(());
-        };
+    pub(crate) fn reset(&mut self) {
+        self.held.clear();
+        self.scanned.fill(0);
+        self.retry_at = 0;
+        self.pending.clear();
+        self.resample_pos = 0.0;
+        self.locked_sf = None;
+        if let Some(d) = &mut self.decim {
+            d.reset();
+        }
+    }
+
+    pub(crate) fn unlock(&mut self) {
+        self.locked_sf = None;
+    }
+
+    /// Bring a block to two samples a chip and hold it.
+    pub(crate) fn feed(&mut self, iq: &[C32]) {
+        let Some(decim) = self.decim.as_mut() else { return };
         // Decimate to near the target, then resample the last few percent to
         // exactly OVERSAMPLE per chip. `pending` holds the decimator output
         // with the fractional read position carried between blocks.
@@ -316,8 +291,7 @@ impl Simple for LoraNode {
         while (self.resample_pos as usize) + 1 < self.pending.len() {
             let idx = self.resample_pos as usize;
             let frac = (self.resample_pos - idx as f64) as f32;
-            self.held
-                .push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
+            self.held.push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
             self.resample_pos += step;
         }
         // Drop consumed pending samples, keeping the one the position still
@@ -327,9 +301,15 @@ impl Simple for LoraNode {
             self.pending.drain(..consumed);
             self.resample_pos -= consumed as f64;
         }
+    }
 
-        if self.held.len() < self.retry_at {
-            return Ok(());
+    /// The next complete packet in what is held, or None when there is
+    /// nothing whole to read yet. The packet's samples are taken out of the
+    /// hold before it is returned, so the caller reads the packet and asks
+    /// again.
+    pub(crate) fn next(&mut self) -> Option<Found> {
+        if self.demods.is_empty() || self.held.len() < self.retry_at {
+            return None;
         }
         self.retry_at = 0;
         loop {
@@ -339,9 +319,7 @@ impl Simple for LoraNode {
             let order: Vec<usize> = match self.locked_sf {
                 Some(sf) => {
                     let at = self.demods.iter().position(|d| d.spreading_factor() == sf);
-                    at.into_iter()
-                        .chain((0..self.demods.len()).filter(|k| Some(*k) != at))
-                        .collect()
+                    at.into_iter().chain((0..self.demods.len()).filter(|k| Some(*k) != at)).collect()
                 }
                 None => (0..self.demods.len()).collect(),
             };
@@ -358,7 +336,7 @@ impl Simple for LoraNode {
                     // them; decoding now would report a truncated packet as
                     // a CRC failure, which is a worse answer than silence.
                     self.retry_at = self.held.len() + 8 * self.demods[k].symbol_len();
-                    return Ok(());
+                    return None;
                 }
                 found = Some(p);
                 break;
@@ -374,21 +352,169 @@ impl Simple for LoraNode {
                         *s = s.saturating_sub(drop);
                     }
                 }
-                return Ok(());
+                return None;
             };
 
+            let end = packet.end.min(self.held.len());
             // More than twice the channel's power arriving than is in the
             // channel: what was read is the middle of something wider.
             if self.in_pow > self.chan_pow * OUTSIDE_RATIO {
-                let end = packet.end.min(self.held.len());
                 self.held.drain(..end);
                 self.scanned.fill(0);
                 if self.held.len() < self.demods[0].symbol_len() * 4 {
-                    return Ok(());
+                    return None;
                 }
                 continue;
             }
-            let ldro = dsp::lora::ldro_default(packet.sf, self.bandwidth());
+            // The packet's own samples, at two a chip, and the level they
+            // stood at against the channel just before the preamble. A
+            // dechirp's peak over its transform is a processing gain, not a
+            // channel SNR, so the level is measured on the samples
+            // themselves.
+            let samples = self.held[packet.start..end].to_vec();
+            let power =
+                |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len().max(1) as f32;
+            let sig = power(&samples);
+            let sym = self.demods[0].symbol_len();
+            let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
+            let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
+                let noise = power(before).max(1e-20);
+                (10.0 * sig.log10(), 10.0 * ((sig - noise).max(noise * 0.01) / noise).log10())
+            } else {
+                (10.0 * sig.max(1e-20).log10(), f32::NAN)
+            };
+            self.locked_sf = Some(packet.sf);
+            self.held.drain(..end);
+            self.scanned.fill(0);
+            return Some(Found { packet, samples, rssi_dbfs, snr_db });
+        }
+    }
+}
+
+impl Default for LoraNode {
+    fn default() -> Self {
+        Self::new(0.0)
+    }
+}
+
+impl LoraNode {
+    pub fn new(bandwidth_hz: f64) -> Self {
+        Self { bandwidth_hz, sf: 0, reader: ChirpReader::new(), decoded: 0 }
+    }
+
+    /// Frames whose header checksum passed since the node was built.
+    pub fn decoded(&self) -> u64 {
+        self.decoded
+    }
+
+    /// The spreading factor the node settled on, once it has.
+    pub fn spreading_factor(&self) -> Option<u8> {
+        self.reader.locked_sf()
+    }
+
+    fn bandwidth(&self) -> f64 {
+        self.reader.bandwidth()
+    }
+}
+
+/// The nearest standard bandwidth to a measured width, when the width is
+/// close enough to one to mean it.
+pub fn bandwidth_for(width_hz: f64) -> Option<f64> {
+    BANDWIDTHS_HZ
+        .iter()
+        .copied()
+        .find(|bw| width_hz >= bw * FILL && width_hz <= bw * 1.4)
+}
+
+/// Every standard bandwidth a measured width could be, nearest first.
+///
+/// A width is a measurement of a strong signal's skirts as much as of its
+/// channel: a 62.5 kHz MeshCore packet at 59 dB measured 110 kHz and read
+/// as the 125 kHz channel, and dechirped nothing. Where the measurement
+/// sits between two channels both are offered, and whichever reads the
+/// packet is the one kept.
+pub fn bandwidths_for(width_hz: f64) -> Vec<f64> {
+    fit(&BANDWIDTHS_HZ, width_hz)
+}
+
+/// The same, for a source at `center_hz`: the sub-gigahertz bandwidths or
+/// the one 2.4 GHz uses.
+pub fn bandwidths_for_at(center_hz: f64, width_hz: f64) -> Vec<f64> {
+    if is_2g4(center_hz) {
+        fit(&BANDWIDTHS_2G4_HZ, width_hz)
+    } else {
+        fit(&BANDWIDTHS_HZ, width_hz)
+    }
+}
+
+fn fit(bandwidths: &[f64], width_hz: f64) -> Vec<f64> {
+    let mut out: Vec<f64> = bandwidths
+        .iter()
+        .copied()
+        .filter(|bw| width_hz >= bw * FILL && width_hz <= bw * 2.0)
+        .collect();
+    out.sort_by(|a, b| (a - width_hz).abs().total_cmp(&(b - width_hz).abs()));
+    out
+}
+
+impl Simple for LoraNode {
+    fn name(&self) -> &str {
+        "lora"
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("lora reads complex baseband"));
+        }
+        let rate = i.spec.rate;
+        let bw = if self.bandwidth_hz > 0.0 {
+            self.bandwidth_hz
+        } else {
+            let width = if i.spec.bandwidth > 0.0 {
+                i.spec.bandwidth
+            } else {
+                rate
+            };
+            bandwidth_for(width).ok_or_else(|| {
+                common::Error::other(format!(
+                    "lora: {width:.0} Hz is not one of its channels, which fill \
+                     125, 250 or 500 kHz"
+                ))
+            })?
+        };
+        // Every LoRa transmitter on 2.4 GHz is an SX128x, and that family
+        // sends with I and Q swapped against the SX127x convention, so a
+        // demodulator built for 868 MHz finds nothing there at all. The band
+        // decides it, because nothing else on 2.4 GHz chirps this way and a
+        // node that tried both ways up would cost twice as much on every
+        // source to read a transmitter that does not exist.
+        let center_hz = i.spec.center.as_f64();
+        let inverted = is_2g4(center_hz);
+        let sfs: Vec<u8> = match (self.sf, inverted) {
+            // The SX128x rates use SF5 to SF8, and scanning 9 to 12 there
+            // would be scanning for something no chip in the band sends.
+            (0, true) => (5..=8u8).collect(),
+            (0, false) => dsp::lora::SCANNED_SPREADING_FACTORS.collect(),
+            (sf, _) => vec![sf],
+        };
+        self.reader.design(rate, center_hz, bw, sfs, inverted)?;
+
+        // Packets rather than frames, for the same reason M17 sends
+        // packets: what the front end knows about a transmission is more
+        // than its bytes, and a packet has somewhere to put the width it was
+        // heard through and how strong it was.
+        let mut out = i.spec.with_kind(PortKind::Packets);
+        out.bandwidth = bw;
+        out.rate = 0.0;
+        Ok(out)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+        let Some(iq) = i.as_iq() else { return Ok(()) };
+        self.reader.feed(iq);
+        while let Some(Found { packet, samples, rssi_dbfs, snr_db }) = self.reader.next() {
+            let bw = self.bandwidth();
+            let ldro = dsp::lora::ldro_default(packet.sf, bw);
             match lora::decode(&packet.symbols, packet.sf, ldro) {
                 // A frame whose payload CRC did not check, or that has none
                 // to check, stands on its eight-bit header checksum alone,
@@ -405,48 +531,23 @@ impl Simple for LoraNode {
                         message: format!(
                             "SF{} over {:.0} kHz: {} bytes without a CRC that checks, sync {:#04x}, refused",
                             packet.sf,
-                            self.bandwidth() / 1e3,
+                            bw / 1e3,
                             frame.payload.len(),
                             packet.sync_word
                         ),
                     });
                 }
                 Ok(frame) => {
-                    self.locked_sf = Some(packet.sf);
                     self.decoded += 1;
-                    let bw = self.bandwidth();
-                    // The packet's own samples, at two a chip, and the level
-                    // they stood at against the channel just before the
-                    // preamble. A dechirp's peak over its transform is a
-                    // processing gain, not a channel SNR, so the level is
-                    // measured on the samples themselves.
-                    let end = packet.end.min(self.held.len());
-                    let samples = self.held[packet.start..end].to_vec();
-                    let power = |s: &[C32]| {
-                        s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len().max(1) as f32
-                    };
-                    let sig = power(&samples);
-                    let sym = self.demods[0].symbol_len();
-                    let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
-                    let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
-                        let noise = power(before).max(1e-20);
-                        (
-                            10.0 * sig.log10(),
-                            10.0 * ((sig - noise).max(noise * 0.01) / noise).log10(),
-                        )
-                    } else {
-                        (10.0 * sig.max(1e-20).log10(), f32::NAN)
-                    };
-                    let rate = bw * OVERSAMPLE as f64;
                     let f = common::Frame::measured(
                         frame.to_bytes(packet.sf, bw, packet.sync_word),
                         rssi_dbfs,
                         snr_db,
                     )
-                    .at(self.center_hz as u64)
+                    .at(self.reader.center_hz() as u64)
                     .with_iq(std::sync::Arc::new(common::IqBurst {
-                        rate,
-                        center_hz: self.center_hz as u64,
+                        rate: self.reader.sample_rate(),
+                        center_hz: self.reader.center_hz() as u64,
                         samples,
                     }));
                     o.packets_mut().push(common::Packet::of_frame(now_us(), bw as u32, f));
@@ -457,31 +558,18 @@ impl Simple for LoraNode {
                         message: format!(
                             "SF{} over {:.0} kHz: {} symbols and {e:?}",
                             packet.sf,
-                            self.bandwidth() / 1e3,
+                            bw / 1e3,
                             packet.symbols.len()
                         ),
                     });
                 }
             }
-            let end = packet.end.min(self.held.len());
-            self.held.drain(..end);
-            self.scanned.fill(0);
-            if self.held.len() < self.demods[0].symbol_len() * 4 {
-                return Ok(());
-            }
         }
+        Ok(())
     }
 
     fn reset(&mut self) {
-        self.held.clear();
-        self.scanned.fill(0);
-        self.retry_at = 0;
-        self.pending.clear();
-        self.resample_pos = 0.0;
-        self.locked_sf = None;
-        if let Some(d) = &mut self.decim {
-            d.reset();
-        }
+        self.reader.reset();
     }
 
     fn params(&self) -> Vec<Param> {
@@ -502,7 +590,7 @@ impl Simple for LoraNode {
                 } else {
                     0
                 };
-                self.locked_sf = None;
+                self.reader.unlock();
             }
             _ => {
                 return Err(common::Error::other(format!(
@@ -956,7 +1044,7 @@ impl Protocol for Lora {
     }
     fn shape(&self) -> Shape {
         Shape {
-            widths: &BANDWIDTHS_HZ,
+            widths: &ALL_BANDWIDTHS_HZ,
             min_rate_hz: 0.0,
             feed_rate_hz: 0.0,
             span_wide: false,
@@ -971,11 +1059,11 @@ impl Protocol for Lora {
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets]
     }
-    fn accepts_width(&self, source_width_hz: f64) -> bool {
-        !bandwidths_for(source_width_hz).is_empty()
+    fn accepts_width(&self, hz: f64, source_width_hz: f64) -> bool {
+        !bandwidths_for_at(hz, source_width_hz).is_empty()
     }
-    fn widths_for(&self, source_width_hz: f64) -> Vec<f64> {
-        bandwidths_for(source_width_hz)
+    fn widths_for(&self, hz: f64, source_width_hz: f64) -> Vec<f64> {
+        bandwidths_for_at(hz, source_width_hz)
     }
     /// Two channels an octave apart share a sweep rate two spreading
     /// factors apart, so a 250 kHz packet also reads, as something, through
@@ -1018,12 +1106,12 @@ mod tests {
         let mut s = StreamSpec::iq(4_000_000.0, Hz(2_440_400_000));
         s.bandwidth = 812_500.0;
         n.negotiate(&PortSpec { spec: s, latency: 0 }).expect("a 2.4 GHz source");
-        assert_eq!(n.demods.len(), 4, "SF5 to SF8, which is what the band uses");
-        assert!(n.demods.iter().all(|d| d.inverted()));
+        assert_eq!(n.reader.demods.len(), 4, "SF5 to SF8, which is what the band uses");
+        assert!(n.reader.demods.iter().all(|d| d.inverted()));
 
         let mut n = LoraNode::new(250_000.0);
         n.negotiate(&spec(2_000_000.0, 250_000.0)).expect("an 868 MHz source");
-        assert!(n.demods.iter().all(|d| !d.inverted()));
+        assert!(n.reader.demods.iter().all(|d| !d.inverted()));
     }
 
     #[test]

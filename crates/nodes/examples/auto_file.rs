@@ -37,7 +37,7 @@ fn main() {
         &registry(),
     )
     .unwrap();
-    let block = 16_384;
+    let block: usize = std::env::var("BLOCK").ok().and_then(|s| s.parse().ok()).unwrap_or(16_384);
     let t0 = std::time::Instant::now();
     let mut packets = 0usize;
     let mut worst = 0.0f64;
@@ -52,6 +52,22 @@ fn main() {
         }
         for p in g.output().as_packets().unwrap_or(&[]) {
             packets += 1;
+            if std::env::var_os("MEASURE").is_some() {
+                if let Some(m) = &p.measure {
+                    eprintln!(
+                        "MEASURE at {:.2}s: {:.4} MHz {} conf {:.2} -> {} {:?} {} us {:.0} Hz sweep {:.0} Hz/s",
+                        i as f64 * block as f64 / rate,
+                        p.center_hz() as f64 / 1e6,
+                        m.modulation,
+                        m.confidence,
+                        m.front_end,
+                        m.mode,
+                        m.duration_us,
+                        m.bandwidth_hz,
+                        m.sweep_hz_s
+                    );
+                }
+            }
             if let common::PacketBody::Frame(fr) = &p.body {
                 let b = &fr.bytes;
                 if let Some(d) = nodes::lora_nodes::lora_decoded(&b[..], common::Hz(p.center_hz())) {
@@ -76,6 +92,22 @@ fn main() {
                         p.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
                         p.rssi_dbfs(),
                         p.snr_db()
+                    );
+                }
+            }
+        }
+        if std::env::var_os("PHASES").is_some() && i % 500 == 499 {
+            if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+                .and_then(|(id, _)| g.node(id))
+            {
+                let mut ph: Vec<_> = a.phases();
+                ph.sort_by(|x, y| y.1.mean_us.total_cmp(&x.1.mean_us));
+                for (name, c) in ph.iter().take(12) {
+                    eprintln!(
+                        "phase {name:<22} mean {:8.0} us  p95 {:8} us  share {:5.1}%",
+                        c.mean_us,
+                        c.p95_us,
+                        100.0 * c.mean_us / (c.block_s * 1e6).max(1.0)
                     );
                 }
             }

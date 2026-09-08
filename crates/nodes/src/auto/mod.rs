@@ -896,8 +896,9 @@ impl Node for AutoNode {
         }
         // Thresholds and timings: read every frame, so the detector is
         // built again with them and nothing else changes.
+        let cfg = self.detector_cfg();
         if let Some(d) = &mut self.detector {
-            *d = SourceDetector::new(self.rate, self.input_bw, self.cfg);
+            *d = SourceDetector::new(self.rate, self.input_bw, cfg);
             self.apply_band();
         }
         Ok(())

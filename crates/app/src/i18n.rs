@@ -128,6 +128,7 @@ const EN: &[(&str, &str)] = &[
     ("ui.capture_stop", "Stop capturing, and close the file"),
     ("ui.check", "CHECK"),
     ("ui.close", "CLOSE"),
+    ("ui.data", "Cached data: what is held, and refresh"),
     ("ui.decode", "decode"),
     ("ui.decode_all", "Decode everything in the span"),
     ("ui.log", "Packet log"),

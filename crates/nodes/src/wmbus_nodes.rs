@@ -167,7 +167,7 @@ impl Protocol for Wmbus {
             families: &[],
         }
     }
-    fn accepts_width(&self, source_width_hz: f64) -> bool {
+    fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
         METER_HZ.contains(&source_width_hz)
     }
     /// Mode T and C meters, at 868.95 MHz.

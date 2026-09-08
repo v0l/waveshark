@@ -2,13 +2,37 @@
 //! of, and the span-wide decoders placed where the span reaches them.
 
 use common::Result;
-use dsp::{SourceDetector, SourceExtractor};
+use dsp::{SourceConfig, SourceDetector, SourceExtractor};
 use pipeline::port::StreamSpec;
 
 use super::{AutoNode, Member};
 use crate::protocol::{self, Placed, Stickiness};
 
 impl AutoNode {
+    /// The detector's settings for this span.
+    ///
+    /// The widest source worth opening is the widest channel any protocol
+    /// reads, with the margin a strong signal's skirts add; asked of the
+    /// registry rather than kept as a number here, which is how 2.4 GHz
+    /// LoRa at 812.5 kHz was refused at the door for as long as the number
+    /// said 600. Never more than a quarter of the span, though: a strong
+    /// narrowband transmitter lights most of a 2 MHz span, and a source
+    /// that wide is a saturated receiver rather than a signal, and one
+    /// that grows into it supersedes the narrow source that was reading
+    /// the transmission. The MeshCore advert at 51 dB in a 2.048 MS/s span
+    /// is the capture that says so.
+    pub(super) fn detector_cfg(&self) -> SourceConfig {
+        let widest = protocol::all()
+            .iter()
+            .filter(|p| !p.shape().span_wide)
+            .flat_map(|p| p.shape().widths.iter().copied())
+            .fold(0.0, f64::max);
+        let mut cfg = self.cfg;
+        let want = (widest * cfg.width_margin * 1.5).min(self.rate / 4.0);
+        cfg.max_width_hz = cfg.max_width_hz.max(want);
+        cfg
+    }
+
     /// Limit detection to a band inside the input, or `None` for all of it.
     pub fn set_band(&mut self, band: Option<(f64, f64)>) {
         self.band = band;
@@ -69,7 +93,7 @@ impl AutoNode {
         if self.rate <= 0.0 {
             return Ok(());
         }
-        let d = SourceDetector::new(self.rate, self.input_bw, self.cfg);
+        let d = SourceDetector::new(self.rate, self.input_bw, self.detector_cfg());
         let keep = d.latency_samples();
         self.extractor = Some(SourceExtractor::new(
             self.rate,

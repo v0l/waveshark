@@ -1487,6 +1487,7 @@ name = "datasets"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "flate2",
  "parking_lot",
  "rusqlite",
  "serde",

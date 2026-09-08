@@ -93,6 +93,10 @@ pub struct Session {
     /// Band plan identifier. Held separately from the country because it is
     /// overridable: a country sets it once and then stops having an opinion.
     pub band_plan: String,
+    /// OpenCelliD download token, empty when none has been given. Held with
+    /// the settings rather than in the cache directory: deleting the cached
+    /// data must not lose the credential that fetches it again.
+    pub opencellid_token: String,
     pub dc_block: bool,
     pub decode_on: bool,
     pub volume: f32,
@@ -187,6 +191,7 @@ impl Default for Session {
             language: String::new(),
             country: String::new(),
             band_plan: String::new(),
+            opencellid_token: String::new(),
             dc_block: true,
             decode_on: true,
             volume: 0.5,
@@ -307,6 +312,7 @@ impl Session {
             language: kv.get("language").map(|v| v.to_string()).unwrap_or_default(),
             country: kv.get("country").map(|v| v.to_string()).unwrap_or_default(),
             band_plan: kv.get("band_plan").map(|v| v.to_string()).unwrap_or_default(),
+            opencellid_token: kv.get("opencellid_token").map(|v| v.to_string()).unwrap_or_default(),
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             volume: f("volume", d.volume as f64) as f32,
@@ -356,6 +362,7 @@ impl Session {
             ("language", &self.language),
             ("country", &self.country),
             ("band_plan", &self.band_plan),
+            ("opencellid_token", &self.opencellid_token),
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
             ("gps", &self.gps),
@@ -469,6 +476,7 @@ mod tests {
             audio_in: "Scarlett 2i2 Analogue".into(),
             country: "IE".into(),
             band_plan: "europe".into(),
+            opencellid_token: "pk.0123456789".into(),
             dc_block: false,
             decode_on: false,
             volume: 0.25,

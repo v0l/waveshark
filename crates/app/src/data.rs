@@ -11,7 +11,8 @@
 //! they load on first use and stay loaded.
 
 use datasets::airports::Airport;
-use datasets::gateways::Gateway;
+use datasets::cells::{Cells, Operators};
+use datasets::gateways::{Gateway, HostFile};
 use datasets::radioid::{Repeater, Users};
 use datasets::sigid;
 use datasets::{Cache, When};
@@ -19,7 +20,7 @@ use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The zoom at which airports first appear on the map. Below this the view is
@@ -43,7 +44,16 @@ pub fn airports() -> &'static [Airport] {
 static USERS: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static NXDN: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static REPEATERS: RwLock<Option<Arc<Vec<Repeater>>>> = RwLock::new(None);
-static GATEWAYS: RwLock<Option<Arc<Vec<Gateway>>>> = RwLock::new(None);
+/// One slot per host file, in [`datasets::gateways::HOST_FILES`] order. The
+/// networks are published separately, refreshed separately and fail
+/// separately, so holding them as one list meant one slow publisher held up
+/// the other four and one failure was reported against all of them.
+static GATEWAYS: LazyLock<Vec<GatewaySlot>> =
+    LazyLock::new(|| datasets::gateways::HOST_FILES.iter().map(|_| RwLock::new(None)).collect());
+
+type GatewaySlot = RwLock<Option<Arc<Vec<Gateway>>>>;
+static OPERATORS: RwLock<Option<Arc<Operators>>> = RwLock::new(None);
+static CELLS: RwLock<Option<Arc<Cells>>> = RwLock::new(None);
 /// The two halves of the wiki, held apart because they are two files from
 /// two publishers refreshed on their own, and joined on read.
 static ARTEMIS: RwLock<Option<Arc<Vec<sigid::Signal>>>> = RwLock::new(None);
@@ -73,11 +83,79 @@ pub fn dmr_repeaters() -> Option<Arc<Vec<Repeater>>> {
     on_demand(Which::Repeaters, &REPEATERS)
 }
 
-/// Where the digital voice networks can be reached: an address, a port, and
+/// Where one digital voice network can be reached: an address, a port, and
 /// the channels within it that carry the mode spoken there.
 #[allow(dead_code)]
-pub fn gateways() -> Option<Arc<Vec<Gateway>>> {
-    on_demand(Which::Gateways, &GATEWAYS)
+pub fn gateways_of(h: &'static HostFile) -> Option<Arc<Vec<Gateway>>> {
+    let slot = &GATEWAYS[host_file_index(h)];
+    if let Some(v) = slot.read().clone() {
+        return Some(v);
+    }
+    if !Which::Gateway(h).attempted() {
+        load(Which::Gateway(h), When::IfDue);
+    }
+    None
+}
+
+/// Every gateway of every network whose file has landed, for a view that
+/// does not care which publisher a row came from.
+#[allow(dead_code)]
+pub fn gateways() -> Vec<Gateway> {
+    datasets::gateways::HOST_FILES
+        .iter()
+        .copied()
+        .filter_map(gateways_of)
+        .flat_map(|g| g.iter().cloned().collect::<Vec<_>>())
+        .collect()
+}
+
+fn host_file_index(h: &'static HostFile) -> usize {
+    datasets::gateways::HOST_FILES.iter().position(|o| *o == h).unwrap_or(0)
+}
+
+/// What an MCC and MNC off a GSM beacon belong to.
+#[allow(dead_code)]
+pub fn cell_operators() -> Option<Arc<Operators>> {
+    on_demand(Which::CellOperators, &OPERATORS)
+}
+
+/// Where the cells of the configured country have been heard, when a token
+/// has been given and the export downloaded.
+#[allow(dead_code)]
+pub fn cell_towers() -> Option<Arc<Cells>> {
+    if cell_mcc().is_none() || opencellid_token().is_empty() {
+        return None;
+    }
+    on_demand(Which::CellTowers, &CELLS)
+}
+
+/// The OpenCelliD download token, which is the operator's own: the export
+/// URL carries it, and without one that dataset cannot be fetched at all.
+static TOKEN: RwLock<String> = RwLock::new(String::new());
+/// ISO 3166-1 country, which picks the country export to fetch. The world
+/// file is hundreds of megabytes of cells on other continents.
+static COUNTRY: RwLock<String> = RwLock::new(String::new());
+
+pub fn opencellid_token() -> String {
+    TOKEN.read().clone()
+}
+
+pub fn set_opencellid_token(token: &str) {
+    *TOKEN.write() = token.trim().to_string();
+}
+
+pub fn set_country(iso: &str) {
+    *COUNTRY.write() = iso.trim().to_ascii_lowercase();
+}
+
+/// The MCC the tower export is fetched for: the country's, read out of the
+/// operator table that is already cached for naming networks.
+pub fn cell_mcc() -> Option<u16> {
+    let iso = COUNTRY.read().clone();
+    if iso.is_empty() {
+        return None;
+    }
+    OPERATORS.read().as_ref()?.mcc_for_country(&iso)
 }
 
 /// The signal identification wiki, both halves, for the inspector's guess
@@ -119,31 +197,41 @@ pub enum Which {
     Repeaters,
     DmrIds,
     NxdnIds,
-    Gateways,
+    /// One digital voice network's host file. A row each, because that is
+    /// what a publisher, a refresh and a failure belong to.
+    Gateway(&'static HostFile),
+    CellOperators,
+    CellTowers,
     Artemis,
     SigIdUnid,
 }
 
 impl Which {
-    pub const ALL: [Which; 7] = [
-        Which::Airports,
-        Which::Repeaters,
-        Which::DmrIds,
-        Which::NxdnIds,
-        Which::Gateways,
-        Which::Artemis,
-        Which::SigIdUnid,
-    ];
+    /// Every dataset, in the order the pane lists them. A slice built once
+    /// rather than a constant array: the gateway rows come from the host
+    /// file table, so adding a network adds a row here without touching
+    /// this.
+    pub fn all() -> &'static [Which] {
+        static ALL: OnceLock<Vec<Which>> = OnceLock::new();
+        ALL.get_or_init(|| {
+            let mut v = vec![Which::Airports, Which::Repeaters, Which::DmrIds, Which::NxdnIds];
+            v.extend(datasets::gateways::HOST_FILES.iter().copied().map(Which::Gateway));
+            v.extend([Which::CellOperators, Which::CellTowers, Which::Artemis, Which::SigIdUnid]);
+            v
+        })
+    }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Which::Airports => "Airports",
-            Which::Repeaters => "DMR repeaters",
-            Which::DmrIds => "DMR IDs",
-            Which::NxdnIds => "NXDN IDs",
-            Which::Gateways => "Digital voice gateways",
-            Which::Artemis => "Identified signals",
-            Which::SigIdUnid => "Unidentified signals",
+            Which::Airports => "Airports".into(),
+            Which::Repeaters => "DMR repeaters".into(),
+            Which::DmrIds => "DMR IDs".into(),
+            Which::NxdnIds => "NXDN IDs".into(),
+            Which::Gateway(h) => format!("{} gateways", h.name),
+            Which::CellOperators => "Mobile networks".into(),
+            Which::CellTowers => "Cell towers".into(),
+            Which::Artemis => "Identified signals".into(),
+            Which::SigIdUnid => "Unidentified signals".into(),
         }
     }
 
@@ -151,12 +239,9 @@ impl Which {
     pub fn publisher(self) -> &'static str {
         match self {
             Which::Airports => "ourairports.com",
-            // One row, one publisher to name. Several is a list nobody can
-            // read in a caption, so the pane says how many instead.
-            Which::Gateways => match datasets::gateways::HOST_FILES {
-                [one] => one.publisher,
-                _ => "several host files",
-            },
+            Which::Gateway(h) => h.publisher,
+            Which::CellOperators => "github.com/pbakondy/mcc-mnc-list",
+            Which::CellTowers => "opencellid.org",
             Which::Artemis => "github.com/AresValley/Artemis-DB",
             Which::SigIdUnid => "sigidwiki.com",
             _ => "radioid.net",
@@ -178,9 +263,17 @@ impl Which {
                  is what turns it into a callsign without asking anybody over the network."
             }
             Which::NxdnIds => "The same registry for NXDN.",
-            Which::Gateways => {
-                "Where the digital voice networks can be reached: the address and port of \
-                 every reflector, and which of its channels carry the mode spoken there."
+            Which::Gateway(h) => h.about,
+            Which::CellOperators => {
+                "Which network an MCC and MNC belong to, so a decoded GSM beacon reads as an \
+                 operator and a country rather than two numbers. Also what picks the cell \
+                 export below for the country this receiver is in."
+            }
+            Which::CellTowers => {
+                "Where the cells of this country have been heard, from the OpenCelliD \
+                 community export: a position and a rough radius for a decoded cell \
+                 identity. It needs a download token of your own, and OpenCelliD allows two \
+                 downloads of a file a day."
             }
             Which::Artemis => {
                 "Every signal the Signal Identification Wiki names, with frequency, keying \
@@ -195,20 +288,40 @@ impl Which {
     }
 
     fn sources(self) -> Vec<datasets::Source> {
-        use datasets::{airports, gateways, radioid};
+        use datasets::{airports, radioid};
         match self {
             Which::Airports => vec![airports::airports_source(), airports::frequencies_source()],
             Which::Repeaters => vec![radioid::repeaters_source()],
             Which::DmrIds => vec![radioid::users_source()],
             Which::NxdnIds => vec![radioid::nxdn_source()],
-            Which::Gateways => gateways::sources(),
+            Which::Gateway(h) => vec![h.source()],
+            Which::CellOperators => vec![datasets::cells::operators_source()],
+            // Nothing to fetch until both halves of the URL exist. An empty
+            // list reads as nothing held, which is the truth.
+            Which::CellTowers => match (cell_mcc(), opencellid_token()) {
+                (Some(mcc), t) if !t.is_empty() => vec![datasets::cells::towers_source(mcc, &t)],
+                _ => Vec::new(),
+            },
             Which::Artemis => vec![sigid::artemis_source()],
             Which::SigIdUnid => vec![sigid::unid_source()],
         }
     }
 
+    /// Why this dataset cannot be fetched yet, for the pane to say instead of
+    /// offering a refresh that would fail.
+    pub fn blocked(self) -> Option<&'static str> {
+        if self != Which::CellTowers {
+            return None;
+        }
+        match (cell_mcc(), opencellid_token().is_empty()) {
+            (_, true) => Some("needs an OpenCelliD token"),
+            (None, _) => Some("needs a country, set in Setup"),
+            _ => None,
+        }
+    }
+
     fn index(self) -> usize {
-        Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
+        Self::all().iter().position(|w| *w == self).unwrap_or(0)
     }
 
     /// How many rows are held, or `None` when it is not loaded.
@@ -221,19 +334,21 @@ impl Which {
             Which::Repeaters => REPEATERS.read().as_ref().map(|r| r.len()),
             Which::DmrIds => USERS.read().as_ref().map(|u| u.len()),
             Which::NxdnIds => NXDN.read().as_ref().map(|u| u.len()),
-            Which::Gateways => GATEWAYS.read().as_ref().map(|g| g.len()),
+            Which::Gateway(h) => GATEWAYS[host_file_index(h)].read().as_ref().map(|g| g.len()),
+            Which::CellOperators => OPERATORS.read().as_ref().map(|o| o.len()),
+            Which::CellTowers => CELLS.read().as_ref().map(|c| c.len()),
             Which::Artemis => ARTEMIS.read().as_ref().map(|s| s.len()),
             Which::SigIdUnid => UNID.read().as_ref().map(|s| s.len()),
         }
     }
 
     fn attempted(self) -> bool {
-        WORK[self.index()].attempted.load(Ordering::Acquire)
+        work_slot(self).attempted.load(Ordering::Acquire)
     }
 }
 
 /// What a load or refresh is doing, for the settings pane to draw. One slot
-/// per dataset, in [`Which::ALL`] order.
+/// per dataset, in [`Which::all`] order.
 struct Work {
     busy: AtomicBool,
     attempted: AtomicBool,
@@ -250,7 +365,12 @@ impl Work {
     }
 }
 
-static WORK: [Work; 7] = [Work::new(), Work::new(), Work::new(), Work::new(), Work::new(), Work::new(), Work::new()];
+static WORK: LazyLock<Vec<Work>> =
+    LazyLock::new(|| Which::all().iter().map(|_| Work::new()).collect());
+
+fn work_slot(which: Which) -> &'static Work {
+    &WORK[which.index()]
+}
 
 /// A dataset as the settings pane shows it: what is held, how big it is on
 /// disk, when it was last checked, and whatever went wrong last time.
@@ -263,12 +383,17 @@ pub struct Row {
     pub checked_ago: Option<u64>,
     pub busy: bool,
     pub error: Option<String>,
+    /// Set when the dataset cannot be fetched as things stand, such as a
+    /// token that has not been given. The pane says this instead of offering
+    /// a refresh that would only fail.
+    pub blocked: Option<&'static str>,
 }
 
 pub fn status() -> Vec<Row> {
     let cache = cache();
-    Which::ALL
-        .into_iter()
+    Which::all()
+        .iter()
+        .copied()
         .map(|which| {
             let mut bytes = 0;
             let mut oldest: Option<u64> = None;
@@ -286,7 +411,7 @@ pub fn status() -> Vec<Row> {
                     oldest = Some(oldest.map_or(c, |o: u64| o.min(c)));
                 }
             }
-            let w = &WORK[which.index()];
+            let w = work_slot(which);
             Row {
                 which,
                 rows: which.rows(),
@@ -294,6 +419,7 @@ pub fn status() -> Vec<Row> {
                 checked_ago: present.then(|| oldest.map(|c| now().saturating_sub(c))).flatten(),
                 busy: w.busy.load(Ordering::Acquire),
                 error: w.error.read().clone(),
+                blocked: which.blocked(),
             }
         })
         .collect()
@@ -312,7 +438,7 @@ pub fn refresh(which: Which) {
 /// Load or refresh one dataset on a thread of its own, so a slow 85 MB
 /// download does not hold up the three small ones or the frame.
 fn load(which: Which, when: When) {
-    let w = &WORK[which.index()];
+    let w = work_slot(which);
     if w.busy.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -329,8 +455,9 @@ fn load(which: Which, when: When) {
                 Ok(()) => tracing::info!(dataset = name, "dataset ready"),
                 Err(e) => tracing::warn!(dataset = name, "dataset unavailable: {e}"),
             }
-            *WORK[which.index()].error.write() = outcome.err();
-            WORK[which.index()].busy.store(false, Ordering::Release);
+            let w = work_slot(which);
+            *w.error.write() = outcome.err();
+            w.busy.store(false, Ordering::Release);
         })
         .is_ok();
     if !started {
@@ -342,7 +469,7 @@ fn load(which: Which, when: When) {
 /// first step is the download and the second answers 304 straight away; on a
 /// warm one the first step is a file read.
 fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> {
-    use datasets::{airports, gateways, radioid};
+    use datasets::{airports, cells, gateways, radioid};
     match which {
         Which::Airports => {
             if airports().is_empty() {
@@ -376,12 +503,41 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
                 *NXDN.write() = Some(Arc::new(u));
             }
         }
-        Which::Gateways => {
-            if GATEWAYS.read().is_none() {
-                *GATEWAYS.write() = Some(Arc::new(gateways::load(cache)?));
+        Which::Gateway(h) => {
+            let slot = &GATEWAYS[host_file_index(h)];
+            if slot.read().is_none() {
+                *slot.write() = Some(Arc::new(gateways::load_one(cache, h)?));
             }
-            if let Some(g) = gateways::refresh(cache, when)? {
-                *GATEWAYS.write() = Some(Arc::new(g));
+            if let Some(g) = gateways::refresh_one(cache, h, when)? {
+                *slot.write() = Some(Arc::new(g));
+            }
+        }
+        Which::CellOperators => {
+            if OPERATORS.read().is_none() {
+                *OPERATORS.write() = Some(Arc::new(cells::load_operators(cache)?));
+            }
+            if let Some(o) = cells::refresh_operators(cache, when)? {
+                *OPERATORS.write() = Some(Arc::new(o));
+            }
+        }
+        Which::CellTowers => {
+            // The country's MCC is read out of the operator table, so that
+            // has to be here first. Fetching it is the cheap half.
+            if OPERATORS.read().is_none() {
+                *OPERATORS.write() = Some(Arc::new(cells::load_operators(cache)?));
+            }
+            let token = opencellid_token();
+            let (Some(mcc), false) = (cell_mcc(), token.is_empty()) else {
+                return Err(datasets::Error::Parse(
+                    "opencellid".into(),
+                    Which::CellTowers.blocked().unwrap_or("not configured").into(),
+                ));
+            };
+            if CELLS.read().is_none() {
+                *CELLS.write() = Some(Arc::new(cells::load_towers(cache, mcc, &token)?));
+            }
+            if let Some(c) = cells::refresh_towers(cache, mcc, &token, when)? {
+                *CELLS.write() = Some(Arc::new(c));
             }
         }
         Which::Artemis => {
@@ -467,11 +623,28 @@ pub fn fetch_all() {
         datasets::radioid::refresh_users(&cache, When::Now).map(|u| u.is_some()),
         datasets::radioid::load_users(&cache).map(|u| u.len()),
     );
+    for h in datasets::gateways::HOST_FILES.iter().copied() {
+        each(
+            &format!("{} gateways", h.name),
+            datasets::gateways::refresh_one(&cache, h, When::Now).map(|u| u.is_some()),
+            datasets::gateways::load_one(&cache, h).map(|g| g.len()),
+        );
+    }
     each(
-        "gateways",
-        datasets::gateways::refresh(&cache, When::Now).map(|u| u.is_some()),
-        datasets::gateways::load(&cache).map(|g| g.len()),
+        "mobile networks",
+        datasets::cells::refresh_operators(&cache, When::Now).map(|u| u.is_some()),
+        datasets::cells::load_operators(&cache).map(|o| o.len()),
     );
+    // The cell export is the one dataset warming the cache cannot decide to
+    // fetch on its own: it costs a token and a choice of country.
+    match (cell_mcc(), opencellid_token()) {
+        (Some(mcc), t) if !t.is_empty() => each(
+            "cell towers",
+            datasets::cells::refresh_towers(&cache, mcc, &t, When::Now).map(|u| u.is_some()),
+            datasets::cells::load_towers(&cache, mcc, &t).map(|c| c.len()),
+        ),
+        _ => println!("cell towers: {}", Which::CellTowers.blocked().unwrap_or("skipped")),
+    }
     each(
         "identified signals",
         datasets::sigid::refresh_artemis(&cache, When::Now).map(|u| u.is_some()),
@@ -486,6 +659,8 @@ pub fn fetch_all() {
 
 fn each(
     what: &str,
+    // Both halves are results because a publisher being down must report
+    // against that dataset alone and let the rest run.
     refreshed: Result<bool, datasets::Error>,
     count: Result<usize, datasets::Error>,
 ) {
@@ -541,11 +716,38 @@ mod tests {
 
     #[test]
     fn every_dataset_has_at_least_one_source_and_its_own_slot() {
-        for w in Which::ALL {
-            assert!(!w.sources().is_empty(), "{} has no source", w.label());
+        for w in Which::all().iter().copied() {
+            // The cell export is the exception, and deliberately: without a
+            // token there is no URL to fetch, and the pane says so instead
+            // of offering a refresh that cannot work.
+            let blocked = w.blocked().is_some();
+            assert!(blocked || !w.sources().is_empty(), "{} has no source", w.label());
         }
-        let idx: Vec<usize> = Which::ALL.iter().map(|w| w.index()).collect();
-        assert_eq!(idx, [0, 1, 2, 3, 4, 5, 6], "slot indices must be distinct");
-        assert_eq!(WORK.len(), Which::ALL.len());
+        let idx: Vec<usize> = Which::all().iter().map(|w| w.index()).collect();
+        assert_eq!(idx, (0..Which::all().len()).collect::<Vec<_>>(), "slots must be distinct");
+        assert_eq!(WORK.len(), Which::all().len());
+    }
+
+    #[test]
+    fn a_gateway_row_exists_for_every_published_host_file() {
+        for h in datasets::gateways::HOST_FILES.iter().copied() {
+            let w = Which::Gateway(h);
+            assert!(Which::all().contains(&w), "{} has no dataset row", h.name);
+            // One file each, or a refresh of one network would overwrite
+            // another's cache entry and report its rows.
+            assert_eq!(w.sources().len(), 1);
+            assert_eq!(w.publisher(), h.publisher);
+        }
+    }
+
+    #[test]
+    fn the_cell_export_says_what_it_is_waiting_for() {
+        set_opencellid_token("");
+        set_country("gb");
+        assert_eq!(Which::CellTowers.blocked(), Some("needs an OpenCelliD token"));
+        set_opencellid_token("pk.test");
+        set_country("");
+        assert_eq!(Which::CellTowers.blocked(), Some("needs a country, set in Setup"));
+        set_opencellid_token("");
     }
 }

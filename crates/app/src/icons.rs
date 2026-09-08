@@ -34,6 +34,8 @@ pub enum Icon {
     Capture,
     /// Key the transmitter: a mast with waves off it.
     Transmit,
+    /// The dataset cache: somebody else's files kept on this machine.
+    Data,
 }
 
 /// Side of the clickable square, in points.
@@ -194,6 +196,38 @@ impl Icon {
                             .collect();
                         p.add(egui::Shape::line(pts, s));
                     }
+                }
+            }
+            Icon::Data => {
+                // The stacked cylinder every database has been drawn as
+                // since tape reels: a top ellipse, two sides, and two more
+                // ellipses under it for the stack.
+                let (rx, ry) = (b.width() * 0.42, b.height() * 0.14);
+                let (top, bot) = (b.top() + ry + sw * 0.5, b.bottom() - ry - sw * 0.5);
+                let ring = |y: f32| -> Vec<Pos2> {
+                    (0..=28)
+                        .map(|i| {
+                            let a = std::f32::consts::TAU * i as f32 / 28.0;
+                            Pos2::new(c.x + rx * a.cos(), y + ry * a.sin())
+                        })
+                        .collect()
+                };
+                p.add(egui::Shape::line(ring(top), s));
+                for side in [-1.0f32, 1.0] {
+                    let x = c.x + side * rx;
+                    p.line_segment([Pos2::new(x, top), Pos2::new(x, bot)], s);
+                }
+                // Only the front halves of the lower rims: a whole ellipse
+                // there reads as a second cylinder rather than a shelf.
+                for k in [0.5f32, 1.0] {
+                    let y = top + (bot - top) * k;
+                    let pts: Vec<Pos2> = (0..=14)
+                        .map(|i| {
+                            let a = std::f32::consts::PI * i as f32 / 14.0;
+                            Pos2::new(c.x + rx * a.cos(), y + ry * a.sin())
+                        })
+                        .collect();
+                    p.add(egui::Shape::line(pts, s));
                 }
             }
             Icon::Log => {

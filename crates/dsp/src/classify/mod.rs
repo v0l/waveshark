@@ -441,6 +441,19 @@ impl Classifier {
         } else {
             (iq.to_vec(), iq.len())
         };
+        // A burst that is a few long transmissions with silence between
+        // them is measured on one of them. The router holds a burst open
+        // across ten milliseconds of silence so a sensor's repeats arrive
+        // together, and an ExpressLRS handset sends four packets on a
+        // channel before it hops, seven milliseconds each with two and a
+        // half between: measured whole, that is a keyed envelope, and a
+        // chirp with a keyed envelope scores as nothing. A run has to be
+        // milliseconds long to count as a transmission of its own, so a
+        // sensor's pulses, which are shorter, still measure as the keying
+        // they are.
+        if let Some(r) = longest_transmission(&trimmed, self.rate, self.cfg.min_samples) {
+            trimmed = trimmed[r].to_vec();
+        }
         if trimmed.len() > self.cfg.max_samples.max(self.cfg.min_samples) {
             let n = self.cfg.max_samples.max(self.cfg.min_samples);
             let from = (trimmed.len() - n) / 2;
@@ -978,6 +991,55 @@ fn median_high_run(amp: &[f32], level: f32) -> f32 {
 /// kilohertz and an envelope measured in units contribute equally: what is
 /// wanted from both is where the jumps are, not how large.
 /// Smooth in place with a boxcar of `width` samples.
+/// A transmission of its own inside a burst: the longest of several long
+/// runs of carrier that between them are most of the burst.
+///
+/// Several, and most of it, because one long run is a symbol: an X10
+/// remote opens with nine milliseconds of carrier before its pulses, and
+/// measured on that alone it is a carrier and not the keying it is. Four
+/// packets of seven milliseconds with two and a half between them are not
+/// symbols of anything.
+fn longest_transmission(iq: &[C32], rate: f64, min_samples: usize) -> Option<std::ops::Range<usize>> {
+    let least = ((OWN_TRANSMISSION_S * rate) as usize).max(min_samples);
+    if iq.len() < least * 2 {
+        return None;
+    }
+    let mut amp: Vec<f32> = iq.iter().map(|c| c.norm()).collect();
+    boxcar(&mut amp, 64);
+    let mut sorted = amp.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let top = sorted[sorted.len() * 99 / 100];
+    let floor = top * 0.3;
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut start = None;
+    for (i, a) in amp.iter().enumerate().chain(std::iter::once((amp.len(), &0.0))) {
+        match (start, *a >= floor) {
+            (None, true) => start = Some(i),
+            (Some(s), false) => {
+                if i - s >= least {
+                    runs.push(s..i);
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if runs.len() < 2 {
+        return None;
+    }
+    let covered: usize = runs.iter().map(|r| r.len()).sum();
+    if covered < iq.len() / 2 {
+        return None;
+    }
+    let best = runs.into_iter().max_by_key(|r| r.len())?;
+    (best.len() < iq.len() * 9 / 10).then_some(best)
+}
+
+/// How long a run of carrier has to be before it is a transmission of its
+/// own rather than a symbol of the burst around it. Two milliseconds: a
+/// sensor's pulses are under one, a packet on a hopping link is several.
+const OWN_TRANSMISSION_S: f64 = 2e-3;
+
 fn boxcar(v: &mut Vec<f32>, width: usize) {
     if width <= 1 || v.len() <= width {
         return;
@@ -1567,6 +1629,33 @@ mod tests {
         let c = classify(&chirp());
         assert_eq!(c.modulation, Modulation::Chirp);
         assert!(c.features.chirp_rate.abs() > 1e6, "sweep rate came out at {}", c.features.chirp_rate);
+    }
+
+    /// Four chirp packets on one channel with silence between them, which
+    /// is what an ExpressLRS handset sends before it hops, are a chirp and
+    /// not a keyed envelope: the classifier measures one of the packets.
+    #[test]
+    fn packets_with_gaps_between_them_are_measured_one_at_a_time() {
+        let one = chirp();
+        let gap = vec![C32::new(0.0, 0.0); one.len() / 3];
+        let mut burst = Vec::new();
+        for _ in 0..4 {
+            burst.extend_from_slice(&one);
+            burst.extend_from_slice(&gap);
+        }
+        let n = burst.len();
+        let r = longest_transmission(&burst, RATE, 256).expect("a packet inside the burst");
+        assert!(r.len() >= one.len() * 9 / 10 && r.len() <= one.len() * 11 / 10, "{r:?} of {n}");
+        assert_eq!(classify(&burst).modulation, Modulation::Chirp);
+        // One long run before a train of pulses is a symbol of the keying,
+        // not a transmission of its own.
+        let mut keyed = Vec::new();
+        keyed.extend_from_slice(&one);
+        for _ in 0..160 {
+            keyed.extend_from_slice(&carrier()[..SPS / 2]);
+            keyed.extend(std::iter::repeat_n(C32::new(0.0, 0.0), SPS / 2));
+        }
+        assert!(longest_transmission(&keyed, RATE, 256).is_none());
     }
 
     #[test]

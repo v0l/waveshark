@@ -15,6 +15,7 @@ impl App {
             Settings::PacketLog => "Packet log",
             Settings::Scanners => "Scanners",
             Settings::Memory => "Memory bank",
+            Settings::Data => crate::i18n::t("settings.data"),
             Settings::App => crate::i18n::t("settings.title"),
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
@@ -22,7 +23,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(match which {
                     Settings::Radio | Settings::PacketLog => 420.0,
-                    Settings::App => 520.0,
+                    Settings::App | Settings::Data => 520.0,
                     Settings::Scanners | Settings::Memory => 560.0,
                     _ => 320.0,
                 });
@@ -34,6 +35,7 @@ impl App {
                     Settings::PacketLog => self.packet_log_settings(ui),
                     Settings::Scanners => self.scanner_settings(ui),
                     Settings::Memory => self.memory_pane(ui),
+                    Settings::Data => self.data_settings(ui),
                     Settings::App => self.app_settings(ui),
                 }
                 ui.add_space(12.0);
@@ -570,6 +572,9 @@ impl App {
             });
         if let Some(c) = pick {
             self.country = c.code.to_string();
+            // The cell export is fetched per country, so the dataset pane
+            // has to hear about this to know which one it would fetch.
+            crate::data::set_country(&self.country);
             // A country decides the plan the first time and then stops having
             // an opinion, so choosing one after overriding the plan puts the
             // override back rather than leaving a mismatch nobody asked for.
@@ -643,10 +648,6 @@ impl App {
         ui.add_space(10.0);
 
         self.gps_settings(ui);
-
-        ui.separator();
-        ui.add_space(6.0);
-        Self::data_settings(ui);
 
         ui.separator();
         ui.add_space(6.0);
@@ -818,80 +819,95 @@ impl App {
         ui.add_space(10.0);
     }
 
-    /// What is in the dataset cache, and the button that goes and asks.
+    /// What is in the dataset cache, and the buttons that go and ask.
     ///
-    /// The airports, repeaters and ID registries are somebody else's files
-    /// kept on this machine, so the questions an operator has about them are
-    /// how old the copy is, how much disc it is using, and whether the last
-    /// attempt to update it worked. Those are the three columns.
-    fn data_settings(ui: &mut egui::Ui) {
+    /// A window of its own rather than a block inside Setup. The airports,
+    /// repeaters, host files and registries are somebody else's files kept on
+    /// this machine, there are a dozen of them and there will be more, and
+    /// the questions an operator has about each are how old the copy is, how
+    /// much disc it is using, and whether the last attempt to update it
+    /// worked. That is a list, and a list does not fit under the three
+    /// settings Setup is actually about.
+    fn data_settings(&mut self, ui: &mut egui::Ui) {
         let t = crate::i18n::t;
-        legend_help(ui, t("settings.data"), t("settings.data.help"));
-        ui.add_space(4.0);
+        hint(ui, t("settings.data.help"));
+        ui.add_space(6.0);
 
         let rows = crate::data::status();
         let busy = rows.iter().any(|r| r.busy);
-        for r in &rows {
-            let frame = egui::Frame::NONE
-                .fill(theme::WELL)
-                .stroke(Stroke::new(1.0, theme::ETCH))
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .corner_radius(2);
-            frame.show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    theme::Line::new()
-                        .value(r.which.label())
-                        .size(13.0)
-                        .note(r.which.publisher())
-                        .show(ui);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Disabled rather than hidden while it works: a
-                        // button that vanishes under the pointer is a button
-                        // that gets pressed twice.
-                        let label = if r.busy { "CHECKING" } else { t("ui.refresh") };
-                        if ui
-                            .add_enabled(!r.busy, egui::Button::new(legend(label)))
-                            .on_hover_text(r.which.about())
-                            .clicked()
-                        {
-                            crate::data::refresh(r.which);
-                        }
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            for r in &rows {
+                let frame = egui::Frame::NONE
+                    .fill(theme::WELL)
+                    .stroke(Stroke::new(1.0, theme::ETCH))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .corner_radius(2);
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        theme::Line::new()
+                            .value(r.which.label())
+                            .size(13.0)
+                            .note(r.which.publisher())
+                            .show(ui);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Disabled rather than hidden while it works: a
+                            // button that vanishes under the pointer is a button
+                            // that gets pressed twice.
+                            let label = if r.busy { "CHECKING" } else { t("ui.refresh") };
+                            let can = !r.busy && r.blocked.is_none();
+                            if ui
+                                .add_enabled(can, egui::Button::new(legend(label)))
+                                .on_hover_text(r.which.about())
+                                .clicked()
+                            {
+                                crate::data::refresh(r.which);
+                            }
+                        });
                     });
+                    theme::Line::new()
+                        .legend("held")
+                        .value(match r.rows {
+                            Some(n) => format!("{n} rows"),
+                            // Cached but not parsed is the ordinary state for the
+                            // registries, which are read the first time something
+                            // asks them a question.
+                            None if r.bytes > 0 => "on disc".into(),
+                            None => "not downloaded".into(),
+                        })
+                        .size(12.0)
+                        .gap(18.0)
+                        .legend("size")
+                        .value(crate::data::fmt_bytes(r.bytes))
+                        .size(12.0)
+                        .gap(18.0)
+                        .legend("checked")
+                        .value(match r.checked_ago {
+                            Some(s) => crate::data::fmt_ago(s),
+                            None => "never".into(),
+                        })
+                        .size(12.0)
+                        .show(ui);
+                    if let Some(e) = &r.error {
+                        ui.label(egui::RichText::new(e).small().color(theme::FAULT));
+                    }
+                    if let Some(b) = r.blocked {
+                        hint(ui, b);
+                    }
                 });
-                theme::Line::new()
-                    .legend("held")
-                    .value(match r.rows {
-                        Some(n) => format!("{n} rows"),
-                        // Cached but not parsed is the ordinary state for the
-                        // registries, which are read the first time something
-                        // asks them a question.
-                        None if r.bytes > 0 => "on disc".into(),
-                        None => "not downloaded".into(),
-                    })
-                    .size(12.0)
-                    .gap(18.0)
-                    .legend("size")
-                    .value(crate::data::fmt_bytes(r.bytes))
-                    .size(12.0)
-                    .gap(18.0)
-                    .legend("checked")
-                    .value(match r.checked_ago {
-                        Some(s) => crate::data::fmt_ago(s),
-                        None => "never".into(),
-                    })
-                    .size(12.0)
-                    .show(ui);
-                if let Some(e) = &r.error {
-                    ui.label(egui::RichText::new(e).small().color(theme::FAULT));
-                }
-            });
-            ui.add_space(4.0);
-        }
+                ui.add_space(4.0);
+            }
+        });
+
+        ui.add_space(6.0);
+        self.opencellid_row(ui);
 
         ui.horizontal(|ui| {
             if ui.add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all")))).clicked() {
-                for w in crate::data::Which::ALL {
-                    crate::data::refresh(w);
+                // A dataset that cannot be fetched is skipped rather than
+                // failed: refresh all is a convenience, not a demand for a
+                // token.
+                for w in crate::data::Which::all().iter().filter(|w| w.blocked().is_none()) {
+                    crate::data::refresh(*w);
                 }
             }
             if let Some(dir) = crate::data::cache_dir() {
@@ -906,6 +922,34 @@ impl App {
         if busy {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
         }
+    }
+
+    /// The OpenCelliD download token.
+    ///
+    /// Kept here rather than in Setup because it is not a preference: it is
+    /// the credential one row in the list above needs, and it is meaningless
+    /// anywhere else. Free to get from opencellid.org, and the address is
+    /// spelled out because a token field with no idea where to get one is a
+    /// dead end.
+    fn opencellid_row(&mut self, ui: &mut egui::Ui) {
+        legend_help(
+            ui,
+            "OpenCelliD token",
+            "An account at opencellid.org gives a download token. It goes in the URL of the \
+             cell export, so without one that row cannot be fetched; the rest of the list \
+             needs nothing.",
+        );
+        let before = self.opencellid_token.clone();
+        ui.add(
+            egui::TextEdit::singleline(&mut self.opencellid_token)
+                .desired_width(ui.available_width())
+                .password(true)
+                .hint_text("pk.0123456789abcdef"),
+        );
+        if self.opencellid_token != before {
+            crate::data::set_opencellid_token(&self.opencellid_token);
+        }
+        ui.add_space(8.0);
     }
 
     /// Create a radio that is not on this machine.

@@ -47,7 +47,7 @@ const BAND_W: f32 = 96.0;
 const SPAN_W: f32 = 104.0;
 const VIEW_W: f32 = 128.0;
 const SPEED_W: f32 = 100.0;
-const PANELS_W: f32 = 60.0;
+const PANELS_W: f32 = 88.0;
 const UPDATE_W: f32 = 72.0;
 
 impl App {
@@ -303,13 +303,15 @@ impl App {
         });
     }
 
-    /// The windows that open over the view: the packet log and setup.
+    /// The windows that open over the view: the packet log, the cached
+    /// datasets and setup.
     ///
     /// Together at the right end because they are the same kind of thing, a
-    /// panel that appears rather than a property of the receiver, and neither
-    /// belongs in the reading half of the bar.
+    /// panel that appears rather than a property of the receiver, and none of
+    /// them belongs in the reading half of the bar.
     fn panels_cell(&mut self, ui: &mut egui::Ui) {
         let mut log = false;
+        let mut data = false;
         let mut setup = false;
         cell(ui, "panels", PANELS_W, |ui| {
             segment(ui, PANELS_W, |ui| {
@@ -326,6 +328,15 @@ impl App {
                     ICON,
                 )
                 .clicked();
+                data = icon_button_sized(
+                    ui,
+                    Icon::Data,
+                    crate::i18n::t("ui.data"),
+                    true,
+                    self.open == Some(Settings::Data),
+                    ICON,
+                )
+                .clicked();
                 setup = icon_button_sized(
                     ui,
                     Icon::Setup,
@@ -339,6 +350,14 @@ impl App {
         });
         if log {
             self.log.open = !self.log.open;
+        }
+        if data {
+            // A second press closes it, like the log: this is a window, not
+            // a place to be taken to.
+            self.open = match self.open {
+                Some(Settings::Data) => None,
+                _ => Some(Settings::Data),
+            };
         }
         if setup {
             self.open = Some(Settings::App);

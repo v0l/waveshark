@@ -12,6 +12,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- Which mobile network an MCC and MNC belong to, and cell positions from
+  OpenCelliD for the country set in Setup, which needs a download token of
+  your own entered in the datasets window.
 - Bluetooth LE advertising, including Bluetooth 5 Long Range, and Open
   Drone ID out of it or off a beacon.
 - GSM: a cell's identity off its synchronisation burst, the blocks it
@@ -39,6 +42,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The cached datasets have a window of their own, opened from the icon
+  beside Setup, and each digital voice network is a row of its own that
+  refreshes and fails on its own.
 - The auto front end asks one protocol registry where each decoder belongs,
   what it reads, how sticky its channel is and how to build it; the
   scanner table, the strip and the spectrum markers read the same
