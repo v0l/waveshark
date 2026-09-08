@@ -123,6 +123,12 @@ pub struct DsssRx {
     /// Samples a symbol, exactly 20 at this receiver's rate.
     symbol: usize,
     corr: Vec<C32>,
+    /// The burst and the correlation, split by part, which is the layout the
+    /// vector units want.
+    re: Vec<f32>,
+    im: Vec<f32>,
+    out_re: Vec<f32>,
+    out_im: Vec<f32>,
 }
 
 impl DsssRx {
@@ -136,6 +142,10 @@ impl DsssRx {
             sps: rate / CHIP_RATE,
             symbol,
             corr: Vec::new(),
+            re: Vec::new(),
+            im: Vec::new(),
+            out_re: Vec::new(),
+            out_im: Vec::new(),
         })
     }
 
@@ -210,20 +220,60 @@ impl DsssRx {
     /// Correlate the whole burst against the Barker sequence, one output per
     /// input sample. The chips are interpolated because they do not land on
     /// samples.
+    /// Correlate the whole burst against the Barker sequence, one output per
+    /// input sample.
+    ///
+    /// Written as eleven passes over the burst rather than eleven multiplies
+    /// per sample. Where a chip falls between samples does not depend on
+    /// which sample: eleven chips span exactly twenty samples at this rate,
+    /// so the offset and the interpolation weight of chip `k` are the same
+    /// for every output, and each chip becomes one weighted add of a shifted
+    /// slice. That shape vectorises; the per-sample loop it replaces did not,
+    /// and this is the hot loop of the whole direct sequence side.
     fn despread(&mut self, burst: &[C32]) {
+        use wide::f32x8;
         let span = (10.0 * self.sps).ceil() as usize + 2;
-        self.corr.clear();
-        self.corr.reserve(burst.len().saturating_sub(span));
-        for n in 0..burst.len().saturating_sub(span) {
-            let mut c = C32::default();
-            for (k, &b) in BARKER.iter().enumerate() {
-                let x = n as f64 + k as f64 * self.sps;
-                let (i, f) = (x.floor() as usize, (x - x.floor()) as f32);
-                let s = burst[i] * (1.0 - f) + burst[i + 1] * f;
-                c += s * b;
+        let n = burst.len().saturating_sub(span);
+        self.re.clear();
+        self.im.clear();
+        self.re.extend(burst.iter().map(|x| x.re));
+        self.im.extend(burst.iter().map(|x| x.im));
+        self.out_re.clear();
+        self.out_im.clear();
+        self.out_re.resize(n, 0.0);
+        self.out_im.resize(n, 0.0);
+
+        for (k, &b) in BARKER.iter().enumerate() {
+            let x = k as f64 * self.sps;
+            let (o, f) = (x.floor() as usize, (x - x.floor()) as f32);
+            for (w, at) in [(b * (1.0 - f), o), (b * f, o + 1)] {
+                if w == 0.0 {
+                    continue;
+                }
+                let g = f32x8::splat(w);
+                for (part, src) in [(&mut self.out_re, &self.re), (&mut self.out_im, &self.im)] {
+                    let mut i = 0usize;
+                    while i + 8 <= n {
+                        let a = f32x8::from(<[f32; 8]>::try_from(&part[i..i + 8]).unwrap());
+                        let s =
+                            f32x8::from(<[f32; 8]>::try_from(&src[i + at..i + at + 8]).unwrap());
+                        part[i..i + 8].copy_from_slice(&s.mul_add(g, a).to_array());
+                        i += 8;
+                    }
+                    while i < n {
+                        part[i] += src[i + at] * w;
+                        i += 1;
+                    }
+                }
             }
-            self.corr.push(c);
         }
+        self.corr.clear();
+        self.corr.extend(
+            self.out_re
+                .iter()
+                .zip(self.out_im.iter())
+                .map(|(&r, &i)| C32::new(r, i)),
+        );
     }
 
     /// The header at `at` bits into the descrambled stream, and the frame

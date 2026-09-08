@@ -270,8 +270,11 @@ pub struct WifiDetector {
     bursts: Vec<(u64, u64)>,
     /// Per-sample products and powers the plateau detector slides its window
     /// over, kept between calls so the scan does not allocate.
-    prod: Vec<C32>,
+    prod_re: Vec<f32>,
+    prod_im: Vec<f32>,
     pow: Vec<f32>,
+    sre: Vec<f32>,
+    sim: Vec<f32>,
     /// Tracked noise power: the quietest block seen, climbing a hundredth per
     /// block so a long transmission cannot become the floor. The same
     /// estimator `nodes::FrameMeter` uses, and for the same reason: a floor
@@ -322,8 +325,11 @@ impl WifiDetector {
             burst_from: None,
             quiet: 0,
             bursts: Vec::new(),
-            prod: Vec::new(),
+            prod_re: Vec::new(),
+            prod_im: Vec::new(),
             pow: Vec::new(),
+            sre: Vec::new(),
+            sim: Vec::new(),
             lts_energy: lts_ref.iter().map(|x| x.norm_sqr()).sum(),
             lts_re: lts_ref.iter().map(|x| x.re).collect(),
             lts_im: lts_ref.iter().map(|x| x.im).collect(),
@@ -401,7 +407,11 @@ impl WifiDetector {
         // fading one: a floor that learns the burst shuts the gate partway
         // through and a beacon arrives as eight fragments.
         for i in from..self.buf.len() {
-            let v = self.buf[i].norm();
+            // Power, not amplitude: a square root per sample per channel at
+            // twenty megasamples a second is the most expensive thing in an
+            // idle receiver, and every threshold here is a ratio, which
+            // squares as happily as it roots.
+            let v = self.buf[i].norm_sqr();
             self.env += (v - self.env) * 0.01;
             // The floor is seeded from the first millisecond rather than from
             // the first sample. Seeding from one sample seeds from whatever
@@ -423,9 +433,9 @@ impl WifiDetector {
                 self.noise += (self.env - self.noise) * 1e-5;
             }
             let high = if self.in_burst {
-                self.env > self.noise * 2.0
+                self.env > self.noise * 4.0
             } else {
-                self.env > self.noise * 3.5
+                self.env > self.noise * 12.25
             };
             let at = self.base + i as u64;
             match (high, self.burst_from) {
@@ -470,7 +480,7 @@ impl WifiDetector {
             }
             let burst = &self.buf[lo..hi];
             let level = burst.iter().map(|c| c.norm()).sum::<f32>() / burst.len() as f32;
-            let noise = self.noise.max(1e-9);
+            let noise = self.noise.max(1e-18).sqrt();
             let mut found = Vec::new();
             if let Some(rx) = self.dsss.as_mut() {
                 rx.read(
@@ -587,23 +597,50 @@ impl WifiDetector {
         // arithmetic over a slice, which the compiler vectorises; the sums
         // themselves are a recurrence and cannot be.
         let span = end + WIN + LAG - at;
-        self.prod.clear();
-        self.prod.reserve(span);
-        self.pow.clear();
-        self.pow.reserve(span);
         let w = &self.buf[at..at + span];
-        for i in 0..span - LAG {
-            self.prod.push(w[i] * w[i + LAG].conj());
+        self.sre.clear();
+        self.sim.clear();
+        self.sre.extend(w.iter().map(|x| x.re));
+        self.sim.extend(w.iter().map(|x| x.im));
+        self.prod_re.clear();
+        self.prod_im.clear();
+        self.prod_re.resize(span, 0.0);
+        self.prod_im.resize(span, 0.0);
+        self.pow.clear();
+        self.pow.resize(span, 0.0);
+        {
+            use wide::f32x8;
+            let load =
+                |v: &[f32], i: usize| f32x8::from(<[f32; 8]>::try_from(&v[i..i + 8]).unwrap());
+            let n = span - LAG;
+            let mut i = 0usize;
+            while i + 8 <= n {
+                let (ar, ai) = (load(&self.sre, i), load(&self.sim, i));
+                let (br, bi) = (load(&self.sre, i + LAG), load(&self.sim, i + LAG));
+                self.prod_re[i..i + 8].copy_from_slice(&(ar * br + ai * bi).to_array());
+                self.prod_im[i..i + 8].copy_from_slice(&(ai * br - ar * bi).to_array());
+                self.pow[i..i + 8].copy_from_slice(&(ar * ar + ai * ai).to_array());
+                i += 8;
+            }
+            while i < n {
+                let (a, b) = (w[i], w[i + LAG]);
+                self.prod_re[i] = a.re * b.re + a.im * b.im;
+                self.prod_im[i] = a.im * b.re - a.re * b.im;
+                self.pow[i] = a.norm_sqr();
+                i += 1;
+            }
+            for (p, x) in self.pow[n..span].iter_mut().zip(&w[n..span]) {
+                *p = x.norm_sqr();
+            }
         }
-        self.prod.resize(span, C32::default());
-        self.pow.extend(w.iter().map(|x| x.norm_sqr()));
 
-        let (prod, pw) = (&self.prod, &self.pow);
-        let mut c = C32::default();
+        let (prod_re, prod_im, pw) = (&self.prod_re, &self.prod_im, &self.pow);
+        let (mut cr, mut ci) = (0.0f32, 0.0f32);
         let mut p = 0.0f32;
         let mut q = 0.0f32;
         for k in 0..WIN {
-            c += prod[k];
+            cr += prod_re[k];
+            ci += prod_im[k];
             p += pw[k + LAG];
             q += pw[k];
         }
@@ -617,7 +654,7 @@ impl WifiDetector {
             // Normalised against both windows rather than against the delayed
             // one twice. A ratio that can exceed one is not a correlation,
             // and this one reached twenty where the power stepped.
-            if c.norm_sqr() > detect2 * p * q && p > gate {
+            if cr * cr + ci * ci > detect2 * p * q && p > gate {
                 run += 1;
                 // Half the short field seen as a plateau is a frame; less
                 // than that is two symbols of something that rhymes.
@@ -628,7 +665,8 @@ impl WifiDetector {
                 run = 0;
             }
             let i = n - at;
-            c += prod[i + WIN] - prod[i];
+            cr += prod_re[i + WIN] - prod_re[i];
+            ci += prod_im[i + WIN] - prod_im[i];
             p += pw[i + WIN + LAG] - pw[i + LAG];
             q += pw[i + WIN] - pw[i];
         }
