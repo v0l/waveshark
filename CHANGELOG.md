@@ -17,7 +17,8 @@ the code is in the commit log; what a decoder can and cannot do is in
   Doppler for whatever is up now, and how stale the elements it was worked
   out from are.
 - Listening to a pass: one button on the card puts a channel on the
-  satellite's downlink and keeps it there as the pass moves, so it does not
+  satellite's downlink, keeps it there as the pass moves, and closes it when
+  the satellite sets, so it does not
   drift out of the channel before the satellite is overhead. The strip names
   it after the satellite and the transmitter, says it is following, and its
   dial is locked while it is; the chain is the demodulator for the mode, or
