@@ -98,7 +98,7 @@ impl AutoNode {
             if !candidate(*p, hz, b.bandwidth_hz, b.rate) {
                 continue;
             }
-            for w in p.widths_for(b.bandwidth_hz) {
+            for w in p.widths_for(hz, b.bandwidth_hz) {
                 let at = Placed {
                     center_hz: hz,
                     width_hz: w,
@@ -169,7 +169,7 @@ impl AutoNode {
                     .map(|m| m.ring.clone())
                     .unwrap_or_default()
             });
-            for w in p.widths_for(slot.signal_hz) {
+            for w in p.widths_for(hz, slot.signal_hz) {
                 let at = Placed {
                     center_hz: hz,
                     width_hz: w,
@@ -198,5 +198,5 @@ pub(super) fn candidate(p: &dyn Protocol, hz: f64, width_hz: f64, rate: f64) -> 
     let shape = p.shape();
     rate >= shape.min_rate_hz
         && p.placement().covers(hz, shape.widths[0])
-        && p.accepts_width(width_hz)
+        && p.accepts_width(hz, width_hz)
 }

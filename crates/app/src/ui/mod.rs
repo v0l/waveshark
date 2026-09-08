@@ -140,6 +140,8 @@ pub struct App {
     last_frame: Option<std::time::Instant>,
     /// ISO country code, or empty when nothing has chosen one.
     country: String,
+    /// OpenCelliD download token, as typed in the datasets pane.
+    opencellid_token: String,
     /// Sound devices by name, empty for the system default. The speaker the
     /// mix comes out of, and the microphone a keyed channel transmits from.
     audio_out: String,
@@ -199,6 +201,8 @@ pub enum Settings {
     Scanners,
     /// The memory bank: saved channels, in groups.
     Memory,
+    /// The dataset cache: what is held on disc, how old it is, and refresh.
+    Data,
     /// Everything about where this receiver is rather than what it is doing:
     /// language, country, band plan, station position.
     App,
@@ -415,6 +419,7 @@ impl Default for App {
             accuracy_m: None,
             last_frame: None,
             country: String::new(),
+            opencellid_token: String::new(),
             audio_out: String::new(),
             audio_in: String::new(),
             radio_settings: Default::default(),
@@ -444,6 +449,12 @@ impl App {
         crate::shutdown::install(cc.egui_ctx.clone());
         let mut s = crate::session::Session::load();
         apply_locale(&mut s);
+        // The dataset cache is asked questions from drawing code with no
+        // session to consult, so what it needs is handed to it once here:
+        // the country picks which cell export applies, and the token is what
+        // fetches it.
+        crate::data::set_country(&s.country);
+        crate::data::set_opencellid_token(&s.opencellid_token);
         // A radio on the network cannot be found by looking at the bus, so the
         // saved servers have to be registered before the list is built. Added
         // rather than set: the command line may already have put one there.
@@ -471,6 +482,7 @@ impl App {
             location: s.location,
             accuracy_m: None,
             country: s.country.clone(),
+            opencellid_token: s.opencellid_token.clone(),
             audio_out: s.audio_out.clone(),
             audio_in: s.audio_in.clone(),
             radio_settings: s.radio(),
@@ -528,6 +540,7 @@ impl App {
             location: self.location,
             language: crate::i18n::language().code().to_string(),
             country: self.country.clone(),
+            opencellid_token: self.opencellid_token.clone(),
             audio_out: self.audio_out.clone(),
             audio_in: self.audio_in.clone(),
             band_plan: crate::bands::plan().id().to_string(),

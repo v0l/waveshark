@@ -1321,7 +1321,7 @@ impl Protocol for Tetra {
     }
     /// A carrier is on all day and measures however wide the tuner's
     /// splatter makes it; the band decides, not the width.
-    fn accepts_width(&self, _source_width_hz: f64) -> bool {
+    fn accepts_width(&self, _hz: f64, _source_width_hz: f64) -> bool {
         true
     }
     fn default_hz(&self) -> f64 {

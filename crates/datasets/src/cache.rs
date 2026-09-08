@@ -69,14 +69,14 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn http(name: &'static str, url: &'static str, max_age: Duration) -> Self {
-        Self { name, from: Arc::new(Http { url }), max_age }
+    pub fn http(name: &'static str, url: impl Into<String>, max_age: Duration) -> Self {
+        Self { name, from: Arc::new(Http { url: url.into() }), max_age }
     }
 }
 
 /// An HTTP source, revalidated with entity tags and modification dates.
 pub struct Http {
-    pub url: &'static str,
+    pub url: String,
 }
 
 /// Identifies the client to servers with a usage policy, the same way the
@@ -105,7 +105,7 @@ impl Fetch for Http {
             .timeout_global(Some(Duration::from_secs(600)))
             .build()
             .into();
-        let mut req = agent.get(self.url);
+        let mut req = agent.get(&self.url);
         if let Some(e) = &have.etag {
             req = req.header("If-None-Match", e);
         }
@@ -119,7 +119,7 @@ impl Fetch for Http {
             return Ok(None);
         }
         if code != 200 {
-            return Err(Error::Status(self.url.into(), code));
+            return Err(Error::Status(self.url.clone(), code));
         }
         let header = |k: &str| {
             resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string)

@@ -199,20 +199,21 @@ pub trait Protocol: Send + Sync {
     /// them reading half of it.
     fn resolve_widths(&self, _heard: &mut Vec<f64>) {}
 
-    /// Whether a source measured this wide could be a channel of this
-    /// protocol. Within reach of one of the declared widths unless the
-    /// protocol says otherwise.
-    fn accepts_width(&self, source_width_hz: f64) -> bool {
+    /// Whether a source at `hz`, measured `source_width_hz` wide, could be
+    /// a channel of this protocol. Within reach of one of the declared
+    /// widths unless the protocol says otherwise; the frequency is for a
+    /// protocol keyed differently in different bands.
+    fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
         self.shape()
             .widths
             .iter()
             .any(|w| source_width_hz <= w * CHANNEL_WIDTH_TOLERANCE)
     }
 
-    /// The channel widths to try on a source measured this wide. One,
-    /// unless the protocol is keyed at several and the measurement sits
-    /// between them.
-    fn widths_for(&self, _source_width_hz: f64) -> Vec<f64> {
+    /// The channel widths to try on a source at `hz` measured
+    /// `source_width_hz` wide. One, unless the protocol is keyed at several
+    /// and the measurement sits between them.
+    fn widths_for(&self, _hz: f64, _source_width_hz: f64) -> Vec<f64> {
         self.shape().widths.first().copied().into_iter().collect()
     }
 
