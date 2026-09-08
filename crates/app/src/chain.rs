@@ -268,6 +268,11 @@ pub struct Receiver {
     tracks: Option<NodeId>,
     transcripts: Option<NodeId>,
     survey: Option<NodeId>,
+    wigle: Option<NodeId>,
+    /// Who the receiver uploads to wigle.net as, when it does. Kept beside
+    /// the survey path and for the same reason: a rebuild replaces the node,
+    /// and the setting is what survives it.
+    wigle_account: Option<survey::Account>,
     /// Where the survey is written, if it is. Held as a path rather than an
     /// open database for the same reason the packet log holds a directory: a
     /// rebuild replaces the node, and what survives it is the setting.
@@ -479,6 +484,8 @@ impl Receiver {
             tracks: None,
             transcripts: None,
             survey: None,
+            wigle: None,
+            wigle_account: None,
             survey_path: None,
             station: None,
             logged: 0,
@@ -893,6 +900,7 @@ impl Receiver {
         let tracks = of_kind("tracks").first().copied();
         let transcripts = of_kind("transcribe_live").first().copied();
         let survey = of_kind("survey").first().copied();
+        let wigle = of_kind("wigle").first().copied();
 
         // The bus is the output: everything that is heard leaves through it.
         // Everything else that leaves the graph is read by the port it is
@@ -1013,6 +1021,8 @@ impl Receiver {
         self.tracks = tracks;
         self.transcripts = transcripts;
         self.survey = survey;
+        self.wigle = wigle;
+        self.open_wigle();
         // A survey built fresh has to be reopened, and both it and a fresh
         // tracker have to be told where the receiver is: the tracker resolves
         // a position from a single frame with it, and without it a rebuild in
@@ -1905,6 +1915,41 @@ impl Receiver {
         self.survey_path.as_deref()
     }
 
+    /// Start or stop feeding wigle.net. The node stays in the graph either
+    /// way; what changes is whether it has an account to upload as.
+    pub fn set_wigle(&mut self, account: Option<survey::Account>) {
+        self.wigle_account = account.filter(survey::Account::is_complete);
+        self.open_wigle();
+    }
+
+    pub fn wigle_account(&self) -> Option<&survey::Account> {
+        self.wigle_account.as_ref()
+    }
+
+    /// What the feed has sent, what is waiting, and why the last attempt
+    /// failed. `None` when there is no node, which is a graph with no bus.
+    pub fn wigle_status(&self) -> Option<nodes::WigleStatus> {
+        Some(self.wigle_node()?.status())
+    }
+
+    fn open_wigle(&mut self) {
+        let account = self.wigle_account.clone();
+        if let Some(n) = self.wigle_node_mut() {
+            n.set_account(account);
+        }
+    }
+
+    fn wigle_node(&self) -> Option<&nodes::WigleNode> {
+        self.wigle.and_then(|id| downcast::<nodes::WigleNode>(&self.graph, id))
+    }
+
+    fn wigle_node_mut(&mut self) -> Option<&mut nodes::WigleNode> {
+        self.wigle
+            .and_then(|id| self.graph.node_mut(id))
+            .and_then(|n| n.as_any_mut())
+            .and_then(|a| a.downcast_mut::<nodes::WigleNode>())
+    }
+
     fn open_survey(&mut self) {
         let db = match &self.survey_path {
             Some(p) => match survey::Db::open(p) {
@@ -1997,6 +2042,9 @@ impl Receiver {
             n.set_reference(at.lat, at.lon);
         }
         if let Some(n) = self.survey_node_mut() {
+            n.set_station(Some(at));
+        }
+        if let Some(n) = self.wigle_node_mut() {
             n.set_station(Some(at));
         }
     }
@@ -2220,6 +2268,8 @@ pub mod derived {
     pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
     /// The video bus, where every picture the receiver has meets.
     pub const VIDEO: u64 = Patch::DERIVED_BASE + 16;
+    /// The wardriving feed: what was heard, on its way to wigle.net.
+    pub const WIGLE: u64 = Patch::DERIVED_BASE + 17;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2574,6 +2624,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // mid-drive does not rebuild the receiver under the packets.
         let survey = p.add_derived(derived::SURVEY, "survey", Settings::new());
         p.connect(Source::Stage(decode, 0), (survey, 0));
+
+        // The feed to wigle.net is a second consumer of the same decodes,
+        // and it is drawn whether or not an account has been set: turning
+        // wardriving on is a setting on a node that is already there, the
+        // way the survey's file is.
+        let wigle = p.add_derived(derived::WIGLE, "wigle", Settings::new());
+        p.connect(Source::Stage(decode, 0), (wigle, 0));
     }
 
     p
@@ -3334,6 +3391,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "tracks" => "Tracks".into(),
         "transcribe_live" => "Transcribe".into(),
         "survey" => "Devices".into(),
+        "wigle" => "WiGLE".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
         "video_bus" => "Video".into(),

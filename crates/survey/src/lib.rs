@@ -49,9 +49,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 mod locate;
-mod wigle;
+pub mod wigle;
 pub use locate::{locate, Estimate};
-pub use wigle::write_wigle;
+pub use wigle::{write_wigle, Account, Receipt};
 
 /// Schema version, written into the file. A file from a newer version is
 /// refused rather than half read.
@@ -436,7 +436,7 @@ impl Db {
 }
 
 /// Whether a reception says something the last one did not.
-fn worth_keeping(prev: &Sighting, now: &Sighting) -> bool {
+pub fn worth_keeping(prev: &Sighting, now: &Sighting) -> bool {
     if now.at_us.saturating_sub(prev.at_us) >= INTERVAL_S * 1_000_000 {
         return true;
     }

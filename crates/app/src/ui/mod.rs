@@ -504,6 +504,10 @@ impl App {
         // with the same receiver, and typing the port again every start is
         // the difference between a tool and a demonstration.
         app.survey.gps = gps::Transport::parse(&s.gps);
+        app.survey.wigle.name = s.wigle_name.clone();
+        app.survey.wigle.token = s.wigle_token.clone();
+        app.survey.wigle.donate = s.wigle_donate;
+        app.survey.wigle.on = s.wigle_on;
         app.radio_dirty = true;
         // What was changed about the graph, if anything was. Applied
         // whether or not manual mode is on: the mode only says whether the
@@ -555,6 +559,10 @@ impl App {
             volume: self.audio.volume,
             log_cap_mb: self.log_cap_mb,
             gps: self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default(),
+            wigle_name: self.survey.wigle.name.clone(),
+            wigle_token: self.survey.wigle.token.clone(),
+            wigle_donate: self.survey.wigle.donate,
+            wigle_on: self.survey.wigle.on,
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
             map_layers: self.map.map.layers.saved(),
@@ -860,6 +868,9 @@ impl App {
         }
         if let Some(t) = self.survey.gps.clone() {
             self.send(Cmd::Gps(Some(t)));
+        }
+        if self.survey.wigle.on {
+            self.apply_wigle();
         }
         // Same for the feeds and the station position: they belong to the
         // graph, and a new radio thread has built a new one.
@@ -1395,6 +1406,7 @@ impl App {
                 self.survey.estimate = survey::locate(&self.survey.trail);
             }
             Some(devices_pane::Action::Export) => self.export_survey(),
+            Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
             None => {}
         }
     }
@@ -1455,6 +1467,23 @@ impl App {
             }
         }
         self.survey.refreshed = Some(std::time::Instant::now());
+    }
+
+    /// Start or stop feeding wigle.net with what has been typed into the
+    /// modal.
+    ///
+    /// The account goes to the radio thread rather than being kept here: the
+    /// feed is a node on the packet bus, and the interface holding an account
+    /// the node had not been told about would be a switch that reports on.
+    fn apply_wigle(&mut self) {
+        let account = survey::Account {
+            name: self.survey.wigle.name.trim().to_string(),
+            token: self.survey.wigle.token.trim().to_string(),
+            donate: self.survey.wigle.donate,
+        };
+        self.survey.wigle.on = self.survey.wigle.on && account.is_complete();
+        let on = self.survey.wigle.on;
+        self.send(Cmd::Wigle(on.then_some(account)));
     }
 
     /// Write the survey out as WiGLE CSV, beside the survey file.
@@ -1702,6 +1731,9 @@ impl eframe::App for App {
         }
         self.screenshot(ui.ctx());
         self.soak_check(ui.ctx());
+        // Read once a frame rather than where it is drawn: the pane's button
+        // and the modal both show it, and only one of them is ever open.
+        self.survey.wigle.status = self.radio.as_ref().and_then(|r| r.status.wigle.lock().clone());
         if crate::shutdown::asked() {
             // Closing rather than exiting, so the session is saved and the
             // radio and the log are dropped the way a click on the close
@@ -1738,6 +1770,7 @@ impl eframe::App for App {
         }
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
+        self.wigle_modal(ui.ctx());
         self.flush_cmds();
         self.restore_radio_settings();
         self.save_session();

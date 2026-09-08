@@ -31,6 +31,7 @@ pub mod gsm_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
+pub mod wigle_nodes;
 pub mod voice_nodes;
 pub mod wfm;
 pub mod lora_nodes;
@@ -50,6 +51,7 @@ pub use ais_nodes::AisNode;
 pub use frame_meter::FrameMeter;
 pub use ble_nodes::BleNode;
 pub use survey_nodes::SurveyNode;
+pub use wigle_nodes::{Account, WigleNode, WigleStatus};
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
 pub use m17_nodes::M17Node;
@@ -290,6 +292,21 @@ pub fn registry() -> Registry {
             category: "sink",
         },
         |_s: &Settings| Ok(Box::new(SurveyNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "wigle",
+            summary: "Feed what was heard to wigle.net: CSV rows, spooled and uploaded",
+            category: "sink",
+        },
+        |s: &Settings| {
+            let dir = match s.str_or("spool", "") {
+                "" => wigle_nodes::default_spool_dir(),
+                p => std::path::PathBuf::from(p),
+            };
+            Ok(Box::new(WigleNode::new(dir)) as Box<dyn Node>)
+        },
     );
 
     r.register(

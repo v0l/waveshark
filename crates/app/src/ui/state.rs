@@ -394,6 +394,27 @@ pub struct SurveyState {
     /// apart from the live one so a half-written port does not restart the
     /// reader on every keystroke.
     pub gps_edit: Option<String>,
+    /// The feed to wigle.net: who it uploads as, and what it has sent.
+    pub wigle: WigleState,
+}
+
+/// The wardriving feed, as the interface holds it.
+///
+/// The account is the operator's and the uploading is the node's; what lives
+/// here is what has been typed and what the radio thread last reported.
+#[derive(Default)]
+pub struct WigleState {
+    pub open: bool,
+    /// The API name from wigle.net/account, which is not the login name.
+    pub name: String,
+    pub token: String,
+    /// Whether wigle.net may licence the rows on commercially. Off unless the
+    /// operator says otherwise: they are the ones giving the data away.
+    pub donate: bool,
+    /// Whether the feed is running, as the interface asked for it.
+    pub on: bool,
+    /// What the node last said it was doing.
+    pub status: Option<nodes::WigleStatus>,
 }
 
 impl Default for SurveyState {
@@ -410,6 +431,7 @@ impl Default for SurveyState {
             db: None,
             refreshed: None,
             gps_edit: None,
+            wigle: WigleState::default(),
         }
     }
 }

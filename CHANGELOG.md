@@ -39,12 +39,22 @@ the code is in the commit log; what a decoder can and cannot do is in
 - Every protocol is a mode a strip channel can be set to, span-wide ones
   included, and a frequency in any scanner block.
 - A newer release is reported in setup and shown in the header.
+- Wardriving: Bluetooth devices and GSM cells heard with a position can be
+  uploaded to wigle.net while you drive. Rows are spooled to disc and sent
+  when there is a network, so a drive with no coverage uploads when it gets
+  home. The API name and token go in the WiGLE dialog on the devices pane,
+  which also shows what is waiting, what has been sent and why an upload
+  failed.
 
 ### Changed
 
 - The cached datasets have a window of their own, opened from the icon
   beside Setup, and each digital voice network is a row of its own that
   refreshes and fails on its own.
+- The WiGLE CSV export writes a Bluetooth row and a cell row the way the
+  format defines them, and leaves out what the format has no type for:
+  aircraft, vessels, pagers and sensors were being exported as Bluetooth
+  devices.
 - The auto front end asks one protocol registry where each decoder belongs,
   what it reads, how sticky its channel is and how to build it; the
   scanner table, the strip and the spectrum markers read the same

@@ -79,13 +79,9 @@ pub struct Http {
     pub url: String,
 }
 
-/// Identifies the client to servers with a usage policy, the same way the
-/// tile fetcher does.
-const AGENT: &str = concat!(
-    "WaveShark/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/v0l/waveshark)"
-);
+// Identifies the client to servers with a usage policy, the same way every
+// other request this program makes does.
+use httpc::USER_AGENT as AGENT;
 
 /// A dataset arrives in one response. The DMR user dump is 85 MB, and a limit
 /// an order of magnitude above that guards against a redirect to something

@@ -60,7 +60,7 @@ pub fn identity(d: &Decoded) -> Option<(String, String)> {
 }
 
 /// A name a device gave for itself, where its decode carries one.
-fn name_of(d: &Decoded) -> Option<String> {
+pub(crate) fn name_of(d: &Decoded) -> Option<String> {
     if let Some(n) = d.identity.as_ref().and_then(|w| w.name.clone()) {
         return Some(n);
     }
@@ -76,7 +76,7 @@ fn name_of(d: &Decoded) -> Option<String> {
 }
 
 /// Who made it, where the decode says so.
-fn vendor_of(d: &Decoded) -> Option<String> {
+pub(crate) fn vendor_of(d: &Decoded) -> Option<String> {
     if let Some(v) = d.identity.as_ref().and_then(|w| w.vendor.clone()) {
         return Some(v);
     }

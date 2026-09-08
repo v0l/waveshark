@@ -117,6 +117,14 @@ pub struct Session {
     /// the command line: a serial port or a gpsd address. A survey started
     /// once should not need its GPS naming again at every start.
     pub gps: String,
+    /// The wigle.net account the wardriving feed uploads as, and whether it
+    /// is running. The token is a credential in a plain text file, which is
+    /// said in the dialog that takes it: the alternative is a keyring this
+    /// program has no other use for.
+    pub wigle_name: String,
+    pub wigle_token: String,
+    pub wigle_donate: bool,
+    pub wigle_on: bool,
     /// How the spectrum and the waterfall are drawn.
     ///
     /// Kept here with the rest of it because they are settings in the same
@@ -200,6 +208,10 @@ impl Default for Session {
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
             capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             gps: String::new(),
+            wigle_name: String::new(),
+            wigle_token: String::new(),
+            wigle_donate: false,
+            wigle_on: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
             streams: Vec::new(),
@@ -321,6 +333,10 @@ impl Session {
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
             capture_cap_mb: cap(kv.get("capture_cap_mb").copied(), d.capture_cap_mb),
             gps: kv.get("gps").map(|v| v.to_string()).unwrap_or_default(),
+            wigle_name: kv.get("wigle_name").map(|v| v.to_string()).unwrap_or_default(),
+            wigle_token: kv.get("wigle_token").map(|v| v.to_string()).unwrap_or_default(),
+            wigle_donate: kv.get("wigle_donate").map(|v| *v == "true").unwrap_or(false),
+            wigle_on: kv.get("wigle_on").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
                     as f32,
@@ -366,6 +382,8 @@ impl Session {
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
             ("gps", &self.gps),
+            ("wigle_name", &self.wigle_name),
+            ("wigle_token", &self.wigle_token),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -387,6 +405,12 @@ impl Session {
         s.push_str(&format!("smoothing = {}\n", v.smoothing));
         if self.manual_chain {
             s.push_str("manual_chain = true\n");
+        }
+        if self.wigle_donate {
+            s.push_str("wigle_donate = true\n");
+        }
+        if self.wigle_on {
+            s.push_str("wigle_on = true\n");
         }
         for (name, mode) in &self.gains {
             s.push_str(&format!("gain.{name} = {}\n", render_gain(*mode)));
@@ -481,6 +505,10 @@ mod tests {
             decode_on: false,
             volume: 0.25,
             gps: "/dev/ttyACM0@9600".into(),
+            wigle_name: "AID0000".into(),
+            wigle_token: "hunter2".into(),
+            wigle_donate: true,
+            wigle_on: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             view: ViewPrefs {

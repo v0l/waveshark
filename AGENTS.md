@@ -97,6 +97,17 @@ given asks for it (`pipeline::Request`: a claim, a channel beside it, a
 reshape, a release, a retune) rather than reaching for the detector; the
 auto node answers what it can and the receiver logs the rest.
 
+## Every HTTP request goes out under the same name
+
+`crates/httpc` holds the user agent and builds every client, asynchronous or
+blocking. **No `reqwest::Client::builder()` anywhere else.** The string is how
+the far end sees this program: a tile server that blocks an unnamed client
+blocks the map, and an operator whose upload was refused needs the log at the
+other end to say what sent it. There were four copies of the same constant and
+one client, in `meshnode`, that set no agent at all, which is the state this
+rule exists to prevent returning to. `crates/datasets` still fetches over
+`ureq` and takes the same string from `httpc::USER_AGENT`.
+
 ## The changelog is for the person running it
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com). A

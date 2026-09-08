@@ -38,10 +38,7 @@ impl Channel {
 pub async fn channels(host: String) -> Result<Vec<Channel>, String> {
     let host = host.as_str();
     let base = base_url(host);
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let http = httpc::client(Duration::from_secs(8)).map_err(|e| e.to_string())?;
     // ToRadio.want_config_id, field 3, varint. Any nonce does; the node
     // echoes it in FromRadio.config_complete_id, field 7.
     const NONCE: u64 = 0x2a;
