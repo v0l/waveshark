@@ -305,8 +305,22 @@ fn parse(text: &str) -> Vec<Capture> {
             bridge_us,
         });
     };
+    // A description is prose, and a line of prose that happens to start
+    // with "name" is not the name: the fm_broadcast entry lost its name to
+    // one and was never scored.
+    let mut in_description = false;
     for line in text.lines() {
         let l = line.trim();
+        if in_description {
+            if l.ends_with("\"\"\"") {
+                in_description = false;
+            }
+            continue;
+        }
+        if l.starts_with("description") && l.contains("\"\"\"") && !l.ends_with("\"\"\"\"") {
+            in_description = !l[l.find("\"\"\"").unwrap() + 3..].contains("\"\"\"");
+            continue;
+        }
         if l == "[[capture]]" {
             flush(
                 &mut name,

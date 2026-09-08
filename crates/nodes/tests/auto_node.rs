@@ -443,6 +443,48 @@ fn auto_finds_lora_in_a_real_capture() {
     assert!(!lora.is_empty(), "auto placed no LoRa that decoded; {} packets, {chirps} chirps", pk.len());
 }
 
+/// An ExpressLRS handset heard through the whole auto path: the source
+/// opened a megahertz wide, the burst of four packets named a chirp, the
+/// front end placed on the verdict, the link recovered from the packets'
+/// own CRC seeds with no sync packet in the span, and the sticks read.
+///
+/// Three separate faults kept this at zero before there was a capture:
+/// the detector refused any source wider than 600 kHz, the classifier
+/// measured the four packets as one keyed burst, and nothing placed an
+/// ExpressLRS decoder at all. None of them showed on synthesised packets.
+#[test]
+fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/offair/elrs_100hz_2415M_20000k.cs8");
+    if !p.exists() {
+        eprintln!("skipping: elrs_100hz_2415M_20000k.cs8 absent, run testdata/fetch.sh");
+        return;
+    }
+    let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+    let pk = packets(NodeSpec::new("auto"), buf.rate.as_f64(), buf.center, &buf.samples);
+    let rows: Vec<_> = pk
+        .iter()
+        .filter_map(|p| match &p.body {
+            PacketBody::Frame(f) => nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(p.center_hz())),
+            _ => None,
+        })
+        .collect();
+    let chirps = pk.iter().filter(|p| p.modulation() == Some("chirp")).count();
+    // Fifteen packets on four channel visits; the first two of each visit
+    // are what the link is recovered from and come out with it.
+    assert!(rows.len() >= 12, "{} ExpressLRS rows of {} packets, {chirps} chirps", rows.len(), pk.len());
+    for r in &rows {
+        assert_eq!(r.identity.as_ref().map(|i| i.id.as_str()), Some("6f37"), "{r:?}");
+        let detail = r.detail.as_deref().unwrap_or("");
+        // Sticks centred, throttle low, disarmed: what the handset was doing.
+        assert!(detail.contains("rc 51") || detail.contains("rc 50"), "{detail}");
+        assert!(detail.contains(" 86 "), "throttle was low: {detail}");
+        assert!(!detail.contains("armed"), "{detail}");
+    }
+    let channels: std::collections::BTreeSet<u64> = rows.iter().map(|r| r.center.0 / 100_000).collect();
+    assert!(channels.len() >= 3, "read on {channels:?} only");
+}
+
 /// A channel a front end has read is kept for the session. The Meshtastic
 /// capture decodes once through detection; afterwards the node must report
 /// the LoRa channel as remembered, so the next packet on it is read without

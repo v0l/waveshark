@@ -364,3 +364,40 @@ session and the same gain setting as the LoRa captures. The receiver's own
 noise floor and spurs, which is what a burst detector has to not fire on. Half
 of the two seconds recorded, and there is nothing in either half.
 """
+
+[[capture]]
+name = "elrs_100hz_2415M_20000k.cs8"
+sha256 = "4591925dff4a435961abeef08f05432385b3e8d08668dcb188391d4ae60dcd00"
+url = "https://nostr.download/4591925dff4a435961abeef08f05432385b3e8d08668dcb188391d4ae60dcd00.xz"
+compression = "xz"
+center_hz = 2_415_000_000
+rate_sps = 20_000_000
+format = "cs8"
+family = "chirp"
+receiver = "HackRF One, 2.4 GHz whip"
+# A packet is seven milliseconds and the next on the same channel is two and
+# a half after it; the default bridge would glue the four into one burst,
+# which is the shape that scored as nothing before the classifier learned to
+# measure one packet of several.
+bridge_us = 500
+burst_us = [3000, 12000]
+description = """
+An ExpressLRS handset, a RadioMaster TX16S at 100 Hz Full, on the bench with
+the sticks centred and the throttle low, disarmed. LoRa SF7 over 812.5 kHz,
+the SX1280's long interleaved 4/8 coding, thirteen byte packets, four on each
+channel of the hop set before it hops. Three tenths of a second cut from
+8.6 s with `cut --seconds 0.3 --skip 2.0`: four visits to channels inside the
+span, fifteen packets, and the floor between them.
+
+What it is evidence of: the classifier names the burst a chirp with a sweep
+of -5.04e9 Hz/s, which is SF7 over 812.5 kHz and nothing else; the auto node
+opens a source a megahertz wide on each visit and places the ExpressLRS front
+end on the verdict; the front end recovers the link from the CRC seeds of
+consecutive packets, since the sync channel at 2440.4 MHz is outside this
+span and no sync packet is in the capture; and every packet then reads as
+the same sticks under a CRC that agrees. The link is 6f37, which is bytes 4
+and 5 of a binding UID this author owns. Sample rate and centre are in the
+name, and the level is what a handset a metre away gives a HackRF at its
+default gain: 46 dB over the floor, which is why the sources measure up to
+1.7 MHz wide.
+"""

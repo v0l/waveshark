@@ -570,6 +570,48 @@ impl Demod {
     }
 }
 
+/// Build a packet the way a transmitter would, at [`OVERSAMPLE`] samples a
+/// chip: `preamble` upchirps, the sync word, the downchirps, then one
+/// symbol per value, with half a symbol of silence before and a symbol
+/// after. `inverted` builds it the way an SX128x sends it.
+///
+/// Here for the reason every demodulator in this tree has a modulator next
+/// to it: it proves the plumbing, and it is what a decoder for a packet
+/// format that has no explicit header is tested against, since the
+/// fixtures in `decode` can only say what one real transmitter sent.
+pub fn modulate(sf: u8, preamble: usize, sync: u8, values: &[u16], inverted: bool) -> Vec<C32> {
+    let d = Demod::new(Config { sf, ..Default::default() });
+    let sym = d.symbol_len();
+    // A symbol of value v is the upchirp shifted cyclically by v chips,
+    // which is the definition the dechirp inverts rather than a model of
+    // it.
+    let mut out = vec![C32::default(); sym / 2];
+    let push_up = |out: &mut Vec<C32>, v: u16| {
+        let shift = v as usize * OVERSAMPLE;
+        for k in 0..sym {
+            out.push(d.up[(k + shift) % sym]);
+        }
+    };
+    for _ in 0..preamble {
+        push_up(&mut out, 0);
+    }
+    push_up(&mut out, (sync >> 4) as u16 * SYNC_STEP);
+    push_up(&mut out, (sync & 0xf) as u16 * SYNC_STEP);
+    for k in 0..(2 * sym + sym / 4) {
+        out.push(d.down[k % sym]);
+    }
+    for &v in values {
+        push_up(&mut out, v);
+    }
+    out.extend(std::iter::repeat_n(C32::default(), sym));
+    if inverted {
+        for c in &mut out {
+            *c = c.conj();
+        }
+    }
+    out
+}
+
 /// A bin above half the span is a negative offset, not a large positive one.
 fn wrap(bin: f32, n: usize) -> f32 {
     if bin > n as f32 / 2.0 {
@@ -594,38 +636,9 @@ pub fn ldro_default(sf: u8, bw: f64) -> bool {
 mod tests {
     use super::*;
 
-    /// Build a packet the way a transmitter would, to check the detector
-    /// finds the structure it expects. This proves the plumbing and nothing
-    /// about real RF: the fixtures in `decode` do that.
+    /// See [`modulate`].
     fn synth(sf: u8, preamble: usize, sync: u8, values: &[u16]) -> Vec<C32> {
-        let d = Demod::new(Config {
-            sf,
-            ..Default::default()
-        });
-        let sym = d.symbol_len();
-        // A symbol of value v is the upchirp shifted cyclically by v chips,
-        // which is the definition the dechirp inverts rather than a model of
-        // it.
-        let mut out = vec![C32::default(); sym / 2];
-        let push_up = |out: &mut Vec<C32>, v: u16| {
-            let shift = v as usize * OVERSAMPLE;
-            for k in 0..sym {
-                out.push(d.up[(k + shift) % sym]);
-            }
-        };
-        for _ in 0..preamble {
-            push_up(&mut out, 0);
-        }
-        push_up(&mut out, (sync >> 4) as u16 * SYNC_STEP);
-        push_up(&mut out, (sync & 0xf) as u16 * SYNC_STEP);
-        for k in 0..(2 * sym + sym / 4) {
-            out.push(d.down[k % sym]);
-        }
-        for &v in values {
-            push_up(&mut out, v);
-        }
-        out.extend(std::iter::repeat_n(C32::default(), sym));
-        out
+        modulate(sf, preamble, sync, values, false)
     }
 
     /// A transmitter that swaps I and Q is read by a demodulator told to
