@@ -97,6 +97,22 @@ given asks for it (`pipeline::Request`: a claim, a channel beside it, a
 reshape, a release, a retune) rather than reaching for the detector; the
 auto node answers what it can and the receiver logs the rest.
 
+## The changelog is for the person running it
+
+`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com). A
+change somebody running the receiver would notice, a protocol it now reads,
+a pane, a setting, a fix for something that was wrong on screen, gets a
+line under `[Unreleased]` in the same commit, under `Added`, `Changed`,
+`Fixed` or `Removed`. A refactor, a test, a doc edit does not. Write the
+line for the person, not the code: "Bluetooth LE advertising", not
+"add BleNode".
+
+A release is `tools/changelog.sh release X.Y.Z` (which dates the section
+and fixes the compare links), the version in `Cargo.toml`, one commit, and
+the tag `vX.Y.Z` pushed. The release workflow takes its notes from that
+section and refuses a tag that has none; CI checks the file has an
+`[Unreleased]` section and that a tagged version has its own.
+
 ## Every packet carries what it was heard at
 
 A row in the packet list is evidence, and evidence that does not say how
