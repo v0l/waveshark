@@ -133,6 +133,9 @@ pub struct WifiFrame {
     pub fcs_ok: bool,
     /// Whether it arrived inside an aggregate rather than on its own.
     pub aggregated: bool,
+    /// The channel it was read on, which in a span holding several is not the
+    /// tuner's own centre. Zero until a [`WifiSpan`] fills it in.
+    pub center_hz: f64,
     /// What the SIGNAL field said it was sent at.
     pub rate: Rate,
     /// The channel's complex response on subcarriers -26..26 without DC,
@@ -210,9 +213,12 @@ const MAX_FRAME_SAMPLES: usize = 320 + SYMBOL * 1400;
 
 pub struct WifiDetector {
     cfg: WifiConfig,
-    /// Input samples per working sample.
-    factor: usize,
+    /// Input samples per working sample, which is not a whole number once a
+    /// resampler is in the way.
+    in_per_out: f64,
     decim: Option<crate::fir::FirDecim>,
+    resamp: crate::resample::Rational,
+    resampled: Vec<C32>,
     fft: Arc<dyn Fft<f32>>,
     /// The centre spur, tracked and taken out.
     ///
@@ -247,10 +253,15 @@ pub struct WifiDetector {
 }
 
 impl WifiDetector {
-    /// `rate` is the input rate and must be an integer multiple of 20 MS/s.
+    /// A receiver for one channel, fed at `rate`.
+    ///
+    /// Any rate from 20 MS/s up: the integer part of the ratio is decimated
+    /// away and whatever is left over is resampled, because the standard's
+    /// 20 MS/s is not reachable by division from every radio. A LimeSDR's
+    /// 61.44 divides by three to 20.48 and then wants 125/128 of that.
     pub fn new(rate: f64, cfg: WifiConfig) -> Option<Self> {
-        let factor = (rate / ofdm::RATE_HZ).round() as usize;
-        if factor == 0 || (rate - factor as f64 * ofdm::RATE_HZ).abs() > rate * 1e-4 {
+        let factor = (rate / ofdm::RATE_HZ + 1e-6).floor() as usize;
+        if factor == 0 {
             return None;
         }
         let decim = (factor > 1).then(|| {
@@ -259,14 +270,17 @@ impl WifiDetector {
             let taps = crate::fir::lowpass((32 * factor) | 1, 9.0e6 / rate, 60.0);
             crate::fir::FirDecim::new(taps, factor)
         });
+        let resamp = crate::resample::Rational::new(rate / factor as f64, ofdm::RATE_HZ, 4096)?;
         let mut lts_ref: Vec<C32> = tx::preamble()[192..192 + FFT].to_vec();
         for x in lts_ref.iter_mut() {
             *x = x.conj();
         }
         Some(Self {
             cfg,
-            factor,
+            in_per_out: rate / ofdm::RATE_HZ,
             decim,
+            resamp,
+            resampled: Vec::new(),
             fft: FftPlanner::new().plan_fft_forward(FFT),
             dc: crate::dc::DcBlock::new(ofdm::RATE_HZ),
             prod: Vec::new(),
@@ -286,6 +300,7 @@ impl WifiDetector {
         self.base = 0;
         self.floor = 1e-6;
         self.dc.reset();
+        self.resamp.reset();
     }
 
     /// Read whatever frames are in `iq`, appending them to `out`.
@@ -295,9 +310,18 @@ impl WifiDetector {
             Some(d) => {
                 self.scratch.clear();
                 d.process(iq, &mut self.scratch);
-                self.buf.append(&mut self.scratch);
             }
-            None => self.buf.extend_from_slice(iq),
+            None => {
+                self.scratch.clear();
+                self.scratch.extend_from_slice(iq);
+            }
+        }
+        if self.resamp.is_identity() {
+            self.buf.append(&mut self.scratch);
+        } else {
+            self.resampled.clear();
+            self.resamp.process(&self.scratch, &mut self.resampled);
+            self.buf.append(&mut self.resampled);
         }
         self.dc.process(&mut self.buf[from..]);
         let mean = self.buf[from..].iter().map(|x| x.norm_sqr()).sum::<f32>()
@@ -648,12 +672,13 @@ impl WifiDetector {
         WifiFrame {
             fcs_ok: fcs_ok(&psdu),
             aggregated: false,
+            center_hz: 0.0,
             psdu,
             csi: occupied(rate.mcs.is_some())
                 .map(|k| csi[ofdm::bin(k)])
                 .collect(),
             rate,
-            start_sample: (self.base + start as u64) * self.factor as u64,
+            start_sample: ((self.base + start as u64) as f64 * self.in_per_out) as u64,
             freq_off_hz: (cfo * ofdm::RATE_HZ as f32),
             rssi_dbfs: 20.0 * level.max(1e-9).log10(),
             snr_db,
@@ -859,6 +884,86 @@ impl WifiDetector {
             ofdm::demap(x[ofdm::bin(k)] / h(k) * rot, bpsc, out);
         }
         Some(())
+    }
+}
+
+/// Every channel inside a span, each with a receiver of its own.
+///
+/// A 20 MHz span is one channel and this is a mixer set to zero in front of
+/// one receiver. A LimeSDR's 61.44 MHz holds a dozen overlapping channels,
+/// and each one that is asked for costs its own mixer, filter and receiver:
+/// there is no shared bank that helps, because a channel here is a third of
+/// the span rather than a fiftieth of it.
+pub struct WifiSpan {
+    rxs: Vec<ChannelRx>,
+    mixed: Vec<C32>,
+}
+
+struct ChannelRx {
+    center_hz: f64,
+    mixer: Option<crate::Mixer>,
+    det: WifiDetector,
+}
+
+impl WifiSpan {
+    /// A receiver for each of `channels` that the span reaches.
+    ///
+    /// `None` when the span holds no whole channel, which is what a receiver
+    /// too narrow for 802.11 gets.
+    pub fn new(rate: f64, center_hz: f64, channels: &[f64], cfg: WifiConfig) -> Option<Self> {
+        let mut rxs = Vec::new();
+        for &c in channels {
+            // The channel has to be inside the span, and the receiver has to
+            // have a whole channel to work in once it is mixed down.
+            if (c - center_hz).abs() + ofdm::CHANNEL_WIDTH_HZ / 2.0 > rate / 2.0 + 1.0 {
+                continue;
+            }
+            let Some(det) = WifiDetector::new(rate, cfg) else {
+                continue;
+            };
+            let shift = c - center_hz;
+            rxs.push(ChannelRx {
+                center_hz: c,
+                mixer: (shift.abs() > 0.5).then(|| crate::Mixer::new(-shift, rate)),
+                det,
+            });
+        }
+        (!rxs.is_empty()).then_some(Self {
+            rxs,
+            mixed: Vec::new(),
+        })
+    }
+
+    /// The channels being read, low first.
+    pub fn channels(&self) -> Vec<f64> {
+        self.rxs.iter().map(|r| r.center_hz).collect()
+    }
+
+    pub fn reset(&mut self) {
+        for r in self.rxs.iter_mut() {
+            r.det.reset();
+            if let Some(m) = r.mixer.as_mut() {
+                m.reset();
+            }
+        }
+    }
+
+    /// Read every channel, appending what each one heard.
+    pub fn process(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
+        for r in self.rxs.iter_mut() {
+            let at = out.len();
+            match r.mixer.as_mut() {
+                Some(m) => {
+                    self.mixed.clear();
+                    m.process(iq, &mut self.mixed);
+                    r.det.process(&self.mixed, out);
+                }
+                None => r.det.process(iq, out),
+            }
+            for f in out[at..].iter_mut() {
+                f.center_hz = r.center_hz;
+            }
+        }
     }
 }
 
@@ -1086,6 +1191,56 @@ mod tests {
         assert_eq!(got[0].psdu, want);
     }
 
+    /// Two channels inside one wide span, each with a frame of its own, at a
+    /// rate no decimator reaches 20 MS/s from. Every part of the wideband
+    /// path at once: the mixer, the decimation, the resampler, and the frame
+    /// coming back tagged with the channel it was on rather than with the
+    /// tuner's centre.
+    #[test]
+    fn two_channels_of_a_wide_span_are_read_separately() {
+        let (rate, center) = (61_440_000.0, 2_457_000_000.0);
+        let ratio = rate / ofdm::RATE_HZ;
+        let mut span = vec![C32::default(); 300_000];
+
+        for (ch, mbps, seed) in [
+            (2_437_000_000.0f64, 6u8, 0x11u8),
+            (2_462_000_000.0, 36, 0x7a),
+        ] {
+            let frame = tx::frame(&psdu(), mbps, seed);
+            let shift = (ch - center) / rate;
+            for (i, s) in span.iter_mut().enumerate().skip(20_000).take(200_000) {
+                let x = (i - 20_000) as f64 / ratio;
+                let a = x.floor() as usize;
+                if a + 1 >= frame.len() {
+                    break;
+                }
+                let f = (x - x.floor()) as f32;
+                let v = frame[a] * (1.0 - f) + frame[a + 1] * f;
+                let ph = std::f32::consts::TAU * shift as f32 * i as f32;
+                *s += v * C32::new(ph.cos(), ph.sin());
+            }
+        }
+        let samples = air(&span, 25_000.0, 0.001, 5000);
+
+        let mut rx = WifiSpan::new(
+            rate,
+            center,
+            &[2_437_000_000.0, 2_462_000_000.0],
+            WifiConfig::default(),
+        )
+        .expect("a span receiver");
+        assert_eq!(rx.channels().len(), 2);
+        let mut got = Vec::new();
+        for block in samples.chunks(16_384) {
+            rx.process(block, &mut got);
+        }
+        assert_eq!(got.len(), 2, "{} frames", got.len());
+        let mut heard: Vec<(f64, f32)> = got.iter().map(|f| (f.center_hz, f.rate.mbps)).collect();
+        heard.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(heard, vec![(2_437_000_000.0, 6.0), (2_462_000_000.0, 36.0)]);
+        assert!(got.iter().all(|f| f.fcs_ok && f.psdu == psdu()));
+    }
+
     #[test]
     fn noise_alone_produces_no_frames() {
         let samples = air(&[], 0.0, 0.05, 200_000);
@@ -1134,11 +1289,48 @@ mod tests {
         assert!(got[0].snr_db < 12.0, "{} dB is not weak", got[0].snr_db);
     }
 
+    /// Any rate that holds a whole channel, whether or not 20 MS/s divides
+    /// into it. What is refused is a span too narrow for the modulation,
+    /// which is every RTL-SDR.
     #[test]
-    fn a_rate_that_is_not_twenty_megasamples_is_refused() {
+    fn a_span_too_narrow_for_a_channel_is_refused() {
         assert!(WifiDetector::new(2_400_000.0, WifiConfig::default()).is_none());
-        assert!(WifiDetector::new(30_000_000.0, WifiConfig::default()).is_none());
+        assert!(WifiDetector::new(20_000_000.0, WifiConfig::default()).is_some());
+        assert!(WifiDetector::new(30_000_000.0, WifiConfig::default()).is_some());
         assert!(WifiDetector::new(40_000_000.0, WifiConfig::default()).is_some());
+        assert!(WifiDetector::new(61_440_000.0, WifiConfig::default()).is_some());
+    }
+
+    /// The rate a LimeSDR gives, which no decimator reaches 20 MS/s from.
+    /// The frame is the same frame stretched by 3.072, so what the chain must
+    /// not do is lose it.
+    #[test]
+    fn a_frame_at_a_rate_no_decimator_reaches_still_decodes() {
+        let want = psdu();
+        let frame = tx::frame(&want, 24, 0x31);
+        // Stretched to 61.44 MS/s by linear interpolation, which is crude
+        // and is meant to be: what is under test is the receiver's own
+        // resampler, and a rough transmitter is a harder input than a clean
+        // one.
+        let ratio = 61_440_000.0f64 / ofdm::RATE_HZ;
+        let n = (frame.len() as f64 * ratio) as usize;
+        let stretched: Vec<C32> = (0..n)
+            .map(|i| {
+                let x = i as f64 / ratio;
+                let (a, f) = (x.floor() as usize, (x - x.floor()) as f32);
+                let (p, q) = (frame[a], frame[(a + 1).min(frame.len() - 1)]);
+                p * (1.0 - f) + q * f
+            })
+            .collect();
+        let samples = air(&stretched, 30_000.0, 0.002, 3000);
+        let mut det = WifiDetector::new(61_440_000.0, WifiConfig::default()).unwrap();
+        let mut got = Vec::new();
+        for block in samples.chunks(16_384) {
+            det.process(block, &mut got);
+        }
+        assert_eq!(got.len(), 1, "{} frames", got.len());
+        assert!(got[0].fcs_ok);
+        assert_eq!(got[0].psdu, want);
     }
 
     #[test]

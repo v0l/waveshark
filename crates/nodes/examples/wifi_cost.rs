@@ -6,7 +6,14 @@ fn main() {
     let buf = src.read_all().expect("read");
     let rate = src.rate().as_f64();
     let secs = buf.samples.len() as f64 / rate;
-    let mut det = dsp::wifi::WifiDetector::new(rate, Default::default()).expect("rate");
+    let mut det = dsp::wifi::WifiSpan::new(
+        rate,
+        src.center().as_f64(),
+        &nodes::wifi_nodes::channels(),
+        Default::default(),
+    )
+    .expect("a channel in the span");
+    println!("{} channels", det.channels().len());
     let mut frames = Vec::new();
     let t = std::time::Instant::now();
     for block in buf.samples.chunks(16_384) {
