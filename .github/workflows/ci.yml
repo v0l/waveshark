@@ -36,3 +36,21 @@ jobs:
 
       - name: Build with no radio attached
         run: cargo build --workspace --release --all-targets
+
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The changelog has to have the shape the release job reads: an
+      # Unreleased section to release from, and a section for the version
+      # in Cargo.toml once it has been tagged.
+      - name: CHANGELOG.md has an Unreleased section
+        run: grep -q '^## \[Unreleased\]' CHANGELOG.md
+      - name: A tagged version has its section
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if git tag --list "v$v" | grep -q .; then
+            tools/changelog.sh check "$v"
+          fi

@@ -151,13 +151,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+      # The release notes are the changelog's section for this version, and
+      # a tag with no section is a mistake to stop on rather than release
+      # with a generated list of commit subjects.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          tools/changelog.sh check "$v"
+          tools/changelog.sh notes "$v" > notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: notes.md
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
-          generate_release_notes: true
