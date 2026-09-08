@@ -3439,10 +3439,11 @@ pub(crate) mod tests {
     /// point and one station.
     ///
     /// The capture was cut around forty-one frames identified by bandwidth
-    /// when it was recorded; the receiver reads eighty-one, because the
-    /// margin either side of each one holds traffic too. Every one of them
-    /// passed a CRC-32 over the whole frame, so the count is evidence rather
-    /// than a threshold: fewer is a receiver that got worse.
+    /// when it was recorded; the receiver reads eighty-four, because the
+    /// margin either side of each one holds traffic too, and because three of
+    /// them are 802.11n aggregates whose subframes are frames in their own
+    /// right. Every one passed a CRC-32 over the whole frame, so the count is
+    /// evidence rather than a threshold: fewer is a receiver that got worse.
     #[test]
     fn wifi_frames_are_found_and_read() {
         let Some(buf) = wifi_fixture() else {
@@ -3460,7 +3461,7 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
-        assert!(wifi.len() >= 75, "read {} frames, expected 81", wifi.len());
+        assert!(wifi.len() >= 80, "read {} frames, expected 84", wifi.len());
         for r in &wifi {
             assert_eq!(r.crc, Some(true), "a frame without its FCS got through: {r:?}");
             assert!(
@@ -3481,6 +3482,14 @@ pub(crate) mod tests {
             }),
             "the station that sent the data frames is not named: {all}"
         );
+        // The 802.11n frames in the capture: MCS 7 with the short guard
+        // interval, carried inside an aggregate.
+        let ht: Vec<&&DecodeRecord> =
+            wifi.iter().filter(|r| r.detail.contains("phy=MCS")).collect();
+        assert!(!ht.is_empty(), "no HT frame read");
+        for r in &ht {
+            assert!(r.detail.contains("aggregated=1"), "{}", r.detail);
+        }
         every_row_carries_its_measurements(&wifi);
     }
 

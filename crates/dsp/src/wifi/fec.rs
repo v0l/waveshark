@@ -102,6 +102,8 @@ fn outputs(u: u8, s: u8) -> (u8, u8) {
 pub const P_1_2: &[u8] = &[1, 1];
 pub const P_2_3: &[u8] = &[1, 1, 1, 0];
 pub const P_3_4: &[u8] = &[1, 1, 1, 0, 0, 1];
+/// The rate an HT frame adds at MCS 7.
+pub const P_5_6: &[u8] = &[1, 1, 1, 0, 0, 1, 1, 0, 0, 1];
 
 /// Encode and puncture. `bits` must already carry its six zero tail bits.
 pub fn encode(bits: &[u8], pattern: &[u8]) -> Vec<u8> {
@@ -205,14 +207,39 @@ pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
 
 /// The interleaver's permutation for one symbol: `map[k]` is where coded bit
 /// `k` is transmitted. Clause 17.3.5.7's two permutations, in that order.
-pub fn interleave_map(n_cbps: usize, n_bpsc: usize) -> Vec<usize> {
+///
+/// `columns` is the only thing an HT symbol changes: the legacy interleaver
+/// writes 16 columns and the 20 MHz HT one writes 13, which with 52 rather
+/// than 48 subcarriers keeps the rows a whole number of bits per
+/// constellation point.
+pub fn interleave_map(n_cbps: usize, n_bpsc: usize, columns: usize) -> Vec<usize> {
     let s = (n_bpsc / 2).max(1);
+    let rows = n_cbps / columns;
     (0..n_cbps)
         .map(|k| {
-            let i = (n_cbps / 16) * (k % 16) + k / 16;
-            s * (i / s) + (i + n_cbps - (16 * i) / n_cbps) % s
+            let i = rows * (k % columns) + k / columns;
+            s * (i / s) + (i + n_cbps - (columns * i) / n_cbps) % s
         })
         .collect()
+}
+
+/// The check an HT SIGNAL field carries over its own first 34 bits.
+///
+/// Eight bits, MSB of the register first and inverted, which is the shift
+/// register drawn in the standard rather than any named CRC-8. It is the
+/// whole reason an HT header can be trusted: unlike the legacy SIGNAL field,
+/// which has one parity bit, this refuses a wrong MCS outright.
+pub fn ht_sig_crc(bits: &[u8]) -> [u8; 8] {
+    let mut c = [1u8; 8];
+    for &m in bits {
+        let f = m ^ c[7];
+        c = [f, f ^ c[0], f ^ c[1], c[2], c[3], c[4], c[5], c[6]];
+    }
+    let mut out = [0u8; 8];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = 1 - c[7 - i];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -247,15 +274,32 @@ mod tests {
     #[test]
     fn the_interleaver_permutation_is_a_bijection() {
         for (n_cbps, n_bpsc) in [(48, 1), (96, 2), (192, 4), (288, 6)] {
-            let mut m = interleave_map(n_cbps, n_bpsc);
+            let mut m = interleave_map(n_cbps, n_bpsc, 16);
             m.sort_unstable();
             assert!(m.iter().copied().eq(0..n_cbps), "{n_cbps}");
         }
+        for (n_cbps, n_bpsc) in [(52, 1), (104, 2), (208, 4), (312, 6)] {
+            let mut m = interleave_map(n_cbps, n_bpsc, 13);
+            m.sort_unstable();
+            assert!(m.iter().copied().eq(0..n_cbps), "HT {n_cbps}");
+        }
+    }
+
+    /// The standard prints one worked example beside the shift register, and
+    /// it is the only check on this that is not circular.
+    #[test]
+    fn the_ht_signal_check_matches_the_published_example() {
+        let bits: Vec<u8> = "1111000100100110000000001110000000"
+            .bytes()
+            .map(|b| b - b'0')
+            .collect();
+        assert_eq!(bits.len(), 34);
+        assert_eq!(ht_sig_crc(&bits), [1, 0, 1, 0, 1, 0, 0, 0]);
     }
 
     #[test]
     fn the_trellis_decodes_what_it_encoded_at_every_rate() {
-        for pattern in [P_1_2, P_2_3, P_3_4] {
+        for pattern in [P_1_2, P_2_3, P_3_4, P_5_6] {
             let mut bits: Vec<u8> = (0..200).map(|i| (i * 5 % 7 < 3) as u8).collect();
             bits.extend([0; 6]);
             let coded = encode(&bits, pattern);

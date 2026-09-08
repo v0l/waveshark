@@ -56,8 +56,8 @@ fn main() {
         for f in frames.iter().take(20) {
             let mac = decode::wifi::parse(&f.psdu);
             println!(
-                "  {:>3} Mbit/s {:>5} B fcs={} err={:.3} snr={:.1} rssi={:.1} off={:.0} Hz  {}",
-                f.rate.mbps,
+                "  {:>10} {:>5} B fcs={} err={:.3} snr={:.1} rssi={:.1} off={:.0} Hz  {}",
+                f.rate.label(),
                 f.psdu.len(),
                 f.fcs_ok,
                 f.bit_err,

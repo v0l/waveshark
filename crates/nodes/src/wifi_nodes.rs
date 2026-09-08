@@ -148,9 +148,17 @@ impl Simple for WifiNode {
                 continue;
             }
             self.accepted += 1;
-            let mut frame = common::Frame::measured(f.psdu.clone(), f.rssi_dbfs, f.snr_db);
-            // Preamble, SIGNAL and as much of the payload as the cap allows.
-            let len = (320 + 80 + f.psdu.len() * 8 * 20 / f.rate.mbps as usize).min(MAX_FRAME_IQ);
+            let bytes = mac::wrap(
+                &f.psdu,
+                f.rate.mcs,
+                f.rate.mbps,
+                f.rate.short_gi,
+                f.aggregated,
+            );
+            let mut frame = common::Frame::measured(bytes, f.rssi_dbfs, f.snr_db);
+            // Preamble, headers and as much of the payload as the cap allows.
+            let len =
+                (400 + (f.psdu.len() as f32 * 8.0 * 20.0 / f.rate.mbps) as usize).min(MAX_FRAME_IQ);
             frame.iq = self.meter.iq_at(f.start_sample, len);
             out.push(frame);
         }
@@ -171,11 +179,21 @@ impl Simple for WifiNode {
 /// tells one from anything else arriving on the same centre.
 pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     use common::Value;
-    if !dsp::wifi::fcs_ok(bytes) {
+    let r = mac::Received::parse(bytes)?;
+    if !dsp::wifi::fcs_ok(&r.mpdu) {
         return None;
     }
-    let f = mac::parse(bytes)?;
-    let mut fields: Vec<(String, Value)> = vec![("type".into(), Value::Text(f.kind.name().into()))];
+    let f = mac::parse(&r.mpdu)?;
+    let mut fields: Vec<(String, Value)> = vec![
+        ("type".into(), Value::Text(f.kind.name().into())),
+        ("phy".into(), Value::Text(r.phy())),
+    ];
+    if r.short_gi {
+        fields.push(("short_gi".into(), Value::Int(1)));
+    }
+    if r.aggregated {
+        fields.push(("aggregated".into(), Value::Int(1)));
+    }
     if let Some(ch) = channel_of(center.as_f64()) {
         fields.push(("channel".into(), Value::Int(i64::from(ch))));
     }
@@ -234,7 +252,7 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut who = common::Identity::new("wifi", who_addr.to_string());
     who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
     Some(
-        Decoded::bytes("802.11", center, 0.0, bytes.to_vec())
+        Decoded::bytes("802.11", center, 0.0, r.mpdu.clone())
             .with_link(link)
             .by(who)
             .with_detail(detail)
@@ -308,7 +326,7 @@ impl Protocol for Wifi {
         let common::PacketBody::Frame(fr) = &p.body else {
             return None;
         };
-        let f = mac::parse(&fr.bytes)?;
+        let f = mac::parse(&mac::Received::parse(&fr.bytes)?.mpdu)?;
         if !matches!(f.kind, mac::Kind::Management(8)) {
             return None;
         }
@@ -383,7 +401,9 @@ mod tests {
 
         let frames = output.as_frames().expect("frames");
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].bytes, want);
+        let r = mac::Received::parse(&frames[0].bytes).expect("an envelope");
+        assert_eq!(r.mpdu, want);
+        assert_eq!(r.mbps, 6);
         assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
         assert!(
             frames[0].iq.is_some(),
@@ -402,9 +422,25 @@ mod tests {
     #[test]
     fn bytes_that_are_not_a_frame_are_not_a_row() {
         assert!(wifi_decoded(&[0u8; 20], Hz(2_437_000_000)).is_none());
+        // A MAC frame with no envelope in front of it did not come from here.
+        assert!(wifi_decoded(&beacon(), Hz(2_437_000_000)).is_none());
         let mut bad = beacon();
         bad[8] ^= 0xff;
-        assert!(wifi_decoded(&bad, Hz(2_437_000_000)).is_none());
+        assert!(
+            wifi_decoded(&mac::wrap(&bad, None, 6.0, false, false), Hz(2_437_000_000)).is_none()
+        );
+    }
+
+    /// The row says how the frame arrived, which is the only place that can
+    /// be said: a MAC frame carries no rate inside itself.
+    #[test]
+    fn a_row_names_the_rate_the_frame_arrived_at() {
+        let b = mac::wrap(&beacon(), Some(7), 65.0, true, true);
+        let d = wifi_decoded(&b, Hz(2_437_000_000)).expect("a decode");
+        let detail = d.detail.as_deref().unwrap();
+        assert!(detail.contains("phy=MCS 7"), "{detail}");
+        assert!(detail.contains("aggregated=1"), "{detail}");
+        assert_eq!(d.detail.is_some(), true);
     }
 
     #[test]

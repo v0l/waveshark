@@ -7,6 +7,69 @@
 
 use std::fmt;
 
+/// What the front end puts in front of a MAC frame on the bus: the tag, the
+/// physical layer it was read at, and the flags.
+///
+/// The same trick `decode::lora` uses, and for the same reason: how a frame
+/// arrived is evidence about it, and there is nowhere else on the bus to put
+/// it. An 802.11 frame carries no rate inside itself, so without this a row
+/// cannot say whether it was a beacon crawling at 6 Mbit/s or one subframe of
+/// an aggregate at MCS 7, which is most of what says where the sender is and
+/// what it thinks of the link.
+const TAG: [u8; 4] = *b"W802";
+const ENVELOPE: usize = 4 + 1 + 1 + 1;
+
+/// Flags in the envelope's last byte.
+const SHORT_GI: u8 = 1;
+const AGGREGATED: u8 = 2;
+
+/// The envelope in front of a MAC frame, written by the front end.
+pub fn wrap(mpdu: &[u8], mcs: Option<u8>, mbps: f32, short_gi: bool, aggregated: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ENVELOPE + mpdu.len());
+    out.extend_from_slice(&TAG);
+    out.push(mcs.unwrap_or(0xff));
+    out.push(mbps.round() as u8);
+    out.push((u8::from(short_gi) * SHORT_GI) | (u8::from(aggregated) * AGGREGATED));
+    out.extend_from_slice(mpdu);
+    out
+}
+
+/// What a frame off the bus was: how it arrived, and the MAC frame itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Received {
+    /// The modulation and coding scheme, for a frame sent as HT.
+    pub mcs: Option<u8>,
+    /// Megabits a second, rounded to what a person says.
+    pub mbps: u8,
+    pub short_gi: bool,
+    /// Whether it shared its transmission with other MAC frames.
+    pub aggregated: bool,
+    pub mpdu: Vec<u8>,
+}
+
+impl Received {
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < ENVELOPE + 10 || bytes[..4] != TAG {
+            return None;
+        }
+        Some(Self {
+            mcs: (bytes[4] != 0xff).then_some(bytes[4]),
+            mbps: bytes[5],
+            short_gi: bytes[6] & SHORT_GI != 0,
+            aggregated: bytes[6] & AGGREGATED != 0,
+            mpdu: bytes[ENVELOPE..].to_vec(),
+        })
+    }
+
+    /// How a person names the rate: "MCS 7" or "36 Mbit/s".
+    pub fn phy(&self) -> String {
+        match self.mcs {
+            Some(m) => format!("MCS {m}"),
+            None => format!("{} Mbit/s", self.mbps),
+        }
+    }
+}
+
 /// A MAC address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Mac(pub [u8; 6]);
@@ -322,6 +385,25 @@ mod tests {
         assert_eq!(f.addr2, None);
         assert_eq!(f.seq, None);
         assert_eq!(f.addr1.to_string(), "00:11:22:33:44:55");
+    }
+
+    #[test]
+    fn the_envelope_carries_how_a_frame_arrived() {
+        let b = wrap(&beacon(), Some(7), 65.0, true, true);
+        let r = Received::parse(&b).expect("an envelope");
+        assert_eq!(r.mcs, Some(7));
+        assert!(r.short_gi && r.aggregated);
+        assert_eq!(r.phy(), "MCS 7");
+        assert_eq!(r.mpdu, beacon());
+
+        let b = wrap(&beacon(), None, 6.0, false, false);
+        let r = Received::parse(&b).expect("an envelope");
+        assert_eq!(r.mcs, None);
+        assert_eq!(r.phy(), "6 Mbit/s");
+        assert!(!r.short_gi && !r.aggregated);
+
+        // A MAC frame without the envelope is not one of these.
+        assert_eq!(Received::parse(&beacon()), None);
     }
 
     #[test]
