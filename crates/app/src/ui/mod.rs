@@ -1600,6 +1600,19 @@ impl App {
         self.send_channels();
     }
 
+    /// Take a channel out of the strip by its id, keeping the listening
+    /// selection pointed at whatever it was pointed at.
+    fn close_channel(&mut self, id: u64) {
+        let Some(i) = self.audio.channels.iter().position(|c| c.id == id) else { return };
+        self.audio.channels.remove(i);
+        match self.audio.listening {
+            Some(l) if l == i => self.audio.listening = None,
+            Some(l) if l > i => self.audio.listening = Some(l - 1),
+            _ => {}
+        }
+        self.send_channels();
+    }
+
     /// Stop following, and give the channel its dial back rather than
     /// leaving one nobody is allowed to tune.
     fn stop_tracking(&mut self) {
@@ -1609,13 +1622,17 @@ impl App {
         }
     }
 
-    /// Where a satellite's downlink is arriving right now, or `None` when
-    /// there is no station, no elements, or it is below the horizon.
-    fn doppler_at(&self, norad: u64, downlink_hz: f64) -> Option<f64> {
+    /// Where a satellite is from here, now.
+    fn look_at(&self, norad: u64) -> Option<orbit::Look> {
         let (lat, lon) = self.location?;
         let sky = crate::sats::sky(self.sats.group)?;
-        let look = sky.get(norad)?.look(orbit::Station::new(lat, lon), crate::sats::now_s())?;
-        Some(look.doppler_hz(downlink_hz))
+        sky.get(norad)?.look(orbit::Station::new(lat, lon), crate::sats::now_s())
+    }
+
+    /// Where a satellite's downlink is arriving right now, or `None` when
+    /// there is no station or no elements.
+    fn doppler_at(&self, norad: u64, downlink_hz: f64) -> Option<f64> {
+        Some(self.look_at(norad)?.doppler_hz(downlink_hz))
     }
 
     /// Move the tracking channel to where the downlink is now.
@@ -1632,7 +1649,17 @@ impl App {
             self.sats.tracking = None;
             return;
         }
-        let Some(now_hz) = self.doppler_at(t.norad, t.downlink_hz) else { return };
+        let Some(look) = self.look_at(t.norad) else { return };
+        // The pass ends and the channel goes with it. A channel left on a
+        // frequency nothing is transmitting on is a strip of noise the
+        // operator has to notice and close, and the next pass makes another
+        // one: an hour of watching leaves a dozen.
+        if look.el_deg <= 0.0 {
+            self.close_channel(t.channel);
+            self.sats.tracking = None;
+            return;
+        }
+        let now_hz = look.doppler_hz(t.downlink_hz);
         // A hundred hertz is inside the narrowest channel this receiver
         // demodulates and is about a second of drift on a two-metre pass.
         if (now_hz - t.tuned_hz).abs() < 100.0 {
@@ -2120,6 +2147,29 @@ mod tests {
         assert_eq!(sat_label(&downlink("BPSK", "")), "ISS (ZARYA):BPSK");
         // And one with neither still says something a person can tell apart.
         assert_eq!(sat_label(&downlink("", "")), "ISS (ZARYA):145.800 MHz");
+    }
+
+    /// A pass ends and its channel goes with it, or an hour of watching
+    /// leaves a strip of dead channels the operator has to close by hand.
+    #[test]
+    fn closing_a_channel_keeps_the_listening_selection_where_it_was() {
+        let mut a = app();
+        channel(&mut a, 100_000.0, true, 1.0);
+        channel(&mut a, 200_000.0, true, 1.0);
+        channel(&mut a, 300_000.0, true, 1.0);
+        let (first, third) = (a.audio.channels[0].id, a.audio.channels[2].id);
+        a.audio.listening = Some(2);
+        a.close_channel(first);
+        assert_eq!(a.audio.channels.len(), 2);
+        assert_eq!(a.audio.listening, Some(1), "the selection followed the wrong channel");
+        assert_eq!(a.audio.channels[1].id, third);
+        // Closing what is being listened to leaves nothing selected rather
+        // than the channel that slid into its place.
+        a.close_channel(third);
+        assert_eq!(a.audio.listening, None);
+        // And an id that is not there is not a panic.
+        a.close_channel(999);
+        assert_eq!(a.audio.channels.len(), 1);
     }
 
     /// A mode with a demodulator here gets it; anything else gets the auto
