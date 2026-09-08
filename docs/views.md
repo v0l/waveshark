@@ -152,6 +152,31 @@ claims what it can render.
   the picture arrived is the only quality there is.
   `crates/app/src/videobus.rs`, `crates/app/src/ui/video_pane.rs`.
 
+- **Satellites**: the one view that shows something nobody has heard. Every
+  pass over the station in the next day, from elements CelesTrak published
+  and the SGP4 model they were fitted for, with the peak elevation, the
+  azimuths to point at, and for whatever is above the horizon now the live
+  look angles and the Doppler on a two-metre downlink. Because it is a
+  prediction and not a reception, the age of the elements is on the screen:
+  a set a fortnight past its epoch puts a low satellite kilometres from
+  where it is, and a table that does not say so is fiction drawn as fact.
+  Selecting a row draws that satellite's ground track and footprint on the
+  map, and clicking one on the map selects it here.
+  `crates/app/src/ui/sats_pane.rs`, `crates/app/src/sats.rs`, over
+  `crates/orbit` and `datasets::tle`.
+
+  Two approximations in `crates/orbit` are deliberate, and both are far
+  inside the error of the elements themselves: the rotation from the model's
+  frame to the Earth's leaves out polar motion, and the elevation is
+  geometric, with no refraction lifting a satellite on the horizon by about
+  half a degree. What Gpredict has that this does not is in
+  `docs/references.md`.
+
+  Two costs kept apart, because they differ by three orders of magnitude:
+  where one satellite is now is a single propagation and happens while
+  drawing, and when a hundred satellites next rise is a search over a day
+  that runs on a thread and is published when it finishes.
+
 - **Keys**: a row per enciphered channel a front end reports, and what is known
   about the key for it. The view is always there as an encryption monitor; the
   key store, key entry and the TETRA decryption behind it need the `tea`
