@@ -35,7 +35,10 @@ pub fn operators_source() -> Source {
 pub fn towers_source(mcc: u16, token: &str) -> Source {
     let url =
         format!("https://opencellid.org/ocid/downloads?token={token}&type=mcc&file={mcc}.csv.gz");
-    Source::http(mcc_file(mcc), url, DAILY)
+    Source::http(mcc_file(mcc), url, DAILY).checked(|head| match token_error(head) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    })
 }
 
 /// Leaked because [`Source::name`] is the cache file name and must outlive
@@ -283,6 +286,8 @@ fn token_error(raw: &[u8]) -> Option<String> {
     if !head.starts_with(b"{") {
         return None;
     }
+    // The body is small enough to be whole in the head the cache checks, and
+    // a real export is gzip and never reaches here.
     let v: serde_json::Value = serde_json::from_slice(raw).ok()?;
     let msg = v.get("message")?.as_str()?;
     Some(match msg {
