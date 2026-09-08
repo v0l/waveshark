@@ -39,6 +39,7 @@ pub mod ssb;
 pub mod stereo;
 pub mod tetra;
 pub(crate) mod twolevel;
+pub mod wifi;
 pub mod window;
 pub mod wmbus;
 
