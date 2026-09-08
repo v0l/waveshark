@@ -50,13 +50,13 @@ impl Rational {
         // decimating. A tenth of margin keeps the transition out of the band
         // a decoder cares about.
         let cutoff = 0.45 / l.max(m) as f64;
-        let taps = crate::fir::lowpass(per_phase * l | 1, cutoff, 60.0);
+        let taps = crate::fir::lowpass((per_phase * l) | 1, cutoff, 60.0);
         let mut phases = vec![Vec::with_capacity(per_phase); l];
-        for p in 0..l {
+        for (p, phase) in phases.iter_mut().enumerate() {
             for k in 0..per_phase {
                 // Gain `l`, because interpolation spreads one sample's energy
                 // over `l` of them.
-                phases[p].push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
+                phase.push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
             }
         }
         Self {
