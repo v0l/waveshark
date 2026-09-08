@@ -22,7 +22,9 @@ the code is in the commit log; what a decoder can and cannot do is in
   watches the whole 2.4 GHz band at once. 802.11b at 1 and 2 Mbit/s as
   well, which is what every access point sends its beacon at, so networks
   are listed by name with their access point and security. Needs a HackRF
-  or a LimeSDR, since one channel is 20 MHz wide.
+  or a LimeSDR, since one channel is 20 MHz wide. The channels are read in
+  parallel and a channel with nothing in it is skipped, so a LimeSDR
+  watching eight channels keeps up with the radio.
 - GSM: a cell's identity off its synchronisation burst, the blocks it
   broadcasts, who a page is calling, and the signalling channel a phone is
   sent to, on the beacon carrier or on another carrier timed from it.
