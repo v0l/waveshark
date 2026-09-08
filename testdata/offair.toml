@@ -305,11 +305,12 @@ actually held.
 Selection is by occupied bandwidth, not duration: the Bluetooth bursts overlap
 802.11 frames in length and never in bandwidth, 1 MHz against 16.
 
-The 802.11 front end reads 81 frames off this file, not 41: the four
+The 802.11 front end reads 84 frames off this file, not 41: the four
 milliseconds kept around each selected frame hold acknowledgements and data
-frames of their own. Every one of the 81 passes its FCS, so the count is
-evidence about the receiver rather than a threshold, and `radio.rs` asserts
-it.
+frames of their own, and three of the transmissions are 802.11n aggregates
+holding a QoS data frame each. Every one of the 84 passes its FCS, so the
+count is evidence about the receiver rather than a threshold, and `radio.rs`
+asserts it.
 """
 
 [[capture]]

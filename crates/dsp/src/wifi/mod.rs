@@ -82,6 +82,39 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// The MPDUs inside an A-MPDU, which is how an HT frame carries more than one
+/// MAC frame in one transmission.
+///
+/// Each is behind a four byte delimiter: twelve bits of length, a check over
+/// those, and the signature 0x4E that lets a receiver find its place again
+/// after a bad one. A delimiter of zero length is padding, which is how the
+/// transmitter fills the aggregate out to the symbol.
+pub fn deaggregate(psdu: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 4 <= psdu.len() {
+        let d = &psdu[at..at + 4];
+        if d[3] != 0x4e {
+            // Lost the thread. The signature is one byte, so hunting for the
+            // next one on a four byte grid is cheap and cannot run away.
+            at += 4;
+            continue;
+        }
+        let len = usize::from(u16::from_le_bytes([d[0], d[1]]) >> 4);
+        at += 4;
+        if len == 0 {
+            continue;
+        }
+        if at + len > psdu.len() {
+            break;
+        }
+        out.push(psdu[at..at + len].to_vec());
+        // Each subframe is padded out to a multiple of four bytes.
+        at += len.next_multiple_of(4);
+    }
+    out
+}
+
 /// Whether a MAC frame's trailing four bytes check out.
 pub fn fcs_ok(psdu: &[u8]) -> bool {
     if psdu.len() < 8 {
@@ -98,6 +131,8 @@ pub struct WifiFrame {
     pub psdu: Vec<u8>,
     /// Whether those four bytes agree with the rest.
     pub fcs_ok: bool,
+    /// Whether it arrived inside an aggregate rather than on its own.
+    pub aggregated: bool,
     /// What the SIGNAL field said it was sent at.
     pub rate: Rate,
     /// The channel's complex response on subcarriers -26..26 without DC,
@@ -162,6 +197,13 @@ impl Default for WifiConfig {
 /// the same plateau is not found again, short enough that a frame starting
 /// inside a false alarm is still seen.
 const PAST: usize = 64;
+
+/// Where an HT frame's data symbols start in the pilot polarity sequence.
+///
+/// The sequence runs on through the preamble: the legacy SIGNAL field is at
+/// zero, the two HT header symbols take one and two, and the data starts at
+/// three. The training symbols between them are not in it.
+const HT_PILOT_OFFSET: usize = 3;
 
 /// Samples one frame can occupy: 4095 bytes at 6 Mbit/s is 1366 symbols.
 const MAX_FRAME_SAMPLES: usize = 320 + SYMBOL * 1400;
@@ -364,8 +406,19 @@ impl WifiDetector {
 
         let sig_at = lts_at + 2 * FFT;
         let mut soft = Vec::with_capacity(48);
-        self.symbol(sig_at, cfo, &csi, 0, 1, &mut soft)?;
-        let de = deinterleave(&soft, 48, 1);
+        self.symbol(
+            sig_at,
+            CP,
+            cfo,
+            &csi,
+            &ofdm::DATA_SUBCARRIERS,
+            0,
+            0,
+            1,
+            false,
+            &mut soft,
+        )?;
+        let de = deinterleave(&soft, 48, 1, 16);
         let (bits, _) = fec::viterbi(&de, fec::P_1_2, 24);
         // Parity over the rate, the length and the reserved bit. Without it
         // a noise detection names a rate and a length and asks for four
@@ -381,8 +434,20 @@ impl WifiDetector {
             return Some(start + PAST);
         }
 
-        let n_sym = (16 + 8 * len + 6).div_ceil(rate.dbps());
         let data_at = sig_at + SYMBOL;
+        // An HT frame says 6 Mbit/s here whatever it is really sent at, and
+        // puts its own header in the two symbols after this one, keyed a
+        // quarter turn round so a legacy receiver reads the length, waits,
+        // and keeps off the air.
+        if rate.mbps == 6.0 {
+            match self.read_ht(start, data_at, cfo, &csi, snr_db, out) {
+                HtAttempt::Read(end) => return Some(end),
+                HtAttempt::Wait => return None,
+                HtAttempt::NotHt => {}
+            }
+        }
+
+        let n_sym = (16 + 8 * len + 6).div_ceil(rate.dbps());
         let end = data_at + n_sym * SYMBOL;
         if self.buf.len() < end {
             return None;
@@ -392,8 +457,19 @@ impl WifiDetector {
         let mut sym = Vec::with_capacity(rate.cbps());
         for n in 0..n_sym {
             sym.clear();
-            self.symbol(data_at + n * SYMBOL, cfo, &csi, n + 1, rate.bpsc, &mut sym)?;
-            soft.extend(deinterleave(&sym, rate.cbps(), rate.bpsc));
+            self.symbol(
+                data_at + n * SYMBOL,
+                CP,
+                cfo,
+                &csi,
+                &ofdm::DATA_SUBCARRIERS,
+                n + 1,
+                0,
+                rate.bpsc,
+                false,
+                &mut sym,
+            )?;
+            soft.extend(deinterleave(&sym, rate.cbps(), rate.bpsc, 16));
         }
         let (mut bits, bit_err) = fec::viterbi(&soft, rate.puncture(), n_sym * rate.dbps());
         if fec::descramble(&mut bits).is_none() {
@@ -404,20 +480,161 @@ impl WifiDetector {
             .map(|c| c.iter().enumerate().fold(0u8, |a, (i, &b)| a | b << i))
             .collect();
 
+        out.push(self.frame(start, end, cfo, psdu, rate, &csi, snr_db, bit_err));
+        Some(end)
+    }
+
+    /// Read the HT header at `data_at` and, if it is one, the frame behind it.
+    ///
+    /// Everything here is single stream and 20 MHz: one aerial receives one
+    /// spatial stream however many were sent, so MCS 8 and above cannot be
+    /// separated, and a 40 MHz frame is twice the span this is given.
+    fn read_ht(
+        &self,
+        start: usize,
+        data_at: usize,
+        cfo: f32,
+        csi: &[C32; FFT],
+        snr_db: f32,
+        out: &mut Vec<WifiFrame>,
+    ) -> HtAttempt {
+        if self.buf.len() < data_at + 2 * SYMBOL {
+            return HtAttempt::Wait;
+        }
+        let mut soft = Vec::with_capacity(96);
+        for n in 0..2 {
+            let mut sym = Vec::with_capacity(48);
+            if self
+                .symbol(
+                    data_at + n * SYMBOL,
+                    CP,
+                    cfo,
+                    csi,
+                    &ofdm::DATA_SUBCARRIERS,
+                    n + 1,
+                    0,
+                    1,
+                    true,
+                    &mut sym,
+                )
+                .is_none()
+            {
+                return HtAttempt::Wait;
+            }
+            soft.extend(deinterleave(&sym, 48, 1, 16));
+        }
+        let (bits, _) = fec::viterbi(&soft, fec::P_1_2, 48);
+        if fec::ht_sig_crc(&bits[..34]) != bits[34..42] || bits[42..].iter().any(|&b| b != 0) {
+            return HtAttempt::NotHt;
+        }
+        let num = |from: usize, n: usize| -> usize {
+            (0..n).fold(0usize, |a, i| a | usize::from(bits[from + i]) << i)
+        };
+        let (mcs, cbw, len) = (num(0, 7) as u8, bits[7], num(8, 16));
+        let short_gi = bits[31] == 1;
+        let bits_aggregated = bits[27] == 1;
+        // What this reads: one stream, no space-time coding, no aggregation
+        // beyond what the MAC does with it, and the convolutional code rather
+        // than LDPC. Anything else is a frame it can see and cannot read.
+        let single = cbw == 0 && bits[28] == 0 && bits[29] == 0 && bits[30] == 0 && num(32, 2) == 0;
+        let Some(rate) = ofdm::mcs(mcs, short_gi).filter(|_| single) else {
+            return HtAttempt::NotHt;
+        };
+        if len == 0 || len > self.cfg.max_psdu {
+            return HtAttempt::NotHt;
+        }
+
+        // The short training field is for a receiver's gain control and
+        // carries nothing; the long one after it is the channel measured
+        // again, over the four subcarriers an HT frame adds as well.
+        // Two header symbols, then the short training field, then the long
+        // one; the data begins after that.
+        let ltf_at = data_at + 3 * SYMBOL;
+        let first = ltf_at + SYMBOL;
+        let n_sym = (16 + 8 * len + 6).div_ceil(rate.dbps());
+        let end = first + n_sym * rate.symbol_samples();
+        if self.buf.len() < end {
+            return HtAttempt::Wait;
+        }
+        let ht_csi = self.ht_channel(ltf_at + CP, cfo);
+
+        let mut soft = Vec::with_capacity(n_sym * rate.cbps());
+        let mut sym = Vec::with_capacity(rate.cbps());
+        let cp = rate.symbol_samples() - FFT;
+        for n in 0..n_sym {
+            sym.clear();
+            if self
+                .symbol(
+                    first + n * rate.symbol_samples(),
+                    cp,
+                    cfo,
+                    &ht_csi,
+                    &ofdm::HT_DATA_SUBCARRIERS,
+                    n + HT_PILOT_OFFSET,
+                    n,
+                    rate.bpsc,
+                    false,
+                    &mut sym,
+                )
+                .is_none()
+            {
+                return HtAttempt::Wait;
+            }
+            soft.extend(deinterleave(&sym, rate.cbps(), rate.bpsc, 13));
+        }
+        let (mut bits, bit_err) = fec::viterbi(&soft, rate.puncture(), n_sym * rate.dbps());
+        if fec::descramble(&mut bits).is_none() {
+            return HtAttempt::Read(end);
+        }
+        let psdu: Vec<u8> = bits[16..16 + 8 * len]
+            .chunks(8)
+            .map(|c| c.iter().enumerate().fold(0u8, |a, (i, &b)| a | b << i))
+            .collect();
+        // An aggregate is several MAC frames in one transmission, each behind
+        // a delimiter and each with an FCS of its own. Reported as the frames
+        // they are: one row per MAC frame, all with the measurements of the
+        // transmission they shared.
+        if bits_aggregated {
+            for mpdu in deaggregate(&psdu) {
+                let mut f = self.frame(start, end, cfo, mpdu, rate, &ht_csi, snr_db, bit_err);
+                f.aggregated = true;
+                out.push(f);
+            }
+        } else {
+            out.push(self.frame(start, end, cfo, psdu, rate, &ht_csi, snr_db, bit_err));
+        }
+        HtAttempt::Read(end)
+    }
+
+    /// One frame, with what it was heard at.
+    #[allow(clippy::too_many_arguments)]
+    fn frame(
+        &self,
+        start: usize,
+        end: usize,
+        cfo: f32,
+        psdu: Vec<u8>,
+        rate: ofdm::Rate,
+        csi: &[C32; FFT],
+        snr_db: f32,
+        bit_err: f32,
+    ) -> WifiFrame {
         let level: f32 =
             self.buf[start..end].iter().map(|c| c.norm()).sum::<f32>() / (end - start) as f32;
-        out.push(WifiFrame {
+        WifiFrame {
             fcs_ok: fcs_ok(&psdu),
+            aggregated: false,
             psdu,
+            csi: occupied(rate.mcs.is_some())
+                .map(|k| csi[ofdm::bin(k)])
+                .collect(),
             rate,
-            csi,
             start_sample: (self.base + start as u64) * self.factor as u64,
             freq_off_hz: (cfo * ofdm::RATE_HZ as f32),
             rssi_dbfs: 20.0 * level.max(1e-9).log10(),
             snr_db,
             bit_err,
-        });
-        Some(end)
+        }
     }
 
     /// Carrier offset from the short field's own repeat, as a fraction of the
@@ -488,24 +705,33 @@ impl WifiDetector {
         self.buf[n] * C32::new(ph.cos(), ph.sin())
     }
 
-    /// The channel response on each data and pilot subcarrier, and the SNR
-    /// the two long symbols disagreeing implies.
-    fn channel(&self, lts_at: usize, cfo: f32) -> (Vec<C32>, f32) {
+    /// The channel response on each occupied subcarrier, by FFT bin, and the
+    /// SNR the two long symbols disagreeing implies.
+    fn channel(&self, lts_at: usize, cfo: f32) -> ([C32; FFT], f32) {
         let a = self.transform(lts_at, cfo);
         let b = self.transform(lts_at + FFT, cfo);
-        let mut csi = Vec::with_capacity(52);
+        let mut csi = [C32::default(); FFT];
         let (mut sig, mut noise) = (0.0f32, 0.0f32);
-        for k in -26..=26 {
-            if k == 0 {
-                continue;
-            }
-            let l = ofdm::lts(k);
-            let h = (a[ofdm::bin(k)] + b[ofdm::bin(k)]) * 0.5 / l;
+        for k in occupied(false) {
+            let bin = ofdm::bin(k);
+            let h = (a[bin] + b[bin]) * 0.5 / ofdm::lts(k);
             sig += h.norm_sqr();
-            noise += (a[ofdm::bin(k)] - b[ofdm::bin(k)]).norm_sqr() * 0.25;
-            csi.push(h);
+            noise += (a[bin] - b[bin]).norm_sqr() * 0.25;
+            csi[bin] = h;
         }
         (csi, 10.0 * (sig / noise.max(1e-20)).log10())
+    }
+
+    /// The channel measured again on the HT long training symbol, which
+    /// covers the four subcarriers the legacy one leaves as guard. `at` is
+    /// the start of its useful part.
+    fn ht_channel(&self, at: usize, cfo: f32) -> [C32; FFT] {
+        let x = self.transform(at, cfo);
+        let mut csi = [C32::default(); FFT];
+        for k in occupied(true) {
+            csi[ofdm::bin(k)] = x[ofdm::bin(k)] / ofdm::ht_lts(k);
+        }
+        csi
     }
 
     /// One symbol's useful part, transformed, with the carrier offset out.
@@ -515,49 +741,80 @@ impl WifiDetector {
         buf
     }
 
-    /// Equalise one data symbol and demap it. `at` is the start of its cyclic
-    /// prefix; `index` counts from SIGNAL for the pilot polarity.
+    /// Equalise one data symbol and demap it.
+    ///
+    /// `at` is the start of its cyclic prefix and `cp` how long that is, which
+    /// an HT frame halves when it uses the short guard interval. `index` is
+    /// the symbol's place in the pilot polarity sequence, and `shift` how far
+    /// the pilot pattern has turned. `quarter` turns the
+    /// constellation back a quarter, which is how an HT header is keyed so
+    /// that a legacy receiver can tell it from a legacy SIGNAL field.
+    #[allow(clippy::too_many_arguments)]
     fn symbol(
         &self,
         at: usize,
+        cp: usize,
         cfo: f32,
-        csi: &[C32],
+        csi: &[C32; FFT],
+        carriers: &[i32],
         index: usize,
+        shift: usize,
         bpsc: usize,
+        quarter: bool,
         out: &mut Vec<f32>,
     ) -> Option<()> {
-        if at + SYMBOL > self.buf.len() {
+        if at + cp + FFT > self.buf.len() {
             return None;
         }
-        let x = self.transform(at + CP, cfo);
-        let h = |k: i32| -> C32 {
-            let i = (k + 26) as usize - usize::from(k > 0);
-            csi[i]
-        };
+        let x = self.transform(at + cp, cfo);
+        let h = |k: i32| -> C32 { csi[ofdm::bin(k)] };
         // Residual phase from the four pilots. A frame is milliseconds long
         // and the offset estimate is good to a few hundred hertz, so without
         // this the constellation has rotated most of the way round by the end
         // of a long frame and everything past the first symbols is noise.
         let mut e = C32::default();
-        for (k, sign) in ofdm::PILOTS {
-            let want = sign * fec::pilot_polarity(index);
-            e += x[ofdm::bin(k)] / h(k) * want;
+        for (m, (k, _)) in ofdm::PILOTS.iter().enumerate() {
+            // An HT frame turns the pilot pattern by one subcarrier every
+            // symbol; a legacy one never does, and passes a shift of zero.
+            let want = ofdm::PILOTS[(m + shift) % 4].1 * fec::pilot_polarity(index);
+            e += x[ofdm::bin(*k)] / h(*k) * want;
         }
         let rot = if e.norm() > 0.0 {
             e.conj() / e.norm()
         } else {
             C32::new(1.0, 0.0)
         };
-        for &k in ofdm::DATA_SUBCARRIERS.iter() {
+        let rot = if quarter {
+            rot * C32::new(0.0, -1.0)
+        } else {
+            rot
+        };
+        for &k in carriers {
             ofdm::demap(x[ofdm::bin(k)] / h(k) * rot, bpsc, out);
         }
         Some(())
     }
 }
 
+/// What came of looking for an HT header where one could be.
+enum HtAttempt {
+    /// A header, and the frame behind it if it decoded. Carry on from here.
+    Read(usize),
+    /// The samples are not all here yet.
+    Wait,
+    /// Not an HT frame: read what follows as legacy.
+    NotHt,
+}
+
+/// Every subcarrier a frame occupies, low first, DC skipped.
+fn occupied(ht: bool) -> impl Iterator<Item = i32> {
+    let edge = if ht { 28 } else { 26 };
+    (-edge..=edge).filter(|&k| k != 0)
+}
+
 /// Undo one symbol's interleaving, soft bits and all.
-fn deinterleave(soft: &[f32], n_cbps: usize, n_bpsc: usize) -> Vec<f32> {
-    let map = fec::interleave_map(n_cbps, n_bpsc);
+fn deinterleave(soft: &[f32], n_cbps: usize, n_bpsc: usize, columns: usize) -> Vec<f32> {
+    let map = fec::interleave_map(n_cbps, n_bpsc, columns);
     let mut out = vec![0.0f32; n_cbps];
     for (k, &to) in map.iter().enumerate() {
         out[k] = soft.get(to).copied().unwrap_or(0.0);
@@ -624,7 +881,7 @@ mod tests {
             det.process(&samples, &mut got);
             assert_eq!(got.len(), 1, "{mbps} Mbit/s: {} frames", got.len());
             let f = &got[0];
-            assert_eq!(f.rate.mbps, mbps);
+            assert_eq!(f.rate.mbps, f32::from(mbps));
             assert!(f.fcs_ok, "{mbps} Mbit/s failed its FCS");
             assert_eq!(f.psdu, want);
             assert_eq!(f.csi.len(), 52);
@@ -635,6 +892,80 @@ mod tests {
             );
             assert!(f.snr_db > 20.0, "{} dB", f.snr_db);
         }
+    }
+
+    /// Every single-stream HT rate, with and without the short guard
+    /// interval, and carrying an aggregate because that is how an HT frame
+    /// normally carries anything.
+    #[test]
+    fn every_ht_rate_decodes_both_guard_intervals() {
+        for mcs in 0..8u8 {
+            for short_gi in [false, true] {
+                let want = psdu();
+                let frame = tx::ht_frame(&want, mcs, short_gi, true, 0x5d);
+                let samples = air(&frame, 20_000.0, 0.002, 1000);
+                let mut det = WifiDetector::new(ofdm::RATE_HZ, WifiConfig::default()).unwrap();
+                let mut got = Vec::new();
+                det.process(&samples, &mut got);
+                assert_eq!(
+                    got.len(),
+                    1,
+                    "MCS {mcs} sgi {short_gi}: {} frames",
+                    got.len()
+                );
+                let f = &got[0];
+                assert_eq!(f.rate.mcs, Some(mcs));
+                assert_eq!(f.rate.short_gi, short_gi);
+                assert!(f.aggregated);
+                assert!(f.fcs_ok, "MCS {mcs} sgi {short_gi} failed its FCS");
+                assert_eq!(f.psdu, want);
+                // An HT frame measures the channel again on its own training
+                // symbol, which covers four subcarriers the legacy one does
+                // not reach.
+                assert_eq!(f.csi.len(), 56);
+            }
+        }
+    }
+
+    /// Two MAC frames in one transmission, which is what an aggregate is for.
+    #[test]
+    fn an_aggregate_becomes_one_row_per_mac_frame() {
+        let mut a = psdu();
+        a[10] = 0x11;
+        let crc = crc32(&a[..a.len() - 4]);
+        a.truncate(a.len() - 4);
+        a.extend(crc.to_le_bytes());
+        let b = psdu();
+
+        let mut body = Vec::new();
+        for m in [&a, &b] {
+            let d = (m.len() as u16) << 4;
+            body.extend_from_slice(&d.to_le_bytes());
+            body.push(0);
+            body.push(0x4e);
+            let at = body.len();
+            body.extend_from_slice(m);
+            body.resize(at + m.len().next_multiple_of(4), 0);
+        }
+        assert_eq!(deaggregate(&body), vec![a.clone(), b.clone()]);
+
+        let samples = air(&tx::ht_frame(&body, 3, false, false, 0x22), 0.0, 0.002, 900);
+        let mut det = WifiDetector::new(ofdm::RATE_HZ, WifiConfig::default()).unwrap();
+        let mut got = Vec::new();
+        det.process(&samples, &mut got);
+        // Sent without the aggregation bit, so the receiver reports the whole
+        // body as one frame and the FCS over it fails: an aggregate is only
+        // an aggregate because the header says so.
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].fcs_ok);
+
+        let samples = air(&tx::ht_frame(&a, 3, false, true, 0x22), 0.0, 0.002, 900);
+        let mut det = WifiDetector::new(ofdm::RATE_HZ, WifiConfig::default()).unwrap();
+        let mut got = Vec::new();
+        det.process(&samples, &mut got);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].fcs_ok && got[0].aggregated);
+        assert_eq!(got[0].psdu, a);
     }
 
     #[test]
