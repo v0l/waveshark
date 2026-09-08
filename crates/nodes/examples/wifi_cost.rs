@@ -9,7 +9,10 @@ fn main() {
     let mut det = dsp::wifi::WifiSpan::new(
         rate,
         src.center().as_f64(),
-        &nodes::wifi_nodes::channels(),
+        &match std::env::var("WIFICH") {
+            Ok(v) => v.split(',').filter_map(|c| c.parse().ok()).collect::<Vec<f64>>(),
+            Err(_) => nodes::wifi_nodes::channels(),
+        },
         Default::default(),
     )
     .expect("a channel in the span");

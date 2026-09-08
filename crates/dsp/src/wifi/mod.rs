@@ -38,6 +38,7 @@ pub mod tx;
 
 use common::C32;
 use ofdm::{Rate, CP, FFT, SYMBOL};
+use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
@@ -331,6 +332,34 @@ impl WifiDetector {
             floor: 1e-6,
             scratch: Vec::new(),
         })
+    }
+
+    /// Move the sample counter on by `input` samples that were not read.
+    ///
+    /// A sleeping channel still has to know what time it is. Without this its
+    /// clock stops while it sleeps, every frame it later reports is stamped
+    /// with a position from before the gap, and two channels that heard the
+    /// same transmission disagree about when, so it is reported twice.
+    pub fn advance(&mut self, input: i64) {
+        let working = (input as f64 / self.in_per_out).round() as i64;
+        self.base = self.base.saturating_add_signed(working);
+    }
+
+    /// Drop what is buffered without forgetting what the channel is like.
+    ///
+    /// For a receiver that was asleep: the samples it holds are not
+    /// continuous with the ones arriving, but the noise floor and the
+    /// envelope estimate it learned still describe this channel, and a
+    /// direct sequence gate that has to learn its floor again takes a
+    /// millisecond, which is a third of a beacon.
+    pub fn resume(&mut self) {
+        self.buf.clear();
+        self.bursts.clear();
+        self.burst_from = None;
+        self.in_burst = false;
+        self.quiet = 0;
+        self.dsss_at = 0;
+        self.resamp.reset();
     }
 
     pub fn reset(&mut self) {
@@ -1074,19 +1103,115 @@ impl WifiDetector {
 /// the span rather than a fiftieth of it.
 pub struct WifiSpan {
     rxs: Vec<ChannelRx>,
-    mixed: Vec<C32>,
     /// Last block's frames, held so a copy heard a block later on another
     /// channel can be recognised as the same transmission.
     pending: Vec<WifiFrame>,
+    /// The block before this one, kept so a channel that has just woken up
+    /// is handed the samples a transmission began in.
+    prev: Vec<C32>,
+    /// The transform the per-channel energy is measured with, and its input
+    /// and output buffers.
+    fft: Arc<dyn Fft<f32>>,
+    spectrum: Vec<f32>,
+    scratch: Vec<C32>,
+    rate: f64,
+    center_hz: f64,
 }
 
 struct ChannelRx {
     center_hz: f64,
     mixer: Option<crate::Mixer>,
     det: WifiDetector,
+    mixed: Vec<C32>,
+    /// Bins of the span's spectrum this channel occupies.
+    band: (usize, usize),
+    /// The quietest this channel has been, and whether it is being read.
+    floor: f32,
+    active: bool,
+    hangover: u8,
+    seen: u32,
+}
+
+impl ChannelRx {
+    /// Mix this channel down if it is not already at the centre, and read it.
+    fn feed(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
+        match self.mixer.as_mut() {
+            Some(m) => {
+                self.mixed.clear();
+                m.process(iq, &mut self.mixed);
+                let mixed = std::mem::take(&mut self.mixed);
+                self.det.process(&mixed, out);
+                self.mixed = mixed;
+            }
+            None => self.det.process(iq, out),
+        }
+    }
+
+    /// Whether this channel is worth reading this block: six decibels over
+    /// the quietest it has been.
+    fn awake(&mut self, spectrum: &[f32]) -> bool {
+        let (lo, hi) = self.band;
+        let mut power = 0.0f32;
+        let mut n = 0usize;
+        let mut k = lo;
+        loop {
+            power += spectrum[k];
+            n += 1;
+            if k == hi {
+                break;
+            }
+            k = (k + 1) % spectrum.len();
+        }
+        let power = power / n.max(1) as f32;
+        if self.floor == 0.0 || power < self.floor {
+            self.floor = power.max(1e-12);
+        } else if !self.active {
+            self.floor += (power - self.floor) * 1e-3;
+        }
+        // Three decibels to wake, and it stays awake for a few blocks after
+        // the level drops: a frame runs past the block it was noticed in, and
+        // a channel that sleeps between blocks of the same transmission reads
+        // neither half of it.
+        // Awake for the first blocks whatever the level: the floor is
+        // whatever the first block held, so a stream that opens on a
+        // transmission would sleep through it and every capture would lose
+        // its first frame.
+        self.seen = self.seen.saturating_add(1);
+        if power > self.floor * 2.0 || self.seen <= 8 {
+            self.hangover = 8;
+        } else {
+            self.hangover = self.hangover.saturating_sub(1);
+        }
+        self.active = self.hangover > 0;
+        self.active
+    }
 }
 
 impl WifiSpan {
+    /// The span's mean power per bin over this block, which is what says
+    /// which channels have anything in them.
+    fn measure(&mut self, iq: &[C32]) {
+        self.spectrum.iter_mut().for_each(|x| *x = 0.0);
+        let mut windows = 0usize;
+        let step = (iq.len() / 8).max(POWER_FFT);
+        let mut at = 0usize;
+        while at + POWER_FFT <= iq.len() {
+            self.scratch.clear();
+            self.scratch.extend_from_slice(&iq[at..at + POWER_FFT]);
+            self.fft.process(&mut self.scratch);
+            // The loudest window rather than the mean of them. A block is a
+            // quarter of a millisecond and an acknowledgement is thirty
+            // microseconds, so averaging buries a frame ten times over and
+            // the channel it was on never wakes.
+            for (s, x) in self.spectrum.iter_mut().zip(self.scratch.iter()) {
+                *s = s.max(x.norm_sqr() / POWER_FFT as f32);
+            }
+            windows += 1;
+            at += step;
+        }
+        let _ = (windows, self.rate, self.center_hz);
+    }
+
     /// A receiver for each of `channels` that the span reaches.
     ///
     /// `None` when the span holds no whole channel, which is what a receiver
@@ -1103,16 +1228,36 @@ impl WifiSpan {
                 continue;
             };
             let shift = c - center_hz;
+            // Which bins of the span's spectrum this channel occupies, for
+            // the energy test that decides whether to run it at all.
+            let bin = |hz: f64| -> usize {
+                let k = (hz / rate * POWER_FFT as f64).round() as i64;
+                k.rem_euclid(POWER_FFT as i64) as usize
+            };
             rxs.push(ChannelRx {
                 center_hz: c,
                 mixer: (shift.abs() > 0.5).then(|| crate::Mixer::new(-shift, rate)),
                 det,
+                mixed: Vec::new(),
+                band: (
+                    bin(shift - ofdm::CHANNEL_WIDTH_HZ * 0.4),
+                    bin(shift + ofdm::CHANNEL_WIDTH_HZ * 0.4),
+                ),
+                floor: 0.0,
+                active: true,
+                hangover: 0,
+                seen: 0,
             });
         }
         (!rxs.is_empty()).then_some(Self {
             rxs,
-            mixed: Vec::new(),
             pending: Vec::new(),
+            prev: Vec::new(),
+            fft: FftPlanner::new().plan_fft_forward(POWER_FFT),
+            spectrum: vec![0.0; POWER_FFT],
+            scratch: Vec::new(),
+            rate,
+            center_hz,
         })
     }
 
@@ -1143,22 +1288,50 @@ impl WifiSpan {
     }
 
     /// Read every channel, appending what each one heard.
+    ///
+    /// The channels are independent, so they run in parallel; each holds its
+    /// own buffers and its own state, and nothing is shared but the samples
+    /// they all read.
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
         let first = out.len();
-        for r in self.rxs.iter_mut() {
-            let at = out.len();
-            match r.mixer.as_mut() {
-                Some(m) => {
-                    self.mixed.clear();
-                    m.process(iq, &mut self.mixed);
-                    r.det.process(&self.mixed, out);
+        self.measure(iq);
+        let (spectrum, prev) = (&self.spectrum, &self.prev);
+        let found: Vec<Vec<WifiFrame>> = self
+            .rxs
+            .par_iter_mut()
+            .map(|r| {
+                let mut mine = Vec::new();
+                // Nothing is decoded on a channel sitting at its own floor,
+                // and most channels sit there most of the time. The saving is
+                // the whole chain, extraction included, which is the larger
+                // half of what a channel costs.
+                let was = r.active;
+                if !r.awake(spectrum) {
+                    r.det.advance(iq.len() as i64);
+                    return mine;
                 }
-                None => r.det.process(iq, out),
-            }
-            for f in out[at..].iter_mut() {
-                f.center_hz = r.center_hz;
-            }
-        }
+                if !was {
+                    // Just woken: the transmission that woke it started in
+                    // the block before, and the samples from while it slept
+                    // never arrived, so what it holds is not continuous with
+                    // what is coming. The noise estimates are kept, because
+                    // they are what it learned about this channel and are
+                    // right; only the buffers are dropped.
+                    r.det.resume();
+                    r.det.advance(-(prev.len() as i64));
+                    r.feed(prev, &mut mine);
+                }
+                r.feed(iq, &mut mine);
+                for f in mine.iter_mut() {
+                    f.center_hz = r.center_hz;
+                }
+                mine
+            })
+            .collect();
+        out.extend(found.into_iter().flatten());
+        self.prev.clear();
+        self.prev.extend_from_slice(iq);
+
         // Held for one block before being handed on, because the same
         // transmission finishes in different blocks on different channels:
         // the receivers do not run in step, and a copy that arrives a block
@@ -1268,6 +1441,11 @@ fn correlate(re: &[f32], im: &[f32], hr: &[f32], hi: &[f32]) -> C32 {
 fn load(v: &[f32]) -> wide::f32x8 {
     wide::f32x8::from(<[f32; 8]>::try_from(&v[..8]).unwrap())
 }
+
+/// The transform the per-channel energy test runs on. Coarse on purpose:
+/// 256 bins over a 61.44 MHz span is 240 kHz a bin, which places a 20 MHz
+/// channel to within a bin and costs a few microseconds a block.
+const POWER_FFT: usize = 256;
 
 /// Every subcarrier a frame occupies, low first, DC skipped.
 fn occupied(ht: bool) -> impl Iterator<Item = i32> {
