@@ -1101,7 +1101,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         payload: bytes.to_vec(),
         text: None,
         crc_ok: Some(crc_ok),
-        modulation: Some("pi/4-DQPSK"),
+        modulation: Some(common::Modulation::Dqpsk),
         bandwidth_hz: Some(CHANNEL_WIDTH_HZ),
         detail: Some(format!(
             "traffic burst TS{tn} marker {marker}{}",
@@ -1280,7 +1280,7 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("pi/4-DQPSK")
+        .with_modulation(common::Modulation::Dqpsk)
         // Every block behind an event passed the CRC the standard puts
         // on it; a burst that failed never became a block.
         .with_crc(Some(true));

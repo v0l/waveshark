@@ -156,7 +156,11 @@ impl Widget for Fader<'_> {
         }
 
         let p = ui.painter();
-        Vu::paint(p, Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)), self.peak);
+        Vu::paint(
+            p,
+            Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)),
+            self.peak,
+        );
 
         // Amber, because the handle is the one part of this the operator set,
         // and outlined so it stays legible crossing a lit bar of any colour.
@@ -295,17 +299,18 @@ pub fn card<R>(
     header: impl FnOnce(&mut Ui),
     body: impl FnOnce(&mut Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let outer = egui::Frame::NONE
-        .fill(theme::PANEL)
-        .stroke(Stroke::new(1.0, theme::ETCH))
-        .corner_radius(2);
+    let outer =
+        egui::Frame::NONE.fill(theme::PANEL).stroke(Stroke::new(1.0, theme::ETCH)).corner_radius(2);
     let framed = outer.show(ui, |ui| {
         // The header and the body are one surface split by a rule, so no
         // spacing may creep in between them.
         ui.spacing_mut().item_spacing.y = 0.0;
-        let head = egui::Frame::NONE
-            .fill(theme::WELL)
-            .inner_margin(egui::Margin { left: 10, right: 10, top: 4, bottom: 4 });
+        let head = egui::Frame::NONE.fill(theme::WELL).inner_margin(egui::Margin {
+            left: 10,
+            right: 10,
+            top: 4,
+            bottom: 4,
+        });
         let h = head.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| header(ui));

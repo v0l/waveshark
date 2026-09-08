@@ -41,11 +41,7 @@ impl Msgs<'_> {
             if !self.st.list.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
-                ui.add(
-                    egui::TextEdit::singleline(filter)
-                        .hint_text("filter")
-                        .desired_width(160.0),
-                );
+                ui.add(egui::TextEdit::singleline(filter).hint_text("filter").desired_width(160.0));
                 if !filter.is_empty() && ui.button("Clear filter").clicked() {
                     filter.clear();
                 }
@@ -87,19 +83,17 @@ impl Msgs<'_> {
             ui.spacing_mut().item_spacing.y = 6.0;
             // The cards keep their own margin off the edge of the pane, so
             // the rule down the left of one is not against the window frame.
-            egui::Frame::NONE
-                .inner_margin(egui::Margin::symmetric(12, 0))
-                .show(ui, |ui| {
-                    for m in &shown {
-                        // Drawn and not clickable. A message is a thing that
-                        // was said, and the frequency it arrived on is a
-                        // detail of how it got here: retuning the receiver
-                        // because somebody read a page is the last thing
-                        // this view should do, and it took the receiver off
-                        // whatever it was watching.
-                        message_card(ui, m, now);
-                    }
-                });
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+                for m in &shown {
+                    // Drawn and not clickable. A message is a thing that
+                    // was said, and the frequency it arrived on is a
+                    // detail of how it got here: retuning the receiver
+                    // because somebody read a page is the last thing
+                    // this view should do, and it took the receiver off
+                    // whatever it was watching.
+                    message_card(ui, m, now);
+                }
+            });
             ui.add_space(8.0);
         });
         act

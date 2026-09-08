@@ -60,9 +60,7 @@ impl LinksView<'_> {
             if !links.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
-                ui.add(
-                    egui::TextEdit::singleline(filter).hint_text("filter").desired_width(180.0),
-                );
+                ui.add(egui::TextEdit::singleline(filter).hint_text("filter").desired_width(180.0));
                 if !filter.is_empty() && ui.button("Clear filter").clicked() {
                     filter.clear();
                 }
@@ -126,8 +124,7 @@ impl LinksView<'_> {
                         let picked = self.st.chosen.as_deref() == Some(l.title().as_str());
                         let r = link_row(ui, l, now, picked);
                         if r.clicked() {
-                            self.st.chosen =
-                                if picked { None } else { Some(l.title()) };
+                            self.st.chosen = if picked { None } else { Some(l.title()) };
                         }
                     }
                 });
@@ -153,23 +150,20 @@ impl LinksView<'_> {
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(
-                        ui,
-                        |ui| {
-                            let held: Vec<&DecodeRecord> =
-                                self.packets.iter().filter(|r| l.holds(r)).collect();
-                            let first = held.first().map(|r| r.at);
-                            if held.is_empty() {
-                                theme::Line::new()
-                                    .legend("no packets in the log for this link")
-                                    .size(11.0)
-                                    .show(ui);
-                            }
-                            for r in held {
-                                packet_row(ui, r, first);
-                            }
-                        },
-                    );
+                    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+                        let held: Vec<&DecodeRecord> =
+                            self.packets.iter().filter(|r| l.holds(r)).collect();
+                        let first = held.first().map(|r| r.at);
+                        if held.is_empty() {
+                            theme::Line::new()
+                                .legend("no packets in the log for this link")
+                                .size(11.0)
+                                .show(ui);
+                        }
+                        for r in held {
+                            packet_row(ui, r, first);
+                        }
+                    });
                     ui.add_space(8.0);
                 });
         }
@@ -209,7 +203,8 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
                 .value(format!("{:.4} MHz", l.channel_hz / 1e6))
                 .size(11.0);
             if l.last_rssi_dbfs.is_finite() {
-                line = line.legend("rssi").value(format!("{:.0} dBFS", l.last_rssi_dbfs)).size(11.0);
+                line =
+                    line.legend("rssi").value(format!("{:.0} dBFS", l.last_rssi_dbfs)).size(11.0);
             }
             // A link whose frames fail their checks is not a link, and the
             // row says so rather than letting the count speak for it.
@@ -231,11 +226,7 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
 fn packet_row(ui: &mut egui::Ui, r: &DecodeRecord, first: Option<std::time::Instant>) {
     let t = first.map(|f| r.at.saturating_duration_since(f).as_secs_f64()).unwrap_or(0.0);
     ui.horizontal_wrapped(|ui| {
-        theme::Line::new()
-            .legend(&format!("{t:>8.3}"))
-            .value(r.model.clone())
-            .size(11.0)
-            .show(ui);
+        theme::Line::new().legend(&format!("{t:>8.3}")).value(r.model.clone()).size(11.0).show(ui);
         if r.rssi_dbfs.is_finite() {
             theme::Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs)).size(11.0).show(ui);
         }
@@ -246,10 +237,7 @@ fn packet_row(ui: &mut egui::Ui, r: &DecodeRecord, first: Option<std::time::Inst
     });
     // What it said, where it said anything: this is the point of following a
     // link, so it gets a line of its own at full width rather than a column.
-    let said = r
-        .to_message(r.at)
-        .map(|m| m.text)
-        .filter(|t| !t.trim().is_empty());
+    let said = r.to_message(r.at).map(|m| m.text).filter(|t| !t.trim().is_empty());
     if let Some(t) = said {
         ui.horizontal(|ui| {
             ui.add_space(16.0);

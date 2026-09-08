@@ -28,9 +28,7 @@ use std::collections::HashMap;
 use crate::scanners::Front;
 use common::{Hz, Result, C32};
 use dsp::rds::Station;
-use nodes::{
-    AgcNode, BankNode, DecimateNode, SpectrumNode, SquelchNode, WfmDemodNode,
-};
+use nodes::{AgcNode, BankNode, DecimateNode, SpectrumNode, SquelchNode, WfmDemodNode};
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
@@ -129,7 +127,6 @@ enum Role {
     /// the graph a node of the wrong type entirely.
     Patch(u64, String),
 }
-
 
 /// What a channel branch was built for. A branch is only reused while all of
 /// this is unchanged, since every one of these decides a filter's
@@ -620,8 +617,7 @@ impl Receiver {
             Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
         );
         let roles = std::mem::take(&mut self.roles);
-        let mut pool: HashMap<Role, NodePart> =
-            roles.into_iter().zip(graph.into_parts()).collect();
+        let mut pool: HashMap<Role, NodePart> = roles.into_iter().zip(graph.into_parts()).collect();
 
         // A channel whose mixer shift or filter design would differ is not
         // the same channel, and it does not have to be caught here any more:
@@ -636,9 +632,7 @@ impl Receiver {
             // The spectrum's FFT size can change and the node cannot resize,
             // and one holding an average of another band is worse than one
             // starting empty.
-            Role::Patch(_, kind) if kind == "spectrum" => {
-                !retuned && self.fft_size() == plan.fft
-            }
+            Role::Patch(_, kind) if kind == "spectrum" => !retuned && self.fft_size() == plan.fft,
             _ => true,
         });
 
@@ -1187,9 +1181,7 @@ impl Receiver {
         let levels: Vec<(usize, f32, bool, String)> = self
             .chans
             .iter()
-            .filter_map(|c| {
-                c.port.map(|k| (k, c.spec.volume, c.spec.muted, c.spec.label.clone()))
-            })
+            .filter_map(|c| c.port.map(|k| (k, c.spec.volume, c.spec.muted, c.spec.label.clone())))
             .collect();
         if let Some(b) = self.audio_mut().map(|n| n.bus_mut()) {
             for (k, volume, muted, label) in levels {
@@ -1211,11 +1203,8 @@ impl Receiver {
             // The mixer keeps its phase across a change of step, so moving a
             // channel is a shift of frequency and not a discontinuity.
             if let Some(id) = mix {
-                let _ = self.set_node_param(
-                    id.0,
-                    "shift_hz",
-                    pipeline::ParamValue::Float(shift_hz),
-                );
+                let _ =
+                    self.set_node_param(id.0, "shift_hz", pipeline::ParamValue::Float(shift_hz));
             }
             if let (Some(id), Some(db)) = (squelch, db) {
                 if let Some(sq) = self
@@ -1323,9 +1312,7 @@ impl Receiver {
             .iter()
             .filter(|c| c.live())
             .filter_map(|c| {
-                c.last
-                    .as_ref()
-                    .map(|f| (c.key.clone(), c.label.clone(), f.completeness()))
+                c.last.as_ref().map(|f| (c.key.clone(), c.label.clone(), f.completeness()))
             })
             .collect()
     }
@@ -1352,7 +1339,9 @@ impl Receiver {
 
     /// Every input of the bus, as the strip draws it.
     pub fn strips(&self) -> Vec<StripState> {
-        let Some(bus) = self.audio().map(|n| n.bus()) else { return Vec::new() };
+        let Some(bus) = self.audio().map(|n| n.bus()) else {
+            return Vec::new();
+        };
         bus.strips()
             .iter()
             .enumerate()
@@ -1400,9 +1389,9 @@ impl Receiver {
                 let outs = self.graph.node(id).map(|n| n.num_outputs()).unwrap_or(1);
                 let mut ports: Vec<Out> = voice.then_some(out).into_iter().collect();
                 ports.extend(
-                    (1..outs)
-                        .map(|p| id.out(p))
-                        .filter(|o| self.graph.spec_of(*o).map(|s| s.kind) == Some(PortKind::Voice)),
+                    (1..outs).map(|p| id.out(p)).filter(|o| {
+                        self.graph.spec_of(*o).map(|s| s.kind) == Some(PortKind::Voice)
+                    }),
                 );
                 ports
             })
@@ -1438,7 +1427,9 @@ impl Receiver {
     pub fn live_sources(&self) -> Vec<LiveSource> {
         let mut out = Vec::new();
         for &id in &self.sources {
-            let Some(spec) = self.graph.spec_of(id.o()) else { continue };
+            let Some(spec) = self.graph.spec_of(id.o()) else {
+                continue;
+            };
             let c = spec.center.as_f64();
             let live = if let Some(n) = downcast::<nodes::SourceDetectNode>(&self.graph, id) {
                 n.live()
@@ -1503,7 +1494,8 @@ impl Receiver {
     /// on that cell decodes. From the key manager, for a manual key.
     #[cfg(feature = "tea")]
     pub fn set_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
-        let ids: Vec<_> = self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
+        let ids: Vec<_> =
+            self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
         for id in ids {
             if let Some(n) = self.graph.node_mut(id) {
                 if let Some(t) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TetraNode>()) {
@@ -1673,10 +1665,8 @@ impl Receiver {
         // Into the description too, or the next rebuild puts the stage back
         // the way the patch had it and the setting was a slider that sprang
         // back.
-        if let Some(st) = self
-            .graph
-            .tag_of(pipeline::graph::NodeId(id))
-            .and_then(|tag| self.patch.stage_mut(tag))
+        if let Some(st) =
+            self.graph.tag_of(pipeline::graph::NodeId(id)).and_then(|tag| self.patch.stage_mut(tag))
         {
             st.settings.insert(name.to_string(), value);
         }
@@ -1729,7 +1719,8 @@ impl Receiver {
                         spec.label = s.label.clone();
                     }
                 }
-                if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id)) {
+                if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id))
+                {
                     spec.squelch_db = Some(sq.threshold_db());
                 }
                 if let Some(a) = c.agc.and_then(|id| downcast::<AgcNode>(&self.graph, id)) {
@@ -1767,11 +1758,11 @@ impl Receiver {
     }
 
     pub fn latency_ms(&self, i: usize) -> f64 {
-        let Some(c) = self.chans.get(i) else { return 0.0 };
+        let Some(c) = self.chans.get(i) else {
+            return 0.0;
+        };
         self.graph.latency_of(c.tail) as f64 / c.audio_rate.max(1.0) * 1e3
     }
-
-
 
     pub fn set_refresh(&mut self, hz: f32) {
         if let Some(s) = self.spectrum_mut() {
@@ -2168,7 +2159,6 @@ impl Receiver {
     pub fn zoomed_samples(&self) -> &[C32] {
         self.graph.buf(self.head).and_then(|p| p.as_iq()).unwrap_or(&[])
     }
-
 }
 
 /// What a bank tier is called, which is its channel width.
@@ -2187,10 +2177,7 @@ const MODES_BAND_HZ: f64 = 2_000_000.0;
 /// expects: every registered one, span-wide or not. A decoder that reads a
 /// span is put on a channel as wide as what it reads.
 pub fn channel_fronts() -> Vec<(&'static str, f64)> {
-    nodes::protocol::all()
-        .iter()
-        .map(|p| (p.id(), p.shape().widths[0]))
-        .collect()
+    nodes::protocol::all().iter().map(|p| (p.id(), p.shape().widths[0])).collect()
 }
 
 /// The channel a protocol's decoder expects, or None if there is no such
@@ -2231,11 +2218,8 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
             // A span-wide decoder is handed the band it owns; one that reads
             // a channel is handed twice the channel, and mixes and filters
             // its own out of that.
-            let band = if shape.span_wide {
-                (hz - w / 2.0, hz + w / 2.0)
-            } else {
-                (hz - w, hz + w)
-            };
+            let band =
+                if shape.span_wide { (hz - w / 2.0, hz + w / 2.0) } else { (hz - w, hz + w) };
             Some((band, shape.feed_rate_hz))
         }
         Front::Banks(widths) => {
@@ -2252,14 +2236,8 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
 
 /// Patch stages whose output the packet bus accepts, besides every
 /// protocol's decoder.
-const BUS_TAILS: [&str; 6] = [
-    "pulse_detect",
-    "ask_detect",
-    "fsk_detect",
-    "bank",
-    "source_decode",
-    "auto",
-];
+const BUS_TAILS: [&str; 6] =
+    ["pulse_detect", "ask_detect", "fsk_detect", "bank", "source_decode", "auto"];
 
 /// Whether a stage of this kind puts frames or packets on its first output.
 fn bus_tail(kind: &str) -> bool {
@@ -2278,10 +2256,7 @@ fn bus_tail(kind: &str) -> bool {
 fn voice_port(kind: &str) -> Option<usize> {
     match kind {
         "auto" | "voice" => Some(1),
-        _ => nodes::protocol::by_id(kind)?
-            .outputs()
-            .iter()
-            .position(|k| *k == PortKind::Voice),
+        _ => nodes::protocol::by_id(kind)?.outputs().iter().position(|k| *k == PortKind::Voice),
     }
 }
 
@@ -2290,10 +2265,7 @@ fn voice_port(kind: &str) -> Option<usize> {
 fn video_port(kind: &str) -> Option<usize> {
     match kind {
         "auto" => Some(2),
-        _ => nodes::protocol::by_id(kind)?
-            .outputs()
-            .iter()
-            .position(|k| *k == PortKind::Video),
+        _ => nodes::protocol::by_id(kind)?.outputs().iter().position(|k| *k == PortKind::Video),
     }
 }
 
@@ -2404,10 +2376,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // Passband just inside the new Nyquist: the whole point is that what
         // is left is clean, since anything folded in cannot be told from a
         // signal afterwards.
-        zoom.insert(
-            "passband_hz".into(),
-            pipeline::ParamValue::Float(plan.eff_rate() * 0.45),
-        );
+        zoom.insert("passband_hz".into(), pipeline::ParamValue::Float(plan.eff_rate() * 0.45));
         zoom.insert("input_rate_hz".into(), pipeline::ParamValue::Float(plan.rate));
         p.add_derived(derived::ZOOM, "decimate", zoom);
         p.connect(head, (derived::ZOOM, 0));
@@ -2506,10 +2475,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // switched off it costs a memcpy of nothing.
     {
         let mut s = Settings::new();
-        s.insert(
-            "dir".into(),
-            pipeline::ParamValue::Text(plan.capture_dir.display().to_string()),
-        );
+        s.insert("dir".into(), pipeline::ParamValue::Text(plan.capture_dir.display().to_string()));
         s.insert("enabled".into(), pipeline::ParamValue::Bool(false));
         s.insert(
             "format".into(),
@@ -2548,8 +2514,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // would refuse it at negotiation and take the whole graph down with
         // it, and one badly placed block should cost its own front end rather
         // than the receiver.
-        let fits =
-            |hz: f64, width: f64| (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width;
+        let fits = |hz: f64, width: f64| {
+            (hz - plan.center.as_f64()).abs() <= plan.eff_rate() / 2.0 - width
+        };
         match front {
             Front::Protocol { hz, .. } => {
                 let Some(proto) = front.proto() else { continue };
@@ -2573,10 +2540,16 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 for (i, stage) in chain.into_iter().enumerate() {
                     let mut settings = stage.settings;
                     if i == last {
-                        settings
-                            .insert("label".into(), pipeline::ParamValue::Text(proto.stage_label(*hz)));
+                        settings.insert(
+                            "label".into(),
+                            pipeline::ParamValue::Text(proto.stage_label(*hz)),
+                        );
                     }
-                    let id = p.add_derived(derived::at(proto.id(), key, i as u64), &stage.kind, settings);
+                    let id = p.add_derived(
+                        derived::at(proto.id(), key, i as u64),
+                        &stage.kind,
+                        settings,
+                    );
                     p.connect(from, (id, 0));
                     from = Source::Stage(id, 0);
                 }
@@ -2626,8 +2599,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // transmission.
                 let mut built: Vec<usize> = Vec::new();
                 for &width in widths {
-                    let channels =
-                        nodes::BankNode::channels_for(sub.rate(plan.eff_rate()), width);
+                    let channels = nodes::BankNode::channels_for(sub.rate(plan.eff_rate()), width);
                     if built.contains(&channels) {
                         continue;
                     }
@@ -2636,8 +2608,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     s.insert("channel_hz".into(), pipeline::ParamValue::Float(width));
                     s.insert("band_lo_hz".into(), pipeline::ParamValue::Float(band.0));
                     s.insert("band_hi_hz".into(), pipeline::ParamValue::Float(band.1));
-                    let id =
-                        p.add_derived(derived::at("bank", sub.key(), width as u64), "bank", s);
+                    let id = p.add_derived(derived::at("bank", sub.key(), width as u64), "bank", s);
                     p.connect(src, (id, 0));
                 }
             }
@@ -2672,12 +2643,8 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // consumes them hangs off the far side. One input per source: the bus is
     // the only stage whose shape follows the rest of the graph rather than
     // its own settings.
-    let sources: Vec<u64> = p
-        .stages()
-        .iter()
-        .filter(|s| puts_packets_on_bus(&s.kind))
-        .map(|s| s.id)
-        .collect();
+    let sources: Vec<u64> =
+        p.stages().iter().filter(|s| puts_packets_on_bus(&s.kind)).map(|s| s.id).collect();
     if !sources.is_empty() {
         let mut s = Settings::new();
         s.insert("inputs".into(), pipeline::ParamValue::Int(sources.len() as i64));
@@ -2699,10 +2666,8 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // about. Attached whenever anything could produce a frame it can
         // resolve a position from: a feed is usually the reason to run one at
         // all on a band that is neither 1090 nor 162.
-        let makes_tracks = p
-            .stages()
-            .iter()
-            .any(|s| TRACK_SOURCES.contains(&s.kind.as_str()) || s.kind == "feed");
+        let makes_tracks =
+            p.stages().iter().any(|s| TRACK_SOURCES.contains(&s.kind.as_str()) || s.kind == "feed");
         if makes_tracks {
             let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
             // Downstream of the protocols and not beside them: the packets
@@ -2924,12 +2889,8 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // and one spare on the end for the next chain to be wired into. A gap
     // is an input nothing feeds, which is what the spare is, and two of
     // them is a mixer with a hole in it.
-    let mut wired: Vec<(usize, Source)> = p
-        .links()
-        .iter()
-        .filter(|l| l.to.0 == bus)
-        .map(|l| (l.to.1, l.from))
-        .collect();
+    let mut wired: Vec<(usize, Source)> =
+        p.links().iter().filter(|l| l.to.0 == bus).map(|l| (l.to.1, l.from)).collect();
     wired.sort_by_key(|(k, _)| *k);
     let per_port: Vec<Settings> = wired
         .iter()
@@ -2943,9 +2904,11 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             own
         })
         .collect();
-    s.retain(|name, _| !["vol", "mute", "label"].iter().any(|w| {
-        name.strip_prefix(w).is_some_and(|k| k.parse::<usize>().is_ok())
-    }));
+    s.retain(|name, _| {
+        !["vol", "mute", "label"]
+            .iter()
+            .any(|w| name.strip_prefix(w).is_some_and(|k| k.parse::<usize>().is_ok()))
+    });
     for (k, _) in &wired {
         p.disconnect((bus, *k));
     }
@@ -3137,11 +3100,8 @@ fn decode_channel_stages(
     // be fed, or a multiple of the channel where it asks for nothing.
     let proto = nodes::protocol::by_id(kind);
     let feed = proto.map_or(0.0, |p| p.shape().feed_rate_hz);
-    let target = if feed > 0.0 {
-        feed
-    } else {
-        (width * DECODE_RATE_RATIO).max(DECODE_MIN_RATE_HZ)
-    };
+    let target =
+        if feed > 0.0 { feed } else { (width * DECODE_RATE_RATIO).max(DECODE_MIN_RATE_HZ) };
     let dec = ((rate / target).floor() as usize).max(1);
     let mut ifd = Settings::new();
     ifd.insert("factor".into(), V::Int(dec as i64));
@@ -3205,9 +3165,8 @@ fn audio_channel_stages(
     // mode's: a 25 kHz repeater set by hand on an NFM channel has to survive
     // the decimation before any filter can be built around it.
     let width = spec.bandwidth();
-    let if_dec = ((rate / mode.if_rate().max(width * crate::radio::IF_HEADROOM)).round()
-        as usize)
-        .max(1);
+    let if_dec =
+        ((rate / mode.if_rate().max(width * crate::radio::IF_HEADROOM)).round() as usize).max(1);
     let if_rate = rate / if_dec as f64;
     let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
     // Every stage says which channel it belongs to, so the ones a channel
@@ -3250,10 +3209,7 @@ fn audio_channel_stages(
             // On CW the width control is the filter itself, which is the
             // whole reason to reach for it: 500 Hz on a quiet band, 150 in a
             // pile-up.
-            d.insert(
-                "width_hz".into(),
-                V::Float(spec.bandwidth_hz.unwrap_or(CW_FILTER_HZ)),
-            );
+            d.insert("width_hz".into(), V::Float(spec.bandwidth_hz.unwrap_or(CW_FILTER_HZ)));
             d.insert("label".into(), V::Text("CW filter".into()));
         } else {
             // Half the channel is one sideband, which is what the demodulator
@@ -3292,10 +3248,7 @@ fn audio_channel_stages(
 
     if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
         let mut s = Settings::new();
-        s.insert(
-            "kind".into(),
-            V::Text(if mode == Demod::Nfm { "noise" } else { "level" }.into()),
-        );
+        s.insert("kind".into(), V::Text(if mode == Demod::Nfm { "noise" } else { "level" }.into()));
         s.insert("threshold_db".into(), V::Float(db as f64));
         let sq = at(p, "chan_squelch", "squelch", s);
         p.connect(tail, (sq, 0));
@@ -3418,10 +3371,7 @@ fn extract_stages(
         return *src;
     }
     let mut mix = Settings::new();
-    mix.insert(
-        "shift_hz".into(),
-        pipeline::ParamValue::Float(plan.center.as_f64() - sub.center),
-    );
+    mix.insert("shift_hz".into(), pipeline::ParamValue::Float(plan.center.as_f64() - sub.center));
     mix.insert(
         "label".into(),
         pipeline::ParamValue::Text(format!("{:.4} MHz mixer", sub.center / 1e6)),
@@ -3701,7 +3651,8 @@ fn add_patch(
                     st.settings.get("passband_hz").and_then(|v| v.as_f64()),
                     st.settings.get("input_rate_hz").and_then(|v| v.as_f64()),
                 ) {
-                    if let Some(d) = node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
+                    if let Some(d) =
+                        node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
                     {
                         d.set_passband_hz(rate, pb);
                     }
@@ -3725,7 +3676,8 @@ fn add_patch(
         // it, and that changes with every retune. It is carried across
         // rebuilds because it holds the open log file, so it has to be told.
         if st.kind == "packet_bus" {
-            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+            if let Some(n) =
+                node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
             {
                 n.set_inputs(st.settings.i64_or("inputs", 1).max(1) as usize);
             }
@@ -3757,7 +3709,9 @@ fn add_patch(
                 let spur = st.settings.f64_or("spur_hz", 0.0);
                 n.set_spur((spur > 0.0).then_some(spur));
                 let step = st.settings.f64_or("raster_hz", 0.0);
-                n.set_raster((step > 0.0).then(|| (st.settings.f64_or("raster_origin_hz", 0.0), step)));
+                n.set_raster(
+                    (step > 0.0).then(|| (st.settings.f64_or("raster_origin_hz", 0.0), step)),
+                );
             }
         }
         made.push((st.id, st.kind.clone(), node));
@@ -3829,7 +3783,9 @@ fn add_patch(
     // has one. Connecting an input twice replaces the earlier edge, which is
     // exactly what is wanted here.
     for st in patch.stages().iter().filter(|s| live.contains(&s.id)) {
-        let Some(&nid) = ids.get(&st.id) else { continue };
+        let Some(&nid) = ids.get(&st.id) else {
+            continue;
+        };
         for l in patch.links().iter().filter(|l| l.to.0 == st.id) {
             if let Source::Stage(f, port) = l.from {
                 if let Some(from) = ids.get(&f) {
@@ -3870,16 +3826,14 @@ pub enum ScanMark {
 }
 
 /// What the scanner table is listening to on this span.
-pub fn scan_marks(
-    scanners: &crate::scanners::Scanners,
-    center: f64,
-    rate: f64,
-) -> Vec<ScanMark> {
+pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) -> Vec<ScanMark> {
     let mut out = Vec::new();
     for at in scanners.fronts(center, rate) {
         match &at.front {
             Front::Protocol { hz, .. } => {
-                let Some(proto) = at.front.proto() else { continue };
+                let Some(proto) = at.front.proto() else {
+                    continue;
+                };
                 for m in proto.marks(*hz) {
                     out.push(ScanMark::Channel { hz: m.hz, width: m.width_hz, label: m.label });
                 }
@@ -3887,7 +3841,9 @@ pub fn scan_marks(
             Front::Auto => {
                 // No grid to draw: the band is watched whole and whatever
                 // is in it is found where it is.
-                let Some(band) = at.covered(center, rate) else { continue };
+                let Some(band) = at.covered(center, rate) else {
+                    continue;
+                };
                 out.push(ScanMark::Band {
                     lo: band.0,
                     hi: band.1,
@@ -3897,7 +3853,9 @@ pub fn scan_marks(
                 });
             }
             Front::Banks(widths) => {
-                let Some(band) = at.covered(center, rate) else { continue };
+                let Some(band) = at.covered(center, rate) else {
+                    continue;
+                };
                 let sub = SubBand::plan(band, rate, 0.0);
                 let sub_rate = sub.rate(rate);
                 for &width in widths {
@@ -3958,7 +3916,7 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         freq: d.center.as_f64(),
         channel_hz,
         model: d.protocol.to_string(),
-        modulation: d.modulation.unwrap_or("?"),
+        modulation: d.modulation.unwrap_or(common::Modulation::Unknown),
         detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
         fields: d.fields.clone(),
         media_type: d.media_type,
@@ -3973,19 +3931,18 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
 }
 
 fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
+    use common::Modulation as M;
     match d.modulation {
-        Some("PPM") => MODES_BAND_HZ,
+        Some(M::Ppm) => MODES_BAND_HZ,
         // AIS is heard through one 25 kHz marine channel, whichever of the
         // two carried the frame.
-        Some("GMSK") => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
+        Some(M::Gmsk) => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
         // A pager is keyed FSK like an 868 MHz sensor and heard through a
         // channel a tenth the width, so the keying alone does not say which
         // front end produced it.
-        Some("FSK") if d.protocol.starts_with("POCSAG") => {
-            nodes::pocsag_nodes::CHANNEL_WIDTH_HZ
-        }
-        Some("4FSK") => nodes::m17_nodes::CHANNEL_WIDTH_HZ,
-        Some("FSK") => FSK_CHANNEL_HZ,
+        Some(M::Fsk2) if d.protocol.starts_with("POCSAG") => nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
+        Some(M::Fsk4) => nodes::m17_nodes::CHANNEL_WIDTH_HZ,
+        Some(M::Fsk2 | M::Gfsk | M::Afsk) => FSK_CHANNEL_HZ,
         _ => OOK_CHANNEL_HZ,
     }
 }
@@ -4225,8 +4182,7 @@ mod tests {
         let rx = Receiver::build(&plan, Default::default()).expect("a tapped spectrum");
         let topo = rx.topology();
         let decim = topo.nodes.iter().find(|n| n.tag == Some(dec)).expect("the stage runs");
-        let spectrum =
-            topo.nodes.iter().find(|n| n.tag == Some(view)).expect("a spectrum");
+        let spectrum = topo.nodes.iter().find(|n| n.tag == Some(view)).expect("a spectrum");
         assert!(
             spectrum.inputs.iter().any(|(s, _)| decim.outputs.iter().any(|(o, _)| o == s)),
             "the spectrum should read the stage, not the head"
@@ -4327,8 +4283,7 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.channels = vec![chan(1, 100_000.0, Demod::Nfm)];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
-        let labels: Vec<String> =
-            rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
+        let labels: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
         for want in ["DC block", "Spectrum", "31 kHz bank", "125 kHz bank", "Mixer"] {
             assert!(labels.iter().any(|l| l == want), "{want} is not in {labels:?}");
         }
@@ -4670,12 +4625,8 @@ mod tests {
         p.channels[0].mode = ChanMode::Audio(Demod::Nfm);
         rx.rebuild(&p).unwrap();
         assert_eq!(rx.channels().len(), 1);
-        let chan_stages = rx
-            .patch()
-            .stages()
-            .iter()
-            .filter(|s| s.settings.contains_key("channel"))
-            .count();
+        let chan_stages =
+            rx.patch().stages().iter().filter(|s| s.settings.contains_key("channel")).count();
         assert_eq!(chan_stages, 9, "an NFM chain is nine stages, and no more were kept");
         // A fader drag in manual mode is a number on the bus, not a rebuild
         // that would drop every source the auto node had open.
@@ -4696,10 +4647,11 @@ mod tests {
         p.audio.master = 1.0;
         let mut patch = derived_patch(&p);
         let mix = patch.add("mixer");
-        patch.stage_mut(mix).unwrap().settings.insert(
-            "shift_hz".into(),
-            pipeline::ParamValue::Float(-200_000.0),
-        );
+        patch
+            .stage_mut(mix)
+            .unwrap()
+            .settings
+            .insert("shift_hz".into(), pipeline::ParamValue::Float(-200_000.0));
         let env = patch.add("envelope");
         patch.connect(Source::Span, (mix, 0));
         patch.connect(Source::Stage(mix, 0), (env, 0));
@@ -4751,7 +4703,11 @@ mod tests {
         // A decimator put between the head and the spectrum, by hand.
         let mut patch = rx.patch().clone();
         let dec = patch.add("decimate");
-        patch.stage_mut(dec).unwrap().settings.insert("factor".into(), pipeline::ParamValue::Int(4));
+        patch
+            .stage_mut(dec)
+            .unwrap()
+            .settings
+            .insert("factor".into(), pipeline::ParamValue::Int(4));
         patch.connect(Source::Span, (dec, 0));
         patch.connect(Source::Stage(dec, 0), (derived::SPECTRUM, 0));
         p.edits = crate::patch::Edits::diff(&patch, rx.base());
@@ -4856,14 +4812,8 @@ mod tests {
         p.log = true;
         let d = std::env::temp_dir().join(format!("sr-chainlog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let rx = Receiver::build(
-            &p,
-            Sinks {
-                packet_log: Some(d.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let rx = Receiver::build(&p, Sinks { packet_log: Some(d.clone()), ..Default::default() })
+            .unwrap();
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a packet bus");
         assert_eq!(
@@ -4952,7 +4902,10 @@ mod tests {
     #[test]
     fn two_front_ends_on_one_span_both_reach_the_bus() {
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("pocsag", 153_350_000.0))];
+        p.fronts = vec![
+            anywhere(Front::protocol("aprs", 144_800_000.0)),
+            anywhere(Front::protocol("pocsag", 153_350_000.0)),
+        ];
         // The pager channel is nine megahertz away, well outside this span,
         // so it is dropped rather than built into a node that would refuse
         // its own input and take the graph down.
@@ -4963,7 +4916,10 @@ mod tests {
 
         // Both inside the span now.
         let mut p = plan(2_400_000.0, Hz(144_400_000));
-        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("pocsag", 145_000_000.0))];
+        p.fronts = vec![
+            anywhere(Front::protocol("aprs", 144_800_000.0)),
+            anywhere(Front::protocol("pocsag", 145_000_000.0)),
+        ];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.aprs_on() && rx.pocsag_on(), "both front ends should run");
         let topo = rx.topology();
@@ -5082,14 +5038,9 @@ mod tests {
         std::fs::write(d.join("2026-09-08.000.wspkt"), vec![0u8; 65_536]).unwrap();
         let mut p = plan(2_400_000.0, Hz::mhz(2457));
         p.fronts.clear();
-        let mut rx = Receiver::build(
-            &p,
-            Sinks {
-                packet_log: Some(d.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut rx =
+            Receiver::build(&p, Sinks { packet_log: Some(d.clone()), ..Default::default() })
+                .unwrap();
         assert!(!rx.topology().nodes.iter().any(|n| n.label == "Packet log"), "a bus was drawn");
         rx.refresh_log_folder();
         assert_eq!(rx.log_bytes(), 65_536);
@@ -5098,7 +5049,7 @@ mod tests {
 
     /// A bank over a scanner's own band, at the width that band asked for.
     fn ism_at(center_mhz: f64, rate: f64) -> Plan {
-        let mut p = plan(rate, Hz(( center_mhz * 1e6) as u64));
+        let mut p = plan(rate, Hz((center_mhz * 1e6) as u64));
         p.fronts = vec![crate::scanners::FrontAt {
             front: Front::Banks(vec![OOK_CHANNEL_HZ]),
             band: (433.05e6, 434.79e6),
@@ -5157,9 +5108,7 @@ mod tests {
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         let live = rx.bank_channels()[0];
         let marks = scan_marks_of(&p);
-        let ScanMark::Band { lo, hi, spacing, origin, .. } = &marks[0] else {
-            panic!("{marks:?}")
-        };
+        let ScanMark::Band { lo, hi, spacing, origin, .. } = &marks[0] else { panic!("{marks:?}") };
         // The grid the ticks are drawn on has to be the grid the channels are
         // on: a channel centre is the origin plus a whole number of spacings.
         let k = (433.92e6 - origin) / spacing;
@@ -5174,7 +5123,8 @@ mod tests {
 
     /// The marks the interface would draw for a plan, for tests about them.
     fn scan_marks_of(p: &Plan) -> Vec<ScanMark> {
-        let mut s = crate::scanners::Scanners { list: Vec::new(), version: crate::scanners::VERSION };
+        let mut s =
+            crate::scanners::Scanners { list: Vec::new(), version: crate::scanners::VERSION };
         s.list.push(crate::scanners::Scanner {
             name: "ISM 433".into(),
             lo: 433.05e6,
@@ -5206,14 +5156,8 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.log = true;
         let d = std::env::temp_dir().join(format!("sr-keeplog-{}", std::process::id()));
-        let mut rx = Receiver::build(
-            &p,
-            Sinks {
-                packet_log: Some(d),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut rx =
+            Receiver::build(&p, Sinks { packet_log: Some(d), ..Default::default() }).unwrap();
         p.center = Hz::mhz(868);
         rx.rebuild(&p).unwrap();
         assert!(
@@ -5251,8 +5195,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sr-chain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rec = Recorder::new(&dir, p.eff_rate(), p.center).unwrap();
-        let rx =
-            Receiver::build(&p, Sinks { recorder: Some(rec), ..Default::default() }).unwrap();
+        let rx = Receiver::build(&p, Sinks { recorder: Some(rec), ..Default::default() }).unwrap();
         let order: Vec<String> = rx.topology().nodes.iter().map(|n| n.label.clone()).collect();
         let ring = order.iter().position(|l| l == "Recorder").expect("a recorder");
         let bank = order.iter().position(|l| l == "31 kHz bank").expect("a bank");
@@ -5307,7 +5250,12 @@ mod scan_mark_tests {
              channels = 439.9875 MHz\nmargin = 12.5 kHz\n",
         );
         let marks = scan_marks(&s, 439_987_500.0, 500_000.0);
-        assert!(marks.iter().any(|m| matches!(m, ScanMark::Channel { hz, .. } if (*hz - 439_987_500.0).abs() < 1.0)), "{marks:?}");
+        assert!(
+            marks.iter().any(
+                |m| matches!(m, ScanMark::Channel { hz, .. } if (*hz - 439_987_500.0).abs() < 1.0)
+            ),
+            "{marks:?}"
+        );
     }
 }
 
@@ -5366,9 +5314,7 @@ pub fn transmit_graph(
     // the radio's.
     let band = tx_audio_band(mode);
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
-        (TxSource::Mic, Some(src)) => {
-            Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band))
-        }
+        (TxSource::Mic, Some(src)) => Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band)),
         (TxSource::Mic, None) => {
             return Err(common::Error::other("no microphone is open to transmit from"))
         }
@@ -5380,10 +5326,7 @@ pub fn transmit_graph(
         TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
     };
-    pipeline::chain(
-        input,
-        vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))],
-    )
+    pipeline::chain(input, vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))])
 }
 
 #[cfg(test)]
@@ -5449,13 +5392,15 @@ mod extraction_tests {
     #[test]
     fn two_front_ends_in_one_band_share_one_extraction() {
         let mut p = plan(20_000_000.0, Hz::mhz(145));
-        p.fronts = vec![anywhere(Front::protocol("aprs", 144_800_000.0)), anywhere(Front::protocol("aprs", 144_800_000.0))];
+        p.fronts = vec![
+            anywhere(Front::protocol("aprs", 144_800_000.0)),
+            anywhere(Front::protocol("aprs", 144_800_000.0)),
+        ];
         let labels = topo_labels(&p);
         let mixers = labels.iter().filter(|l| l.contains("mixer")).count();
         assert_eq!(mixers, 1, "{labels:?}");
     }
 }
-
 
 #[cfg(test)]
 mod tx_tests {
@@ -5678,8 +5623,7 @@ mod tx_tests {
             let peak = iq[1_000..]
                 .chunks(200)
                 .map(|c| {
-                    let turns: f64 =
-                        c.windows(2).map(|w| (w[1] * w[0].conj()).arg() as f64).sum();
+                    let turns: f64 = c.windows(2).map(|w| (w[1] * w[0].conj()).arg() as f64).sum();
                     (turns / (c.len() - 1) as f64 / std::f64::consts::TAU * rate).abs()
                 })
                 .fold(0.0f64, f64::max);

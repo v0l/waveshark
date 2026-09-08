@@ -8,8 +8,8 @@
 //! These are the parts of the interface that survive a frame. Anything a pane
 //! works out again each frame stays a local.
 
-use crate::radio::{ChanMode, Cmd, DecodeRecord};
 use crate::dial::Dial;
+use crate::radio::{ChanMode, Cmd, DecodeRecord};
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
 use std::time::Instant;
@@ -290,8 +290,7 @@ impl ChainState {
 
     /// Write the edits out, with where the stages were put.
     pub fn save_patch(&mut self) {
-        self.places =
-            self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
+        self.places = self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
         self.edits.save(&self.places);
         self.saved_at = Some(std::time::Instant::now());
     }
@@ -427,6 +426,12 @@ pub struct SatsState {
     /// The catalogue number the table has selected, which is also what the
     /// map draws a path for.
     pub selected: Option<u64>,
+    /// Which transmitter of a satellite the operator picked, by SatNOGS's
+    /// identifier for it. A satellite has many: the ISS has fifty rows and
+    /// forty-one of them are live, so quoting one and offering no way to
+    /// change it hides most of what is up there. Empty means whatever
+    /// `Transmitters::best` chooses.
+    pub downlink: std::collections::HashMap<u64, String>,
     /// The channel that is following a satellite down, if one is.
     pub tracking: Option<Tracking>,
 }
@@ -458,6 +463,7 @@ impl Default for SatsState {
             group: &datasets::tle::AMATEUR,
             min_el_deg: 10.0,
             selected: None,
+            downlink: std::collections::HashMap::new(),
             tracking: None,
         }
     }
@@ -539,7 +545,11 @@ impl CallsState {
     /// Every group is listened to until it is turned off. A scanner that
     /// hears nothing until it is configured is a scanner nobody hears
     /// anything on, and the box on the row is how it is turned off.
-    pub fn subscribe_new(&mut self, calls: &[crate::calls::Call], cmds: &mut Vec<crate::radio::Cmd>) {
+    pub fn subscribe_new(
+        &mut self,
+        calls: &[crate::calls::Call],
+        cmds: &mut Vec<crate::radio::Cmd>,
+    ) {
         let mut added = false;
         for c in calls {
             let rule = crate::audiobus::Rule::Group(c.to.clone());

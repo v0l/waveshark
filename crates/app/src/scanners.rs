@@ -159,8 +159,7 @@ impl Front {
     /// and a protocol placed by band, such as AIS with its two channels, is
     /// one decoder over all of it.
     pub fn per_channel(&self) -> bool {
-        self.proto()
-            .is_some_and(|p| !matches!(p.placement(), nodes::Placement::Bands(_)))
+        self.proto().is_some_and(|p| !matches!(p.placement(), nodes::Placement::Bands(_)))
     }
 
     /// The same front end moved to another channel.
@@ -178,11 +177,8 @@ impl Front {
             "banks" => return Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
             _ => {}
         }
-        let id = ALIASES
-            .iter()
-            .find(|(alias, _)| *alias == s)
-            .map(|(_, id)| *id)
-            .unwrap_or(s.as_str());
+        let id =
+            ALIASES.iter().find(|(alias, _)| *alias == s).map(|(_, id)| *id).unwrap_or(s.as_str());
         Front::named(id)
     }
 }
@@ -203,8 +199,7 @@ impl FrontAt {
     /// The part of this band the span actually covers, or `None` when the two
     /// do not overlap.
     pub fn covered(&self, center: f64, rate: f64) -> Option<(f64, f64)> {
-        let (lo, hi) =
-            (self.band.0.max(center - rate / 2.0), self.band.1.min(center + rate / 2.0));
+        let (lo, hi) = (self.band.0.max(center - rate / 2.0), self.band.1.min(center + rate / 2.0));
         (hi > lo).then_some((lo, hi))
     }
 }
@@ -321,7 +316,9 @@ impl Scanners {
     /// Writing them is the point: a table nobody can see is not configurable,
     /// and the shipped blocks are the worked examples for adding another.
     pub fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default() };
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut t = Self::parse(&text);
@@ -434,11 +431,7 @@ impl Scanners {
         s.push_str(&format!("\nversion = {VERSION}\n"));
         for sc in &self.list {
             s.push_str(&format!("\n[{}]\n", sc.name));
-            s.push_str(&format!(
-                "range = {} - {} MHz\n",
-                num(sc.lo / 1e6),
-                num(sc.hi / 1e6)
-            ));
+            s.push_str(&format!("range = {} - {} MHz\n", num(sc.lo / 1e6), num(sc.hi / 1e6)));
             s.push_str(&format!("span  = {} kHz\n", num(sc.min_rate / 1e3)));
             s.push_str(&format!("front = {}\n", sc.front.key()));
             if let Front::Banks(w) = &sc.front {
@@ -503,7 +496,9 @@ impl Scanners {
                 });
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             if cur.is_none() {
                 if k.trim() == "version" {
                     version = v.trim().parse().unwrap_or(0);
@@ -534,7 +529,10 @@ impl Scanners {
                     s.channels = v.split(',').filter_map(hz).collect();
                 }
                 "margin" => s.margin_hz = hz(v).unwrap_or(0.0),
-                "enabled" => s.enabled = !matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "0" | "off"),
+                "enabled" => {
+                    s.enabled =
+                        !matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "0" | "off")
+                }
                 "widths" => {
                     let w: Vec<f64> = v.split(',').filter_map(hz).collect();
                     if !w.is_empty() {
@@ -587,7 +585,9 @@ impl Scanner {
         // A single-channel front end takes its frequency from the block. With
         // several listed it is the first, and the rest become their own front
         // ends when the span covers them.
-        let Some(&c) = self.channels.first() else { return };
+        let Some(&c) = self.channels.first() else {
+            return;
+        };
         if self.front.per_channel() {
             self.front = self.front.at(c);
         }
@@ -600,7 +600,6 @@ impl Scanner {
     fn channels_unset(&self) -> bool {
         self.hi <= self.lo
     }
-
 }
 
 /// The unit suffix of a value, so `433.05 - 434.79 MHz` can write it once.
@@ -964,10 +963,9 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "GSM 850", "GSM 900",
-                "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169",
-                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920",
-                "ISM 2.4", "ISM 5.8"
+                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "GSM 850", "GSM 900", "DCS 1800",
+                "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169", "ISM 315", "SLP 426",
+                "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4", "ISM 5.8"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from
@@ -1026,9 +1024,9 @@ mod tests {
     fn the_gsm_downlinks_are_scanned_and_the_uplinks_are_not() {
         let s = Scanners::default();
         for hz in [
-            881_000_000.0,  // GSM 850, ARFCN 190 or so
-            923_000_000.0,  // GSM-R
-            947_400_000.0,  // E-GSM / P-GSM 900
+            881_000_000.0,   // GSM 850, ARFCN 190 or so
+            923_000_000.0,   // GSM-R
+            947_400_000.0,   // E-GSM / P-GSM 900
             1_842_000_000.0, // DCS 1800
             1_960_000_000.0, // PCS 1900
         ] {
@@ -1075,7 +1073,10 @@ mod tests {
         // Widen that last span until it reaches the packet channel 700 kHz
         // away, though, and APRS runs: the receiver is sampling it either
         // way, and the dial is only where somebody is looking.
-        assert_eq!(kinds(&s.fronts(145_500_000.0, 2_400_000.0)), [Front::protocol("aprs", 144_800_000.0)]);
+        assert_eq!(
+            kinds(&s.fronts(145_500_000.0, 2_400_000.0)),
+            [Front::protocol("aprs", 144_800_000.0)]
+        );
     }
 
     /// A span too narrow for the front end is not that front end.
@@ -1084,7 +1085,10 @@ mod tests {
         let s = Scanners::default();
         // Mode S bits are 1 us wide and need 2 MS/s.
         assert!(s.fronts(1_090_000_000.0, 1_024_000.0).is_empty());
-        assert_eq!(kinds(&s.fronts(1_090_000_000.0, 2_048_000.0)), [Front::named("mode_s").unwrap()]);
+        assert_eq!(
+            kinds(&s.fronts(1_090_000_000.0, 2_048_000.0)),
+            [Front::named("mode_s").unwrap()]
+        );
     }
 
     /// The channel test is what the AIS gate used to be: both channels have to
@@ -1106,7 +1110,10 @@ mod tests {
         let s = Scanners::default();
         // Tuned 200 kHz below the DAPNET channel, which the old rule would
         // have refused because the dial sits outside the block's range.
-        assert_eq!(kinds(&s.fronts(439_787_500.0, 2_400_000.0)), [Front::protocol("pocsag", 439_987_500.0)]);
+        assert_eq!(
+            kinds(&s.fronts(439_787_500.0, 2_400_000.0)),
+            [Front::protocol("pocsag", 439_987_500.0)]
+        );
         // And AIS from a dial parked on marine voice a megahertz away.
         assert_eq!(kinds(&s.fronts(161_000_000.0, 2_400_000.0)), [Front::named("ais").unwrap()]);
     }
@@ -1122,7 +1129,10 @@ mod tests {
              channels = 153.55 MHz\nmargin = 8 kHz\n",
         );
         let fronts = kinds(&s.fronts(153_450_000.0, 1_000_000.0));
-        assert_eq!(fronts, [Front::protocol("pocsag", 153_350_000.0), Front::protocol("aprs", 153_550_000.0)]);
+        assert_eq!(
+            fronts,
+            [Front::protocol("pocsag", 153_350_000.0), Front::protocol("aprs", 153_550_000.0)]
+        );
     }
 
     /// Two blocks asking for the same thing are one front end. A duplicate
@@ -1166,7 +1176,10 @@ mod tests {
             "[APRS]\nrange = 144.38 - 144.40 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
-        assert_eq!(kinds(&s.fronts(144_390_000.0, 500_000.0)), [Front::protocol("aprs", 144_390_000.0)]);
+        assert_eq!(
+            kinds(&s.fronts(144_390_000.0, 500_000.0)),
+            [Front::protocol("aprs", 144_390_000.0)]
+        );
         assert!(s.fronts(144_800_000.0, 500_000.0).is_empty(), "the European one is gone");
     }
 

@@ -195,7 +195,8 @@ impl Recorder {
         Mixer::new(self.center - r.freq, self.rate).process(&raw, &mut shifted);
         let iq = if factor > 1 {
             let mut out = Vec::with_capacity(shifted.len() / factor + 1);
-            FirDecim::design_hz(self.rate, factor, out_rate * 0.4, 60.0).process(&shifted, &mut out);
+            FirDecim::design_hz(self.rate, factor, out_rate * 0.4, 60.0)
+                .process(&shifted, &mut out);
             out
         } else {
             shifted
@@ -211,7 +212,7 @@ impl Recorder {
             "g{:04}_{}_{}_{:.4}M_{:.0}k.cu8",
             self.seq,
             sanitise(&r.model),
-            r.modulation.to_ascii_lowercase(),
+            r.modulation.label().to_ascii_lowercase(),
             r.freq / 1e6,
             out_rate / 1e3,
         );
@@ -266,7 +267,7 @@ impl Recorder {
             rate,
             samples,
             esc(&r.model),
-            esc(r.modulation),
+            esc(r.modulation.label()),
             r.rssi_dbfs,
             r.snr_db,
             crc,
@@ -293,11 +294,13 @@ fn to_cu8(iq: &[C32]) -> Vec<u8> {
 }
 
 fn sanitise(s: &str) -> String {
-    let s: String = s
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-        .collect();
-    if s.is_empty() { "unknown".into() } else { s }
+    let s: String =
+        s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    if s.is_empty() {
+        "unknown".into()
+    } else {
+        s
+    }
 }
 
 fn esc(s: &str) -> String {
@@ -338,7 +341,10 @@ mod tests {
             r.push(&ramp(30, k as f32 * 30.0));
         }
         let got = r.copy(180, 30);
-        assert_eq!(got.iter().map(|s| s.re).collect::<Vec<_>>(), (180..210).map(|v| v as f32).collect::<Vec<_>>());
+        assert_eq!(
+            got.iter().map(|s| s.re).collect::<Vec<_>>(),
+            (180..210).map(|v| v as f32).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -387,7 +393,10 @@ mod tests {
                 if r.model.contains("Fineoffset") {
                     found = true;
                     assert_eq!(
-                        r.fields.iter().find(|(k, _)| k == "temperature_c").map(|(_, v)| v.as_f64()),
+                        r.fields
+                            .iter()
+                            .find(|(k, _)| k == "temperature_c")
+                            .map(|(_, v)| v.as_f64()),
                         Some(Some(16.2)),
                         "the same packet came back with a different reading"
                     );
@@ -479,4 +488,3 @@ mod tests {
         assert_eq!(b[4], 128);
     }
 }
-

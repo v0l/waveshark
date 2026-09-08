@@ -16,8 +16,8 @@
 
 use common::{Device, GainMode, Hz, Sps};
 use nodes::{FmModNode, ToneNode, TxSinkNode};
-use pipeline::port::{Flow, PortKind, StreamSpec};
 use pipeline::chain;
+use pipeline::port::{Flow, PortKind, StreamSpec};
 
 /// The radio runs well above the audio rate, so the modulator is fed at the
 /// transmit rate and the tone is generated there: no resampler exists on this

@@ -1,10 +1,10 @@
 //! The channel strip: every level that reaches the speaker, and the controls
 //! that belong to one channel rather than to the receiver.
 
-use crate::radio::TxSource;
 use super::state::AudioState;
 use super::*;
 use crate::audiobus::AudioBusNode;
+use crate::radio::TxSource;
 use pipeline::param::ParamValue;
 
 /// What the strip wants done that it cannot do itself.
@@ -48,7 +48,9 @@ impl Strip<'_> {
         let mut changed = false;
         // A decode channel has neither: its front end sets its own levels and
         // decides for itself whether a burst is a transmission.
-        let Some(demod) = ch.mode.demod() else { return false };
+        let Some(demod) = ch.mode.demod() else {
+            return false;
+        };
         ui.add_space(4.0);
         if demod != Demod::Wfm {
             ui.horizontal(|ui| {
@@ -241,7 +243,9 @@ impl Strip<'_> {
         // and a line of apology take as much room as the controls do and
         // offer nothing: a channel that cannot transmit is a receiving
         // channel, which is what the rest of the strip already shows.
-        let Some(mode) = crate::radio::tx_mode_for(&ch.mode) else { return false };
+        let Some(mode) = crate::radio::tx_mode_for(&ch.mode) else {
+            return false;
+        };
         let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);
 
         ui.add_space(6.0);
@@ -356,10 +360,8 @@ impl Strip<'_> {
         // drag, not a click: a button that only senses clicks reports the
         // press and then stops tracking the pointer, so a key held down came
         // back up on its own after a frame or two.
-        let (rect, key) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), 30.0),
-            Sense::click_and_drag(),
-        );
+        let (rect, key) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click_and_drag());
         if ui.is_rect_visible(rect) {
             let p = ui.painter();
             let (fill, ink) = if keyed_here {
@@ -380,7 +382,10 @@ impl Strip<'_> {
             let x0 = rect.center().x - total / 2.0;
             crate::icons::Icon::Transmit.paint(
                 p,
-                Rect::from_center_size(Pos2::new(x0 + icon / 2.0, rect.center().y), Vec2::splat(icon)),
+                Rect::from_center_size(
+                    Pos2::new(x0 + icon / 2.0, rect.center().y),
+                    Vec2::splat(icon),
+                ),
                 ink,
             );
             p.galley(

@@ -18,8 +18,13 @@ fn main() {
         d.set_center(Hz(f as u64)).unwrap();
         let mut s = d.start_rx().unwrap();
         let mut sp = dsp::spectrum::Spectrum::new(4096);
-        for _ in 0..10 { let _ = s.read(); }
-        for _ in 0..6 { let b = s.read().unwrap(); sp.process(&b.samples); }
+        for _ in 0..10 {
+            let _ = s.read();
+        }
+        for _ in 0..6 {
+            let b = s.read().unwrap();
+            sp.process(&b.samples);
+        }
         drop(s);
         let db = sp.power_db().to_vec();
         let n = db.len();
@@ -28,7 +33,9 @@ fn main() {
         let floor = sorted[n / 2];
         for (i, v) in db.iter().enumerate() {
             // Middle is the DC spur, edges are the filter roll-off.
-            if i.abs_diff(n / 2) < 24 || i < n / 8 || i > n * 7 / 8 { continue; }
+            if i.abs_diff(n / 2) < 24 || i < n / 8 || i > n * 7 / 8 {
+                continue;
+            }
             if *v - floor > 15.0 {
                 found.push((f + (i as f64 - n as f64 / 2.0) * 4e6 / n as f64, *v, *v - floor));
             }
@@ -39,7 +46,9 @@ fn main() {
     found.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut kept: Vec<(f64, f32, f32)> = Vec::new();
     for c in found {
-        if kept.iter().all(|k| (k.0 - c.0).abs() > 150e3) { kept.push(c); }
+        if kept.iter().all(|k| (k.0 - c.0).abs() > 150e3) {
+            kept.push(c);
+        }
     }
     kept.sort_by(|a, b| a.0.total_cmp(&b.0));
     println!("{ant} on {chan}, {lo}-{hi} MHz, 60 dB gain");

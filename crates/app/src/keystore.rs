@@ -116,7 +116,9 @@ impl KeyStore {
     /// no defaults are written: an empty keystore is the normal state, and a
     /// file appears only once a key is known.
     pub fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default() };
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text),
             Err(_) => Self::default(),
@@ -211,7 +213,9 @@ impl KeyStore {
                 origin = Origin::Manual;
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "tea1" => key = u32::from_str_radix(v, 16).ok().map(Key::Tea1),
@@ -221,7 +225,11 @@ impl KeyStore {
                     if let (Some((system, name)), Some(bytes)) =
                         (&chan, decode::channel_keys::parse_key(v))
                     {
-                        channels.push(ChannelKey { system: *system, name: name.clone(), key: bytes });
+                        channels.push(ChannelKey {
+                            system: *system,
+                            name: name.clone(),
+                            key: bytes,
+                        });
                     }
                 }
                 _ => {}
@@ -293,11 +301,19 @@ mod tests {
             name: "waveshark".into(),
             key: decode::channel_keys::parse_key("D7CA0CE2D3C78953").unwrap(),
         });
-        ks.insert_channel(ChannelKey { system: System::MeshCore, name: "hikers".into(), key: vec![1; 16] });
+        ks.insert_channel(ChannelKey {
+            system: System::MeshCore,
+            name: "hikers".into(),
+            key: vec![1; 16],
+        });
         let back = KeyStore::parse(&ks.render());
         assert_eq!(back.channels(), ks.channels());
         // The same channel again replaces rather than duplicates.
-        ks.insert_channel(ChannelKey { system: System::Meshtastic, name: "waveshark".into(), key: vec![9] });
+        ks.insert_channel(ChannelKey {
+            system: System::Meshtastic,
+            name: "waveshark".into(),
+            key: vec![9],
+        });
         assert_eq!(ks.channels().len(), 2);
         ks.remove_channel(System::Meshtastic, "waveshark");
         assert_eq!(ks.channels().len(), 1);
@@ -309,7 +325,11 @@ mod tests {
         let a = CellId { mcc: 272, mnc: 91, colour: 5 };
         let b = CellId { mcc: 204, mnc: 1337, colour: 22 };
         ks.insert(a, Key::Tea1(0x00000111), Origin::Recovered);
-        ks.insert(b, Key::Tea2([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa]), Origin::Manual);
+        ks.insert(
+            b,
+            Key::Tea2([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa]),
+            Origin::Manual,
+        );
 
         let back = KeyStore::parse(&ks.render());
         assert_eq!(back.get(a).unwrap().key, Key::Tea1(0x111));

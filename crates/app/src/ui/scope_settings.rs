@@ -31,14 +31,14 @@ impl ScopeSettings<'_> {
                     cost time to transform.";
         row_help(ui, "FFT bins", bins, |ui| {
             let mut n = self.st.fft_size;
-            egui::ComboBox::from_id_salt("fft")
-                .selected_text(n.to_string())
-                .width(120.0)
-                .show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("fft").selected_text(n.to_string()).width(120.0).show_ui(
+                ui,
+                |ui| {
                     for v in FFTS {
                         ui.selectable_value(&mut n, v, v.to_string());
                     }
-                });
+                },
+            );
             if n != self.st.fft_size {
                 self.st.fft_size = n;
                 // The same value the session saves and the radio starts with,
@@ -50,9 +50,7 @@ impl ScopeSettings<'_> {
             }
         });
         ui.label(
-            egui::RichText::new(bin_hint(self.rate, self.st.fft_size))
-                .small()
-                .color(theme::LEGEND),
+            egui::RichText::new(bin_hint(self.rate, self.st.fft_size)).small().color(theme::LEGEND),
         );
         ui.add_space(8.0);
 

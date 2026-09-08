@@ -206,14 +206,12 @@ impl Patch {
     /// table: where the edits file sits, named after the drawing that used
     /// to be saved whole.
     pub fn path() -> Option<std::path::PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
+        let base =
+            std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| {
                 std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
             })?;
         Some(base.join("waveshark").join("patch"))
     }
-
 }
 
 /// What the operator changed about the graph the receiver draws for itself.
@@ -276,7 +274,9 @@ impl Edits {
                 e.stages.push(st.clone());
                 continue;
             }
-            let Some(was) = base.stage(st.id) else { continue };
+            let Some(was) = base.stage(st.id) else {
+                continue;
+            };
             for (name, v) in &st.settings {
                 if was.settings.get(name) != Some(v) && Self::own_settings(st, name, was) {
                     e.settings.push((st.id, name.clone(), v.clone()));
@@ -381,7 +381,8 @@ impl Edits {
                     e.stages.push(Stage { id, kind: kind.to_string(), settings: Settings::new() });
                 }
                 Some("set") => {
-                    let (Some(name), Some(kind), Some(st)) = (w.next(), w.next(), e.stages.last_mut())
+                    let (Some(name), Some(kind), Some(st)) =
+                        (w.next(), w.next(), e.stages.last_mut())
                     else {
                         continue;
                     };
@@ -412,7 +413,9 @@ impl Edits {
                     }
                 }
                 Some("link") => {
-                    let (Some(from), Some(to)) = (w.next(), w.next()) else { continue };
+                    let (Some(from), Some(to)) = (w.next(), w.next()) else {
+                        continue;
+                    };
                     let (Some(from), Some(to)) = (parse_source(from), parse_port(to)) else {
                         continue;
                     };

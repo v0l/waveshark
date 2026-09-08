@@ -79,9 +79,8 @@ impl Memory {
             s.group = UNGROUPED.into();
         }
         s.group = s.group.trim().to_string();
-        let same = |e: &Saved| {
-            e.group == s.group && (e.freq - s.freq).abs() < 1.0 && e.mode == s.mode
-        };
+        let same =
+            |e: &Saved| e.group == s.group && (e.freq - s.freq).abs() < 1.0 && e.mode == s.mode;
         if let Some(i) = self.list.iter().position(same) {
             self.list[i] = s;
         } else {
@@ -120,9 +119,15 @@ impl Memory {
                 continue;
             }
             let mut t = line.split_whitespace();
-            let (Some(f), Some(u)) = (t.next(), t.next()) else { continue };
-            let Some(freq) = hz(&format!("{f} {u}")) else { continue };
-            let Some(mode) = t.next().and_then(mode_from) else { continue };
+            let (Some(f), Some(u)) = (t.next(), t.next()) else {
+                continue;
+            };
+            let Some(freq) = hz(&format!("{f} {u}")) else {
+                continue;
+            };
+            let Some(mode) = t.next().and_then(mode_from) else {
+                continue;
+            };
             let rest: Vec<&str> = t.collect();
             // A width is a number followed by a unit; a label that starts
             // with a number would have to be written after one.
@@ -143,7 +148,11 @@ impl Memory {
         for g in self.groups() {
             s.push_str(&format!("\n[{g}]\n"));
             for (_, c) in self.in_group(g) {
-                s.push_str(&format!("{:<14}{:<8}", format!("{} MHz", num(c.freq / 1e6)), c.mode.label()));
+                s.push_str(&format!(
+                    "{:<14}{:<8}",
+                    format!("{} MHz", num(c.freq / 1e6)),
+                    c.mode.label()
+                ));
                 match c.bandwidth_hz {
                     Some(bw) => s.push_str(&format!("{:<12}", format!("{} kHz", num(bw / 1e3)))),
                     None => s.push_str(&format!("{:<12}", "")),

@@ -226,11 +226,7 @@ fn lane_height(topo: &Topology, places: &[Place], lane: usize) -> f32 {
         .map(|(n, _)| n.phases.len())
         .max()
         .unwrap_or(0);
-    let extra = if inner == 0 {
-        0.0
-    } else {
-        INNER_GAP + inner as f32 * (INNER_H + INNER_GAP)
-    };
+    let extra = if inner == 0 { 0.0 } else { INNER_GAP + inner as f32 * (INNER_H + INNER_GAP) };
     let phase_extra = if phases == 0 { 0.0 } else { INNER_GAP + phases as f32 * PHASE_H };
     let tallest = topo
         .nodes
@@ -282,11 +278,7 @@ enum Drag {
     /// to read. Both are how people reach for a connection, and a view that
     /// only accepts one of them feels broken to whoever reached the other
     /// way.
-    Wire {
-        from: Option<crate::patch::Source>,
-        to: Option<(u64, usize)>,
-        at: Pos2,
-    },
+    Wire { from: Option<crate::patch::Source>, to: Option<(u64, usize)>, at: Pos2 },
     /// Moving the view. A drag that started on nothing is a drag of the
     /// canvas: in manual mode the pane takes every drag so that a stage can
     /// be moved, and without this the graph could not be panned at all.
@@ -330,7 +322,7 @@ fn stable_key(label: &str, kind: &str, nth: u32) -> u64 {
     nth.hash(&mut h);
     // Clear of the patch's own ids, which count up from one, and of the
     // block the receiver's stages are named in.
-     1_000_000 + h.finish() % (crate::patch::builtin::FIRST - 2_000_000)
+    1_000_000 + h.finish() % (crate::patch::builtin::FIRST - 2_000_000)
 }
 
 impl Default for Edit {
@@ -420,8 +412,8 @@ pub fn inspector(
         for (slot, spec) in &node.outputs {
             ui.label(
                 egui::RichText::new(format!("out {}", wire_label(spec, topo.rate_of(*slot))))
-                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
-                .color(theme::TRACE),
+                    .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                    .color(theme::TRACE),
             );
         }
     }
@@ -448,9 +440,7 @@ pub fn inspector(
 
     if node.params.is_empty() {
         ui.label(
-            egui::RichText::new("This stage has nothing to set.")
-                .size(11.0)
-                .color(theme::LEGEND),
+            egui::RichText::new("This stage has nothing to set.").size(11.0).color(theme::LEGEND),
         );
         return None;
     }
@@ -505,11 +495,7 @@ pub fn inspector(
             // A value whose range says something else about it: show the
             // number rather than a control that would write the wrong type.
             (v, _) => {
-                ui.label(
-                    egui::RichText::new(format!("{v:?}"))
-                        .size(11.0)
-                        .color(theme::VALUE),
-                );
+                ui.label(egui::RichText::new(format!("{v:?}")).size(11.0).color(theme::VALUE));
             }
         }
         if prm.affects_rate {
@@ -525,7 +511,11 @@ pub fn inspector(
 }
 
 fn unit(p: &pipeline::param::Param) -> String {
-    if p.unit.is_empty() { String::new() } else { format!(" {}", p.unit) }
+    if p.unit.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", p.unit)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -634,15 +624,14 @@ pub fn draw(
             for (n, st) in patch
                 .stages()
                 .iter()
-                .filter(|s| !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id))
+                .filter(|s| {
+                    !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id)
+                })
                 .enumerate()
             {
                 // Under the source, out of the way of the chain that is
                 // running, until it is dragged somewhere better.
-                let seed = Pos2::new(
-                    12.0 + box_w / 2.0,
-                    height - 40.0 - n as f32 * (BOX_H + GAP),
-                );
+                let seed = Pos2::new(12.0 + box_w / 2.0, height - 40.0 - n as f32 * (BOX_H + GAP));
                 let at = *edit.pos.entry(st.id).or_insert(seed);
                 ghosts.push((
                     st.id,
@@ -661,17 +650,7 @@ pub fn draw(
         });
         let press = ui.input(|i| i.pointer.press_origin());
         interact(
-            &resp,
-            press,
-            topo,
-            &node_keys,
-            &rects,
-            &ghosts,
-            src,
-            rect.min,
-            edit,
-            &mut act,
-            patch,
+            &resp, press, topo, &node_keys, &rects, &ghosts, src, rect.min, edit, &mut act, patch,
         );
         // Dragging empty canvas moves the view. The pane owns every drag in
         // manual mode so that a stage can be moved, which leaves the scroll
@@ -761,11 +740,9 @@ pub fn draw(
             (Some(from), _) => wire_start(topo, &rects, &ghosts, src, from),
             // Pulled off an input that had nothing on it: the wire hangs from
             // the port it is looking for a source for.
-            (None, Some((tag, k))) => edit
-                .drawn
-                .get(&tag)
-                .map(|r| port(*r, k, 1, Side::In))
-                .unwrap_or(at),
+            (None, Some((tag, k))) => {
+                edit.drawn.get(&tag).map(|r| port(*r, k, 1, Side::In)).unwrap_or(at)
+            }
             (None, None) => at,
         };
         loose(&p, anchor, at);
@@ -796,10 +773,7 @@ pub fn draw(
     }
 
     for (id, r) in &ghosts {
-        let kind = patch
-            .and_then(|p| p.stage(*id))
-            .map(|s| s.kind.clone())
-            .unwrap_or_default();
+        let kind = patch.and_then(|p| p.stage(*id)).map(|s| s.kind.clone()).unwrap_or_default();
         p.rect(*r, 3.0, theme::WELL, Stroke::new(1.0, theme::READOUT), StrokeKind::Inside);
         p.text(
             Pos2::new(r.center().x, r.top() + 9.0),
@@ -834,12 +808,16 @@ pub fn draw(
             if edit.manual {
                 // The grip: two short diagonals in the corner, the mark
                 // every resizable window has carried.
-                let c = Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
+                let c =
+                    Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
                 let hot_c = pointer.is_some_and(|q| c.contains(q));
                 let col = if hot_c { theme::READOUT } else { theme::LEGEND };
                 for k in [4.0f32, 8.0] {
                     p.line_segment(
-                        [Pos2::new(r.right() - 2.0, r.bottom() - k - 2.0), Pos2::new(r.right() - k - 2.0, r.bottom() - 2.0)],
+                        [
+                            Pos2::new(r.right() - 2.0, r.bottom() - k - 2.0),
+                            Pos2::new(r.right() - k - 2.0, r.bottom() - 2.0),
+                        ],
                         Stroke::new(1.0, col),
                     );
                 }
@@ -1016,7 +994,8 @@ fn interact(
                 return Drag::Node(crate::patch::builtin::SPAN, src.center() - q);
             }
             if let Some(i) = rects.iter().position(|r| {
-                let c = Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
+                let c =
+                    Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
                 c.contains(q)
             }) {
                 if resizable(&topo.nodes[i]) {
@@ -1125,10 +1104,7 @@ fn input_at(
             }
         }
     }
-    ghosts
-        .iter()
-        .find(|(_, r)| near(port(*r, 0, 1, Side::In), q))
-        .map(|(id, _)| (*id, 0))
+    ghosts.iter().find(|(_, r)| near(port(*r, 0, 1, Side::In), q)).map(|(id, _)| (*id, 0))
 }
 
 /// The output port under a point, as something a wire can start at or land
@@ -1254,12 +1230,7 @@ fn near_wire(from: Pos2, to: Pos2, q: Pos2) -> bool {
 
 /// A ring round whatever a wire would attach to if it were let go now.
 fn target_ring(p: &egui::Painter, at: Rect) {
-    p.rect_stroke(
-        at.expand(2.0),
-        4.0,
-        Stroke::new(1.5, theme::READOUT),
-        StrokeKind::Outside,
-    );
+    p.rect_stroke(at.expand(2.0), 4.0, Stroke::new(1.5, theme::READOUT), StrokeKind::Outside);
 }
 
 /// The wire that is being drawn but has not landed anywhere yet.
@@ -1277,20 +1248,39 @@ fn loose(p: &egui::Painter, from: Pos2, to: Pos2) {
 
 /// A scope's readings inside its box, under the label line: the meter, the
 /// spectrum auto-ranged to what it is seeing, and the spectrogram.
-fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame: Option<&nodes::ScopeFrame>) {
+fn paint_scope(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    r: Rect,
+    id: usize,
+    frame: Option<&nodes::ScopeFrame>,
+) {
     let mono = FontId::new(9.0, FontFamily::Name(theme::READOUT_FONT.into()));
-    let inner = Rect::from_min_max(Pos2::new(r.left() + 8.0, r.top() + 40.0), Pos2::new(r.right() - 8.0, r.bottom() - 8.0));
+    let inner = Rect::from_min_max(
+        Pos2::new(r.left() + 8.0, r.top() + 40.0),
+        Pos2::new(r.right() - 8.0, r.bottom() - 8.0),
+    );
     let Some(f) = frame else {
-        p.text(inner.center(), egui::Align2::CENTER_CENTER, "nothing on the wire yet", mono, theme::LEGEND);
+        p.text(
+            inner.center(),
+            egui::Align2::CENTER_CENTER,
+            "nothing on the wire yet",
+            mono,
+            theme::LEGEND,
+        );
         return;
     };
     let db = |v: f32| 20.0 * v.max(1e-6).log10();
 
     // Level, on the same strip every fader carries, the held peak as a mark.
-    let vu = Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, crate::ui::widgets::VU_H));
+    let vu =
+        Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, crate::ui::widgets::VU_H));
     crate::ui::widgets::Vu::paint(p, vu, f.rms * 2f32.sqrt());
     let x = vu.left() + f.peak_hold.clamp(0.0, 1.0).sqrt() * vu.width();
-    p.line_segment([Pos2::new(x, vu.top()), Pos2::new(x, vu.bottom())], Stroke::new(1.0, theme::VALUE));
+    p.line_segment(
+        [Pos2::new(x, vu.top()), Pos2::new(x, vu.bottom())],
+        Stroke::new(1.0, theme::VALUE),
+    );
     p.text(
         Pos2::new(inner.right(), vu.center().y),
         egui::Align2::RIGHT_CENTER,
@@ -1302,7 +1292,11 @@ fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame
         return;
     }
 
-    let (lo_hz, hi_hz) = if f.real { (0.0, f.rate / 2.0) } else { (f.center_hz - f.rate / 2.0, f.center_hz + f.rate / 2.0) };
+    let (lo_hz, hi_hz) = if f.real {
+        (0.0, f.rate / 2.0)
+    } else {
+        (f.center_hz - f.rate / 2.0, f.center_hz + f.rate / 2.0)
+    };
     let fmt = |hz: f64| {
         if hz.abs() >= 1e6 {
             format!("{:.3}M", hz / 1e6)
@@ -1335,7 +1329,10 @@ fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame
     // Spectrum in the upper part, spectrogram below it.
     let body_top = vu.bottom() + 6.0;
     let spec_h = ((inner.bottom() - body_top) * 0.4).max(30.0);
-    let sr = Rect::from_min_max(Pos2::new(inner.left(), body_top), Pos2::new(inner.right(), body_top + spec_h));
+    let sr = Rect::from_min_max(
+        Pos2::new(inner.left(), body_top),
+        Pos2::new(inner.right(), body_top + spec_h),
+    );
     p.rect_filled(sr, 2.0, theme::WELL);
     let n = f.spectrum.len();
     let pts: Vec<Pos2> = f
@@ -1351,10 +1348,34 @@ fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame
     p.add(egui::Shape::line(pts, Stroke::new(1.0, theme::TRACE)));
     // Range at the top left, one number over the other; the frequency ends
     // in the bottom corners where they belong.
-    p.text(Pos2::new(sr.left() + 3.0, sr.top() + 2.0), egui::Align2::LEFT_TOP, format!("{top:.0} dB"), mono.clone(), theme::LEGEND);
-    p.text(Pos2::new(sr.left() + 3.0, sr.top() + 13.0), egui::Align2::LEFT_TOP, format!("{floor:.0}"), mono.clone(), theme::LEGEND);
-    p.text(Pos2::new(sr.left() + 3.0, sr.bottom() - 2.0), egui::Align2::LEFT_BOTTOM, fmt(lo_hz), mono.clone(), theme::LEGEND);
-    p.text(Pos2::new(sr.right() - 3.0, sr.bottom() - 2.0), egui::Align2::RIGHT_BOTTOM, fmt(hi_hz), mono.clone(), theme::LEGEND);
+    p.text(
+        Pos2::new(sr.left() + 3.0, sr.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("{top:.0} dB"),
+        mono.clone(),
+        theme::LEGEND,
+    );
+    p.text(
+        Pos2::new(sr.left() + 3.0, sr.top() + 13.0),
+        egui::Align2::LEFT_TOP,
+        format!("{floor:.0}"),
+        mono.clone(),
+        theme::LEGEND,
+    );
+    p.text(
+        Pos2::new(sr.left() + 3.0, sr.bottom() - 2.0),
+        egui::Align2::LEFT_BOTTOM,
+        fmt(lo_hz),
+        mono.clone(),
+        theme::LEGEND,
+    );
+    p.text(
+        Pos2::new(sr.right() - 3.0, sr.bottom() - 2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        fmt(hi_hz),
+        mono.clone(),
+        theme::LEGEND,
+    );
 
     if f.history.is_empty() {
         return;
@@ -1369,7 +1390,10 @@ fn paint_scope(ctx: &egui::Context, p: &egui::Painter, r: Rect, id: usize, frame
     let mut img = egui::ColorImage::new([cols, rows], vec![Color32::BLACK; cols * rows]);
     for (y, row) in f.history.iter().enumerate() {
         for x in 0..cols {
-            let v = row[x * step..((x + 1) * step).min(n)].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let v = row[x * step..((x + 1) * step).min(n)]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
             let t = ((v - floor) / (top - floor)).clamp(0.0, 1.0);
             img.pixels[y * cols + x] = crate::waterfall::colormap(t);
         }
@@ -1393,10 +1417,28 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool, cost
     // that is costing something says so without growing.
     let cost_text = cost.and_then(cost_label);
     if let (Some(text), Some(c)) = (cost_text, cost) {
-        p.text(Pos2::new(r.left() + 8.0, r.top() + 26.0), egui::Align2::LEFT_TOP, kind, mono.clone(), theme::LEGEND);
-        p.text(Pos2::new(r.right() - 8.0, r.top() + 26.0), egui::Align2::RIGHT_TOP, text, mono, cost_colour(c));
+        p.text(
+            Pos2::new(r.left() + 8.0, r.top() + 26.0),
+            egui::Align2::LEFT_TOP,
+            kind,
+            mono.clone(),
+            theme::LEGEND,
+        );
+        p.text(
+            Pos2::new(r.right() - 8.0, r.top() + 26.0),
+            egui::Align2::RIGHT_TOP,
+            text,
+            mono,
+            cost_colour(c),
+        );
     } else {
-        p.text(Pos2::new(r.center().x, r.top() + 26.0), egui::Align2::CENTER_TOP, kind, mono, theme::LEGEND);
+        p.text(
+            Pos2::new(r.center().x, r.top() + 26.0),
+            egui::Align2::CENTER_TOP,
+            kind,
+            mono,
+            theme::LEGEND,
+        );
     }
 }
 
@@ -1406,8 +1448,20 @@ fn phases(p: &egui::Painter, r: Rect, phases: &[(String, Cost)]) -> f32 {
     let mut y = r.bottom() + INNER_GAP;
     for (name, c) in phases {
         let Some(text) = cost_label(c) else { continue };
-        p.text(Pos2::new(r.left() + 10.0, y), egui::Align2::LEFT_TOP, name, mono.clone(), theme::LEGEND);
-        p.text(Pos2::new(r.right() - 10.0, y), egui::Align2::RIGHT_TOP, text, mono.clone(), cost_colour(c));
+        p.text(
+            Pos2::new(r.left() + 10.0, y),
+            egui::Align2::LEFT_TOP,
+            name,
+            mono.clone(),
+            theme::LEGEND,
+        );
+        p.text(
+            Pos2::new(r.right() - 10.0, y),
+            egui::Align2::RIGHT_TOP,
+            text,
+            mono.clone(),
+            cost_colour(c),
+        );
         y += PHASE_H;
     }
     y
@@ -1753,8 +1807,7 @@ mod tests {
         let (topo, patch, _) = with_patch_stage();
         let mut h = Harness::new(topo, patch);
         h.frame(vec![]);
-        let before: Vec<(u64, Pos2)> =
-            h.edit.drawn.iter().map(|(k, r)| (*k, r.center())).collect();
+        let before: Vec<(u64, Pos2)> = h.edit.drawn.iter().map(|(k, r)| (*k, r.center())).collect();
 
         // The same graph with another stage in it, as a rebuild would hand
         // it over: one more node, and every id after it shifted.
@@ -1874,10 +1927,7 @@ mod tests {
         h.press(from);
         h.move_to(from + Vec2::new(0.0, 20.0));
         let act = h.release(onto);
-        assert_eq!(
-            act.link,
-            Some((crate::patch::Source::Stage(id, 0), sink, 0)),
-        );
+        assert_eq!(act.link, Some((crate::patch::Source::Stage(id, 0), sink, 0)),);
     }
 
     #[test]

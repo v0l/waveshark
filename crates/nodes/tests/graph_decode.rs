@@ -216,7 +216,7 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
         assert_eq!(d.protocol, "unknown", "nothing should have matched: {d:?}");
         assert_eq!(
             d.modulation,
-            Some("OOK"),
+            Some(common::Modulation::Ook),
             "the modulation belongs in the report"
         );
         let detail = d.detail.as_deref().unwrap_or_default();

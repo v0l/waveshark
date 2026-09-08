@@ -185,7 +185,10 @@ impl Waterfall {
             let bottom = y + a_rows as f32 * row_px;
             p.image(
                 id,
-                egui::Rect::from_min_max(Pos2::new(rect.left(), y), Pos2::new(rect.right(), bottom)),
+                egui::Rect::from_min_max(
+                    Pos2::new(rect.left(), y),
+                    Pos2::new(rect.right(), bottom),
+                ),
                 egui::Rect::from_min_max(
                     Pos2::new(0.0, c as f32 / h),
                     Pos2::new(1.0, (c - a_rows) as f32 / h),
@@ -200,7 +203,10 @@ impl Waterfall {
             let bottom = y + b_rows as f32 * row_px;
             p.image(
                 id,
-                egui::Rect::from_min_max(Pos2::new(rect.left(), y), Pos2::new(rect.right(), bottom)),
+                egui::Rect::from_min_max(
+                    Pos2::new(rect.left(), y),
+                    Pos2::new(rect.right(), bottom),
+                ),
                 egui::Rect::from_min_max(
                     Pos2::new(0.0, 1.0),
                     Pos2::new(1.0, (self.height - b_rows) as f32 / h),
@@ -247,7 +253,6 @@ mod tests {
     fn luma(c: Color32) -> f32 {
         0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32
     }
-
 
     #[test]
     fn the_colormap_brightens_monotonically() {

@@ -3,8 +3,6 @@
 //! Held as text apart from the live table, so that a half-typed block does
 //! not retune the receiver on every keystroke.
 
-
-
 /// One scanner as the interface edits it.
 ///
 /// Frequencies are held in the units they are typed in, and the lists stay as

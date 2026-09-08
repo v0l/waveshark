@@ -289,7 +289,12 @@ impl MapView {
                 theme::FAULT,
                 1.0,
             );
-            canvas.label(Pos2::new(rect.left() + 8.0, rect.bottom() - 8.0), &short, theme::LEGEND, 1.0);
+            canvas.label(
+                Pos2::new(rect.left() + 8.0, rect.bottom() - 8.0),
+                &short,
+                theme::LEGEND,
+                1.0,
+            );
         }
         p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
 
@@ -326,10 +331,7 @@ impl MapView {
                 p.layout_no_wrap(c.name.into(), name_font.clone(), theme::VALUE),
                 Some(c.url),
             ));
-            pieces.push((
-                p.layout_no_wrap(c.licence.into(), small.clone(), theme::LEGEND),
-                None,
-            ));
+            pieces.push((p.layout_no_wrap(c.licence.into(), small.clone(), theme::LEGEND), None));
         }
         let gap = 5.0;
         let w: f32 =
@@ -398,7 +400,9 @@ impl MapView {
                 // the far side of the world rather than a hole.
                 let wrapped = tx.rem_euclid(n);
                 let id = crate::map::TileId { z, x: wrapped as u32, y: ty as u32 };
-                let Some(tex) = tiles.get(id, rt) else { continue };
+                let Some(tex) = tiles.get(id, rt) else {
+                    continue;
+                };
                 let min = Pos2::new(
                     mid.x + ((tx as f64 - cx) * scale) as f32,
                     mid.y + ((ty as f64 - cy) * scale) as f32,
@@ -543,9 +547,8 @@ mod tests {
     /// strokes across the map.
     #[test]
     fn a_wrap_is_measured_against_the_world_and_not_against_the_pane() {
-        let world = |zoom: f64| {
-            crate::map::tile_scale(zoom) * f64::from(1u32 << crate::map::level(zoom))
-        };
+        let world =
+            |zoom: f64| crate::map::tile_scale(zoom) * f64::from(1u32 << crate::map::level(zoom));
         assert!(world(2.0) < 1200.0, "{} px", world(2.0));
         // And it doubles with every level, so the test has to scale too.
         assert!((world(3.0) / world(2.0) - 2.0).abs() < 1e-9);

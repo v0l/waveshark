@@ -116,7 +116,7 @@ impl VoiceChannelNode {
             Vec::new(),
         );
         d.media_type = media::TEXT;
-        d.modulation = Some("FM");
+        d.modulation = Some(common::Modulation::Fm);
         d.bandwidth_hz = Some(self.meter_bandwidth());
         d.fields = vec![
             ("voice".into(), Value::Bool(true)),

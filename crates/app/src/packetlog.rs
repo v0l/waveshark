@@ -125,24 +125,26 @@ pub const KIND_MEASURED: u8 = 3;
 /// That byte was written as zero and never read, which is what makes this a
 /// compatible change rather than a version bump: an older file says nothing
 /// about the keying, and nothing is exactly what it knew.
-fn keying_code(m: Option<&'static str>) -> u8 {
-    match m {
-        Some("OOK") => 1,
-        Some("ASK") => 2,
-        Some("FSK") => 3,
-        Some("4-FSK") => 4,
-        Some("MSK") => 5,
+fn keying_code(m: Option<common::Modulation>) -> u8 {
+    use common::Modulation as M;
+    match m.map(M::family) {
+        Some(M::Ook) => 1,
+        Some(M::Ask) => 2,
+        Some(M::Fsk2) => 3,
+        Some(M::Fsk4) => 4,
+        Some(M::Msk) => 5,
         _ => 0,
     }
 }
 
-fn keying_from_code(c: u8) -> Option<&'static str> {
+fn keying_from_code(c: u8) -> Option<common::Modulation> {
+    use common::Modulation as M;
     match c {
-        1 => Some("OOK"),
-        2 => Some("ASK"),
-        3 => Some("FSK"),
-        4 => Some("4-FSK"),
-        5 => Some("MSK"),
+        1 => Some(M::Ook),
+        2 => Some(M::Ask),
+        3 => Some(M::Fsk2),
+        4 => Some(M::Fsk4),
+        5 => Some(M::Msk),
         _ => None,
     }
 }
@@ -281,15 +283,16 @@ impl PacketLog {
         if self.total() < cap {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return false };
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return false;
+        };
         // The name is the date and a sequence, so alphabetical order is
         // chronological.
         let mut days: Vec<std::path::PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
-                p.extension().is_some_and(|x| x == EXT)
-                    && p.file_stem().is_some_and(|s| s != open)
+                p.extension().is_some_and(|x| x == EXT) && p.file_stem().is_some_and(|s| s != open)
             })
             .collect();
         days.sort();
@@ -368,12 +371,18 @@ impl PacketLog {
                 if p.extension().is_none_or(|x| x != EXT) {
                     continue;
                 }
-                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-                let Some((d, seq)) = stem.rsplit_once('.') else { continue };
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some((d, seq)) = stem.rsplit_once('.') else {
+                    continue;
+                };
                 if d != day {
                     continue;
                 }
-                let Ok(seq) = seq.parse::<u32>() else { continue };
+                let Ok(seq) = seq.parse::<u32>() else {
+                    continue;
+                };
                 if last.as_ref().is_none_or(|(n, _)| seq > *n) {
                     last = Some((seq, p));
                 }
@@ -518,7 +527,9 @@ pub fn folder_bytes(dir: &std::path::Path) -> u64 {
 
 /// Add up the segments on the disk, other than the one named.
 fn measure(dir: &std::path::Path, except: Option<&str>) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     entries
         .flatten()
         .filter(|e| {
@@ -555,8 +566,8 @@ fn put_measure(m: &common::Measure) -> Vec<u8> {
         out.extend_from_slice(&(b.len() as u16).to_le_bytes());
         out.extend_from_slice(b);
     };
-    put_str(&mut out, m.modulation);
-    put_str(&mut out, m.front_end);
+    put_str(&mut out, m.modulation.label());
+    put_str(&mut out, m.front_end.label());
     put_str(&mut out, m.mode.as_deref().unwrap_or(""));
     out.extend_from_slice(&m.confidence.to_le_bytes());
     out.extend_from_slice(&m.duration_us.to_le_bytes());
@@ -579,16 +590,18 @@ fn take_measure(body: &[u8]) -> Option<(common::Measure, &[u8])> {
     let modulation = take_str(&mut at)?;
     let front = take_str(&mut at)?;
     let mode = take_str(&mut at)?;
-    let getf = |o: usize| -> Option<f32> { Some(f32::from_le_bytes(body.get(o..o + 4)?.try_into().ok()?)) };
+    let getf = |o: usize| -> Option<f32> {
+        Some(f32::from_le_bytes(body.get(o..o + 4)?.try_into().ok()?))
+    };
     let confidence = getf(at)?;
     let duration_us = u32::from_le_bytes(body.get(at + 4..at + 8)?.try_into().ok()?);
     let nums: Vec<f32> = (0..5).map(|k| getf(at + 8 + k * 4)).collect::<Option<_>>()?;
     let rest = body.get(at + 28..)?;
     Some((
         common::Measure {
-            modulation: common::Measure::label(&modulation),
+            modulation: common::Modulation::from_label(&modulation).unwrap_or_default(),
             confidence,
-            front_end: common::Measure::front(&front),
+            front_end: common::FrontEnd::from_label(&front).unwrap_or_default(),
             mode: (!mode.is_empty()).then_some(mode),
             duration_us,
             bandwidth_hz: nums[0],
@@ -612,7 +625,9 @@ fn put_iq(mut rec: Vec<u8>, q: &common::IqBurst) -> Vec<u8> {
     let mut raw = Vec::with_capacity(samples.len() * 4);
     for s in samples {
         for v in [s.re, s.im] {
-            raw.extend_from_slice(&((v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+            raw.extend_from_slice(
+                &((v * 32767.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes(),
+            );
         }
     }
     rec.extend_from_slice(&q.rate.to_le_bytes());
@@ -714,7 +729,9 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
             KIND_PULSES | KIND_MEASURED => {
                 let mut body = body;
                 if kind == KIND_MEASURED {
-                    let Some((m, rest)) = take_measure(body) else { continue };
+                    let Some((m, rest)) = take_measure(body) else {
+                        continue;
+                    };
                     measure = Some(m);
                     body = rest;
                 }
@@ -819,7 +836,7 @@ mod tests {
                 rssi_dbfs: -21.25,
                 start_sample: 0,
                 center_hz: center,
-                modulation: Some("OOK"),
+                modulation: Some(common::Modulation::Ook),
             },
         )
     }
@@ -834,9 +851,9 @@ mod tests {
             pkg.pulses.clear();
         }
         p.measure = Some(common::Measure {
-            modulation: "chirp",
+            modulation: common::Modulation::Chirp,
             confidence: 0.83,
-            front_end: "none",
+            front_end: common::FrontEnd::None,
             mode: Some("LoRa SF9 BW125 (EU868)".into()),
             duration_us: 183_000,
             bandwidth_hz: 125_000.0,
@@ -847,9 +864,9 @@ mod tests {
         });
         let mut q = burst(433_920_000);
         q.measure = Some(common::Measure {
-            modulation: "OOK",
+            modulation: common::Modulation::Ook,
             confidence: 0.91,
-            front_end: "ook",
+            front_end: common::FrontEnd::Ook,
             mode: None,
             duration_us: 184_000,
             bandwidth_hz: 11_700.0,
@@ -940,7 +957,9 @@ mod tests {
             rate: 62_500.0,
             center_hz: 869_618_000,
             samples: (0..1000)
-                .map(|i| common::C32::new((i as f32 * 0.01).sin() * 0.5, (i as f32 * 0.01).cos() * 0.5))
+                .map(|i| {
+                    common::C32::new((i as f32 * 0.01).sin() * 0.5, (i as f32 * 0.01).cos() * 0.5)
+                })
                 .collect(),
         }));
         let mut q = burst(433_920_000);
@@ -957,7 +976,8 @@ mod tests {
         assert_eq!(got[0].frame(), p.frame());
         let (a, b) = (got[0].iq.as_ref().unwrap(), p.iq.as_ref().unwrap());
         assert_eq!((a.rate, a.center_hz, a.samples.len()), (b.rate, b.center_hz, b.samples.len()));
-        let err = a.samples.iter().zip(&b.samples).map(|(x, y)| (x - y).norm()).fold(0.0f32, f32::max);
+        let err =
+            a.samples.iter().zip(&b.samples).map(|(x, y)| (x - y).norm()).fold(0.0f32, f32::max);
         assert!(err < 1e-4, "samples moved by {err}");
         assert_eq!(got[1].iq.as_ref().unwrap().samples[0], common::C32::new(1.0, -1.0));
         assert_eq!(got[1].package().map(|p| p.pulses.len()), Some(3));
@@ -1087,10 +1107,8 @@ mod tests {
         let d = dir("voice");
         let mut log = PacketLog::new(d.clone());
         let mut over = Packet::of_frame(AT, 12_500, common::Frame::unmeasured(Vec::new()));
-        over.audio = Some(std::sync::Arc::new(common::Speech {
-            pcm: vec![0.1; 48_000],
-            rate: 48_000.0,
-        }));
+        over.audio =
+            Some(std::sync::Arc::new(common::Speech { pcm: vec![0.1; 48_000], rate: 48_000.0 }));
         log.write(&over);
         log.write(&burst(868_300_000));
         log.flush();

@@ -110,12 +110,8 @@ pub fn passes(
     now_s: i64,
     min_el_deg: f64,
 ) -> Option<Arc<Vec<Upcoming>>> {
-    let key = (
-        group,
-        (at.lat_deg * 1000.0) as i64,
-        (at.lon_deg * 1000.0) as i64,
-        min_el_deg as i64,
-    );
+    let key =
+        (group, (at.lat_deg * 1000.0) as i64, (at.lon_deg * 1000.0) as i64, min_el_deg as i64);
     let stale = COMPUTED_FOR.lock().as_ref() != Some(&key)
         || now_s as u64 >= COMPUTED_AT.load(Ordering::Relaxed) + RECOMPUTE_EVERY_S;
     if stale {

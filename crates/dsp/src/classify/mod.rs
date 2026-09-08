@@ -52,6 +52,7 @@ mod steady;
 mod tones;
 mod zoom;
 
+pub use common::Modulation;
 pub use hypothesis::{Evidence, Hypothesis};
 
 use crate::window;
@@ -79,86 +80,6 @@ pub fn hypotheses() -> &'static [&'static dyn Hypothesis] {
         &steady::NoiseLike,
         &steady::Carrier,
     ]
-}
-
-/// What the burst was keyed on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Modulation {
-    /// Amplitude keyed all the way off. The OOK front end reads these.
-    Ook,
-    /// Amplitude keyed, but not to zero. Shallow ASK, which needs
-    /// [`crate::ask`] rather than the plain envelope path.
-    Ask,
-    /// Two tones. [`crate::fsk`] reads these.
-    Fsk2,
-    /// Four levels. [`crate::c4fm`] reads these.
-    Fsk4,
-    /// Two tones at a modulation index near 0.5, which is MSK and its
-    /// filtered relative GMSK. Worth separating from plain FSK because the
-    /// tones overlap and a hard threshold on the discriminator loses to a
-    /// matched receiver by several dB.
-    Msk,
-    /// Phase keyed, two states.
-    Psk2,
-    /// Phase keyed, four states.
-    Psk4,
-    /// Four phases shifted by an eighth of a turn every symbol, which is
-    /// what TETRA and the trunked systems key. The fourth power alternates
-    /// sign each symbol, so instead of one line it shows a pair a symbol
-    /// rate apart.
-    Dqpsk,
-    /// Frequency swept linearly, which is chirp spread spectrum and radar.
-    Chirp,
-    /// Many carriers with a cyclic prefix. Told from the rest of the
-    /// noise-like family by the prefix repeating at one lag.
-    Ofdm,
-    /// A single carrier spread by a chip sequence, which repeats in the
-    /// envelope even though the data cancels it in the complex samples.
-    Dsss,
-    /// Modulated, but with no keying structure to find: flat spectrum,
-    /// Gaussian amplitude. OFDM and direct sequence spread spectrum both land
-    /// here, and so does interference.
-    NoiseLike,
-    /// Present and steady. An unmodulated carrier, a leaking oscillator, or
-    /// the quiet half of a signal whose data has not started yet.
-    Carrier,
-    /// Measured, and nothing fit.
-    Unknown,
-}
-
-impl Modulation {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Modulation::Ook => "OOK",
-            Modulation::Ask => "ASK",
-            Modulation::Fsk2 => "2-FSK",
-            Modulation::Fsk4 => "4-FSK",
-            Modulation::Msk => "MSK",
-            Modulation::Psk2 => "BPSK",
-            Modulation::Psk4 => "QPSK",
-            Modulation::Dqpsk => "pi/4-DQPSK",
-            Modulation::Chirp => "chirp",
-            Modulation::Ofdm => "OFDM",
-            Modulation::Dsss => "DSSS",
-            Modulation::NoiseLike => "noise-like",
-            Modulation::Carrier => "carrier",
-            Modulation::Unknown => "unknown",
-        }
-    }
-
-    /// Whether a front end in this crate can read it today.
-    pub fn has_front_end(&self) -> bool {
-        matches!(self, Modulation::Ook | Modulation::Ask | Modulation::Fsk2 | Modulation::Fsk4)
-    }
-
-    /// Whether the verdict says anything about the signal. Noise-like is
-    /// the classifier reporting that it found power and no structure in
-    /// it, which names nothing and cannot be gone looking for: a list of
-    /// those is a list of squelch gates opening, and it buries the bursts
-    /// that were worth a row.
-    pub fn is_named(&self) -> bool {
-        !matches!(self, Modulation::NoiseLike | Modulation::Unknown)
-    }
 }
 
 /// Everything measured from the burst, kept whatever the verdict.

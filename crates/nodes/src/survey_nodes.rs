@@ -264,7 +264,7 @@ mod tests {
                 &r,
                 &common::Package::default(),
                 Hz(433_920_000),
-                "OOK",
+                common::Modulation::Ook,
             )
         };
         let a = report("Acurite-Tower");

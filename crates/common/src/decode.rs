@@ -281,10 +281,10 @@ pub struct Decoded {
     /// which matters: an unchecked decode should never be presented with the
     /// same confidence as a CRC-verified one.
     pub crc_ok: Option<bool>,
-    /// How it was keyed: "OOK", "FSK", "ASK". A packet list needs this in its
-    /// own column, and the protocol name does not imply it: plenty of devices
-    /// exist in both an OOK and an FSK variant.
-    pub modulation: Option<&'static str>,
+    /// How it was keyed. A packet list needs this in its own column, and the
+    /// protocol name does not imply it: plenty of devices exist in both an
+    /// OOK and an FSK variant.
+    pub modulation: Option<crate::Modulation>,
     /// The width it was heard through, in hertz.
     ///
     /// Carried rather than inferred from the keying. The same burst arrives in
@@ -420,7 +420,7 @@ impl Decoded {
         self
     }
 
-    pub fn with_modulation(mut self, m: &'static str) -> Self {
+    pub fn with_modulation(mut self, m: crate::Modulation) -> Self {
         self.modulation = Some(m);
         self
     }

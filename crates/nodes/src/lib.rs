@@ -976,13 +976,8 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |s: &Settings| {
-            // Static because the modulation rides on every packet this node
-            // emits, and a list column should not own a string per row.
-            let m = match s.str_or("modulation", "OOK") {
-                "FSK" | "fsk" => "FSK",
-                "ASK" | "ask" => "ASK",
-                _ => "OOK",
-            };
+            let m = common::Modulation::parse(s.str_or("modulation", "OOK"))
+                .unwrap_or(common::Modulation::Ook);
             let mut n = ProtocolDecodeNode::all().with_modulation(m);
             for k in ["report_all", "report_crc_failures", "report_unknown"] {
                 if let Some(v) = s.get(k) {

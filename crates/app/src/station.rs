@@ -15,9 +15,7 @@ use std::sync::OnceLock;
 
 fn cell() -> &'static RwLock<gps::Source> {
     static GPS: OnceLock<RwLock<gps::Source>> = OnceLock::new();
-    GPS.get_or_init(|| {
-        RwLock::new(gps::Source::start(gps::Config::new(gps::Transport::default())))
-    })
+    GPS.get_or_init(|| RwLock::new(gps::Source::start(gps::Config::new(gps::Transport::default()))))
 }
 
 /// Read from a named GPS, or `None` for the local gpsd the reader looks for

@@ -101,7 +101,9 @@ impl Tiles {
             .map(|(id, _)| *id)
             .collect();
         for id in done {
-            let Some(Slot::Loading(p)) = self.slots.remove(&id) else { continue };
+            let Some(Slot::Loading(p)) = self.slots.remove(&id) else {
+                continue;
+            };
             match p.block_and_take() {
                 Ok(img) => {
                     let name = format!("tile-{}-{}-{}", id.z, id.x, id.y);
@@ -216,9 +218,7 @@ async fn load(
 /// PNG decoding is milliseconds of CPU per tile, which is long enough to
 /// stall the other fetches sharing the runtime's two workers.
 async fn decode_off_thread(bytes: Vec<u8>) -> Result<ColorImage, String> {
-    tokio::task::spawn_blocking(move || decode(&bytes))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || decode(&bytes)).await.map_err(|e| e.to_string())?
 }
 
 fn decode(bytes: &[u8]) -> Result<ColorImage, String> {
@@ -278,12 +278,7 @@ pub fn ll_to_screen(center: (f64, f64), zoom: f64, ll: (f64, f64)) -> (f64, f64)
 /// Zooming to the middle of the window means chasing whatever you wanted to
 /// look at with a drag afterwards; what you are pointing at is what you are
 /// looking at.
-pub fn anchored_zoom(
-    center: (f64, f64),
-    zoom: f64,
-    new_zoom: f64,
-    off: (f64, f64),
-) -> (f64, f64) {
+pub fn anchored_zoom(center: (f64, f64), zoom: f64, new_zoom: f64, off: (f64, f64)) -> (f64, f64) {
     let anchor = screen_to_ll(center, zoom, off);
     let (z, scale) = (level(new_zoom), tile_scale(new_zoom));
     let (ax, ay) = project(anchor.0, anchor.1, z);

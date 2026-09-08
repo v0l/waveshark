@@ -382,7 +382,7 @@ fn sync_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(cell)))
             .with_detail(detail)
             .with_fields(fields)
-            .with_modulation("GMSK")
+            .with_modulation(common::Modulation::Gmsk)
             // The ten parity bits held in the demodulator, which is a real
             // check and the only reason this burst exists rather than a
             // Viterbi decoder's best guess at noise.
@@ -526,7 +526,7 @@ fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("GMSK")
+        .with_modulation(common::Modulation::Gmsk)
         // Forty bits of Fire code held over the block before it left the
         // demodulator.
         .with_crc(Some(true));

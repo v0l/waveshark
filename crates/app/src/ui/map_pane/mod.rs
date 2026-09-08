@@ -188,20 +188,13 @@ impl Map<'_> {
         place
     }
 
-
     /// The handle between the map and the table, and the drag that moves it.
     ///
     /// The same grip the scope pane uses, because it is the same gesture: a
     /// pane split two ways where which half matters changes with what is
     /// being watched. Follows the pointer rather than accumulating deltas,
     /// so a long drag cannot leave the divider behind the cursor.
-    fn divider(
-        ui: &mut egui::Ui,
-        top: f32,
-        usable: f32,
-        frac: f32,
-        splitting: &mut bool,
-    ) -> f32 {
+    fn divider(ui: &mut egui::Ui, top: f32, usable: f32, frac: f32, splitting: &mut bool) -> f32 {
         let (grip, resp) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), SPLIT_GRIP_H),
             Sense::click_and_drag(),
@@ -269,11 +262,7 @@ impl Map<'_> {
         });
         set
     }
-    fn track_rows(
-        ui: &mut egui::Ui,
-        active: &[&crate::tracks::Track],
-        now: std::time::Instant,
-    ) {
+    fn track_rows(ui: &mut egui::Ui, active: &[&crate::tracks::Track], now: std::time::Instant) {
         use crate::tracks::Kind;
         let count = |k: Kind| active.iter().filter(|t| t.kind() == k).count();
         ui.horizontal(|ui| {
@@ -281,14 +270,12 @@ impl Map<'_> {
                 theme::Line::new().legend("tracks").value(active.len().to_string()).size(12.0);
             // Broken down by kind, because "14 tracks" on a coast says nothing
             // about whether the aircraft or the shipping is being heard.
-            for (k, name) in
-                [
-                    (Kind::Aircraft, "aircraft"),
-                    (Kind::Vessel, "vessels"),
-                    (Kind::Vehicle, "vehicles"),
-                    (Kind::Station, "stations"),
-                ]
-            {
+            for (k, name) in [
+                (Kind::Aircraft, "aircraft"),
+                (Kind::Vessel, "vessels"),
+                (Kind::Vehicle, "vehicles"),
+                (Kind::Station, "stations"),
+            ] {
                 let n = count(k);
                 if n > 0 {
                     line = line.gap(16.0).legend(name).value(n.to_string()).size(12.0);
@@ -329,157 +316,176 @@ impl Map<'_> {
         // window is narrower than that.
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 60.0;
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
-        ui.set_min_width(width);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
-        let p = ui.painter_at(rect);
-        let mut x = rect.left();
-        for (name, w) in COLS {
-            widgets::cell(&p, rect, x, w, name, theme::LEGEND);
-            x += w;
-        }
-        widgets::cell(&p, rect, x, rect.right() - x, "age", theme::LEGEND);
-        p.line_segment(
-            [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
-            Stroke::new(1.0, theme::ETCH),
-        );
-
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (n, a) in active.iter().enumerate() {
-                let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
-                if !ui.is_rect_visible(rect) {
-                    continue;
-                }
-                let p = ui.painter_at(rect);
-                if n % 2 == 1 {
-                    p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
-                }
-                let dash = "-".to_string();
-                // The one column that differs by kind: an aircraft is placed
-                // vertically by its altitude, a vessel by what it is doing.
-                // What a radar's interrogations got out of it, which no
-                // broadcast carries: the code the crew set, and the weather
-                // the aircraft is flying through.
-                let (squawk, weather) = match &a.detail {
-                    crate::tracks::Detail::Aircraft { squawk, wind, temp_c, .. } => (
-                        squawk.map(|s| format!("{s:04}")).unwrap_or_default(),
-                        match (wind, temp_c) {
-                            (Some((kt, deg)), Some(t)) => {
-                                format!("{deg:.0}/{kt:.0} kt  {t:.0} C")
-                            }
-                            (Some((kt, deg)), None) => format!("{deg:.0}/{kt:.0} kt"),
-                            (None, Some(t)) => format!("{t:.0} C"),
-                            (None, None) => String::new(),
-                        },
-                    ),
-                    crate::tracks::Detail::Mesh { temperature_c, humidity_pct, pressure_hpa, .. } => {
-                        let mut parts = Vec::new();
-                        if let Some(t) = temperature_c {
-                            parts.push(format!("{t:.1} C"));
-                        }
-                        if let Some(h) = humidity_pct {
-                            parts.push(format!("{h:.0}%"));
-                        }
-                        if let Some(p) = pressure_hpa {
-                            parts.push(format!("{p:.0} hPa"));
-                        }
-                        (String::new(), parts.join("  "))
-                    }
-                    _ => (String::new(), String::new()),
-                };
-                let alt = match &a.detail {
-                    crate::tracks::Detail::Aircraft { altitude_ft, .. }
-                    | crate::tracks::Detail::Aprs { altitude_ft, .. } => {
-                        altitude_ft.map(|v| format!("{v} ft"))
-                    }
-                    crate::tracks::Detail::Mesh { altitude_m, .. } => altitude_m.map(|v| format!("{v} m")),
-                    _ => None,
-                }
-                .unwrap_or_else(|| dash.clone());
-                let (state, state_col) = match &a.detail {
-                    crate::tracks::Detail::Aircraft { vertical_rate_fpm, .. } => (
-                        match vertical_rate_fpm {
-                            Some(v) if *v > 128 => format!("climbing {v} fpm"),
-                            Some(v) if *v < -128 => format!("descending {} fpm", -v),
-                            Some(_) => "level".to_string(),
-                            None => dash.clone(),
-                        },
-                        // Climb and descent are worth telling apart at a
-                        // glance; level flight is not worth colouring at all.
-                        match vertical_rate_fpm {
-                            Some(v) if *v > 128 => CRC_OK,
-                            Some(v) if *v < -128 => theme::READOUT,
-                            _ => theme::VALUE,
-                        },
-                    ),
-                    crate::tracks::Detail::Vessel { nav_status, ship_type, .. } => (
-                        nav_status
-                            .or(*ship_type)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| dash.clone()),
-                        theme::LEGEND,
-                    ),
-                    crate::tracks::Detail::Station { aid } => (
-                        if *aid { "navigation mark".into() } else { "shore station".into() },
-                        theme::LEGEND,
-                    ),
-                    // An APRS station says what it is in a comment more often
-                    // than in any field, so that is what the column shows.
-                    crate::tracks::Detail::Aprs { comment, .. } => {
-                        (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
-                    }
-                    crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
-                        let mut parts = Vec::new();
-                        if let Some(s) = short_name {
-                            parts.push(s.clone());
-                        }
-                        if let Some(b) = battery_pct {
-                            parts.push(if *b > 100 { "on power".into() } else { format!("{b}%") });
-                        }
-                        (if parts.is_empty() { dash.clone() } else { parts.join(", ") }, theme::LEGEND)
-                    }
-                    crate::tracks::Detail::MeshCore { role, .. } => (role.to_string(), theme::LEGEND),
-                };
-                let kind = match a.kind() {
-                    Kind::Aircraft => "air",
-                    Kind::Vessel => "sea",
-                    Kind::Vehicle => "land",
-                    Kind::Station => "fixed",
-                };
-                let text = [
-                    (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
-                    (a.id.text(), theme::VALUE),
-                    (a.id.system().to_string(), theme::LEGEND),
-                    (kind.to_string(), theme::LEGEND),
-                    (state, state_col),
-                    (
-                        a.speed_kt.map(|v| format!("{v:.0} kt")).unwrap_or_else(|| dash.clone()),
-                        theme::VALUE,
-                    ),
-                    (
-                        a.course_deg.map(|v| format!("{v:.0}")).unwrap_or_else(|| dash.clone()),
-                        theme::LEGEND,
-                    ),
-                    (
-                        a.position
-                            .map(|(lat, lon)| format!("{lat:.4}, {lon:.4}"))
-                            .unwrap_or_else(|| dash.clone()),
-                        theme::TRACE,
-                    ),
-                    (alt, theme::VALUE),
-                    (squawk, theme::VALUE),
-                    (weather, theme::TRACE),
-                    (a.messages.to_string(), theme::LEGEND),
-                ];
-                let mut x = rect.left();
-                for ((t, c), (_, w)) in text.iter().zip(COLS) {
-                    widgets::cell(&p, rect, x, w, t, *c);
-                    x += w;
-                }
-                let age = a.age(now).as_secs();
-                widgets::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
+            ui.set_min_width(width);
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+            let p = ui.painter_at(rect);
+            let mut x = rect.left();
+            for (name, w) in COLS {
+                widgets::cell(&p, rect, x, w, name, theme::LEGEND);
+                x += w;
             }
-        });
+            widgets::cell(&p, rect, x, rect.right() - x, "age", theme::LEGEND);
+            p.line_segment(
+                [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
+                Stroke::new(1.0, theme::ETCH),
+            );
+
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (n, a) in active.iter().enumerate() {
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let p = ui.painter_at(rect);
+                    if n % 2 == 1 {
+                        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                    }
+                    let dash = "-".to_string();
+                    // The one column that differs by kind: an aircraft is placed
+                    // vertically by its altitude, a vessel by what it is doing.
+                    // What a radar's interrogations got out of it, which no
+                    // broadcast carries: the code the crew set, and the weather
+                    // the aircraft is flying through.
+                    let (squawk, weather) = match &a.detail {
+                        crate::tracks::Detail::Aircraft { squawk, wind, temp_c, .. } => (
+                            squawk.map(|s| format!("{s:04}")).unwrap_or_default(),
+                            match (wind, temp_c) {
+                                (Some((kt, deg)), Some(t)) => {
+                                    format!("{deg:.0}/{kt:.0} kt  {t:.0} C")
+                                }
+                                (Some((kt, deg)), None) => format!("{deg:.0}/{kt:.0} kt"),
+                                (None, Some(t)) => format!("{t:.0} C"),
+                                (None, None) => String::new(),
+                            },
+                        ),
+                        crate::tracks::Detail::Mesh {
+                            temperature_c,
+                            humidity_pct,
+                            pressure_hpa,
+                            ..
+                        } => {
+                            let mut parts = Vec::new();
+                            if let Some(t) = temperature_c {
+                                parts.push(format!("{t:.1} C"));
+                            }
+                            if let Some(h) = humidity_pct {
+                                parts.push(format!("{h:.0}%"));
+                            }
+                            if let Some(p) = pressure_hpa {
+                                parts.push(format!("{p:.0} hPa"));
+                            }
+                            (String::new(), parts.join("  "))
+                        }
+                        _ => (String::new(), String::new()),
+                    };
+                    let alt = match &a.detail {
+                        crate::tracks::Detail::Aircraft { altitude_ft, .. }
+                        | crate::tracks::Detail::Aprs { altitude_ft, .. } => {
+                            altitude_ft.map(|v| format!("{v} ft"))
+                        }
+                        crate::tracks::Detail::Mesh { altitude_m, .. } => {
+                            altitude_m.map(|v| format!("{v} m"))
+                        }
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| dash.clone());
+                    let (state, state_col) = match &a.detail {
+                        crate::tracks::Detail::Aircraft { vertical_rate_fpm, .. } => (
+                            match vertical_rate_fpm {
+                                Some(v) if *v > 128 => format!("climbing {v} fpm"),
+                                Some(v) if *v < -128 => format!("descending {} fpm", -v),
+                                Some(_) => "level".to_string(),
+                                None => dash.clone(),
+                            },
+                            // Climb and descent are worth telling apart at a
+                            // glance; level flight is not worth colouring at all.
+                            match vertical_rate_fpm {
+                                Some(v) if *v > 128 => CRC_OK,
+                                Some(v) if *v < -128 => theme::READOUT,
+                                _ => theme::VALUE,
+                            },
+                        ),
+                        crate::tracks::Detail::Vessel { nav_status, ship_type, .. } => (
+                            nav_status
+                                .or(*ship_type)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| dash.clone()),
+                            theme::LEGEND,
+                        ),
+                        crate::tracks::Detail::Station { aid } => (
+                            if *aid { "navigation mark".into() } else { "shore station".into() },
+                            theme::LEGEND,
+                        ),
+                        // An APRS station says what it is in a comment more often
+                        // than in any field, so that is what the column shows.
+                        crate::tracks::Detail::Aprs { comment, .. } => {
+                            (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
+                        }
+                        crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
+                            let mut parts = Vec::new();
+                            if let Some(s) = short_name {
+                                parts.push(s.clone());
+                            }
+                            if let Some(b) = battery_pct {
+                                parts.push(if *b > 100 {
+                                    "on power".into()
+                                } else {
+                                    format!("{b}%")
+                                });
+                            }
+                            (
+                                if parts.is_empty() { dash.clone() } else { parts.join(", ") },
+                                theme::LEGEND,
+                            )
+                        }
+                        crate::tracks::Detail::MeshCore { role, .. } => {
+                            (role.to_string(), theme::LEGEND)
+                        }
+                    };
+                    let kind = match a.kind() {
+                        Kind::Aircraft => "air",
+                        Kind::Vessel => "sea",
+                        Kind::Vehicle => "land",
+                        Kind::Station => "fixed",
+                    };
+                    let text = [
+                        (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
+                        (a.id.text(), theme::VALUE),
+                        (a.id.system().to_string(), theme::LEGEND),
+                        (kind.to_string(), theme::LEGEND),
+                        (state, state_col),
+                        (
+                            a.speed_kt
+                                .map(|v| format!("{v:.0} kt"))
+                                .unwrap_or_else(|| dash.clone()),
+                            theme::VALUE,
+                        ),
+                        (
+                            a.course_deg.map(|v| format!("{v:.0}")).unwrap_or_else(|| dash.clone()),
+                            theme::LEGEND,
+                        ),
+                        (
+                            a.position
+                                .map(|(lat, lon)| format!("{lat:.4}, {lon:.4}"))
+                                .unwrap_or_else(|| dash.clone()),
+                            theme::TRACE,
+                        ),
+                        (alt, theme::VALUE),
+                        (squawk, theme::VALUE),
+                        (weather, theme::TRACE),
+                        (a.messages.to_string(), theme::LEGEND),
+                    ];
+                    let mut x = rect.left();
+                    for ((t, c), (_, w)) in text.iter().zip(COLS) {
+                        widgets::cell(&p, rect, x, w, t, *c);
+                        x += w;
+                    }
+                    let age = a.age(now).as_secs();
+                    widgets::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
+                }
+            });
         });
     }
 }

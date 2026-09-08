@@ -289,10 +289,7 @@ impl LiveTranscribeNode {
 
     /// Seconds of audio held for a key, for tests and for a status line.
     pub fn held_seconds(&self, key: &str) -> f64 {
-        self.talking
-            .get(key)
-            .map(|t| t.pcm.len() as f64 / t.rate)
-            .unwrap_or(0.0)
+        self.talking.get(key).map(|t| t.pcm.len() as f64 / t.rate).unwrap_or(0.0)
     }
 }
 
@@ -404,7 +401,9 @@ mod work {
         /// enough has arrived since the last one, and nothing while the model
         /// still has the previous window.
         pub(super) fn pump(&mut self, key: &str) {
-            let Some(t) = self.talking.get(key) else { return };
+            let Some(t) = self.talking.get(key) else {
+                return;
+            };
             if t.waiting {
                 return;
             }
@@ -425,7 +424,9 @@ mod work {
 
         /// Send what is held for a key to the model.
         pub(super) fn ask(&mut self, key: &str, settled: bool) {
-            let Some(t) = self.talking.get(key) else { return };
+            let Some(t) = self.talking.get(key) else {
+                return;
+            };
             if t.waiting {
                 return;
             }
@@ -492,9 +493,7 @@ impl Simple for LiveTranscribeNode {
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Voice {
-            return Err(common::Error::other(
-                "the live transcriber reads the audio bus tap",
-            ));
+            return Err(common::Error::other("the live transcriber reads the audio bus tap"));
         }
         Ok(i.spec.clone())
     }
@@ -574,7 +573,14 @@ pub const LIVE: Duration = Duration::from_secs(10);
 mod tests {
     use super::*;
 
-    fn voice(system: &'static str, hz: f64, to: Option<&str>, from: Option<&str>, level: f32, n: usize) -> common::Voice {
+    fn voice(
+        system: &'static str,
+        hz: f64,
+        to: Option<&str>,
+        from: Option<&str>,
+        level: f32,
+        n: usize,
+    ) -> common::Voice {
         common::Voice {
             system,
             channel_hz: hz,
@@ -630,10 +636,7 @@ mod tests {
         for _ in 0..8 {
             n.collect(key.clone(), &quiet, block, at);
         }
-        assert!(
-            n.collect(key.clone(), &quiet, block, at),
-            "the utterance never ended"
-        );
+        assert!(n.collect(key.clone(), &quiet, block, at), "the utterance never ended");
         assert!(n.held_seconds(&key) > 1.0, "the audio was thrown away");
     }
 
@@ -735,11 +738,7 @@ mod tests {
         }
         let u = n.log().latest(key).expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
-        assert!(
-            u.text.to_lowercase().contains("country"),
-            "read as {:?}",
-            u.text
-        );
+        assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
     }
 
     #[test]
@@ -757,6 +756,9 @@ mod tests {
         }
         assert_eq!(log.keys().len(), MAX_KEYS);
         assert!(log.of("Audio:0::").is_empty(), "the oldest conversation was kept");
-        assert_eq!(log.latest(&format!("Audio:{}::", MAX_KEYS + 7)).unwrap().text, format!("{}", MAX_KEYS + 7));
+        assert_eq!(
+            log.latest(&format!("Audio:{}::", MAX_KEYS + 7)).unwrap().text,
+            format!("{}", MAX_KEYS + 7)
+        );
     }
 }

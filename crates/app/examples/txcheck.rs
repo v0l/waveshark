@@ -27,8 +27,8 @@ fn main() {
     let mut spec = Spectrum::new(N);
     spec.smoothing = 1.0;
     // Bins run lowest frequency first with DC in the middle.
-    let bin = (N as i64 / 2 + (offset / actual * N as f64).round() as i64)
-        .clamp(0, N as i64 - 1) as usize;
+    let bin = (N as i64 / 2 + (offset / actual * N as f64).round() as i64).clamp(0, N as i64 - 1)
+        as usize;
 
     let mut s = d.start_rx().unwrap();
     let t = std::time::Instant::now();

@@ -1,43 +1,43 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-mod prof;
-mod wheel;
-mod chain;
-mod bands;
 mod audiobus;
-mod videobus;
+mod bands;
+mod beacondb;
 mod callrec;
 mod calls;
+mod chain;
+mod chainview;
+mod data;
 mod devices;
+mod dial;
 mod i18n;
 mod icons;
 mod keystore;
 mod links;
-mod meshnode;
 mod locale;
-mod dial;
-mod tracks;
-mod transcripts;
 mod map;
+mod memory;
+mod meshnode;
 mod messages;
-mod data;
-mod sats;
-mod beacondb;
 mod packetlog;
 mod patch;
-mod chainview;
-mod theme;
+mod prof;
 mod radio;
 mod record;
+mod sats;
 mod scanners;
-mod memory;
 mod session;
-mod station;
 mod shutdown;
+mod station;
+mod theme;
+mod tracks;
+mod transcripts;
 mod ui;
 mod update;
+mod videobus;
 mod waterfall;
+mod wheel;
 
 /// `--probe <mhz>` runs the radio thread without a window and reports what the
 /// waterfall would be drawing, so the signal path can be checked over ssh.
@@ -67,7 +67,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         squelch_db: None,
         voice: false,
         agc: true,
-            tx: None,
+        tx: None,
     }]));
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -75,7 +75,9 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
     let start = std::time::Instant::now();
     while start.elapsed().as_secs_f32() < 6.0 {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let Some(st) = r.status.channel_state(1) else { continue };
+        let Some(st) = r.status.channel_state(1) else {
+            continue;
+        };
         readings.push((st.squelch_db, st.agc_gain_db, st.squelch_open));
     }
     r.send(radio::Cmd::Stop);
@@ -105,9 +107,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
     let all = devices::list();
     let Some(entry) = want
         .and_then(|w| {
-            all.iter()
-                .find(|d| d.label.to_lowercase().contains(&w.to_lowercase()))
-                .cloned()
+            all.iter().find(|d| d.label.to_lowercase().contains(&w.to_lowercase())).cloned()
         })
         .or_else(|| all.into_iter().next())
     else {
@@ -141,7 +141,9 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
     // and radiotext is sixteen, repeated every couple of seconds.
     let secs = if listen { 25 } else { 8 };
     while start.elapsed().as_secs() < secs {
-        let Ok(f) = r.frames.recv_timeout(std::time::Duration::from_secs(3)) else { break };
+        let Ok(f) = r.frames.recv_timeout(std::time::Duration::from_secs(3)) else {
+            break;
+        };
         n += 1;
         if n % 20 != 0 {
             continue;
@@ -186,10 +188,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
         }
     }
     let dropped = r.status.dropped.load(std::sync::atomic::Ordering::Relaxed);
-    println!(
-        "\n{n} frames in {:.1}s   dropped {dropped}",
-        start.elapsed().as_secs_f64()
-    );
+    println!("\n{n} frames in {:.1}s   dropped {dropped}", start.elapsed().as_secs_f64());
     let err = r.status.error.lock().clone();
     if let Some(e) = err {
         println!("error: {e}");
@@ -484,9 +483,7 @@ fn scan(
     let Some(entry) = want
         .as_ref()
         .and_then(|w| {
-            all.iter()
-                .find(|d| d.label.to_lowercase().contains(&w.to_lowercase()))
-                .cloned()
+            all.iter().find(|d| d.label.to_lowercase().contains(&w.to_lowercase())).cloned()
         })
         .or_else(|| all.into_iter().next())
     else {
@@ -494,7 +491,8 @@ fn scan(
         return;
     };
     let rate = span_khz * 1e3;
-    let r = radio::Radio::start(entry.clone(), Hz((mhz * 1e6) as u64), Sps(rate as u64), 1024, || {});
+    let r =
+        radio::Radio::start(entry.clone(), Hz((mhz * 1e6) as u64), Sps(rate as u64), 1024, || {});
     r.send(radio::Cmd::DcBlock(dc_on));
     r.send(radio::Cmd::Decode(true));
     if let Some((lat, lon)) = location {
@@ -595,10 +593,7 @@ fn replay(path: &str) -> anyhow::Result<()> {
             Err(e) => println!("{name}: {e}"),
         }
     }
-    println!(
-        "\n{} capture(s): {decoded} decoded, {unknown} unknown",
-        files.len()
-    );
+    println!("\n{} capture(s): {decoded} decoded, {unknown} unknown", files.len());
     Ok(())
 }
 
@@ -612,8 +607,7 @@ fn replay(path: &str) -> anyhow::Result<()> {
 /// `LAT,LON` in decimal degrees, from the command line or the station field.
 /// A GPS source as the operator writes one on the command line.
 fn parse_gps(s: &str) -> Result<gps::Transport, String> {
-    gps::Transport::parse(s)
-        .ok_or_else(|| format!("{s:?} is not a serial port or a gpsd address"))
+    gps::Transport::parse(s).ok_or_else(|| format!("{s:?} is not a serial port or a gpsd address"))
 }
 
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
@@ -846,7 +840,9 @@ fn m17_dump(path: &std::path::Path) {
     let mut runs: Vec<Vec<(u16, [u8; 16])>> = Vec::new();
     let mut setups = 0usize;
     for p in &packets {
-        let common::PacketBody::Frame(fr) = &p.body else { continue };
+        let common::PacketBody::Frame(fr) = &p.body else {
+            continue;
+        };
         let b = &fr.bytes;
         match Event::parse(b) {
             Some(Event::LinkSetup { lsf, .. }) => {
@@ -878,14 +874,12 @@ fn m17_dump(path: &std::path::Path) {
             run.last().map(|(n, _)| *n),
         );
         for (n, p) in run.iter().take(3) {
-            println!("  frame {n:>3}: {}", p.iter().map(|b| format!("{b:02x}")).collect::<String>());
+            println!(
+                "  frame {n:>3}: {}",
+                p.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
         }
-        println!(
-            "  {} samples, peak {:.1} dBFS, rms {:.1} dBFS",
-            pcm.len(),
-            db(peak),
-            db(rms)
-        );
+        println!("  {} samples, peak {:.1} dBFS, rms {:.1} dBFS", pcm.len(), db(peak), db(rms));
         // The payloads as they were on the air, for taking apart with
         // anything else that speaks Codec 2.
         let out = path.with_extension(format!("stream{i}.c2"));

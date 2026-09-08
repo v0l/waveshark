@@ -246,7 +246,7 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut d = Decoded::bytes(model, center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("4FSK");
+        .with_modulation(common::Modulation::Fsk4);
     d.link = lc_link(flags, dst, src);
     if flags & FLAG_HAVE_LC != 0 {
         d.identity = Some(common::Identity::new("dmr", src.to_string()));
@@ -274,7 +274,7 @@ fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut d = Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
         .with_detail(detail)
         .with_fields(fields)
-        .with_modulation("4FSK");
+        .with_modulation(common::Modulation::Fsk4);
     d.link = lc_link(flags, dst, src);
     if flags & FLAG_HAVE_LC != 0 {
         d.identity = Some(common::Identity::new("dmr", src.to_string()));

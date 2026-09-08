@@ -220,7 +220,8 @@ impl Dial {
             if digits[i] != 0 || dec <= 6 {
                 leading = false;
             }
-            let cell = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(digit_w, rect.height()));
+            let cell =
+                Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(digit_w, rect.height()));
             let is_hot = hover.is_some_and(|h| cell.x_range().contains(h.x) && rect.contains(h));
             if is_hot {
                 hot = Some(dec);

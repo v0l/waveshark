@@ -48,9 +48,7 @@ impl Log<'_> {
             .max_size((ui.ctx().content_rect().height() - 160.0).max(240.0))
             .show_separator_line(true)
             .frame(
-                egui::Frame::NONE
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
+                egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ui, |ui| {
                 self.log_header(ui);
@@ -76,7 +74,8 @@ impl Log<'_> {
                 // outside the panel's clip rect.
                 let gap = ui.spacing().item_spacing.y;
                 let (inspect_h, gaps) = if selected.is_some() {
-                    self.st.inspector_h = self.st.inspector_h.clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
+                    self.st.inspector_h =
+                        self.st.inspector_h.clamp(INSPECTOR_MIN_H, inspector_max(avail, gap));
                     (self.st.inspector_h, gap * 2.0)
                 } else {
                     (0.0, 0.0)
@@ -90,22 +89,22 @@ impl Log<'_> {
                 // content asks for as much room as it has rows, the panel
                 // grows to match, and the headings are pushed off the top of
                 // the window they are supposed to be pinned to.
-                egui::ScrollArea::horizontal()
-                    .auto_shrink([false, false])
-                    .max_height(list_h)
-                    .show(ui, |ui| {
-                    let w = ui.available_width().max(Self::table_width());
-                    ui.set_min_width(w);
-                    if !self.st.decodes.is_empty() {
-                        self.log_header_row(ui, w);
-                    }
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height((list_h - widgets::ROW_H).max(16.0))
-                        .stick_to_bottom(true)
-                        .id_salt("packet_rows")
-                        .show(ui, |ui| self.log_rows(ui, w));
-                });
+                egui::ScrollArea::horizontal().auto_shrink([false, false]).max_height(list_h).show(
+                    ui,
+                    |ui| {
+                        let w = ui.available_width().max(Self::table_width());
+                        ui.set_min_width(w);
+                        if !self.st.decodes.is_empty() {
+                            self.log_header_row(ui, w);
+                        }
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height((list_h - widgets::ROW_H).max(16.0))
+                            .stick_to_bottom(true)
+                            .id_salt("packet_rows")
+                            .show(ui, |ui| self.log_rows(ui, w));
+                    },
+                );
                 if let Some(rec) = &selected {
                     self.inspector(ui, rec, inspect_h, avail);
                 }
@@ -136,7 +135,10 @@ impl Log<'_> {
         let y = hrect.center().y;
         ui.painter().line_segment(
             [Pos2::new(hrect.left(), y), Pos2::new(hrect.right(), y)],
-            Stroke::new(1.0, if hresp.hovered() || hresp.dragged() { theme::READOUT } else { theme::ETCH }),
+            Stroke::new(
+                1.0,
+                if hresp.hovered() || hresp.dragged() { theme::READOUT } else { theme::ETCH },
+            ),
         );
         // The body, in the rest of the height regardless of what it holds.
         let body_h = (height - HANDLE_H).max(8.0);
@@ -190,7 +192,11 @@ impl Log<'_> {
                 // builds and drops candidates by the second, and a status
                 // that named each of them flickered with every source.
                 let running: Vec<&str> = if self.decode_on {
-                    self.scanners.active(self.center, self.rate).iter().map(|s| s.name.as_str()).collect()
+                    self.scanners
+                        .active(self.center, self.rate)
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -214,11 +220,10 @@ impl Log<'_> {
                 .unwrap_or(0);
             if logged > 0 {
                 ui.add_space(10.0);
-                ui.label(legend(&format!("{logged} saved")))
-                    .on_hover_text(match &self.st.path {
-                        Some(d) => format!("appended to {}", d.display()),
-                        None => "appended to the packet log".into(),
-                    });
+                ui.label(legend(&format!("{logged} saved"))).on_hover_text(match &self.st.path {
+                    Some(d) => format!("appended to {}", d.display()),
+                    None => "appended to the packet log".into(),
+                });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {
@@ -288,9 +293,7 @@ impl Log<'_> {
             let running = self.scanners.active(self.center, self.rate);
             let waiting = match (self.decode_on, running.as_slice()) {
                 (false, _) => "decoding is off".to_string(),
-                (true, []) => {
-                    "no scanner covers this span: press SCAN to add one".to_string()
-                }
+                (true, []) => "no scanner covers this span: press SCAN to add one".to_string(),
                 (true, blocks) => {
                     let names: Vec<&str> = blocks.iter().map(|s| s.name.as_str()).collect();
                     format!("{} running, nothing heard yet", names.join(", "))

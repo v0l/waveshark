@@ -260,10 +260,7 @@ impl Icon {
                 for i in 0..3 {
                     let y = b.top() + b.height() * (0.15 + 0.35 * i as f32);
                     p.line_segment(
-                        [
-                            Pos2::new(b.left(), y),
-                            Pos2::new(b.left() + b.width() * 0.18, y),
-                        ],
+                        [Pos2::new(b.left(), y), Pos2::new(b.left() + b.width() * 0.18, y)],
                         s,
                     );
                     p.line_segment(

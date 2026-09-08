@@ -23,7 +23,12 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn local(kind: DriverKind, index: usize, label: String, rates: std::ops::RangeInclusive<Sps>) -> Self {
+    fn local(
+        kind: DriverKind,
+        index: usize,
+        label: String,
+        rates: std::ops::RangeInclusive<Sps>,
+    ) -> Self {
         Self { kind, index, label, rates, addr: None, pinned: None }
     }
 }
@@ -146,7 +151,11 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
 /// Serial tails identify a unit; the leading zeros do not.
 fn short(s: &str) -> String {
     let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
+    if t.len() > 8 {
+        t[t.len() - 8..].to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
@@ -195,10 +204,8 @@ impl Span {
 /// at, and a span narrower than the demodulator's own IF cannot be listened
 /// to.
 pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
-    let mut out: Vec<Span> = spans_for(range)
-        .into_iter()
-        .map(|(label, rate)| Span { label, rate, zoom: 1 })
-        .collect();
+    let mut out: Vec<Span> =
+        spans_for(range).into_iter().map(|(label, rate)| Span { label, rate, zoom: 1 }).collect();
     // A device pinned to one rate is usually not on a round number, so none of
     // the candidates fall inside it. Its own rate is then the only span there
     // is, and offering nothing would leave the receiver unable to start.
@@ -206,7 +213,9 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
         let rate = range.end().as_f64();
         out.push(Span { label: label(rate), rate, zoom: 1 });
     }
-    let Some(base) = out.first().map(|s| s.rate) else { return out };
+    let Some(base) = out.first().map(|s| s.rate) else {
+        return out;
+    };
     let mut zoom = 2;
     while base / zoom as f64 >= 48_000.0 && zoom <= 64 {
         out.insert(0, Span { label: label(base / zoom as f64), rate: base, zoom });
@@ -235,11 +244,7 @@ pub fn spans_for(range: &std::ops::RangeInclusive<Sps>) -> Vec<(String, f64)> {
         61_440_000.0,
     ];
     let (lo, hi) = (range.start().0 as f64, range.end().0 as f64);
-    CANDIDATES
-        .iter()
-        .filter(|r| **r >= lo && **r <= hi)
-        .map(|r| (label(*r), *r))
-        .collect()
+    CANDIDATES.iter().filter(|r| **r >= lo && **r <= hi).map(|r| (label(*r), *r)).collect()
 }
 
 fn label(hz: f64) -> String {

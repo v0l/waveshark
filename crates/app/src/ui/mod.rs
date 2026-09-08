@@ -27,22 +27,22 @@
 mod burst;
 mod calls_pane;
 mod chain_pane;
-mod head;
 mod devices_pane;
+mod head;
 mod keys_pane;
-mod map_pane;
-mod sats_pane;
-mod mapview;
 mod links_pane;
+mod map_pane;
+mod mapview;
 mod messages_pane;
 mod packets;
+mod sats_pane;
 mod scope;
 mod scope_settings;
 mod settings;
 mod settings_rows;
 mod state;
-mod video_pane;
 mod strip;
+mod video_pane;
 pub(crate) mod widgets;
 
 use crate::bands;
@@ -52,6 +52,12 @@ use crate::radio::{
 };
 use crate::theme::{self, legend, value};
 use burst::*;
+use common::{GainMode, Hz, Sps};
+use egui::containers::{CentralPanel, Panel};
+use egui::{
+    Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
+    TextureOptions, Vec2,
+};
 use settings::RemoteEdit;
 use settings_rows::{mhz_field, ScannerRow};
 use state::{Channel, Logged};
@@ -59,9 +65,6 @@ use widgets::{
     bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title, reading, row,
     row_help, Fader, Squelch, Vu,
 };
-use common::{GainMode, Hz, Sps};
-use egui::containers::{CentralPanel, Panel};
-use egui::{Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions, Vec2};
 
 pub struct App {
     /// What each view remembers. A pane is handed its own and nothing else,
@@ -96,7 +99,6 @@ pub struct App {
 
     center: f64,
     rate: f64,
-
 
     dial: Dial,
     open: Option<Settings>,
@@ -144,6 +146,10 @@ pub struct App {
     country: String,
     /// OpenCelliD download token, as typed in the datasets pane.
     opencellid_token: String,
+    /// The Space-Track login, as typed in the same pane. Its catalogue query
+    /// is answered only while logged in.
+    spacetrack_identity: String,
+    spacetrack_password: String,
     /// Sound devices by name, empty for the system default. The speaker the
     /// mix comes out of, and the microphone a keyed channel transmits from.
     audio_out: String,
@@ -152,6 +158,10 @@ pub struct App {
     /// route to a radio setting writes and reads; see
     /// [`crate::session::RadioSettings`].
     radio_settings: crate::session::RadioSettings,
+    /// Reference correction by device label, as saved. The live figure is the
+    /// one in `radio_settings`; this is where the radios not in use keep
+    /// theirs, because a correction is a property of one crystal.
+    ppm_by_device: std::collections::BTreeMap<String, f64>,
     /// Whether the radio has a freshly opened device that has not yet been
     /// given the settings. Set on connect and on reset, cleared once the
     /// driver has reported its controls and the settings have gone to it.
@@ -214,13 +224,8 @@ const FFTS: [usize; 6] = [512, 1024, 2048, 4096, 8192, 16384];
 /// Spectrum refresh rates in frames per second.
 const REFRESH: [(&str, f32); 4] = [("10", 10.0), ("20", 20.0), ("30", 30.0), ("60", 60.0)];
 /// Waterfall scroll rates in rows per second.
-const SPEEDS: [(&str, f32); 5] = [
-    ("5", 5.0),
-    ("10", 10.0),
-    ("20", 20.0),
-    ("40", 40.0),
-    ("80", 80.0),
-];
+const SPEEDS: [(&str, f32); 5] =
+    [("5", 5.0), ("10", 10.0), ("20", 20.0), ("40", 40.0), ("80", 80.0)];
 
 /// What the main pane shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -294,8 +299,7 @@ fn background_runtime() -> tokio::runtime::Runtime {
 
 /// Bytes, in whatever unit keeps the number readable.
 fn human_bytes(n: u64) -> String {
-    const UNITS: [(&str, u64); 4] =
-        [("GB", 1 << 30), ("MB", 1 << 20), ("kB", 1 << 10), ("B", 1)];
+    const UNITS: [(&str, u64); 4] = [("GB", 1 << 30), ("MB", 1 << 20), ("kB", 1 << 10), ("B", 1)];
     for (name, size) in UNITS {
         if n >= size {
             return format!("{:.1} {name}", n as f64 / size as f64);
@@ -329,10 +333,7 @@ fn mean_position(active: &[&crate::tracks::Track]) -> Option<(f64, f64)> {
         return None;
     }
     let n = fixes.len() as f64;
-    Some((
-        fixes.iter().map(|f| f.0).sum::<f64>() / n,
-        fixes.iter().map(|f| f.1).sum::<f64>() / n,
-    ))
+    Some((fixes.iter().map(|f| f.0).sum::<f64>() / n, fixes.iter().map(|f| f.1).sum::<f64>() / n))
 }
 
 /// Colour of a packet whose integrity check passed.
@@ -425,9 +426,12 @@ impl Default for App {
             last_frame: None,
             country: String::new(),
             opencellid_token: String::new(),
+            spacetrack_identity: String::new(),
+            spacetrack_password: String::new(),
             audio_out: String::new(),
             audio_in: String::new(),
             radio_settings: Default::default(),
+            ppm_by_device: Default::default(),
             radio_dirty: false,
             feeds: Vec::new(),
             feed_host: String::new(),
@@ -460,6 +464,10 @@ impl App {
         // fetches it.
         crate::data::set_country(&s.country);
         crate::data::set_opencellid_token(&s.opencellid_token);
+        datasets::spacetrack::set_account(Some(datasets::spacetrack::Account {
+            identity: s.spacetrack_identity.clone(),
+            password: s.spacetrack_password.clone(),
+        }));
         // A radio on the network cannot be found by looking at the bus, so the
         // saved servers have to be registered before the list is built. Added
         // rather than set: the command line may already have put one there.
@@ -474,6 +482,7 @@ impl App {
             .as_deref()
             .and_then(|want| devices.iter().find(|d| d.label == want).cloned())
             .or_else(|| devices.first().cloned());
+        let radio_settings = s.radio(device.as_ref().map(|d| d.label.as_str()));
         let mut app = Self {
             devices,
             device,
@@ -488,9 +497,12 @@ impl App {
             accuracy_m: None,
             country: s.country.clone(),
             opencellid_token: s.opencellid_token.clone(),
+            spacetrack_identity: s.spacetrack_identity.clone(),
+            spacetrack_password: s.spacetrack_password.clone(),
             audio_out: s.audio_out.clone(),
             audio_in: s.audio_in.clone(),
-            radio_settings: s.radio(),
+            radio_settings,
+            ppm_by_device: s.ppm.clone(),
             feeds: s.feeds.clone(),
             log_cap_mb: s.log_cap_mb,
             capture_cap_mb: s.capture_cap_mb,
@@ -548,21 +560,20 @@ impl App {
             gains: rs.gains.clone(),
             toggles: rs.toggles.clone(),
             choices: rs.choices.clone(),
-            ppm: rs.ppm,
+            ppm: self.ppm_by_device.clone(),
             tx_gain_db: rs.tx_gain_db,
             location: self.location,
             language: crate::i18n::language().code().to_string(),
             country: self.country.clone(),
             opencellid_token: self.opencellid_token.clone(),
+            spacetrack_identity: self.spacetrack_identity.clone(),
+            spacetrack_password: self.spacetrack_password.clone(),
             audio_out: self.audio_out.clone(),
             audio_in: self.audio_in.clone(),
             band_plan: crate::bands::plan().id().to_string(),
             view: self.scope.prefs(),
             feeds: self.feeds.clone(),
-            streams: crate::devices::streams()
-                .into_iter()
-                .map(|r| (r.addr, r.label))
-                .collect(),
+            streams: crate::devices::streams().into_iter().map(|r| (r.addr, r.label)).collect(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
             volume: self.audio.volume,
@@ -612,7 +623,9 @@ impl App {
     /// rather than refused, so a session saved on one radio applies what it
     /// can to another.
     fn apply_radio_settings(&mut self) {
-        let Some(radio) = self.radio.as_ref() else { return };
+        let Some(radio) = self.radio.as_ref() else {
+            return;
+        };
         let controls = radio.status.radio();
         if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
         {
@@ -651,7 +664,9 @@ impl App {
         if !self.radio_dirty {
             return;
         }
-        let Some(radio) = self.radio.as_ref() else { return };
+        let Some(radio) = self.radio.as_ref() else {
+            return;
+        };
         let controls = radio.status.radio();
         if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
         {
@@ -711,7 +726,9 @@ impl App {
     /// what the map, the range rings and anything resolving a bearing against
     /// the receiver follow.
     fn follow_gps(&mut self) {
-        let Some(f) = crate::station::fix() else { return };
+        let Some(f) = crate::station::fix() else {
+            return;
+        };
         self.accuracy_m = f.accuracy_m();
         let moved = self
             .location
@@ -726,7 +743,8 @@ impl App {
 
     /// Turn the packet log off, or point it somewhere other than the default.
     pub fn set_packet_log(&mut self, off: bool, dir: Option<std::path::PathBuf>) {
-        self.log.path = if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
+        self.log.path =
+            if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
         let dir = self.log.path.clone();
         self.send(Cmd::PacketLog(dir));
     }
@@ -758,6 +776,15 @@ impl App {
     pub fn set_rf_gain(&mut self, db: f32) {
         self.radio_settings.set_gain("tuner", common::GainMode::Manual(db));
         self.radio_dirty = true;
+    }
+
+    /// Correct the reference of the radio in use, and record the figure
+    /// against that radio so it is not applied to the next one.
+    pub fn set_ppm(&mut self, ppm: f64) {
+        self.radio_settings.ppm = ppm;
+        if let Some(d) = self.device.as_ref() {
+            self.ppm_by_device.insert(d.label.clone(), ppm);
+        }
     }
 
     /// Start on the radio whose label contains `want`, for when several are
@@ -942,6 +969,10 @@ impl App {
             self.scope.wf_center = self.center;
             self.scope.db_center = self.center;
         }
+        // The correction belongs to the crystal, not to the receiver: the
+        // radio being put down keeps its figure and the one picked up brings
+        // its own, which is zero until somebody has calibrated it.
+        self.radio_settings.ppm = self.ppm_by_device.get(&e.label).copied().unwrap_or(0.0);
         self.device = Some(e);
         self.audio.listening = None;
         self.connect(ctx);
@@ -1094,7 +1125,8 @@ impl App {
             }
             self.slide_waterfall(f.center, f.db.len());
 
-            let due = self.scope
+            let due = self
+                .scope
                 .wf_last
                 .map(|t| t.elapsed().as_secs_f32() >= 1.0 / self.scope.rows_per_sec)
                 .unwrap_or(true);
@@ -1103,7 +1135,11 @@ impl App {
                 // wants headroom so peaks are not clipped flat, the colour
                 // ramp wants the opposite or its hottest colours go unused.
                 let pending = std::mem::take(&mut self.scope.wf_pending);
-                    self.scope.wf.push(&pending, self.scope.floor, self.scope.ceil - self.scope.wf_top_offset);
+                self.scope.wf.push(
+                    &pending,
+                    self.scope.floor,
+                    self.scope.ceil - self.scope.wf_top_offset,
+                );
                 self.scope.wf_pending = pending;
                 self.scope.wf_pending.fill(f32::MIN);
                 self.scope.wf_last = Some(std::time::Instant::now());
@@ -1368,13 +1404,7 @@ impl App {
             Some(r) => (r.status.video(), r.status.video_inputs()),
             None => (None, Vec::new()),
         };
-        video_pane::VideoPane {
-            st: &mut self.video,
-            frame,
-            inputs,
-            cmds: &mut self.cmds,
-        }
-        .show(ui);
+        video_pane::VideoPane { st: &mut self.video, frame, inputs, cmds: &mut self.cmds }.show(ui);
     }
 
     /// Draw the message list, then do what its buttons asked for.
@@ -1475,10 +1505,8 @@ impl App {
         if self.survey.db.is_none() {
             self.survey.db = survey::Db::open_read(&path).ok();
         }
-        let due = self
-            .survey
-            .refreshed
-            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+        let due =
+            self.survey.refreshed.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
         if !due {
             return;
         }
@@ -1529,11 +1557,9 @@ impl App {
             return;
         };
         let out = path.with_extension("wigle.csv");
-        let written = std::fs::File::create(&out)
-            .map_err(|e| e.to_string())
-            .and_then(|mut f| {
-                survey::write_wigle(db, survey::Query::default(), &mut f).map_err(|e| e.to_string())
-            });
+        let written = std::fs::File::create(&out).map_err(|e| e.to_string()).and_then(|mut f| {
+            survey::write_wigle(db, survey::Query::default(), &mut f).map_err(|e| e.to_string())
+        });
         // The same banner a radio fault uses: an export is a thing that
         // happened once, and it should say so and then get out of the way.
         self.err = Some(match written {
@@ -1556,11 +1582,7 @@ impl App {
 
     /// The pass table, and what its buttons asked for.
     fn sats_view(&mut self, ui: &mut egui::Ui) {
-        let acts = sats_pane::Sats {
-            st: &mut self.sats,
-            home: self.location,
-        }
-        .show(ui);
+        let acts = sats_pane::Sats { st: &mut self.sats, home: self.location }.show(ui);
         for a in acts {
             match a {
                 sats_pane::Action::ShowOnMap => self.view = View::Map,
@@ -1591,8 +1613,17 @@ impl App {
         {
             self.set_center(shifted / 1e6);
         }
-        self.push_channel(shifted, sat_mode(&d.mode), Some(sat_label(d)));
-        let Some(c) = self.audio.channels.last_mut() else { return };
+        let mode = sat_mode(d.kind);
+        self.push_channel(shifted, mode, Some(sat_label(d)));
+        let Some(c) = self.audio.channels.last_mut() else {
+            return;
+        };
+        // SatNOGS quotes a LoRa transmitter's bandwidth in the baud field,
+        // so the chirp is built at the width it was sent at rather than at
+        // the front end's default.
+        if d.kind == datasets::satnogs::Mode::Lora {
+            c.bandwidth_hz = d.baud.filter(|b| *b >= 1_000.0);
+        }
         c.doppler = true;
         let channel = c.id;
         self.sats.tracking =
@@ -1603,7 +1634,9 @@ impl App {
     /// Take a channel out of the strip by its id, keeping the listening
     /// selection pointed at whatever it was pointed at.
     fn close_channel(&mut self, id: u64) {
-        let Some(i) = self.audio.channels.iter().position(|c| c.id == id) else { return };
+        let Some(i) = self.audio.channels.iter().position(|c| c.id == id) else {
+            return;
+        };
         self.audio.channels.remove(i);
         match self.audio.listening {
             Some(l) if l == i => self.audio.listening = None,
@@ -1616,7 +1649,9 @@ impl App {
     /// Stop following, and give the channel its dial back rather than
     /// leaving one nobody is allowed to tune.
     fn stop_tracking(&mut self) {
-        let Some(t) = self.sats.tracking.take() else { return };
+        let Some(t) = self.sats.tracking.take() else {
+            return;
+        };
         if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == t.channel) {
             c.doppler = false;
         }
@@ -1649,7 +1684,9 @@ impl App {
             self.sats.tracking = None;
             return;
         }
-        let Some(look) = self.look_at(t.norad) else { return };
+        let Some(look) = self.look_at(t.norad) else {
+            return;
+        };
         // The pass ends and the channel goes with it. A channel left on a
         // frequency nothing is transmitting on is a strip of noise the
         // operator has to notice and close, and the next pass makes another
@@ -1781,7 +1818,8 @@ impl App {
 
     fn channel_specs(&self) -> Vec<ChannelSpec> {
         let center = self.center;
-        self.audio.channels
+        self.audio
+            .channels
             .iter()
             .filter(|c| c.on)
             .map(|c| ChannelSpec {
@@ -1856,10 +1894,7 @@ fn apply_locale(s: &mut crate::session::Session) {
 /// music station for as long as the receiver is on, and off for anything that
 /// is not audio: a decoder's channel produces its own calls.
 fn speaks(mode: &ChanMode) -> bool {
-    matches!(
-        mode,
-        ChanMode::Audio(Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb)
-    )
+    matches!(mode, ChanMode::Audio(Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb))
 }
 
 fn front_for(model: &str) -> Option<&'static str> {
@@ -1868,21 +1903,51 @@ fn front_for(model: &str) -> Option<&'static str> {
     crate::chain::channel_fronts().iter().map(|(k, _)| *k).find(|k| *k == system)
 }
 
-/// What to build for a downlink, from the mode SatNOGS names it by.
+/// What to build for a downlink, from what SatNOGS says its mode is.
 ///
-/// The modes with a demodulator here get it. Everything else, the
-/// phase-keyed telemetry and the packet modes, gets the auto front end,
-/// which measures what is actually in the channel and places whatever reads
-/// it: better than guessing narrow FM and better than a fixed list here that
-/// would have to be kept in step with what the receiver can decode.
-fn sat_mode(mode: &str) -> ChanMode {
-    match mode.to_ascii_uppercase().as_str() {
-        "FM" | "FMN" | "NFM" => ChanMode::Audio(Demod::Nfm),
-        "AM" => ChanMode::Audio(Demod::Am),
-        "USB" => ChanMode::Audio(Demod::Usb),
-        "LSB" => ChanMode::Audio(Demod::Lsb),
-        "CW" => ChanMode::Audio(Demod::Cw),
-        _ => ChanMode::Auto,
+/// Speech and Morse get the demodulator for them. A mode this receiver has a
+/// front end for gets that front end, asked for by name against the registry
+/// so a decoder added there is used the day it arrives: a LoRa downlink was
+/// given the auto node while `lora` sat in the registry, which meant the
+/// spreading factor and bandwidth had to be found again by measurement.
+/// Everything else, the phase-keyed telemetry and the framings with no
+/// decoder here, gets the auto front end, which measures what is in the
+/// channel and places whatever reads it.
+fn sat_mode(mode: datasets::satnogs::Mode) -> ChanMode {
+    use datasets::satnogs::Mode as M;
+    let front = |id: &str| {
+        crate::chain::front_kind(id).map_or(ChanMode::Auto, |k| ChanMode::Decode(k.into()))
+    };
+    match mode {
+        M::Fm => ChanMode::Audio(Demod::Nfm),
+        M::Am => ChanMode::Audio(Demod::Am),
+        M::Usb => ChanMode::Audio(Demod::Usb),
+        M::Lsb => ChanMode::Audio(Demod::Lsb),
+        M::Cw => ChanMode::Audio(Demod::Cw),
+        M::Lora => front("lora"),
+        M::Dmr => front("dmr"),
+        // AX.25 at 1200 baud is what AFSK on a satellite nearly always is,
+        // and the APRS front end is the one that reads it.
+        M::Afsk => front("aprs"),
+        M::Fsk
+        | M::Gfsk
+        | M::Gmsk
+        | M::Msk
+        | M::Bpsk
+        | M::Qpsk
+        | M::Psk
+        | M::Ask
+        | M::Dvb
+        | M::Sstv
+        | M::Apt
+        | M::Lrpt
+        | M::Hrpt
+        | M::Duv
+        | M::Dstar
+        // C4FM here is System Fusion, which this does not read: it is not
+        // M17, whatever the keying looks like.
+        | M::C4fm
+        | M::Other => ChanMode::Auto,
     }
 }
 
@@ -1945,9 +2010,8 @@ impl eframe::App for App {
         }
         {
             let _s = tracing::info_span!("scope").entered();
-            CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(theme::CHASSIS))
-                .show(ui, |ui| match self.view {
+            CentralPanel::default().frame(egui::Frame::NONE.fill(theme::CHASSIS)).show(ui, |ui| {
+                match self.view {
                     View::Spectrum => self.scope_view(ui),
                     View::Chain => self.chain_view(ui),
                     View::Map => self.map_view(ui),
@@ -1958,7 +2022,8 @@ impl eframe::App for App {
                     View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),
-                });
+                }
+            });
         }
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
@@ -2004,17 +2069,16 @@ impl App {
                 Some((u + k) / 100.0)
             })
             .unwrap_or(0.0);
-        println!(
-            "ran {el:.1}s, used {cpu:.2}s CPU = {:.0}% of one core",
-            cpu / el as f64 * 100.0
-        );
+        println!("ran {el:.1}s, used {cpu:.2}s CPU = {:.0}% of one core", cpu / el as f64 * 100.0);
         crate::prof::report(std::time::Duration::from_secs_f32(el));
         self.shot_sent = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn screenshot(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.shot.clone() else { return };
+        let Some(path) = self.shot.clone() else {
+            return;
+        };
         ctx.request_repaint();
         let t0 = *self.shot_at.get_or_insert_with(std::time::Instant::now);
         // Wait for the tuner to lock and the waterfall to fill; a screenshot
@@ -2035,7 +2099,8 @@ impl App {
         });
         if let Some(img) = img {
             let (w, h) = (img.width() as u32, img.height() as u32);
-            let buf: Vec<u8> = img.pixels.iter().flat_map(|p| [p.r(), p.g(), p.b(), p.a()]).collect();
+            let buf: Vec<u8> =
+                img.pixels.iter().flat_map(|p| [p.r(), p.g(), p.b(), p.a()]).collect();
             if let Some(b) = image::RgbaImage::from_raw(w, h, buf) {
                 let _ = b.save(&path);
                 println!("wrote {path} ({w}x{h})");
@@ -2100,7 +2165,6 @@ impl App {
         self.send(Cmd::Center(Hz(self.center as u64)));
         self.reset_waterfall();
     }
-
 }
 
 /// The handle between the spectrum and the waterfall.
@@ -2114,10 +2178,7 @@ fn split_grip(p: &egui::Painter, r: &Rect, hot: bool) {
     let y = r.center().y;
     let x0 = r.center().x - w / 2.0;
     for dy in [-2.0f32, 1.0] {
-        p.line_segment(
-            [Pos2::new(x0, y + dy), Pos2::new(x0 + w, y + dy)],
-            Stroke::new(1.0, col),
-        );
+        p.line_segment([Pos2::new(x0, y + dy), Pos2::new(x0 + w, y + dy)], Stroke::new(1.0, col));
     }
 }
 
@@ -2131,6 +2192,8 @@ mod tests {
             sat: "ISS (ZARYA)".into(),
             hz: 145_800_000.0,
             mode: mode.into(),
+            kind: datasets::satnogs::Mode::parse(mode),
+            baud: None,
             what: what.into(),
         }
     }
@@ -2172,24 +2235,26 @@ mod tests {
         assert_eq!(a.audio.channels.len(), 1);
     }
 
-    /// A mode with a demodulator here gets it; anything else gets the auto
-    /// front end, which measures the channel rather than guessing at it.
+    /// A mode with a demodulator here gets it, a mode with a front end here
+    /// gets that, and anything else gets the auto front end, which measures
+    /// the channel rather than guessing at it.
     #[test]
-    fn a_downlink_gets_a_demodulator_or_the_auto_front_end() {
-        assert_eq!(sat_mode("FM"), ChanMode::Audio(Demod::Nfm));
-        assert_eq!(sat_mode("usb"), ChanMode::Audio(Demod::Usb));
-        assert_eq!(sat_mode("CW"), ChanMode::Audio(Demod::Cw));
-        for digital in ["BPSK", "AFSK", "GMSK", "FSK", "", "LRPT"] {
-            assert_eq!(sat_mode(digital), ChanMode::Auto, "{digital}");
+    fn a_downlink_gets_a_demodulator_a_front_end_or_the_auto_one() {
+        use datasets::satnogs::Mode as M;
+        assert_eq!(sat_mode(M::parse("FM")), ChanMode::Audio(Demod::Nfm));
+        assert_eq!(sat_mode(M::parse("usb")), ChanMode::Audio(Demod::Usb));
+        assert_eq!(sat_mode(M::parse("CW")), ChanMode::Audio(Demod::Cw));
+        // The three this receiver reads with a decoder of its own.
+        assert_eq!(sat_mode(M::Lora), ChanMode::Decode("lora".into()));
+        assert_eq!(sat_mode(M::Afsk), ChanMode::Decode("aprs".into()));
+        assert_eq!(sat_mode(M::Dmr), ChanMode::Decode("dmr".into()));
+        for digital in ["BPSK", "GMSK", "FSK", "", "LRPT"] {
+            assert_eq!(sat_mode(M::parse(digital)), ChanMode::Auto, "{digital}");
         }
     }
 
     fn app() -> App {
-        let mut a = App {
-            center: 100_000_000.0,
-            rate: 2_000_000.0,
-            ..Default::default()
-        };
+        let mut a = App { center: 100_000_000.0, rate: 2_000_000.0, ..Default::default() };
         // The waterfall holds history from where the radio actually is,
         // which after a settled tune is the same place.
         a.scope.wf_center = 100_000_000.0;
@@ -2265,14 +2330,13 @@ mod tests {
         Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(1000.0, 400.0))
     }
 
-
     fn record(freq: f64, crc: Option<bool>) -> DecodeRecord {
         DecodeRecord {
             at: std::time::Instant::now(),
             freq,
             model: "Fineoffset-WHx080".into(),
             channel_hz: 31_250.0,
-            modulation: "OOK",
+            modulation: common::Modulation::Ook,
             detail: "temperature_c=16.2 humidity_pct=89".into(),
             fields: vec![
                 ("temperature_c".into(), common::Value::Float(16.2)),
@@ -2297,7 +2361,11 @@ mod tests {
         // two pixel waterfall is not a smaller waterfall, it is a broken one.
         for want in [0.0f32, 1.0, 0.6] {
             a.scope.plot_frac = want.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
-            assert!(PLOT_FRAC_RANGE.contains(&a.scope.plot_frac), "{want} left {}", a.scope.plot_frac);
+            assert!(
+                PLOT_FRAC_RANGE.contains(&a.scope.plot_frac),
+                "{want} left {}",
+                a.scope.plot_frac
+            );
         }
         assert!(*PLOT_FRAC_RANGE.start() > 0.0 && *PLOT_FRAC_RANGE.end() < 1.0);
     }
@@ -2308,8 +2376,10 @@ mod tests {
         // spectrum's share of it.
         let full = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(1000.0, 800.0));
         let usable = full.height() - 16.0 - SPLIT_GRIP_H;
-        let frac_at = |y: f32| ((y - full.top() - SPLIT_GRIP_H / 2.0) / usable)
-            .clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
+        let frac_at = |y: f32| {
+            ((y - full.top() - SPLIT_GRIP_H / 2.0) / usable)
+                .clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end())
+        };
 
         let up = frac_at(300.0);
         let down = frac_at(700.0);
@@ -2317,7 +2387,6 @@ mod tests {
         // A quarter of the way down the pane is about a quarter of the split.
         assert!((frac_at(full.top() + usable * 0.25) - 0.25).abs() < 0.02);
     }
-
 
     #[test]
     fn logged_packets_are_numbered_in_arrival_order() {
@@ -2644,5 +2713,4 @@ mod tests {
         assert_eq!(fmt_hz(12_500.0), "12.5 kHz");
         assert_eq!(fmt_hz(400.0), "400 Hz");
     }
-
 }

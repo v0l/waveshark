@@ -159,11 +159,9 @@ impl Devices<'_> {
         let selected = self.st.selected;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                egui::Grid::new("devices")
-                    .num_columns(7)
-                    .spacing([14.0, 4.0])
-                    .striped(true)
-                    .show(ui, |ui| {
+                egui::Grid::new("devices").num_columns(7).spacing([14.0, 4.0]).striped(true).show(
+                    ui,
+                    |ui| {
                         for h in
                             ["identity", "protocol", "name", "vendor", "level", "seen", "packets"]
                         {
@@ -172,9 +170,11 @@ impl Devices<'_> {
                         ui.end_row();
                         for d in &rows {
                             let hit = Some(d.id) == selected;
-                            let ident = egui::RichText::new(&d.ident)
-                                .size(11.0)
-                                .color(if hit { theme::READOUT } else { theme::TRACE });
+                            let ident = egui::RichText::new(&d.ident).size(11.0).color(if hit {
+                                theme::READOUT
+                            } else {
+                                theme::TRACE
+                            });
                             if ui.selectable_label(hit, ident).clicked() {
                                 act = Some(Action::Select(if hit { None } else { Some(d.id) }));
                             }
@@ -202,7 +202,8 @@ impl Devices<'_> {
                             ui.label(freq);
                             ui.end_row();
                         }
-                    });
+                    },
+                );
             });
             ui.add_space(8.0);
         });

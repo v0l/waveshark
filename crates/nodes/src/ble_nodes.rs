@@ -213,7 +213,7 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             .by(who)
             .with_detail(detail)
             .with_fields(fields)
-            .with_modulation("GFSK")
+            .with_modulation(common::Modulation::Gfsk)
             // Everything that reaches here passed the link layer's CRC-24 in
             // the demodulator, which is a real check and not an argument
             // from plausibility.
