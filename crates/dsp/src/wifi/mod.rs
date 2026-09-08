@@ -74,11 +74,7 @@ pub fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= u32::from(b);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                crc >> 1 ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
+            crc = if crc & 1 != 0 { crc >> 1 ^ 0xedb8_8320 } else { crc >> 1 };
         }
     }
     !crc
@@ -192,12 +188,7 @@ pub struct WifiConfig {
 
 impl Default for WifiConfig {
     fn default() -> Self {
-        Self {
-            detect: 0.4,
-            lts: 0.35,
-            min_level_db: 3.0,
-            max_psdu: 4095,
-        }
+        Self { detect: 0.4, lts: 0.35, min_level_db: 3.0, max_psdu: 4095 }
     }
 }
 
@@ -265,6 +256,8 @@ pub struct WifiDetector {
     noise: f32,
     warm: usize,
     in_burst: bool,
+    /// Where the last plateau [`Self::find`] returned stopped holding.
+    plateau_end: usize,
     burst_from: Option<u64>,
     quiet: usize,
     bursts: Vec<(u64, u64)>,
@@ -322,6 +315,7 @@ impl WifiDetector {
             noise: 0.0,
             warm: 0,
             in_burst: false,
+            plateau_end: 0,
             burst_from: None,
             quiet: 0,
             bursts: Vec::new(),
@@ -500,13 +494,7 @@ impl WifiDetector {
         // A burst still being gathered holds the buffer too. Forgetting that
         // was why nothing longer than one block ever decoded: the trim ran
         // under the burst and its start was gone by the time it ended.
-        let oldest = self
-            .bursts
-            .first()
-            .map(|&(f, _)| f)
-            .into_iter()
-            .chain(self.burst_from)
-            .min();
+        let oldest = self.bursts.first().map(|&(f, _)| f).into_iter().chain(self.burst_from).min();
         self.dsss_at = oldest
             .map(|f| (f.saturating_sub(margin).saturating_sub(self.base)) as usize)
             .unwrap_or(self.buf.len())
@@ -536,11 +524,7 @@ impl WifiDetector {
         self.dc.process(&mut self.buf[from..]);
         let mean = self.buf[from..].iter().map(|x| x.norm_sqr()).sum::<f32>()
             / (self.buf.len() - from).max(1) as f32;
-        self.floor = if mean < self.floor {
-            mean
-        } else {
-            self.floor * 1.01
-        };
+        self.floor = if mean < self.floor { mean } else { self.floor * 1.01 };
 
         self.read_dsss(from, out);
 
@@ -584,6 +568,7 @@ impl WifiDetector {
     /// This is the only thing that runs on every sample, which is why it is
     /// four multiplies a sample and not a matched filter.
     fn find(&mut self, at: usize) -> Option<usize> {
+        self.plateau_end = 0;
         const WIN: usize = 48;
         const LAG: usize = 16;
         if self.buf.len() < at + WIN + LAG + 320 {
@@ -650,6 +635,7 @@ impl WifiDetector {
         // band. The comparison is the same one.
         let detect2 = self.cfg.detect * self.cfg.detect;
         let mut run = 0usize;
+        let mut found: Option<usize> = None;
         for n in at..end {
             // Normalised against both windows rather than against the delayed
             // one twice. A ratio that can exceed one is not a correlation,
@@ -658,10 +644,23 @@ impl WifiDetector {
                 run += 1;
                 // Half the short field seen as a plateau is a frame; less
                 // than that is two symbols of something that rhymes.
-                if run >= 24 {
-                    return Some(n.saturating_sub(run));
+                if run >= 24 && found.is_none() {
+                    found = Some(n.saturating_sub(run));
                 }
             } else {
+                // Where the plateau ended, which is what the caller skips to
+                // when nothing was behind it. A short training field holds
+                // this for 160 samples and no longer; a frequency-hopping
+                // burst holds it for its whole length, and stepping 64
+                // samples through one of those asked for a training-symbol
+                // search every 64 samples for as long as it lasted. On a
+                // busy 2.4 GHz band that was 132,000 searches a second and
+                // three quarters of the front end's time, with nothing to
+                // show for any of it.
+                if let Some(start) = found {
+                    self.plateau_end = n;
+                    return Some(start);
+                }
                 run = 0;
             }
             let i = n - at;
@@ -669,6 +668,12 @@ impl WifiDetector {
             ci += prod_im[i + WIN] - prod_im[i];
             p += pw[i + WIN + LAG] - pw[i + LAG];
             q += pw[i + WIN] - pw[i];
+        }
+        // Still high at the end of what has arrived: the plateau may go on
+        // into the next block, so nothing is skipped on its account.
+        if let Some(start) = found {
+            self.plateau_end = start;
+            return Some(start);
         }
         None
     }
@@ -691,25 +696,18 @@ impl WifiDetector {
         // off-air capture meant the real frames a millisecond later were
         // never reached.
         let Some((lts_at, fine)) = self.sync(start, coarse) else {
-            return Some(start + PAST);
+            // Past the plateau that produced this, not 64 samples on: a real
+            // preamble's plateau is over within 160 samples, so anything
+            // longer is not one and searching inside it again cannot find a
+            // frame that is not there.
+            return Some(self.plateau_end.max(start + PAST));
         };
         let cfo = coarse + fine;
         let (csi, snr_db) = self.channel(lts_at, cfo);
 
         let sig_at = lts_at + 2 * FFT;
         let mut soft = Vec::with_capacity(48);
-        self.symbol(
-            sig_at,
-            CP,
-            cfo,
-            &csi,
-            &ofdm::DATA_SUBCARRIERS,
-            0,
-            0,
-            1,
-            false,
-            &mut soft,
-        )?;
+        self.symbol(sig_at, CP, cfo, &csi, &ofdm::DATA_SUBCARRIERS, 0, 0, 1, false, &mut soft)?;
         let de = deinterleave(&soft, 48, 1, 16);
         let (bits, _) = fec::viterbi(&de, fec::P_1_2, 24);
         // Parity over the rate, the length and the reserved bit. Without it
@@ -919,9 +917,7 @@ impl WifiDetector {
             dsss: false,
             center_hz: 0.0,
             psdu,
-            csi: occupied(rate.mcs.is_some())
-                .map(|k| csi[ofdm::bin(k)])
-                .collect(),
+            csi: occupied(rate.mcs.is_some()).map(|k| csi[ofdm::bin(k)]).collect(),
             rate,
             start_sample: ((self.base + start as u64) as f64 * self.in_per_out) as u64,
             freq_off_hz: (cfo * ofdm::RATE_HZ as f32),
@@ -1115,16 +1111,8 @@ impl WifiDetector {
             let want = ofdm::PILOTS[(m + shift) % 4].1 * fec::pilot_polarity(index);
             e += x[ofdm::bin(*k)] / h(*k) * want;
         }
-        let rot = if e.norm() > 0.0 {
-            e.conj() / e.norm()
-        } else {
-            C32::new(1.0, 0.0)
-        };
-        let rot = if quarter {
-            rot * C32::new(0.0, -1.0)
-        } else {
-            rot
-        };
+        let rot = if e.norm() > 0.0 { e.conj() / e.norm() } else { C32::new(1.0, 0.0) };
+        let rot = if quarter { rot * C32::new(0.0, -1.0) } else { rot };
         for &k in carriers {
             ofdm::demap(x[ofdm::bin(k)] / h(k) * rot, bpsc, out);
         }
@@ -1285,10 +1273,8 @@ impl WifiSpan {
     /// `None` when the span holds no whole channel, which is what a receiver
     /// too narrow for 802.11 gets.
     pub fn new(rate: f64, center_hz: f64, channels: &[f64], cfg: WifiConfig) -> Option<Self> {
-        let rxs: Vec<ChannelRx> = channels
-            .iter()
-            .filter_map(|&c| ChannelRx::new(rate, center_hz, c, cfg))
-            .collect();
+        let rxs: Vec<ChannelRx> =
+            channels.iter().filter_map(|&c| ChannelRx::new(rate, center_hz, c, cfg)).collect();
         (!rxs.is_empty()).then_some(Self {
             rxs,
             pending: Vec::new(),
@@ -1306,9 +1292,7 @@ impl WifiSpan {
     /// it, because there is always a next block.
     pub fn flush(&mut self, out: &mut Vec<WifiFrame>) {
         out.extend(
-            std::mem::take(&mut self.pending)
-                .into_iter()
-                .filter(|f| f.center_hz.is_finite()),
+            std::mem::take(&mut self.pending).into_iter().filter(|f| f.center_hz.is_finite()),
         );
     }
 
@@ -1320,11 +1304,7 @@ impl WifiSpan {
     /// was heard on a neighbour. Costs a receiver's worth of work from here
     /// on, which is why it is not done for every channel the span covers.
     pub fn open(&mut self, center_hz: f64, cfg: WifiConfig) -> bool {
-        if self
-            .rxs
-            .iter()
-            .any(|r| (r.center_hz - center_hz).abs() < 1.0)
-        {
+        if self.rxs.iter().any(|r| (r.center_hz - center_hz).abs() < 1.0) {
             return false;
         }
         let Some(mut rx) = ChannelRx::new(self.rate, self.center_hz, center_hz, cfg) else {
@@ -1335,9 +1315,7 @@ impl WifiSpan {
         rx.hangover = 8;
         self.rxs.push(rx);
         self.rxs.sort_by(|a, b| {
-            a.center_hz
-                .partial_cmp(&b.center_hz)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            a.center_hz.partial_cmp(&b.center_hz).unwrap_or(std::cmp::Ordering::Equal)
         });
         true
     }
@@ -1440,11 +1418,7 @@ fn dedupe_neighbours(frames: &mut [WifiFrame]) {
             if !same {
                 continue;
             }
-            let weaker = if frames[i].rssi_dbfs >= frames[j].rssi_dbfs {
-                j
-            } else {
-                i
-            };
+            let weaker = if frames[i].rssi_dbfs >= frames[j].rssi_dbfs { j } else { i };
             frames[weaker].center_hz = f64::NAN;
         }
     }
@@ -1596,11 +1570,7 @@ mod tests {
             assert!(f.fcs_ok, "{mbps} Mbit/s failed its FCS");
             assert_eq!(f.psdu, want);
             assert_eq!(f.csi.len(), 52);
-            assert!(
-                (f.freq_off_hz - 48_000.0).abs() < 2_000.0,
-                "{}",
-                f.freq_off_hz
-            );
+            assert!((f.freq_off_hz - 48_000.0).abs() < 2_000.0, "{}", f.freq_off_hz);
             assert!(f.snr_db > 20.0, "{} dB", f.snr_db);
         }
     }
@@ -1618,12 +1588,7 @@ mod tests {
                 let mut det = WifiDetector::new(ofdm::RATE_HZ, WifiConfig::default()).unwrap();
                 let mut got = Vec::new();
                 det.process(&samples, &mut got);
-                assert_eq!(
-                    got.len(),
-                    1,
-                    "MCS {mcs} sgi {short_gi}: {} frames",
-                    got.len()
-                );
+                assert_eq!(got.len(), 1, "MCS {mcs} sgi {short_gi}: {} frames", got.len());
                 let f = &got[0];
                 assert_eq!(f.rate.mcs, Some(mcs));
                 assert_eq!(f.rate.short_gi, short_gi);
@@ -1718,10 +1683,7 @@ mod tests {
         let ratio = rate / ofdm::RATE_HZ;
         let mut span = vec![C32::default(); 300_000];
 
-        for (ch, mbps, seed) in [
-            (2_437_000_000.0f64, 6u8, 0x11u8),
-            (2_462_000_000.0, 36, 0x7a),
-        ] {
+        for (ch, mbps, seed) in [(2_437_000_000.0f64, 6u8, 0x11u8), (2_462_000_000.0, 36, 0x7a)] {
             // Different bytes on each: two channels carrying identical bytes
             // at the same instant is one transmission heard twice, and the
             // receiver is right to report it once.
@@ -1746,13 +1708,9 @@ mod tests {
         }
         let samples = air(&span, 25_000.0, 0.001, 5000);
 
-        let mut rx = WifiSpan::new(
-            rate,
-            center,
-            &[2_437_000_000.0, 2_462_000_000.0],
-            WifiConfig::default(),
-        )
-        .expect("a span receiver");
+        let mut rx =
+            WifiSpan::new(rate, center, &[2_437_000_000.0, 2_462_000_000.0], WifiConfig::default())
+                .expect("a span receiver");
         assert_eq!(rx.channels().len(), 2);
         let mut got = Vec::new();
         for block in samples.chunks(16_384) {
