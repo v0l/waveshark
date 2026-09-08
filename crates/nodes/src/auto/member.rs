@@ -88,7 +88,13 @@ pub(super) struct Member {
     /// What the burst front end inside has named the bursts of this source,
     /// each once. What places the decoders that wait for a verdict, late,
     /// fed from `ring`.
-    pub(super) verdicts: Vec<dsp::Modulation>,
+    /// What the burst front end inside has named the bursts of this source,
+    /// each once, with how wide it measured them. The width is what places
+    /// a decoder on the right channel of a protocol keyed at several: a
+    /// 125 kHz LoRa packet inside a channel remembered at 250 kHz is a
+    /// chirp either way, and only its width says which demodulator reads
+    /// it.
+    pub(super) verdicts: Vec<(dsp::Modulation, f64)>,
     /// Samples still to be read before the live ones: what a decoder placed
     /// late has to catch up on, and every block that arrives while it does.
     /// Read a bounded amount a block. Two seconds of history through six
@@ -111,6 +117,11 @@ const CATCHUP_MIN: usize = 16_384;
 
 /// Longest run of samples kept behind a packet, in seconds.
 const RING_MAX_S: f64 = 2.0;
+
+/// Most verdicts kept for one source. A source producing more distinct
+/// modulations and widths than this is a channel with a lot in it, and the
+/// decoders the first few placed are what it gets.
+const VERDICTS_MAX: usize = 8;
 
 /// How much of that ring a packet leaves with.
 ///
@@ -309,8 +320,16 @@ impl Member {
             // packet stream and carries no rate.
             let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
-                if !self.verdicts.contains(&b.class.modulation) {
-                    self.verdicts.push(b.class.modulation);
+                // The same modulation at a clearly different width is a
+                // second verdict, not a repeat of the first: that is what
+                // two LoRa networks sharing a frequency look like.
+                let w = b.class.features.bandwidth_hz as f64;
+                let same = |(m, v): &(dsp::Modulation, f64)| {
+                    *m == b.class.modulation
+                        && (*v <= 0.0 || w <= 0.0 || (w - v).abs() <= v.max(w) * 0.4)
+                };
+                if !self.verdicts.iter().any(same) && self.verdicts.len() < VERDICTS_MAX {
+                    self.verdicts.push((b.class.modulation, w));
                 }
                 // A diagnostic: with `SR_DUMP_BURSTS` naming a directory,
                 // every burst the router cut is written there as

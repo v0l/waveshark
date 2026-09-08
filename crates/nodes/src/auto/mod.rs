@@ -656,11 +656,10 @@ impl Node for AutoNode {
         let mut closed = Vec::new();
         for (k, ev, pk, done, heard, _) in results {
             let center = Hz(self.slots[k].center_hz);
-            let named = !self.slots[k].remembered
-                && self.slots[k]
-                    .members
-                    .iter()
-                    .any(|m| m.verdicts.len() > self.slots[k].verdicts_seen);
+            let named = self.slots[k]
+                .members
+                .iter()
+                .any(|m| m.verdicts.len() > self.slots[k].verdicts_seen);
             if named {
                 self.place_on_verdict(k, done);
             }
@@ -690,9 +689,18 @@ impl Node for AutoNode {
                     p.resolve_widths(&mut widths);
                     keep.extend(widths.into_iter().map(|w| (p.id(), w)));
                 }
-                self.slots[k]
-                    .members
-                    .retain(|m| keep.iter().any(|(n, w)| *n == m.name && *w == m.channel_hz));
+                // The classifier stays on a remembered channel. The
+                // detector is locked out of one, so nothing else will ever
+                // find a second transmitter sharing the frequency, and
+                // dropping the classifier there is what made a LoRa network
+                // at another bandwidth invisible for the session. On an
+                // ordinary source it goes as before: the detector is still
+                // watching and will open the other signal itself.
+                let remembered = self.slots[k].remembered;
+                self.slots[k].members.retain(|m| {
+                    (remembered && m.router.is_some())
+                        || keep.iter().any(|(n, w)| *n == m.name && *w == m.channel_hz)
+                });
             }
             // A remembered channel that is still decoding is kept; one that
             // has gone quiet for its hold is given back to the detector.
@@ -1137,10 +1145,15 @@ mod tests {
     fn a_remembered_channel_belongs_to_its_front_end_alone() {
         // Once a front end has read a channel, that channel is its: the
         // detector's openings inside it are dropped, whatever width they
-        // measure, so nothing else is built there and the same burst is not
-        // logged twice by two decoders. A wide measurement of the same
-        // transmitter used to slip past the width tolerance and bring the
-        // burst router and every narrowband decoder with it.
+        // measure, so no other decoder is built there and the same burst is
+        // not logged twice. A wide measurement of the same transmitter used
+        // to slip past the width tolerance and bring every narrowband
+        // decoder with it.
+        //
+        // The classifier is the exception and rides along. The detector is
+        // locked out of the channel, so it is the only thing that can
+        // notice a second transmitter sharing the frequency, which is what
+        // two LoRa networks at different bandwidths are.
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
         assert!(n.remembered().is_empty());
@@ -1160,7 +1173,55 @@ mod tests {
         };
         let slot = n.open(&b).unwrap();
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
-        assert_eq!(names, ["pocsag"], "a locked channel runs one front end");
+        assert_eq!(
+            names,
+            ["pocsag", "burst_route"],
+            "a locked channel runs its front end and the classifier"
+        );
+    }
+
+    /// Two networks on one frequency at different bandwidths both get a
+    /// decoder, even after one of them has locked the channel.
+    ///
+    /// Meshtastic on a 250 kHz LoRa channel and MeshCore on 125 kHz in the
+    /// same place: the 250 kHz demodulator dechirps nothing of the narrower
+    /// one, the detector is locked out of a remembered channel, so without
+    /// the classifier riding along the second network is invisible for the
+    /// rest of the session. The width it measures is what places the
+    /// decoder; the channel's own width is the wrong answer here.
+    #[test]
+    fn a_second_bandwidth_on_a_remembered_channel_gets_its_own_decoder() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(869))]).unwrap();
+        n.remember("lora", 869_525_000.0, 250_000.0);
+        let b = SourceBlock {
+            id: n.sticky[0].id,
+            state: SourceState::Opened,
+            center_hz: 869_525_000,
+            bandwidth_hz: 250_000.0,
+            signal_hz: 250_000.0,
+            rate: 1_000_000.0,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b).unwrap();
+        n.slots.push(slot);
+        let router = n.slots[0]
+            .members
+            .iter_mut()
+            .find(|m| m.router.is_some())
+            .expect("a remembered channel keeps the classifier");
+        router.verdicts.push((dsp::Modulation::Chirp, 125_000.0));
+        n.place_on_verdict(0, false);
+        let placed: Vec<f64> = n.slots[0]
+            .members
+            .iter()
+            .filter(|m| m.name == "lora")
+            .map(|m| m.channel_hz)
+            .collect();
+        assert!(placed.contains(&125_000.0), "placed {placed:?}");
+        assert!(placed.contains(&250_000.0), "the remembered channel went: {placed:?}");
     }
 
     /// A channel kept with a hold is given back once nothing has decoded

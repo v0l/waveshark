@@ -22,9 +22,11 @@ pub(super) struct Slot {
     /// measured, for a front end placed after the source opened.
     pub(super) spec: StreamSpec,
     pub(super) signal_hz: f64,
-    /// Protocols that wait for the classifier's verdict and have had it
-    /// for this source: placed, or ruled out.
-    pub(super) tried: Vec<&'static str>,
+    /// Protocol and channel width that waited for the classifier's verdict
+    /// and have had it for this source: placed, or ruled out. Keyed by
+    /// width as well as protocol, so a second network on the same channel
+    /// at another width is still placed.
+    pub(super) tried: Vec<(&'static str, u64)>,
     /// How many verdicts had been considered when they were last asked.
     pub(super) verdicts_seen: usize,
     /// A channel remembered from earlier, which runs the one decoder that
@@ -69,10 +71,22 @@ impl AutoNode {
             let mut extra = origin.clone();
             extra.extend(st.settings.iter().map(|(k, v)| (k.clone(), v.clone())));
             let m = Member::place(p, spec, at, &extra, &self.reg)?;
+            // The classifier rides along on a remembered channel, so a
+            // second transmitter that shares the frequency is named rather
+            // than fed to a demodulator that cannot read it: two LoRa
+            // networks at different spreading factors and bandwidths do
+            // exactly this. It is affordable because the router measures
+            // each burst shape once and skips the repeats.
+            let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
+            let mut members = vec![m];
+            if let Ok(mut c) = Member::classifier(spec, route, &self.reg) {
+                c.source_snr_db = b.snr_db;
+                members.push(c);
+            }
             return Ok(Slot {
                 id: b.id,
                 center_hz: b.center_hz,
-                members: vec![m],
+                members,
                 heard: true,
                 spec,
                 signal_hz: b.signal_hz,
@@ -152,14 +166,26 @@ impl AutoNode {
         let mut history: Option<Vec<C32>> = None;
         for p in protocol::all() {
             let shape = p.shape();
-            if shape.span_wide || slot.tried.contains(&p.id()) {
+            if shape.span_wide || slot.tried.contains(&(p.id(), 0)) {
                 continue;
             }
-            if !shape.families.iter().any(|f| verdicts.contains(f)) {
+            if !shape.families.iter().any(|f| verdicts.iter().any(|(m, _)| m == f)) {
                 continue;
             }
-            slot.tried.push(p.id());
-            if !candidate(*p, hz, slot.signal_hz, slot.spec.rate) {
+            let width = shape
+                .families
+                .iter()
+                .filter_map(|f| verdicts.iter().find(|(m, _)| m == f).map(|(_, w)| *w))
+                .fold(0.0f64, f64::max)
+                .max(0.0);
+            // What the classifier measured the burst at, where it measured
+            // anything, and otherwise what the detector measured the source
+            // at. On a remembered channel the source's width is the channel
+            // a front end already owns, which is the wrong answer for a
+            // narrower signal sharing it.
+            let width = if width > 0.0 { width } else { slot.signal_hz };
+            if !candidate(*p, hz, width, slot.spec.rate) {
+                slot.tried.push((p.id(), 0));
                 continue;
             }
             let history = history.get_or_insert_with(|| {
@@ -169,7 +195,11 @@ impl AutoNode {
                     .map(|m| m.ring.clone())
                     .unwrap_or_default()
             });
-            for w in p.widths_for(hz, slot.signal_hz) {
+            for w in p.widths_for(hz, width) {
+                if slot.tried.contains(&(p.id(), w as u64)) {
+                    continue;
+                }
+                slot.tried.push((p.id(), w as u64));
                 let at = Placed {
                     center_hz: hz,
                     width_hz: w,

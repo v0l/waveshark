@@ -193,6 +193,8 @@ pub struct PacketLog {
     /// Records written into the buffer since the last flush.
     dirty: bool,
     last_flush: std::time::Instant,
+    /// When the folder was last added up, for the reading in the interface.
+    measured: std::time::Instant,
 }
 
 impl PacketLog {
@@ -214,17 +216,23 @@ impl PacketLog {
     }
 
     pub fn new(dir: PathBuf) -> Self {
+        // Measured here rather than at the first record: the reading is about
+        // the folder, and a receiver that has heard nothing yet, or is tuned
+        // where no front end produces packets, still has whatever last night
+        // wrote sitting on the disk. It read 0 B until something arrived.
+        let older = measure(&dir, None);
         Self {
             dir,
             open: None,
             segment: None,
             bytes: 0,
-            older: 0,
+            older,
             full: false,
             written: 0,
             cap: Some(DEFAULT_MAX_BYTES),
             dirty: false,
             last_flush: std::time::Instant::now(),
+            measured: std::time::Instant::now(),
         }
     }
 
@@ -245,19 +253,19 @@ impl PacketLog {
         self.older + self.bytes
     }
 
-    /// Add up the days already on the disk, other than the one named.
-    fn measure(&self, except: &str) -> u64 {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
-        entries
-            .flatten()
-            .filter(|e| {
-                let p = e.path();
-                p.extension().is_some_and(|x| x == EXT)
-                    && p.file_stem().is_some_and(|s| s != except)
-            })
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum()
+    /// Add up the folder again, at most this often.
+    ///
+    /// Called from whatever publishes the status rather than from a write:
+    /// the segment being written is counted as it grows, so this is only for
+    /// what changed underneath, and a directory listing per record is a
+    /// syscall per burst.
+    pub fn refresh_folder(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.measured.elapsed() < EVERY {
+            return;
+        }
+        self.measured = std::time::Instant::now();
+        self.older = measure(&self.dir, self.segment.as_deref());
     }
 
     /// Delete whole segments, oldest first, until the folder is back under
@@ -324,7 +332,8 @@ impl PacketLog {
             };
             let mut w = std::io::BufWriter::with_capacity(BUF_BYTES, f);
             self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
-            self.older = self.measure(&name);
+            self.older = measure(&self.dir, Some(&name));
+            self.measured = std::time::Instant::now();
             // A receiver started against a folder already over its limit
             // makes room before it writes, rather than on the record that
             // happens to cross the line.
@@ -498,7 +507,28 @@ impl nodes::PacketSink for PacketLog {
     /// went quiet still gets its last burst on the disk.
     fn flush(&mut self) {
         self.flush_due();
+        self.refresh_folder();
     }
+}
+
+/// What a log folder holds, for a receiver with no log open to ask.
+pub fn folder_bytes(dir: &std::path::Path) -> u64 {
+    measure(dir, None)
+}
+
+/// Add up the segments on the disk, other than the one named.
+fn measure(dir: &std::path::Path, except: Option<&str>) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .filter(|e| {
+            let p = e.path();
+            p.extension().is_some_and(|x| x == EXT)
+                && except.is_none_or(|e| p.file_stem().is_some_and(|s| s != e))
+        })
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Whether there is anything in this packet a decoder could read.
@@ -1067,6 +1097,24 @@ mod tests {
         let got = read(d.join(format!("{}.000.wspkt", day_of(AT)))).expect("the log reads back");
         assert_eq!(got.len(), 1, "the over went into the log");
         assert!(matches!(got[0].body, PacketBody::Pulses(_)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What the interface shows is what the folder holds, and a log that has
+    /// not written anything yet holds whatever last night wrote. It read 0 B
+    /// until the first burst arrived, which on a quiet band is never.
+    #[test]
+    fn a_log_that_has_written_nothing_reports_the_folder() {
+        let d = dir("holds");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(format!("2026-08-30.000.{EXT}")), vec![0u8; 40_000]).unwrap();
+        let mut log = PacketLog::new(d.clone());
+        assert_eq!(log.total(), 40_000, "the folder was not measured");
+        // And it follows the folder afterwards, whoever emptied it.
+        std::fs::remove_file(d.join(format!("2026-08-30.000.{EXT}"))).unwrap();
+        log.measured -= std::time::Duration::from_secs(5);
+        log.refresh_folder();
+        assert_eq!(log.total(), 0);
         let _ = std::fs::remove_dir_all(&d);
     }
 

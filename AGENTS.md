@@ -3,7 +3,10 @@
 Read [`docs/design.md`](docs/design.md) first. It has the layout, the
 measurements behind the current shape, and the mistakes that produced it. Then
 [`docs/protocols.md`](docs/protocols.md) for what is decoded and what is not,
-[`docs/views.md`](docs/views.md) before adding a pane, and
+[`docs/views.md`](docs/views.md) before adding a pane,
+[`docs/references.md`](docs/references.md) before adding a data source or a
+decoder, since it holds the terms each publisher asks for and the rules two
+of them make the code follow, and
 [`docs/web.md`](docs/web.md) only knowing it is a plan and not a status report.
 What follows is the two rules that are easiest to break without noticing, and
 the procedure for adding a capture to the test corpus.
@@ -199,6 +202,33 @@ across rebuilds is its derived id, so a channel's stages are keyed by mode and
 rate and not by offset; the mixer's shift is a setting, and keying on it meant
 every channel was rebuilt, and forgot its station, whenever the dial moved
 under it.
+
+## A test says how much was read, not that something was
+
+The receiver's job is to read everything that is there, so a test that only
+proves it read *something* is not testing the thing. `assert!(decoded >= 1)`
+and `assert!(!rows.is_empty())` pass when fourteen of fifteen packets have
+been thrown away, which is the failure that matters and the one they hide.
+A capture is a fixed input, so the count is fixed too: **assert the number.**
+
+What to pin, wherever the test has it: how many packets decoded, how many
+rows came out, how many carried a measurement, which callsigns and ids, and
+which channels they were read on. Where an independent implementation has
+read the same file, assert what it said rather than what this code currently
+produces, and put the provenance in the test's doc comment so a later reader
+can tell a broken decoder from a wrong expectation.
+
+The rule this exists for: **an optimisation may not change any of those
+numbers.** Faster is a claim about time and nothing else. If a change makes
+a count smaller, that is the change being wrong, and "it only dropped the
+repeats" or "only the rows nothing decoded" is the same sentence as "it reads
+less than it did". Run the affected tests before and after and expect the
+same numbers, not merely a pass.
+
+Be as exact as the signal allows and no more. A decoder whose count moves
+with a fade or a scheduler is pinned with a floor and a ceiling and a comment
+saying which, not with `>= 1`. A skip for an absent fixture is not a pass
+either: print the name and `run testdata/fetch.sh`.
 
 ## Adding a capture to the test corpus
 
