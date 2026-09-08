@@ -17,7 +17,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 - GSM: a cell's identity off its synchronisation burst, the blocks it
   broadcasts, who a page is calling, and the signalling channel a phone is
   sent to, on the beacon carrier or on another carrier timed from it.
-- ExpressLRS at 2.4 GHz, FrSky ACCST, FlySky AFHDS-2A and XN297 remotes.
+- ExpressLRS at 2.4 GHz, with the SX1280's long interleaved coding
+  measured off the air and a payload read through it, FrSky ACCST, FlySky
+  AFHDS-2A and XN297 remotes.
 - LoRa at 2.4 GHz as the SX128x sends it, and inverted LoRa as a setting.
 - Analogue video: a camera's picture off the span, PAL or NTSC, with
   colour, on a video bus and pane of its own.
