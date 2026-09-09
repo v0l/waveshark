@@ -250,6 +250,9 @@ pub struct AudioBus {
     last: Option<String>,
     /// Peak of the speech share of this block's mix.
     voice_peak: f32,
+    /// Loudest thing the bus heard this block on any call, whichever path
+    /// its audio took to the speaker. See [`AudioBus::voice_peak`].
+    heard_peak: f32,
     /// Who is talking now, by conversation, from every voice that passed the
     /// tap. See [`AudioBus::track`].
     live: HashMap<String, LiveCall>,
@@ -326,6 +329,7 @@ impl AudioBus {
             agc_on: true,
             last: None,
             voice_peak: 0.0,
+            heard_peak: 0.0,
             live: HashMap::new(),
         }
     }
@@ -530,6 +534,7 @@ impl AudioBus {
         // than about whose fader is up.
         let m = self.peaks.entry(Self::key_of(v.system, v.channel_hz, to)).or_insert(0.0);
         *m = m.max(peak);
+        self.heard_peak = self.heard_peak.max(peak);
         let talking = peak > SPEECH_FLOOR;
         let now = std::time::Instant::now();
         match self.live.get_mut(&key) {
@@ -659,9 +664,18 @@ impl AudioBus {
         self.last.as_deref()
     }
 
-    /// Peak of the speech share of the last mix, after the call level.
+    /// The loudest call the bus heard in the last block.
+    ///
+    /// What the bus heard, not what it mixed. Speech decoded from a digital
+    /// front end is mixed here, under the calls fader; audio from a channel
+    /// on the strip reaches the speaker as a strip input, under that
+    /// channel's own fader, and never passes the call mix at all. A meter
+    /// taken off the mix therefore sat still through every analogue
+    /// transmission on the calls view, which is the view that exists to show
+    /// them. Both are measured where every voice passes, in
+    /// [`AudioBus::track`].
     pub fn voice_peak(&self) -> f32 {
-        self.voice_peak
+        self.voice_peak.max(self.heard_peak)
     }
 
     /// This block's audio: every strip, every subscribed call and a slice
@@ -718,6 +732,10 @@ impl AudioBus {
     pub fn clear(&mut self) {
         self.mix.clear();
         self.voice.clear();
+        // Decayed rather than zeroed, for the same reason the row meters
+        // are: a block with no speech in it is a gap between words, not the
+        // end of the transmission.
+        self.heard_peak *= 0.7;
         for s in &mut self.strips {
             s.peak *= 0.7;
             if s.peak < 0.002 {
@@ -1455,6 +1473,11 @@ mod tests {
             b.levels().into_iter().find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or(0.0)
         };
         assert!(level(&b) > 0.3, "{:?}", b.levels());
+        // And the meter beside the calls fader, which is the same question
+        // asked of the whole list: it read the mixed speech, which analogue
+        // audio from a strip never joins, so it sat at zero through every
+        // transmission the calls view was listing.
+        assert!(b.voice_peak() > 0.3, "the call bus meter stayed down");
 
         // And it falls back when the transmission stops, so the column is a
         // meter rather than a high-water mark.
