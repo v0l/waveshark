@@ -43,9 +43,19 @@ const ICON: f32 = 22.0;
 /// The rest of the cell widths. Fixed for the same reason the height is: a
 /// bar whose columns move as a band name or a version number changes length
 /// is a bar nobody can find anything on twice.
-const BAND_W: f32 = 96.0;
 const SPAN_W: f32 = 104.0;
-const VIEW_W: f32 = 128.0;
+/// Side of a view tab. Larger than the transport's icons because these are
+/// the only route to a view by pointer and they carry a glyph that has to be
+/// told from nine others, not a play triangle.
+const TAB: f32 = 34.0;
+/// Ten tabs, the gap between the two groups, and the well's margin.
+const VIEW_W: f32 = TAB * 10.0 + 2.0 * 9.0 + 5.0 + 8.0;
+/// How a view's shortcut is written in its hover text.
+#[cfg(target_os = "macos")]
+const TAB_MOD: &str = "\u{2318}";
+#[cfg(not(target_os = "macos"))]
+const TAB_MOD: &str = "Ctrl+";
+
 const SPEED_W: f32 = 100.0;
 const PANELS_W: f32 = 88.0;
 const UPDATE_W: f32 = 72.0;
@@ -63,14 +73,24 @@ impl App {
                 // own.
                 ui.horizontal_top(|ui| {
                     ui.set_height(CELL_H);
-                    let out = self.dial.show_tunable(ui, self.center, 34.0, self.tunable);
-                    if out.changed {
-                        self.retune(out.hz);
-                    }
-
-                    ui.add_space(GAP);
-                    cell(ui, "band", BAND_W, |ui| {
-                        ui.label(value(bands::name_at(self.center)).color(theme::TRACE).size(15.0));
+                    // The band under the dial, not beside it. It is not a
+                    // control and it is not a subject of its own: it is what
+                    // the number above it means, and a cell of its own put a
+                    // legend and a divider around a caption.
+                    ui.vertical(|ui| {
+                        let out = self.dial.show_tunable(ui, self.center, 34.0, self.tunable);
+                        if out.changed {
+                            self.retune(out.hz);
+                        }
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(2.0);
+                            // A caption on the dial, in the caption's own
+                            // colour. Cyan is what the radio heard, and a
+                            // band plan is not heard: it is looked up from
+                            // the number above it.
+                            theme::Line::new().legend(bands::name_at(self.center)).show(ui);
+                        });
                     });
 
                     self.rule(ui);
@@ -85,15 +105,26 @@ impl App {
                     // A right-to-left layout allocated at the cursor sizes
                     // itself to its content instead, which is how the setup
                     // button ended up sitting in the middle of the bar.
-                    let rest = ui.available_width();
+                    // A right-to-left layout draws over whatever is to its
+                    // left when the row has run out of width, and what it
+                    // drew over was the view strip. Claiming a floor keeps
+                    // the bar wider than the window instead, which clips at
+                    // the edge rather than stacking two cells on one another.
+                    let rest = ui.available_width().max(PANELS_W + 12.0);
+                    // The speed trace is a readout and the strip beside it
+                    // is a control, so on a narrow window the readout is the
+                    // one that goes.
+                    let room = rest > SPEED_W + PANELS_W + GAP * 2.0;
                     ui.allocate_ui_with_layout(
                         Vec2::new(rest, CELL_H),
                         egui::Layout::right_to_left(egui::Align::Min),
                         |ui| {
                             self.panels_cell(ui);
-                            self.rule(ui);
-                            self.speed_cell(ui);
-                            self.update_badge(ui);
+                            if room {
+                                self.rule(ui);
+                                self.speed_cell(ui);
+                                self.update_badge(ui);
+                            }
                         },
                     );
                 });
@@ -271,30 +302,78 @@ impl App {
     }
 
     /// Which window fills the middle of the screen.
+    ///
+    /// A strip of tabs rather than a dropdown. Ten views behind a combo box
+    /// cost two clicks and a read of a menu every time, which is most of a
+    /// second to look at the map and another to come back; as tabs it is one
+    /// click, the choice is visible without opening anything, and a dot on a
+    /// tab says which views are holding traffic.
+    ///
+    /// One row of ten rather than two of five. Two rows kept the cell as
+    /// narrow as the dropdown was, but only by drawing the glyphs at the
+    /// size of the transport buttons, which is too small to tell a dish from
+    /// a handset in passing; a row of full-size tabs spends the width the bar
+    /// has spare and puts the tabs in the order of their shortcuts. The gap
+    /// in the middle is the join between what the receiver is doing and who
+    /// is out there.
     fn view_cell(&mut self, ui: &mut egui::Ui) {
-        cell(ui, "view", VIEW_W, |ui| {
-            let mut v = self.view;
-            egui::ComboBox::from_id_salt("view").selected_text(v.label()).width(VIEW_W).show_ui(
-                ui,
-                |ui| {
-                    for opt in [
-                        View::Spectrum,
-                        View::Chain,
-                        View::Map,
-                        View::Calls,
-                        View::Messages,
-                        View::Video,
-                        View::Links,
-                        View::Devices,
-                        View::Satellites,
-                        View::Keys,
-                    ] {
-                        ui.selectable_value(&mut v, opt, opt.label());
-                    }
-                },
-            );
-            self.view = v;
-        });
+        let mut pick = None;
+        ui.allocate_ui_with_layout(
+            Vec2::new(VIEW_W, CELL_H),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(Vec2::new(VIEW_W, CELL_H));
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                // The legend doubles as the readout: with no room to label
+                // ten tabs, the one that is on has to be spelled where the
+                // eye already goes for the cell's name.
+                theme::Line::new()
+                    .legend("view")
+                    .gap(6.0)
+                    .legend(self.view.label())
+                    .tint(theme::READOUT)
+                    .show(ui);
+                ui.add_space(3.0);
+                egui::Frame::NONE
+                    .fill(theme::WELL)
+                    .stroke(Stroke::new(1.0, theme::ETCH))
+                    .inner_margin(egui::Margin::symmetric(4, 3))
+                    .corner_radius(2)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                        ui.horizontal(|ui| {
+                            for (i, row) in View::ROWS.into_iter().enumerate() {
+                                if i > 0 {
+                                    ui.add_space(5.0);
+                                }
+                                for v in row {
+                                    let tip = format!(
+                                        "{}  ({}{})\n{}",
+                                        v.label(),
+                                        TAB_MOD,
+                                        v.digit_label(),
+                                        v.about()
+                                    );
+                                    let hit = crate::icons::icon_tab(
+                                        ui,
+                                        v.icon(),
+                                        &tip,
+                                        self.view == v,
+                                        self.view_live(v),
+                                        TAB,
+                                    );
+                                    if hit.clicked() {
+                                        pick = Some(v);
+                                    }
+                                }
+                            }
+                        });
+                    });
+            },
+        );
+        if let Some(v) = pick {
+            self.set_view(v);
+        }
     }
 
     /// The windows that open over the view: the packet log, the cached

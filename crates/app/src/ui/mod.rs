@@ -126,6 +126,16 @@ pub struct App {
     /// artefact of the receiver, not something being received.
     dc_block: bool,
     view: View,
+    /// What was open before it. A look at the map and back is then one key,
+    /// which is the thing an operator does most often with these views.
+    prev_view: View,
+    /// How much each view held when it was last looked at, by
+    /// [`View::slot`]. A tab's dot is on when its view has more than this.
+    view_seen: [u64; 10],
+    /// Video transmissions that have ended, and whether one is running.
+    /// Counted because the video pane has no list to take a length of.
+    video_seen: u64,
+    video_live_was: bool,
     /// Decoding every channel is on by default and can be turned off; it is
     /// the most expensive thing the app does.
     decode_on: bool,
@@ -228,7 +238,7 @@ const SPEEDS: [(&str, f32); 5] =
     [("5", 5.0), ("10", 10.0), ("20", 20.0), ("40", 40.0), ("80", 80.0)];
 
 /// What the main pane shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
     Spectrum,
     Chain,
@@ -255,6 +265,86 @@ impl View {
             View::Satellites => "Satellites",
             View::Video => "Video",
             View::Keys => "Keys",
+        }
+    }
+
+    /// What the tab draws. One glyph per view, no two alike at 22 points.
+    fn icon(self) -> crate::icons::Icon {
+        use crate::icons::Icon;
+        match self {
+            View::Spectrum => Icon::Spectrum,
+            View::Chain => Icon::Chain,
+            View::Calls => Icon::Calls,
+            View::Messages => Icon::Messages,
+            View::Video => Icon::Video,
+            View::Map => Icon::Map,
+            View::Links => Icon::Links,
+            View::Devices => Icon::Devices,
+            View::Satellites => Icon::Satellite,
+            View::Keys => Icon::Key,
+        }
+    }
+
+    /// One line about what the view holds, under the name in the hover text.
+    /// An icon alone is a rebus, and ten of them need more than a noun.
+    fn about(self) -> &'static str {
+        match self {
+            View::Spectrum => "The span, and the waterfall under it",
+            View::Chain => "The graph the receiver is running",
+            View::Calls => "Who is talking, from every voice decoder",
+            View::Messages => "Text sent over the air",
+            View::Video => "Pictures, while something is sending them",
+            View::Map => "Everything that reported a position",
+            View::Links => "Who is talking to whom",
+            View::Devices => "Transmitters seen, and where they were",
+            View::Satellites => "Passes overhead, and what they send",
+            View::Keys => "Encryption seen, and the keys held",
+        }
+    }
+
+    /// The strip, in two rows of five: what the receiver is doing and what it
+    /// heard on the top row, who is out there on the bottom.
+    const ROWS: [[View; 5]; 2] = [
+        [View::Spectrum, View::Chain, View::Calls, View::Messages, View::Video],
+        [View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
+    ];
+
+    /// The digit that selects it, held with the modifier key. Reading order
+    /// across the strip, so the number is where the tab is.
+    fn digit(self) -> egui::Key {
+        use egui::Key::*;
+        match self {
+            View::Spectrum => Num1,
+            View::Chain => Num2,
+            View::Calls => Num3,
+            View::Messages => Num4,
+            View::Video => Num5,
+            View::Map => Num6,
+            View::Links => Num7,
+            View::Devices => Num8,
+            View::Satellites => Num9,
+            View::Keys => Num0,
+        }
+    }
+
+    /// Where the view keeps what it has been seen holding. The strip's own
+    /// order, so a reader of one is a reader of the other.
+    fn slot(self) -> usize {
+        View::ROWS.into_iter().flatten().position(|v| v == self).unwrap_or(0)
+    }
+
+    fn digit_label(self) -> &'static str {
+        match self.digit() {
+            egui::Key::Num1 => "1",
+            egui::Key::Num2 => "2",
+            egui::Key::Num3 => "3",
+            egui::Key::Num4 => "4",
+            egui::Key::Num5 => "5",
+            egui::Key::Num6 => "6",
+            egui::Key::Num7 => "7",
+            egui::Key::Num8 => "8",
+            egui::Key::Num9 => "9",
+            _ => "0",
         }
     }
 }
@@ -421,6 +511,10 @@ impl Default for App {
             shot_sent: false,
             dc_block: true,
             view: View::Spectrum,
+            prev_view: View::Chain,
+            view_seen: [0; 10],
+            video_seen: 0,
+            video_live_was: false,
             location: None,
             accuracy_m: None,
             last_frame: None,
@@ -1585,7 +1679,7 @@ impl App {
         let acts = sats_pane::Sats { st: &mut self.sats, home: self.location }.show(ui);
         for a in acts {
             match a {
-                sats_pane::Action::ShowOnMap => self.view = View::Map,
+                sats_pane::Action::ShowOnMap => self.set_view(View::Map),
                 sats_pane::Action::Track(d) => self.listen_to_satellite(&d),
                 sats_pane::Action::Untrack => self.stop_tracking(),
             }
@@ -1996,6 +2090,8 @@ impl eframe::App for App {
             // button drops them.
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        self.view_keys(ui.ctx());
+        self.read_views();
         {
             let _s = tracing::info_span!("head").entered();
             self.head(ui);
@@ -2117,7 +2213,95 @@ impl App {
     }
 
     pub fn show_chain(&mut self) {
-        self.view = View::Chain;
+        self.set_view(View::Chain);
+    }
+
+    /// Open a view, remembering the one being left.
+    fn set_view(&mut self, v: View) {
+        if v != self.view {
+            self.prev_view = self.view;
+            self.view = v;
+        }
+    }
+
+    /// How much a view is holding, as one number that moves when something
+    /// arrives in it.
+    ///
+    /// Cheap enough to ask for every view on every frame: each answer is a
+    /// length already in hand. The spectrum and the chain answer nothing,
+    /// because they are never a place traffic collects.
+    fn view_mark(&self, v: View) -> u64 {
+        match v {
+            View::Spectrum | View::Chain => 0,
+            View::Calls => self.calls.list.len() as u64,
+            View::Messages => self.messages.list.len() as u64,
+            View::Video => self.video_seen,
+            View::Map => self.map.tracks.len() as u64,
+            View::Links => self.links.list.len() as u64,
+            View::Devices => self.survey.rows.len() as u64,
+            View::Satellites => u64::from(self.sats.tracking.is_some()),
+            View::Keys => self.keys.store.channels().len() as u64,
+        }
+    }
+
+    /// Whether a view has taken something in since it was last looked at,
+    /// which is what its tab's dot says.
+    ///
+    /// Not "has anything": on a busy band every list is non-empty a minute
+    /// after the radio starts, so a dot meaning that is a lamp that is always
+    /// lit and tells nobody anything. What is worth a glance is the view that
+    /// has grown while you were somewhere else.
+    fn view_live(&self, v: View) -> bool {
+        self.view_mark(v) > self.view_seen[v.slot()]
+    }
+
+    /// Mark the open view as read, and follow a list that shrank down so a
+    /// call forgotten and heard again still lights its tab.
+    fn read_views(&mut self) {
+        // Pictures come and go without a list to count, so the arrivals are
+        // counted instead: a second transmission after you looked is a dot,
+        // the same one still sending is not.
+        // From the bus rather than from the pane: the pane's own idea of
+        // whether a picture is live only moves while it is being drawn, so a
+        // transmission that came and went while the spectrum was open would
+        // never have been counted.
+        let sending =
+            self.radio.as_ref().is_some_and(|r| !r.status.video_inputs().is_empty());
+        if sending {
+            self.video_live_was = true;
+        } else if std::mem::take(&mut self.video_live_was) {
+            self.video_seen += 1;
+        }
+        for v in View::ROWS.into_iter().flatten() {
+            let mark = self.view_mark(v);
+            let seen = &mut self.view_seen[v.slot()];
+            if v == self.view || mark < *seen {
+                *seen = mark;
+            }
+        }
+    }
+
+    /// The keyboard route to the views: the modifier and a digit for each,
+    /// and the modifier and a backtick to swap with the last one.
+    fn view_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let back = self.prev_view;
+        let mut pick = None;
+        ctx.input_mut(|i| {
+            for v in View::ROWS.into_iter().flatten() {
+                if i.consume_key(egui::Modifiers::COMMAND, v.digit()) {
+                    pick = Some(v);
+                }
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Backtick) {
+                pick = Some(back);
+            }
+        });
+        if let Some(v) = pick {
+            self.set_view(v);
+        }
     }
 
     /// Open the scanner table.
@@ -2131,28 +2315,28 @@ impl App {
     }
 
     pub fn show_map(&mut self) {
-        self.view = View::Map;
+        self.set_view(View::Map);
     }
 
     pub fn show_calls(&mut self) {
-        self.view = View::Calls;
+        self.set_view(View::Calls);
     }
 
     pub fn show_messages(&mut self) {
-        self.view = View::Messages;
+        self.set_view(View::Messages);
     }
 
     /// Open on the video pane, for a receiver pointed at a camera.
     pub fn show_video(&mut self) {
-        self.view = View::Video;
+        self.set_view(View::Video);
     }
 
     pub fn show_links(&mut self) {
-        self.view = View::Links;
+        self.set_view(View::Links);
     }
 
     pub fn show_devices(&mut self) {
-        self.view = View::Devices;
+        self.set_view(View::Devices);
     }
 
     /// Point the receiver at a frequency without opening a channel on it.
@@ -2705,6 +2889,101 @@ mod tests {
         assert_eq!(a.center, 1e6);
         a.retune(9e9);
         assert_eq!(a.center, 6e9);
+    }
+
+    /// The strip is the only route to a view by pointer, so a view missing
+    /// from it is a view that cannot be opened, and two views sharing a
+    /// glyph or a digit is a tab that opens the wrong one.
+    #[test]
+    fn every_view_has_a_tab_of_its_own() {
+        let tabs: Vec<View> = View::ROWS.into_iter().flatten().collect();
+        assert_eq!(tabs.len(), 10);
+        for v in [
+            View::Spectrum,
+            View::Chain,
+            View::Map,
+            View::Calls,
+            View::Messages,
+            View::Links,
+            View::Devices,
+            View::Satellites,
+            View::Video,
+            View::Keys,
+        ] {
+            assert!(tabs.contains(&v), "{} has no tab", v.label());
+        }
+        for (i, a) in tabs.iter().enumerate() {
+            for b in &tabs[i + 1..] {
+                assert!(a.icon() != b.icon(), "{} and {} share a glyph", a.label(), b.label());
+                assert_ne!(a.digit(), b.digit(), "{} and {} share a key", a.label(), b.label());
+                assert_ne!(a.digit_label(), b.digit_label());
+            }
+        }
+    }
+
+    /// Going back is one key, which is the whole reason the previous view is
+    /// kept: a look at the map and back should not be a hunt.
+    #[test]
+    fn a_view_remembers_the_one_before_it() {
+        let mut a = app();
+        assert_eq!(a.view, View::Spectrum);
+        a.set_view(View::Map);
+        assert_eq!(a.prev_view, View::Spectrum);
+        // Choosing the view already open is not a move, or the way back
+        // would point at itself.
+        a.set_view(View::Map);
+        assert_eq!(a.prev_view, View::Spectrum);
+        a.set_view(a.prev_view);
+        assert_eq!(a.view, View::Spectrum);
+        assert_eq!(a.prev_view, View::Map);
+    }
+
+    /// The dot is worth its ink only while it means "this grew since you
+    /// were last there". A dot for "has anything" is lit for good a minute
+    /// into a busy band, which is the state this test exists to catch.
+    #[test]
+    fn a_tab_lights_for_what_arrived_while_you_were_elsewhere() {
+        let mut a = app();
+        a.read_views();
+        assert!(!a.view_live(View::Links), "nothing has arrived yet");
+
+        let heard = || survey::Device {
+            id: 1,
+            protocol: "ble".into(),
+            ident: "aa:bb:cc:dd:ee:ff".into(),
+            first_us: 0,
+            last_us: 0,
+            packets: 1,
+            name: None,
+            vendor: None,
+            best_rssi_dbfs: None,
+            best_lat: None,
+            best_lon: None,
+            center_hz: 2_440_000_000,
+        };
+        a.survey.rows.push(heard());
+        assert!(a.view_live(View::Devices));
+
+        a.set_view(View::Devices);
+        a.read_views();
+        assert!(!a.view_live(View::Devices), "the view has been looked at");
+
+        a.survey.rows.push(heard());
+        assert!(a.view_live(View::Devices), "but a second device is new again");
+
+        // A list that was cleared must not leave its tab dark for the next
+        // thing that arrives.
+        a.set_view(View::Spectrum);
+        a.read_views();
+        a.survey.rows.clear();
+        a.read_views();
+        a.survey.rows.push(heard());
+        assert!(a.view_live(View::Devices));
+
+        // The spectrum and the chain are never a place traffic collects, so
+        // they never carry one.
+        assert!(!a.view_live(View::Spectrum));
+        assert!(!a.view_live(View::Chain));
     }
 
     #[test]
