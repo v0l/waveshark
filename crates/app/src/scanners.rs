@@ -582,9 +582,19 @@ impl Scanner {
                 self.front = Front::Auto;
             }
         }
-        // A single-channel front end takes its frequency from the block. With
-        // several listed it is the first, and the rest become their own front
-        // ends when the span covers them.
+        self.pin_to_channel();
+    }
+
+    /// A single-channel front end takes its frequency from the block. With
+    /// several listed it is the first, and the rest become their own front
+    /// ends when the span covers them.
+    ///
+    /// Called from the file's [`Self::settle`] and from the interface's row
+    /// editor, which is the whole of it: a block added in the interface used
+    /// to keep the protocol's default channel whatever was typed into the
+    /// channels field, so a video front end asked for on 5800 was built on
+    /// 5865 and read a part of the band the span did not cover.
+    pub(crate) fn pin_to_channel(&mut self) {
         let Some(&c) = self.channels.first() else {
             return;
         };

@@ -9,11 +9,13 @@ impl AutoNode {
     /// Whether what the span-wide decoders have claimed covers the whole
     /// span, since then there is nothing left for the detector to look at.
     ///
-    /// A claim is kept once taken, for the session, rather than followed
-    /// block by block. A picture fades and comes back, a call ends and the
-    /// next one starts on the same channel, and a claim that flapped with
-    /// the signal would hand the band back to the detector every time and
-    /// take it again a moment later.
+    /// A claim is kept until the front end that took it gives it back, not
+    /// followed block by block. A picture fades and comes back, a call ends
+    /// and the next one starts on the same channel, and a claim that flapped
+    /// with the signal would hand the band back to the detector every time
+    /// and take it again a moment later. What ends it is a `Release` from
+    /// the decoder that claimed, which is how a camera that has left the air
+    /// puts the band back.
     pub(super) fn claimed_whole_span(&self) -> bool {
         let (lo, hi) = (
             self.center.as_f64() - self.input_bw / 2.0,
@@ -60,7 +62,12 @@ impl AutoNode {
                 match slot {
                     None => {
                         for m in self.wide.iter_mut().filter(|m| m.name == stage) {
-                            m.band = Some((lo_hz, hi_hz));
+                            let (mut lo, mut hi) = (lo_hz, hi_hz);
+                            if let Some((a, b)) = m.placed_band {
+                                lo = lo.min(a);
+                                hi = hi.max(b);
+                            }
+                            m.band = Some((lo, hi));
                         }
                         self.apply_locked();
                     }
@@ -133,7 +140,15 @@ impl AutoNode {
                 None
             }
             Request::Release => {
-                let k = slot?;
+                let Some(k) = slot else {
+                    // A span-wide decoder giving its band back: the detector
+                    // and the other span-wide decoders have it again.
+                    for m in self.wide.iter_mut().filter(|m| m.name == stage) {
+                        m.band = None;
+                    }
+                    self.apply_locked();
+                    return None;
+                };
                 self.slots[k].members.retain(|m| m.name != stage);
                 if self.slots[k].remembered || self.slots[k].members.is_empty() {
                     let id = self.slots[k].id;

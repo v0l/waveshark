@@ -120,6 +120,57 @@ impl Stickiness {
     pub const SESSION: Stickiness = Stickiness::Latch { hold_s: None };
 }
 
+/// How much of the stream a span-wide decoder needs while nothing has been
+/// read on it.
+///
+/// A source cut out of the span is only read while it is transmitting; a
+/// span-wide decoder is handed every block for as long as the receiver runs,
+/// whether or not anything it can read is on the air. Measured on a 5.8 GHz
+/// capture, the Wi-Fi front end read 7.5 seconds of air in 3.1 seconds of
+/// CPU and returned no frames at all, because there was no Wi-Fi there: four
+/// seconds of that file is an empty band.
+///
+/// What makes duty cycling honest for one protocol and dishonest for another
+/// is whether its traffic repeats. A beacon goes out ten times a second per
+/// network, so a fifth of the air names every network within a second. A
+/// Mode S squitter or a sensor packet happens once and is gone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Watch {
+    /// Every sample, always. What it reads happens once.
+    Everything,
+    /// `on_s` of every `every_s`, until it reads something, and then
+    /// everything for `hold_s` after the last thing it read, so a
+    /// conversation is followed rather than sampled.
+    Sampled { on_s: f64, every_s: f64, hold_s: f64 },
+}
+
+/// How much to divide a span by before handing it to a span-wide decoder,
+/// and the rate that leaves.
+///
+/// A decoder declares the rate it wants (`Shape::feed_rate_hz`) and the
+/// receiver's own extraction obeys it for a front end the scanner table
+/// places. The auto node used to ignore it and hand over the raw span, so a
+/// Mode S correlator asking for 2.4 MS/s ran over 20 and cost 127% of a core
+/// on an empty band against 37% once narrowed.
+///
+/// `offset_hz` is how far the band it was placed on sits from the middle of
+/// the span, and it is kept rather than mixed away: what survives is wide
+/// enough to still hold the band, so nothing here has to shift the signal.
+/// A band far enough off centre simply is not narrowed.
+///
+/// Only for a decoder that asks (see [`Protocol::narrow_span`]).
+pub fn span_feed(rate: f64, offset_hz: f64, shape: &Shape) -> (usize, f64) {
+    if shape.feed_rate_hz <= 0.0 {
+        return (1, rate);
+    }
+    let want = shape.feed_rate_hz + 2.0 * offset_hz.abs();
+    let mut factor = 1usize;
+    while rate / (factor * 2) as f64 >= want {
+        factor *= 2;
+    }
+    (factor, rate / factor as f64)
+}
+
 /// A marker on the spectrum for a placed channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mark {
@@ -191,6 +242,27 @@ pub trait Protocol: Send + Sync {
 
     fn stickiness(&self) -> Stickiness {
         Stickiness::SESSION
+    }
+
+    /// Whether the receiver should cut the span down to `feed_rate_hz`
+    /// before this decoder sees it.
+    ///
+    /// True for one that works per sample at whatever rate it is handed: a
+    /// Mode S correlator, a video discriminator and sync separator. False,
+    /// and by default, for one that cuts its own channels out of the span,
+    /// where a filter in front is a second pass over the same samples to
+    /// save a decoder that was not reading them anyway. Measured on an empty
+    /// 20 MS/s span: narrowing takes Mode S from 127% of a core to 37%, and
+    /// puts AIS up from 8% to 15% and BLE from 13% to 23%.
+    fn narrow_span(&self) -> bool {
+        false
+    }
+
+    /// How much of the span this decoder needs while it is finding nothing.
+    /// Everything, unless what it reads repeats often enough that a sample
+    /// of the air finds it just as surely.
+    fn watch(&self) -> Watch {
+        Watch::Everything
     }
 
     /// Of the channel widths that each read something on one source, the

@@ -446,6 +446,13 @@ impl Protocol for ModeS {
     fn marks(&self, hz: f64) -> Vec<Mark> {
         vec![Mark { hz, width_hz: self.shape().widths[0], label: "Mode S".into() }]
     }
+    /// Every sample gets a correlation, so what it is handed is what it
+    /// costs: 2.4 MS/s is plenty for a 1 Mbit/s pulse train and the 20 MS/s
+    /// a receiver may be running is eight times the work for the same
+    /// frames.
+    fn narrow_span(&self) -> bool {
+        true
+    }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("mode_s")]
     }

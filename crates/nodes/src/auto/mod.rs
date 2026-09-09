@@ -522,6 +522,15 @@ impl Node for AutoNode {
         // the same fanout, since a Mode S correlator over the whole span
         // costs more than any narrowband member.
         let blocks = &self.blocks;
+        // A front end that has claimed the whole span is the only thing on
+        // it, and that goes for the other span-wide decoders as much as for
+        // the detector: an OFDM correlator over 20 MS/s of FM camera carrier
+        // is eighteen times real time spent proving there is no Wi-Fi in a
+        // picture. Whichever member holds the claim keeps running, so the
+        // claim can be given back.
+        let span = (c0 - self.input_bw / 2.0, c0 + self.input_bw / 2.0);
+        let claimant =
+            |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
         let wide = &mut self.wide;
         let slots = &mut self.slots;
         let t_fronts = Instant::now();
@@ -539,9 +548,18 @@ impl Node for AutoNode {
             || {
                 wide.par_iter_mut()
                     .map(|m| {
+                        // Not this block: something else owns the span, or
+                        // this front end is sampling the air rather than
+                        // reading all of it.
+                        if (watching && !claimant(m)) || !m.wants(iq.len(), rate) {
+                            return (Vec::new(), Vec::new(), m.name, 0);
+                        }
                         let mut pk = Vec::new();
                         let t = Instant::now();
                         let ev = m.run(iq, at_us, &mut pk);
+                        if !pk.is_empty() {
+                            m.read_something();
+                        }
                         (ev, pk, m.name, t.elapsed().as_micros() as u64)
                     })
                     .collect()
@@ -1004,6 +1022,137 @@ mod tests {
         // PAL luma reaches 5 MHz with the subcarrier at 4.43, so a slower
         // span cannot be carrying a picture whatever else is in it.
         assert!(!placed(8e6));
+    }
+
+    /// A front end that has claimed the whole span is the only thing reading
+    /// it. The other span-wide decoders stop too, not only the detector: an
+    /// OFDM correlator over 20 MS/s of FM camera carrier measured eighteen
+    /// times real time to prove there is no Wi-Fi inside a picture.
+    #[test]
+    fn a_claim_on_the_whole_span_stops_the_other_span_wide_decoders() {
+        // 5805 is Wi-Fi channel 161 and channel A4 of the video plan, so
+        // both front ends are on this span.
+        let (rate, center) = (20e6, Hz::mhz(5805));
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        assert!(n.wide().contains(&"video") && n.wide().contains(&"wifi"), "{:?}", n.wide());
+
+        let run = |n: &mut AutoNode| -> Vec<(String, u64)> {
+            let ins = [spec(rate, center)];
+            let input = Payload::Iq(vec![C32::new(0.01, -0.01); 16_384]);
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
+            let (mut events, mut tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+            Node::process(n, &[&input], &mut out, &mut ctx).unwrap();
+            // What this block cost, not the running mean the chain view
+            // draws: a mean is still warm the block after the work stopped.
+            n.phase_sum.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        };
+        let spent = |ph: &[(String, u64)], name: &str| -> u64 {
+            ph.iter().find(|(k, _)| k == name).map(|(_, v)| *v).unwrap_or(0)
+        };
+
+        let before = run(&mut n);
+        assert!(spent(&before, "wifi") > 0, "{before:?}");
+
+        // The camera says the span is its picture.
+        let mut out = Vec::new();
+        n.answer(
+            None,
+            "video",
+            Request::Claim { lo_hz: center.as_f64() - rate, hi_hz: center.as_f64() + rate },
+            &mut out,
+        );
+        let after = run(&mut n);
+        assert_eq!(spent(&after, "wifi"), 0, "{after:?}");
+        assert!(spent(&after, "video") > 0, "the claimant still reads {after:?}");
+
+        // And giving it back puts everything else back on the span.
+        n.answer(None, "video", Request::Release, &mut out);
+        let back = run(&mut n);
+        assert!(spent(&back, "wifi") > 0, "{back:?}");
+    }
+
+    /// One span-wide front end per protocol, whatever the plan calls the
+    /// span. The 5.8 GHz video plan lists 5865 as A1 and 5866 as B8, and
+    /// both channels' 18 MHz fit inside a 20 MS/s span at 5865, so the
+    /// receiver demodulated the whole span twice and published every field
+    /// twice: 41 fields a second arriving at the bus for a camera sending 20.
+    /// A decoder that works per sample is handed the rate it asked for, not
+    /// the span. Mode S wants 2.4 MS/s for a 1 Mbit/s pulse train and cost
+    /// 127% of a core reading an empty 20 MS/s band; narrowed it costs 37%.
+    /// A decoder that cuts its own channels out gets the span as before,
+    /// because a filter in front of it is a second pass for nothing.
+    #[test]
+    fn a_per_sample_decoder_is_handed_the_rate_it_asked_for() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(1090))]).unwrap();
+        let m = n.wide.iter().find(|m| m.name == "mode_s").expect("a mode s front end");
+        let topo = m.graph.topology();
+        let node = topo.nodes.iter().find(|x| x.kind == "mode_s").expect("the decoder");
+        let fed = node.inputs[0].1.rate;
+        assert!(fed <= 5e6 && fed >= 2e6, "mode s was handed {fed} S/s");
+
+        // BLE reads a span and cuts its three advertising channels out of
+        // it, so it keeps the whole span.
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz(2_426_000_000))]).unwrap();
+        let m = n.wide.iter().find(|m| m.name == "ble").expect("a ble front end");
+        let topo = m.graph.topology();
+        let node = topo.nodes.iter().find(|x| x.kind == "ble").expect("the decoder");
+        assert_eq!(node.inputs[0].1.rate, 20e6);
+    }
+
+    /// A front end whose traffic repeats samples the air rather than reading
+    /// all of it. Wi-Fi read 7.5 seconds of an empty 5.8 GHz band in 3.1
+    /// seconds of CPU for no frames at all, which is an afternoon spent
+    /// proving a band is quiet.
+    #[test]
+    fn a_sampling_front_end_reads_a_fraction_of_the_air() {
+        let (rate, center) = (20e6, Hz::mhz(5805));
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        let block = 131_072usize;
+        let ins = [spec(rate, center)];
+        let mut read = 0usize;
+        let blocks = (2.0 * rate / block as f64) as usize;
+        for _ in 0..blocks {
+            let input = Payload::Iq(vec![C32::new(0.0, 0.0); block]);
+            let mut out = [
+                Payload::Packets(Vec::new()),
+                Payload::Voice(Vec::new()),
+                Payload::Video(Vec::new()),
+            ];
+            let (mut events, mut tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+            Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();
+            if n.phase_sum.iter().any(|(k, v)| *k == "wifi" && *v > 0) {
+                read += 1;
+            }
+        }
+        // A fifth of a second in every second, so a fifth of the blocks,
+        // give or take where the window falls in a block.
+        let share = read as f64 / blocks as f64;
+        assert!((0.1..0.35).contains(&share), "{read} of {blocks} blocks");
+        // And the camera, which reads a carrier that is there all the time,
+        // is handed every block.
+        let video = n.wide.iter().find(|m| m.name == "video").expect("a camera front end");
+        assert!(matches!(
+            video.protocol.map(|p| p.watch()),
+            Some(crate::protocol::Watch::Everything)
+        ));
+    }
+
+    #[test]
+    fn a_span_wide_front_end_is_placed_once_per_span() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(5865))]).unwrap();
+        let video = n.wide().iter().filter(|w| **w == "video").count();
+        assert_eq!(video, 1, "{:?}", n.wide());
     }
 
     #[test]

@@ -812,6 +812,19 @@ impl Receiver {
             };
             let shape = proto.shape();
             if shape.span_wide {
+                // One that reads the span needs the span to be wide enough
+                // for what it reads. Built anyway, the node refuses its own
+                // input and takes the whole graph down with it, so the
+                // receiver a person asked for a camera on came up with
+                // nothing in it at all.
+                if plan.eff_rate() < shape.min_rate_hz {
+                    refused = Some(format!(
+                        "{} needs {:.1} MS/s and the span is {:.1}",
+                        proto.label(),
+                        shape.min_rate_hz / 1e6,
+                        plan.eff_rate() / 1e6
+                    ));
+                }
                 continue;
             }
             if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - shape.widths[0] {
@@ -2522,6 +2535,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 let Some(proto) = front.proto() else { continue };
                 let shape = proto.shape();
                 if !shape.span_wide && !fits(*hz, shape.widths[0]) {
+                    continue;
+                }
+                if shape.span_wide && plan.eff_rate() < shape.min_rate_hz {
                     continue;
                 }
                 let at = nodes::Placed {
@@ -5377,6 +5393,26 @@ mod extraction_tests {
         let topo = rx.topology();
         let pager = topo.nodes.iter().find(|n| n.kind == "pocsag").expect("a pager node");
         assert!(pager.inputs[0].1.rate <= 400_000.0, "{} S/s", pager.inputs[0].1.rate);
+    }
+
+    /// A span-wide front end the span is too narrow for is left out and the
+    /// reason is reported. Built anyway, the node refuses its own input at
+    /// negotiation and the whole graph fails, so a receiver somebody pinned a
+    /// camera on came up with nothing in it at all.
+    #[test]
+    fn a_span_wide_front_end_the_span_cannot_feed_is_refused_not_built() {
+        let mut p = plan(10_000_000.0, Hz(5_865_000_000));
+        p.fronts = vec![anywhere(Front::protocol("video", 5_865_000_000.0))];
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph still builds");
+        assert!(!rx.topology().nodes.iter().any(|n| n.kind == "video"));
+        assert!(rx.refused.is_some(), "and the interface has to be told why");
+
+        // Wide enough, and it is there.
+        let mut p = plan(20_000_000.0, Hz(5_865_000_000));
+        p.fronts = vec![anywhere(Front::protocol("video", 5_865_000_000.0))];
+        let rx = Receiver::build(&p, Sinks::default()).expect("a graph");
+        assert!(rx.topology().nodes.iter().any(|n| n.kind == "video"));
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
     #[test]

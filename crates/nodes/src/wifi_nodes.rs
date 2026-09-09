@@ -380,6 +380,20 @@ impl Protocol for Wifi {
     fn stickiness(&self) -> Stickiness {
         Stickiness::Forget
     }
+    /// A fifth of the air while nothing is being read, and all of it for ten
+    /// seconds after anything is.
+    ///
+    /// Wi-Fi is the one span-wide front end whose traffic repeats hard
+    /// enough to sample: every network beacons about ten times a second, so
+    /// a 200 ms window names every access point in range within a second of
+    /// arriving on the channel. Reading the span costs 2.4 times real time
+    /// on its own, measured, and on a band with no Wi-Fi on it that is the
+    /// whole of what the receiver spends its afternoon doing. Once a frame
+    /// does decode the sampling stops, because from then on what is being
+    /// missed is somebody's traffic rather than the next copy of a beacon.
+    fn watch(&self) -> crate::protocol::Watch {
+        crate::protocol::Watch::Sampled { on_s: 0.2, every_s: 1.0, hold_s: 10.0 }
+    }
     fn stage_label(&self, hz: f64) -> String {
         match channel_of(hz) {
             Some(ch) => format!("WIFI {ch}"),

@@ -119,17 +119,54 @@ impl AutoNode {
             if !shape.span_wide || self.rate < shape.min_rate_hz {
                 continue;
             }
-            for (lo, hi) in p.placement().bands(shape.widths[0]) {
-                if !covers(lo, hi) {
-                    continue;
-                }
+            // One per span, not one per band the plan happens to name. A
+            // span-wide front end reads the span itself, so a second copy of
+            // it demodulates the same samples again for the same result: the
+            // 5.8 GHz video plan calls 5865 A1 and 5866 B8, both of their
+            // 18 MHz windows fit in a 20 MS/s span at 5865, and the receiver
+            // ran two full-span FM demodulators and published every field of
+            // the picture twice. Where several bands cover, the one nearest
+            // the centre is the one the span is really on.
+            let mut bands: Vec<(f64, f64)> =
+                p.placement().bands(shape.widths[0]).into_iter().filter(|(lo, hi)| covers(*lo, *hi)).collect();
+            bands.sort_by(|a, b| {
+                let off = |(lo, hi): &(f64, f64)| ((lo + hi) / 2.0 - c).abs();
+                off(a).total_cmp(&off(b))
+            });
+            bands.truncate(1);
+            for (lo, hi) in bands {
+                // Cut the span down to the rate the protocol asked to be
+                // fed, the way the receiver's own extraction does for a
+                // front end the scanner table places. A span-wide decoder
+                // used to be handed the raw span whatever it declared, so a
+                // Mode S correlator that wants 2.4 MS/s ran over 20 and cost
+                // 120% of a core on an empty band. What a decoder cannot
+                // avoid is the noise it is handed: this is the same saving
+                // twice over, in work and in signal to noise.
+                let offset = (lo + hi) / 2.0 - c;
+                let (factor, rate) = match p.narrow_span() {
+                    true => protocol::span_feed(self.rate, offset, &shape),
+                    false => (1, self.rate),
+                };
                 let at = Placed {
                     center_hz: (lo + hi) / 2.0,
                     width_hz: hi - lo,
-                    rate: self.rate,
+                    rate,
                     snr_db: f32::NAN,
                 };
-                let mut m = Member::place(*p, spec, at, &Default::default(), &self.reg)?;
+                // Four fifths of the new Nyquist and sixty decibels: a
+                // transition band wide enough that the filter stays short,
+                // and more rejection than a decoder can tell.
+                let pre: Vec<crate::NodeSpec> = match factor {
+                    1 => Vec::new(),
+                    f => vec![crate::NodeSpec::new("decimate")
+                        .i("factor", f as i64)
+                        .f("passband", 0.8)
+                        .f("atten_db", 60.0)],
+                };
+                let mut m =
+                    Member::place_behind(*p, spec, at, &pre, &Default::default(), &self.reg)?;
+                m.placed_band = Some((lo, hi));
                 // One that latches owns its band from the moment the span
                 // reaches it; one that claims owns nothing until it says so.
                 if matches!(p.stickiness(), Stickiness::Latch { .. }) {

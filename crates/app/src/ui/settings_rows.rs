@@ -85,7 +85,7 @@ impl ScannerRow {
             crate::scanners::Front::Banks(_) => self.banks_with_current_widths(),
             ref f => f.clone(),
         };
-        Some(crate::scanners::Scanner {
+        let mut sc = crate::scanners::Scanner {
             name: name.to_string(),
             lo: self.lo_mhz * 1e6,
             hi: self.hi_mhz * 1e6,
@@ -94,7 +94,11 @@ impl ScannerRow {
             margin_hz: self.margin_khz * 1e3,
             front,
             enabled: self.enabled,
-        })
+        };
+        // What the channels field says is where the front end goes, exactly
+        // as it is when the same block is read from the file.
+        sc.pin_to_channel();
+        Some(sc)
     }
 }
 
@@ -112,4 +116,41 @@ pub(super) fn trim_num(v: f64) -> String {
 /// A megahertz field, typed to enough places for a 25 kHz channel raster.
 pub(super) fn mhz_field(ui: &mut egui::Ui, v: &mut f64) {
     ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=6000.0).max_decimals(4));
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanners::{Front, Scanners, VERSION};
+
+    /// What the channels field says is where the front end goes. A block
+    /// added in the interface used to keep the protocol's default channel,
+    /// so a camera asked for on 5800 was built on 5865: sixty-five megahertz
+    /// outside the span, which is a front end that decodes nothing and a
+    /// block the table still shows as running.
+    #[test]
+    fn a_row_pins_its_front_end_to_the_channel_that_was_typed() {
+        let mut r = ScannerRow::new_at(5_800e6, 20e6);
+        r.front = Front::named("video").unwrap();
+        r.channels = "5800".into();
+        let sc = r.to_scanner().expect("a block");
+        assert_eq!(sc.front, Front::protocol("video", 5_800e6));
+
+        let t = Scanners { list: vec![sc], version: VERSION };
+        let fronts = t.fronts(5_800e6, 20e6);
+        assert_eq!(fronts.len(), 1);
+        assert_eq!(fronts[0].front, Front::protocol("video", 5_800e6));
+    }
+
+    /// And a banks row keeps its widths. `Scanner::settle` also turns the
+    /// widths the file used to ship with into `auto`, which is right for a
+    /// file written by an older version and wrong for a row somebody has
+    /// just set to banks in front of them.
+    #[test]
+    fn a_banks_row_stays_banks() {
+        let r = ScannerRow::new_at(433.9e6, 2.4e6);
+        let sc = r.to_scanner().expect("a block");
+        assert!(matches!(sc.front, Front::Banks(_)), "{:?}", sc.front);
+    }
 }

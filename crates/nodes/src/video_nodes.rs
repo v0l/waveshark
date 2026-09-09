@@ -54,9 +54,22 @@ pub struct VideoNode {
     /// What the last successful look found, for a caller that wants to know
     /// why there is a picture or why there is not.
     lock: Option<Lock>,
+    /// Samples since the separator last produced a field.
+    quiet: usize,
     sequence: u64,
     fields: u64,
 }
+
+/// How long a locked separator may produce nothing before the lock is
+/// dropped and the standard measured again.
+///
+/// The lock is not evidence that lasts: it is one measurement of one 40 ms
+/// window, and a window of noise that happens to score can hold the span for
+/// the rest of the session, since the claim keeps the detector and every
+/// other span-wide decoder out of it. Three seconds is far longer than any
+/// fade a picture rides through at fifty fields a second, and short enough
+/// that a wrong lock costs a few seconds of the band rather than all of it.
+const RELOCK_S: f64 = 3.0;
 
 impl Default for VideoNode {
     fn default() -> Self {
@@ -77,6 +90,7 @@ impl VideoNode {
             priming: Vec::new(),
             backoff: 0,
             lock: None,
+            quiet: 0,
             sequence: 0,
             fields: 0,
         }
@@ -124,10 +138,14 @@ impl Simple for VideoNode {
             return Err(common::Error::other("video reads complex baseband"));
         }
         // A PAL luma signal reaches 5 MHz and the colour subcarrier sits at
-        // 4.43, so a span narrower than this cannot hold a picture.
-        if i.spec.rate < 12e6 {
+        // 4.43, so a stream that cannot carry 4.43 MHz of baseband cannot
+        // hold a picture. This is the rate the node reads at, which is not
+        // the span: `Video::chain` band-limits a wide span down to
+        // `WORK_RATE_HZ` first, and `Shape::min_rate_hz` is what decides
+        // whether a span is worth putting the front end on at all.
+        if i.spec.rate < 2.0 * Standard::Pal.subcarrier_hz() {
             return Err(common::Error::other(
-                "analogue video needs at least 12 MS/s to hold its baseband",
+                "analogue video needs at least 8.9 MS/s to hold its baseband",
             ));
         }
         self.rate = i.spec.rate;
@@ -202,6 +220,23 @@ impl Simple for VideoNode {
 
         let mut fields = Vec::new();
         sep.process(&self.base, &mut fields);
+        // A lock that has stopped producing is either a transmitter that has
+        // gone or a lock that was never real. Both are answered the same
+        // way: drop it, give the span back, and measure again.
+        self.quiet = if fields.is_empty() { self.quiet + self.base.len() } else { 0 };
+        if self.quiet as f64 > RELOCK_S * self.rate {
+            self.quiet = 0;
+            self.lock = None;
+            self.priming.clear();
+            self.backoff = self.rate as usize;
+            if self.forced.is_none() {
+                self.sep = None;
+            } else if let Some(s) = self.sep.as_mut() {
+                s.reset();
+            }
+            c.request("video", Request::Release);
+            return Ok(());
+        }
         let label = decode::video_channels::name_at(self.center_hz as u64, 3_000_000);
         let out = o.video_mut();
         for f in fields {
@@ -232,6 +267,7 @@ impl Simple for VideoNode {
         self.priming.clear();
         self.backoff = 0;
         self.lock = None;
+        self.quiet = 0;
         if let Some(s) = self.sep.as_mut() {
             s.reset();
         }
@@ -292,6 +328,25 @@ pub struct Video;
 /// Half of what a channel of the plan occupies.
 const CHANNEL_HALF_HZ: f64 = 9e6;
 
+/// What the front end would rather read, in samples per second.
+///
+/// Enough for the whole FM signal (4.6 MHz measured on the AKK capture) and
+/// for the 4.43 MHz colour subcarrier in the baseband that comes out of it,
+/// and no more: the noise a discriminator sees is the bandwidth it is
+/// handed. A line is then 640 samples, which is exactly the width a field is
+/// resampled to.
+const WORK_RATE_HZ: f64 = 10e6;
+
+/// How much to divide a span by to reach [`WORK_RATE_HZ`] without going
+/// under it. A 20 MS/s span stays whole, since halving it would leave 10.
+fn decimation(rate: f64) -> usize {
+    let mut f = 1usize;
+    while rate / (f * 2) as f64 >= WORK_RATE_HZ {
+        f *= 2;
+    }
+    f
+}
+
 impl Protocol for Video {
     fn id(&self) -> &'static str {
         "video"
@@ -313,7 +368,7 @@ impl Protocol for Video {
             // PAL luma reaches 5 MHz with the colour subcarrier at 4.43, so
             // a slower stream cannot be carrying a picture.
             min_rate_hz: 12e6,
-            feed_rate_hz: 12e6,
+            feed_rate_hz: WORK_RATE_HZ,
             span_wide: true,
             families: &[],
         }
@@ -321,11 +376,41 @@ impl Protocol for Video {
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim
     }
+    /// A discriminator and a sync separator run per sample, and the noise
+    /// they carry is the bandwidth they are handed. See [`Video::chain`].
+    fn narrow_span(&self) -> bool {
+        true
+    }
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
-    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("video")]
+    /// Band-limited down to about [`WORK_RATE_HZ`] first, and read there.
+    ///
+    /// The camera occupies under 5 MHz of the span it is found in: the AKK
+    /// capture measures 4.6 MHz with about 1 MHz rms deviation, whatever the
+    /// manuals imply. A discriminator handed the whole 20 MHz carries all of
+    /// that bandwidth's noise into the picture, which costs 3 dB of
+    /// pre-detection signal to noise for every doubling of span and made a
+    /// weak camera undecodable: off air 40 dB down the band, 20 MS/s gave no
+    /// sync pulse at all and 10 MS/s gave the line rate to within 0.1 us.
+    /// It is also most of what the front end cost, since both the
+    /// discriminator and the sync separator run per sample.
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        match decimation(at.rate) {
+            1 => vec![NodeSpec::new("video")],
+            // Four fifths of the new Nyquist, which at 10 MS/s keeps the
+            // carrier's whole 8 MHz and leaves a transition band wide enough
+            // that the filter is fifty-odd taps rather than a hundred and
+            // fifty. Sixty decibels is far more than a signal read through a
+            // discriminator can tell.
+            f => vec![
+                NodeSpec::new("decimate")
+                    .i("factor", f as i64)
+                    .f("passband", 0.8)
+                    .f("atten_db", 60.0),
+                NodeSpec::new("video"),
+            ],
+        }
     }
 }
 
@@ -374,6 +459,57 @@ mod tests {
             out.extend(std::iter::repeat_n(0.0f32, n(std.line_s())));
         }
         out
+    }
+
+    /// Run one payload through, collecting the requests it made.
+    fn feed(n: &mut VideoNode, iq: &[C32], rate: f64) -> (Vec<VideoFrame>, Vec<Request>) {
+        let ins = [spec(rate, 5_865e6)];
+        let tags = Vec::new();
+        let (mut fields, mut asked) = (Vec::new(), Vec::new());
+        let mut out = Payload::empty_of(PortKind::Video);
+        for chunk in iq.chunks(1 << 16) {
+            let mut events = Vec::new();
+            let mut new_tags = Vec::new();
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            out.clear();
+            n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).expect("process");
+            fields.extend(out.as_video().unwrap_or(&[]).iter().cloned());
+            asked.extend(events.into_iter().filter_map(|e| match e {
+                pipeline::event::Event::Request { request, .. } => Some(request),
+                _ => None,
+            }));
+        }
+        (fields, asked)
+    }
+
+    /// A lock is one measurement of one 40 ms window, and the claim it takes
+    /// shuts the detector and every other span-wide decoder out of the band.
+    /// So a lock that stops producing fields is given up: a camera that has
+    /// left the air puts the span back, and a window of noise that scored
+    /// costs a few seconds rather than the session.
+    #[test]
+    fn a_lock_that_stops_producing_gives_the_span_back() {
+        let rate = 16e6;
+        let mut n = VideoNode::new(None, false);
+        n.negotiate(&spec(rate, 5_865e6)).expect("a span");
+        let (fields, asked) = feed(&mut n, &modulate(&pal(rate, 4), rate), rate);
+        assert!(!fields.is_empty(), "no picture to lose");
+        assert!(n.locked(), "not locked");
+        assert!(
+            asked.iter().any(|r| matches!(r, Request::Claim { .. })),
+            "a picture claims the span"
+        );
+
+        // The transmitter goes. Silence at the same rate, longer than the
+        // relock timeout, and the claim comes back.
+        let quiet = vec![C32::new(0.0, 0.0); ((RELOCK_S + 1.0) * rate) as usize];
+        let (_, asked) = feed(&mut n, &quiet, rate);
+        assert!(
+            asked.iter().any(|r| matches!(r, Request::Release)),
+            "the span was never given back"
+        );
+        assert!(!n.locked(), "still locked on nothing");
+        assert_eq!(n.standard(), None, "the standard is measured again");
     }
 
     #[test]

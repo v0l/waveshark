@@ -3432,7 +3432,12 @@ pub(crate) mod tests {
             .into_iter()
             .find(|s| s.locked_to == Some("video"))
             .expect("the camera never claimed its band");
-        assert!(owned.bandwidth_hz >= 19e6, "{owned:?}");
+        // The channel of the plan, which is what a camera occupies and what
+        // the front end was placed on. Not the sampled span: the front end
+        // reads a band-limited 10 MS/s of it and cannot claim what it was
+        // never handed, so the auto node widens the claim to the band it
+        // placed the decoder on.
+        assert!(owned.bandwidth_hz >= 18e6, "{owned:?}");
     }
 
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
