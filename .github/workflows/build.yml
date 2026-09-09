@@ -22,6 +22,15 @@ jobs:
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: --no-default-features --features limesdr,stt
+          # The same again with the speech model on the card. A separate
+          # asset rather than one binary that tries: candle links cudart and
+          # cublas at load, so a CUDA build does not start on a machine
+          # without them, and most machines are without them.
+          - name: linux-x86_64-cuda
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: --no-default-features --features limesdr,stt,cuda
+            cuda: '12.8.1'
           # Apple silicon only. The Intel runners are on their way out and
           # nobody has an Intel Mac to check the result on, and a binary
           # nobody has started is not a release asset.
@@ -33,6 +42,11 @@ jobs:
             os: windows-2022
             target: x86_64-pc-windows-msvc
             features: --no-default-features --features stt
+          - name: windows-x86_64-cuda
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            features: --no-default-features --features stt,cuda
+            cuda: '12.8.1'
 
     steps:
       - uses: actions/checkout@v4
@@ -73,12 +87,37 @@ jobs:
           # a path it looks in by itself.
           "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -Append $env:GITHUB_ENV
 
+      # The toolkit, where the job builds for a card. Network on Linux
+      # installs only the packages named; the Windows installer takes
+      # component names instead. The runner has no card, so the compute
+      # capability is given: 7.5 is Turing, and PTX for it is finished by
+      # the driver on anything since.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        if: matrix.cuda && runner.os == 'Linux'
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cccl", "crt", "nvrtc-dev", "driver-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        if: matrix.cuda && runner.os == 'Windows'
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: local
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "cccl", "visual_studio_integration"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
+      - name: Compute capability for the kernels
+        if: matrix.cuda
+        shell: bash
+        run: echo "CUDA_COMPUTE_CAP=75" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.name }}
 
       # Every job names its features rather than taking the defaults. A build
       # from source has TETRA decryption and the AMBE vocoder on, and neither
@@ -116,6 +155,16 @@ jobs:
           ordinary. The macOS build is linked against Homebrew's librtlsdr
           and LimeSuite, so both have to be installed for it to start.
 
+          The -cuda build runs the speech model on an NVIDIA card and also
+          links the CUDA 12 runtime: libcudart.so.12, libcublas.so.12,
+          libcublasLt.so.12, libcurand.so.10 and libnvrtc.so.12, with a
+          driver of 570 or later. Without those it does not start; the
+          plain build is the same receiver reading speech on the CPU.
+
+            Debian/Ubuntu   sudo apt install cuda-runtime-12-8   (NVIDIA's repo)
+            Fedora          sudo dnf install cuda-runtime-12-8   (NVIDIA's repo)
+            Arch            sudo pacman -S cuda
+
           On Linux a plain user needs permission to claim the device. The
           rtl-sdr package usually installs the udev rules that grant it; if
           the radio is only visible as root, that is what is missing.
@@ -139,6 +188,12 @@ jobs:
           Copy-Item README.md stage\ -ErrorAction SilentlyContinue
           @"
           Plug the radio in before starting waveshark.
+
+          The -cuda build runs the speech model on an NVIDIA card and needs
+          the CUDA 12 runtime DLLs (cudart64_12, cublas64_12, cublasLt64_12,
+          curand64_10, nvrtc64_120_0) on the PATH, which the CUDA Toolkit
+          12.8 installer puts there, and a driver of 570 or later. The
+          plain build reads speech on the CPU and needs neither.
 
           Windows needs WinUSB bound to the device rather than the DVB-T
           driver it ships with. Use Zadig (https://zadig.akeo.ie) and replace

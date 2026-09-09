@@ -26,16 +26,49 @@ jobs:
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
+      # A build from source has CUDA on by default, and candle compiles its
+      # kernels with nvcc, so the toolkit has to be here for the default
+      # feature set to build at all. The runner has no card: the kernels are
+      # compiled as PTX for compute 7.5, which any later card's driver
+      # finishes at load, and nothing here runs them.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.8.1'
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cccl", "crt", "nvrtc-dev", "driver-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
+          log-file-suffix: 'ci.txt'
+
+      # The test binaries link libcuda.so.1 outright and the runner has no
+      # driver, so they would not start. The toolkit ships a stub driver for
+      # linking against; given the driver's soname it loads, reports no
+      # cards, and the tests see a machine with the CUDA build and no GPU,
+      # which is a machine somebody will have.
+      - name: Stub driver for the test binaries
+        run: |
+          mkdir -p "$HOME/cuda-stub"
+          ln -sf "$CUDA_PATH/lib64/stubs/libcuda.so" "$HOME/cuda-stub/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$HOME/cuda-stub:$CUDA_PATH/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       - name: Test
+        env:
+          CUDA_COMPUTE_CAP: '75'
         # Release: several tests assert throughput against real time, and a
         # debug build misses those by a wide enough margin to be meaningless.
         run: cargo test --workspace --release
 
       - name: Build with no radio attached
+        env:
+          CUDA_COMPUTE_CAP: '75'
         run: cargo build --workspace --release --all-targets
+
+      # What the release workflow ships on Linux is built without CUDA, so
+      # that set has to keep building too, or a release breaks on a Tuesday.
+      - name: Build the shipped feature set
+        run: cargo build --release -p app --no-default-features --features limesdr,stt
 
   changelog:
     runs-on: ubuntu-latest
