@@ -42,6 +42,7 @@ mod settings;
 mod settings_rows;
 mod state;
 mod strip;
+mod transcript_pane;
 mod video_pane;
 pub(crate) mod widgets;
 
@@ -76,6 +77,7 @@ pub struct App {
     map: map_pane::MapState,
     sats: state::SatsState,
     calls: state::CallsState,
+    transcript: state::TranscriptState,
     messages: state::MessagesState,
     links: state::LinksState,
     video: video_pane::VideoState,
@@ -131,7 +133,7 @@ pub struct App {
     prev_view: View,
     /// How much each view held when it was last looked at, by
     /// [`View::slot`]. A tab's dot is on when its view has more than this.
-    view_seen: [u64; 10],
+    view_seen: [u64; 11],
     /// Video transmissions that have ended, and whether one is running.
     /// Counted because the video pane has no list to take a length of.
     video_seen: u64,
@@ -244,6 +246,8 @@ enum View {
     Chain,
     Map,
     Calls,
+    /// What was said, as the model on the audio bus read it.
+    Transcript,
     Messages,
     Links,
     Devices,
@@ -259,6 +263,7 @@ impl View {
             View::Chain => "Signal chain",
             View::Map => "Map",
             View::Calls => "Calls",
+            View::Transcript => "Transcript",
             View::Messages => "Messages",
             View::Links => "Data links",
             View::Devices => "Devices",
@@ -275,6 +280,7 @@ impl View {
             View::Spectrum => Icon::Spectrum,
             View::Chain => Icon::Chain,
             View::Calls => Icon::Calls,
+            View::Transcript => Icon::Transcript,
             View::Messages => Icon::Messages,
             View::Video => Icon::Video,
             View::Map => Icon::Map,
@@ -292,6 +298,7 @@ impl View {
             View::Spectrum => "The span, and the waterfall under it",
             View::Chain => "The graph the receiver is running",
             View::Calls => "Who is talking, from every voice decoder",
+            View::Transcript => "What was said, read by the local model",
             View::Messages => "Text sent over the air",
             View::Video => "Pictures, while something is sending them",
             View::Map => "Everything that reported a position",
@@ -302,21 +309,30 @@ impl View {
         }
     }
 
-    /// The strip, in two rows of five: what the receiver is doing and what it
-    /// heard on the top row, who is out there on the bottom.
-    const ROWS: [[View; 5]; 2] = [
-        [View::Spectrum, View::Chain, View::Calls, View::Messages, View::Video],
-        [View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
+    /// The strip, in two rows: what the receiver is doing and what it heard
+    /// on the top row, who is out there on the bottom.
+    const ROWS: [&'static [View]; 2] = [
+        &[View::Spectrum, View::Chain, View::Calls, View::Transcript, View::Messages, View::Video],
+        &[View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
     ];
 
-    /// The digit that selects it, held with the modifier key. Reading order
-    /// across the strip, so the number is where the tab is.
+    /// Every view, in the strip's order.
+    fn all() -> impl Iterator<Item = View> {
+        View::ROWS.into_iter().flatten().copied()
+    }
+
+    /// The key that selects it, held with the modifier key. Reading order
+    /// across the strip, so the number is where the tab is; the transcript
+    /// has a letter because there are eleven views and ten digits, and
+    /// renumbering the strip to fit it in would move every shortcut an
+    /// operator has learned.
     fn digit(self) -> egui::Key {
         use egui::Key::*;
         match self {
             View::Spectrum => Num1,
             View::Chain => Num2,
             View::Calls => Num3,
+            View::Transcript => T,
             View::Messages => Num4,
             View::Video => Num5,
             View::Map => Num6,
@@ -330,11 +346,12 @@ impl View {
     /// Where the view keeps what it has been seen holding. The strip's own
     /// order, so a reader of one is a reader of the other.
     fn slot(self) -> usize {
-        View::ROWS.into_iter().flatten().position(|v| v == self).unwrap_or(0)
+        View::all().position(|v| v == self).unwrap_or(0)
     }
 
     fn digit_label(self) -> &'static str {
         match self.digit() {
+            egui::Key::T => "T",
             egui::Key::Num1 => "1",
             egui::Key::Num2 => "2",
             egui::Key::Num3 => "3",
@@ -482,6 +499,7 @@ impl Default for App {
             map: map_pane::MapState::default(),
             rt: background_runtime(),
             calls: state::CallsState::default(),
+            transcript: state::TranscriptState::default(),
             messages: state::MessagesState::default(),
             links: state::LinksState::default(),
             video: video_pane::VideoState::default(),
@@ -512,7 +530,7 @@ impl Default for App {
             dc_block: true,
             view: View::Spectrum,
             prev_view: View::Chain,
-            view_seen: [0; 10],
+            view_seen: [0; 11],
             video_seen: 0,
             video_live_was: false,
             location: None,
@@ -1279,14 +1297,6 @@ impl App {
         // subscriptions used to be made where the call list is drawn, so a
         // receiver sitting on the spectrum heard nothing however much it
         // decoded, and the fault looked like a broken vocoder.
-        // What the transcriber heard, matched to the calls by key. A call
-        // that produced no speech the model would read keeps whatever text
-        // its own decoder gave it.
-        #[cfg(feature = "stt")]
-        if let Some(r) = &self.radio {
-            let said = r.status.said.lock().clone();
-            self.calls.list.read_transcripts(&said);
-        }
         let heard: Vec<crate::calls::Call> =
             self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
         let mut cmds = std::mem::take(&mut self.cmds);
@@ -1482,12 +1492,14 @@ impl App {
             st: &mut self.calls,
             audio: &mut self.audio,
             radio: self.radio.as_ref(),
+            said: &self.transcript.log,
             cmds: &mut self.cmds,
         }
         .show(ui);
         match act {
             Some(calls_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(calls_pane::Action::Clear) => self.calls.list.clear(),
+            Some(calls_pane::Action::Transcript(key)) => self.show_transcript(Some(key)),
             None => {}
         }
     }
@@ -1499,6 +1511,55 @@ impl App {
             None => (None, Vec::new()),
         };
         video_pane::VideoPane { st: &mut self.video, frame, inputs, cmds: &mut self.cmds }.show(ui);
+    }
+
+    /// Fold the window of utterances the radio publishes into the interface's
+    /// own log, and give the call list the newest line for each call.
+    ///
+    /// Every frame rather than when a packet arrives. Speech is not a packet:
+    /// an FM channel transcribes without decoding anything, and the partial
+    /// of an over in progress is replaced several times while it is being
+    /// spoken.
+    fn read_said(&mut self) {
+        let Some(r) = &self.radio else {
+            return;
+        };
+        let seq = r.status.said_seq.load(std::sync::atomic::Ordering::Relaxed);
+        if seq == self.transcript.seq {
+            return;
+        }
+        self.transcript.seq = seq;
+        let said = r.status.said.lock().clone();
+        if said.is_empty() {
+            return;
+        }
+        // A call that produced no speech the model would read keeps whatever
+        // text its own decoder gave it.
+        self.calls.list.read_transcripts(&said);
+        for u in said {
+            self.transcript.log.push(u);
+        }
+    }
+
+    /// Draw the transcript, then do what its buttons asked for.
+    fn transcript_view(&mut self, ui: &mut egui::Ui) {
+        let engine = self
+            .radio
+            .as_ref()
+            .and_then(|r| r.status.transcriber.lock().clone());
+        let act = transcript_pane::Transcript {
+            st: &mut self.transcript,
+            engine,
+            cmds: &mut self.cmds,
+        }
+        .show(ui);
+        match act {
+            Some(transcript_pane::Action::Clear) => {
+                self.transcript.log.clear();
+                self.transcript.only = None;
+            }
+            None => {}
+        }
     }
 
     /// Draw the message list, then do what its buttons asked for.
@@ -2112,6 +2173,7 @@ impl eframe::App for App {
                     View::Chain => self.chain_view(ui),
                     View::Map => self.map_view(ui),
                     View::Calls => self.call_view(ui),
+                    View::Transcript => self.transcript_view(ui),
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
@@ -2143,6 +2205,7 @@ impl App {
     /// shell and the number that matters is over a steady-state window.
     fn soak_check(&mut self, ctx: &egui::Context) {
         let Some(secs) = self.soak else { return };
+        self.read_said();
         if self.shot_sent {
             return;
         }
@@ -2234,6 +2297,7 @@ impl App {
         match v {
             View::Spectrum | View::Chain => 0,
             View::Calls => self.calls.list.len() as u64,
+            View::Transcript => self.transcript.log.len() as u64,
             View::Messages => self.messages.list.len() as u64,
             View::Video => self.video_seen,
             View::Map => self.map.tracks.len() as u64,
@@ -2272,7 +2336,7 @@ impl App {
         } else if std::mem::take(&mut self.video_live_was) {
             self.video_seen += 1;
         }
-        for v in View::ROWS.into_iter().flatten() {
+        for v in View::all() {
             let mark = self.view_mark(v);
             let seen = &mut self.view_seen[v.slot()];
             if v == self.view || mark < *seen {
@@ -2290,7 +2354,7 @@ impl App {
         let back = self.prev_view;
         let mut pick = None;
         ctx.input_mut(|i| {
-            for v in View::ROWS.into_iter().flatten() {
+            for v in View::all() {
                 if i.consume_key(egui::Modifiers::COMMAND, v.digit()) {
                     pick = Some(v);
                 }
@@ -2324,6 +2388,12 @@ impl App {
 
     pub fn show_messages(&mut self) {
         self.set_view(View::Messages);
+    }
+
+    /// Open the transcript, on one conversation or on everything heard.
+    pub fn show_transcript(&mut self, only: Option<String>) {
+        self.transcript.only = only;
+        self.set_view(View::Transcript);
     }
 
     /// Open on the video pane, for a receiver pointed at a camera.
@@ -2896,13 +2966,14 @@ mod tests {
     /// glyph or a digit is a tab that opens the wrong one.
     #[test]
     fn every_view_has_a_tab_of_its_own() {
-        let tabs: Vec<View> = View::ROWS.into_iter().flatten().collect();
-        assert_eq!(tabs.len(), 10);
+        let tabs: Vec<View> = View::all().collect();
+        assert_eq!(tabs.len(), 11);
         for v in [
             View::Spectrum,
             View::Chain,
             View::Map,
             View::Calls,
+            View::Transcript,
             View::Messages,
             View::Links,
             View::Devices,
@@ -2919,6 +2990,46 @@ mod tests {
                 assert_ne!(a.digit_label(), b.digit_label());
             }
         }
+    }
+
+    /// The call list's route into the transcript: the key travels, so the
+    /// view opens on that conversation and not on the whole afternoon.
+    #[test]
+    fn a_call_opens_the_transcript_on_its_own_conversation() {
+        let mut a = app();
+        let key = "DMR:435000000:9:1234567".to_string();
+        a.read_views();
+        assert!(!a.view_live(View::Transcript), "nothing has been said yet");
+        assert!(
+            !a.transcript.log.has(&key),
+            "and so no row would offer a way in"
+        );
+
+        for (n, text) in ["go ahead", "received, out"].into_iter().enumerate() {
+            a.transcript.log.push(crate::transcripts::Utterance {
+                key: key.clone(),
+                at: std::time::Instant::now() + std::time::Duration::from_secs(n as u64),
+                seconds: 1.0,
+                text: text.into(),
+                settled: true,
+                confidence: -0.3,
+            });
+        }
+        assert!(a.transcript.log.has(&key));
+        assert!(
+            a.view_live(View::Transcript),
+            "two lines arrived while elsewhere"
+        );
+
+        a.show_transcript(Some(key.clone()));
+        assert_eq!(a.view, View::Transcript);
+        assert_eq!(a.transcript.only.as_deref(), Some(key.as_str()));
+        assert_eq!(a.transcript.log.of(&key).len(), 2);
+        a.read_views();
+        assert!(
+            !a.view_live(View::Transcript),
+            "the view has been looked at"
+        );
     }
 
     /// Going back is one key, which is the whole reason the previous view is

@@ -57,6 +57,17 @@ impl Files {
             flavour,
         })
     }
+
+    /// What the three files take on disc. Shown beside the directory, since
+    /// "a model is here" and "90 MB of model is here" are different claims to
+    /// somebody deciding whether to fetch a larger one.
+    pub fn bytes(&self) -> u64 {
+        [&self.config, &self.tokenizer, &self.weights]
+            .into_iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
+    }
 }
 
 /// How many tokens the model was trained with, from its config.

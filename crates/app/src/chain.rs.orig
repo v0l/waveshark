@@ -1949,20 +1949,6 @@ impl Receiver {
             .unwrap_or_default()
     }
 
-    /// What the transcriber is, where its model is, and what it is doing.
-    ///
-    /// `None` when there is no transcriber in the graph at all, which is a
-    /// different thing from one that has read nothing and has to read as one
-    /// on screen.
-    #[cfg(feature = "stt")]
-    pub fn transcriber(&self) -> Option<crate::transcripts::Engine> {
-        let id = self.transcripts?;
-        let n = downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id)?;
-        let mut e = n.engine();
-        e.node = id.0;
-        Some(e)
-    }
-
     /// Tell the tracker roughly where the receiver is.
     /// Start or stop recording a survey. The node stays in the graph either
     /// way; what changes is whether it has a file.

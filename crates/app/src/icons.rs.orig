@@ -51,9 +51,6 @@ pub enum Icon {
     Devices,
     Satellite,
     Key,
-    /// What was said, written down: a bubble with words in it, against the
-    /// empty bubble that means text somebody typed.
-    Transcript,
 }
 
 /// Side of the clickable square, in points.
@@ -460,32 +457,6 @@ impl Icon {
                     let x = b.left() + b.width() * at;
                     p.line_segment([Pos2::new(x, c.y), Pos2::new(x, c.y + b.height() * 0.22)], s);
                 }
-            }
-            Icon::Transcript => {
-                // A bubble with lines of writing in it. `Messages` is the
-                // same bubble empty, because there the shape is the message;
-                // here the point is that speech came out as words, so the
-                // words are what is drawn and the bubble is squarer and has
-                // no tail.
-                let body = Rect::from_min_max(
-                    Pos2::new(b.left(), b.top() + b.height() * 0.06),
-                    Pos2::new(b.right(), b.bottom() - b.height() * 0.24),
-                );
-                p.rect_stroke(body, b.width() * 0.1, s, egui::StrokeKind::Middle);
-                let thin = Stroke::new(sw * 0.75, col);
-                for (i, wide) in [0.62f32, 0.46, 0.7].into_iter().enumerate() {
-                    let y = body.top() + body.height() * (0.28 + 0.24 * i as f32);
-                    let x0 = body.left() + body.width() * 0.16;
-                    p.line_segment([Pos2::new(x0, y), Pos2::new(x0 + body.width() * wide, y)], thin);
-                }
-                p.add(egui::Shape::line(
-                    vec![
-                        Pos2::new(body.right() - body.width() * 0.44, body.bottom()),
-                        Pos2::new(body.right() - body.width() * 0.2, b.bottom()),
-                        Pos2::new(body.right() - body.width() * 0.16, body.bottom()),
-                    ],
-                    s,
-                ));
             }
             Icon::Log => {
                 // Rows with a mark against each, which is what the log is.

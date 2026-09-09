@@ -12,10 +12,24 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- A Transcript view (Ctrl+T): what the local Whisper model read off
+  everything the receiver heard, newest at the bottom, with a line still
+  being spoken marked as it grows and a low-confidence reading flagged. It
+  can be filtered by words or opened on one conversation, and the calls list
+  has a "read" button on each row the model heard speech on that opens it
+  there.
+
+- The transcript view says what the speech-to-text is doing: which model, the
+  directory its files are in, how much is on disc and whether they are the
+  English-only or multilingual weights, whether it is loading, ready or
+  failed and why, whether it is running on CPU, CUDA or Metal, and how much
+  faster than real time it read the last window. A button loads or downloads
+  the model there and then instead of waiting for the first transmission.
+
 - The views are a strip of tabs in the top bar instead of a dropdown: one
-  click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0, Ctrl+` to go back
-  to the last view, and a dot on any tab whose view has taken something in
-  since you last looked at it.
+  click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0 and Ctrl+T,
+  Ctrl+` to go back to the last view, and a dot on any tab whose view has
+  taken something in since you last looked at it.
 
 - An OPEN button beside the raw capture folder, with the path next to it, so a
   recording can be replayed or trimmed without typing the path out.

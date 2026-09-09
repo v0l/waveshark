@@ -126,15 +126,13 @@ pub struct TranscriptLog {
 }
 
 impl TranscriptLog {
-    /// Add or replace. One utterance is one start time on one key, so a
-    /// reading of speech already held replaces what is there: that is what
-    /// makes a growing window read as one line getting longer rather than as
-    /// a page of half sentences, and it is what lets a view fold the same
-    /// published window in on every frame without collecting duplicates.
+    /// Add or replace. An unsettled utterance replaces the last unsettled one
+    /// on the same key, which is what makes a growing window read as one line
+    /// getting longer rather than as a page of half sentences.
     pub fn push(&mut self, u: Utterance) {
         let list = self.by_key.entry(u.key.clone()).or_default();
         match list.last_mut() {
-            Some(last) if last.at == u.at => *last = u.clone(),
+            Some(last) if !last.settled && last.at == u.at => *last = u.clone(),
             _ => list.push(u.clone()),
         }
         if list.len() > MAX_PER_KEY {
@@ -174,17 +172,6 @@ impl TranscriptLog {
         all
     }
 
-    /// Whether anything was read on one conversation, which is what decides
-    /// whether a call is worth offering a way into this log.
-    pub fn has(&self, key: &str) -> bool {
-        self.by_key.get(key).is_some_and(|v| !v.is_empty())
-    }
-
-    /// Lines held, across every conversation.
-    pub fn len(&self) -> usize {
-        self.by_key.values().map(|v| v.len()).sum()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.by_key.is_empty()
     }
@@ -192,89 +179,6 @@ impl TranscriptLog {
     pub fn clear(&mut self) {
         self.by_key.clear();
         self.order.clear();
-    }
-}
-
-/// Where the model is in its life, which the node cannot see for itself: the
-/// fetching, the loading and the reading all happen on the worker thread.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum ModelState {
-    /// Nothing has asked for it yet. The model is loaded by the first speech
-    /// worth reading, so a receiver that hears none never fetches one.
-    #[default]
-    Cold,
-    /// Being downloaded from the hub, which is the one thing here that needs
-    /// a network.
-    Fetching,
-    Loading,
-    Ready,
-    /// It cannot be used, and why.
-    Failed(String),
-}
-
-impl ModelState {
-    /// What a pane prints for it. The reason is shown beside this rather than
-    /// inside it, because it is a sentence and this is a word.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Cold => "not loaded",
-            Self::Fetching => "downloading",
-            Self::Loading => "loading",
-            Self::Ready => "ready",
-            Self::Failed(_) => "failed",
-        }
-    }
-}
-
-/// What the transcriber is and what it is doing, for the view that shows it.
-///
-/// Which model, where its files are, whether they are there at all, what it
-/// is running on and how much it has read. Without this the pane can say
-/// only that no text has appeared, which is the same picture for a model
-/// that was never downloaded, one that failed to load, one running on a CPU
-/// too slow to keep up, and a band where nobody is talking.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Engine {
-    /// The node in the running graph, so a view can set its parameters.
-    pub node: usize,
-    pub enabled: bool,
-    /// The repository the files come from when they have to be fetched.
-    pub repo: String,
-    /// Where they are kept.
-    pub dir: String,
-    /// Whether a usable model is in that directory already, and what it
-    /// takes up.
-    pub present: bool,
-    pub bytes: u64,
-    /// What the files in that directory actually are: the weights file and
-    /// whether they carry language tokens. The repository is only where they
-    /// would be fetched from, so on a receiver whose directory was filled by
-    /// hand, or by an earlier run asking for another model, the two disagree
-    /// and this is the half that is running.
-    pub weights: String,
-    pub flavour: String,
-    pub state: ModelState,
-    /// What it is running on, once it has loaded: CPU, CUDA or Metal.
-    pub device: String,
-    /// Windows read since it loaded, and what the last one cost against how
-    /// much audio it was. A receiver whose model is slower than real time is
-    /// a receiver that will fall behind, and this is where that shows.
-    pub reads: u64,
-    pub last_ms: u64,
-    pub last_audio_s: f64,
-    /// Speech being collected right now, and on how many conversations.
-    pub holding_s: f64,
-    pub speakers: usize,
-    /// Whether the model has a window in front of it at this moment.
-    pub busy: bool,
-}
-
-impl Engine {
-    /// How much faster than real time the last read was. Below 1 the model
-    /// cannot keep up with somebody talking continuously.
-    pub fn speed(&self) -> Option<f64> {
-        (self.last_ms > 0 && self.last_audio_s > 0.0)
-            .then(|| self.last_audio_s / (self.last_ms as f64 / 1000.0))
     }
 }
 
@@ -308,41 +212,6 @@ pub struct LiveTranscribeNode {
     repo: String,
     #[cfg(feature = "stt")]
     reported: bool,
-    /// What the model is doing, written by the thread that has it.
-    #[cfg(feature = "stt")]
-    health: std::sync::Arc<parking_lot::Mutex<Health>>,
-}
-
-/// The worker thread's half of [`Engine`].
-#[cfg(feature = "stt")]
-#[derive(Debug, Default)]
-struct Health {
-    state: ModelState,
-    device: String,
-    reads: u64,
-    last_ms: u64,
-    last_audio_s: f64,
-    present: bool,
-    bytes: u64,
-    weights: String,
-    flavour: String,
-}
-
-#[cfg(feature = "stt")]
-impl Health {
-    /// Record what is on disc, or that nothing is.
-    fn describe(&mut self, files: Option<&stt::Files>) {
-        self.present = files.is_some();
-        self.bytes = files.map(|f| f.bytes()).unwrap_or(0);
-        self.weights = files
-            .and_then(|f| f.weights.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_default();
-        self.flavour = match files.map(|f| f.flavour) {
-            Some(stt::Flavour::English) => "English only".into(),
-            Some(stt::Flavour::Multilingual) => "multilingual".into(),
-            None => String::new(),
-        };
-    }
 }
 
 impl Default for LiveTranscribeNode {
@@ -366,53 +235,13 @@ impl LiveTranscribeNode {
             repo: stt::DEFAULT_REPO.to_string(),
             #[cfg(feature = "stt")]
             reported: false,
-            #[cfg(feature = "stt")]
-            health: std::sync::Arc::new(parking_lot::Mutex::new(Health::default())),
         }
     }
 
     #[cfg(feature = "stt")]
     pub fn in_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.dir = dir.into();
-        self.look();
         self
-    }
-
-    /// Whether a model is on disc where this node would look, and how large
-    /// it is. Three stats, taken when the directory changes rather than per
-    /// block.
-    #[cfg(feature = "stt")]
-    fn look(&self) {
-        let mut h = self.health.lock();
-        h.describe(stt::Files::in_dir(&self.dir).ok().as_ref());
-    }
-
-    /// What this node is and what it is doing, for the transcript view.
-    pub fn engine(&self) -> Engine {
-        #[allow(unused_mut)]
-        let mut e = Engine {
-            enabled: self.enabled,
-            speakers: self.talking.len(),
-            holding_s: self.talking.values().map(|t| t.pcm.len() as f64 / t.rate).sum(),
-            busy: self.talking.values().any(|t| t.waiting),
-            ..Default::default()
-        };
-        #[cfg(feature = "stt")]
-        {
-            e.repo = self.repo.clone();
-            e.dir = self.dir.display().to_string();
-            let h = self.health.lock();
-            e.state = h.state.clone();
-            e.device = h.device.clone();
-            e.reads = h.reads;
-            e.last_ms = h.last_ms;
-            e.last_audio_s = h.last_audio_s;
-            e.present = h.present;
-            e.bytes = h.bytes;
-            e.weights = h.weights.clone();
-            e.flavour = h.flavour.clone();
-        }
-        e
     }
 
     #[cfg(feature = "stt")]
@@ -509,10 +338,9 @@ mod work {
                 let (done_tx, done_rx) = bounded::<Done>(32);
                 let dir = self.dir.clone();
                 let repo = self.repo.clone();
-                let health = self.health.clone();
                 std::thread::Builder::new()
                     .name("whisper-live".into())
-                    .spawn(move || run(dir, repo, health, jobs_rx, done_tx))
+                    .spawn(move || run(dir, repo, jobs_rx, done_tx))
                     .ok()?;
                 self.worker = Some(Worker { jobs: jobs_tx, done: done_rx });
             }
@@ -619,36 +447,13 @@ mod work {
         }
     }
 
-    fn run(
-        dir: std::path::PathBuf,
-        repo: String,
-        health: std::sync::Arc<parking_lot::Mutex<Health>>,
-        jobs: Receiver<Job>,
-        done: Sender<Done>,
-    ) {
-        let have = stt::Files::in_dir(&dir).is_ok();
-        health.lock().state = if have { ModelState::Loading } else { ModelState::Fetching };
-        let device = stt::best_device();
-        let label = stt::device_label(&device);
-        let loaded = stt::ensure(&repo, &dir).and_then(|f| {
-            {
-                let mut h = health.lock();
-                h.describe(Some(&f));
-                h.state = ModelState::Loading;
-            }
-            stt::Whisper::load(&f, device, None)
-        });
+    fn run(dir: std::path::PathBuf, repo: String, jobs: Receiver<Job>, done: Sender<Done>) {
+        let loaded =
+            stt::ensure(&repo, &dir).and_then(|f| stt::Whisper::load(&f, stt::best_device(), None));
         let mut model = match loaded {
-            Ok(m) => {
-                let mut h = health.lock();
-                h.state = ModelState::Ready;
-                h.device = label.to_string();
-                drop(h);
-                m
-            }
+            Ok(m) => m,
             Err(e) => {
                 let msg = format!("whisper in {}: {e}", dir.display());
-                health.lock().state = ModelState::Failed(msg.clone());
                 while let Ok(job) = jobs.recv() {
                     let _ = done.send(Done {
                         key: job.key,
@@ -663,14 +468,7 @@ mod work {
         };
         while let Ok(job) = jobs.recv() {
             let seconds = job.pcm.len() as f64 / job.rate.max(1.0);
-            let started = Instant::now();
             let result = model.transcribe(&job.pcm, job.rate);
-            {
-                let mut h = health.lock();
-                h.reads += 1;
-                h.last_ms = started.elapsed().as_millis() as u64;
-                h.last_audio_s = seconds;
-            }
             if done
                 .send(Done { key: job.key, at: job.at, seconds, settled: job.settled, result })
                 .is_err()
@@ -746,10 +544,7 @@ impl Simple for LiveTranscribeNode {
             "enabled" => self.enabled = v.as_bool().unwrap_or(self.enabled),
             "min_speech_s" => self.min_speech_s = v.as_f64().unwrap_or(self.min_speech_s),
             #[cfg(feature = "stt")]
-            "dir" => {
-                self.dir = std::path::PathBuf::from(v.as_str().unwrap_or_default());
-                self.look();
-            }
+            "dir" => self.dir = std::path::PathBuf::from(v.as_str().unwrap_or_default()),
             #[cfg(feature = "stt")]
             "model" => {
                 if let Some(t) = v.as_str() {
@@ -757,20 +552,7 @@ impl Simple for LiveTranscribeNode {
                         self.repo = t.to_string();
                         self.worker = None;
                         self.reported = false;
-                        *self.health.lock() = Health::default();
-                        self.look();
                     }
-                }
-            }
-            // Load it now rather than on the first thing worth reading. The
-            // fetch is tens of megabytes and the load is seconds, and an
-            // operator who has just switched transcription on should be able
-            // to find out whether it works without waiting for somebody to
-            // talk.
-            #[cfg(feature = "stt")]
-            "load" => {
-                if v.as_bool().unwrap_or(false) {
-                    self.worker();
                 }
             }
             _ => {
@@ -957,86 +739,6 @@ mod tests {
         let u = n.log().latest(key).expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
         assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
-    }
-
-    /// The interface folds the published window in on every frame, so the
-    /// same utterances arrive over and over. One utterance is one start time
-    /// on one key, so the log has to be the same size after the tenth pass
-    /// as after the first.
-    #[test]
-    fn the_same_window_folded_in_again_is_the_same_log() {
-        let mut log = TranscriptLog::default();
-        let at = Instant::now();
-        let window = |text: &str| {
-            vec![
-                Utterance {
-                    key: "Audio:145500000::".into(),
-                    at,
-                    seconds: 2.0,
-                    text: text.into(),
-                    settled: true,
-                    confidence: -0.2,
-                },
-                Utterance {
-                    key: "DMR:435000000:9:1234567".into(),
-                    at: at + Duration::from_secs(3),
-                    seconds: 1.0,
-                    text: "go ahead".into(),
-                    settled: false,
-                    confidence: -0.4,
-                },
-            ]
-        };
-        for _ in 0..10 {
-            for u in window("all stations, this is EI2ABC") {
-                log.push(u);
-            }
-        }
-        assert_eq!(log.len(), 2);
-        assert_eq!(log.keys().len(), 2);
-        // And the partial still becomes the settled line rather than a
-        // second one beside it.
-        for u in window("all stations, this is EI2ABC") {
-            log.push(Utterance { settled: true, text: format!("{} over", u.text), ..u });
-        }
-        assert_eq!(log.len(), 2);
-        assert_eq!(log.of("DMR:435000000:9:1234567").len(), 1);
-        assert_eq!(log.latest("DMR:435000000:9:1234567").unwrap().text, "go ahead over");
-        assert!(log.has("Audio:145500000::"));
-        assert!(!log.has("Audio:433000000::"), "a conversation nobody spoke on");
-    }
-
-    /// The model can be brought up without waiting for somebody to talk, and
-    /// it says what it is running on when it is. That is the whole of what
-    /// the transcript view's card reads.
-    #[cfg(feature = "stt")]
-    #[test]
-    fn the_model_loads_on_request_and_says_where_it_is_running() {
-        let dir = crate::chain::default_model_dir();
-        if !dir.join("config.json").exists() {
-            println!("no model in {}; skipping", dir.display());
-            return;
-        }
-        let mut n = LiveTranscribeNode::new().in_dir(&dir);
-        let cold = n.engine();
-        assert_eq!(cold.state, ModelState::Cold);
-        assert!(cold.present, "the files are in {}", dir.display());
-        assert!(cold.bytes > 0);
-        assert!(!cold.weights.is_empty(), "what is on disc is not named");
-        assert_eq!(cold.reads, 0);
-
-        n.set_param("load", ParamValue::Bool(true)).unwrap();
-        let waited = std::time::Instant::now();
-        while n.engine().state != ModelState::Ready && waited.elapsed().as_secs() < 120 {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let up = n.engine();
-        assert_eq!(up.state, ModelState::Ready, "the model never loaded");
-        assert!(
-            ["CPU", "CUDA", "Metal"].contains(&up.device.as_str()),
-            "running on {:?}",
-            up.device
-        );
     }
 
     #[test]
