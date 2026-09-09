@@ -112,6 +112,7 @@ The third is hardware.
 | PortaPack | a HackRF with a screen | as HackRF | as HackRF |
 | LimeSDR USB / Mini | 100 kHz-3.8 GHz | 61.44 MS/s on USB3 | full duplex, two receive and two transmit channels on a USB board |
 | iqstream server | whatever feeds it | whatever feeds it | receive only, and its tuning is a reading rather than a setting |
+| Recorded capture | wherever it was recorded | whatever it was recorded at | replay only, paced to the recorded rate and looped. Opened through "Open capture…" in the receiver list or with `--capture`, with the tuning and the rate read out of the filename, and its dial is a reading rather than a setting |
 
 Out of scope whatever the ambition: a Flipper's 125 kHz RFID, its 13.56 MHz
 NFC, its infrared and its iButton are near-field or optical, not radio an SDR

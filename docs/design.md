@@ -13,7 +13,7 @@ the [README](../README.md).
 | `pipeline` | the flow graph: typed DAG, rate negotiation, stream tags, events |
 | `decode` | bit buffers, pulse slicers, unknown-burst analyser, protocol registry, device decoders, and the frame layers of ADS-B, AIS, APRS, POCSAG, DMR, TETRA, M17, LoRa, GSM system information and the mesh protocols |
 | `nodes` | DSP and decoders as graph nodes, the registry, the auto node, the wideband channel bank, the modulators and the transmit sinks |
-| `sources` | file replay with rtl_433-style filename metadata, and the file sink that transmit is tested into |
+| `sources` | file replay with rtl_433-style filename metadata, paced to the recorded rate for the replay receiver, and the file sink that transmit is tested into |
 | `datasets` | cached third party data: airports and their frequencies, DMR and NXDN registries, repeater and reflector lists, the Artemis signal database |
 | `mbe` | AMBE and IMBE vocoder port, opt-in only: the algorithms are patent encumbered, so nothing builds it unless `ambe` is on |
 | `audio` | cpal playback with a drift-tracking resampler, and microphone capture |

@@ -17,6 +17,8 @@ pub struct Entry {
     pub rates: std::ops::RangeInclusive<Sps>,
     /// Where to reach it, for a radio that is not on this machine.
     pub addr: Option<String>,
+    /// The capture this entry replays, for a receiver that is a file.
+    pub path: Option<std::path::PathBuf>,
     /// The one frequency this device delivers, when the tuner is somebody
     /// else's and cannot be moved from here.
     pub pinned: Option<common::Hz>,
@@ -29,7 +31,7 @@ impl Entry {
         label: String,
         rates: std::ops::RangeInclusive<Sps>,
     ) -> Self {
-        Self { kind, index, label, rates, addr: None, pinned: None }
+        Self { kind, index, label, rates, addr: None, path: None, pinned: None }
     }
 }
 
@@ -71,7 +73,92 @@ pub fn list() -> Vec<Entry> {
     for (i, r) in streams().into_iter().enumerate() {
         v.push(stream_entry(i, &r));
     }
+    // Last, so plugging a radio in does not change which receiver a fresh
+    // session opens on. A capture is what somebody reaches for when there is
+    // no aerial to hand, not the default receiver.
+    for (i, c) in captures().into_iter().enumerate() {
+        v.push(c.entry(i));
+    }
     v
+}
+
+/// A capture on disk, offered as a receiver that plays it back.
+///
+/// The point is that a recording is a radio: the same graph, the same
+/// detector, the same front ends and the same panes, driven at the rate the
+/// samples were taken at rather than as fast as the disk allows. A decoder
+/// that only ever sees a file read at ten times real time is not being tested
+/// against the timing the receiver will meet, and a pane cannot be looked at
+/// at all when the whole capture goes past in a tenth of a second.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Capture {
+    pub path: std::path::PathBuf,
+    pub rate: Sps,
+    pub center: Option<common::Hz>,
+    /// How long it plays for, from the file's size and its rate.
+    pub seconds: f64,
+}
+
+impl Capture {
+    pub fn entry(&self, index: usize) -> Entry {
+        let name = self.path.file_name().and_then(|s| s.to_str()).unwrap_or("capture");
+        Entry {
+            kind: DriverKind::File,
+            index,
+            label: format!("{name} ({:.1}s)", self.seconds),
+            rates: self.rate..=self.rate,
+            addr: None,
+            path: Some(self.path.clone()),
+            // A recording was taken at one frequency and cannot be moved off
+            // it. Retuning would leave the dial saying one thing while the
+            // samples said another.
+            pinned: self.center,
+        }
+    }
+}
+
+/// Captures somebody has opened, in the order they were opened.
+///
+/// Configuration rather than discovery, the way a network radio is: nothing
+/// on the bus reveals a file, and a folder scanned for candidates would fill
+/// the list with every recording ever made. One is opened at a time, through
+/// the file dialog in the receiver list, and stays there until it is dropped.
+static CAPTURES: parking_lot::Mutex<Vec<Capture>> = parking_lot::Mutex::new(Vec::new());
+
+/// Offer this capture as a receiver, and say what it will deliver.
+///
+/// `None` when the file cannot be replayed, which is nearly always a name
+/// that does not carry a sample rate and a format. The rate scales every
+/// pulse width downstream, so a guess is a receiver that decodes nothing for
+/// a reason nobody can see, and `sources::parse_filename` is the one place
+/// that convention lives.
+pub fn add_capture(path: impl Into<std::path::PathBuf>) -> Option<Capture> {
+    let path = path.into();
+    let meta = sources::parse_filename(&path);
+    let (rate, format) = (meta.rate?, meta.format?);
+    let len = std::fs::metadata(&path).ok().filter(|m| m.is_file())?.len();
+    let c = Capture {
+        path,
+        rate,
+        center: meta.center,
+        seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
+    };
+    let mut v = CAPTURES.lock();
+    // Opening the same file twice is the same receiver, not a second one.
+    if let Some(i) = v.iter().position(|x| x.path == c.path) {
+        v[i] = c.clone();
+    } else {
+        v.push(c.clone());
+    }
+    Some(c)
+}
+
+pub fn remove_capture(path: &std::path::Path) {
+    CAPTURES.lock().retain(|c| c.path != path);
+}
+
+pub fn captures() -> Vec<Capture> {
+    CAPTURES.lock().clone()
 }
 
 /// iqstream servers to offer alongside whatever is plugged in.
@@ -132,6 +219,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
             label: format!("{name} {:.3} MHz", p.center.as_f64() / 1e6),
             rates: p.rate..=p.rate,
             addr: Some(p.addr),
+            path: None,
             pinned: Some(p.center),
         },
         Err(e) => {
@@ -142,6 +230,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
                 label: format!("{name} (offline)"),
                 rates: RTL_RATES,
                 addr: Some(r.addr.clone()),
+                path: None,
                 pinned: None,
             }
         }
@@ -167,6 +256,23 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::IqStream => {
             let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
             Ok(Box::new(iqnet::IqNet::open(addr)?))
+        }
+        DriverKind::File => {
+            let path = e.path.as_deref().ok_or(Error::NoDevice)?;
+            let rate = *e.rates.end();
+            // Paced to the recorded rate, or the whole capture arrives in one
+            // gulp and the detector sees a band that switched on and off
+            // again between two frames. Looped, because a capture is seconds
+            // long and a receiver that stops after one pass is a receiver
+            // that has to be restarted to look at anything twice.
+            //
+            // A block is about 20 ms of samples: short enough that the pane
+            // moves, long enough that a 20 MS/s capture is not thousands of
+            // reads a second.
+            let block = ((rate.as_f64() / 50.0) as usize).clamp(4096, 1 << 20);
+            Ok(Box::new(
+                sources::FileSource::open(path)?.realtime(true).repeating(true).with_block(block),
+            ))
         }
         other => Err(Error::other(format!("{} cannot be opened live", other.as_str()))),
     }
@@ -336,6 +442,49 @@ mod tests {
         assert_eq!(short("0000000000000000457863dc3579c1df"), "3579c1df");
         assert_eq!(short("00000001"), "1");
         assert_eq!(short(""), "");
+    }
+
+    /// A capture is a receiver. What makes it usable is that the filename
+    /// carries the rate and the centre, so the entry can say what it will
+    /// deliver before anything opens it.
+    #[test]
+    fn a_capture_opened_by_hand_is_offered_as_a_receiver() {
+        let dir = std::env::temp_dir().join("sr_capture_open");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A second of 250 kS/s, eight bit complex.
+        let path = dir.join("bench_433.92M_250k.cu8");
+        std::fs::write(&path, vec![0u8; 500_000]).unwrap();
+
+        let c = add_capture(path.clone()).expect("a capture");
+        assert_eq!(c.rate, Sps(250_000));
+        assert_eq!(c.center, Some(common::Hz(433_920_000)));
+        assert!((c.seconds - 1.0).abs() < 0.01, "{} s", c.seconds);
+
+        let e = c.entry(0);
+        assert_eq!(e.kind, DriverKind::File);
+        assert_eq!(e.path.as_deref(), Some(path.as_path()));
+        assert!(e.label.contains("bench_433.92M_250k.cu8"), "{}", e.label);
+        // Pinned: the samples were taken at one frequency and the dial cannot
+        // move off it without lying about what is being heard.
+        assert_eq!(e.pinned, Some(common::Hz(433_920_000)));
+        assert_eq!(e.rates, Sps(250_000)..=Sps(250_000));
+        // And a span list can be built from that one rate.
+        assert!(spans_with_zoom(&e.rates).iter().any(|s| (s.rate - 250_000.0).abs() < 1.0));
+
+        // Opening the same file again is the same receiver, not a second one.
+        add_capture(path.clone()).expect("a capture");
+        assert_eq!(captures().iter().filter(|x| x.path == path).count(), 1);
+
+        // A name that carries no sample rate is refused rather than guessed
+        // at: a wrong rate rescales every pulse width downstream.
+        let mystery = dir.join("mystery.cu8");
+        std::fs::write(&mystery, vec![0u8; 1024]).unwrap();
+        assert!(add_capture(mystery).is_none());
+
+        remove_capture(&path);
+        assert!(!captures().iter().any(|x| x.path == path));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
