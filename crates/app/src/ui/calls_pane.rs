@@ -183,9 +183,15 @@ impl CallList<'_> {
                             + COLS[..COLS.len() - 1].iter().map(|(_, w)| w).sum::<f32>();
                         let at = Rect::from_min_size(
                             Pos2::new(x, rect.top() + 1.0),
-                            Vec2::new(40.0, h - 2.0),
+                            Vec2::new(COLS[COLS.len() - 1].1 - 6.0, h - 2.0),
                         );
                         let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(at));
+                        // The button is laid out inside a cell narrower than
+                        // the word plus its padding, and a wrapping button
+                        // breaks "read" across two lines and spills out of
+                        // the row. The column is the width; the label is not
+                        // negotiable.
+                        sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if sub
                             .small_button("read")
                             .on_hover_text("Everything the model read on this conversation")
