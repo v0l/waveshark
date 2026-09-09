@@ -22,15 +22,13 @@ jobs:
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: --no-default-features --features limesdr,stt
-          # macOS is off: the build has not been run or fixed on it and a
-          # permanently red job tells nobody anything. Put these back when
-          # someone has a Mac to fix it on.
-          # - name: macos-arm64
-          #   os: macos-14
-          #   target: aarch64-apple-darwin
-          # - name: macos-x86_64
-          #   os: macos-13
-          #   target: x86_64-apple-darwin
+          # Apple silicon only. The Intel runners are on their way out and
+          # nobody has an Intel Mac to check the result on, and a binary
+          # nobody has started is not a release asset.
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            features: --no-default-features --features limesdr,stt
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -52,6 +50,9 @@ jobs:
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
+      # Both -sys crates find their headers through pkg-config, and Homebrew
+      # installs the .pc files where its own pkg-config looks, so nothing has
+      # to be pointed at by hand the way it does on Windows.
       - name: macOS libraries
         if: runner.os == 'macOS'
         run: brew install librtlsdr limesuite pkg-config
@@ -86,8 +87,12 @@ jobs:
       # LimeSuite has no vcpkg port either, so the Windows binary is built
       # without the LimeSDR driver, which only means the device never appears
       # in the list.
+      # Locked: the lock file is the set of versions this has been built with,
+      # and a resolver free to pick a newer one has picked a crate needing a
+      # compiler newer than the job has. That failure reads as "unstable
+      # feature" in a dependency nobody here wrote.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p app ${{ matrix.features }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p app ${{ matrix.features }}
 
       - name: Stage (unix)
         if: runner.os != 'Windows'
@@ -104,15 +109,21 @@ jobs:
             Debian/Ubuntu   sudo apt install librtlsdr0 libasound2
             Fedora          sudo dnf install rtl-sdr alsa-lib
             Arch            sudo pacman -S rtl-sdr alsa-lib
-            macOS           brew install librtlsdr
+            macOS           brew install librtlsdr limesuite
 
           Verified against the built binary, which links librtlsdr.so.0,
           libasound.so.2 and libusb-1.0.so.0 and nothing else out of the
-          ordinary.
+          ordinary. The macOS build is linked against Homebrew's librtlsdr
+          and LimeSuite, so both have to be installed for it to start.
 
           On Linux a plain user needs permission to claim the device. The
           rtl-sdr package usually installs the udev rules that grant it; if
           the radio is only visible as root, that is what is missing.
+
+          On macOS the binary is not signed or notarised, so Gatekeeper
+          refuses it on the first run. Clear the download flag once:
+
+            xattr -dr com.apple.quarantine waveshark
           EOF
           tar -C stage -czf waveshark-${{ matrix.name }}.tar.gz .
 
