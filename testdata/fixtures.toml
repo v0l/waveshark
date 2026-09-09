@@ -201,7 +201,7 @@ earlier attempt at the default 32 dB put the carriers at under one ADC code
 and is not what is uploaded here.
 
 What is uploaded is seconds 4 to 12 of a twelve second recording, cut with
-`cargo run -p sources --bin iq_clipper -- <file> <out> --skip 4 --seconds 8`. The
+`cargo run -p sources --example iq_clipper -- <file> <out> --skip 4 --seconds 8`. The
 window is not arbitrary and is worth leaving alone: the group addresses below
 arrive late, so a cut ending before eight seconds has no call rows in it at
 all, and the sync and network broadcast are each expected exactly once across
