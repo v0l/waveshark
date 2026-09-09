@@ -27,6 +27,7 @@
 mod burst;
 mod calls_pane;
 mod chain_pane;
+mod control_pane;
 mod dashboard_pane;
 mod devices_pane;
 mod head;
@@ -81,6 +82,7 @@ pub struct App {
     transcript: state::TranscriptState,
     messages: state::MessagesState,
     links: state::LinksState,
+    control: state::ControlState,
     video: video_pane::VideoState,
     #[allow(dead_code)]
     keys: state::KeysState,
@@ -261,6 +263,8 @@ enum View {
     Satellites,
     Video,
     Keys,
+    /// Where the sticks are, on every model control link in earshot.
+    Control,
 }
 
 impl View {
@@ -278,6 +282,7 @@ impl View {
             View::Satellites => "Satellites",
             View::Video => "Video",
             View::Keys => "Keys",
+            View::Control => "Control",
         }
     }
 
@@ -297,6 +302,7 @@ impl View {
             View::Devices => Icon::Devices,
             View::Satellites => Icon::Satellite,
             View::Keys => Icon::Key,
+            View::Control => Icon::Control,
         }
     }
 
@@ -316,6 +322,7 @@ impl View {
             View::Devices => "Transmitters seen, and where they were",
             View::Satellites => "Passes overhead, and what they send",
             View::Keys => "Encryption seen, and the keys held",
+            View::Control => "Where the sticks are, on every handset heard",
         }
     }
 
@@ -332,7 +339,7 @@ impl View {
             View::Messages,
             View::Video,
         ],
-        &[View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
+        &[View::Map, View::Links, View::Devices, View::Control, View::Satellites, View::Keys],
     ];
 
     const COUNT: usize = View::ROWS[0].len() + View::ROWS[1].len();
@@ -350,9 +357,9 @@ impl View {
 /// Positional rather than a property of the view, because which tabs are on
 /// the strip depends on whether the dashboard is wanted: the number has to be
 /// where the tab is, so hiding the dashboard puts the spectrum back on 1.
-/// There are ten digits and twelve views, so the last two tabs have no key.
-/// Those are the satellites and the keys, which are the two nobody reaches
-/// for in a hurry.
+/// There are ten digits and thirteen views, so the last three tabs have no
+/// key. Those are the control links, the satellites and the keys, which are
+/// the ones nobody reaches for in a hurry.
 fn tab_digit(i: usize) -> Option<(egui::Key, &'static str)> {
     use egui::Key::*;
     const KEYS: [(egui::Key, &str); 10] = [
@@ -506,6 +513,7 @@ impl Default for App {
             transcript: state::TranscriptState::default(),
             messages: state::MessagesState::default(),
             links: state::LinksState::default(),
+            control: state::ControlState::default(),
             video: video_pane::VideoState::default(),
             keys: state::KeysState::default(),
             audio: state::AudioState::default(),
@@ -1307,6 +1315,9 @@ impl App {
             // anybody spoke or wrote: a meter, an advertiser and a pager
             // capcode all belong in the directory.
             self.links.list.update(&rec, rec.at);
+            // A handset's sticks are state rather than a stream: the control
+            // view holds the last of each channel per transmitter.
+            self.control.list.update(&rec, rec.at);
             let id = self.log.next_packet;
             self.log.next_packet += 1;
             self.log.decodes.push(Logged { id, rec });
@@ -2245,6 +2256,9 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
+                    View::Control => {
+                        control_pane::ControlView { st: &mut self.control }.show(ui)
+                    }
                     View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),
@@ -2370,6 +2384,7 @@ impl App {
             View::Map => self.map.tracks.len() as u64,
             View::Links => self.links.list.len() as u64,
             View::Devices => self.survey.rows.len() as u64,
+            View::Control => self.control.list.len() as u64,
             View::Satellites => u64::from(self.sats.tracking.is_some()),
             View::Keys => self.keys.store.channels().len() as u64,
         }
@@ -2495,6 +2510,10 @@ impl App {
 
     pub fn show_links(&mut self) {
         self.set_view(View::Links);
+    }
+
+    pub fn show_control(&mut self) {
+        self.set_view(View::Control);
     }
 
     pub fn show_devices(&mut self) {
@@ -2695,6 +2714,7 @@ mod tests {
             crc,
             link: None,
             report: common::ReportDetail::Bare,
+            identity: None,
             iq: None,
             audio: None,
         }
@@ -3060,7 +3080,7 @@ mod tests {
     #[test]
     fn every_view_has_a_tab_of_its_own() {
         let tabs: Vec<View> = View::ROWS.into_iter().flatten().copied().collect();
-        assert_eq!(tabs.len(), 12);
+        assert_eq!(tabs.len(), 13);
         for v in [
             View::Dashboard,
             View::Spectrum,
@@ -3074,6 +3094,7 @@ mod tests {
             View::Satellites,
             View::Video,
             View::Keys,
+            View::Control,
         ] {
             assert!(tabs.contains(&v), "{} has no tab", v.label());
         }
@@ -3085,7 +3106,7 @@ mod tests {
     }
 
     /// The digit is where the tab is, whichever tabs are on the strip.
-    /// Twelve views and ten digits, so the last tabs go without one; what may
+    /// Thirteen views and ten digits, so the last tabs go without one; what may
     /// never happen is two tabs answering to the same key.
     #[test]
     fn the_shortcuts_follow_the_strip() {
@@ -3103,7 +3124,7 @@ mod tests {
         assert_eq!(without.first(), Some(&View::Spectrum));
 
         let keys: Vec<_> = (0..with.len()).filter_map(tab_digit).collect();
-        assert_eq!(keys.len(), 10, "ten digits for twelve tabs");
+        assert_eq!(keys.len(), 10, "ten digits for thirteen tabs");
         for (i, x) in keys.iter().enumerate() {
             for y in &keys[i + 1..] {
                 assert_ne!(x.0, y.0, "two tabs answer to the same key");

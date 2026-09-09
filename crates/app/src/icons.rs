@@ -54,6 +54,8 @@ pub enum Icon {
     Devices,
     Satellite,
     Key,
+    /// A model control link: a stick on a gimbal, which no other tab is.
+    Control,
     /// What was said, written down: a bubble with words in it, against the
     /// empty bubble that means text somebody typed.
     Transcript,
@@ -99,6 +101,7 @@ impl Icon {
             Icon::Links => ph::SHARE_NETWORK,
             Icon::Devices => ph::DEVICE_MOBILE,
             Icon::Key => ph::KEY,
+            Icon::Control => ph::JOYSTICK,
             // A ringed planet rather than a dish, which Phosphor has not got.
             // A dish drawn by hand to match the font read as an umbrella at
             // tab size, where the mast crossed the arm and the two signal
