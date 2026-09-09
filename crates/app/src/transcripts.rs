@@ -645,12 +645,16 @@ mod work {
         pub settled: bool,
     }
 
+    /// The worker's word that a job is finished, so the node can send the
+    /// next one. The text itself does not come this way: the worker writes
+    /// it into the transcript directly, so a read that finishes after the
+    /// node that asked for it has gone is still written down.
     pub(super) struct Done {
         pub key: String,
         pub at: Instant,
-        pub seconds: f64,
         pub settled: bool,
-        pub result: Result<stt::Transcript>,
+        /// Whether the model heard speech, or what went wrong.
+        pub result: Result<bool>,
     }
 
     pub(super) struct Worker {
@@ -667,9 +671,10 @@ mod work {
                 let dir = self.dir.clone();
                 let repo = self.repo.clone();
                 let health = self.health.clone();
+                let log = self.log.clone();
                 std::thread::Builder::new()
                     .name("whisper-live".into())
-                    .spawn(move || run(dir, repo, health, jobs_rx, done_tx))
+                    .spawn(move || run(dir, repo, health, log, jobs_rx, done_tx))
                     .ok()?;
                 self.worker = Some(Worker { jobs: jobs_tx, done: done_rx });
             }
@@ -691,13 +696,13 @@ mod work {
                     t.waiting = false;
                 }
                 if done.settled {
-                    if let Ok(t) = &done.result {
+                    if let Ok(speech) = done.result {
                         // Whether it was speech, not whether it was read
                         // well: the model returns a plausible sentence for a
                         // fan or an open squelch, so words alone are not
                         // evidence of anybody talking, and a weak handheld
                         // read badly is still somebody talking.
-                        self.read_back(&done.key, t.speech());
+                        self.read_back(&done.key, speech);
                     }
                     // The last reading of an utterance is the end of it, and
                     // holding it into the next one would read the same words
@@ -715,20 +720,7 @@ mod work {
                     self.pump(&done.key);
                 }
                 match done.result {
-                    Ok(t) => {
-                        let text = t.text.trim().to_string();
-                        if !text.is_empty() {
-                            self.log.lock().push(Utterance {
-                                key: done.key,
-                                at: done.at,
-                                seconds: done.seconds,
-                                text,
-                                settled: done.settled,
-                                confidence: t.avg_logprob() as f32,
-                                credible: t.credible(),
-                            });
-                        }
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         if !self.reported {
                             self.reported = true;
@@ -829,6 +821,7 @@ mod work {
         dir: std::path::PathBuf,
         repo: String,
         health: std::sync::Arc<parking_lot::Mutex<Health>>,
+        log: SharedLog,
         jobs: Receiver<Job>,
         done: Sender<Done>,
     ) {
@@ -859,7 +852,6 @@ mod work {
                     let _ = done.send(Done {
                         key: job.key,
                         at: job.at,
-                        seconds: 0.0,
                         settled: job.settled,
                         result: Err(common::Error::other(&msg)),
                     });
@@ -891,10 +883,50 @@ mod work {
                     h.last_speech = t.speech();
                 }
             }
+            // Written down here, on the thread that read it, and not handed
+            // back to the node: the node is a stage in a graph that is
+            // rebuilt whenever a channel comes or goes, and a reading that
+            // came back to a node that had been rebuilt was thrown away
+            // with the channel it was sent on.
+            let verdict = match &result {
+                Ok(t) => {
+                    let text = t.text.trim().to_string();
+                    if !text.is_empty() {
+                        log.lock().push(Utterance {
+                            key: job.key.clone(),
+                            at: job.at,
+                            seconds,
+                            text,
+                            settled: job.settled,
+                            confidence: t.avg_logprob() as f32,
+                            credible: t.credible(),
+                        });
+                    }
+                    Ok(t.speech())
+                }
+                Err(e) => Err(common::Error::other(format!("{e}"))),
+            };
             if done
-                .send(Done { key: job.key, at: job.at, seconds, settled: job.settled, result })
+                .send(Done {
+                    key: job.key.clone(),
+                    at: job.at,
+                    settled: job.settled,
+                    result: verdict,
+                })
                 .is_err()
             {
+                // Nobody to tell: the node is gone. Whatever this window
+                // read is then the last word on that utterance, since
+                // nothing will ask for the rest of it.
+                if !job.settled {
+                    let mut log = log.lock();
+                    if let Some(u) = log.by_key.get_mut(&job.key).and_then(|v| v.last_mut()) {
+                        if u.at == job.at {
+                            u.settled = true;
+                            log.seq += 1;
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -1178,6 +1210,80 @@ mod tests {
         let u = n.log().lock().latest(key).cloned().expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
         assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
+    }
+
+    /// The node that asked for a reading is gone by the time it comes back,
+    /// which is what a rebuild does to it: the audio bus is rebuilt whenever
+    /// a channel comes or goes, and the transcriber hangs off the bus. The
+    /// reading still has to be written down. It was not: the worker handed
+    /// its text back to the node, and a dropped node is a closed channel,
+    /// so every read that finished across a rebuild vanished. On screen that
+    /// was a card saying the model had read the words and a transcript with
+    /// no lines in it.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_reading_outlives_the_node_that_asked_for_it() {
+        let dir = crate::chain::default_model_dir();
+        let named = std::env::var("WAVESHARK_TEST_WAV").unwrap_or_else(|_| "/tmp/jfk.wav".into());
+        let wav = std::path::Path::new(&named);
+        if !dir.join("config.json").exists() || !wav.exists() {
+            println!("no model in {} or no {named}; skipping", dir.display());
+            return;
+        }
+        let r = hound::WavReader::open(wav).expect("the wav");
+        let rate = r.spec().sample_rate as f64;
+        let pcm: Vec<f32> =
+            r.into_samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / 32768.0).collect();
+        let log: SharedLog = Default::default();
+        let mut n = LiveTranscribeNode::new().in_dir(&dir).into_log(log.clone());
+        // The model up first, so the read below is the model reading and
+        // not the model loading.
+        n.set_param("load", ParamValue::Bool(true)).unwrap();
+        while n.engine().state != ModelState::Ready {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut events = Vec::new();
+        let tags = Vec::new();
+        let mut new_tags = Vec::new();
+        let ins = [PortSpec {
+            spec: StreamSpec { kind: PortKind::Voice, rate, ..Default::default() },
+            latency: 0,
+        }];
+        let block = (rate * 0.1) as usize;
+        let mut blocks: Vec<Vec<f32>> = pcm.chunks(block).map(|c| c.to_vec()).collect();
+        blocks.extend((0..20).map(|_| vec![0.0; block]));
+        for b in blocks {
+            let payload = Payload::Voice(vec![common::Voice {
+                system: crate::audiobus::ANALOGUE,
+                channel_hz: 145_500_000.0,
+                to: None,
+                from: None,
+                rate,
+                pcm: b,
+            }]);
+            let mut out = Payload::Voice(Vec::new());
+            let mut c = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            c.block_seconds = 0.1;
+            n.process(&payload, &mut out, &mut c).unwrap();
+        }
+        assert!(n.engine().busy, "nothing was asked for");
+        // The rebuild: the node goes while the model still has the window.
+        // What was asked for is the whole utterance so far; whether the node
+        // would have asked for it again as settled is beside the point, since
+        // it is not there to ask.
+        drop(n);
+        let key = "Audio:145500000::";
+        for _ in 0..600 {
+            if log.lock().latest(key).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let u = log.lock().latest(key).cloned().expect("the reading died with the node");
+        // The first partial, since that is what was in flight: the node was
+        // gone before it could ask for the rest, so this is the last word.
+        assert!(u.text.to_lowercase().contains("fellow"), "read as {:?}", u.text);
+        assert!(u.settled, "a partial nobody will replace is not a partial");
     }
 
     /// The interface folds the published window in on every frame, so the
