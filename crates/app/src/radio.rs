@@ -1539,7 +1539,12 @@ impl RadioControls {
             choices: dev.choices(),
             ppm,
             reach: Self::reach_of(dev),
-            tunable: dev.info().kind != common::device::DriverKind::IqStream,
+            // A stream is pinned by whoever feeds it and a capture by
+            // whoever recorded it; both dials are readouts.
+            tunable: !matches!(
+                dev.info().kind,
+                common::device::DriverKind::IqStream | common::device::DriverKind::File
+            ),
         }
     }
 }

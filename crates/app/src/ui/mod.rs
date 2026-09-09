@@ -127,6 +127,8 @@ pub struct App {
     record_dir: Option<(std::path::PathBuf, Option<u64>)>,
     shot_at: Option<std::time::Instant>,
     shot_sent: bool,
+    /// Start the radio on the first frame, rather than waiting for a click.
+    autostart: bool,
     /// Remove the direct-conversion centre spur. On by default: it is an
     /// artefact of the receiver, not something being received.
     dc_block: bool,
@@ -539,6 +541,7 @@ impl Default for App {
             capture: false,
             shot_at: None,
             shot_sent: false,
+            autostart: false,
             dc_block: true,
             view: View::Dashboard,
             prev_view: View::Spectrum,
@@ -917,6 +920,12 @@ impl App {
 
     /// Start on the radio whose label contains `want`, for when several are
     /// plugged in and the saved one is not the one wanted.
+    /// Start the radio without waiting for the play button, which is what a
+    /// capture being replayed usually wants and what a screenshot needs.
+    pub fn start_on_open(&mut self) {
+        self.autostart = true;
+    }
+
     pub fn set_device(&mut self, want: &str) {
         let w = want.to_lowercase();
         match self.devices.iter().find(|d| d.label.to_lowercase().contains(&w)) {
@@ -2207,6 +2216,10 @@ impl eframe::App for App {
         {
             let _s = tracing::info_span!("drain").entered();
             self.drain();
+        }
+        if self.autostart {
+            self.autostart = false;
+            self.connect(ui.ctx());
         }
         self.screenshot(ui.ctx());
         // Who is talking and what they said, every frame and whichever view

@@ -54,6 +54,7 @@ poll-promise = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs"] }
 reqwest.workspace = true
 httpc.workspace = true
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [dev-dependencies]
 hound = "3"
