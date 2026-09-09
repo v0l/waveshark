@@ -33,15 +33,18 @@ pub struct Files {
 
 impl Files {
     /// The layout Hugging Face publishes: `config.json`, `tokenizer.json` and
-    /// either `model.safetensors` or a single `.gguf`.
+    /// either `model.safetensors`, an index over shards of it, or a single
+    /// `.gguf`. For a sharded model `weights` is the index, and `bytes`
+    /// counts the shards.
     pub fn in_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let config = required(dir, "config.json")?;
         let tokenizer = required(dir, "tokenizer.json")?;
-        let (weights, quantized) = match first_existing(dir, &["model.safetensors"]) {
-            Some(p) => (p, false),
-            None => (gguf_in(dir)?, true),
-        };
+        let (weights, quantized) =
+            match first_existing(dir, &["model.safetensors", "model.safetensors.index.json"]) {
+                Some(p) => (p, false),
+                None => (gguf_in(dir)?, true),
+            };
         // Read out of the config rather than off the directory name. An
         // English-only model has one token fewer, because it carries no
         // language tokens to choose between, and a model fetched into
@@ -63,12 +66,33 @@ impl Files {
     /// "a model is here" and "90 MB of model is here" are different claims to
     /// somebody deciding whether to fetch a larger one.
     pub fn bytes(&self) -> u64 {
-        [&self.config, &self.tokenizer, &self.weights]
-            .into_iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum()
+        let mut files = vec![self.config.clone(), self.tokenizer.clone(), self.weights.clone()];
+        if let Some(dir) = self.weights.parent() {
+            files.extend(shards(&self.weights).into_iter().map(|s| dir.join(s)));
+        }
+        files.into_iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
     }
+}
+
+/// The shard files an index names, or nothing for a file that is not one.
+fn shards(index: &Path) -> Vec<String> {
+    if index.file_name().and_then(|n| n.to_str()) != Some("model.safetensors.index.json") {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(index) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = v
+        .get("weight_map")
+        .and_then(|m| m.as_object())
+        .map(|m| m.values().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// How many tokens the model was trained with, from its config.
@@ -151,7 +175,18 @@ pub fn fetch(repo: &str, revision: &str, dir: impl AsRef<Path>) -> Result<Files>
         Ok(dst)
     };
     let config = get("config.json")?;
-    get("model.safetensors")?;
+    // One file, or an index and the shards it names. Asking the hub which
+    // rather than reading the listing: a 404 on the index is the answer.
+    match get("model.safetensors.index.json") {
+        Ok(index) => {
+            for shard in shards(&index) {
+                get(&shard)?;
+            }
+        }
+        Err(_) => {
+            get("model.safetensors")?;
+        }
+    }
     // Qwen3-ASR publishes no tokenizer.json, only the vocabulary, the merges
     // and the special tokens it would be built from. Whisper publishes the
     // built one.

@@ -31,10 +31,15 @@ fn main() -> common::Result<()> {
     let dev = device.open()?;
     println!("on {}", stt::device_label(&dev));
     let mut w = stt::Engine::load(&files, dev, None)?;
+    // Twice, because the first read on a GPU is mostly the driver compiling
+    // kernels and says nothing about how fast the model is.
+    let t0 = std::time::Instant::now();
+    let _ = w.transcribe(&pcm, rate)?;
+    let first = t0.elapsed().as_secs_f64();
     let t0 = std::time::Instant::now();
     let out = w.transcribe(&pcm, rate)?;
     let secs = pcm.len() as f64 / rate;
-    println!("{:.1}s audio in {:.1}s", secs, t0.elapsed().as_secs_f64());
+    println!("{secs:.1}s audio in {:.1}s (first read {first:.1}s)", t0.elapsed().as_secs_f64());
     for s in &out.segments {
         println!(
             "{:6.1}-{:5.1}  logprob {:+.2}  no-speech {:.2}  {}",
