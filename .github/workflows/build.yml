@@ -101,6 +101,9 @@ jobs:
           mkdir -p stage
           cp target/${{ matrix.target }}/release/waveshark stage/
           cp README.md LICENSE* stage/ 2>/dev/null || true
+          # The desktop entry a Linux user writes points at an icon file, so
+          # the archive carries one.
+          cp assets/logo/waveshark-icon.png stage/ 2>/dev/null || true
           cat > stage/RUNNING.txt <<'EOF'
           waveshark links librtlsdr at run time rather than bundling it,
           because the copy that matches your udev rules and your USB stack is
@@ -137,6 +140,7 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" stage\
           Copy-Item "$env:VCPKG_BIN\*.dll" stage\ -ErrorAction SilentlyContinue
           Copy-Item README.md stage\ -ErrorAction SilentlyContinue
+          Copy-Item assets\logo\waveshark-icon.png stage\ -ErrorAction SilentlyContinue
           @"
           Plug the radio in before starting waveshark.
 

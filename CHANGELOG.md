@@ -12,6 +12,11 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- The WaveShark mark is the window's icon, so the dock, the task bar and the
+  window switcher show it instead of a blank default. On Windows it is in the
+  executable as well, and the release archives carry the icon file for a
+  desktop entry to point at.
+
 - The views are a strip of tabs in the top bar instead of a dropdown: one
   click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0, Ctrl+` to go back
   to the last view, and a dot on any tab whose view has taken something in
