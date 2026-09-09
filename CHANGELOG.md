@@ -22,8 +22,10 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
-- CUDA is on by default in a build from source. Building needs the CUDA
-  toolkit; `--no-default-features --features limesdr,stt` builds without it.
+- CUDA is on by default in a build from source, and the release publishes
+  a `-cuda` build for Linux and Windows beside the plain one. Building
+  needs the CUDA toolkit; `--no-default-features --features limesdr,stt`
+  builds without it, and the `-cuda` binary needs the CUDA 12 runtime.
 
 - The model card names the model rather than printing the path to its
   files; the path is on hover over the "on disc" line.

@@ -70,9 +70,9 @@ stt = ["nodes/stt", "dep:stt"]
 # Run the speech model on a CUDA card. On by default in a build from source,
 # since the model on a CPU keeps up with one handheld and not a repeater;
 # nothing on a Mac, which gets Metal whenever `stt` is on. Building it needs
-# the CUDA toolkit on the path, and the release workflow leaves it off
-# because the runners have none and a binary linked against cudart does not
-# start on a machine without it.
+# the CUDA toolkit on the path. The release workflow ships it as a separate
+# `-cuda` asset, since a binary linked against cudart does not start on a
+# machine without it.
 cuda = ["stt?/cuda"]
 
 [[example]]

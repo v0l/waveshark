@@ -586,8 +586,10 @@ model runs is the other pick on the card: Auto takes the fastest thing the
 build can use that actually launches a kernel, and below it are the CPU and
 every CUDA card the driver lists by name, or Metal on a Mac. CUDA is on by
 default in a build from source (`cuda` feature; it needs `nvcc` on the path
-and a driver at least as new as the toolkit) and off in the published
-binaries. A card that is picked outright and fails is an error on the card,
+and a driver at least as new as the toolkit, which is what
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` on the first read means) and the
+release workflow publishes it as a separate `-cuda` asset built against
+CUDA 12.8, which wants that runtime installed and a 570 driver. A card that is picked outright and fails is an error on the card,
 not a silent fall back to the CPU. Any front end that carries speech is transcribed, not
 just analogue channels, so an M17 or DMR call gets the same treatment. The
 text arrives as a `transcript` field on the decode, with the model's own mean
