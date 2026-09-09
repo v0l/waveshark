@@ -896,11 +896,12 @@ pub struct DecodeRecord {
     pub modulation: common::Modulation,
     /// Fields for a decode, inferred coding and timings for an unknown.
     pub detail: String,
-    /// The same fields, structured.
+    /// The same fields, structured, in the order the decoder emitted them.
     ///
-    /// This is what makes the packet list a bus rather than a display: a map,
-    /// a chart or an image pane reads these rather than the bytes or the
-    /// summary line. See `docs/views.md`.
+    /// For the packet list's detail column and the burst pane to print. A view
+    /// reads the typed parts of the decode instead, since a field name is a
+    /// spelling nothing checks and every identifier in here is text. See
+    /// `docs/views.md`.
     pub fields: Vec<(String, common::Value)>,
     /// What the payload is, as a media type, so a view can claim packets it
     /// knows how to render without knowing the protocol that made them.

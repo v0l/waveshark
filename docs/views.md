@@ -21,18 +21,54 @@ the ones not built yet would need.
 | `channel_hz` | how wide that channel was, and so how far apart two reports must be to be different bursts | deduplication |
 | `model` | protocol name, or "unknown" | routing |
 | `media_type` | what `bytes` holds | routing |
-| `fields` | the decoder's own fields, structured | map, chart, text |
+| `fields` | the decoder's own fields, in the order it emitted them | the packet list's detail column and the burst pane, for a person to read |
+| `link` | who the transmission was between, as a kind and an identifier | links directory |
 | `bytes` | the raw frame | hex dump, image pane |
 | `iq` | the burst's own samples, where the front end kept them | the packet list's burst detail |
 | `audio` | decoded speech, with the call it belongs to | call list, audio bus |
 | `rssi_dbfs`, `snr_db` | how it was received | list, and a map colouring tracks by signal |
 | `crc` | integrity check result, `None` when the protocol has none | every view: an unverified position is not a position |
 
-`fields` is the part that makes this work. A decoder produces
-`decode::protocol::Report`, whose fields are `common::Value` (int, float, bool
-or text), and those survive all the way to the record. A map reads
-`field("lat")`; it does not parse `lat=51.5` out of a display string, and it
-does not need to know which protocol produced the packet.
+### A view reads a typed part of the decode, not its fields
+
+The first version of this file said `fields` was the part that made it work,
+and that a map should read `field("lat")`. That was wrong, and the way it was
+wrong is worth keeping written down.
+
+`fields` is `Vec<(String, common::Value)>`: a name a decoder chose and an int,
+float, bool or text. It is what the packet list prints and what the burst pane
+dumps, so it is display data, and it carries none of the meaning a view needs.
+Every identifier in it is "text", so a talkgroup, a callsign and a MAC address
+are the same type and `9` on one protocol merges with `9` on another; that is
+the bug `links.rs` records, and it was found only after the directory had been
+built on the fields. A name is a spelling nothing checks, so `lat` in one
+decoder and `latitude` in another are silently different views of the same
+reading, and a decoder renaming a field for the packet list breaks a pane
+nobody was editing. A unit is not in the name either, or is in it by
+convention: `ch1` in counts and `ch1_us` in microseconds are the same quantity
+from two decoders of the same kind of link.
+
+So `common::Decoded` carries the parts a view consumes as types beside the
+fields, and a decoder fills in whichever it can say: `link` for who it was
+between, `position` for where the transmitter said it was, `identity` for who
+transmitted, `airtime` for how long it held the channel and whether it carried
+speech, `audio` for what was said, and `report` for what the transmission said
+about the transmitter besides its place. `report` is `ReportDetail`, an enum
+per kind of thing reporting, rather than one struct with every option on it,
+so an aircraft cannot carry a ship type.
+
+**Adding a view means adding the typed part it reads, not agreeing on a field
+name.** Put it on `Decoded` (a new `ReportDetail` variant where it describes
+the transmitter, a new sidecar where it does not), fill it in the decoders that
+can say it, carry it through `DecodeRecord`, and read that. The fields stay as
+they are, since a person still wants to see what the frame held.
+
+What is still on the old footing: the call list (`crates/app/src/calls.rs`)
+matches `voice`, `to`, `from`, `encryption`, `seconds` and `live` as strings,
+though `Decoded::airtime` and `Decoded::link` now say all of it, and
+`DecodeRecord` does not carry either. That is a debt, not a precedent. The map
+is on the typed side already: `tracks.rs` takes a `Decoded` and reads
+`position`, `report` and `identity`.
 
 `media_type` is the routing key for payloads that are not fields:
 `pipeline::event::media` already defines `BYTES`, `JSON`, `TEXT`, `JPEG` and
@@ -533,10 +569,31 @@ has no frame to log.
 
 ### Chart, for sensors
 
-Any protocol with a numeric field and a stable identity: temperature, humidity,
-tyre pressure, battery voltage. Reads `fields` and needs nothing else, which
-makes it the cheapest of the three. The Fine Offset decoder already produces
-everything it needs.
+Any protocol with a numeric reading and a stable identity: temperature,
+humidity, tyre pressure, battery voltage. The Fine Offset decoder already
+recovers everything such a chart would draw, but it recovers it as fields, so
+the work is a `ReportDetail::Sensor` carrying the readings with their units and
+the decoders filling it in. Plotting `field("temperature_C")` would put the
+chart on a name and a unit nothing checks, and a second sensor decoder spelling
+it `temp_c` would be absent from the chart with nothing to say so.
+
+### Control links
+
+`decode::elrs`, `decode::frsky` and `decode::flysky` all recover stick
+positions, and none of them are drawn anywhere: the values reach the packet
+list as fields and stop there. A control link is state rather than a stream,
+and reading it out of a list that takes a hundred rows a second is impossible,
+so the view is one row per transmitter holding the last frame, aged out, with a
+bar per channel and the arm state called out.
+
+What it needs first is the typed part above, since the three decoders do not
+agree and cannot be made to agree by convention: ExpressLRS emits raw ten bit
+counts as `chN`, the other two emit microseconds as `chN_us`, and FrSky sends
+channels 1 to 8 and 9 to 16 in alternate frames with a `bank` string saying
+which. As one type that is a fixed array of sixteen optional microsecond
+values, partly filled, which the view merges per transmitter rather than
+replaces; the conversion from counts happens once, in the ExpressLRS decoder.
+The transmitter it belongs to is the link the decode already names.
 
 ### More into the message view
 
