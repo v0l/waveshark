@@ -113,6 +113,9 @@ pub struct Session {
     pub spacetrack_password: String,
     pub dc_block: bool,
     pub decode_on: bool,
+    /// Whether the dashboard is one of the views, and so the one the receiver
+    /// opens on. On for a new install, and off for anyone who turned it off.
+    pub dashboard: bool,
     pub volume: f32,
     /// Sound devices by name, empty for the system default.
     ///
@@ -225,6 +228,7 @@ impl Default for Session {
             spacetrack_password: String::new(),
             dc_block: true,
             decode_on: true,
+            dashboard: true,
             volume: 0.5,
             audio_out: String::new(),
             audio_in: String::new(),
@@ -383,6 +387,7 @@ impl Session {
                 .unwrap_or_default(),
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
+            dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
             volume: f("volume", d.volume as f64) as f32,
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
@@ -453,6 +458,7 @@ impl Session {
         }
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
+        s.push_str(&format!("dashboard = {}\n", self.dashboard));
         s.push_str(&format!("volume = {}\n", self.volume));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
         s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
@@ -573,6 +579,7 @@ mod tests {
             spacetrack_password: "hunter2".into(),
             dc_block: false,
             decode_on: false,
+            dashboard: false,
             volume: 0.25,
             gps: "/dev/ttyACM0@9600".into(),
             wigle_name: "AID0000".into(),

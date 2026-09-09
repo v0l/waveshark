@@ -340,6 +340,85 @@ pub fn card<R>(
     framed
 }
 
+/// Full scale of the speed trace, in octaves either side of real time: the
+/// top of the well is 8x and the bottom is an eighth.
+const SPEED_OCTAVES: f32 = 3.0;
+
+/// Below this the margin is thin enough to be worth saying so before a block
+/// is actually late.
+const SPEED_TIGHT: f32 = 1.5;
+
+/// How fast the graph is running against real time, drawn as a trace over a
+/// line at 1x.
+///
+/// A lamp lived here and said too little: green meant "nothing has been
+/// dropped yet", which is the same colour whether the host has ten times the
+/// headroom it needs or is a hair from falling over. What an operator about to
+/// add a channel wants is the margin, and the margin is only readable against
+/// real time, so the trace is drawn against a 1x rule. Touching that rule is
+/// the warning; crossing it is the fault, and the dropped count that used to
+/// be the whole reading is behind the hover.
+pub fn speed_trace(ui: &mut Ui, size: Vec2, running: bool, dropped: u64, hist: &[f32]) -> Response {
+    let now = hist.last().copied().unwrap_or(0.0);
+    let worst = hist.iter().copied().fold(f32::INFINITY, f32::min);
+    let col = if !running || dropped > 0 || worst < 1.0 {
+        theme::FAULT
+    } else if worst < SPEED_TIGHT {
+        theme::READOUT
+    } else {
+        theme::OK
+    };
+
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 1.0, theme::WELL);
+    p.rect_stroke(rect, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+
+    // Ratios, so 2x above the line has to look like half speed below it; on a
+    // linear axis everything slow is squashed into the bottom pixel.
+    let plot = rect.shrink(2.0);
+    let y = |v: f32| {
+        let t = (v.max(0.03).log2() / SPEED_OCTAVES).clamp(-1.0, 1.0);
+        plot.center().y - t * plot.height() / 2.0
+    };
+    let one = y(1.0);
+    for x in (0..plot.width() as i32).step_by(4) {
+        let x = plot.left() + x as f32;
+        p.line_segment(
+            [Pos2::new(x, one), Pos2::new((x + 2.0).min(plot.right()), one)],
+            Stroke::new(1.0, theme::LEGEND.gamma_multiply(0.7)),
+        );
+    }
+
+    if hist.len() > 1 {
+        let step = plot.width() / (hist.len() - 1) as f32;
+        let pts: Vec<Pos2> = hist
+            .iter()
+            .enumerate()
+            .map(|(i, v)| Pos2::new(plot.left() + i as f32 * step, y(*v)))
+            .collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.0, col)));
+    }
+
+    resp.on_hover_text(if !running {
+        "Stopped. The device is free for another program.".to_string()
+    } else if hist.is_empty() {
+        "Receiving. No block has been timed yet.".to_string()
+    } else if dropped == 0 {
+        format!(
+            "Running at {now:.1}x real time, worst {worst:.1}x of the last {} blocks. \
+             No samples dropped.",
+            hist.len()
+        )
+    } else {
+        format!(
+            "Running at {now:.1}x real time, worst {worst:.1}x, and {} samples were dropped: \
+             the host is not keeping up with this span.",
+            super::burst::thousands(dropped)
+        )
+    })
+}
+
 /// A line of explanation under a control.
 ///
 /// Added through `Label` with wrapping asked for explicitly: inside a modal

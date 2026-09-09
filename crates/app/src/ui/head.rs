@@ -14,14 +14,6 @@
 
 use super::*;
 
-/// Full scale of the speed trace, in octaves either side of real time: the
-/// top of the well is 8x and the bottom is an eighth.
-const SPEED_DECADES: f32 = 3.0;
-
-/// Below this the margin is thin enough to be worth saying so before a block
-/// is actually late.
-const SPEED_TIGHT: f32 = 1.5;
-
 /// Height of the cells, and so of the bar.
 ///
 /// Fixed rather than grown from the content: the tallest cell is the receiver,
@@ -303,16 +295,16 @@ impl App {
 
     /// Which window fills the middle of the screen.
     ///
-    /// A strip of tabs rather than a dropdown. Ten views behind a combo box
+    /// A strip of tabs rather than a dropdown. Eleven views behind a combo box
     /// cost two clicks and a read of a menu every time, which is most of a
     /// second to look at the map and another to come back; as tabs it is one
     /// click, the choice is visible without opening anything, and a dot on a
     /// tab says which views are holding traffic.
     ///
-    /// One row of ten rather than two of five. Two rows kept the cell as
-    /// narrow as the dropdown was, but only by drawing the glyphs at the
-    /// size of the transport buttons, which is too small to tell a dish from
-    /// a handset in passing; a row of full-size tabs spends the width the bar
+    /// One row rather than two of five. Two rows kept the cell as narrow as
+    /// the dropdown was, but only by drawing the glyphs at the size of the
+    /// transport buttons, which is too small to tell a dish from a handset in
+    /// passing; a row of full-size tabs spends the width the bar
     /// has spare and puts the tabs in the order of their shortcuts. The gap
     /// in the middle is the join between what the receiver is doing and who
     /// is out there.
@@ -342,18 +334,24 @@ impl App {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
                         ui.horizontal(|ui| {
-                            for (i, row) in View::ROWS.into_iter().enumerate() {
+                            let mut n = 0;
+                            for (i, row) in self.tabs().into_iter().enumerate() {
                                 if i > 0 {
                                     ui.add_space(5.0);
                                 }
-                                for v in row {
-                                    let tip = format!(
-                                        "{}  ({}{})\n{}",
-                                        v.label(),
-                                        TAB_MOD,
-                                        v.digit_label(),
-                                        v.about()
-                                    );
+                                for v in row.iter().copied() {
+                                    let key = tab_digit(n);
+                                    n += 1;
+                                    let tip = match key {
+                                        Some((_, d)) => format!(
+                                            "{}  ({}{})\n{}",
+                                            v.label(),
+                                            TAB_MOD,
+                                            d,
+                                            v.about()
+                                        ),
+                                        None => format!("{}\n{}", v.label(), v.about()),
+                                    };
                                     let hit = crate::icons::icon_tab(
                                         ui,
                                         v.icon(),
@@ -516,16 +514,8 @@ impl App {
         ui.add_space(GAP);
     }
 
-    /// How fast the graph is running against real time, drawn as a trace over
-    /// a line at 1x.
-    ///
-    /// A lamp lived here and said too little: green meant "nothing has been
-    /// dropped yet", which is the same colour whether the host has ten times
-    /// the headroom it needs or is a hair from falling over. What an operator
-    /// about to add a channel wants is the margin, and the margin is only
-    /// readable against real time, so the trace is drawn against a 1x rule.
-    /// Touching that rule is the warning; crossing it is the fault, and the
-    /// dropped count that used to be the whole reading is behind the hover.
+    /// How fast the graph is running against real time. Drawn by
+    /// [`widgets::speed_trace`], which the dashboard shows larger.
     fn status_lamp(&self, ui: &mut egui::Ui) {
         use std::sync::atomic::Ordering;
         let (running, dropped, hist) = match &self.radio {
@@ -536,64 +526,7 @@ impl App {
             ),
             None => (false, 0, Vec::new()),
         };
-        let now = hist.last().copied().unwrap_or(0.0);
-        let worst = hist.iter().copied().fold(f32::INFINITY, f32::min);
-        let col = if !running || dropped > 0 || worst < 1.0 {
-            theme::FAULT
-        } else if worst < SPEED_TIGHT {
-            theme::READOUT
-        } else {
-            theme::OK
-        };
-
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(SPEED_W, 20.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(rect, 1.0, theme::WELL);
-        p.rect_stroke(rect, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
-
-        // Ratios, so 2x above the line has to look like half speed below it;
-        // on a linear axis everything slow is squashed into the bottom pixel.
-        let plot = rect.shrink(2.0);
-        let y = |v: f32| {
-            let t = (v.max(0.03).log2() / SPEED_DECADES).clamp(-1.0, 1.0);
-            plot.center().y - t * plot.height() / 2.0
-        };
-        let one = y(1.0);
-        for x in (0..plot.width() as i32).step_by(4) {
-            let x = plot.left() + x as f32;
-            p.line_segment(
-                [Pos2::new(x, one), Pos2::new((x + 2.0).min(plot.right()), one)],
-                Stroke::new(1.0, theme::LEGEND.gamma_multiply(0.7)),
-            );
-        }
-
-        if hist.len() > 1 {
-            let step = plot.width() / (hist.len() - 1) as f32;
-            let pts: Vec<Pos2> = hist
-                .iter()
-                .enumerate()
-                .map(|(i, v)| Pos2::new(plot.left() + i as f32 * step, y(*v)))
-                .collect();
-            p.add(egui::Shape::line(pts, Stroke::new(1.0, col)));
-        }
-
-        resp.on_hover_text(if !running {
-            "Stopped. The device is free for another program.".to_string()
-        } else if hist.is_empty() {
-            "Receiving. No block has been timed yet.".to_string()
-        } else if dropped == 0 {
-            format!(
-                "Running at {now:.1}x real time, worst {worst:.1}x of the last {} blocks. \
-                 No samples dropped.",
-                hist.len()
-            )
-        } else {
-            format!(
-                "Running at {now:.1}x real time, worst {worst:.1}x, and {} samples were dropped: \
-                 the host is not keeping up with this span.",
-                thousands(dropped)
-            )
-        });
+        widgets::speed_trace(ui, Vec2::new(SPEED_W, 20.0), running, dropped, &hist);
     }
 }
 
