@@ -180,6 +180,12 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- Nothing is written down until it is asked for. The packet log, the device
+  survey and the transcriber are all off on a new install and on an upgrade,
+  and each is remembered from then on, so it is a decision made once rather
+  than a switch to find at every start. `--packet-log` and `--survey` turn
+  them on from the command line and `--no-packet-log` and `--no-survey` turn
+  them off whatever was saved.
 - On Windows the receiver no longer opens a console window behind itself. Run
   from a terminal it still prints, so `--help` and the offline tools work as
   before.

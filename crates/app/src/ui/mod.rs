@@ -635,7 +635,11 @@ impl App {
         app.scope.db_center = s.center;
         app.scope.wf_center = s.center;
         app.audio.volume = s.volume;
-        app.log.path = crate::packetlog::PacketLog::default_dir();
+        // What the receiver writes down, as the operator last left it. Off
+        // until asked: see `Session::packet_log_on`.
+        app.log.path = s.packet_log_on.then(crate::packetlog::PacketLog::default_dir).flatten();
+        app.survey.path =
+            s.survey_on.then(crate::packetlog::PacketLog::default_survey_path).flatten();
         // A GPS named once stays named: a survey is usually the same drive
         // with the same receiver, and typing the port again every start is
         // the difference between a tool and a demonstration.
@@ -706,6 +710,8 @@ impl App {
             beacondb_lookup: self.survey.beacondb.lookup,
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
+            packet_log_on: self.log.path.is_some(),
+            survey_on: self.survey.path.is_some(),
             map_layers: self.map.map.layers.saved(),
             dashboard: self.dashboard,
         }

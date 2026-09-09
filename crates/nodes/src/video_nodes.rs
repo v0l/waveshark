@@ -17,7 +17,7 @@ use crate::NodeSpec;
 use common::{Pixels, Result, VideoFrame};
 use dsp::video::{find_lines, Lock, Standard, SyncSeparator};
 use pipeline::event::Request;
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 

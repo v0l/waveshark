@@ -123,7 +123,10 @@ because traffic does not collect there.
   `crates/app/src/calls.rs`.
 
 - **Transcript**: what was said, as the model on the audio bus tap read it,
-  newest at the bottom. A conversation is the transcriber's key,
+  newest at the bottom. Off until it is switched on, like the packet log and
+  the survey: a receiver does not start writing down what people said because
+  nobody told it not to. The switch is a setting on the stage, so turning it
+  on is an edit and is remembered. A conversation is the transcriber's key,
   `{proto}:{freq}:{chan}:{speaker}`, so the pane can be opened on one and
   nothing else, which is what the calls list's "read" button does; that
   button is drawn only on rows the log has lines for, since a way into an

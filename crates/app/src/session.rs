@@ -113,6 +113,22 @@ pub struct Session {
     pub spacetrack_password: String,
     pub dc_block: bool,
     pub decode_on: bool,
+    /// What the receiver writes down about what it hears, each off until
+    /// somebody asks for it.
+    ///
+    /// A receiver that records by default is a receiver that has decided for
+    /// its operator: the packet log keeps every burst on the disc, the survey
+    /// builds a database of every device heard with where it was heard.
+    /// Those are reasonable things to want and neither is a reasonable thing
+    /// to start doing without being asked. Each is remembered once it is
+    /// turned on, so it is a decision made once rather than a switch to find
+    /// at every start.
+    ///
+    /// The transcriber is the third of these and is not here: it is a stage
+    /// in the graph, off in the graph the receiver draws, and switching it on
+    /// is an edit like any other setting changed by hand.
+    pub packet_log_on: bool,
+    pub survey_on: bool,
     /// Whether the dashboard is one of the views, and so the one the receiver
     /// opens on. On for a new install, and off for anyone who turned it off.
     pub dashboard: bool,
@@ -228,6 +244,8 @@ impl Default for Session {
             spacetrack_password: String::new(),
             dc_block: true,
             decode_on: true,
+            packet_log_on: false,
+            survey_on: false,
             dashboard: true,
             volume: 0.5,
             audio_out: String::new(),
@@ -388,6 +406,11 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
+            packet_log_on: kv
+                .get("packet_log_on")
+                .map(|v| *v == "true")
+                .unwrap_or(d.packet_log_on),
+            survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
             volume: f("volume", d.volume as f64) as f32,
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
@@ -459,6 +482,8 @@ impl Session {
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
+        s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
+        s.push_str(&format!("survey_on = {}\n", self.survey_on));
         s.push_str(&format!("volume = {}\n", self.volume));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
         s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
@@ -580,6 +605,8 @@ mod tests {
             dc_block: false,
             decode_on: false,
             dashboard: false,
+            packet_log_on: true,
+            survey_on: true,
             volume: 0.25,
             gps: "/dev/ttyACM0@9600".into(),
             wigle_name: "AID0000".into(),
@@ -662,4 +689,25 @@ mod tests {
             vec![("tuner".into(), GainMode::Manual(29.7)), ("if".into(), GainMode::Auto)]
         );
     }
+
+    /// Nothing is written down until somebody asks for it, and the asking is
+    /// remembered.
+    ///
+    /// A receiver that logs every burst to disc and builds a database of
+    /// every device it has heard, because nobody said not to, has decided
+    /// something for its operator. A file that predates the switches reads as
+    /// off for the same reason.
+    #[test]
+    fn what_is_written_down_is_off_until_it_is_asked_for() {
+        let d = Session::default();
+        assert!(!d.packet_log_on);
+        assert!(!d.survey_on);
+        assert_eq!(Session::parse("center = 433920000").packet_log_on, false);
+        assert_eq!(Session::parse("center = 433920000").survey_on, false);
+
+        let on = Session { packet_log_on: true, survey_on: true, ..Session::default() };
+        let back = Session::parse(&on.render());
+        assert!(back.packet_log_on && back.survey_on, "a switch turned on was forgotten");
+    }
+
 }

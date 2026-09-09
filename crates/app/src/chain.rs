@@ -2958,7 +2958,10 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     {
         let mut t = Settings::new();
         t.insert("root".into(), V::Text(models_root().display().to_string()));
-        t.insert("enabled".into(), V::Bool(true));
+        // Off in the graph the receiver draws: writing down what people said
+        // is not something to start doing because nobody said otherwise.
+        // Turning it on is an edit, which is how it is remembered.
+        t.insert("enabled".into(), V::Bool(false));
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(bus, 1), (id, 0));
     }

@@ -387,9 +387,10 @@ impl App {
             None => (0, 0, false),
         };
 
-        // The log is on by default and stays on: the transmission worth
-        // having is always the one before somebody thought to press record.
-        // What is settable is where it goes and how large it may get.
+        // Off until it is asked for, and remembered once it is: writing
+        // every burst a receiver hears onto somebody's disc is a decision
+        // for them to make. What is settable besides the switch is where it
+        // goes and how large it may get.
         let mut on = self.log.path.is_some();
         let log_help = "Timings and frames as demodulated, a day per file, replayable.";
         if check_help(ui, &mut on, "Write every packet to disk", log_help).changed() {

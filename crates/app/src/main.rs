@@ -731,21 +731,23 @@ struct Args {
     #[arg(long)]
     capture_iq: bool,
 
-    /// Where the binary packet log is written, one file a day. Defaults to
+    /// Write a binary packet log, one file a day. Off unless asked for, and
+    /// in the interface the switch is remembered. Defaults to
     /// $XDG_DATA_HOME/waveshark/packets
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "")]
     packet_log: Option<PathBuf>,
 
-    /// Do not write the packet log
+    /// Do not write the packet log, whatever the saved setting says
     #[arg(long)]
     no_packet_log: bool,
 
-    /// Where the device database is written. Defaults to
+    /// Record a database of the devices heard and where they were heard. Off
+    /// unless asked for. Defaults to
     /// $XDG_DATA_HOME/waveshark/survey.sqlite
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "")]
     survey: Option<PathBuf>,
 
-    /// Do not record a device database
+    /// Do not record a device database, whatever the saved setting says
     #[arg(long)]
     no_survey: bool,
 
@@ -981,16 +983,22 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if args.headless {
-        let log = if args.no_packet_log {
-            None
-        } else {
-            args.packet_log.clone().or_else(packetlog::PacketLog::default_dir)
-        };
-        let survey = if args.no_survey {
-            None
-        } else {
-            args.survey.clone().or_else(packetlog::PacketLog::default_survey_path)
-        };
+        // Nothing is written down unless it was asked for. Headless has no
+        // session to remember a choice in, so the choice is the command line.
+        let log = args
+            .packet_log
+            .clone()
+            .filter(|_| !args.no_packet_log)
+            .map(|d| if d.as_os_str().is_empty() { None } else { Some(d) })
+            .map(|d| d.or_else(packetlog::PacketLog::default_dir))
+            .unwrap_or(None);
+        let survey = args
+            .survey
+            .clone()
+            .filter(|_| !args.no_survey)
+            .map(|f| if f.as_os_str().is_empty() { None } else { Some(f) })
+            .map(|f| f.or_else(packetlog::PacketLog::default_survey_path))
+            .unwrap_or(None);
         scan(
             args.tune.first().copied().unwrap_or(433.92),
             args.span.unwrap_or(2_400.0),
@@ -1061,8 +1069,16 @@ fn main() -> eframe::Result<()> {
             for mhz in &args.tune {
                 app.tune_to(*mhz, args.mode.into());
             }
-            app.set_packet_log(args.no_packet_log, args.packet_log.clone());
-            app.set_survey(args.no_survey, args.survey.clone());
+            // The command line overrides the saved switch in either
+            // direction, and says nothing when it is not given: the receiver
+            // then does what it was last told in the interface.
+            let named = |p: &Option<PathBuf>| p.clone().filter(|d| !d.as_os_str().is_empty());
+            if args.no_packet_log || args.packet_log.is_some() {
+                app.set_packet_log(args.no_packet_log, named(&args.packet_log));
+            }
+            if args.no_survey || args.survey.is_some() {
+                app.set_survey(args.no_survey, named(&args.survey));
+            }
             if let Some(t) = args.gps.clone() {
                 app.set_gps(Some(t));
             }
