@@ -182,6 +182,26 @@ pub struct Network {
     pub rsn: bool,
 }
 
+/// A vendor specific element (id 221) as it stands: the OUI that says whose
+/// it is, the type byte that vendor uses to tell its own elements apart, and
+/// the rest. What is inside is not this module's business, the same way
+/// `decode::ble` hands over advertising structures without reading them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vendor {
+    pub oui: [u8; 3],
+    pub kind: u8,
+    pub data: Vec<u8>,
+}
+
+/// An action frame's payload: the category, the code within it, and whatever
+/// follows. Remote ID over Wi-Fi NAN arrives as one of these.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    pub category: u8,
+    pub code: u8,
+    pub body: Vec<u8>,
+}
+
 /// A parsed MAC frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -199,6 +219,11 @@ pub struct Frame {
     pub from_ds: bool,
     pub seq: Option<u16>,
     pub network: Option<Network>,
+    /// The vendor specific elements of a management frame that carries
+    /// elements, in the order they were sent.
+    pub vendor: Vec<Vendor>,
+    /// The payload of an action frame, where the frame is one.
+    pub action: Option<Action>,
 }
 
 impl Frame {
@@ -273,6 +298,20 @@ pub fn parse(psdu: &[u8]) -> Option<Frame> {
         _ => None,
     };
 
+    let vendor = match kind {
+        Kind::Management(8) | Kind::Management(5) if body.len() >= 36 => vendors(&body[36..]),
+        Kind::Management(4) if body.len() >= 24 => vendors(&body[24..]),
+        _ => Vec::new(),
+    };
+    let action = match kind {
+        Kind::Management(13) if body.len() >= 26 => Some(Action {
+            category: body[24],
+            code: body[25],
+            body: body[26..].to_vec(),
+        }),
+        _ => None,
+    };
+
     Some(Frame {
         kind,
         addr1,
@@ -283,7 +322,21 @@ pub fn parse(psdu: &[u8]) -> Option<Frame> {
         from_ds,
         seq,
         network,
+        vendor,
+        action,
     })
+}
+
+/// The vendor specific elements in a run of information elements.
+fn vendors(b: &[u8]) -> Vec<Vendor> {
+    elements(b)
+        .filter(|(id, v)| *id == 221 && v.len() >= 4)
+        .map(|(_, v)| Vendor {
+            oui: [v[0], v[1], v[2]],
+            kind: v[3],
+            data: v[4..].to_vec(),
+        })
+        .collect()
 }
 
 /// The information elements of a management frame body, as id and value.

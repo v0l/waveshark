@@ -12,6 +12,19 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- The views are a strip of tabs in the top bar instead of a dropdown: one
+  click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0, Ctrl+` to go back
+  to the last view, and a dot on any tab whose view has taken something in
+  since you last looked at it.
+
+- An OPEN button beside the raw capture folder, with the path next to it, so a
+  recording can be replayed or trimmed without typing the path out.
+
+- Drone Remote ID over Wi-Fi: an aircraft that broadcasts its identity in a
+  beacon or a NAN discovery frame is read on the 802.11 receiver, and its
+  serial, position and operator are the front of the row instead of a
+  network's name.
+
 - A Satellites view: every pass over the station in the next day, ordered by
   rise time, with the peak elevation, which way to point, live az/el and
   Doppler for whatever is up now, and how stale the elements it was worked

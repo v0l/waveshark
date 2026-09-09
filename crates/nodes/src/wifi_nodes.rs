@@ -287,6 +287,30 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(s) = f.seq {
         fields.push(("seq".into(), Value::Int(i64::from(s))));
     }
+    // An aircraft's broadcast is not a row about a network that happens to
+    // carry some bytes, so it is named for what it is and its own fields go
+    // in front of the link layer's, as they do on Bluetooth.
+    let mut odid: Vec<decode::odid::Parsed> = f
+        .vendor
+        .iter()
+        .filter_map(|v| decode::odid::from_vendor_element(v.oui, v.kind, &v.data))
+        .flatten()
+        .collect();
+    if let Some(a) = &f.action {
+        if let Some(pack) = decode::odid::from_nan_action(a.category, a.code, &a.body) {
+            odid.extend(pack);
+        }
+    }
+    let protocol = if odid.is_empty() {
+        "802.11"
+    } else {
+        "OpenDroneID"
+    };
+    if !odid.is_empty() {
+        let mut f = decode::odid::fields(&odid);
+        f.append(&mut fields);
+        fields = f;
+    }
     let detail = fields
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
@@ -309,7 +333,7 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut who = common::Identity::new("wifi", who_addr.to_string());
     who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
     Some(
-        Decoded::bytes("802.11", center, 0.0, r.mpdu.clone())
+        Decoded::bytes(protocol, center, 0.0, r.mpdu.clone())
             .with_link(link)
             .by(who)
             .with_detail(detail)
@@ -483,6 +507,74 @@ mod tests {
         assert!(detail.contains("type=beacon"), "{detail}");
         assert!(detail.contains("channel=6"), "{detail}");
         assert!(detail.contains("security=wpa2"), "{detail}");
+    }
+
+    /// A basic id message naming a serial, which is the one field a row
+    /// about an aircraft has to carry.
+    fn basic_id() -> Vec<u8> {
+        let mut m = vec![0x02, (1 << 4) | 2];
+        m.extend_from_slice(b"1596F3AAAAAAAAAAAAAA");
+        m.resize(decode::odid::MESSAGE_LEN, 0);
+        m
+    }
+
+    /// An aircraft broadcasting Remote ID over Wi-Fi sends an ordinary
+    /// beacon with one extra element, so the row has to be named for the
+    /// aircraft rather than for the network it looks like.
+    #[test]
+    fn a_beacon_carrying_remote_id_is_a_row_about_the_aircraft() {
+        let mut v = beacon();
+        v.truncate(v.len() - 4);
+        let mut ie = decode::odid::WIFI_OUI.to_vec();
+        ie.push(decode::odid::WIFI_OUI_TYPE);
+        ie.push(0x07); // the transmitter's message counter
+        ie.extend_from_slice(&basic_id());
+        v.push(221);
+        v.push(ie.len() as u8);
+        v.extend_from_slice(&ie);
+        v.extend(dsp::wifi::crc32(&v).to_le_bytes());
+
+        let d = wifi_decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000))
+            .expect("a decode");
+        assert_eq!(d.protocol, "OpenDroneID");
+        let detail = d.detail.as_deref().unwrap();
+        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
+        assert!(detail.contains("message=basic id"), "{detail}");
+        // The 802.11 fields are still there, behind the aircraft's own.
+        assert!(detail.contains("ssid=waveshark"), "{detail}");
+    }
+
+    /// A NAN service discovery frame is an action frame, which carries no
+    /// elements at all, so the pack has to be found in its payload.
+    #[test]
+    fn a_nan_action_frame_is_a_row_about_the_aircraft() {
+        let mut v = vec![0xd0, 0x00, 0x00, 0x00];
+        v.extend([0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00]);
+        v.extend([0x02, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]);
+        v.extend([0x50, 0x6f, 0x9a, 0x01, 0x00, 0xff]);
+        v.extend([0x10, 0x00]);
+        v.extend([0x04, 0x09]); // public action, vendor specific
+        v.extend([0x50, 0x6f, 0x9a, 0x13]); // Wi-Fi Alliance, NAN
+
+        let mut pack = vec![(0x0f << 4) | 2, decode::odid::MESSAGE_LEN as u8, 1];
+        pack.extend_from_slice(&basic_id());
+
+        let mut sda = decode::odid::NAN_SERVICE_ID.to_vec();
+        sda.extend([0x01, 0x00, 0x10]);
+        sda.push((1 + pack.len()) as u8);
+        sda.push(0x07);
+        sda.extend_from_slice(&pack);
+        v.push(0x03);
+        v.extend((sda.len() as u16).to_le_bytes());
+        v.extend_from_slice(&sda);
+        v.extend(dsp::wifi::crc32(&v).to_le_bytes());
+
+        let d = wifi_decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000))
+            .expect("a decode");
+        assert_eq!(d.protocol, "OpenDroneID");
+        let detail = d.detail.as_deref().unwrap();
+        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
+        assert!(detail.contains("type=action"), "{detail}");
     }
 
     #[test]
