@@ -252,12 +252,13 @@ the code is in the commit log; what a decoder can and cannot do is in
   showed "0 lines" and the call list stayed empty.
 
 - A channel marked as voice is heard through its own fader like any other
-  channel, and listed in the calls view from the audio bus. It used to be
-  wrapped in an empty packet so the call list would see it, which put a
-  "voice" row saying nothing into the packet list and the log for every
-  transmission, and left the channel silent until something subscribed to
-  it. Analogue speech is audio, not a packet, and no longer touches the
-  packet log at all.
+  channel. It used to be wrapped in an empty packet so the call list would
+  see it, which put a "voice" row saying nothing into the packet list and the
+  log for every transmission, and left the channel silent until something
+  subscribed to it. Analogue speech is audio, not a packet, and no longer
+  touches the packet log at all. It is not listed as a call either: a mode
+  and a frequency do not say whether what is coming out is a conversation.
+  It is still transcribed.
 
 - The speaker is fed a block of silence rather than nothing at all when
   nothing on the bus is playing, which used to starve the sound card.

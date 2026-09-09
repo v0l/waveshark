@@ -512,26 +512,25 @@ impl AudioBus {
 
     /// Fold one block of speech into the table of who is talking now.
     ///
-    /// Every block of every voice that passes the tap comes through here,
+    /// Every block of every call a front end decoded comes through here,
     /// whether or not anybody is listening to it: this is the receiver's
     /// record of who is on the air, and it must not depend on which fader is
-    /// up. Silence is what ends a call, after [`HANG_S`], because a squelch
-    /// closing on an analogue channel and a vocoder going quiet on a digital
-    /// one both look the same from here, and this is the one place they can
-    /// be judged the same way.
+    /// up. Silence is what ends a call, after [`HANG_S`].
+    ///
+    /// A channel on the strip does not: see the note in
+    /// [`AudioBusNode::process`]. A mode and a frequency do not say whether
+    /// what is coming out is a conversation.
     pub fn track(&mut self, v: &common::Voice, block_s: f64) {
         let Some(to) = v.to.as_deref() else {
             return;
         };
         let key = live_key(v.system, v.channel_hz, to, v.from.as_deref());
         let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        // The meter for the call list, here rather than in `push`, because
-        // this is the one place every voice passes: `push` sees only speech
-        // the subscriptions mix, so an analogue channel on the strip, whose
-        // audio reaches the speaker through `feed`, had a row in the calls
-        // list with a meter that never moved. What it shows is the level the
-        // call arrived at, which is a fact about the transmission rather
-        // than about whose fader is up.
+        // The meter for the call list, here rather than in `push`: `push`
+        // sees only what the subscriptions mix, so a call nobody had
+        // subscribed to was listed with a bar that never moved. What this
+        // shows is the level the call arrived at, which is a fact about the
+        // transmission rather than about whose fader is up.
         let m = self.peaks.entry(Self::key_of(v.system, v.channel_hz, to)).or_insert(0.0);
         *m = m.max(peak);
         self.heard_peak = self.heard_peak.max(peak);
@@ -932,13 +931,30 @@ impl pipeline::node::Node for AudioBusNode {
         outputs: &mut [Payload],
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        // Two kinds of thing arrive here and only one of them is a call.
+        //
+        // A front end that decoded speech knows it decoded speech: it has a
+        // system, a talkgroup or a callsign, and a transmission that began
+        // and ended. A channel somebody tuned by hand is a demodulator
+        // pointed at a frequency, and nothing about a mode and a frequency
+        // says whether what is coming out is a conversation, a repeater's
+        // idle hiss, a pager tone or the radio traffic control loop on the
+        // airband. Listing those as calls filled the list with rows that
+        // could not be told apart and that nobody had decided anything
+        // about; the strip is where a channel is watched and heard.
+        //
+        // Both still leave on the tap, because the transcriber wants
+        // everything the receiver hears, whether or not the receiver can say
+        // who is talking.
         let mut tapped: Vec<common::Voice> = Vec::new();
+        let mut calls: Vec<common::Voice> = Vec::new();
         for (k, p) in inputs.iter().enumerate() {
             match p {
                 Payload::Voice(voices) => {
                     for v in voices {
                         if !v.pcm.is_empty() {
                             tapped.push(v.clone());
+                            calls.push(v.clone());
                         }
                         let Some(to) = v.to.as_deref() else { continue };
                         if v.pcm.is_empty() {
@@ -965,9 +981,9 @@ impl pipeline::node::Node for AudioBusNode {
                 _ => {}
             }
         }
-        // Every voice that passed the tap is a conversation the bus is
+        // Every call a front end decoded is a conversation the bus is
         // hearing, subscribed or not, muted or not.
-        for v in &tapped {
+        for v in &calls {
             self.bus.track(v, ctx.block_seconds);
         }
         // What this block is worth in audio, from the run's own clock, with
@@ -1448,35 +1464,32 @@ mod tests {
     }
 
 
-    /// The call list's meter moves for every call the bus hears, whichever
-    /// way its audio arrived.
+    /// The call list's meter moves for every call the bus hears, whether or
+    /// not anybody has subscribed to it.
     ///
-    /// Analogue speech from a channel on the strip reaches the speaker
-    /// through `feed`, never through `push`, so a meter filled in `push` was
-    /// dead for exactly the rows an operator was listening to: an NFM
-    /// channel had an airtime, a level bar and no movement in it.
+    /// It used to be filled where the subscriptions mix, so a conversation
+    /// nobody was listening to was listed with a bar that never moved, and
+    /// so was the meter beside the calls fader.
     #[test]
-    fn a_call_has_a_meter_whichever_way_its_audio_arrived() {
+    fn a_call_that_nobody_subscribed_to_still_has_a_meter() {
         let mut b = bus(&[]);
         let pcm = vec![0.4f32; 480];
-        let analogue = common::Voice {
-            system: "Audio",
-            channel_hz: 446_049_100.0,
-            to: Some("PMR5".into()),
-            from: None,
-            rate: 48_000.0,
+        let call = common::Voice {
+            system: "M17",
+            channel_hz: 433_475_000.0,
+            to: Some("M17-M17 C".into()),
+            from: Some("M0ABC".into()),
+            rate: 8_000.0,
             pcm: pcm.clone(),
         };
-        b.track(&analogue, 0.01);
-        let key = AudioBus::key_of("Audio", 446_049_100.0, "PMR5");
+        // Nothing is subscribed, so nothing is mixed.
+        assert!(b.gain_for(&voice("M17-M17 C", "M0ABC", &pcm)).is_none());
+        b.track(&call, 0.01);
+        let key = AudioBus::key_of("M17", 433_475_000.0, "M17-M17 C");
         let level = |b: &AudioBus| {
             b.levels().into_iter().find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or(0.0)
         };
         assert!(level(&b) > 0.3, "{:?}", b.levels());
-        // And the meter beside the calls fader, which is the same question
-        // asked of the whole list: it read the mixed speech, which analogue
-        // audio from a strip never joins, so it sat at zero through every
-        // transmission the calls view was listing.
         assert!(b.voice_peak() > 0.3, "the call bus meter stayed down");
 
         // And it falls back when the transmission stops, so the column is a
@@ -1485,29 +1498,40 @@ mod tests {
             b.clear();
         }
         assert_eq!(level(&b), 0.0, "{:?}", b.levels());
+    }
 
-        // A call nobody has subscribed to is still measured: the row is
-        // there whether or not its audio is being mixed.
-        assert!(b.gain_for(&Voice {
-            system: "M17",
-            channel_hz: 433e6,
-            to: "M17-M17 C",
-            from: None,
-            pcm: &pcm,
-            rate: 8_000.0,
-        })
-        .is_none());
-        let digital = common::Voice {
-            system: "M17",
-            channel_hz: 433e6,
-            to: Some("M17-M17 C".into()),
-            from: Some("M0ABC".into()),
-            rate: 8_000.0,
-            pcm,
+    /// A channel somebody tuned is not a call.
+    ///
+    /// A mode and a frequency do not say whether what is coming out is a
+    /// conversation, a repeater idling or an airband loop, so a strip
+    /// channel is heard on the strip and never listed. It still leaves on
+    /// the tap, which is what the transcriber reads.
+    #[test]
+    fn a_strip_channel_is_not_listed_as_a_call() {
+        use pipeline::node::Node;
+        let mut n = strips(1, 48_000.0, 1);
+        n.bus_mut().strip_mut(0).unwrap().voice = true;
+        n.bus_mut().strip_mut(0).unwrap().label = "PMR5".into();
+        n.bus_mut().strip_mut(0).unwrap().center_hz = 446_049_100.0;
+
+        let spec = StreamSpec {
+            kind: PortKind::Real,
+            rate: 48_000.0,
+            center: common::Hz(0),
+            bandwidth: 0.0,
+            channels: 1,
+            ..Default::default()
         };
-        b.track(&digital, 0.01);
-        let k2 = AudioBus::key_of("M17", 433e6, "M17-M17 C");
-        assert!(b.levels().iter().any(|(k, v)| *k == k2 && *v > 0.3), "{:?}", b.levels());
+        let ins = [PortSpec { spec, latency: 0 }];
+        let input = Payload::Real(vec![0.4f32; 480]);
+        let mut out = [Payload::Real(Vec::new()), Payload::Voice(Vec::new())];
+        let (mut events, mut tags) = (Vec::new(), Vec::new());
+        let mut ctx = pipeline::node::NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+        ctx.block_seconds = 0.01;
+        Node::process(&mut n, &[&input], &mut out, &mut ctx).expect("a block");
+
+        assert!(n.bus_mut().take_calls().is_empty(), "a tuned channel became a call");
+        assert!(!out[1].as_voice().unwrap_or(&[]).is_empty(), "and it is still on the tap");
     }
 
 }
