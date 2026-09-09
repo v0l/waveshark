@@ -1391,7 +1391,7 @@ impl Receiver {
 
     /// Every voice front end running, talking or not, read off the ports
     /// they publish on.
-    fn voices(&self) -> Vec<common::Voice> {
+    pub(crate) fn voices(&self) -> Vec<common::Voice> {
         self.graph
             .order()
             .flat_map(|(id, _)| {

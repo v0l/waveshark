@@ -240,6 +240,18 @@ impl AutoNode {
     /// decoders built for it there and then, and they are as much a part of
     /// the receiver as a stage somebody placed by hand.
     fn inner_voice(&self, out: &mut Vec<common::Voice>) {
+        // The span-wide front ends as well as the ones on a source: a camera
+        // is span-wide and the sound on its subcarrier is speech like any
+        // other. Reading only the slots is why a picture arrived with no
+        // sound at all.
+        for m in &self.wide {
+            for t in &m.voice {
+                let Some(v) = m.graph.buf(*t).and_then(|p| p.as_voice()) else {
+                    continue;
+                };
+                out.extend(v.iter().cloned());
+            }
+        }
         for slot in &self.slots {
             for m in &slot.members {
                 for t in &m.voice {

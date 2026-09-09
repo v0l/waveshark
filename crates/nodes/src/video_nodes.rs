@@ -21,6 +21,10 @@ use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
+/// What a camera's transmission is called, on a frame and on the sound that
+/// came with it.
+const SYSTEM: &str = "analogue video";
+
 /// What the picture is resampled to. A PAL line holds about 720 samples at
 /// broadcast rates and a small camera rather fewer, so this is a choice rather
 /// than a measurement.
@@ -33,11 +37,32 @@ const DEVIATION_HZ: f64 = 6e6;
 
 pub struct VideoNode {
     demod: dsp::FmDemod,
+    /// The picture's own filter, when the span is wider than the picture
+    /// needs.
+    ///
+    /// The two halves of a camera's transmission want different bandwidths
+    /// and a chain cannot fork, so the narrowing happens here rather than as
+    /// a stage in front. The picture is read from 10 MS/s, because a
+    /// discriminator handed the whole 20 carries all of that bandwidth's
+    /// noise into it and a weak link then produces no sync pulse at all. The
+    /// sound is on a 6.5 MHz subcarrier, which only exists in the wide
+    /// baseband: filtered to 10 MS/s it is gone.
+    narrow: Option<dsp::fir::FirDecim>,
+    narrowed: Vec<common::C32>,
+    /// The sound subcarrier, and the discriminator that reaches it.
+    sound: Option<dsp::video::Sound>,
+    wide_demod: dsp::FmDemod,
+    wide: Vec<f32>,
+    pcm: Vec<f32>,
     sep: Option<SyncSeparator>,
     /// Set by hand, or `None` to measure it from the line period.
     forced: Option<Standard>,
     colour: bool,
+    /// The rate the picture is read at, after narrowing.
     rate: f64,
+    /// The rate the node is fed at, which is what it claims and what the
+    /// sound is read from.
+    span_hz: f64,
     center_hz: f64,
     base: Vec<f32>,
     /// Samples kept while the standard is still being measured.
@@ -81,10 +106,17 @@ impl VideoNode {
     pub fn new(forced: Option<Standard>, colour: bool) -> Self {
         Self {
             demod: dsp::FmDemod::new(20e6, DEVIATION_HZ),
+            narrow: None,
+            narrowed: Vec::new(),
+            sound: None,
+            wide_demod: dsp::FmDemod::new(20e6, DEVIATION_HZ),
+            wide: Vec::new(),
+            pcm: Vec::new(),
             sep: None,
             forced,
             colour,
             rate: 20e6,
+            span_hz: 20e6,
             center_hz: 0.0,
             base: Vec::new(),
             priming: Vec::new(),
@@ -128,12 +160,30 @@ impl VideoNode {
 
 }
 
-impl Simple for VideoNode {
+impl pipeline::node::Node for VideoNode {
     fn name(&self) -> &str {
         "video"
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    /// The picture, and the sound that came with it.
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("video reads complex baseband"));
         }
@@ -148,8 +198,17 @@ impl Simple for VideoNode {
                 "analogue video needs at least 8.9 MS/s to hold its baseband",
             ));
         }
-        self.rate = i.spec.rate;
+        let span = i.spec.rate;
+        self.span_hz = span;
         self.center_hz = i.spec.center.as_f64();
+        // The sound first, because it is the one that needs the whole span.
+        self.sound = dsp::video::Sound::new(span);
+        self.wide_demod = dsp::FmDemod::new(span, DEVIATION_HZ);
+        // Then the picture's own rate, and the filter that reaches it.
+        let factor = decimation(span);
+        self.rate = span / factor as f64;
+        self.narrow = (factor > 1)
+            .then(|| dsp::fir::FirDecim::design_hz(span, factor, self.rate * 0.4, 60.0));
         self.demod = dsp::FmDemod::new(self.rate, DEVIATION_HZ);
         self.sep = self.forced.map(|std| {
             let s = SyncSeparator::new(self.rate, std, WIDTH);
@@ -164,11 +223,22 @@ impl Simple for VideoNode {
         // A field is not a sampled stream, so the rate the graph negotiated
         // means nothing downstream; the frame carries its own geometry.
         out.rate = 0.0;
-        Ok(out)
+        let mut voice = out.with_kind(PortKind::Voice);
+        // The subcarrier's own rate after two decimations, not the graph's.
+        voice.rate = self.sound.as_ref().map_or(crate::m17_nodes::VOICE_HZ, |s| s.rate());
+        voice.channels = 1;
+        Ok(vec![out, voice])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let Some(iq) = i.as_iq() else { return Ok(()) };
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
+        let (o, sound_out) = outputs.split_at_mut(1);
+        let o = &mut o[0];
         // Before the demodulation and not after it: this runs on the whole
         // span, so a span with no camera in it would otherwise FM demodulate
         // twenty megasamples a second to decide that again every block.
@@ -177,7 +247,14 @@ impl Simple for VideoNode {
             return Ok(());
         }
         self.base.clear();
-        self.demod.process(iq, &mut self.base);
+        match self.narrow.as_mut() {
+            Some(f) => {
+                self.narrowed.clear();
+                f.process(iq, &mut self.narrowed);
+                self.demod.process(&self.narrowed, &mut self.base);
+            }
+            None => self.demod.process(iq, &mut self.base),
+        }
 
         if self.sep.is_none() {
             // Two fields' worth before deciding, so the test has hundreds of
@@ -206,8 +283,8 @@ impl Simple for VideoNode {
             c.request(
                 "video",
                 Request::Claim {
-                    lo_hz: self.center_hz - self.rate / 2.0,
-                    hi_hz: self.center_hz + self.rate / 2.0,
+                    lo_hz: self.center_hz - self.span_hz / 2.0,
+                    hi_hz: self.center_hz + self.span_hz / 2.0,
                 },
             );
             // The samples that decided it are still video, so they are read
@@ -238,6 +315,34 @@ impl Simple for VideoNode {
             return Ok(());
         }
         let label = decode::video_channels::name_at(self.center_hz as u64, 3_000_000);
+
+        // The sound, from the whole span rather than the picture's slice of
+        // it: the subcarrier is at 6.5 MHz and the picture is read from a
+        // baseband that reaches 5. Only once there is a picture, because a
+        // second discriminator over 20 MS/s is a seventh of a core and a
+        // camera nobody can see is not one whose sound anybody wants.
+        if let Some(sound) = self.sound.as_mut() {
+            self.wide.clear();
+            self.wide_demod.process(iq, &mut self.wide);
+            self.pcm.clear();
+            sound.process(&self.wide, &mut self.pcm);
+            if !self.pcm.is_empty() {
+                if let Some(v) = sound_out.first_mut() {
+                    v.voice_mut().push(common::Voice {
+                        system: SYSTEM,
+                        channel_hz: self.center_hz,
+                        // Named after the channel of the plan, so the strip
+                        // and the transcript call it what the picture is
+                        // captioned with.
+                        to: label.clone().or_else(|| Some(format!("{:.0} MHz", self.center_hz / 1e6))),
+                        from: None,
+                        rate: sound.rate(),
+                        pcm: std::mem::take(&mut self.pcm),
+                    });
+                }
+            }
+        }
+
         let out = o.video_mut();
         for f in fields {
             self.fields += 1;
@@ -247,7 +352,7 @@ impl Simple for VideoNode {
                 None => (Pixels::Luma8, f.luma),
             };
             out.push(VideoFrame {
-                system: "analogue video",
+                system: SYSTEM,
                 channel_hz: self.center_hz,
                 label: label.clone(),
                 width: f.width,
@@ -264,6 +369,10 @@ impl Simple for VideoNode {
 
     fn reset(&mut self) {
         self.demod.reset();
+        self.wide_demod.reset();
+        if let Some(s) = self.sound.as_mut() {
+            s.reset();
+        }
         self.priming.clear();
         self.backoff = 0;
         self.lock = None;
@@ -376,41 +485,26 @@ impl Protocol for Video {
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim
     }
-    /// A discriminator and a sync separator run per sample, and the noise
-    /// they carry is the bandwidth they are handed. See [`Video::chain`].
+    /// Not by the receiver: the front end needs the whole span for the
+    /// sound and narrows the picture itself. See [`Video::chain`].
     fn narrow_span(&self) -> bool {
-        true
+        false
     }
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Video]
+        &[PortKind::Video, PortKind::Voice]
     }
-    /// Band-limited down to about [`WORK_RATE_HZ`] first, and read there.
+    /// The whole span, and the node narrows what it needs to.
     ///
-    /// The camera occupies under 5 MHz of the span it is found in: the AKK
-    /// capture measures 4.6 MHz with about 1 MHz rms deviation, whatever the
-    /// manuals imply. A discriminator handed the whole 20 MHz carries all of
-    /// that bandwidth's noise into the picture, which costs 3 dB of
-    /// pre-detection signal to noise for every doubling of span and made a
-    /// weak camera undecodable: off air 40 dB down the band, 20 MS/s gave no
-    /// sync pulse at all and 10 MS/s gave the line rate to within 0.1 us.
-    /// It is also most of what the front end cost, since both the
-    /// discriminator and the sync separator run per sample.
-    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        match decimation(at.rate) {
-            1 => vec![NodeSpec::new("video")],
-            // Four fifths of the new Nyquist, which at 10 MS/s keeps the
-            // carrier's whole 8 MHz and leaves a transition band wide enough
-            // that the filter is fifty-odd taps rather than a hundred and
-            // fifty. Sixty decibels is far more than a signal read through a
-            // discriminator can tell.
-            f => vec![
-                NodeSpec::new("decimate")
-                    .i("factor", f as i64)
-                    .f("passband", 0.8)
-                    .f("atten_db", 60.0),
-                NodeSpec::new("video"),
-            ],
-        }
+    /// The two halves of a camera's transmission want different bandwidths.
+    /// The picture wants about 10 MS/s: it occupies under 5 MHz, the AKK
+    /// capture measures 4.6, and a discriminator handed the whole 20 carries
+    /// all of that bandwidth's noise into it. Off air 40 dB down the band
+    /// that was the difference between no sync pulse at all and the line
+    /// rate to within 0.1 us. The sound wants all of it: the subcarrier sits
+    /// at 6.5 MHz of baseband, which a 10 MS/s stream cannot hold. A chain
+    /// cannot fork, so the front end takes the span and does both.
+    fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new("video")]
     }
 }
 
@@ -418,6 +512,35 @@ impl Protocol for Video {
 mod tests {
     use super::*;
     use common::{Hz, C32};
+    use pipeline::node::Node;
+
+    /// One block through the node, as the graph would run it: the fields it
+    /// produced, the sound that came with them, and what it asked for.
+    fn run(
+        n: &mut VideoNode,
+        iq: &[C32],
+        rate: f64,
+    ) -> (Vec<VideoFrame>, Vec<common::Voice>, Vec<Request>) {
+        let ins = [spec(rate, 5_865e6)];
+        let tags = Vec::new();
+        let (mut fields, mut heard, mut asked) = (Vec::new(), Vec::new(), Vec::new());
+        for chunk in iq.chunks(1 << 16) {
+            let mut events = Vec::new();
+            let mut new_tags = Vec::new();
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            let mut out =
+                [Payload::empty_of(PortKind::Video), Payload::empty_of(PortKind::Voice)];
+            let input = Payload::Iq(chunk.to_vec());
+            Node::process(n, &[&input], &mut out, &mut ctx).expect("process");
+            fields.extend(out[0].as_video().unwrap_or(&[]).iter().cloned());
+            heard.extend(out[1].as_voice().unwrap_or(&[]).iter().cloned());
+            asked.extend(events.into_iter().filter_map(|e| match e {
+                pipeline::event::Event::Request { request, .. } => Some(request),
+                _ => None,
+            }));
+        }
+        (fields, heard, asked)
+    }
 
     fn spec(rate: f64, center: f64) -> PortSpec {
         PortSpec {
@@ -461,27 +584,6 @@ mod tests {
         out
     }
 
-    /// Run one payload through, collecting the requests it made.
-    fn feed(n: &mut VideoNode, iq: &[C32], rate: f64) -> (Vec<VideoFrame>, Vec<Request>) {
-        let ins = [spec(rate, 5_865e6)];
-        let tags = Vec::new();
-        let (mut fields, mut asked) = (Vec::new(), Vec::new());
-        let mut out = Payload::empty_of(PortKind::Video);
-        for chunk in iq.chunks(1 << 16) {
-            let mut events = Vec::new();
-            let mut new_tags = Vec::new();
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            out.clear();
-            n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).expect("process");
-            fields.extend(out.as_video().unwrap_or(&[]).iter().cloned());
-            asked.extend(events.into_iter().filter_map(|e| match e {
-                pipeline::event::Event::Request { request, .. } => Some(request),
-                _ => None,
-            }));
-        }
-        (fields, asked)
-    }
-
     /// A lock is one measurement of one 40 ms window, and the claim it takes
     /// shuts the detector and every other span-wide decoder out of the band.
     /// So a lock that stops producing fields is given up: a camera that has
@@ -491,8 +593,8 @@ mod tests {
     fn a_lock_that_stops_producing_gives_the_span_back() {
         let rate = 16e6;
         let mut n = VideoNode::new(None, false);
-        n.negotiate(&spec(rate, 5_865e6)).expect("a span");
-        let (fields, asked) = feed(&mut n, &modulate(&pal(rate, 4), rate), rate);
+        Node::negotiate(&mut n, &[spec(rate, 5_865e6)]).expect("a span");
+        let (fields, _, asked) = run(&mut n, &modulate(&pal(rate, 4), rate), rate);
         assert!(!fields.is_empty(), "no picture to lose");
         assert!(n.locked(), "not locked");
         assert!(
@@ -503,7 +605,7 @@ mod tests {
         // The transmitter goes. Silence at the same rate, longer than the
         // relock timeout, and the claim comes back.
         let quiet = vec![C32::new(0.0, 0.0); ((RELOCK_S + 1.0) * rate) as usize];
-        let (_, asked) = feed(&mut n, &quiet, rate);
+        let (_, _, asked) = run(&mut n, &quiet, rate);
         assert!(
             asked.iter().any(|r| matches!(r, Request::Release)),
             "the span was never given back"
@@ -515,8 +617,8 @@ mod tests {
     #[test]
     fn the_node_refuses_a_span_too_narrow_for_a_picture() {
         let mut n = VideoNode::default();
-        assert!(n.negotiate(&spec(20e6, 5_865e6)).is_ok());
-        assert!(n.negotiate(&spec(2e6, 5_865e6)).is_err());
+        assert!(Node::negotiate(&mut n, &[spec(20e6, 5_865e6)]).is_ok());
+        assert!(Node::negotiate(&mut n, &[spec(2e6, 5_865e6)]).is_err());
     }
 
     /// The whole path: a transmitter's carrier in, fields out, on a port that
@@ -526,27 +628,18 @@ mod tests {
         let rate = 16e6;
         let iq = modulate(&pal(rate, 4), rate);
         let mut n = VideoNode::new(None, false);
-        let out_spec = n.negotiate(&spec(rate, 5_865e6)).expect("a span");
-        assert_eq!(out_spec.kind, PortKind::Video);
+        let out = Node::negotiate(&mut n, &[spec(rate, 5_865e6)]).expect("a span");
+        assert_eq!(out[0].kind, PortKind::Video);
+        // The sound the camera sends beside the picture, on a port of its
+        // own, so a channel a receiver is watching can be listened to.
+        assert_eq!(out[1].kind, PortKind::Voice);
 
-        let ins = [spec(rate, 5_865e6)];
-        let tags = Vec::new();
-        let mut out = Payload::empty_of(PortKind::Video);
-        let mut fields: Vec<VideoFrame> = Vec::new();
-        for chunk in iq.chunks(1 << 16) {
-            let mut events = Vec::new();
-            let mut new_tags = Vec::new();
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            out.clear();
-            n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx)
-                .expect("process");
-            fields.extend(out.as_video().unwrap_or(&[]).iter().cloned());
-        }
+        let (fields, _, _) = run(&mut n, &iq, rate);
         assert!(!fields.is_empty(), "no field reached the port");
         assert_eq!(n.standard(), Some(Standard::Pal), "the standard was measured");
 
         let f = fields.iter().max_by_key(|f| f.lines_seen).expect("a field");
-        assert_eq!(f.system, "analogue video");
+        assert_eq!(f.system, SYSTEM);
         assert_eq!(f.pixels, Pixels::Luma8);
         assert_eq!(f.samples.len(), f.width * f.height);
         assert!(f.completeness() > 0.8, "{} of {} lines", f.lines_seen, f.height);

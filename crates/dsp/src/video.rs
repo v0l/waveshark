@@ -34,6 +34,10 @@
 //! which is another demodulator on this same baseband. The line spectrum of
 //! the capture in `testdata` has it plainly at 6.5 MHz.
 
+use crate::fir::{FirDecim, FirDecimReal};
+use crate::FmDemod;
+use common::C32;
+
 /// Which set of timings the camera is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standard {
@@ -323,6 +327,201 @@ pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
         agreement,
         coverage,
     })
+}
+
+
+/// The sound a camera sends beside its picture.
+///
+/// Analogue video links put audio on an FM subcarrier of the composite
+/// baseband: 6.5 MHz on the AKK capture here, at 49.5 dB against 29.5 for the
+/// colour burst, and 5.5, 6.0 or 6.8 on other transmitters. It is inside the
+/// discriminator's output rather than beside the carrier, so hearing it needs
+/// the whole 20 MHz of the transmission and not the 10 the picture is read
+/// from: the sound path is why the front end keeps a wideband discriminator
+/// after the picture stopped needing one.
+///
+/// What comes out is at whatever rate the two decimations leave, around
+/// 50 kHz, and it is labelled with that: everything downstream of a voice
+/// port resamples anyway, and resampling twice is worse than once.
+pub struct Sound {
+    rate: f64,
+    /// The subcarrier, once it has been found. `None` while looking.
+    hz: Option<f64>,
+    /// Composite kept for the search, which needs a frame of it.
+    probe: Vec<f32>,
+    /// Phase of the mixer that brings the subcarrier to zero, in turns, kept
+    /// across blocks so it does not click every block boundary.
+    phase: f64,
+    mixed: Vec<C32>,
+    down: FirDecim,
+    demod: FmDemod,
+    fm: Vec<f32>,
+    audio: FirDecimReal,
+    /// One-pole de-emphasis, and its state.
+    deemph: f32,
+    last: f32,
+    out_rate: f64,
+}
+
+/// Candidate subcarriers, in hertz. Every analogue link this author has seen
+/// uses one of these; a transmitter using another is heard as silence rather
+/// than as noise, which is the right failure.
+const SOUND_HZ: [f64; 4] = [5.5e6, 6.0e6, 6.5e6, 6.8e6];
+
+/// How far either side of a candidate the search looks, and the width the
+/// mixer's filter keeps: an FM subcarrier at 50 to 100 kHz deviation with
+/// 15 kHz of audio on it needs a couple of hundred kilohertz.
+const SOUND_WIDTH_HZ: f64 = 220e3;
+
+/// Peak deviation of the subcarrier mapped to full scale.
+const SOUND_DEVIATION_HZ: f64 = 100e3;
+
+/// De-emphasis time constant. 50 us is what European FM uses and what these
+/// transmitters copy; without it the sound is thin and hissy.
+const DEEMPHASIS_S: f64 = 50e-6;
+
+impl Sound {
+    /// A reader for composite at `rate`, or `None` when the stream cannot
+    /// hold a subcarrier at all: below about 13 MS/s the 6.5 MHz one is
+    /// outside the baseband and there is nothing to hear.
+    pub fn new(rate: f64) -> Option<Self> {
+        let lowest = SOUND_HZ[0] + SOUND_WIDTH_HZ;
+        if rate / 2.0 <= lowest {
+            return None;
+        }
+        // Two stages: the span down to a couple of hundred kilohertz, where
+        // the subcarrier is demodulated, then that down to something an
+        // audio bus can take. One stage from 20 MS/s to 50 kHz would be a
+        // filter of thousands of taps.
+        let f1 = (rate / (2.0 * SOUND_WIDTH_HZ)).floor().max(1.0) as usize;
+        let r1 = rate / f1 as f64;
+        let f2 = (r1 / 44.1e3).floor().max(1.0) as usize;
+        let out_rate = r1 / f2 as f64;
+        let alpha = 1.0 - (-1.0 / (DEEMPHASIS_S * out_rate)).exp();
+        Some(Self {
+            rate,
+            hz: None,
+            probe: Vec::new(),
+            phase: 0.0,
+            mixed: Vec::new(),
+            down: FirDecim::design_hz(rate, f1, SOUND_WIDTH_HZ / 2.0, 60.0),
+            demod: FmDemod::new(r1, SOUND_DEVIATION_HZ),
+            fm: Vec::new(),
+            audio: FirDecimReal::design_hz(r1, f2, 15e3, 60.0),
+            deemph: alpha as f32,
+            last: 0.0,
+            out_rate,
+        })
+    }
+
+    /// The subcarrier being read, once one has been found.
+    pub fn subcarrier_hz(&self) -> Option<f64> {
+        self.hz
+    }
+
+    /// The rate the audio comes out at.
+    pub fn rate(&self) -> f64 {
+        self.out_rate
+    }
+
+    /// Forget the subcarrier and look again: what to do when the picture has
+    /// gone, since the next transmitter may put its sound elsewhere.
+    pub fn reset(&mut self) {
+        self.hz = None;
+        self.probe.clear();
+        self.phase = 0.0;
+        self.last = 0.0;
+    }
+
+    /// Read a block of composite, appending whatever audio came out.
+    pub fn process(&mut self, base: &[f32], out: &mut Vec<f32>) {
+        let Some(hz) = self.hz.or_else(|| self.look(base)) else {
+            return;
+        };
+        // Mix the subcarrier to zero. The phase runs from a counter kept
+        // across blocks: restarting it each block puts a step in the
+        // demodulator's output at every boundary, which is a click at the
+        // block rate.
+        let step = hz / self.rate;
+        self.mixed.clear();
+        self.mixed.reserve(base.len());
+        for &x in base {
+            let a = -std::f64::consts::TAU * self.phase;
+            self.mixed.push(C32::new(x * a.cos() as f32, x * a.sin() as f32));
+            self.phase = (self.phase + step).fract();
+        }
+        let mixed = std::mem::take(&mut self.mixed);
+        let mut narrow = Vec::new();
+        self.down.process(&mixed, &mut narrow);
+        self.mixed = mixed;
+        self.fm.clear();
+        self.demod.process(&narrow, &mut self.fm);
+        let mut audio = Vec::new();
+        self.audio.process(&self.fm, &mut audio);
+        for v in &audio {
+            self.last += self.deemph * (*v - self.last);
+            out.push(self.last);
+        }
+    }
+
+    /// Which of the candidate subcarriers is there, if any.
+    ///
+    /// Measured rather than assumed: a transmitter's sound sits at one of a
+    /// handful of frequencies and which one is a fact about the unit. The
+    /// test is the power in a narrow band around each candidate against the
+    /// baseband either side of them, so a camera sending no sound at all is
+    /// answered with `None` instead of a band of noise being demodulated
+    /// into hiss.
+    fn look(&mut self, base: &[f32]) -> Option<f64> {
+        self.probe.extend_from_slice(base);
+        // A frame of composite. Long enough that a 250 kHz bin holds
+        // hundreds of cycles, short enough to decide within a field.
+        let want = (0.02 * self.rate) as usize;
+        if self.probe.len() < want {
+            return None;
+        }
+        let probe = std::mem::take(&mut self.probe);
+        let mut best: Option<(f64, f32)> = None;
+        for hz in SOUND_HZ {
+            if hz + SOUND_WIDTH_HZ / 2.0 >= self.rate / 2.0 {
+                continue;
+            }
+            let on = band_power(&probe, self.rate, hz, SOUND_WIDTH_HZ);
+            // The floor a megahertz below it, which on a camera's baseband
+            // is the quiet stretch between the colour burst and the sound.
+            let off = band_power(&probe, self.rate, hz - 1.0e6, SOUND_WIDTH_HZ);
+            let snr = on / off.max(1e-20);
+            if snr > 10.0 && best.is_none_or(|(_, b)| snr > b) {
+                best = Some((hz, snr));
+            }
+        }
+        self.hz = best.map(|(hz, _)| hz);
+        self.hz
+    }
+}
+
+/// Power in a band of a real signal, by mixing it down and averaging: a
+/// whole transform is not worth it for four candidates.
+fn band_power(x: &[f32], rate: f64, hz: f64, width_hz: f64) -> f32 {
+    // A moving average of the mixed signal is a lowpass at about `width`,
+    // which is all the selectivity this test needs.
+    let n = ((rate / width_hz).round() as usize).max(1);
+    let step = hz / rate;
+    let (mut re, mut im) = (0.0f32, 0.0f32);
+    let mut power = 0.0f64;
+    let mut taken = 0usize;
+    for (i, &v) in x.iter().enumerate() {
+        let a = -std::f64::consts::TAU * (i as f64 * step).fract();
+        re += v * a.cos() as f32;
+        im += v * a.sin() as f32;
+        if (i + 1) % n == 0 {
+            power += f64::from(re * re + im * im) / (n * n) as f64;
+            taken += 1;
+            re = 0.0;
+            im = 0.0;
+        }
+    }
+    (power / taken.max(1) as f64) as f32
 }
 
 /// One field, as luma samples.
