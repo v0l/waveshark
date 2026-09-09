@@ -155,6 +155,13 @@ impl Speaker {
 
 /// Everything that has been said, by conversation.
 ///
+/// One for the whole program, behind [`log`]. The node writes to it and the
+/// interface reads it, and neither owns it: the node is a stage in a graph
+/// that is rebuilt on every retune, and a log that lived inside it was
+/// emptied every time the dial moved, which on screen was three reads and
+/// no lines. A transcript outlives any one graph the way the call list
+/// does.
+///
 /// In memory and bounded. Nothing here is written to disk yet: the packet log
 /// holds evidence and a transcript is not evidence, so where transcripts
 /// belong on disk is a decision that has not been made.
@@ -163,6 +170,19 @@ pub struct TranscriptLog {
     by_key: HashMap<String, Vec<Utterance>>,
     /// Keys in the order they were last spoken on, oldest first.
     order: Vec<String>,
+    /// Bumped on every push, so a reader can tell whether anything changed
+    /// without comparing the contents.
+    seq: u64,
+}
+
+/// The one transcript.
+pub type SharedLog = std::sync::Arc<parking_lot::Mutex<TranscriptLog>>;
+
+/// The program's transcript, which every transcriber writes to and the
+/// transcript view reads.
+pub fn log() -> &'static SharedLog {
+    static LOG: std::sync::OnceLock<SharedLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(Default::default)
 }
 
 impl TranscriptLog {
@@ -186,6 +206,19 @@ impl TranscriptLog {
             let gone = self.order.remove(0);
             self.by_key.remove(&gone);
         }
+        self.seq += 1;
+    }
+
+    /// How many pushes there have been, for a reader deciding whether to
+    /// look again.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// A copy, for a view to draw from without holding the lock while it
+    /// draws.
+    pub fn snapshot(&self) -> Self {
+        Self { by_key: self.by_key.clone(), order: self.order.clone(), seq: self.seq }
     }
 
     /// Everything said on one conversation, oldest first.
@@ -232,6 +265,7 @@ impl TranscriptLog {
     pub fn clear(&mut self) {
         self.by_key.clear();
         self.order.clear();
+        self.seq += 1;
     }
 }
 
@@ -374,7 +408,9 @@ fn cut_point(pcm: &[f32], rate: f64) -> usize {
 
 /// The streaming transcriber, as a node on the audio bus tap.
 pub struct LiveTranscribeNode {
-    log: TranscriptLog,
+    /// Where the lines go: the program's one transcript, unless a test
+    /// handed this node one of its own.
+    log: SharedLog,
     talking: HashMap<String, Talking>,
     enabled: bool,
     /// Shortest run of speech worth reading. A squelch tail transcribes as
@@ -436,7 +472,7 @@ impl Default for LiveTranscribeNode {
 impl LiveTranscribeNode {
     pub fn new() -> Self {
         Self {
-            log: TranscriptLog::default(),
+            log: log().clone(),
             talking: HashMap::new(),
             enabled: true,
             min_speech_s: 0.6,
@@ -505,7 +541,14 @@ impl LiveTranscribeNode {
         self
     }
 
-    pub fn log(&self) -> &TranscriptLog {
+    /// Write to a transcript of the caller's own rather than the program's,
+    /// so a test reads what it produced and nothing else.
+    pub fn into_log(mut self, log: SharedLog) -> Self {
+        self.log = log;
+        self
+    }
+
+    pub fn log(&self) -> &SharedLog {
         &self.log
     }
 
@@ -675,7 +718,7 @@ mod work {
                     Ok(t) => {
                         let text = t.text.trim().to_string();
                         if !text.is_empty() {
-                            self.log.push(Utterance {
+                            self.log.lock().push(Utterance {
                                 key: done.key,
                                 at: done.at,
                                 seconds: done.seconds,
@@ -1092,7 +1135,7 @@ mod tests {
         let pcm: Vec<f32> =
             r.into_samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / 32768.0).collect();
 
-        let mut n = LiveTranscribeNode::new().in_dir(&dir);
+        let mut n = LiveTranscribeNode::new().in_dir(&dir).into_log(Default::default());
         let mut events = Vec::new();
         let tags = Vec::new();
         let mut new_tags = Vec::new();
@@ -1123,7 +1166,7 @@ mod tests {
         // The model is on its own thread, so the answer arrives on a later
         // block the way it does in the receiver.
         for _ in 0..600 {
-            if n.log().latest(key).is_some_and(|u| u.settled) {
+            if n.log().lock().latest(key).is_some_and(|u| u.settled) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1132,7 +1175,7 @@ mod tests {
             c.block_seconds = 0.1;
             n.process(&Payload::Voice(Vec::new()), &mut out, &mut c).unwrap();
         }
-        let u = n.log().latest(key).expect("nothing was transcribed");
+        let u = n.log().lock().latest(key).cloned().expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
         assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
     }

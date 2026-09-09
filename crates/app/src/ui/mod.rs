@@ -1538,32 +1538,25 @@ impl App {
         self.cmds = cmds;
     }
 
-    /// Fold the window of utterances the radio publishes into the interface's
-    /// own log, and give the call list the newest line for each call.
+    /// Take a fresh copy of the transcript when it has changed, and give the
+    /// call list the newest line for each call.
     ///
-    /// Every frame rather than when a packet arrives. Speech is not a packet:
-    /// an FM channel transcribes without decoding anything, and the partial
-    /// of an over in progress is replaced several times while it is being
-    /// spoken.
+    /// The transcript is one for the whole program and the node writes into
+    /// it from the radio thread; the view draws from a copy so it never
+    /// holds the lock while drawing. Every frame rather than when a packet
+    /// arrives, because speech is not a packet.
     fn read_said(&mut self) {
-        let Some(r) = &self.radio else {
-            return;
-        };
-        let seq = r.status.said_seq.load(std::sync::atomic::Ordering::Relaxed);
+        let shared = crate::transcripts::log();
+        let seq = shared.lock().seq();
         if seq == self.transcript.seq {
             return;
         }
         self.transcript.seq = seq;
-        let said = r.status.said.lock().clone();
-        if said.is_empty() {
-            return;
-        }
+        self.transcript.log = shared.lock().snapshot();
+        let said = self.transcript.log.recent(256).into_iter().cloned().collect::<Vec<_>>();
         // A call that produced no speech the model would read keeps whatever
         // text its own decoder gave it.
         self.calls.list.read_transcripts(&said);
-        for u in said {
-            self.transcript.log.push(u);
-        }
     }
 
     /// Draw the transcript, then do what its buttons asked for.
@@ -1574,6 +1567,7 @@ impl App {
                 .show(ui);
         match act {
             Some(transcript_pane::Action::Clear) => {
+                crate::transcripts::log().lock().clear();
                 self.transcript.log.clear();
                 self.transcript.only = None;
             }

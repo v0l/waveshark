@@ -117,10 +117,12 @@ because traffic does not collect there.
   say they all look like an empty pane. What is on disc is what is named,
   because the repository setting is only where files would be fetched from
   and a directory filled by an earlier run holds a different model. The
-  status comes off the node through `Status::transcriber`, and the utterances
-  through `Status::said`, a window the interface folds into its own log: an
-  utterance is one start time on one key, so the same window arriving twice
-  replaces rather than repeats.
+  status comes off the node through `Status::transcriber`. The transcript
+  itself is one for the whole program, `transcripts::log()`: the node writes
+  into it and the view copies it when its sequence number moves. It is not
+  kept in the node, because the node is a stage in a graph that is rebuilt
+  on every retune, and a log that lived there was emptied every time the
+  dial moved.
 
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
