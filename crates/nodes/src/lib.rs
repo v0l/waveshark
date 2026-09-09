@@ -15,6 +15,7 @@ pub mod bank;
 pub mod video_nodes;
 pub mod capture_nodes;
 pub mod decode_nodes;
+pub mod droneid_nodes;
 pub mod dsp_nodes;
 pub mod dmr_nodes;
 pub mod elrs_nodes;
@@ -362,6 +363,15 @@ pub fn registry() -> Registry {
             category: "decode",
         },
         |_s: &Settings| Ok(Box::new(WifiNode::default()) as Box<dyn Node>),
+    );
+
+    r.register(
+        StageDesc {
+            name: "droneid",
+            summary: "DJI DroneID: the 15.36 MS/s OFDM burst an aircraft broadcasts about itself",
+            category: "decode",
+        },
+        |_s: &Settings| Ok(Box::new(droneid_nodes::DroneIdNode::new()) as Box<dyn Node>),
     );
 
     r.register(

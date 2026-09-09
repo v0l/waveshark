@@ -43,6 +43,7 @@ pub mod meshcore;
 pub mod meshtastic;
 pub mod morse;
 pub mod nrf24;
+pub mod droneid;
 pub mod odid;
 pub mod pocsag;
 pub mod protocol;
