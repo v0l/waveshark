@@ -331,10 +331,12 @@ impl pipeline::node::Node for VideoNode {
                     v.voice_mut().push(common::Voice {
                         system: SYSTEM,
                         channel_hz: self.center_hz,
-                        // Named after the channel of the plan, so the strip
-                        // and the transcript call it what the picture is
-                        // captioned with.
-                        to: label.clone().or_else(|| Some(format!("{:.0} MHz", self.center_hz / 1e6))),
+                        // No party, because there is none: this is the sound
+                        // half of a transmission, not a call somebody placed
+                        // to somebody. It is heard because the receiver is
+                        // receiving it, and the picture is what says which
+                        // channel it came from.
+                        to: None,
                         from: None,
                         rate: sound.rate(),
                         pcm: std::mem::take(&mut self.pcm),

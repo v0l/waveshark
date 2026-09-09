@@ -445,18 +445,54 @@ impl AudioBus {
         let Some(gain) = self.gain_for(&v) else {
             return false;
         };
-        if v.pcm.is_empty() || gain <= 0.0 {
+        let heard = self.mix_speech(v.system, v.channel_hz, v.pcm, v.rate, gain);
+        if heard {
+            self.last = Some(match v.from {
+                Some(f) => format!("{f} to {}", v.to),
+                None => v.to.to_string(),
+            });
+        }
+        heard
+    }
+
+    /// Publish audio from a front end that is not a call.
+    ///
+    /// A camera's sound subcarrier is speech in every sense that matters to
+    /// a speaker and in none that matters to a call list: it names no party,
+    /// nobody keyed up to start it and nothing ends it but the transmitter
+    /// going away. So there is nothing for a subscription to match and
+    /// nothing to wait for one: it is heard because the receiver is
+    /// receiving it, under the calls fader like the rest of what the front
+    /// ends produce.
+    pub fn push_audio(&mut self, system: &str, channel_hz: f64, pcm: &[f32], rate: f64) -> bool {
+        if self.muted || self.calls_muted {
             return false;
         }
+        self.mix_speech(system, channel_hz, pcm, rate, self.calls)
+    }
+
+    /// Resample a block into the speech share of the mix at `gain`.
+    fn mix_speech(
+        &mut self,
+        system: &str,
+        channel_hz: f64,
+        pcm: &[f32],
+        rate: f64,
+        gain: f32,
+    ) -> bool {
+        if pcm.is_empty() || gain <= 0.0 {
+            return false;
+        }
+        let v = (system, channel_hz, pcm, rate);
         // Resampling state is per carrier, not per group: only one group on a
         // channel is ever speaking, and a map keyed by group would grow for
         // as long as the receiver runs.
         let rs = self
             .rs
-            .entry(format!("{}:{:.0}", v.system, v.channel_hz))
-            .or_insert_with(|| audio::Resampler::new(v.rate, self.out_rate, 4));
+            .entry(format!("{}:{:.0}", v.0, v.1))
+            .or_insert_with(|| audio::Resampler::new(v.3, self.out_rate, 4));
         self.scratch.clear();
-        rs.process(v.pcm, &mut self.scratch);
+        rs.process(v.2, &mut self.scratch);
 
         // Levelled before the subscription's own volume, so what an operator
         // sets is a level relative to other calls rather than a fight with
@@ -470,10 +506,6 @@ impl AudioBus {
         for (m, s) in self.voice.iter_mut().zip(self.scratch.iter()) {
             *m += s * gain;
         }
-        self.last = Some(match v.from {
-            Some(f) => format!("{f} to {}", v.to),
-            None => v.to.to_string(),
-        });
         true
     }
 
@@ -952,14 +984,21 @@ impl pipeline::node::Node for AudioBusNode {
             match p {
                 Payload::Voice(voices) => {
                     for v in voices {
-                        if !v.pcm.is_empty() {
-                            tapped.push(v.clone());
-                            calls.push(v.clone());
-                        }
-                        let Some(to) = v.to.as_deref() else { continue };
                         if v.pcm.is_empty() {
                             continue;
                         }
+                        tapped.push(v.clone());
+                        // A front end that names a party decoded a call. One
+                        // that does not is audio the receiver demodulated:
+                        // a camera's sound subcarrier has no party, nobody
+                        // keyed up to start it, and a row for it would say
+                        // only that a transmitter is on the air, which the
+                        // picture already says.
+                        let Some(to) = v.to.as_deref() else {
+                            self.bus.push_audio(v.system, v.channel_hz, &v.pcm, v.rate);
+                            continue;
+                        };
+                        calls.push(v.clone());
                         self.bus.push(Voice {
                             system: v.system,
                             channel_hz: v.channel_hz,
@@ -1532,6 +1571,49 @@ mod tests {
 
         assert!(n.bus_mut().take_calls().is_empty(), "a tuned channel became a call");
         assert!(!out[1].as_voice().unwrap_or(&[]).is_empty(), "and it is still on the tap");
+    }
+
+
+    /// Audio that names no party is heard, and is not a call.
+    ///
+    /// A camera's sound subcarrier is the other half of a transmission
+    /// rather than a conversation: nobody keyed up to start it and there is
+    /// nothing for a subscription to match, so waiting for one would mean a
+    /// picture that is watched in silence.
+    #[test]
+    fn audio_with_no_party_is_heard_without_being_listed() {
+        use pipeline::node::Node;
+        let mut n = strips(1, 48_000.0, 1);
+        n.bus_mut().set_calls(1.0, false);
+        // Nothing is subscribed to anything.
+        assert!(n.bus().subscriptions().is_empty());
+
+        let spec = StreamSpec {
+            kind: PortKind::Voice,
+            rate: 44_100.0,
+            center: common::Hz(0),
+            bandwidth: 0.0,
+            channels: 1,
+            ..Default::default()
+        };
+        let ins = [PortSpec { spec, latency: 0 }];
+        let input = Payload::Voice(vec![common::Voice {
+            system: "analogue video",
+            channel_hz: 5_865_000_000.0,
+            to: None,
+            from: None,
+            rate: 44_100.0,
+            pcm: vec![0.4f32; 441],
+        }]);
+        let mut out = [Payload::Real(Vec::new()), Payload::Voice(Vec::new())];
+        let (mut events, mut tags) = (Vec::new(), Vec::new());
+        let mut ctx = pipeline::node::NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+        ctx.block_seconds = 0.01;
+        Node::process(&mut n, &[&input], &mut out, &mut ctx).expect("a block");
+
+        let mix = out[0].as_real().unwrap_or(&[]);
+        assert!(mix.iter().any(|v| v.abs() > 0.1), "the sound was not heard");
+        assert!(n.bus_mut().take_calls().is_empty(), "a subcarrier became a call");
     }
 
 }
