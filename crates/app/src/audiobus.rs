@@ -782,11 +782,14 @@ pub fn levels_db(speech: &Speech) -> (f32, f32) {
 /// it, and the strip read it back.
 pub struct AudioBusNode {
     bus: AudioBus,
+    /// The fraction of an output frame this block was worth and the last one
+    /// did not produce. See [`AudioBusNode::process`].
+    owed: f64,
 }
 
 impl AudioBusNode {
     pub fn new(out_rate: f64) -> Self {
-        Self { bus: AudioBus::new(out_rate) }
+        Self { bus: AudioBus::new(out_rate), owed: 0.0 }
     }
 
     pub fn bus(&self) -> &AudioBus {
@@ -944,8 +947,20 @@ impl pipeline::node::Node for AudioBusNode {
         for v in &tapped {
             self.bus.track(v, ctx.block_seconds);
         }
-        // What this block is worth in audio, from the run's own clock.
-        let frames = (ctx.block_seconds * self.bus.out_rate()).round() as usize;
+        // What this block is worth in audio, from the run's own clock, with
+        // the fraction of a frame carried to the next block.
+        //
+        // Rounding each block on its own is a rate error, not a rounding
+        // error, because the same block length arrives every time: 131072
+        // samples at 20 MS/s is 6.5536 ms, which is 314.57 frames at 48 kHz,
+        // and 315 of them every block is 0.14% too much audio forever. The
+        // sink's drift loop trims by at most 0.1%, so it cannot absorb that:
+        // the queue climbed from its 1024 sample target to the 12000 where
+        // the callback throws blocks away, clicked, and climbed again.
+        let want = ctx.block_seconds * self.bus.out_rate() + self.owed;
+        let frames = want.max(0.0).floor();
+        self.owed = want - frames;
+        let frames = frames as usize;
         let out = outputs[0].real_mut();
         out.extend_from_slice(self.bus.render(frames));
         self.bus.clear();
@@ -958,6 +973,7 @@ impl pipeline::node::Node for AudioBusNode {
     fn reset(&mut self) {
         self.bus.stop_replay();
         self.bus.clear();
+        self.owed = 0.0;
     }
 
     fn params(&self) -> Vec<Param> {
@@ -1352,4 +1368,48 @@ mod tests {
         n.set_param("vol5", ParamValue::Float(0.1)).unwrap();
         assert_eq!(n.bus().strips().len(), 6);
     }
+
+    /// The bus produces exactly real time's worth of audio, block after
+    /// block, whatever the block length rounds to.
+    ///
+    /// 131072 samples at 20 MS/s is 6.5536 ms, which is 314.5728 frames at
+    /// 48 kHz. Rounded per block that is 315 frames, 0.14% too much audio
+    /// forever, and the sink's drift loop trims by at most 0.1%: the queue
+    /// climbed off its 1024 sample target until the callback threw blocks
+    /// away, clicked, and climbed again. A second of blocks may not be a
+    /// frame out.
+    #[test]
+    fn a_block_of_air_is_a_block_of_audio_to_the_frame() {
+        use pipeline::node::Node;
+        use pipeline::port::{Payload, PortKind, StreamSpec};
+
+        let rate = 20e6;
+        let block = 131_072usize;
+        let block_s = block as f64 / rate;
+        let mut n = AudioBusNode::new(48_000.0);
+        let ins = [pipeline::node::PortSpec {
+            spec: StreamSpec { kind: PortKind::Real, rate: 48_000.0, ..Default::default() },
+            latency: 0,
+        }];
+        Node::negotiate(&mut n, &ins).expect("a bus");
+
+        let blocks = (1.0 / block_s).round() as usize;
+        let mut frames = 0usize;
+        for _ in 0..blocks {
+            let input = Payload::Real(Vec::new());
+            let mut out = [Payload::Real(Vec::new()), Payload::Voice(Vec::new())];
+            let (mut events, mut tags) = (Vec::new(), Vec::new());
+            let mut ctx = pipeline::node::NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
+            ctx.block_seconds = block_s;
+            Node::process(&mut n, &[&input], &mut out, &mut ctx).expect("a block");
+            frames += out[0].as_real().map(|v| v.len()).unwrap_or(0) / 2;
+        }
+        let want = (blocks as f64 * block_s * 48_000.0).round() as usize;
+        assert!(
+            frames.abs_diff(want) <= 1,
+            "{frames} frames for {want} of air: {:.3}% out",
+            100.0 * (frames as f64 - want as f64) / want as f64
+        );
+    }
+
 }

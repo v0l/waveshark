@@ -418,10 +418,19 @@ impl Dashboard<'_> {
                             n => format!("{} samples dropped", burst::thousands(n)),
                         },
                     );
+                    // Queued audio, in the time a listener hears it late. The
+                    // sink holds a queue on purpose, a thousand samples of
+                    // it, so "behind" starts at several times that and not
+                    // at zero: reading it as an error made the lamp amber
+                    // whenever the speaker was working.
+                    let late_ms = backlog as f64 / crate::audiobus::OUT_HZ * 1e3;
                     Self::lamp_row(
                         ui,
-                        backlog < 4,
-                        &format!("Audio bus {backlog} transfers behind"),
+                        (backlog as f64) < 3.0 * audio::TARGET_BACKLOG,
+                        &match backlog {
+                            0 => "Speaker queue empty".to_string(),
+                            _ => format!("Speaker {late_ms:.0} ms behind"),
+                        },
                     );
                     let err = s.error.lock().clone();
                     match err {
