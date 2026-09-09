@@ -57,7 +57,7 @@ hound = "3"
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["limesdr", "stt", "tea", "ambe"]
+default = ["limesdr", "stt", "cuda", "tea", "ambe"]
 limesdr = ["dep:limesdr"]
 # TETRA decryption and key recovery. On in a build from source, since a Keys
 # view that can only watch is half a receiver, and off in the binaries the
@@ -73,6 +73,13 @@ ambe = ["nodes/ambe"]
 # build with no model costs a node that copies packets. Turn it off with
 # --no-default-features to keep candle and the tokenizer out of the build.
 stt = ["nodes/stt", "dep:stt"]
+# Run the speech model on a CUDA card. On by default in a build from source,
+# since the model on a CPU keeps up with one handheld and not a repeater;
+# nothing on a Mac, which gets Metal whenever `stt` is on. Building it needs
+# the CUDA toolkit on the path. The release workflow ships it as a separate
+# `-cuda` asset, since a binary linked against cudart does not start on a
+# machine without it.
+cuda = ["stt?/cuda"]
 
 [[example]]
 name = "lime"

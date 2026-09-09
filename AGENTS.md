@@ -130,6 +130,36 @@ The exception is an identifier that is genuinely open, such as a protocol id
 from the registry or a call sign. Where the set is fixed by a specification
 or by this code, it is a type.
 
+## Words on the screen go through `theme::Line`
+
+Every caption, reading, sentence and label a pane draws is a `theme::Line`
+(`crates/app/src/theme.rs`), shown with `show` or, where the text is prose or
+came off the air, `wrapped`. **No `egui::Label`, no `RichText`, no `ui.label`
+in a pane.** The reason is baseline alignment: `Line` lays a row out as one
+galley and paints it on a fixed baseline, whatever faces and sizes it holds,
+so a legend, a number in the readout face and a note beside them sit on the
+same line. A `Label` centres its own galley instead, so two of them next to
+each other land on baselines a pixel or two apart, and a row with a control
+between its caption and its reading cannot be one galley at all.
+
+It also decides which face a thing is drawn in, and that is a meaning rather
+than a style: `legend` is a silkscreened caption, `value` a reading, `set`
+something the operator chose, `heard` something the radio heard, `words` text
+off the air, `note` a sentence for a person. Reaching for `RichText` skips
+that choice, so a frequency ends up in the prose face and a sentence in the
+tabular one.
+
+The helpers in `crates/app/src/ui/widgets.rs` (`hint`, `cell`, `row`, `card`)
+are built on `Line` for the same reason, and a new one belongs there rather
+than in a pane. Painted text is the one exception: a table cell inside a
+row painted onto an allocated rect goes through `widgets::cell`, which owns
+that call, and the spectrum's own axis labels are drawn by the painter
+because they are part of a plot and not part of a row.
+
+Older panes still call `ui.label` directly, `burst.rs` and `chain_pane.rs`
+most of all. That is a debt, not a precedent: convert what you touch, and do
+not add more.
+
 ## Every HTTP request goes out under the same name
 
 `crates/httpc` holds the user agent and builds every client, asynchronous or

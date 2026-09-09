@@ -34,11 +34,32 @@ the code is in the commit log; what a decoder can and cannot do is in
   window switcher show it instead of a blank default. On Windows it is in the
   executable as well, and the release archives carry the icon file for a
   desktop entry to point at.
+- The transcript view's model card offers a list of models to pick from,
+  every size of Whisper plus Qwen3-ASR, and a list of devices to run on,
+  the CPU and each GPU by name. A model picked is fetched on first use into
+  its own directory, so switching back costs nothing.
+
+- Qwen3-ASR (0.6B and 1.7B) as a transcriber beside Whisper. It reads
+  noisy and accented speech better and says what language it heard.
+
+- A Transcript view: what the local speech model read off
+  everything the receiver heard, newest at the bottom, with a line still
+  being spoken marked as it grows and a low-confidence reading flagged. It
+  can be filtered by words or opened on one conversation, and the calls list
+  has a "read" button on each row the model heard speech on that opens it
+  there.
+
+- The transcript view says what the speech-to-text is doing: which model, the
+  directory its files are in, how much is on disc and whether they are the
+  English-only or multilingual weights, whether it is loading, ready or
+  failed and why, whether it is running on CPU, CUDA or Metal, and how much
+  faster than real time it read the last window. A button loads or downloads
+  the model there and then instead of waiting for the first transmission.
 
 - The views are a strip of tabs in the top bar instead of a dropdown: one
-  click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0, Ctrl+` to go back
-  to the last view, and a dot on any tab whose view has taken something in
-  since you last looked at it.
+  click to switch, the keyboard shortcuts Ctrl+1 to Ctrl+0,
+  Ctrl+` to go back to the last view, and a dot on any tab whose view has
+  taken something in since you last looked at it.
 
 - An OPEN button beside the raw capture folder, with the path next to it, so a
   recording can be replayed or trimmed without typing the path out.
@@ -149,36 +170,18 @@ the code is in the commit log; what a decoder can and cannot do is in
   which also shows what is waiting, what has been sent and why an upload
   failed.
 
-### Fixed
-
-- Weak analogue video decodes. The picture was read off the whole sampled
-  span, so a 4.6 MHz camera arrived with 20 MHz of noise on it; it is band
-  limited first, which turned a 5.8 GHz link that produced nothing into one
-  that produces a picture, and halved what the front end costs.
-- Only one video front end is placed on a span. The 5.8 GHz plan names 5865
-  and 5866 as different channels, so a receiver on either read the span
-  twice and published every field twice.
-- Mode S on a wide span reads the 2.4 MS/s it asks for instead of everything
-  the radio is sampling. On a 20 MS/s span it was 127% of a processor core
-  looking at an empty band, and is now 37%.
-- Wi-Fi samples the air, a fifth of a second in every second, until it hears
-  something. Every network beacons ten times a second so they are all still
-  found within a second, and a band with no Wi-Fi on it no longer costs more
-  than everything else the receiver is doing put together.
-- A scanner block added in the interface now demodulates the channel typed
-  into it. It kept the protocol's own default frequency instead, so a camera
-  asked for on 5800 MHz was read on 5865 and nothing appeared.
-- While a camera owns the span, the Wi-Fi and other span-wide decoders stop
-  reading it. An OFDM search through an FM picture was eighteen times real
-  time, which is what kept the picture breaking up.
-- A picture that goes away gives the band back, so a receiver that locked onto
-  a moment of noise recovers after a few seconds instead of staying deaf for
-  the session.
-- A front end that reads the whole span is left out, with a reason, when the
-  span is too narrow for it. It used to be built anyway and take the whole
-  receiver down with it.
-
 ### Changed
+
+- The transcript is a table: time, frequency, speaker, group or channel,
+  and the words, which wrap.
+
+- CUDA is on by default in a build from source, and the release publishes
+  a `-cuda` build for Linux and Windows beside the plain one. Building
+  needs the CUDA toolkit; `--no-default-features --features limesdr,stt`
+  builds without it, and the `-cuda` binary needs the CUDA 12 runtime.
+
+- The model card names the model rather than printing the path to its
+  files; the path is on hover over the "on disc" line.
 
 - The toolbar and view tabs use the Phosphor icon set, so the icons share one
   weight and one grid at every size instead of drifting between the top bar
@@ -227,6 +230,70 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+
+- With the device on Auto, a card that has no room for the model, or that
+  opens and then cannot run it, hands the model to the CPU and the card
+  says why. It used to be a failed model.
+
+- The model and device picked on the transcript card, and any setting
+  changed in the chain inspector, are remembered across a restart. They
+  reached the receiver but were never written to the edits file.
+
+- The transcript view and the call list fill in as speech is read. Both
+  were only read under the soak option, so a model that read every word
+  showed "0 lines" and the call list stayed empty.
+
+- A channel marked as voice is heard through its own fader like any other
+  channel, and listed in the calls view from the audio bus. It used to be
+  wrapped in an empty packet so the call list would see it, which put a
+  "voice" row saying nothing into the packet list and the log for every
+  transmission, and left the channel silent until something subscribed to
+  it. Analogue speech is audio, not a packet, and no longer touches the
+  packet log at all.
+
+- The speaker is fed a block of silence rather than nothing at all when
+  nothing on the bus is playing, which used to starve the sound card.
+
+- Speech is transcribed as it is spoken instead of piling up: nothing is
+  held longer than the thirty seconds the model reads in one pass, and a
+  transmission that runs past that is cut at a pause and written down as far
+  as it got. A repeater left keyed used to collect a minute and a half of
+  audio and show nothing.
+
+- A reading the model was unsure of is shown, marked "unsure", rather than
+  thrown away. A weak or fading handheld produced an empty transcript before,
+  which looked like a receiver that was not listening.
+
+- A channel carrying noise rather than speech, an open squelch or a hiss, is
+  left alone after two windows the model finds no speech in, instead of being
+  read over and over for as long as it hisses.
+
+- Weak analogue video decodes. The picture was read off the whole sampled
+  span, so a 4.6 MHz camera arrived with 20 MHz of noise on it; it is band
+  limited first, which turned a 5.8 GHz link that produced nothing into one
+  that produces a picture, and halved what the front end costs.
+- Only one video front end is placed on a span. The 5.8 GHz plan names 5865
+  and 5866 as different channels, so a receiver on either read the span
+  twice and published every field twice.
+- Mode S on a wide span reads the 2.4 MS/s it asks for instead of everything
+  the radio is sampling. On a 20 MS/s span it was 127% of a processor core
+  looking at an empty band, and is now 37%.
+- Wi-Fi samples the air, a fifth of a second in every second, until it hears
+  something. Every network beacons ten times a second so they are all still
+  found within a second, and a band with no Wi-Fi on it no longer costs more
+  than everything else the receiver is doing put together.
+- A scanner block added in the interface now demodulates the channel typed
+  into it. It kept the protocol's own default frequency instead, so a camera
+  asked for on 5800 MHz was read on 5865 and nothing appeared.
+- While a camera owns the span, the Wi-Fi and other span-wide decoders stop
+  reading it. An OFDM search through an FM picture was eighteen times real
+  time, which is what kept the picture breaking up.
+- A picture that goes away gives the band back, so a receiver that locked onto
+  a moment of noise recovers after a few seconds instead of staying deaf for
+  the session.
+- A front end that reads the whole span is left out, with a reason, when the
+  span is too narrow for it. It used to be built anyway and take the whole
+  receiver down with it.
 
 - Wi-Fi on a busy 2.4 GHz band costs a sixth of what it did. A hopping
   transmitter held the preamble detector open and cost a training-symbol

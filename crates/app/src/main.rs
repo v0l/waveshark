@@ -16,7 +16,6 @@ fn window_icon() -> Option<egui::IconData> {
 mod audiobus;
 mod bands;
 mod beacondb;
-mod callrec;
 mod calls;
 mod chain;
 mod chainview;
@@ -686,6 +685,10 @@ struct Args {
     #[arg(long)]
     messages: bool,
 
+    /// Open on the transcript: what the local model read off the audio bus
+    #[arg(long)]
+    transcript: bool,
+
     /// Open on the data links: who is talking to whom, and what passed
     #[arg(long)]
     links: bool,
@@ -1067,6 +1070,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.messages {
                 app.show_messages();
+            }
+            if args.transcript {
+                app.show_transcript(None);
             }
             if args.video {
                 app.show_video();

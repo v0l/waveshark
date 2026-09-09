@@ -5,6 +5,7 @@
 //! the files are fetched once, or placed by hand, and after that
 //! transcription is as offline as demodulation is.
 
+use crate::Family;
 use common::{Error, Result};
 use std::path::{Path, PathBuf};
 
@@ -26,19 +27,24 @@ pub struct Files {
     pub weights: PathBuf,
     pub quantized: bool,
     pub flavour: Flavour,
+    /// Which decoder reads these files, from `model_type` in the config.
+    pub family: Family,
 }
 
 impl Files {
     /// The layout Hugging Face publishes: `config.json`, `tokenizer.json` and
-    /// either `model.safetensors` or a single `.gguf`.
+    /// either `model.safetensors`, an index over shards of it, or a single
+    /// `.gguf`. For a sharded model `weights` is the index, and `bytes`
+    /// counts the shards.
     pub fn in_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let config = required(dir, "config.json")?;
         let tokenizer = required(dir, "tokenizer.json")?;
-        let (weights, quantized) = match first_existing(dir, &["model.safetensors"]) {
-            Some(p) => (p, false),
-            None => (gguf_in(dir)?, true),
-        };
+        let (weights, quantized) =
+            match first_existing(dir, &["model.safetensors", "model.safetensors.index.json"]) {
+                Some(p) => (p, false),
+                None => (gguf_in(dir)?, true),
+            };
         // Read out of the config rather than off the directory name. An
         // English-only model has one token fewer, because it carries no
         // language tokens to choose between, and a model fetched into
@@ -49,14 +55,44 @@ impl Files {
             Some(n) if n <= 51_864 => Flavour::English,
             _ => Flavour::Multilingual,
         };
-        Ok(Self {
-            config,
-            tokenizer,
-            weights,
-            quantized,
-            flavour,
-        })
+        let family = match model_type(&config).as_deref() {
+            Some("qwen3_asr") => Family::Qwen3Asr,
+            _ => Family::Whisper,
+        };
+        Ok(Self { config, tokenizer, weights, quantized, flavour, family })
     }
+
+    /// What the three files take on disc. Shown beside the directory, since
+    /// "a model is here" and "90 MB of model is here" are different claims to
+    /// somebody deciding whether to fetch a larger one.
+    pub fn bytes(&self) -> u64 {
+        let mut files = vec![self.config.clone(), self.tokenizer.clone(), self.weights.clone()];
+        if let Some(dir) = self.weights.parent() {
+            files.extend(shards(&self.weights).into_iter().map(|s| dir.join(s)));
+        }
+        files.into_iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+    }
+}
+
+/// The shard files an index names, or nothing for a file that is not one.
+fn shards(index: &Path) -> Vec<String> {
+    if index.file_name().and_then(|n| n.to_str()) != Some("model.safetensors.index.json") {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(index) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = v
+        .get("weight_map")
+        .and_then(|m| m.as_object())
+        .map(|m| m.values().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// How many tokens the model was trained with, from its config.
@@ -64,6 +100,13 @@ fn vocab_size(config: &Path) -> Option<usize> {
     let text = std::fs::read_to_string(config).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v.get("vocab_size")?.as_u64().map(|n| n as usize)
+}
+
+/// What the config says the architecture is.
+fn model_type(config: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("model_type")?.as_str().map(str::to_string)
 }
 
 fn required(dir: &Path, name: &str) -> Result<PathBuf> {
@@ -86,10 +129,7 @@ fn gguf_in(dir: &Path) -> Result<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next().ok_or_else(|| {
-        Error::other(format!(
-            "{} has neither model.safetensors nor a .gguf",
-            dir.display()
-        ))
+        Error::other(format!("{} has neither model.safetensors nor a .gguf", dir.display()))
     })
 }
 
@@ -119,22 +159,47 @@ pub fn fetch(repo: &str, revision: &str, dir: impl AsRef<Path>) -> Result<Files>
 
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
-    let api = ApiBuilder::new()
-        .build()
-        .map_err(|e| Error::other(format!("hub: {e}")))?
-        .repo(hf_hub::Repo::with_revision(
+    let api = ApiBuilder::new().build().map_err(|e| Error::other(format!("hub: {e}")))?.repo(
+        hf_hub::Repo::with_revision(
             repo.to_string(),
             hf_hub::RepoType::Model,
             revision.to_string(),
-        ));
-    for name in ["config.json", "tokenizer.json", "model.safetensors"] {
-        let src = api
-            .get(name)
-            .map_err(|e| Error::other(format!("hub {name}: {e}")))?;
+        ),
+    );
+    let get = |name: &str| -> Result<PathBuf> {
+        let src = api.get(name).map_err(|e| Error::other(format!("hub {name}: {e}")))?;
         let dst = dir.join(name);
         if !dst.exists() {
             std::fs::copy(&src, &dst)?;
         }
+        Ok(dst)
+    };
+    let config = get("config.json")?;
+    // One file, or an index and the shards it names. Asking the hub which
+    // rather than reading the listing: a 404 on the index is the answer.
+    match get("model.safetensors.index.json") {
+        Ok(index) => {
+            for shard in shards(&index) {
+                get(&shard)?;
+            }
+        }
+        Err(_) => {
+            get("model.safetensors")?;
+        }
+    }
+    // Qwen3-ASR publishes no tokenizer.json, only the vocabulary, the merges
+    // and the special tokens it would be built from. Whisper publishes the
+    // built one.
+    if model_type(&config).as_deref() == Some("qwen3_asr") {
+        let read = |name: &str| -> Result<String> { Ok(std::fs::read_to_string(get(name)?)?) };
+        let vocab = read("vocab.json")?;
+        let merges = read("merges.txt")?;
+        let tok_config = read("tokenizer_config.json")?;
+        let json = crate::qwen3::tokenizer_json(&vocab, &merges, &tok_config)
+            .map_err(|e| Error::other(format!("qwen3 tokenizer: {e}")))?;
+        std::fs::write(dir.join("tokenizer.json"), json)?;
+    } else {
+        get("tokenizer.json")?;
     }
     Files::in_dir(dir)
 }

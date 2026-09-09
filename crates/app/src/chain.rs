@@ -866,7 +866,6 @@ impl Receiver {
             // front end, which is heard only if it has speech to give.
             let last = match () {
                 _ if spec.mode.is_decode() => "chan_front",
-                _ if spec.voice => "chan_voice",
                 _ => "chan_blend",
             };
             let Some(tail) = of(last) else { continue };
@@ -897,7 +896,6 @@ impl Receiver {
                 tail: match &spec.mode {
                     ChanMode::Decode(kind) => tail.out(voice_port(kind).unwrap_or(0)),
                     ChanMode::Auto => tail.out(voice_port("auto").unwrap_or(0)),
-                    ChanMode::Audio(_) if spec.voice => tail.out(voice_port("voice").unwrap_or(0)),
                     ChanMode::Audio(_) => tail.o(),
                 },
                 port,
@@ -1939,27 +1937,18 @@ impl Receiver {
             .unwrap_or_default()
     }
 
-    /// What has been said lately, newest last.
+    /// What the transcriber is, where its model is, and what it is doing.
     ///
-    /// Read off the node rather than published on the status, because the
-    /// text of a busy afternoon is larger than anything else the interface
-    /// polls and a view wants a window of it rather than all of it.
+    /// `None` when there is no transcriber in the graph at all, which is a
+    /// different thing from one that has read nothing and has to read as one
+    /// on screen.
     #[cfg(feature = "stt")]
-    pub fn said(&self, n: usize) -> Vec<crate::transcripts::Utterance> {
-        self.transcripts
-            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
-            .map(|t| t.log().recent(n).into_iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// What was said on one conversation, oldest first. The key is
-    /// `{proto}:{freq}:{chan}:{speaker}`; see `crate::transcripts`.
-    #[cfg(feature = "stt")]
-    pub fn said_on(&self, key: &str) -> Vec<crate::transcripts::Utterance> {
-        self.transcripts
-            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
-            .map(|t| t.log().of(key).to_vec())
-            .unwrap_or_default()
+    pub fn transcriber(&self) -> Option<crate::transcripts::Engine> {
+        let id = self.transcripts?;
+        let n = downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id)?;
+        let mut e = n.engine();
+        e.node = id.0;
+        Some(e)
     }
 
     /// Tell the tracker roughly where the receiver is.
@@ -2268,7 +2257,7 @@ fn bus_tail(kind: &str) -> bool {
 /// own, and a voice channel's decoder on its second.
 fn voice_port(kind: &str) -> Option<usize> {
     match kind {
-        "auto" | "voice" => Some(1),
+        "auto" => Some(1),
         _ => nodes::protocol::by_id(kind)?.outputs().iter().position(|k| *k == PortKind::Voice),
     }
 }
@@ -2721,14 +2710,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 /// are what a strip channel can be set to, and a decoder nobody wired to the
 /// bus decodes into silence.
 fn puts_packets_on_bus(kind: &str) -> bool {
-    bus_tail(kind) || kind == "feed" || kind == "voice"
+    bus_tail(kind) || kind == "feed"
 }
 
 /// The stages of one strip channel, in the order they are built. A decode
 /// channel uses the first two and then its front end; an audio one uses the
 /// rest.
-const CHAN_STAGES: [&str; 11] = [
-    "chan_voice",
+const CHAN_STAGES: [&str; 10] = [
     "chan_mix",
     "chan_ifdec",
     "chan_front",
@@ -2817,10 +2805,12 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         // decoded one is heard only if its front end has speech to give, and
         // a pager does not.
         let port = match &spec.mode {
-            // A channel marked as voice is heard through its voice port, the
-            // same as a decoded one: its calls are then subscribable by group
-            // rather than only audible on the strip.
-            ChanMode::Audio(_) if spec.voice => voice_port("voice"),
+            // A played channel ends in audio, whether or not it is speech:
+            // the bus is the first stop for every demodulator's audio, and a
+            // channel marked as voice is played through its fader like any
+            // other and named as a conversation on the tap. There is no
+            // packet in analogue speech, so there is nothing to put anywhere
+            // else.
             ChanMode::Audio(_) => Some(0),
             ChanMode::Decode(kind) => voice_port(kind),
             ChanMode::Auto => voice_port("auto"),
@@ -2828,7 +2818,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         if let Some(port) = port {
             tails.push((Source::Stage(tail, port), spec));
         }
-        if spec.mode.is_decode() || (spec.voice && !spec.mode.is_decode()) {
+        if spec.mode.is_decode() {
             fronts.push(tail);
         }
     }
@@ -2912,7 +2902,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         .iter()
         .map(|(k, _)| {
             let mut own = Settings::new();
-            for what in ["vol", "mute", "label"] {
+            for what in ["vol", "mute", "label", "voice"] {
                 if let Some(v) = s.get(&format!("{what}{k}")) {
                     own.insert(what.into(), v.clone());
                 }
@@ -2921,7 +2911,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         })
         .collect();
     s.retain(|name, _| {
-        !["vol", "mute", "label"]
+        !["vol", "mute", "label", "voice"]
             .iter()
             .any(|w| name.strip_prefix(w).is_some_and(|k| k.parse::<usize>().is_ok()))
     });
@@ -2937,6 +2927,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             // A channel's level is the strip's to say.
             Some((_, Some(spec), label)) => {
                 strip_settings(&mut s, k, spec.volume, spec.muted, label);
+                s.insert(format!("voice{k}"), V::Bool(spec.voice && !spec.mode.is_decode()));
             }
             // A voice port's level is the subscriptions' business; the strip
             // itself passes it whole.
@@ -2966,7 +2957,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     #[cfg(feature = "stt")]
     {
         let mut t = Settings::new();
-        t.insert("dir".into(), V::Text(default_model_dir().display().to_string()));
+        t.insert("root".into(), V::Text(models_root().display().to_string()));
         t.insert("enabled".into(), V::Bool(true));
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(bus, 1), (id, 0));
@@ -3002,7 +2993,7 @@ fn channel_stages(
     rate: f64,
 ) -> u64 {
     match &spec.mode {
-        ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, center, rate),
+        ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, rate),
         ChanMode::Decode(kind) => decode_channel_stages(p, head, spec, kind, center, rate),
         ChanMode::Auto => auto_channel_stages(p, head, spec, center, rate),
     }
@@ -3170,7 +3161,6 @@ fn audio_channel_stages(
     head: crate::patch::Source,
     spec: &ChannelSpec,
     mode: Demod,
-    center: f64,
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
@@ -3311,21 +3301,7 @@ fn audio_channel_stages(
 
     let hb = at(p, "chan_blend", "high_blend", Settings::new());
     p.connect(tail, (hb, 0));
-    if !spec.voice {
-        return hb;
-    }
-
-    // A channel marked as voice ends in a front end like any other: what was
-    // said goes on the bus as a call, and the speaker is fed from its voice
-    // port rather than from the audio directly. Two wires in, because the
-    // level of a transmission is in the IF and what was said is in the audio.
-    let mut v = Settings::new();
-    v.insert("channel_hz".into(), V::Float(center + spec.offset_hz));
-    v.insert("label".into(), V::Text(spec.label.clone()));
-    let voice = at(p, "chan_voice", "voice", v);
-    p.connect(Source::Stage(i, 0), (voice, 0));
-    p.connect(Source::Stage(hb, 0), (voice, 1));
-    voice
+    hb
 }
 
 /// The id one stage of one channel is derived under.
@@ -3537,9 +3513,15 @@ pub fn registry() -> pipeline::registry::Registry {
         },
         |s: &pipeline::registry::Settings| {
             use pipeline::SettingsExt;
+            let root = std::path::PathBuf::from(s.str_or("root", ""));
+            let fallback = stt::default_model_in(&root);
             let mut n = crate::transcripts::LiveTranscribeNode::new()
-                .in_dir(s.str_or("dir", ""))
-                .model(s.str_or("model", stt::DEFAULT_REPO));
+                .under(root)
+                .model(s.str_or("model", &fallback))
+                .on(stt::DeviceChoice::parse(s.str_or("device", "auto")));
+            if let Some(dir) = s.get("dir").and_then(|v| v.as_str()).filter(|d| !d.is_empty()) {
+                n = n.in_dir(dir);
+            }
             pipeline::node::Node::set_param(
                 &mut n,
                 "enabled",
@@ -3965,27 +3947,21 @@ fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
 
 /// Where raw span captures go when nobody says otherwise: beside the packet
 /// log, since both are recordings of what was on the air.
-/// Where a Whisper model is looked for.
-///
-/// `models/whisper` beside the packet log, or the first directory under
-/// `models` that holds a `config.json`, which is what a model fetched by
-/// name looks like: `models/whisper-tiny.en`.
+/// Where speech models are kept: `models` beside the packet log, one
+/// directory per model.
+#[cfg(feature = "stt")]
+pub fn models_root() -> PathBuf {
+    crate::packetlog::PacketLog::default_dir()
+        .map(|d| d.with_file_name("models"))
+        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"))
+}
+
+/// Where the files of the model that runs when none was chosen are, or
+/// would be fetched to.
 #[cfg(feature = "stt")]
 pub fn default_model_dir() -> PathBuf {
-    let models = crate::packetlog::PacketLog::default_dir()
-        .map(|d| d.with_file_name("models"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"));
-    let named = models.join("whisper");
-    if named.join("config.json").exists() {
-        return named;
-    }
-    std::fs::read_dir(&models)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("config.json").exists())
-        .min()
-        .unwrap_or(named)
+    let root = models_root();
+    stt::model_dir(&root, &stt::default_model_in(&root))
 }
 
 pub fn default_capture_dir() -> PathBuf {
@@ -4092,11 +4068,13 @@ mod tests {
         assert!(!topo.nodes.iter().any(|n| n.tag == Some(env)), "the unwired one waits");
     }
 
-    /// A channel marked as voice is a front end: its calls have to reach the
-    /// bus, or the call list, the recorder and the transcriber never see the
-    /// one kind of transmission a scanner exists for.
+    /// A channel marked as voice is audio like any other, played through its
+    /// fader, and named as a conversation on the bus's tap. It is not a front
+    /// end: there is no packet in analogue speech, so nothing of it reaches
+    /// the packet bus, and the call list and the transcriber read it off the
+    /// audio bus, which every demodulator's audio goes through first.
     #[test]
-    fn a_channel_marked_as_voice_reaches_the_packet_bus() {
+    fn a_channel_marked_as_voice_is_audio_named_on_the_bus() {
         let mut plan = plan(2_400_000.0, Hz::mhz(145));
         plan.fronts.clear();
         let mut ch = chan(1, 25_000.0, Demod::Nfm);
@@ -4104,27 +4082,61 @@ mod tests {
         plan.channels = vec![ch];
         let rx = Receiver::build(&plan, Default::default()).expect("a voice channel");
         let topo = rx.topology();
-        let voice = topo
-            .nodes
-            .iter()
-            .find(|n| n.kind == "voice")
-            .expect("the channel gets a voice front end");
-        let bus = topo.nodes.iter().find(|n| n.kind == "packet_bus").expect("a bus");
+        assert!(!topo.nodes.iter().any(|n| n.kind == "voice"), "speech is not a front end");
         assert!(
-            bus.inputs.iter().any(|(s, _)| voice.outputs.iter().any(|(o, _)| o == s)),
-            "the calls have to arrive somewhere"
+            !topo.nodes.iter().any(|n| n.kind == "packet_bus"),
+            "an analogue channel puts nothing on the packet bus"
         );
+        let strips = rx.audio().expect("the bus").bus().strips();
+        let fed: Vec<_> = strips.iter().filter(|s| s.is_fed()).collect();
+        assert_eq!(fed.len(), 1);
+        assert!(fed[0].voice, "the strip is named as a conversation");
+        assert_eq!(fed[0].label, "CH1");
+    }
+
+    /// The transcript outlives the graph. The transcriber is a stage wired
+    /// off the audio bus, and the bus is rebuilt whenever a channel comes or
+    /// goes, so a transcript kept inside the node was emptied by adding a
+    /// channel: on screen, three reads and no lines.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_transcript_survives_a_rebuild() {
+        let log = crate::transcripts::log();
+        let key = format!("Audio:{}:CH-rebuild:", 145_000_000u64);
+        log.lock().push(crate::transcripts::Utterance {
+            key: key.clone(),
+            at: std::time::Instant::now(),
+            seconds: 1.0,
+            text: "still here".into(),
+            settled: true,
+            confidence: -0.2,
+            credible: true,
+        });
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let first = rx.transcriber().expect("a transcriber");
+        plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
+        rx.rebuild(&plan).expect("a rebuild");
+        let second = rx.transcriber().expect("a transcriber");
+        // The node's own state did not survive: this is the rebuild that
+        // used to take the transcript with it.
+        assert_eq!(second.reads, 0);
+        assert_eq!(first.reads, 0);
+        assert_eq!(log.lock().latest(&key).map(|u| u.text.as_str()), Some("still here"));
     }
 
     /// Without the mark it is audio and nothing else, which is what an
     /// operator listening to a data channel wants.
     #[test]
-    fn an_unmarked_channel_puts_nothing_on_the_bus() {
+    fn an_unmarked_channel_is_audio_and_nothing_else() {
         let mut plan = plan(2_400_000.0, Hz::mhz(145));
         plan.fronts.clear();
         plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
         let rx = Receiver::build(&plan, Default::default()).expect("a plain channel");
-        assert!(!rx.topology().nodes.iter().any(|n| n.kind == "voice"));
+        let strips = rx.audio().expect("the bus").bus().strips();
+        assert!(strips.iter().filter(|s| s.is_fed()).all(|s| !s.voice));
     }
 
     #[test]

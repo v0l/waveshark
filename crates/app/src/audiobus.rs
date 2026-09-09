@@ -1,7 +1,10 @@
-//! The audio bus: everything that reaches the speaker, in one place.
+//! The audio bus: the first stop for every demodulator's audio, and the
+//! master mixer.
 //!
-//! Every listening channel and every voice front end ends here, and what an
-//! operator hears is decided here and nowhere else. The alternative, which
+//! Every listening channel and every voice front end ends here, FM and M17
+//! alike, and what an operator hears is decided here and nowhere else. It is
+//! also where "who is talking now" is known, since every voice passes its
+//! tap: the call list is fed from here and the transcriber reads the tap. The alternative, which
 //! this replaces, was a sum in the radio loop: the faders, the master, the
 //! clip and the meters lived outside the graph, so a demodulator drawn by
 //! hand had nothing to be wired to and a channel the strip could not name
@@ -162,6 +165,12 @@ pub struct Strip {
     /// The rate it arrives at, which is not the rate it is mixed at.
     in_rate: f64,
     feed: Feed,
+    /// Whether what arrives here is speech: a channel marked as voice on the
+    /// strip. Its audio is played through the fader like any other, and on
+    /// the tap it is named as a conversation so the call list and the
+    /// transcriber can follow it. Analogue speech has no address of its own,
+    /// so the strip's label stands in for the party being called.
+    pub voice: bool,
 }
 
 impl Strip {
@@ -174,6 +183,7 @@ impl Strip {
             center_hz: 0.0,
             in_rate: OUT_HZ,
             feed: Feed::Silent,
+            voice: false,
         }
     }
 
@@ -240,7 +250,55 @@ pub struct AudioBus {
     last: Option<String>,
     /// Peak of the speech share of this block's mix.
     voice_peak: f32,
+    /// Who is talking now, by conversation, from every voice that passed the
+    /// tap. See [`AudioBus::track`].
+    live: HashMap<String, LiveCall>,
 }
+
+/// One conversation the bus is hearing, or has just stopped hearing.
+///
+/// What the call list is built from. A call used to be a packet: an
+/// analogue front end wrapped each over in an empty frame so the list, which
+/// read only the packet bus, would see it, and that put a row saying nothing
+/// into the packet log for every transmission. Speech is not a packet. It is
+/// audio, and every demodulator's audio comes through this bus first, so the
+/// bus is where "who is talking" is known and this is how it says so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveCall {
+    pub system: String,
+    pub channel_hz: f64,
+    pub to: String,
+    pub from: Option<String>,
+    pub first: std::time::Instant,
+    pub last: std::time::Instant,
+    /// Seconds somebody was actually talking, not the span of the call.
+    pub seconds: f64,
+    pub peak: f32,
+    pub quiet_s: f64,
+    /// The hang time has passed since the last speech: this is the last
+    /// report of this call.
+    pub over: bool,
+}
+
+impl LiveCall {
+    /// The key the transcriber uses for the same conversation, so a row here
+    /// and a line there are the same thing.
+    pub fn key(&self) -> String {
+        live_key(&self.system, self.channel_hz, &self.to, self.from.as_deref())
+    }
+}
+
+fn live_key(system: &str, channel_hz: f64, to: &str, from: Option<&str>) -> String {
+    format!("{system}:{}:{to}:{}", channel_hz.max(0.0) as u64, from.unwrap_or(""))
+}
+
+/// Below this peak a block of speech is silence. A squelched analogue
+/// channel delivers zeros and a vocoder between overs delivers near enough.
+const SPEECH_FLOOR: f32 = 0.004;
+
+/// Silence that ends a call. Long enough to survive a squelch chattering at
+/// the edge of a repeater, short enough that a reply is a new row.
+const HANG_S: f64 = 0.7;
 
 impl AudioBus {
     pub fn new(out_rate: f64) -> Self {
@@ -268,6 +326,7 @@ impl AudioBus {
             agc_on: true,
             last: None,
             voice_peak: 0.0,
+            live: HashMap::new(),
         }
     }
 
@@ -444,11 +503,72 @@ impl AudioBus {
         Some(common::Voice {
             system: ANALOGUE,
             channel_hz: strip.center_hz,
-            to: None,
+            to: strip.voice.then(|| strip.label.clone()),
             from: None,
             rate: strip.in_rate,
             pcm: mono,
         })
+    }
+
+    /// Fold one block of speech into the table of who is talking now.
+    ///
+    /// Every block of every voice that passes the tap comes through here,
+    /// whether or not anybody is listening to it: this is the receiver's
+    /// record of who is on the air, and it must not depend on which fader is
+    /// up. Silence is what ends a call, after [`HANG_S`], because a squelch
+    /// closing on an analogue channel and a vocoder going quiet on a digital
+    /// one both look the same from here, and this is the one place they can
+    /// be judged the same way.
+    pub fn track(&mut self, v: &common::Voice, block_s: f64) {
+        let Some(to) = v.to.as_deref() else {
+            return;
+        };
+        let key = live_key(v.system, v.channel_hz, to, v.from.as_deref());
+        let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let talking = peak > SPEECH_FLOOR;
+        let now = std::time::Instant::now();
+        match self.live.get_mut(&key) {
+            Some(c) if talking => {
+                c.last = now;
+                c.quiet_s = 0.0;
+                c.seconds += block_s;
+                c.peak = c.peak.max(peak);
+            }
+            Some(c) => {
+                c.quiet_s += block_s;
+                if c.quiet_s >= HANG_S {
+                    c.over = true;
+                }
+            }
+            None if talking => {
+                self.live.insert(
+                    key,
+                    LiveCall {
+                        system: v.system.to_string(),
+                        channel_hz: v.channel_hz,
+                        to: to.to_string(),
+                        from: v.from.clone(),
+                        first: now,
+                        last: now,
+                        seconds: block_s,
+                        peak,
+                        quiet_s: 0.0,
+                        over: false,
+                    },
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Who is talking now and who has just stopped, oldest first. A call that
+    /// has ended is reported once, with `over` set, and then forgotten: the
+    /// call list keeps the history, the bus keeps only the present.
+    pub fn take_calls(&mut self) -> Vec<LiveCall> {
+        let mut out: Vec<LiveCall> = self.live.values().cloned().collect();
+        out.sort_by_key(|c| c.first);
+        self.live.retain(|_, c| !c.over);
+        out
     }
 
     pub fn feed(&mut self, k: usize, pcm: &[f32]) {
@@ -569,8 +689,14 @@ impl AudioBus {
             }
         }
         self.voice_peak = self.voice.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-        if self.mix.len() < self.voice.len() * 2 {
-            self.mix.resize(self.voice.len() * 2, 0.0);
+        // The block's worth of silence when nothing is playing, rather than
+        // nothing at all. The sink is driven by what comes out of here, so a
+        // bus whose only input is speech nobody has subscribed to handed the
+        // sound card no samples and the speaker starved: the same symptom as
+        // a receiver that is not running.
+        let want = self.voice.len().max(frames);
+        if self.mix.len() < want * 2 {
+            self.mix.resize(want * 2, 0.0);
         }
         for (i, v) in self.voice.iter().enumerate() {
             self.mix[i * 2] += v;
@@ -679,7 +805,7 @@ impl AudioBusNode {
 
     /// Split a per-strip parameter name into what it sets and which strip.
     fn per_strip(name: &str) -> Option<(&str, usize)> {
-        for what in ["vol", "mute", "label"] {
+        for what in ["vol", "mute", "label", "voice"] {
             if let Some(k) = name.strip_prefix(what).and_then(|k| k.parse().ok()) {
                 return Some((what, k));
             }
@@ -813,6 +939,11 @@ impl pipeline::node::Node for AudioBusNode {
                 _ => {}
             }
         }
+        // Every voice that passed the tap is a conversation the bus is
+        // hearing, subscribed or not, muted or not.
+        for v in &tapped {
+            self.bus.track(v, ctx.block_seconds);
+        }
         // What this block is worth in audio, from the run's own clock.
         let frames = (ctx.block_seconds * self.bus.out_rate()).round() as usize;
         let out = outputs[0].real_mut();
@@ -883,6 +1014,7 @@ impl pipeline::node::Node for AudioBusNode {
                     "label" => {
                         s.label = v.as_str().unwrap_or_default().to_string();
                     }
+                    "voice" => s.voice = flag(&v)?,
                     _ => unreachable!(),
                 }
             }

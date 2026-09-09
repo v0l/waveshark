@@ -50,7 +50,9 @@ back; the strip is one click, and it shows which view is open without being
 opened itself. `Ctrl` and a digit selects one, the digit being the tab's own position on the
 strip so that hiding the dashboard puts the spectrum back on 1, and
 ``Ctrl+` `` swaps with the last view, which is the movement an operator makes
-most.
+most. There are twelve views and ten digits, so the last two tabs, the
+satellites and the keys, have no shortcut; they are the two nobody reaches
+for in a hurry.
 
 A tab carries a dot when its view has taken something in since it was last
 looked at: a track, a call, a message, a device, a picture. Not when it holds
@@ -84,8 +86,7 @@ because traffic does not collect there.
   An operator who does not want it turns it off in Settings, App, or from the
   corner of the pane. That takes its tab away and opens the receiver on the
   spectrum, and because a tab's shortcut is its position on the strip, the
-  spectrum is `Ctrl+1` again. There are eleven views and ten digits, so the
-  last tab, the keys view, has no shortcut.
+  spectrum is `Ctrl+1` again.
 
 - **Packet list**: every record, newest at the bottom, with a detail pane
   showing the selected packet's burst as the front end saw it, its
@@ -109,11 +110,42 @@ because traffic does not collect there.
   still picture of a transmitter that has gone away is the worst thing this
   pane could do. `crates/app/src/ui/video_pane.rs`.
 
-- **Calls**: who is talking, from anything that decodes speech. Its own header
-  says what makes it a view rather than a protocol pane: it is fed from the
-  bus, not from a protocol, and reads `from`, `to`, `seconds`, `call_type` and
-  the codec off the record. A DMR call, a TETRA call and an M17 call are the
-  same row with different fields filled in. `crates/app/src/calls.rs`.
+- **Calls**: who is talking, from anything that produces speech. It is fed
+  from two buses and keyed so both land on one row. The audio bus, which
+  every demodulator's audio passes through first, says who is talking now
+  and for how long (`AudioBus::track`, published as `Status::heard`), and
+  that is where every analogue call and the airtime of every digital one
+  comes from. The packet bus says what only a decoder knows, `call_type`,
+  the cipher, the codec, off a decode marked `voice`. A DMR call, a TETRA
+  call, an M17 call and an FM channel marked as voice are the same row with
+  different fields filled in. An analogue over is never a packet: there is
+  no packeting in it, and it goes nowhere near the packet log.
+  `crates/app/src/calls.rs`.
+
+- **Transcript**: what was said, as the model on the audio bus tap read it,
+  newest at the bottom. A conversation is the transcriber's key,
+  `{proto}:{freq}:{chan}:{speaker}`, so the pane can be opened on one and
+  nothing else, which is what the calls list's "read" button does; that
+  button is drawn only on rows the log has lines for, since a way into an
+  empty pane says something was heard when nothing was. A line still being
+  spoken is dim and marked, because the next partial replaces it, and a
+  reading Whisper is unsure of says so rather than being trusted silently.
+  `crates/app/src/ui/transcript_pane.rs`.
+
+  The pane also draws the model as a piece of equipment: which one, where its
+  files are, whether they are there at all and what they are, its state, the
+  device it runs on, and how fast it read the last window. Without that, a
+  model that was never downloaded, one that failed to load, one too slow to
+  keep up and a band where nobody is talking all look the same, which is to
+  say they all look like an empty pane. What is on disc is what is named,
+  because the repository setting is only where files would be fetched from
+  and a directory filled by an earlier run holds a different model. The
+  status comes off the node through `Status::transcriber`. The transcript
+  itself is one for the whole program, `transcripts::log()`: the node writes
+  into it and the view copies it when its sequence number moves. It is not
+  kept in the node, because the node is a stage in a graph that is rebuilt
+  on every retune, and a log that lived there was emptied every time the
+  dial moved.
 
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
@@ -182,7 +214,8 @@ because traffic does not collect there.
   `{proto}:{freq}:{chan}:{speaker}` rather than by a wire between the two.
   Neither knows the other exists, which is what lets a view added later ask
   the same log for the whole of a conversation instead of the last line of
-  it. See `crates/app/src/transcripts.rs`.
+  it, which is what the transcript view does. See
+  `crates/app/src/transcripts.rs`.
 
 - **Video**: the picture, from anything that produces one. The bus keeps a
   channel per transmission, keyed by what it is and where it was received
