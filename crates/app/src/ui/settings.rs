@@ -1596,6 +1596,23 @@ impl App {
         });
         ui.add_space(8.0);
 
+        // Where the files are, and a way into it. A capture is made to be
+        // replayed, trimmed or sent somewhere, all of which happen outside
+        // this program, and a path that can only be read off the screen and
+        // typed again is a path nobody uses.
+        let dir = crate::chain::default_capture_dir();
+        row(ui, "folder", |ui| {
+            if ui.small_button("OPEN").on_hover_text(dir.display().to_string()).clicked() {
+                // Created first: the folder does not exist until the first
+                // capture is written, and a file manager handed a missing
+                // path either opens nothing or opens somewhere else.
+                let _ = std::fs::create_dir_all(&dir);
+                ui.ctx().open_url(egui::OpenUrl::new_tab(file_url(&dir)));
+            }
+            ui.add(egui::Label::new(value(dir.display().to_string()).size(11.0)).truncate());
+        });
+        ui.add_space(4.0);
+
         // The folder first: it is the number the limit above is about, and
         // showing only the file being written made a folder of two gigabytes
         // read as seventy megabytes.
@@ -1622,6 +1639,24 @@ impl App {
             );
         }
     }
+}
+
+/// A path as a `file:` URL, which is what the browser handler opening it
+/// expects. Only the characters that would end the path are escaped: a home
+/// directory with a space in it is common enough to matter, and a full
+/// encoder for one link is a dependency for nothing.
+fn file_url(path: &std::path::Path) -> String {
+    let mut s = String::from("file://");
+    for c in path.display().to_string().chars() {
+        match c {
+            ' ' => s.push_str("%20"),
+            '%' => s.push_str("%25"),
+            '#' => s.push_str("%23"),
+            '?' => s.push_str("%3F"),
+            _ => s.push(c),
+        }
+    }
+    s
 }
 
 /// A folder limit as it is offered and shown, in whichever unit reads.
