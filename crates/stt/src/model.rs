@@ -5,6 +5,7 @@
 //! the files are fetched once, or placed by hand, and after that
 //! transcription is as offline as demodulation is.
 
+use crate::Family;
 use common::{Error, Result};
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,8 @@ pub struct Files {
     pub weights: PathBuf,
     pub quantized: bool,
     pub flavour: Flavour,
+    /// Which decoder reads these files, from `model_type` in the config.
+    pub family: Family,
 }
 
 impl Files {
@@ -49,13 +52,11 @@ impl Files {
             Some(n) if n <= 51_864 => Flavour::English,
             _ => Flavour::Multilingual,
         };
-        Ok(Self {
-            config,
-            tokenizer,
-            weights,
-            quantized,
-            flavour,
-        })
+        let family = match model_type(&config).as_deref() {
+            Some("qwen3_asr") => Family::Qwen3Asr,
+            _ => Family::Whisper,
+        };
+        Ok(Self { config, tokenizer, weights, quantized, flavour, family })
     }
 
     /// What the three files take on disc. Shown beside the directory, since
@@ -75,6 +76,13 @@ fn vocab_size(config: &Path) -> Option<usize> {
     let text = std::fs::read_to_string(config).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v.get("vocab_size")?.as_u64().map(|n| n as usize)
+}
+
+/// What the config says the architecture is.
+fn model_type(config: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("model_type")?.as_str().map(str::to_string)
 }
 
 fn required(dir: &Path, name: &str) -> Result<PathBuf> {
@@ -97,10 +105,7 @@ fn gguf_in(dir: &Path) -> Result<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next().ok_or_else(|| {
-        Error::other(format!(
-            "{} has neither model.safetensors nor a .gguf",
-            dir.display()
-        ))
+        Error::other(format!("{} has neither model.safetensors nor a .gguf", dir.display()))
     })
 }
 
@@ -130,22 +135,36 @@ pub fn fetch(repo: &str, revision: &str, dir: impl AsRef<Path>) -> Result<Files>
 
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
-    let api = ApiBuilder::new()
-        .build()
-        .map_err(|e| Error::other(format!("hub: {e}")))?
-        .repo(hf_hub::Repo::with_revision(
+    let api = ApiBuilder::new().build().map_err(|e| Error::other(format!("hub: {e}")))?.repo(
+        hf_hub::Repo::with_revision(
             repo.to_string(),
             hf_hub::RepoType::Model,
             revision.to_string(),
-        ));
-    for name in ["config.json", "tokenizer.json", "model.safetensors"] {
-        let src = api
-            .get(name)
-            .map_err(|e| Error::other(format!("hub {name}: {e}")))?;
+        ),
+    );
+    let get = |name: &str| -> Result<PathBuf> {
+        let src = api.get(name).map_err(|e| Error::other(format!("hub {name}: {e}")))?;
         let dst = dir.join(name);
         if !dst.exists() {
             std::fs::copy(&src, &dst)?;
         }
+        Ok(dst)
+    };
+    let config = get("config.json")?;
+    get("model.safetensors")?;
+    // Qwen3-ASR publishes no tokenizer.json, only the vocabulary, the merges
+    // and the special tokens it would be built from. Whisper publishes the
+    // built one.
+    if model_type(&config).as_deref() == Some("qwen3_asr") {
+        let read = |name: &str| -> Result<String> { Ok(std::fs::read_to_string(get(name)?)?) };
+        let vocab = read("vocab.json")?;
+        let merges = read("merges.txt")?;
+        let tok_config = read("tokenizer_config.json")?;
+        let json = crate::qwen3::tokenizer_json(&vocab, &merges, &tok_config)
+            .map_err(|e| Error::other(format!("qwen3 tokenizer: {e}")))?;
+        std::fs::write(dir.join("tokenizer.json"), json)?;
+    } else {
+        get("tokenizer.json")?;
     }
     Files::in_dir(dir)
 }

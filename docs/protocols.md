@@ -569,15 +569,26 @@ parts the receiver does not know left empty, so an FM channel is
 view finds a call's text by building that key rather than by being wired to
 the transcriber. The log is in memory and bounded, 512 conversations of 64
 utterances. It is on by default and fetches its
-own weights: the worker thread downloads `openai/whisper-base.en`, 74 MB, into
-`~/.local/share/waveshark/models/whisper` the first time a call is long enough
-to be worth reading, so a receiver that hears no speech never reaches the
-network and one that does waits once. Another model is a `model` setting on
-the stage, or a directory placed there by hand. `--no-default-features` leaves
-candle out of the build entirely. The model runs on whatever candle was built
-for: CUDA under `--features cuda`, Metal on a Mac, the CPU otherwise, and a
-GPU that opens but cannot launch a kernel falls back rather than failing every
-call. Any front end that carries speech is transcribed, not
+own weights: the worker thread downloads the chosen model into a directory
+of its own under `~/.local/share/waveshark/models` the first time a call is
+long enough to be worth reading, so a receiver that hears no speech never
+reaches the network and one that does waits once. Which model is a pick on
+the transcript view's card, or the `model` setting on the stage: every size
+of Whisper in English-only and multilingual, the Distil-Whisper cuts, and
+Qwen3-ASR at 0.6B and 1.7B, which is a Qwen3 language model with an audio
+encoder in front and reads noisy or accented speech better than any Whisper
+of its size while naming the language it heard (`crates/stt/src/qwen3`,
+taken from alan890104/qwen3-asr-rs under MIT). A directory placed under
+`models` by hand is listed beside them. The default is `whisper-base.en`,
+290 MB, or whatever single model an earlier version already fetched.
+`--no-default-features` leaves candle out of the build entirely. Where the
+model runs is the other pick on the card: Auto takes the fastest thing the
+build can use that actually launches a kernel, and below it are the CPU and
+every CUDA card the driver lists by name, or Metal on a Mac. CUDA is on by
+default in a build from source (`cuda` feature; it needs `nvcc` on the path
+and a driver at least as new as the toolkit) and off in the published
+binaries. A card that is picked outright and fails is an error on the card,
+not a silent fall back to the CPU. Any front end that carries speech is transcribed, not
 just analogue channels, so an M17 or DMR call gets the same treatment. The
 text arrives as a `transcript` field on the decode, with the model's own mean
 log probability beside it, and a call whose text the model does not believe

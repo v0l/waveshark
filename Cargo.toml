@@ -23,6 +23,7 @@ members = [
     "crates/httpc",
     "crates/orbit",
     "crates/stt",
+    "crates/stt-cuda",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent

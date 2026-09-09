@@ -21,7 +21,7 @@ mbe = { workspace = true, optional = true }
 poll-promise = { workspace = true, optional = true }
 # Local speech to text. Off by default: candle and the tokenizers are a large
 # dependency tree, and a receiver without a model directory has no use for it.
-stt = { workspace = true, optional = true }
+stt = { workspace = true, optional = true, default-features = false }
 candle-core = { version = "0.11", optional = true }
 crossbeam-channel = { workspace = true, optional = true }
 rayon.workspace = true

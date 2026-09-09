@@ -14,11 +14,26 @@ candle-transformers = "0.11"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 byteorder = "1"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+anyhow.workspace = true
+rustfft.workspace = true
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"] }
 
 [features]
-default = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# The GPU is on unless asked off. A speech model on the CPU keeps up with one
+# handheld and not with a repeater, and the receiver that runs it is more
+# often on a machine with a card than not.
+default = ["cuda"]
+# On everything but a Mac. Cargo features cannot depend on the target, but a
+# dependency can, so the feature turns on a crate that exists only where CUDA
+# can be built and turns on nothing on a Mac, where the same build gets Metal
+# below. Building needs the CUDA toolkit on the path: `nvcc` compiles
+# candle's kernels. A machine without one builds with
+# `--no-default-features`.
+cuda = ["dep:stt-cuda"]
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+stt-cuda = { path = "../stt-cuda", optional = true }
 
 # Metal is not a choice on a Mac, it is what the GPU is called, and the crates
 # behind it refuse to compile anywhere else. As a feature it broke

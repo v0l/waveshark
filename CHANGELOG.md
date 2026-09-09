@@ -10,6 +10,24 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ## [Unreleased]
 
+### Added
+
+- The transcript view's model card offers a list of models to pick from,
+  every size of Whisper plus Qwen3-ASR, and a list of devices to run on,
+  the CPU and each GPU by name. A model picked is fetched on first use into
+  its own directory, so switching back costs nothing.
+
+- Qwen3-ASR (0.6B and 1.7B) as a transcriber beside Whisper. It reads
+  noisy and accented speech better and says what language it heard.
+
+### Changed
+
+- CUDA is on by default in a build from source. Building needs the CUDA
+  toolkit; `--no-default-features --features limesdr,stt` builds without it.
+
+- The model card names the model rather than printing the path to its
+  files; the path is on hover over the "on disc" line.
+
 ### Fixed
 
 - A channel marked as voice is heard through its own fader like any other

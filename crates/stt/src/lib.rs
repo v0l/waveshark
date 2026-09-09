@@ -9,9 +9,17 @@
 //! Not in the graph: this crate holds no state the receiver owns and does no
 //! routing. `nodes::TranscribeNode` is the node, and it calls this.
 
+mod catalogue;
+mod engine;
 mod model;
+pub mod qwen3;
 mod whisper;
 
+pub use catalogue::{
+    default_model_in, devices, installed, label_of, model, model_dir, repo_of, DeviceChoice,
+    DeviceEntry, Family, Model, DEFAULT_MODEL, MODELS,
+};
+pub use engine::Engine;
 pub use model::{ensure, fetch, Files, Flavour, DEFAULT_REPO};
 pub use whisper::{Segment, Transcript, Whisper, WINDOW_S};
 
@@ -30,9 +38,7 @@ pub fn default_dir() -> std::path::PathBuf {
 }
 
 fn dirs_home() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
+    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default()
 }
 
 /// The fastest device candle was built for and can actually run on.
@@ -47,7 +53,7 @@ fn dirs_home() -> std::path::PathBuf {
 /// current card and a candle built against CUDA 13 do, so the check is a real
 /// multiplication.
 pub fn best_device() -> candle_core::Device {
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
     if let Ok(d) = candle_core::Device::new_cuda(0) {
         if runs(&d) {
             return d;
@@ -67,19 +73,32 @@ pub fn best_device() -> candle_core::Device {
 /// What a device is called, for a pane that has to say where the model is
 /// running. A transcript arriving slowly on the CPU and one arriving quickly
 /// on a card look the same on screen otherwise.
-pub fn device_label(d: &candle_core::Device) -> &'static str {
-    if d.is_cuda() {
-        "CUDA"
-    } else if d.is_metal() {
-        "Metal"
-    } else {
-        "CPU"
+pub fn device_label(d: &candle_core::Device) -> String {
+    match d {
+        candle_core::Device::Cpu => "CPU".into(),
+        candle_core::Device::Cuda(c) => {
+            #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
+            {
+                let k = c.cuda_stream().context().ordinal();
+                return devices()
+                    .into_iter()
+                    .find(|e| e.choice == DeviceChoice::Cuda(k))
+                    .map(|e| e.label)
+                    .unwrap_or_else(|| format!("CUDA {k}"));
+            }
+            #[cfg(not(all(feature = "cuda", not(target_vendor = "apple"))))]
+            {
+                let _ = c;
+                "CUDA".into()
+            }
+        }
+        candle_core::Device::Metal(_) => "Metal".into(),
     }
 }
 
 /// Whether a device can do the smallest thing the model will ask of it.
 #[allow(dead_code)]
-fn runs(d: &candle_core::Device) -> bool {
+pub(crate) fn runs(d: &candle_core::Device) -> bool {
     let go = || -> candle_core::Result<f32> {
         let a = candle_core::Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], d)?;
         a.matmul(&a)?.sum_all()?.to_scalar::<f32>()
