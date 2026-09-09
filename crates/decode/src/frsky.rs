@@ -92,8 +92,12 @@ impl Packet {
     ///
     /// The scaling is the PXX one: 1500 us sits at 1024 and the range either
     /// side is 3/4 of the raw span.
+    ///
+    /// Bit 11 says which bank the frame carries and is not part of the
+    /// position, so it is masked off. Clamping to 0x7ff instead read every
+    /// channel of an upper-bank frame as full deflection.
     pub fn microseconds(&self, index: usize) -> Option<f64> {
-        let raw = f64::from(self.channels.get(index)?.min(&0x7ff).to_owned() & 0x7ff);
+        let raw = f64::from(self.channels.get(index)? & 0x7ff);
         Some((raw - 1024.0) * 4.0 / 3.0 / 2.0 + 1500.0)
     }
 }
@@ -247,6 +251,21 @@ mod tests {
             assert_eq!(p.microseconds(i).unwrap().round(), 1500.0);
         }
         assert!(!p.upper_bank());
+    }
+
+    /// Bit 11 marks the bank rather than the position, so a channel of an
+    /// upper-bank frame is the same width as the same value in a lower one.
+    /// Clamping to 0x7ff instead of masking read every one of them as full
+    /// deflection, which on a sixteen channel model is every other frame.
+    #[test]
+    fn the_bank_bit_is_not_part_of_the_position() {
+        let mut p = parse(&PACKET).expect("a packet");
+        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
+        for c in &mut p.channels {
+            *c |= 0x800;
+        }
+        assert!(p.upper_bank());
+        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
     }
 
     /// One bit changed inside the CRC and the packet is refused. Sixteen
