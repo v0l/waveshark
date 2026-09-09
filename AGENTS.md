@@ -281,7 +281,7 @@ invisible on synthesised M17.
    cut those, or the whole band appears to switch on at once and every source
    opens in the same frame.
 
-   `cargo run --release -p sources --bin iq_clipper` does the cutting, and
+   `cargo run --release -p sources --example iq_clipper` does the cutting, and
    `--help` lists everything. With `--bursts` it keeps the samples the
    transmissions were in and drops the silence, which on a packet capture is
    most of the file: the BLE fixture is a seventeenth of what was recorded and

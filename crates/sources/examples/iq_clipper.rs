@@ -1,7 +1,7 @@
 //! Cut a recording down to what a test needs, and move it onto the channel
 //! the signal is actually in.
 //!
-//!     cargo run --release -p sources --bin iq_clipper -- <in> <out> [options]
+//!     cargo run --release -p sources --example iq_clipper -- <in> <out> [options]
 //!
 //! Two jobs, either alone or both in one pass.
 //!
@@ -46,7 +46,7 @@
 //! ```
 use common::{SampleFormat, C32};
 use sources::parse_filename;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 struct Args {
