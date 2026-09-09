@@ -38,10 +38,10 @@ const ICON: f32 = 22.0;
 const SPAN_W: f32 = 104.0;
 /// Side of a view tab. Larger than the transport's icons because these are
 /// the only route to a view by pointer and they carry a glyph that has to be
-/// told from nine others, not a play triangle.
+/// told from ten others, not a play triangle.
 const TAB: f32 = 34.0;
-/// Ten tabs, the gap between the two groups, and the well's margin.
-const VIEW_W: f32 = TAB * 10.0 + 2.0 * 9.0 + 5.0 + 8.0;
+/// Eleven tabs, the gap between the two groups, and the well's margin.
+const VIEW_W: f32 = TAB * 11.0 + 2.0 * 10.0 + 5.0 + 8.0;
 /// How a view's shortcut is written in its hover text.
 #[cfg(target_os = "macos")]
 const TAB_MOD: &str = "\u{2318}";

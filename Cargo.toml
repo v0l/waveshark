@@ -23,6 +23,7 @@ members = [
     "crates/httpc",
     "crates/orbit",
     "crates/stt",
+    "crates/stt-cuda",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
@@ -65,7 +66,7 @@ license = "GPL-3.0-or-later"
 # `common` rather than `core`: a workspace crate named `core` collides with the
 # Rust sysroot crate and makes every `use core::..` path ambiguous.
 common = { path = "crates/common" }
-stt = { path = "crates/stt" }
+stt = { path = "crates/stt", default-features = false }
 dsp = { path = "crates/dsp" }
 pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }

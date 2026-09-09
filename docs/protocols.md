@@ -539,16 +539,20 @@ codewords the message text can be read back out of.
 | FM with CTCSS/DCS | any | FM plus subaudible tone | 12.5 kHz | table | mod | Trivial next to the rest: a Goertzel on the discriminator output |
 
 An analogue channel says nothing about itself, so the strip has a `voice`
-switch per channel and that is what turns one into a front end. Switched on,
-`nodes::VoiceChannelNode` ends an over where the squelch does, puts the whole
-transmission on the packet bus with its audio, and the call appears in the
-call list beside the digital ones. It is on by default for the modes people
-talk on, NFM, AM and SSB, and off for broadcast FM, which would otherwise
-transcribe a music station for as long as the receiver runs; the switch is on
-the strip, for a channel that turns out to be data. It takes two wires, the channel's IF and
-its audio, because what was said is in the audio and how strong it was is only
-in the IF: a level read off a demodulator's output is a level of the
-demodulator.
+switch per channel. It is not a front end and it makes no packet: there is no
+packeting in analogue speech, so nothing of it ever touches the packet bus or
+the packet log. What the switch does is name the strip's audio as a
+conversation on the audio bus, `Audio:{hz}:{label}:`, so the bus's tap
+carries it labelled and the bus counts it as a call. The audio bus is the
+first stop for every demodulator's audio, FM or M17 alike, and it is the one
+place that knows who is talking now: `app::audiobus::AudioBus::track` keeps
+that table and the call list is fed from it, for digital and analogue calls
+the same way. A digital decoder's packet still goes to the packet bus and
+still makes its row in the log, and what only the decoder knows, the cipher,
+the codec, the kind of call, lands on the same call row from that side. The
+switch is on by default for the modes people talk on, NFM, AM and SSB, and
+off for broadcast FM, which would otherwise transcribe a music station for as
+long as the receiver runs.
 
 What was said is read by `crates/stt`, a local Whisper model through candle,
 as `app::transcripts::LiveTranscribeNode` on the audio bus rather than on the
@@ -565,15 +569,32 @@ parts the receiver does not know left empty, so an FM channel is
 view finds a call's text by building that key rather than by being wired to
 the transcriber. The log is in memory and bounded, 512 conversations of 64
 utterances. It is on by default and fetches its
-own weights: the worker thread downloads `openai/whisper-base.en`, 74 MB, into
-`~/.local/share/waveshark/models/whisper` the first time a call is long enough
-to be worth reading, so a receiver that hears no speech never reaches the
-network and one that does waits once. Another model is a `model` setting on
-the stage, or a directory placed there by hand. `--no-default-features` leaves
-candle out of the build entirely. The model runs on whatever candle was built
-for: CUDA under `--features cuda`, Metal on a Mac, the CPU otherwise, and a
-GPU that opens but cannot launch a kernel falls back rather than failing every
-call. Any front end that carries speech is transcribed, not
+own weights: the worker thread downloads the chosen model into a directory
+of its own under `~/.local/share/waveshark/models` the first time a call is
+long enough to be worth reading, so a receiver that hears no speech never
+reaches the network and one that does waits once. Which model is a pick on
+the transcript view's card, or the `model` setting on the stage: every size
+of Whisper in English-only and multilingual, the Distil-Whisper cuts, and
+Qwen3-ASR at 0.6B and 1.7B, which is a Qwen3 language model with an audio
+encoder in front and reads noisy or accented speech better than any Whisper
+of its size while naming the language it heard (`crates/stt/src/qwen3`,
+taken from alan890104/qwen3-asr-rs under MIT). A directory placed under
+`models` by hand is listed beside them. The default is `whisper-base.en`,
+290 MB, or whatever single model an earlier version already fetched.
+`--no-default-features` leaves candle out of the build entirely. Where the
+model runs is the other pick on the card: Auto takes the fastest thing the
+build can use that actually launches a kernel, and below it are the CPU and
+every CUDA card the driver lists by name, or Metal on a Mac. CUDA is on by
+default in a build from source (`cuda` feature; it needs `nvcc` on the path
+and a driver at least as new as the toolkit, which is what
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` on the first read means: on Debian
+`update-alternatives --set cuda /usr/local/cuda-X.Y` picks the toolkit the
+driver matches). The kernels are built for compute 8.0 by `.cargo/config.toml`
+rather than for the card in the machine, so a build runs on any card since
+Ampere and the
+release workflow publishes it as a separate `-cuda` asset built against
+CUDA 12.8, which wants that runtime installed and a 570 driver. A card that is picked outright and fails is an error on the card,
+not a silent fall back to the CPU. Any front end that carries speech is transcribed, not
 just analogue channels, so an M17 or DMR call gets the same treatment. The
 text arrives as a `transcript` field on the decode, with the model's own mean
 log probability beside it, and a call whose text the model does not believe

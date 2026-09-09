@@ -84,8 +84,16 @@ pub struct Call {
     ///
     /// The last one rather than all of them: this is a scanner's list of who
     /// is on the air, and the row is one line. The whole text of every over
-    /// stays in the packet log beside the audio it was read from.
+    /// stays in the transcript beside the audio it was read from.
     pub transcript: Option<String>,
+    /// Seconds of the over in progress the bus has already reported, so the
+    /// running total it sends is folded in once rather than summed again on
+    /// every block.
+    pub heard_s: f64,
+    /// Whether the audio bus has reported this call. Once it has, the bus is
+    /// what counts overs and airtime: a decoder's packets say the same over
+    /// happened, and counting both listed every digital over twice.
+    pub by_bus: bool,
 }
 
 impl Call {
@@ -102,6 +110,21 @@ impl Call {
     /// group can be busy for a minute in six seconds of speech.
     pub fn span(&self) -> Duration {
         self.last.saturating_duration_since(self.first)
+    }
+
+    /// The conversation this call is, as the transcriber keys it.
+    ///
+    /// Here rather than in either of the two places that need it, because a
+    /// call and its transcript are the same conversation only for as long as
+    /// both ends build the key the same way.
+    pub fn transcript_key(&self) -> String {
+        crate::transcripts::Speaker {
+            proto: self.system.clone(),
+            freq_hz: self.channel_hz.max(0.0) as u64,
+            channel: (!self.to.is_empty()).then(|| self.to.clone()),
+            speaker: self.from.clone(),
+        }
+        .key()
     }
 
     /// The label a list shows: the group, with the caller beside it.
@@ -143,16 +166,9 @@ impl Calls {
     /// what, and the call list keeps calls. They meet on the key rather than
     /// on a wire between them: neither has to know the other exists, and a
     /// view that wants the whole conversation asks the log for the key.
-    #[cfg(feature = "stt")]
     pub fn read_transcripts(&mut self, said: &[crate::transcripts::Utterance]) {
         for c in &mut self.seen {
-            let key = crate::transcripts::Speaker {
-                proto: c.system.clone(),
-                freq_hz: c.channel_hz.max(0.0) as u64,
-                channel: (!c.to.is_empty()).then(|| c.to.clone()),
-                speaker: c.from.clone(),
-            }
-            .key();
+            let key = c.transcript_key();
             if let Some(u) = said.iter().rev().find(|u| u.key == key) {
                 c.transcript = Some(u.text.clone());
             }
@@ -169,6 +185,84 @@ impl Calls {
 
     pub fn clear(&mut self) {
         self.seen.clear();
+    }
+
+    /// Fold in a conversation the audio bus is hearing.
+    ///
+    /// This is where every analogue call comes from, and where a digital
+    /// one is marked live: the bus is the first stop for every demodulator's
+    /// audio, so it is the one place that knows who is talking right now.
+    /// What only a decoder knows, the cipher, the codec, the kind of call,
+    /// arrives by [`Self::update`] from the packet side and lands on the same
+    /// row, because the two are keyed the same way.
+    pub fn hear(&mut self, c: &crate::audiobus::LiveCall) {
+        let same = |k: &Call| {
+            k.system == c.system
+                && k.to == c.to
+                && (k.channel_hz - c.channel_hz).abs() < 500.0
+                && (k.from == c.from || k.from.is_none() || c.from.is_none())
+        };
+        let found = self
+            .seen
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| same(k))
+            .max_by_key(|(_, k)| k.last)
+            .map(|(i, _)| i);
+        if let Some(k) = found.map(|i| &mut self.seen[i]) {
+            if k.from.is_none() {
+                k.from = c.from.clone();
+            }
+            // A gap longer than the hang time is a new conversation on the
+            // same group, so the old one keeps its duration rather than
+            // stretching across the silence.
+            if c.first > k.last && k.age(c.first) >= LIVE {
+                k.first = c.first;
+                k.seconds = 0.0;
+                k.overs = 0;
+                k.heard_s = 0.0;
+            }
+            k.last = c.last;
+            // The first word from the bus on a row the packets made: from
+            // here on the bus counts, so what the packets counted is let go
+            // rather than added to.
+            if !k.by_bus {
+                k.by_bus = true;
+                k.seconds = 0.0;
+                k.overs = 0;
+                k.heard_s = 0.0;
+            }
+            // The bus reports the over's running total, so what is added is
+            // the part not already counted.
+            let more = (c.seconds - k.heard_s).max(0.0);
+            k.seconds += more;
+            k.heard_s = if c.over { 0.0 } else { c.seconds };
+            if c.over {
+                k.overs += 1;
+            }
+            return;
+        }
+        self.seen.push(Call {
+            system: c.system.clone(),
+            channel_hz: c.channel_hz,
+            to: c.to.clone(),
+            from: c.from.clone(),
+            group: is_group(&c.to),
+            encrypted: false,
+            cipher: None,
+            codec: None,
+            first: c.first,
+            last: c.last,
+            overs: u64::from(c.over),
+            seconds: c.seconds,
+            heard_s: if c.over { 0.0 } else { c.seconds },
+            by_bus: true,
+            transcript: None,
+        });
+        if self.seen.len() > MAX_CALLS {
+            let at = c.last;
+            self.seen.retain(|k| k.age(at) < FORGET);
+        }
     }
 
     /// Fold one decode in, if it is a call at all.
@@ -250,10 +344,15 @@ impl Calls {
                 c.overs = 0;
             }
             c.last = at;
-            if !live {
-                c.overs += 1;
+            // The bus counts overs and airtime where it hears the call; the
+            // decoder's own count is for a call nothing is playing, such as
+            // one enciphered or in a vocoder this build does not have.
+            if !c.by_bus {
+                if !live {
+                    c.overs += 1;
+                }
+                c.seconds += seconds;
             }
-            c.seconds += seconds;
             // Only a decode that carries the field may change this. TETRA
             // names the cipher in the grant and not in the traffic that
             // follows, so overwriting from every record flipped the call back
@@ -286,6 +385,8 @@ impl Calls {
             last: at,
             overs: u64::from(!live),
             seconds,
+            heard_s: 0.0,
+            by_bus: false,
             transcript,
         });
         if self.seen.len() > MAX_CALLS {
@@ -559,5 +660,92 @@ mod tests {
         let call = &c.active(t(1))[0];
         assert!(call.encrypted, "the row would have gone from red to blue");
         assert_eq!(call.cipher.as_deref(), Some("AIE-3"));
+    }
+
+    /// A digital over arrives twice: as the decoder's packet, with what only
+    /// the decoder knows, and as speech on the audio bus, with when it was
+    /// actually heard. One row, one over, and the bus's count is the one
+    /// kept, because it is the count of what was played.
+    #[test]
+    fn a_digital_over_is_one_row_from_both_sides() {
+        let mut c = Calls::new();
+        let at = Instant::now();
+        let packet = voice(
+            "M17-Voice",
+            433.475e6,
+            &[
+                ("from", Value::Text("M0ABC".into())),
+                ("to", Value::Text("BROADCAST".into())),
+                ("codec", Value::Text("Codec 2 3200".into())),
+                ("seconds", Value::Float(3.0)),
+            ],
+        );
+        c.update(&packet, at);
+        let live = |seconds: f64, over: bool| crate::audiobus::LiveCall {
+            system: "M17".into(),
+            channel_hz: 433.475e6,
+            to: "BROADCAST".into(),
+            from: Some("M0ABC".into()),
+            first: at,
+            last: at + Duration::from_secs_f64(seconds),
+            seconds,
+            peak: 0.3,
+            quiet_s: 0.0,
+            over,
+        };
+        c.hear(&live(1.0, false));
+        c.hear(&live(2.9, false));
+        c.hear(&live(2.9, true));
+        let rows = c.active(at + Duration::from_secs(3));
+        assert_eq!(rows.len(), 1, "two sides of one over made two rows");
+        assert_eq!(rows[0].overs, 1, "the over was counted from both sides");
+        assert!((rows[0].seconds - 2.9).abs() < 1e-6, "airtime {}", rows[0].seconds);
+        assert_eq!(rows[0].codec.as_deref(), Some("Codec 2 3200"), "the decoder's field is kept");
+        // And the next packet for the same call does not add to what the
+        // bus is counting.
+        c.update(&packet, at + Duration::from_secs(1));
+        assert_eq!(c.active(at + Duration::from_secs(3))[0].overs, 1);
+    }
+
+    /// A call and the speech heard on it have to agree on one key, or the
+    /// row shows no transcript and the button into it is never offered. The
+    /// two ends build it from different things: the call from the fields a
+    /// decoder published, the transcriber from the voice block the front end
+    /// put on the bus.
+    #[test]
+    fn a_call_and_its_speech_are_the_same_conversation() {
+        let mut c = Calls::new();
+        c.update(
+            &voice(
+                "DMR-Voice",
+                435.0e6,
+                &[("from", Value::Text("1234567".into())), ("to", Value::Text("9".into()))],
+            ),
+            t(0),
+        );
+        let call = &c.active(t(0))[0];
+        let spoken = crate::transcripts::key_of(&common::Voice {
+            system: "DMR",
+            channel_hz: 435.0e6,
+            to: Some("9".into()),
+            from: Some("1234567".into()),
+            rate: 8_000.0,
+            pcm: vec![0.2; 8],
+        });
+        assert_eq!(call.transcript_key(), spoken);
+        assert_eq!(call.transcript_key(), "DMR:435000000:9:1234567");
+
+        // And what the transcriber read reaches the row.
+        let said = [crate::transcripts::Utterance {
+            key: spoken,
+            at: Instant::now(),
+            seconds: 1.0,
+            text: "go ahead".into(),
+            settled: true,
+            confidence: -0.3,
+            credible: true,
+        }];
+        c.read_transcripts(&said);
+        assert_eq!(c.active(t(0))[0].transcript.as_deref(), Some("go ahead"));
     }
 }

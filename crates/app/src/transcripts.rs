@@ -28,6 +28,22 @@
 //! makes it feel live; the final pass is the one worth reading, because a
 //! model given the whole sentence punctuates and corrects what it guessed
 //! from half of it.
+//!
+//! Nothing is held for longer than the model's own window ([`stt::WINDOW_S`],
+//! thirty seconds). A repeater left keyed used to grow one buffer until it
+//! hit a two-minute cap, and every partial re-read all of it: ninety seconds
+//! held meant three windows decoded every two seconds, for one line that had
+//! not been written yet. So a run of speech that reaches the window is cut
+//! and the part before the cut is settled: the cut is placed at the quietest
+//! moment in the last few seconds, which is a pause if there is one, and what
+//! comes after it starts the next line. The words carry on; what stops
+//! growing is the buffer.
+//!
+//! An open channel that is not speech is stopped by the model rather than by
+//! a threshold. Squelch noise is loud enough to collect, so the level test
+//! alone read a hissing repeater as somebody talking for as long as it hissed;
+//! after two windows come back with nothing credible in them, that
+//! conversation is left alone until it goes quiet again.
 
 use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -47,9 +63,28 @@ const HANG_S: f64 = 0.8;
 /// open one delivers noise, and the noise is what has to be rejected.
 const FLOOR: f32 = 0.004;
 
-/// Longest run of speech kept as one utterance. A repeater left keyed would
-/// otherwise grow a buffer without bound.
-const MAX_UTTERANCE_S: f64 = 120.0;
+/// Longest run of speech held before it is cut into a settled line and a
+/// fresh one. The model's own window: holding more is holding audio that
+/// cannot be read in one pass, and paying for the whole of it again on every
+/// partial.
+#[cfg(feature = "stt")]
+const HOLD_S: f64 = stt::WINDOW_S;
+#[cfg(not(feature = "stt"))]
+const HOLD_S: f64 = 30.0;
+
+/// How far back from the cut a pause is looked for. Long enough to find the
+/// gap between two sentences, short enough that the line before the cut is
+/// most of the window.
+const CUT_SEARCH_S: f64 = 3.0;
+
+/// Windows a conversation may come back empty before it is left alone. Two,
+/// because one window of a caller thinking is not evidence of anything.
+const DUDS_BEFORE_DEAF: u8 = 2;
+
+/// Hard cap on what is held when the model is behind. Beyond this the audio
+/// is dropped rather than queued: a transcript of what was said ten minutes
+/// ago is worth less than keeping up with what is being said now.
+const MAX_HELD_S: f64 = 90.0;
 
 /// Conversations kept before the oldest is forgotten.
 const MAX_KEYS: usize = 512;
@@ -71,6 +106,11 @@ pub struct Utterance {
     /// The model's own mean log probability, near zero for a confident read
     /// and below about -1 for a guess.
     pub confidence: f32,
+    /// Whether the model believed this was speech it read correctly, by its
+    /// own two thresholds. False is a reading worth showing and worth
+    /// doubting, which is why the words are kept and this is carried beside
+    /// them.
+    pub credible: bool,
 }
 
 /// Who is talking, in the parts the receiver knows.
@@ -115,6 +155,13 @@ impl Speaker {
 
 /// Everything that has been said, by conversation.
 ///
+/// One for the whole program, behind [`log`]. The node writes to it and the
+/// interface reads it, and neither owns it: the node is a stage in a graph
+/// that is rebuilt on every retune, and a log that lived inside it was
+/// emptied every time the dial moved, which on screen was three reads and
+/// no lines. A transcript outlives any one graph the way the call list
+/// does.
+///
 /// In memory and bounded. Nothing here is written to disk yet: the packet log
 /// holds evidence and a transcript is not evidence, so where transcripts
 /// belong on disk is a decision that has not been made.
@@ -123,16 +170,31 @@ pub struct TranscriptLog {
     by_key: HashMap<String, Vec<Utterance>>,
     /// Keys in the order they were last spoken on, oldest first.
     order: Vec<String>,
+    /// Bumped on every push, so a reader can tell whether anything changed
+    /// without comparing the contents.
+    seq: u64,
+}
+
+/// The one transcript.
+pub type SharedLog = std::sync::Arc<parking_lot::Mutex<TranscriptLog>>;
+
+/// The program's transcript, which every transcriber writes to and the
+/// transcript view reads.
+pub fn log() -> &'static SharedLog {
+    static LOG: std::sync::OnceLock<SharedLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(Default::default)
 }
 
 impl TranscriptLog {
-    /// Add or replace. An unsettled utterance replaces the last unsettled one
-    /// on the same key, which is what makes a growing window read as one line
-    /// getting longer rather than as a page of half sentences.
+    /// Add or replace. One utterance is one start time on one key, so a
+    /// reading of speech already held replaces what is there: that is what
+    /// makes a growing window read as one line getting longer rather than as
+    /// a page of half sentences, and it is what lets a view fold the same
+    /// published window in on every frame without collecting duplicates.
     pub fn push(&mut self, u: Utterance) {
         let list = self.by_key.entry(u.key.clone()).or_default();
         match list.last_mut() {
-            Some(last) if !last.settled && last.at == u.at => *last = u.clone(),
+            Some(last) if last.at == u.at => *last = u.clone(),
             _ => list.push(u.clone()),
         }
         if list.len() > MAX_PER_KEY {
@@ -144,6 +206,19 @@ impl TranscriptLog {
             let gone = self.order.remove(0);
             self.by_key.remove(&gone);
         }
+        self.seq += 1;
+    }
+
+    /// How many pushes there have been, for a reader deciding whether to
+    /// look again.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// A copy, for a view to draw from without holding the lock while it
+    /// draws.
+    pub fn snapshot(&self) -> Self {
+        Self { by_key: self.by_key.clone(), order: self.order.clone(), seq: self.seq }
     }
 
     /// Everything said on one conversation, oldest first.
@@ -172,6 +247,17 @@ impl TranscriptLog {
         all
     }
 
+    /// Whether anything was read on one conversation, which is what decides
+    /// whether a call is worth offering a way into this log.
+    pub fn has(&self, key: &str) -> bool {
+        self.by_key.get(key).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Lines held, across every conversation.
+    pub fn len(&self) -> usize {
+        self.by_key.values().map(|v| v.len()).sum()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_key.is_empty()
     }
@@ -179,6 +265,120 @@ impl TranscriptLog {
     pub fn clear(&mut self) {
         self.by_key.clear();
         self.order.clear();
+        self.seq += 1;
+    }
+}
+
+/// Where the model is in its life, which the node cannot see for itself: the
+/// fetching, the loading and the reading all happen on the worker thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ModelState {
+    /// Nothing has asked for it yet. The model is loaded by the first speech
+    /// worth reading, so a receiver that hears none never fetches one.
+    #[default]
+    Cold,
+    /// Being downloaded from the hub, which is the one thing here that needs
+    /// a network.
+    Fetching,
+    Loading,
+    Ready,
+    /// It cannot be used, and why.
+    Failed(String),
+}
+
+impl ModelState {
+    /// What a pane prints for it. The reason is shown beside this rather than
+    /// inside it, because it is a sentence and this is a word.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Cold => "not loaded",
+            Self::Fetching => "downloading",
+            Self::Loading => "loading",
+            Self::Ready => "ready",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+/// One model a pane can offer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+    /// Roughly what it takes to fetch, in bytes, or 0 for a model that is
+    /// not in the catalogue.
+    pub bytes: u64,
+    /// Whether its files are already on disc.
+    pub present: bool,
+}
+
+/// What the transcriber is and what it is doing, for the view that shows it.
+///
+/// Which model, where its files are, whether they are there at all, what it
+/// is running on and how much it has read. Without this the pane can say
+/// only that no text has appeared, which is the same picture for a model
+/// that was never downloaded, one that failed to load, one running on a CPU
+/// too slow to keep up, and a band where nobody is talking.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Engine {
+    /// The node in the running graph, so a view can set its parameters.
+    pub node: usize,
+    pub enabled: bool,
+    /// Which model, by catalogue id, and the repository it is fetched from.
+    pub model: String,
+    pub repo: String,
+    /// Where its files are kept.
+    pub dir: String,
+    /// What the chosen model is called.
+    pub label: String,
+    /// Every model that can be picked: the catalogue, plus anything on disc
+    /// under the models directory that is not in it.
+    pub models: Vec<ModelChoice>,
+    /// Where it was asked to run, and every device it could be asked to run
+    /// on, as ids and labels.
+    pub device_choice: String,
+    pub devices: Vec<(String, String)>,
+    /// Whether a usable model is in that directory already, and what it
+    /// takes up.
+    pub present: bool,
+    pub bytes: u64,
+    /// What the files in that directory actually are: the weights file and
+    /// whether they carry language tokens. The repository is only where they
+    /// would be fetched from, so on a receiver whose directory was filled by
+    /// hand, or by an earlier run asking for another model, the two disagree
+    /// and this is the half that is running.
+    pub weights: String,
+    pub flavour: String,
+    pub state: ModelState,
+    /// What it is running on, once it has loaded: CPU, CUDA or Metal.
+    pub device: String,
+    /// Why that is not what Auto reached for first, when it is not: the
+    /// card had no room, or opened and could not run.
+    pub note: String,
+    /// Windows read since it loaded, and what the last one cost against how
+    /// much audio it was. A receiver whose model is slower than real time is
+    /// a receiver that will fall behind, and this is where that shows.
+    pub reads: u64,
+    pub last_ms: u64,
+    pub last_audio_s: f64,
+    /// What the last window came back as, verbatim, and whether the model
+    /// thought it was speech. Shown on the card so a read that produced no
+    /// line can be told from one that never happened.
+    pub last_text: String,
+    pub last_speech: bool,
+    /// Speech being collected right now, and on how many conversations.
+    pub holding_s: f64,
+    pub speakers: usize,
+    /// Whether the model has a window in front of it at this moment.
+    pub busy: bool,
+}
+
+impl Engine {
+    /// How much faster than real time the last read was. Below 1 the model
+    /// cannot keep up with somebody talking continuously.
+    pub fn speed(&self) -> Option<f64> {
+        (self.last_ms > 0 && self.last_audio_s > 0.0)
+            .then(|| self.last_audio_s / (self.last_ms as f64 / 1000.0))
     }
 }
 
@@ -194,11 +394,48 @@ struct Talking {
     waiting: bool,
     /// The speech has stopped and the last reading is owed.
     finished: bool,
+    /// Windows in a row the model has found nothing credible in.
+    duds: u8,
+    /// The model has said, twice, that this is not speech. Nothing more is
+    /// collected until the channel goes quiet, which is what ends it.
+    deaf: bool,
+}
+
+impl Talking {
+    fn seconds(&self) -> f64 {
+        self.pcm.len() as f64 / self.rate
+    }
+}
+
+/// Where to cut a run of speech that has filled the model's window.
+///
+/// The quietest twentieth of a second in the last [`CUT_SEARCH_S`], which is
+/// the pause between two sentences where there is one. Cutting at the end of
+/// the buffer instead splits whatever word was being said across two lines,
+/// and the model reads each half as a different word.
+fn cut_point(pcm: &[f32], rate: f64) -> usize {
+    let step = ((rate * 0.05) as usize).max(1);
+    let back = ((rate * CUT_SEARCH_S) as usize).min(pcm.len());
+    let from = pcm.len() - back;
+    let mut best = pcm.len();
+    let mut quietest = f32::INFINITY;
+    let mut at = from;
+    while at + step <= pcm.len() {
+        let energy: f32 = pcm[at..at + step].iter().map(|s| s.abs()).sum();
+        if energy < quietest {
+            quietest = energy;
+            best = at + step / 2;
+        }
+        at += step;
+    }
+    best
 }
 
 /// The streaming transcriber, as a node on the audio bus tap.
 pub struct LiveTranscribeNode {
-    log: TranscriptLog,
+    /// Where the lines go: the program's one transcript, unless a test
+    /// handed this node one of its own.
+    log: SharedLog,
     talking: HashMap<String, Talking>,
     enabled: bool,
     /// Shortest run of speech worth reading. A squelch tail transcribes as
@@ -206,12 +443,65 @@ pub struct LiveTranscribeNode {
     min_speech_s: f64,
     #[cfg(feature = "stt")]
     worker: Option<Worker>,
+    /// The models directory; each model has a directory of its own in it.
     #[cfg(feature = "stt")]
-    dir: std::path::PathBuf,
+    root: std::path::PathBuf,
+    /// A directory named outright, which wins over root and model. What a
+    /// test hands the node so it reads whatever is there.
     #[cfg(feature = "stt")]
-    repo: String,
+    explicit_dir: Option<std::path::PathBuf>,
+    #[cfg(feature = "stt")]
+    model_id: String,
+    #[cfg(feature = "stt")]
+    device: stt::DeviceChoice,
+    /// What is on disc under `root`, read when something changes rather
+    /// than every time a pane asks.
+    #[cfg(feature = "stt")]
+    installed: Vec<String>,
     #[cfg(feature = "stt")]
     reported: bool,
+    /// What the model is doing, written by the thread that has it.
+    #[cfg(feature = "stt")]
+    health: std::sync::Arc<parking_lot::Mutex<Health>>,
+}
+
+/// The worker thread's half of [`Engine`].
+#[cfg(feature = "stt")]
+#[derive(Debug, Default)]
+struct Health {
+    state: ModelState,
+    device: String,
+    /// Why it is not where it was asked to be, when it is not.
+    note: String,
+    reads: u64,
+    last_ms: u64,
+    last_audio_s: f64,
+    last_text: String,
+    last_speech: bool,
+    present: bool,
+    bytes: u64,
+    weights: String,
+    flavour: String,
+}
+
+#[cfg(feature = "stt")]
+impl Health {
+    /// Record what is on disc, or that nothing is.
+    fn describe(&mut self, files: Option<&stt::Files>) {
+        self.present = files.is_some();
+        self.bytes = files.map(|f| f.bytes()).unwrap_or(0);
+        self.weights = files
+            .and_then(|f| f.weights.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        self.flavour = match files.map(|f| (f.family, f.flavour)) {
+            Some((stt::Family::Qwen3Asr, _)) => "Qwen3-ASR, multilingual".into(),
+            Some((stt::Family::Whisper, stt::Flavour::English)) => "Whisper, English only".into(),
+            Some((stt::Family::Whisper, stt::Flavour::Multilingual)) => {
+                "Whisper, multilingual".into()
+            }
+            None => String::new(),
+        };
+    }
 }
 
 impl Default for LiveTranscribeNode {
@@ -223,34 +513,153 @@ impl Default for LiveTranscribeNode {
 impl LiveTranscribeNode {
     pub fn new() -> Self {
         Self {
-            log: TranscriptLog::default(),
+            log: log().clone(),
             talking: HashMap::new(),
             enabled: true,
             min_speech_s: 0.6,
             #[cfg(feature = "stt")]
             worker: None,
             #[cfg(feature = "stt")]
-            dir: std::path::PathBuf::new(),
+            root: std::path::PathBuf::new(),
             #[cfg(feature = "stt")]
-            repo: stt::DEFAULT_REPO.to_string(),
+            explicit_dir: None,
+            #[cfg(feature = "stt")]
+            model_id: stt::DEFAULT_MODEL.to_string(),
+            #[cfg(feature = "stt")]
+            device: stt::DeviceChoice::Auto,
+            #[cfg(feature = "stt")]
+            installed: Vec::new(),
             #[cfg(feature = "stt")]
             reported: false,
+            #[cfg(feature = "stt")]
+            health: std::sync::Arc::new(parking_lot::Mutex::new(Health::default())),
         }
     }
 
+    /// Read whatever model is in one directory, whatever it is called.
     #[cfg(feature = "stt")]
     pub fn in_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.dir = dir.into();
+        self.explicit_dir = Some(dir.into());
+        self.look();
+        self
+    }
+
+    /// Keep models under `root`, one directory each.
+    #[cfg(feature = "stt")]
+    pub fn under(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.root = root.into();
+        self.look();
+        self
+    }
+
+    /// Where the chosen model's files are, or would be fetched to.
+    #[cfg(feature = "stt")]
+    fn dir(&self) -> std::path::PathBuf {
+        match &self.explicit_dir {
+            Some(d) => d.clone(),
+            None => stt::model_dir(&self.root, &self.model_id),
+        }
+    }
+
+    /// The catalogue and what is on disc beside it, for the pick list.
+    #[cfg(feature = "stt")]
+    fn models(&self) -> Vec<ModelChoice> {
+        let here = &self.installed;
+        let mut out: Vec<ModelChoice> = stt::MODELS
+            .iter()
+            .map(|m| ModelChoice {
+                id: m.id.to_string(),
+                label: m.label.to_string(),
+                bytes: m.mb as u64 * 1_000_000,
+                present: here.iter().any(|h| h == m.id),
+            })
+            .collect();
+        for h in here {
+            if !out.iter().any(|m| m.id == *h) {
+                out.push(ModelChoice { id: h.clone(), label: h.clone(), bytes: 0, present: true });
+            }
+        }
+        out
+    }
+
+    /// Whether a model is on disc where this node would look, and how large
+    /// it is. Three stats, taken when the directory changes rather than per
+    /// block.
+    #[cfg(feature = "stt")]
+    fn look(&mut self) {
+        self.installed = stt::installed(&self.root);
+        let mut h = self.health.lock();
+        h.describe(stt::Files::in_dir(self.dir()).ok().as_ref());
+    }
+
+    /// Forget the loaded model, so the next thing worth reading loads the
+    /// one now chosen on the device now chosen.
+    #[cfg(feature = "stt")]
+    fn reload(&mut self) {
+        self.worker = None;
+        self.reported = false;
+        *self.health.lock() = Health::default();
+        self.look();
+    }
+
+    /// What this node is and what it is doing, for the transcript view.
+    pub fn engine(&self) -> Engine {
+        #[allow(unused_mut)]
+        let mut e = Engine {
+            enabled: self.enabled,
+            speakers: self.talking.len(),
+            holding_s: self.talking.values().map(|t| t.pcm.len() as f64 / t.rate).sum(),
+            busy: self.talking.values().any(|t| t.waiting),
+            ..Default::default()
+        };
+        #[cfg(feature = "stt")]
+        {
+            e.model = self.model_id.clone();
+            e.label = stt::label_of(&self.model_id);
+            e.repo = stt::repo_of(&self.model_id);
+            e.dir = self.dir().display().to_string();
+            e.models = self.models();
+            e.device_choice = self.device.id();
+            e.devices = stt::devices().into_iter().map(|d| (d.choice.id(), d.label)).collect();
+            let h = self.health.lock();
+            e.state = h.state.clone();
+            e.device = h.device.clone();
+            e.note = h.note.clone();
+            e.reads = h.reads;
+            e.last_ms = h.last_ms;
+            e.last_audio_s = h.last_audio_s;
+            e.last_text = h.last_text.clone();
+            e.last_speech = h.last_speech;
+            e.present = h.present;
+            e.bytes = h.bytes;
+            e.weights = h.weights.clone();
+            e.flavour = h.flavour.clone();
+        }
+        e
+    }
+
+    /// Which model, by catalogue id or by any Whisper repository name.
+    #[cfg(feature = "stt")]
+    pub fn model(mut self, id: &str) -> Self {
+        self.model_id = id.to_string();
+        self.look();
         self
     }
 
     #[cfg(feature = "stt")]
-    pub fn model(mut self, repo: &str) -> Self {
-        self.repo = repo.to_string();
+    pub fn on(mut self, device: stt::DeviceChoice) -> Self {
+        self.device = device;
         self
     }
 
-    pub fn log(&self) -> &TranscriptLog {
+    /// Write to a transcript of the caller's own rather than the program's,
+    /// so a test reads what it produced and nothing else.
+    pub fn into_log(mut self, log: SharedLog) -> Self {
+        self.log = log;
+        self
+    }
+
+    pub fn log(&self) -> &SharedLog {
         &self.log
     }
 
@@ -269,7 +678,19 @@ impl LiveTranscribeNode {
             asked_at_s: 0.0,
             waiting: false,
             finished: false,
+            duds: 0,
+            deaf: false,
         });
+        // A conversation the model has twice said is not speech collects
+        // nothing until it goes quiet, which is the channel closing.
+        if entry.deaf {
+            if !loud {
+                entry.pcm.clear();
+                entry.deaf = false;
+                entry.duds = 0;
+            }
+            return false;
+        }
         if loud {
             entry.quiet_s = 0.0;
             entry.pcm.extend_from_slice(&v.pcm);
@@ -283,8 +704,26 @@ impl LiveTranscribeNode {
             // that were not said together and the model reads them as one.
             entry.pcm.extend_from_slice(&v.pcm);
         }
-        let seconds = entry.pcm.len() as f64 / entry.rate;
-        entry.quiet_s >= HANG_S || seconds >= MAX_UTTERANCE_S
+        entry.quiet_s >= HANG_S || entry.seconds() >= MAX_HELD_S
+    }
+
+    /// What the model made of a settled window, so a conversation it found
+    /// nothing in twice is left alone. Squelch noise is loud enough to
+    /// collect and there is no threshold that tells it from speech; the model
+    /// already decides, and this is that decision being used.
+    fn read_back(&mut self, key: &str, anything: bool) {
+        let Some(t) = self.talking.get_mut(key) else {
+            return;
+        };
+        if anything {
+            t.duds = 0;
+            return;
+        }
+        t.duds = t.duds.saturating_add(1);
+        if t.duds >= DUDS_BEFORE_DEAF {
+            t.deaf = true;
+            t.pcm.clear();
+        }
     }
 
     /// Seconds of audio held for a key, for tests and for a status line.
@@ -317,12 +756,16 @@ mod work {
         pub settled: bool,
     }
 
+    /// The worker's word that a job is finished, so the node can send the
+    /// next one. The text itself does not come this way: the worker writes
+    /// it into the transcript directly, so a read that finishes after the
+    /// node that asked for it has gone is still written down.
     pub(super) struct Done {
         pub key: String,
         pub at: Instant,
-        pub seconds: f64,
         pub settled: bool,
-        pub result: Result<stt::Transcript>,
+        /// Whether the model heard speech, or what went wrong.
+        pub result: Result<bool>,
     }
 
     pub(super) struct Worker {
@@ -336,11 +779,14 @@ mod work {
             if self.worker.is_none() {
                 let (jobs_tx, jobs_rx) = bounded::<Job>(32);
                 let (done_tx, done_rx) = bounded::<Done>(32);
-                let dir = self.dir.clone();
-                let repo = self.repo.clone();
+                let dir = self.dir();
+                let repo = stt::repo_of(&self.model_id);
+                let device = self.device;
+                let health = self.health.clone();
+                let log = self.log.clone();
                 std::thread::Builder::new()
                     .name("whisper-live".into())
-                    .spawn(move || run(dir, repo, jobs_rx, done_tx))
+                    .spawn(move || run(dir, repo, device, health, log, jobs_rx, done_tx))
                     .ok()?;
                 self.worker = Some(Worker { jobs: jobs_tx, done: done_rx });
             }
@@ -361,28 +807,32 @@ mod work {
                 if let Some(t) = self.talking.get_mut(&done.key) {
                     t.waiting = false;
                 }
-                // The last reading of an utterance is the end of it: what was
-                // held is now text, and holding it into the next one would
-                // read the same words again with somebody else's in front.
                 if done.settled {
-                    self.talking.remove(&done.key);
+                    if let Ok(speech) = done.result {
+                        // Whether it was speech, not whether it was read
+                        // well: the model returns a plausible sentence for a
+                        // fan or an open squelch, so words alone are not
+                        // evidence of anybody talking, and a weak handheld
+                        // read badly is still somebody talking.
+                        self.read_back(&done.key, speech);
+                    }
+                    // The last reading of an utterance is the end of it, and
+                    // holding it into the next one would read the same words
+                    // again with somebody else's in front. Unless what is
+                    // held is already the next one: a run of speech that
+                    // filled the window was cut, and what came after the cut
+                    // is a line of its own that is still being spoken.
+                    let carried = self.talking.get(&done.key).is_some_and(|t| t.started != done.at);
+                    if carried {
+                        self.pump(&done.key);
+                    } else {
+                        self.talking.remove(&done.key);
+                    }
                 } else {
                     self.pump(&done.key);
                 }
                 match done.result {
-                    Ok(t) => {
-                        let text = t.text.trim().to_string();
-                        if !text.is_empty() {
-                            self.log.push(Utterance {
-                                key: done.key,
-                                at: done.at,
-                                seconds: done.seconds,
-                                text,
-                                settled: done.settled,
-                                confidence: t.avg_logprob() as f32,
-                            });
-                        }
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         if !self.reported {
                             self.reported = true;
@@ -417,8 +867,40 @@ mod work {
                 } else {
                     self.ask(key, true);
                 }
+            } else if seconds >= HOLD_S {
+                // Somebody is still talking and the buffer has reached what
+                // the model reads in one pass. Settle what is there and keep
+                // only what came after the pause it was cut at, so the next
+                // read is one window and not two.
+                self.cut(key);
             } else if !short && seconds - t.asked_at_s >= PARTIAL_EVERY_S {
                 self.ask(key, false);
+            }
+        }
+
+        /// Settle the speech held so far and carry the rest into a new line.
+        pub(super) fn cut(&mut self, key: &str) {
+            let Some(t) = self.talking.get_mut(key) else {
+                return;
+            };
+            if t.waiting {
+                return;
+            }
+            let at = cut_point(&t.pcm, t.rate);
+            let head: Vec<f32> = t.pcm[..at].to_vec();
+            let tail: Vec<f32> = t.pcm[at..].to_vec();
+            let job =
+                Job { key: key.to_string(), at: t.started, pcm: head, rate: t.rate, settled: true };
+            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
+                if let Some(t) = self.talking.get_mut(key) {
+                    // The tail is a new utterance, with its own start time,
+                    // and it waits for the head to come back rather than
+                    // queueing a second window behind it.
+                    t.pcm = tail;
+                    t.started = Instant::now();
+                    t.asked_at_s = 0.0;
+                    t.waiting = true;
+                }
             }
         }
 
@@ -437,7 +919,7 @@ mod work {
                 rate: t.rate,
                 settled,
             };
-            let asked = t.pcm.len() as f64 / t.rate;
+            let asked = t.seconds();
             if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
                 if let Some(t) = self.talking.get_mut(key) {
                     t.waiting = true;
@@ -447,18 +929,48 @@ mod work {
         }
     }
 
-    fn run(dir: std::path::PathBuf, repo: String, jobs: Receiver<Job>, done: Sender<Done>) {
-        let loaded =
-            stt::ensure(&repo, &dir).and_then(|f| stt::Whisper::load(&f, stt::best_device(), None));
+    fn run(
+        dir: std::path::PathBuf,
+        repo: String,
+        choice: stt::DeviceChoice,
+        health: std::sync::Arc<parking_lot::Mutex<Health>>,
+        log: SharedLog,
+        jobs: Receiver<Job>,
+        done: Sender<Done>,
+    ) {
+        let have = stt::Files::in_dir(&dir).is_ok();
+        health.lock().state = if have { ModelState::Loading } else { ModelState::Fetching };
+        let mut label = String::new();
+        let mut note = String::new();
+        let files = stt::ensure(&repo, &dir).map(|f| {
+            let mut h = health.lock();
+            h.describe(Some(&f));
+            h.state = ModelState::Loading;
+            f
+        });
+        let loaded = files.and_then(|f| {
+            stt::Engine::load_on(&f, choice, None).map(|(m, on, why)| {
+                label = on;
+                note = why;
+                m
+            })
+        });
         let mut model = match loaded {
-            Ok(m) => m,
+            Ok(m) => {
+                let mut h = health.lock();
+                h.state = ModelState::Ready;
+                h.device = label;
+                h.note = note;
+                drop(h);
+                m
+            }
             Err(e) => {
-                let msg = format!("whisper in {}: {e}", dir.display());
+                let msg = format!("{}: {e}", stt::label_of(&repo));
+                health.lock().state = ModelState::Failed(msg.clone());
                 while let Ok(job) = jobs.recv() {
                     let _ = done.send(Done {
                         key: job.key,
                         at: job.at,
-                        seconds: 0.0,
                         settled: job.settled,
                         result: Err(common::Error::other(&msg)),
                     });
@@ -466,13 +978,74 @@ mod work {
                 return;
             }
         };
+        // What the model is handed, as files, when asked. The one way to
+        // tell a model that reads nothing from audio that has nothing in it.
+        let dump = std::env::var_os("WAVESHARK_DUMP_STT").map(std::path::PathBuf::from);
+        let mut dumped = 0u32;
         while let Ok(job) = jobs.recv() {
             let seconds = job.pcm.len() as f64 / job.rate.max(1.0);
+            if let Some(dir) = &dump {
+                let name = format!("{dumped:04}_{}_{seconds:.1}s.wav", job.key.replace(':', "_"));
+                let speech = common::Speech { pcm: job.pcm.clone(), rate: job.rate };
+                let _ = crate::audiobus::write_wav(&dir.join(name), &speech);
+                dumped += 1;
+            }
+            let started = Instant::now();
             let result = model.transcribe(&job.pcm, job.rate);
+            {
+                let mut h = health.lock();
+                h.reads += 1;
+                h.last_ms = started.elapsed().as_millis() as u64;
+                h.last_audio_s = seconds;
+                if let Ok(t) = &result {
+                    h.last_text = t.text.trim().to_string();
+                    h.last_speech = t.speech();
+                }
+            }
+            // Written down here, on the thread that read it, and not handed
+            // back to the node: the node is a stage in a graph that is
+            // rebuilt whenever a channel comes or goes, and a reading that
+            // came back to a node that had been rebuilt was thrown away
+            // with the channel it was sent on.
+            let verdict = match &result {
+                Ok(t) => {
+                    let text = t.text.trim().to_string();
+                    if !text.is_empty() {
+                        log.lock().push(Utterance {
+                            key: job.key.clone(),
+                            at: job.at,
+                            seconds,
+                            text,
+                            settled: job.settled,
+                            confidence: t.avg_logprob() as f32,
+                            credible: t.credible(),
+                        });
+                    }
+                    Ok(t.speech())
+                }
+                Err(e) => Err(common::Error::other(format!("{e}"))),
+            };
             if done
-                .send(Done { key: job.key, at: job.at, seconds, settled: job.settled, result })
+                .send(Done {
+                    key: job.key.clone(),
+                    at: job.at,
+                    settled: job.settled,
+                    result: verdict,
+                })
                 .is_err()
             {
+                // Nobody to tell: the node is gone. Whatever this window
+                // read is then the last word on that utterance, since
+                // nothing will ask for the rest of it.
+                if !job.settled {
+                    let mut log = log.lock();
+                    if let Some(u) = log.by_key.get_mut(&job.key).and_then(|v| v.last_mut()) {
+                        if u.at == job.at {
+                            u.settled = true;
+                            log.seq += 1;
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -531,12 +1104,32 @@ impl Simple for LiveTranscribeNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![
+        #[allow(unused_mut)]
+        let mut out = vec![
             Param::bool("enabled", self.enabled).label("Transcribe what is heard"),
             Param::float("min_speech_s", self.min_speech_s, 0.1..=5.0)
                 .unit("s")
                 .label("Shortest speech worth reading"),
-        ]
+        ];
+        // Offered as choices so the chain inspector draws a list, and set
+        // by id so what the patch records is a name and not a position in
+        // a list that grows.
+        #[cfg(feature = "stt")]
+        {
+            let models = self.models();
+            let at = models.iter().position(|m| m.id == self.model_id).unwrap_or(0);
+            out.push(
+                Param::choice("model", at, models.into_iter().map(|m| m.label).collect())
+                    .label("Model"),
+            );
+            let devices = stt::devices();
+            let at = devices.iter().position(|d| d.choice == self.device).unwrap_or(0);
+            out.push(
+                Param::choice("device", at, devices.into_iter().map(|d| d.label).collect())
+                    .label("Run on"),
+            );
+        }
+        out
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -544,15 +1137,46 @@ impl Simple for LiveTranscribeNode {
             "enabled" => self.enabled = v.as_bool().unwrap_or(self.enabled),
             "min_speech_s" => self.min_speech_s = v.as_f64().unwrap_or(self.min_speech_s),
             #[cfg(feature = "stt")]
-            "dir" => self.dir = std::path::PathBuf::from(v.as_str().unwrap_or_default()),
+            "root" => {
+                self.root = std::path::PathBuf::from(v.as_str().unwrap_or_default());
+                self.look();
+            }
+            #[cfg(feature = "stt")]
+            "dir" => {
+                self.explicit_dir = v.as_str().filter(|s| !s.is_empty()).map(Into::into);
+                self.look();
+            }
             #[cfg(feature = "stt")]
             "model" => {
-                if let Some(t) = v.as_str() {
-                    if t != self.repo {
-                        self.repo = t.to_string();
-                        self.worker = None;
-                        self.reported = false;
-                    }
+                let id = match &v {
+                    ParamValue::Choice(i) => self.models().get(*i).map(|m| m.id.clone()),
+                    _ => v.as_str().map(str::to_string),
+                };
+                if let Some(id) = id.filter(|id| *id != self.model_id) {
+                    self.model_id = id;
+                    self.reload();
+                }
+            }
+            #[cfg(feature = "stt")]
+            "device" => {
+                let choice = match &v {
+                    ParamValue::Choice(i) => stt::devices().get(*i).map(|d| d.choice),
+                    _ => v.as_str().map(stt::DeviceChoice::parse),
+                };
+                if let Some(c) = choice.filter(|c| *c != self.device) {
+                    self.device = c;
+                    self.reload();
+                }
+            }
+            // Load it now rather than on the first thing worth reading. The
+            // fetch is tens of megabytes and the load is seconds, and an
+            // operator who has just switched transcription on should be able
+            // to find out whether it works without waiting for somebody to
+            // talk.
+            #[cfg(feature = "stt")]
+            "load" => {
+                if v.as_bool().unwrap_or(false) {
+                    self.worker();
                 }
             }
             _ => {
@@ -665,6 +1289,7 @@ mod tests {
             text: text.into(),
             settled,
             confidence: -0.2,
+            credible: true,
         };
         log.push(u("all stations", false));
         log.push(u("all stations this is", false));
@@ -696,7 +1321,7 @@ mod tests {
         let pcm: Vec<f32> =
             r.into_samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / 32768.0).collect();
 
-        let mut n = LiveTranscribeNode::new().in_dir(&dir);
+        let mut n = LiveTranscribeNode::new().in_dir(&dir).into_log(Default::default());
         let mut events = Vec::new();
         let tags = Vec::new();
         let mut new_tags = Vec::new();
@@ -727,7 +1352,7 @@ mod tests {
         // The model is on its own thread, so the answer arrives on a later
         // block the way it does in the receiver.
         for _ in 0..600 {
-            if n.log().latest(key).is_some_and(|u| u.settled) {
+            if n.log().lock().latest(key).is_some_and(|u| u.settled) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -736,9 +1361,221 @@ mod tests {
             c.block_seconds = 0.1;
             n.process(&Payload::Voice(Vec::new()), &mut out, &mut c).unwrap();
         }
-        let u = n.log().latest(key).expect("nothing was transcribed");
+        let u = n.log().lock().latest(key).cloned().expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
         assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
+    }
+
+    /// The node that asked for a reading is gone by the time it comes back,
+    /// which is what a rebuild does to it: the audio bus is rebuilt whenever
+    /// a channel comes or goes, and the transcriber hangs off the bus. The
+    /// reading still has to be written down. It was not: the worker handed
+    /// its text back to the node, and a dropped node is a closed channel,
+    /// so every read that finished across a rebuild vanished. On screen that
+    /// was a card saying the model had read the words and a transcript with
+    /// no lines in it.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_reading_outlives_the_node_that_asked_for_it() {
+        let dir = crate::chain::default_model_dir();
+        let named = std::env::var("WAVESHARK_TEST_WAV").unwrap_or_else(|_| "/tmp/jfk.wav".into());
+        let wav = std::path::Path::new(&named);
+        if !dir.join("config.json").exists() || !wav.exists() {
+            println!("no model in {} or no {named}; skipping", dir.display());
+            return;
+        }
+        let r = hound::WavReader::open(wav).expect("the wav");
+        let rate = r.spec().sample_rate as f64;
+        let pcm: Vec<f32> =
+            r.into_samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / 32768.0).collect();
+        let log: SharedLog = Default::default();
+        let mut n = LiveTranscribeNode::new().in_dir(&dir).into_log(log.clone());
+        // The model up first, so the read below is the model reading and
+        // not the model loading.
+        n.set_param("load", ParamValue::Bool(true)).unwrap();
+        while n.engine().state != ModelState::Ready {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut events = Vec::new();
+        let tags = Vec::new();
+        let mut new_tags = Vec::new();
+        let ins = [PortSpec {
+            spec: StreamSpec { kind: PortKind::Voice, rate, ..Default::default() },
+            latency: 0,
+        }];
+        let block = (rate * 0.1) as usize;
+        let mut blocks: Vec<Vec<f32>> = pcm.chunks(block).map(|c| c.to_vec()).collect();
+        blocks.extend((0..20).map(|_| vec![0.0; block]));
+        for b in blocks {
+            let payload = Payload::Voice(vec![common::Voice {
+                system: crate::audiobus::ANALOGUE,
+                channel_hz: 145_500_000.0,
+                to: None,
+                from: None,
+                rate,
+                pcm: b,
+            }]);
+            let mut out = Payload::Voice(Vec::new());
+            let mut c = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            c.block_seconds = 0.1;
+            n.process(&payload, &mut out, &mut c).unwrap();
+        }
+        assert!(n.engine().busy, "nothing was asked for");
+        // The rebuild: the node goes while the model still has the window.
+        // What was asked for is the whole utterance so far; whether the node
+        // would have asked for it again as settled is beside the point, since
+        // it is not there to ask.
+        drop(n);
+        let key = "Audio:145500000::";
+        for _ in 0..600 {
+            if log.lock().latest(key).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let u = log.lock().latest(key).cloned().expect("the reading died with the node");
+        // The first partial, since that is what was in flight: the node was
+        // gone before it could ask for the rest, so this is the last word.
+        assert!(u.text.to_lowercase().contains("fellow"), "read as {:?}", u.text);
+        assert!(u.settled, "a partial nobody will replace is not a partial");
+    }
+
+    /// The interface folds the published window in on every frame, so the
+    /// same utterances arrive over and over. One utterance is one start time
+    /// on one key, so the log has to be the same size after the tenth pass
+    /// as after the first.
+    #[test]
+    fn the_same_window_folded_in_again_is_the_same_log() {
+        let mut log = TranscriptLog::default();
+        let at = Instant::now();
+        let window = |text: &str| {
+            vec![
+                Utterance {
+                    key: "Audio:145500000::".into(),
+                    at,
+                    seconds: 2.0,
+                    text: text.into(),
+                    settled: true,
+                    confidence: -0.2,
+                    credible: true,
+                },
+                Utterance {
+                    key: "DMR:435000000:9:1234567".into(),
+                    at: at + Duration::from_secs(3),
+                    seconds: 1.0,
+                    text: "go ahead".into(),
+                    settled: false,
+                    confidence: -0.4,
+                    credible: true,
+                },
+            ]
+        };
+        for _ in 0..10 {
+            for u in window("all stations, this is EI2ABC") {
+                log.push(u);
+            }
+        }
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.keys().len(), 2);
+        // And the partial still becomes the settled line rather than a
+        // second one beside it.
+        for u in window("all stations, this is EI2ABC") {
+            log.push(Utterance { settled: true, text: format!("{} over", u.text), ..u });
+        }
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.of("DMR:435000000:9:1234567").len(), 1);
+        assert_eq!(log.latest("DMR:435000000:9:1234567").unwrap().text, "go ahead over");
+        assert!(log.has("Audio:145500000::"));
+        assert!(!log.has("Audio:433000000::"), "a conversation nobody spoke on");
+    }
+
+    /// The model can be brought up without waiting for somebody to talk, and
+    /// it says what it is running on when it is. That is the whole of what
+    /// the transcript view's card reads.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_model_loads_on_request_and_says_where_it_is_running() {
+        let dir = crate::chain::default_model_dir();
+        if !dir.join("config.json").exists() {
+            println!("no model in {}; skipping", dir.display());
+            return;
+        }
+        let mut n = LiveTranscribeNode::new().in_dir(&dir);
+        let cold = n.engine();
+        assert_eq!(cold.state, ModelState::Cold);
+        assert!(cold.present, "the files are in {}", dir.display());
+        assert!(cold.bytes > 0);
+        assert!(!cold.weights.is_empty(), "what is on disc is not named");
+        assert_eq!(cold.reads, 0);
+
+        n.set_param("load", ParamValue::Bool(true)).unwrap();
+        let waited = std::time::Instant::now();
+        while n.engine().state != ModelState::Ready && waited.elapsed().as_secs() < 120 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let up = n.engine();
+        assert_eq!(up.state, ModelState::Ready, "the model never loaded");
+        assert!(
+            ["CPU", "GPU", "Metal"].iter().any(|d| up.device.starts_with(d)),
+            "running on {:?}",
+            up.device
+        );
+    }
+
+    /// A run of speech that fills the window is cut where it is quietest, so
+    /// the line before the cut ends at a pause rather than in the middle of a
+    /// word.
+    #[test]
+    fn a_full_window_is_cut_at_the_pause_and_not_at_the_end() {
+        let rate = 8_000.0;
+        let mut pcm = vec![0.2f32; (rate * 30.0) as usize];
+        // A gap two seconds from the end, which is inside the search.
+        let gap = pcm.len() - (rate * 2.0) as usize;
+        for s in &mut pcm[gap..gap + (rate * 0.2) as usize] {
+            *s = 0.0;
+        }
+        let at = cut_point(&pcm, rate);
+        assert!(at >= gap && at <= gap + (rate * 0.2) as usize, "cut at {at}, gap at {gap}");
+        // And with nothing quieter than anything else it still cuts inside
+        // the search rather than losing the last seconds.
+        let flat = vec![0.2f32; (rate * 30.0) as usize];
+        let at = cut_point(&flat, rate);
+        assert!(at >= flat.len() - (rate * CUT_SEARCH_S) as usize);
+        assert!(at <= flat.len());
+    }
+
+    /// Squelch noise is loud enough to collect and no threshold tells it from
+    /// speech, so the model's own verdict is what stops it: two windows with
+    /// nothing credible in them and the conversation is left alone until the
+    /// channel closes. Without this a hissing repeater is read for as long as
+    /// it hisses, which is what a receiver holding ninety seconds of nothing
+    /// looks like on screen.
+    #[test]
+    fn a_channel_the_model_finds_nothing_in_is_left_alone() {
+        let mut n = LiveTranscribeNode::new();
+        let key = "Audio:145500000::".to_string();
+        let noise = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.02, 800);
+        let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
+        for _ in 0..50 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert!(n.held_seconds(&key) > 4.0, "noise is collected, since it is loud");
+
+        n.read_back(&key, false);
+        assert!(n.held_seconds(&key) > 4.0, "one empty window is not evidence");
+        n.read_back(&key, false);
+        assert_eq!(n.held_seconds(&key), 0.0, "the second one is");
+        for _ in 0..50 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert_eq!(n.held_seconds(&key), 0.0, "and nothing more is collected");
+
+        // Until the channel closes, which is what starts it listening again.
+        n.collect(key.clone(), &quiet, 0.1, Instant::now());
+        for _ in 0..20 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert!(n.held_seconds(&key) > 1.0);
     }
 
     #[test]
@@ -752,6 +1589,7 @@ mod tests {
                 text: format!("{i}"),
                 settled: true,
                 confidence: -0.2,
+                credible: true,
             });
         }
         assert_eq!(log.keys().len(), MAX_KEYS);

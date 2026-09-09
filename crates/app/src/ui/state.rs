@@ -596,6 +596,26 @@ pub(super) struct MessagesState {
     pub filter: String,
 }
 
+/// The transcript view: what was said, as the model read it.
+///
+/// `log` is a copy of the program's one transcript (`transcripts::log`),
+/// taken whenever its sequence number moves, so the pane draws from
+/// something it owns rather than holding the shared lock while it draws.
+#[derive(Default)]
+pub(super) struct TranscriptState {
+    pub log: crate::transcripts::TranscriptLog,
+    /// The conversation being read on its own, by its key, or `None` for
+    /// everything the receiver heard. Set by the call list's own button.
+    pub only: Option<String>,
+    /// What the operator typed in the filter box.
+    pub filter: String,
+    /// Whether the model has been asked to load, so the button says so once
+    /// rather than every frame.
+    pub asked: bool,
+    /// The transcript's sequence number the copy was taken at.
+    pub seq: u64,
+}
+
 /// The data links view: who is talking to whom, and which link is being
 /// followed.
 #[derive(Default)]

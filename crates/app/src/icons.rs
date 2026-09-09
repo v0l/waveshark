@@ -54,6 +54,9 @@ pub enum Icon {
     Devices,
     Satellite,
     Key,
+    /// What was said, written down: a bubble with words in it, against the
+    /// empty bubble that means text somebody typed.
+    Transcript,
 }
 
 /// Side of the clickable square, in points.
@@ -101,12 +104,12 @@ impl Icon {
             // tab size, where the mast crossed the arm and the two signal
             // arcs closed up into the rim.
             Icon::Satellite => ph::PLANET,
+            // Lines of writing rather than a bubble: `Messages` is the empty
+            // bubble, and here the point is that speech came out as words.
+            Icon::Transcript => ph::ARTICLE,
         }
     }
 
-    /// Draw the icon inside `r`. Public so the panes can settle their corner
-    /// affordance with the same shape the top bar uses: two drawings of the
-    /// same idea is one of them being wrong.
     /// Draw the icon inside `r`. Public so the panes can settle their corner
     /// affordance with the same shape the top bar uses: two drawings of the
     /// same idea is one of them being wrong.

@@ -22,6 +22,11 @@ use crate::model::{Files, Flavour};
 /// endings for sentences that were not cut off.
 const WINDOW: usize = 30 * m::SAMPLE_RATE;
 
+/// That window in seconds, for a caller deciding how much audio to hold: a
+/// buffer longer than this is not one read, it is several, and the cost of a
+/// re-read grows with every second kept.
+pub const WINDOW_S: f64 = 30.0;
+
 /// What one 30-second window came out as.
 #[derive(Clone, Debug)]
 pub struct Segment {
@@ -48,11 +53,44 @@ impl Segment {
 pub struct Transcript {
     pub text: String,
     pub segments: Vec<Segment>,
+    /// The language the model said it heard, where it says. Whisper is
+    /// told or assumes; Qwen3-ASR names it.
+    pub language: Option<String>,
 }
 
 impl Transcript {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty()
+    }
+
+    /// Whether the model believes any window of this was speech it read
+    /// correctly, by its own two thresholds.
+    ///
+    /// A verdict beside the words rather than instead of them. Dropping the
+    /// text on this was the whole of what a caller saw, so a receiver reading
+    /// a fading handheld showed nothing at all and looked broken, when what
+    /// had happened was that the model was unsure and said so.
+    pub fn credible(&self) -> bool {
+        self.segments.iter().any(|s| s.credible())
+    }
+
+    /// The model's own probability that none of this was speech, worst
+    /// window first.
+    pub fn no_speech_prob(&self) -> f64 {
+        self.segments.iter().map(|s| s.no_speech_prob).fold(f64::NAN, f64::min)
+    }
+
+    /// Whether any window held speech at all, whatever the model made of the
+    /// words in it.
+    ///
+    /// Weaker than [`credible`](Self::credible) and asking a different
+    /// question. A fading handheld is speech read badly; a fan, a rainstorm
+    /// and an open squelch are not speech, and the model says so here rather
+    /// than through the log probability of the sentence it invented for them.
+    pub fn speech(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|s| s.no_speech_prob < m::NO_SPEECH_THRESHOLD && !s.text.trim().is_empty())
     }
 
     /// Mean log probability across the windows that were kept, or NaN when
@@ -137,13 +175,7 @@ impl Whisper {
         );
 
         let suppress: Vec<f32> = (0..config.vocab_size as u32)
-            .map(|i| {
-                if config.suppress_tokens.contains(&i) {
-                    f32::NEG_INFINITY
-                } else {
-                    0f32
-                }
-            })
+            .map(|i| if config.suppress_tokens.contains(&i) { f32::NEG_INFINITY } else { 0f32 })
             .collect();
         let suppress = Tensor::new(suppress.as_slice(), &device).map_err(candle)?;
 
@@ -201,7 +233,11 @@ impl Whisper {
             window.resize(WINDOW, 0.0);
             let start_s = (i * WINDOW) as f64 / m::SAMPLE_RATE as f64;
             let seg = self.window(&window, start_s, chunk.len())?;
-            if seg.credible() && !seg.text.trim().is_empty() {
+            // Every window's words are kept, whatever the model thought of
+            // them; `credible` is how it says what it thought. Judging here
+            // threw the reading away where a caller could not see that there
+            // had been one.
+            if !seg.text.trim().is_empty() {
                 if !out.text.is_empty() {
                     out.text.push(' ');
                 }
@@ -248,10 +284,7 @@ impl Whisper {
                 .map_err(candle)?
                 .unsqueeze(0)
                 .map_err(candle)?;
-            let ys = self
-                .weights
-                .decoder(&t, &features, i == 0)
-                .map_err(candle)?;
+            let ys = self.weights.decoder(&t, &features, i == 0).map_err(candle)?;
 
             if i == 0 {
                 let logits = self
@@ -318,9 +351,7 @@ impl Whisper {
 }
 
 fn token(tokenizer: &Tokenizer, t: &str) -> Result<u32> {
-    tokenizer
-        .token_to_id(t)
-        .ok_or_else(|| Error::other(format!("no token id for {t}")))
+    tokenizer.token_to_id(t).ok_or_else(|| Error::other(format!("no token id for {t}")))
 }
 
 fn candle(e: candle_core::Error) -> Error {
@@ -336,11 +367,7 @@ mod tests {
         let pcm = vec![0.0f32; 8000];
         let out = crate::to_whisper_rate(&pcm, 8000.0);
         let ratio = out.len() as f64 / pcm.len() as f64;
-        assert!(
-            (ratio - 2.0).abs() < 0.01,
-            "{} samples from 8 kHz second",
-            out.len()
-        );
+        assert!((ratio - 2.0).abs() < 0.01, "{} samples from 8 kHz second", out.len());
     }
 
     #[test]

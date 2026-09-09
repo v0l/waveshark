@@ -505,11 +505,6 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Utterances republished for the interface. Enough for a pane showing what
-/// has been said this hour; the whole log stays in the node.
-#[cfg(feature = "stt")]
-const SAID_WINDOW: usize = 200;
-
 /// Largest sample in a buffer, which is what a meter reads.
 fn peak_of(pcm: &[f32]) -> f32 {
     pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
@@ -1354,12 +1349,10 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub track_list: parking_lot::Mutex<Vec<crate::tracks::Track>>,
-    /// What has been said lately, from the transcriber on the audio bus tap,
-    /// newest last. A window rather than the whole log: the log is in the
-    /// node, keyed by conversation, and a view that wants the history of one
-    /// asks for that key.
-    #[cfg(feature = "stt")]
-    pub said: parking_lot::Mutex<Vec<crate::transcripts::Utterance>>,
+    /// The transcriber itself: which model, where it is, what it is running
+    /// on and whether it is reading anything. `None` where the graph has no
+    /// transcriber, which is every build made without the `stt` feature.
+    pub transcriber: parking_lot::Mutex<Option<crate::transcripts::Engine>>,
     /// What the raw span capture has written, and where. Off unless somebody
     /// switched it on, which is the usual state.
     pub capture_on: AtomicBool,
@@ -1437,14 +1430,17 @@ pub struct Status {
     /// "nothing was decoded" from "it was decoded and you still cannot hear
     /// it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    /// Who the bus is hearing, and who it has just stopped hearing, since the
+    /// interface last took them. Appended by the radio thread every block
+    /// and drained by the interface every frame: the ending of a call is
+    /// reported once and must not be lost between two frames.
+    pub heard: parking_lot::Mutex<Vec<crate::audiobus::LiveCall>>,
     /// The TETRA cells heard and their key state, for the key manager.
     tetra_keys: parking_lot::Mutex<Vec<nodes::tetra_nodes::KeyStatus>>,
     /// Peak of the whole mix as it left for the speaker, and of the call
     /// bus's share of it, for the meters beside the master and call faders.
     out_level: AtomicU32,
     call_level: AtomicU32,
-    /// Voice transmissions written to disk since the receiver started.
-    pub calls_written: AtomicU64,
     /// What the call bus's gain control is adding, in dB, as f32 bits.
     call_gain_db: AtomicU32,
 }
@@ -1575,10 +1571,10 @@ impl Default for Status {
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            heard: parking_lot::Mutex::new(Vec::new()),
             tetra_keys: parking_lot::Mutex::new(Vec::new()),
             out_level: AtomicU32::new(0),
             call_level: AtomicU32::new(0),
-            calls_written: AtomicU64::new(0),
             call_gain_db: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
@@ -1599,8 +1595,7 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
-            #[cfg(feature = "stt")]
-            said: parking_lot::Mutex::new(Vec::new()),
+            transcriber: parking_lot::Mutex::new(None),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
             capture_folder: AtomicU64::new(0),
@@ -2107,7 +2102,6 @@ fn run(
     let mut calls = BusSettings::default();
     // The same for the video bus: what is being watched outlives the node.
     let mut watching: Vec<crate::videobus::Rule> = vec![crate::videobus::Rule::Everything];
-    let mut call_dir: Option<std::path::PathBuf> = None;
     // Who the WiGLE feed uploads as, which outlives a rebuild for the same
     // reason the survey path does.
     let mut wigle_account: Option<survey::Account> = None;
@@ -2118,7 +2112,6 @@ fn run(
     // all; it runs for as long as the program does, in `crate::station`, and
     // this thread reads the same fix the interface does.
     let mut survey_path: Option<std::path::PathBuf> = None;
-    let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
     // The radio's own transmit gain, and the commands an over held back
@@ -2507,10 +2500,6 @@ fn run(
                 Cmd::TetraIdSecret { colour, c } => rx.set_tetra_id_secret(colour, c),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
-                    // Voice is written beside the log rather than into it: a
-                    // record of what was on the air stays small, and what it
-                    // sounded like is a file per transmission.
-                    call_dir = dir.clone().map(|d| d.join("calls"));
                     rx.set_packet_log(dir);
                     rebuild = true;
                 }
@@ -2815,10 +2804,7 @@ fn run(
             }
             #[cfg(feature = "stt")]
             {
-                let said = rx.said(SAID_WINDOW);
-                if !said.is_empty() || !status.said.lock().is_empty() {
-                    *status.said.lock() = said;
-                }
+                *status.transcriber.lock() = rx.transcriber();
             }
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();
@@ -2930,25 +2916,6 @@ fn run(
 
         records.clear();
         records.extend(rx.decodes(at));
-        // Speech goes to a file per over, assembled from the bursts that
-        // carried it and written when the over ends or goes quiet.
-        if let Some(dir) = &call_dir {
-            let mut done: Vec<crate::callrec::Finished> = Vec::new();
-            for r in &records {
-                done.extend(call_rec.feed(r, at, dir));
-            }
-            done.extend(call_rec.tick(at, dir));
-            for f in done {
-                match crate::audiobus::write_wav(&f.path, &f.speech) {
-                    Ok(()) => status.calls_written.fetch_add(1, Ordering::Relaxed),
-                    Err(e) => {
-                        *status.error.lock() =
-                            Some(format!("cannot write {}: {e}", f.path.display()));
-                        0
-                    }
-                };
-            }
-        }
         dedupe_neighbours(&mut records);
         records.retain(|r| !r.model.is_empty() && dedupe.accept(r, at));
         if let Some(r) = rx.recorder_mut() {
@@ -2985,6 +2952,20 @@ fn run(
         status.set_channel_states(rx.channel_states());
         status.set_strips(rx.audio_node_id(), rx.strips());
         *status.tetra_keys.lock() = rx.tetra_key_status();
+        if let Some(b) = rx.audio_mut().map(|n| n.bus_mut()) {
+            let calls = b.take_calls();
+            if !calls.is_empty() {
+                let mut heard = status.heard.lock();
+                // A running call replaces its last report; an ended one is
+                // kept, since it is the only report that says so.
+                for c in calls {
+                    match heard.iter_mut().find(|h| !h.over && h.key() == c.key()) {
+                        Some(h) => *h = c,
+                        None => heard.push(c),
+                    }
+                }
+            }
+        }
         if let Some(b) = rx.audio().map(|n| n.bus()) {
             Status::set_level(&status.call_level, b.voice_peak());
             *status.call_levels.lock() = b.levels();
@@ -4593,6 +4574,182 @@ pub(crate) mod tests {
             let r = a.audio_rate();
             assert!((r - 48_000.0).abs() < 12_000.0, "{} gave {r} Hz", mode.label());
         }
+    }
+
+    /// A PMR446 handheld through the whole receiver, from IQ to words.
+    ///
+    /// The path this proves is the one that has no test anywhere else: the
+    /// span is decimated to a channel, the channel is demodulated as narrow
+    /// FM, its audio goes on the bus as speech because the channel says it
+    /// is voice, the transcriber on the bus tap collects it, and a line of
+    /// text comes out with the words that were spoken into the handheld. Any
+    /// one of those failing shows up here as an empty transcript, which is
+    /// exactly what it looks like on screen.
+    ///
+    /// Skipped without a model, since fetching one is not something a test
+    /// should do to somebody's machine.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_handheld_on_pmr446_arrives_as_words() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let dir = crate::chain::default_model_dir();
+        if !dir.join("config.json").exists() {
+            eprintln!("skipping: no whisper model in {}", dir.display());
+            return;
+        }
+        // PMR446 channel 1. The capture is tuned 49.1 kHz below it, which is
+        // what the dial was set to rather than anything about the signal.
+        const CHANNEL_HZ: f64 = 446_049_100.0;
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "PMR1".into(),
+            offset_hz: CHANNEL_HZ - buf.center.as_f64(),
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 1.0,
+            muted: false,
+            // Open: the transmission is what the file holds, and a squelch
+            // decision is not what this test is about.
+            squelch_db: Some(-200.0),
+            agc: true,
+            voice: true,
+            tx: None,
+        }];
+        // The transcript is one for the whole program, so what this test
+        // reads is what arrived after it started.
+        let log = crate::transcripts::log();
+        let since = std::time::Instant::now();
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        let _ = replay_blocks(&mut rx, &buf);
+        // The model runs on its own thread, so the answer arrives after the
+        // samples have run out, the way it does in the receiver.
+        let silence = vec![C32::default(); 16_384];
+        let mut said: Vec<crate::transcripts::Utterance> = Vec::new();
+        for _ in 0..600 {
+            let _ = rx.process(&silence);
+            said = log
+                .lock()
+                .recent(usize::MAX)
+                .into_iter()
+                .filter(|u| u.at >= since && u.key.contains(&format!("{}", CHANNEL_HZ as u64)))
+                .cloned()
+                .collect();
+            if said.iter().any(|u| u.settled) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let text = said.iter().map(|u| u.text.as_str()).collect::<Vec<_>>().join(" ");
+        let words = text.to_lowercase();
+        // One transmission is one line. More than one means the utterance
+        // was cut where nobody paused, which is the failure this count is
+        // here to catch; none means nothing reached the model at all.
+        assert_eq!(said.len(), 1, "read as {text:?}");
+        assert!(words.contains("123"), "read as {text:?}");
+        assert!(words.contains("test"), "read as {text:?}");
+        // On the channel it was heard on, since the key is what the call
+        // list and the transcript view meet on.
+        let key = said[0].key.clone();
+        let who = crate::transcripts::Speaker::parse(&key).expect("a key");
+        assert_eq!(who.freq_hz, CHANNEL_HZ as u64, "read on {key}");
+    }
+
+    /// A channel marked as voice is heard through its own fader and listed
+    /// as a call off the audio bus, and nothing of it touches the packet bus.
+    ///
+    /// The bus is the first stop for every demodulator's audio, and the one
+    /// place that knows who is talking now. An analogue over used to be
+    /// wrapped in an empty packet so the call list, which read only the
+    /// packet bus, would see it: that put a row saying nothing into the
+    /// packet log for every transmission, made the channel inaudible until
+    /// something subscribed to it, and was wrong in principle, since there
+    /// is no packet in analogue speech.
+    #[test]
+    fn a_voice_channel_is_heard_and_listed_off_the_audio_bus() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.audio.master = 1.0;
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "PMR1".into(),
+            offset_hz: 446_049_100.0 - buf.center.as_f64(),
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: true,
+            tx: None,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert!(
+            !rx.topology().nodes.iter().any(|n| n.kind == "packet_bus"),
+            "an analogue channel put something on the packet bus"
+        );
+
+        let mut calls = crate::calls::Calls::new();
+        let mut heard: Vec<crate::audiobus::LiveCall> = Vec::new();
+        let mut pcm: Vec<f32> = Vec::new();
+        let mut silent_blocks = 0;
+        for block in buf.samples.chunks(16_384) {
+            if rx.process(block).is_err() {
+                break;
+            }
+            let out = rx.audio_out().0;
+            if out.is_empty() {
+                silent_blocks += 1;
+            }
+            pcm.extend(out.iter().step_by(2));
+            assert!(rx.decodes(std::time::Instant::now()).is_empty(), "speech is not a packet");
+            for c in rx.audio_mut().expect("the bus").bus_mut().take_calls() {
+                calls.hear(&c);
+                heard.push(c);
+            }
+        }
+
+        // Heard, with no subscription to anything: the fader is the strip's.
+        assert_eq!(
+            silent_blocks, 0,
+            "the bus handed the speaker nothing on {silent_blocks} blocks"
+        );
+        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
+        assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
+
+        // Listed, once, as one over of about four seconds on the channel it
+        // was heard on, and the row is the same conversation the transcriber
+        // keys its lines by.
+        let over: Vec<&crate::audiobus::LiveCall> = heard.iter().filter(|c| c.over).collect();
+        assert_eq!(over.len(), 1, "{heard:?}");
+        assert_eq!(over[0].to, "PMR1");
+        assert_eq!(over[0].system, crate::audiobus::ANALOGUE);
+        assert!((3.5..4.5).contains(&over[0].seconds), "the over ran {:.2} s", over[0].seconds);
+        assert_eq!(over[0].key(), "Audio:446049100:PMR1:");
+        let now = std::time::Instant::now();
+        let rows = calls.active(now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].to, "PMR1");
+        assert_eq!(rows[0].overs, 1);
+        assert!((3.5..4.5).contains(&rows[0].seconds), "the row says {:.2} s", rows[0].seconds);
+        assert_eq!(rows[0].transcript_key(), over[0].key());
+    }
+
+    fn pmr446_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/pmr446_test_446.0M_512k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 }
 

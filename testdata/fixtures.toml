@@ -449,3 +449,36 @@ serial = "F8PJC254J001JR4R"
 sequence_first = 437
 sequence_last = 444
 position_reported = false
+
+[[capture]]
+name = "pmr446_test_446.0M_512k.cs8"
+sha256 = "9f74a09ed04446b90db006c86136bd99e7070a227b58c01c576faa514f6da793"
+url = "https://nostr.download/9f74a09ed04446b90db006c86136bd99e7070a227b58c01c576faa514f6da793.xz"
+compression = "xz"
+center_hz = 446_000_000
+rate_sps = 512_000
+format = "cs8"
+description = """
+A PMR446 handheld on channel 1, 446.04915 MHz, saying "one two three, test,
+one two three" into the microphone. Six seconds, HackRF at 512 kS/s tuned
+49 kHz below the channel so the transmission is off centre and clear of the
+tuner's own DC spike. Recorded at a desk with the handheld a metre away, so
+it is full quieting rather than a weak signal.
+
+What it is evidence of is the whole speech path in one file: the span
+decimated to a channel, narrow FM demodulated, the audio put on the bus as
+speech because the channel is marked voice, the transcriber on the bus tap
+collecting it, and a line of text with the words that were spoken. Every
+stage before this test existed and none of them was tested together, which is
+how the receiver came to hold ninety seconds of audio and show nothing.
+
+The expected words are what was said into the handheld, not what this code
+produced. What the model makes of them is its own business: whisper-tiny.en
+reads the whole transmission as "123 test 123", and a larger model that
+punctuates it differently still has to contain those digits and that word.
+"""
+
+[capture.expect]
+channel_hz = 446_049_100
+words = ["123", "test"]
+utterances = 1
