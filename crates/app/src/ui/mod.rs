@@ -2149,6 +2149,11 @@ impl eframe::App for App {
             self.drain();
         }
         self.screenshot(ui.ctx());
+        // Who is talking and what they said, every frame and whichever view
+        // is open. Both used to be read only under --soak, so the call list
+        // and the transcript filled in a soak run and stayed empty in use.
+        self.read_heard();
+        self.read_said();
         self.soak_check(ui.ctx());
         // Read once a frame rather than where it is drawn: the pane's button
         // and the modal both show it, and only one of them is ever open.
@@ -2218,8 +2223,6 @@ impl App {
     /// shell and the number that matters is over a steady-state window.
     fn soak_check(&mut self, ctx: &egui::Context) {
         let Some(secs) = self.soak else { return };
-        self.read_heard();
-        self.read_said();
         if self.shot_sent {
             return;
         }
