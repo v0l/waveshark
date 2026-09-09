@@ -3419,6 +3419,20 @@ pub(crate) mod tests {
         // never handed, so the auto node widens the claim to the band it
         // placed the decoder on.
         assert!(owned.bandwidth_hz >= 18e6, "{owned:?}");
+
+        // And the sound that came with it. A camera puts audio on a
+        // subcarrier of the same transmission, 6.5 MHz up the baseband on
+        // this one, and it arrives on a voice port like any other speech: a
+        // picture with no sound is half a receiver.
+        let heard = rx.voices();
+        let sound = heard.iter().find(|v| v.system == "analogue video").expect("no sound");
+        assert!(sound.rate > 30e3 && sound.rate < 60e3, "{} Hz", sound.rate);
+        assert_eq!(sound.to.as_deref(), Some("A1 or B8"));
+        let peak = sound.pcm.iter().fold(0.0f32, |a: f32, s: &f32| a.max(s.abs()));
+        // The capture is a quiet room, so this is small; what it may not be
+        // is zero, which is what a subcarrier nobody demodulated sounds
+        // like.
+        assert!(peak > 1e-3, "the sound port carried silence, peak {peak}");
     }
 
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
