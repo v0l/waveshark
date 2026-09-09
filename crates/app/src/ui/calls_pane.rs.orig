@@ -9,13 +9,12 @@ use super::state::{AudioState, CallsState};
 use super::*;
 use crate::audiobus::Rule;
 use crate::calls::Call;
-use crate::transcripts::TranscriptLog;
 
 /// Columns, and how wide each is.
 ///
 /// The two subscription boxes come first, because that is what this pane is
 /// for: the rest of the row is what tells you whether to tick them.
-const COLS: [(&str, f32); 13] = [
+const COLS: [(&str, f32); 12] = [
     ("grp", 34.0),
     ("who", 34.0),
     ("system", 60.0),
@@ -28,7 +27,6 @@ const COLS: [(&str, f32); 13] = [
     ("overs", 50.0),
     ("last", 56.0),
     ("said", 320.0),
-    ("log", 46.0),
 ];
 
 /// What the list wants done that it cannot do itself.
@@ -37,9 +35,6 @@ pub(super) enum Action {
     Tune(f64),
     /// Throw the list away.
     Clear,
-    /// Read everything the model heard on one conversation, in the
-    /// transcript view.
-    Transcript(String),
 }
 
 /// The call list, over what it lists and what it has subscribed to.
@@ -50,10 +45,6 @@ pub(super) struct CallList<'a> {
     /// master it read as a control over everything the receiver plays.
     pub audio: &'a mut AudioState,
     pub radio: Option<&'a Radio>,
-    /// What the transcriber has read, so a row can offer a way into it. Only
-    /// where there is something to show: a button that opens an empty pane is
-    /// a button that lies about what was heard.
-    pub said: &'a TranscriptLog,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -106,7 +97,6 @@ impl CallList<'_> {
 
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
         let mut tune_to = None;
-        let mut read: Option<String> = None;
         let mut toggled: Vec<Rule> = Vec::new();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
@@ -173,28 +163,6 @@ impl CallList<'_> {
                         }
                     }
 
-                    // The way into the transcript, on the rows that have one.
-                    // A call the model read nothing on gets no button rather
-                    // than a button onto an empty pane.
-                    let key = c.transcript_key();
-                    if self.said.has(&key) {
-                        let x: f32 = rect.left()
-                            + 12.0
-                            + COLS[..COLS.len() - 1].iter().map(|(_, w)| w).sum::<f32>();
-                        let at = Rect::from_min_size(
-                            Pos2::new(x, rect.top() + 1.0),
-                            Vec2::new(40.0, h - 2.0),
-                        );
-                        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(at));
-                        if sub
-                            .small_button("read")
-                            .on_hover_text("Everything the model read on this conversation")
-                            .clicked()
-                        {
-                            read = Some(key);
-                        }
-                    }
-
                     if resp.clicked() {
                         tune_to = Some(c.channel_hz);
                     }
@@ -231,7 +199,7 @@ impl CallList<'_> {
         }
         // Clicking a row puts the dial on its channel, which is the only
         // other thing anybody wants to do with a call.
-        act.or(read.map(Action::Transcript)).or(tune_to.map(Action::Tune))
+        act.or(tune_to.map(Action::Tune))
     }
 
     /// The call bus: one level for every call the front ends decode, its

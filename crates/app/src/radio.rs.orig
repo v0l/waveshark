@@ -1358,15 +1358,8 @@ pub struct Status {
     /// newest last. A window rather than the whole log: the log is in the
     /// node, keyed by conversation, and a view that wants the history of one
     /// asks for that key.
+    #[cfg(feature = "stt")]
     pub said: parking_lot::Mutex<Vec<crate::transcripts::Utterance>>,
-    /// Bumped whenever that window is replaced, so the interface can fold it
-    /// in when it changes rather than cloning two hundred lines of text on
-    /// every frame it draws.
-    pub said_seq: AtomicU64,
-    /// The transcriber itself: which model, where it is, what it is running
-    /// on and whether it is reading anything. `None` where the graph has no
-    /// transcriber, which is every build made without the `stt` feature.
-    pub transcriber: parking_lot::Mutex<Option<crate::transcripts::Engine>>,
     /// What the raw span capture has written, and where. Off unless somebody
     /// switched it on, which is the usual state.
     pub capture_on: AtomicBool,
@@ -1606,9 +1599,8 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
+            #[cfg(feature = "stt")]
             said: parking_lot::Mutex::new(Vec::new()),
-            said_seq: AtomicU64::new(0),
-            transcriber: parking_lot::Mutex::new(None),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
             capture_folder: AtomicU64::new(0),
@@ -2826,9 +2818,7 @@ fn run(
                 let said = rx.said(SAID_WINDOW);
                 if !said.is_empty() || !status.said.lock().is_empty() {
                     *status.said.lock() = said;
-                    status.said_seq.fetch_add(1, Ordering::Relaxed);
                 }
-                *status.transcriber.lock() = rx.transcriber();
             }
             if !plan.feeds.is_empty() {
                 *status.feeds.lock() = rx.feed_status();

@@ -64,6 +64,19 @@ pub fn best_device() -> candle_core::Device {
     candle_core::Device::Cpu
 }
 
+/// What a device is called, for a pane that has to say where the model is
+/// running. A transcript arriving slowly on the CPU and one arriving quickly
+/// on a card look the same on screen otherwise.
+pub fn device_label(d: &candle_core::Device) -> &'static str {
+    if d.is_cuda() {
+        "CUDA"
+    } else if d.is_metal() {
+        "Metal"
+    } else {
+        "CPU"
+    }
+}
+
 /// Whether a device can do the smallest thing the model will ask of it.
 #[allow(dead_code)]
 fn runs(d: &candle_core::Device) -> bool {

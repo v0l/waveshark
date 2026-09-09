@@ -41,7 +41,7 @@ claims what it can render.
 
 ## Getting to one
 
-The views are tabs in the top bar, in one row of ten with a gap in the
+The views are tabs in the top bar, in one row of eleven with a gap in the
 middle: what the receiver is doing and what it heard on the left of it, who is
 out there on the right, in the order of their shortcuts. A
 dropdown was there first and cost two clicks and a read of a ten-item menu
@@ -49,7 +49,9 @@ each way, which is most of a second to glance at the map and another to come
 back; the strip is one click, and it shows which view is open without being
 opened itself. `Ctrl` and a digit in reading order selects one, and
 ``Ctrl+` `` swaps with the last view, which is the movement an operator makes
-most.
+most. The transcript is `Ctrl+T` rather than a digit: there are eleven views
+and ten digits, and renumbering the strip to fit it in would have moved every
+shortcut an operator had already learned.
 
 A tab carries a dot when its view has taken something in since it was last
 looked at: a track, a call, a message, a device, a picture. Not when it holds
@@ -90,6 +92,29 @@ because traffic does not collect there.
   bus, not from a protocol, and reads `from`, `to`, `seconds`, `call_type` and
   the codec off the record. A DMR call, a TETRA call and an M17 call are the
   same row with different fields filled in. `crates/app/src/calls.rs`.
+
+- **Transcript**: what was said, as the model on the audio bus tap read it,
+  newest at the bottom. A conversation is the transcriber's key,
+  `{proto}:{freq}:{chan}:{speaker}`, so the pane can be opened on one and
+  nothing else, which is what the calls list's "read" button does; that
+  button is drawn only on rows the log has lines for, since a way into an
+  empty pane says something was heard when nothing was. A line still being
+  spoken is dim and marked, because the next partial replaces it, and a
+  reading Whisper is unsure of says so rather than being trusted silently.
+  `crates/app/src/ui/transcript_pane.rs`.
+
+  The pane also draws the model as a piece of equipment: which one, where its
+  files are, whether they are there at all and what they are, its state, the
+  device it runs on, and how fast it read the last window. Without that, a
+  model that was never downloaded, one that failed to load, one too slow to
+  keep up and a band where nobody is talking all look the same, which is to
+  say they all look like an empty pane. What is on disc is what is named,
+  because the repository setting is only where files would be fetched from
+  and a directory filled by an earlier run holds a different model. The
+  status comes off the node through `Status::transcriber`, and the utterances
+  through `Status::said`, a window the interface folds into its own log: an
+  utterance is one start time on one key, so the same window arriving twice
+  replaces rather than repeats.
 
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
@@ -158,7 +183,8 @@ because traffic does not collect there.
   `{proto}:{freq}:{chan}:{speaker}` rather than by a wire between the two.
   Neither knows the other exists, which is what lets a view added later ask
   the same log for the whole of a conversation instead of the last line of
-  it. See `crates/app/src/transcripts.rs`.
+  it, which is what the transcript view does. See
+  `crates/app/src/transcripts.rs`.
 
 - **Video**: the picture, from anything that produces one. The bus keeps a
   channel per transmission, keyed by what it is and where it was received
