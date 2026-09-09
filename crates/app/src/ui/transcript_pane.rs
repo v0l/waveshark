@@ -289,6 +289,43 @@ impl Transcript<'_> {
                     };
                     let where_ = if e.dir.is_empty() { "unset".to_string() } else { e.dir.clone() };
                     l.size(11.0).show(ui).on_hover_text(where_);
+                    // A download is minutes of nothing otherwise: the
+                    // smallest model is 74 MB and the largest a few
+                    // gigabytes, and a card that says only "downloading"
+                    // reads the same as one that has hung.
+                    if matches!(e.state, ModelState::Fetching) {
+                        let f = &e.fetch;
+                        let mut l = theme::Line::new().legend("fetching");
+                        l = if f.file.is_empty() {
+                            l.value("asking the hub")
+                        } else {
+                            l.value(&f.file)
+                        };
+                        if f.total > 0 {
+                            l = l.value(format!(
+                                "{} of {}",
+                                super::human_bytes(f.done),
+                                super::human_bytes(f.total)
+                            ));
+                        } else if f.done > 0 {
+                            l = l.value(super::human_bytes(f.done));
+                        }
+                        if f.files > 1 {
+                            l = l.legend("file").value(format!("{} of {}", f.files_done + 1, f.files));
+                        }
+                        l.size(11.0).show(ui);
+                        if let Some(x) = f.fraction() {
+                            let (r, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width().min(320.0), 6.0),
+                                egui::Sense::hover(),
+                            );
+                            let p = ui.painter();
+                            p.rect_filled(r, 1.0, theme::WELL);
+                            let mut done = r;
+                            done.set_width(r.width() * x.clamp(0.0, 1.0));
+                            p.rect_filled(done, 1.0, theme::TRACE);
+                        }
+                    }
                     ui.horizontal(|ui| {
                         let mut l = theme::Line::new().legend("read").value(e.reads.to_string());
                         if let Some(x) = e.speed() {
@@ -319,25 +356,6 @@ impl Transcript<'_> {
                     }
                     if !e.note.is_empty() {
                         theme::Line::new().words(&e.note).tint(theme::READOUT).wrapped(ui);
-                    }
-                    // What the last window came back as, whether or not it
-                    // became a line. A card saying "read 8" over an empty
-                    // pane is a receiver that looks broken; the same card
-                    // saying the eight reads came back empty and the model
-                    // heard no speech in them is a receiver being handed
-                    // silence, which is a different problem in a different
-                    // place.
-                    if e.reads > 0 {
-                        let (text, tint) = match (e.last_text.is_empty(), e.last_speech) {
-                            (true, _) => ("(nothing)".to_string(), theme::LEGEND),
-                            (false, true) => (e.last_text.clone(), theme::VALUE),
-                            (false, false) => (e.last_text.clone(), theme::FAULT),
-                        };
-                        let mut l = theme::Line::new().legend("last read").words(text).tint(tint);
-                        if !e.last_speech {
-                            l = l.legend("no speech").tint(theme::FAULT);
-                        }
-                        l.size(11.0).wrapped(ui);
                     }
                     // Loading it by hand is the only way to find out whether
                     // transcription works on this machine without waiting

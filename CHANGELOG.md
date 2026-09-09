@@ -12,6 +12,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- The model card shows a download as it happens: which file, how much of it
+  and how many files are left, with a bar. It used to say "downloading" and
+  nothing else for as long as a multi-gigabyte model takes.
 - A dashboard, and the receiver opens on it: what the application can do, as
   cards that take you there, and while a radio is running what it is doing.
   What is tuned, whether the host is keeping up, how much has been decoded,
@@ -172,6 +175,11 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- On Windows the receiver no longer opens a console window behind itself. Run
+  from a terminal it still prints, so `--help` and the offline tools work as
+  before.
+- The transcript card no longer prints what the last window came back as
+  verbatim.
 - The transcript is a table: time, frequency, speaker, group or channel,
   and the words, which wrap.
 

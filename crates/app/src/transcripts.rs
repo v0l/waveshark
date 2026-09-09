@@ -300,6 +300,25 @@ impl ModelState {
     }
 }
 
+/// How far a model download has got. The app's own copy of what `stt`
+/// reports, so the interface does not depend on the feature being built.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fetch {
+    pub file: String,
+    pub done: u64,
+    pub total: u64,
+    pub files_done: usize,
+    pub files: usize,
+}
+
+impl Fetch {
+    /// The fraction of the file in hand, or `None` when the hub has not said
+    /// how big it is.
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| (self.done as f64 / self.total as f64) as f32)
+    }
+}
+
 /// One model a pane can offer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelChoice {
@@ -350,6 +369,11 @@ pub struct Engine {
     pub weights: String,
     pub flavour: String,
     pub state: ModelState,
+    /// How far the download has got, while one is running: the file, the
+    /// bytes of it, and how many files are done. Without it the card says
+    /// "downloading" for as long as a multi-gigabyte model takes, which
+    /// looks exactly like a fetch that has hung.
+    pub fetch: Fetch,
     /// What it is running on, once it has loaded: CPU, CUDA or Metal.
     pub device: String,
     /// Why that is not what Auto reached for first, when it is not: the
@@ -361,11 +385,6 @@ pub struct Engine {
     pub reads: u64,
     pub last_ms: u64,
     pub last_audio_s: f64,
-    /// What the last window came back as, verbatim, and whether the model
-    /// thought it was speech. Shown on the card so a read that produced no
-    /// line can be told from one that never happened.
-    pub last_text: String,
-    pub last_speech: bool,
     /// Speech being collected right now, and on how many conversations.
     pub holding_s: f64,
     pub speakers: usize,
@@ -476,8 +495,7 @@ struct Health {
     reads: u64,
     last_ms: u64,
     last_audio_s: f64,
-    last_text: String,
-    last_speech: bool,
+    fetch: Fetch,
     present: bool,
     bytes: u64,
     weights: String,
@@ -628,8 +646,7 @@ impl LiveTranscribeNode {
             e.reads = h.reads;
             e.last_ms = h.last_ms;
             e.last_audio_s = h.last_audio_s;
-            e.last_text = h.last_text.clone();
-            e.last_speech = h.last_speech;
+            e.fetch = h.fetch.clone();
             e.present = h.present;
             e.bytes = h.bytes;
             e.weights = h.weights.clone();
@@ -942,7 +959,17 @@ mod work {
         health.lock().state = if have { ModelState::Loading } else { ModelState::Fetching };
         let mut label = String::new();
         let mut note = String::new();
-        let files = stt::ensure(&repo, &dir).map(|f| {
+        let files = stt::ensure_with(&repo, &dir, &mut |p| {
+            let mut h = health.lock();
+            h.fetch = Fetch {
+                file: p.file.clone(),
+                done: p.done,
+                total: p.total,
+                files_done: p.files_done,
+                files: p.files,
+            };
+        })
+        .map(|f| {
             let mut h = health.lock();
             h.describe(Some(&f));
             h.state = ModelState::Loading;
@@ -997,10 +1024,6 @@ mod work {
                 h.reads += 1;
                 h.last_ms = started.elapsed().as_millis() as u64;
                 h.last_audio_s = seconds;
-                if let Ok(t) = &result {
-                    h.last_text = t.text.trim().to_string();
-                    h.last_speech = t.speech();
-                }
             }
             // Written down here, on the thread that read it, and not handed
             // back to the node: the node is a stage in a graph that is

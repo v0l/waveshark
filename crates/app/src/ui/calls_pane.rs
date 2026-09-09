@@ -208,8 +208,11 @@ impl CallList<'_> {
                     let mut x = rect.left() + 12.0 + COLS[..2].iter().map(|(_, w)| w).sum::<f32>();
                     for (i, ((text, col), (_, w))) in cells.iter().zip(&COLS[2..]).enumerate() {
                         // The level column is a meter rather than a number:
-                        // what it answers is whether this call is reaching
-                        // the speaker, and a bar answers that at a glance.
+                        // what it answers is how loud this call is arriving,
+                        // and a bar answers that at a glance. The level is
+                        // the one the bus measured off the transmission, not
+                        // the one after the faders, so a call nobody has
+                        // subscribed to still shows that somebody is talking.
                         if i == LEVEL_COL {
                             let key =
                                 crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz, &c.to);
