@@ -23,7 +23,7 @@ const QUEUE_DEPTH: usize = 32;
 /// device-period chunks, so the backlog is a sawtooth whose mean is about half
 /// a block. Targeting the mean rather than the peak keeps the loop near
 /// equilibrium instead of chasing an unreachable level.
-const TARGET_BACKLOG: f64 = 1024.0;
+pub const TARGET_BACKLOG: f64 = 1024.0;
 /// Backlog past which the callback throws queued audio away to get back to
 /// now, in samples per channel: a quarter of a second at 48 kHz.
 ///
