@@ -621,6 +621,24 @@ impl App {
         }
         ui.add_space(10.0);
 
+        // Above the band plan rather than under the version: it is a question
+        // about the interface, like the language and the sound devices, and
+        // somebody looking for it has just come from the dashboard.
+        legend_help(
+            ui,
+            "Dashboard",
+            "Quick start and receiver status, as the first view. Off takes its tab away and \
+             opens the receiver on the spectrum.",
+        );
+        let mut on = self.dashboard;
+        if ui.checkbox(&mut on, "Open on the dashboard").changed() {
+            match on {
+                true => self.dashboard = true,
+                false => self.hide_dashboard(),
+            }
+        }
+        ui.add_space(10.0);
+
         legend_help(ui, t("settings.band_plan"), t("settings.band_plan.help"));
         let mut plan = crate::bands::plan();
         egui::ComboBox::from_id_salt("app-band-plan")

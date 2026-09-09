@@ -27,6 +27,7 @@
 mod burst;
 mod calls_pane;
 mod chain_pane;
+mod dashboard_pane;
 mod devices_pane;
 mod head;
 mod keys_pane;
@@ -129,9 +130,13 @@ pub struct App {
     /// What was open before it. A look at the map and back is then one key,
     /// which is the thing an operator does most often with these views.
     prev_view: View,
+    /// Whether the dashboard is one of the views. Off takes its tab away and
+    /// opens the receiver on the spectrum, for an operator who knows what the
+    /// thing does and wants the band instead.
+    dashboard: bool,
     /// How much each view held when it was last looked at, by
     /// [`View::slot`]. A tab's dot is on when its view has more than this.
-    view_seen: [u64; 10],
+    view_seen: [u64; View::COUNT],
     /// Video transmissions that have ended, and whether one is running.
     /// Counted because the video pane has no list to take a length of.
     video_seen: u64,
@@ -240,6 +245,8 @@ const SPEEDS: [(&str, f32); 5] =
 /// What the main pane shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
+    /// What the receiver can do, and what it is doing.
+    Dashboard,
     Spectrum,
     Chain,
     Map,
@@ -255,6 +262,7 @@ enum View {
 impl View {
     fn label(self) -> &'static str {
         match self {
+            View::Dashboard => "Dashboard",
             View::Spectrum => "Spectrum",
             View::Chain => "Signal chain",
             View::Map => "Map",
@@ -272,6 +280,7 @@ impl View {
     fn icon(self) -> crate::icons::Icon {
         use crate::icons::Icon;
         match self {
+            View::Dashboard => Icon::Dashboard,
             View::Spectrum => Icon::Spectrum,
             View::Chain => Icon::Chain,
             View::Calls => Icon::Calls,
@@ -286,9 +295,10 @@ impl View {
     }
 
     /// One line about what the view holds, under the name in the hover text.
-    /// An icon alone is a rebus, and ten of them need more than a noun.
+    /// An icon alone is a rebus, and a strip of them needs more than a noun.
     fn about(self) -> &'static str {
         match self {
+            View::Dashboard => "What the receiver can do, and what it is doing",
             View::Spectrum => "The span, and the waterfall under it",
             View::Chain => "The graph the receiver is running",
             View::Calls => "Who is talking, from every voice decoder",
@@ -302,51 +312,46 @@ impl View {
         }
     }
 
-    /// The strip, in two rows of five: what the receiver is doing and what it
-    /// heard on the top row, who is out there on the bottom.
-    const ROWS: [[View; 5]; 2] = [
-        [View::Spectrum, View::Chain, View::Calls, View::Messages, View::Video],
-        [View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
+    /// The strip, in two rows: what the receiver can do and what it heard on
+    /// the top row, who is out there on the bottom. The dashboard leads,
+    /// because it is where a receiver that has just been started is.
+    const ROWS: [&'static [View]; 2] = [
+        &[View::Dashboard, View::Spectrum, View::Chain, View::Calls, View::Messages, View::Video],
+        &[View::Map, View::Links, View::Devices, View::Satellites, View::Keys],
     ];
 
-    /// The digit that selects it, held with the modifier key. Reading order
-    /// across the strip, so the number is where the tab is.
-    fn digit(self) -> egui::Key {
-        use egui::Key::*;
-        match self {
-            View::Spectrum => Num1,
-            View::Chain => Num2,
-            View::Calls => Num3,
-            View::Messages => Num4,
-            View::Video => Num5,
-            View::Map => Num6,
-            View::Links => Num7,
-            View::Devices => Num8,
-            View::Satellites => Num9,
-            View::Keys => Num0,
-        }
-    }
+    const COUNT: usize = View::ROWS[0].len() + View::ROWS[1].len();
 
     /// Where the view keeps what it has been seen holding. The strip's own
     /// order, so a reader of one is a reader of the other.
     fn slot(self) -> usize {
-        View::ROWS.into_iter().flatten().position(|v| v == self).unwrap_or(0)
+        View::ROWS.into_iter().flatten().position(|v| *v == self).unwrap_or(0)
     }
+}
 
-    fn digit_label(self) -> &'static str {
-        match self.digit() {
-            egui::Key::Num1 => "1",
-            egui::Key::Num2 => "2",
-            egui::Key::Num3 => "3",
-            egui::Key::Num4 => "4",
-            egui::Key::Num5 => "5",
-            egui::Key::Num6 => "6",
-            egui::Key::Num7 => "7",
-            egui::Key::Num8 => "8",
-            egui::Key::Num9 => "9",
-            _ => "0",
-        }
-    }
+/// The digit that selects the `i`th tab on the strip, held with the modifier
+/// key.
+///
+/// Positional rather than a property of the view, because which tabs are on
+/// the strip depends on whether the dashboard is wanted: the number has to be
+/// where the tab is, so hiding the dashboard puts the spectrum back on 1.
+/// There are ten digits and eleven views, so the last tab has no key. That is
+/// the keys view, which is the one nobody reaches for in a hurry.
+fn tab_digit(i: usize) -> Option<(egui::Key, &'static str)> {
+    use egui::Key::*;
+    const KEYS: [(egui::Key, &str); 10] = [
+        (Num1, "1"),
+        (Num2, "2"),
+        (Num3, "3"),
+        (Num4, "4"),
+        (Num5, "5"),
+        (Num6, "6"),
+        (Num7, "7"),
+        (Num8, "8"),
+        (Num9, "9"),
+        (Num0, "0"),
+    ];
+    KEYS.get(i).copied()
 }
 
 /// Log segments a load reads back, newest first. At 256 MB each this is a
@@ -510,9 +515,10 @@ impl Default for App {
             shot_at: None,
             shot_sent: false,
             dc_block: true,
-            view: View::Spectrum,
-            prev_view: View::Chain,
-            view_seen: [0; 10],
+            view: View::Dashboard,
+            prev_view: View::Spectrum,
+            dashboard: true,
+            view_seen: [0; View::COUNT],
             video_seen: 0,
             video_live_was: false,
             location: None,
@@ -603,6 +609,8 @@ impl App {
             scanners: crate::scanners::Scanners::load(),
             memory: crate::memory::Memory::load(),
             saved: s.clone(),
+            dashboard: s.dashboard,
+            view: if s.dashboard { View::Dashboard } else { View::Spectrum },
             ..Default::default()
         };
         app.map.map.layers.restore(&s.map_layers);
@@ -682,6 +690,7 @@ impl App {
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
             map_layers: self.map.map.layers.saved(),
+            dashboard: self.dashboard,
         }
     }
 
@@ -1663,6 +1672,37 @@ impl App {
         self.err_at = Some(std::time::Instant::now());
     }
 
+    /// Draw the dashboard, then do what it asked for.
+    fn dashboard_view(&mut self, ui: &mut egui::Ui) {
+        let acts = dashboard_pane::Dashboard {
+            radio: self.radio.as_ref(),
+            device: self.device.as_ref().map(|d| d.label.as_str()),
+            center: self.center,
+            rate: self.rate,
+            zoom: self.zoom,
+            decode_on: self.decode_on,
+            counts: dashboard_pane::Counts {
+                tracks: self.map.tracks.len(),
+                calls: self.calls.list.len(),
+                messages: self.messages.list.len(),
+                links: self.links.list.len(),
+                fix: self.accuracy_m.is_some(),
+            },
+        }
+        .show(ui);
+        for a in acts {
+            match a {
+                dashboard_pane::Action::Open(v) => self.set_view(v),
+                dashboard_pane::Action::Panel(p) => self.open = Some(p),
+                dashboard_pane::Action::Start => {
+                    let c = ui.ctx().clone();
+                    self.connect(&c);
+                }
+                dashboard_pane::Action::Hide => self.hide_dashboard(),
+            }
+        }
+    }
+
     /// Draw the key manager.
     fn keys_view(&mut self, ui: &mut egui::Ui) {
         keys_pane::Keys {
@@ -2108,6 +2148,7 @@ impl eframe::App for App {
             let _s = tracing::info_span!("scope").entered();
             CentralPanel::default().frame(egui::Frame::NONE.fill(theme::CHASSIS)).show(ui, |ui| {
                 match self.view {
+                    View::Dashboard => self.dashboard_view(ui),
                     View::Spectrum => self.scope_view(ui),
                     View::Chain => self.chain_view(ui),
                     View::Map => self.map_view(ui),
@@ -2232,7 +2273,7 @@ impl App {
     /// because they are never a place traffic collects.
     fn view_mark(&self, v: View) -> u64 {
         match v {
-            View::Spectrum | View::Chain => 0,
+            View::Dashboard | View::Spectrum | View::Chain => 0,
             View::Calls => self.calls.list.len() as u64,
             View::Messages => self.messages.list.len() as u64,
             View::Video => self.video_seen,
@@ -2265,19 +2306,40 @@ impl App {
         // whether a picture is live only moves while it is being drawn, so a
         // transmission that came and went while the spectrum was open would
         // never have been counted.
-        let sending =
-            self.radio.as_ref().is_some_and(|r| !r.status.video_inputs().is_empty());
+        let sending = self.radio.as_ref().is_some_and(|r| !r.status.video_inputs().is_empty());
         if sending {
             self.video_live_was = true;
         } else if std::mem::take(&mut self.video_live_was) {
             self.video_seen += 1;
         }
-        for v in View::ROWS.into_iter().flatten() {
+        for v in View::ROWS.into_iter().flatten().copied() {
             let mark = self.view_mark(v);
             let seen = &mut self.view_seen[v.slot()];
             if v == self.view || mark < *seen {
                 *seen = mark;
             }
+        }
+    }
+
+    /// The tabs on the strip, in order, without the dashboard when it is not
+    /// wanted. The dashboard leads the top row, so leaving it out is a slice.
+    fn tabs(&self) -> [&'static [View]; 2] {
+        let mut rows = View::ROWS;
+        if !self.dashboard {
+            rows[0] = &View::ROWS[0][1..];
+        }
+        rows
+    }
+
+    /// Stop showing the dashboard, from its own corner or from settings. The
+    /// view it was open on has to go somewhere, and that is the spectrum.
+    fn hide_dashboard(&mut self) {
+        self.dashboard = false;
+        if self.view == View::Dashboard {
+            self.set_view(View::Spectrum);
+        }
+        if self.prev_view == View::Dashboard {
+            self.prev_view = View::Spectrum;
         }
     }
 
@@ -2288,10 +2350,14 @@ impl App {
             return;
         }
         let back = self.prev_view;
+        let tabs = self.tabs();
         let mut pick = None;
         ctx.input_mut(|i| {
-            for v in View::ROWS.into_iter().flatten() {
-                if i.consume_key(egui::Modifiers::COMMAND, v.digit()) {
+            for (n, v) in tabs.into_iter().flatten().copied().enumerate() {
+                let Some((key, _)) = tab_digit(n) else {
+                    continue;
+                };
+                if i.consume_key(egui::Modifiers::COMMAND, key) {
                     pick = Some(v);
                 }
             }
@@ -2896,9 +2962,10 @@ mod tests {
     /// glyph or a digit is a tab that opens the wrong one.
     #[test]
     fn every_view_has_a_tab_of_its_own() {
-        let tabs: Vec<View> = View::ROWS.into_iter().flatten().collect();
-        assert_eq!(tabs.len(), 10);
+        let tabs: Vec<View> = View::ROWS.into_iter().flatten().copied().collect();
+        assert_eq!(tabs.len(), 11);
         for v in [
+            View::Dashboard,
             View::Spectrum,
             View::Chain,
             View::Map,
@@ -2915,10 +2982,46 @@ mod tests {
         for (i, a) in tabs.iter().enumerate() {
             for b in &tabs[i + 1..] {
                 assert!(a.icon() != b.icon(), "{} and {} share a glyph", a.label(), b.label());
-                assert_ne!(a.digit(), b.digit(), "{} and {} share a key", a.label(), b.label());
-                assert_ne!(a.digit_label(), b.digit_label());
             }
         }
+    }
+
+    /// The digit is where the tab is, whichever tabs are on the strip. Eleven
+    /// views and ten digits, so the last tab goes without one; what may never
+    /// happen is two tabs answering to the same key.
+    #[test]
+    fn the_shortcuts_follow_the_strip() {
+        let mut a = app();
+        let with: Vec<View> = a.tabs().into_iter().flatten().copied().collect();
+        assert_eq!(with.first(), Some(&View::Dashboard));
+        assert_eq!(tab_digit(0).map(|(_, d)| d), Some("1"));
+
+        a.hide_dashboard();
+        let without: Vec<View> = a.tabs().into_iter().flatten().copied().collect();
+        assert_eq!(without.len(), with.len() - 1);
+        assert!(!without.contains(&View::Dashboard), "a hidden view keeps its tab");
+        // The spectrum is back on 1, which is where it was before there was a
+        // dashboard to put in front of it.
+        assert_eq!(without.first(), Some(&View::Spectrum));
+
+        let keys: Vec<_> = (0..with.len()).filter_map(tab_digit).collect();
+        assert_eq!(keys.len(), 10, "ten digits for eleven tabs");
+        for (i, x) in keys.iter().enumerate() {
+            for y in &keys[i + 1..] {
+                assert_ne!(x.0, y.0, "two tabs answer to the same key");
+            }
+        }
+    }
+
+    /// Hiding the dashboard while it is open has to leave the operator
+    /// somewhere, and the way back to it may not point at a view with no tab.
+    #[test]
+    fn hiding_the_dashboard_leaves_the_spectrum_open() {
+        let mut a = app();
+        assert_eq!(a.view, View::Dashboard);
+        a.hide_dashboard();
+        assert_eq!(a.view, View::Spectrum);
+        assert_ne!(a.prev_view, View::Dashboard);
     }
 
     /// Going back is one key, which is the whole reason the previous view is
@@ -2926,7 +3029,7 @@ mod tests {
     #[test]
     fn a_view_remembers_the_one_before_it() {
         let mut a = app();
-        assert_eq!(a.view, View::Spectrum);
+        a.set_view(View::Spectrum);
         a.set_view(View::Map);
         assert_eq!(a.prev_view, View::Spectrum);
         // Choosing the view already open is not a move, or the way back
@@ -2980,8 +3083,9 @@ mod tests {
         a.survey.rows.push(heard());
         assert!(a.view_live(View::Devices));
 
-        // The spectrum and the chain are never a place traffic collects, so
-        // they never carry one.
+        // The dashboard, the spectrum and the chain are never a place traffic
+        // collects, so they never carry one.
+        assert!(!a.view_live(View::Dashboard));
         assert!(!a.view_live(View::Spectrum));
         assert!(!a.view_live(View::Chain));
     }

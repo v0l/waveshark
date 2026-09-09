@@ -12,6 +12,13 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- A dashboard, and the receiver opens on it: what the application can do, as
+  cards that take you there, and while a radio is running what it is doing.
+  What is tuned, whether the host is keeping up, how much has been decoded,
+  what is transmitting right now, and what has been heard so far. Turn it off
+  in Settings, App, or from the corner of the view itself, and the receiver
+  opens on the spectrum again.
+
 - DJI DroneID: a DJI aircraft's own broadcast is read, so a row names the
   airframe by the serial printed on it, with its position, height, home point
   and the operator's position where the aircraft has a fix. Needs 15.36 MS/s,

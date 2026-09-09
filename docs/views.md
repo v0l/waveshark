@@ -41,13 +41,14 @@ claims what it can render.
 
 ## Getting to one
 
-The views are tabs in the top bar, in one row of ten with a gap in the
-middle: what the receiver is doing and what it heard on the left of it, who is
+The views are tabs in the top bar, in one row with a gap in the
+middle: what the receiver can do and what it heard on the left of it, who is
 out there on the right, in the order of their shortcuts. A
-dropdown was there first and cost two clicks and a read of a ten-item menu
+dropdown was there first and cost two clicks and a read of a long menu
 each way, which is most of a second to glance at the map and another to come
 back; the strip is one click, and it shows which view is open without being
-opened itself. `Ctrl` and a digit in reading order selects one, and
+opened itself. `Ctrl` and a digit selects one, the digit being the tab's own position on the
+strip so that hiding the dashboard puts the spectrum back on 1, and
 ``Ctrl+` `` swaps with the last view, which is the movement an operator makes
 most.
 
@@ -62,6 +63,29 @@ asked for every view on every frame; the spectrum and the chain answer nothing,
 because traffic does not collect there.
 
 ## The views
+
+- **Dashboard**: the view the receiver opens on, and the only one that is not
+  a view over the packet stream. It answers two questions that are asked at
+  different rates: what the application can do, which somebody asks once, and
+  what the receiver is doing, which somebody asks all day. The first is a card
+  per thing worth starting with, each one a click to the view or the settings
+  panel that does it, railed in the theme's own colours: amber for what the
+  operator sets, cyan for what the radio heard. The second appears only while
+  a radio is running, since every reading on it would otherwise be a zero
+  drawn as a measurement: what is tuned, the real-time trace the top bar also
+  carries (`widgets::speed_trace`, drawn once and shown in two sizes), what
+  has been decoded, what is transmitting in the span right now, and the lamps
+  for dropped samples, audio backlog, faults and the GPS.
+
+  It holds nothing of its own. Every number is read from `radio::Status` or
+  counted off a list another view already keeps, so the dashboard cannot
+  become a second opinion about the receiver.
+
+  An operator who does not want it turns it off in Settings, App, or from the
+  corner of the pane. That takes its tab away and opens the receiver on the
+  spectrum, and because a tab's shortcut is its position on the strip, the
+  spectrum is `Ctrl+1` again. There are eleven views and ten digits, so the
+  last tab, the keys view, has no shortcut.
 
 - **Packet list**: every record, newest at the bottom, with a detail pane
   showing the selected packet's burst as the front end saw it, its
