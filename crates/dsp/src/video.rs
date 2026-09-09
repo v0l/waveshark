@@ -150,6 +150,96 @@ pub struct Lock {
     pub pulses: usize,
     /// Fraction of the gaps between them within one percent of the median.
     pub agreement: f32,
+    /// Lines the gaps account for, against the lines the window holds.
+    ///
+    /// What decides a lock. See [`find_lines`] for why it is not
+    /// `agreement`.
+    pub coverage: f32,
+}
+
+/// What the line test made of a window, for a tool asking why a capture did
+/// not lock. The same arithmetic as [`find_lines`], reported rather than
+/// reduced to a yes or a no.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LockAttempt {
+    /// Sync tip and blanking percentiles, and the slice between them.
+    pub tip: f32,
+    pub black: f32,
+    /// Runs of the right length found.
+    pub pulses: usize,
+    /// Median gap between them, in seconds.
+    pub median_s: f64,
+    /// Fraction of gaps within a percent of the median.
+    pub agreement: f32,
+    /// Lines those gaps account for, against the lines the window holds.
+    pub coverage: f32,
+    pub standard: Option<Standard>,
+}
+
+/// Look for a line rate in demodulated baseband, and say what was found.
+pub fn examine_lines(baseband: &[f32], rate: f64) -> LockAttempt {
+    let mut a = LockAttempt::default();
+    let take = ((0.04 * rate) as usize).min(baseband.len());
+    let base = &baseband[..take];
+    let taps = ((0.25e-6 * rate) as usize).max(1);
+    if base.len() < taps * 4 {
+        return a;
+    }
+    let mut sorted: Vec<f32> = base.to_vec();
+    sorted.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    a.tip = sorted[sorted.len() / 50];
+    a.black = sorted[sorted.len() * 13 / 100];
+    if a.black <= a.tip {
+        return a;
+    }
+    let thresh = (a.tip + a.black) / 2.0;
+    let (mut edges, mut low) = (Vec::new(), 0usize);
+    let (lo, hi) = ((2e-6 * rate) as usize, (8e-6 * rate) as usize);
+    let mut sum: f32 = base[..taps].iter().sum();
+    for i in 0..base.len() - taps {
+        let mean = sum / taps as f32;
+        sum += base[i + taps] - base[i];
+        if mean < thresh {
+            low += 1;
+        } else {
+            if (lo..=hi).contains(&low) {
+                edges.push(i);
+            }
+            low = 0;
+        }
+    }
+    a.pulses = edges.len();
+    if edges.len() < 2 {
+        return a;
+    }
+    let mut gaps: Vec<f64> = edges.windows(2).map(|w| (w[1] - w[0]) as f64 / rate).collect();
+    gaps.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    a.median_s = gaps[gaps.len() / 2];
+    a.standard = Standard::from_line_period(a.median_s);
+    let agree = gaps.iter().filter(|g| (*g / a.median_s - 1.0).abs() < 0.01).count();
+    a.agreement = agree as f32 / gaps.len() as f32;
+    a.coverage = coverage(&gaps, a.median_s, base.len() as f64 / rate);
+    a
+}
+
+/// How much of a window whole lines account for.
+///
+/// A gap of one line period is one line, and a gap of `k` of them is `k`
+/// lines with `k - 1` sync pulses lost to noise, which is a fade rather than
+/// a disagreement. What comes out is the fraction of the window's lines the
+/// pulse train explains, and it is the measure a lock is decided on.
+fn coverage(gaps: &[f64], median_s: f64, window_s: f64) -> f32 {
+    if median_s <= 0.0 || window_s <= 0.0 {
+        return 0.0;
+    }
+    let mut lines = 0.0f64;
+    for g in gaps {
+        let k = (g / median_s).round();
+        if (1.0..=8.0).contains(&k) && (g / (k * median_s) - 1.0).abs() < 0.01 {
+            lines += k;
+        }
+    }
+    (lines / (window_s / median_s)) as f32
 }
 
 /// Look for a line rate in demodulated baseband.
@@ -213,15 +303,25 @@ pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
         .filter(|g| (*g / median - 1.0).abs() < 0.01)
         .count();
     let agreement = agree as f32 / gaps.len() as f32;
-    // Measured, not guessed. The off-air capture in `testdata` scores 0.67,
-    // a synthesised camera 0.99, and the three wide captures that are not
-    // cameras (WiFi, BLE, impulsive noise) never get this far: they fail on
-    // the pulse count or on the median landing at no line period at all. Half
-    // is between the two with room for a worse signal than the one recorded.
-    (agreement > 0.5).then_some(Lock {
+    let coverage = coverage(&gaps, median, base.len() as f64 / rate);
+    // Decided on coverage rather than on agreement, and measured rather than
+    // guessed. Agreement asks what fraction of the gaps are a line long,
+    // which noise ruins twice over: a spurious edge inside a line makes two
+    // gaps that are neither, and a sync pulse lost to noise makes one gap of
+    // two lines that is not one either. On a weak 5.8 GHz camera 40 dB down
+    // the band that put agreement at 0.2 to 0.5, below the half this used to
+    // ask for, while the median gap was 64.0 us every time: the line rate was
+    // never in doubt and the test threw the picture away regardless.
+    //
+    // Coverage asks instead how much of the window whole lines explain, which
+    // a lost pulse does not penalise. The strong AKK capture scores 0.99, the
+    // weak one 0.3 to 0.6, and noise scores nothing because its median is at
+    // no line period at all.
+    (coverage > 0.25).then_some(Lock {
         standard,
         pulses: edges.len(),
         agreement,
+        coverage,
     })
 }
 

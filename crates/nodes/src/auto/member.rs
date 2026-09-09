@@ -45,6 +45,13 @@ pub(super) struct Member {
     /// from the moment the span reaches it; the video front end owns the
     /// whole span, but only while it is reading a picture off it.
     pub(super) band: Option<(f64, f64)>,
+    /// The band a span-wide front end was placed on: what it owns once it
+    /// says it is reading. A claim is widened to this, because a decoder
+    /// knows the stream it was handed and not the span it was cut from, and
+    /// after `Video::chain` band-limits 20 MS/s down to 10 the camera would
+    /// otherwise claim half of its own carrier's span and leave the skirts
+    /// to be opened as sources.
+    pub(super) placed_band: Option<(f64, f64)>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -95,6 +102,21 @@ pub(super) struct Member {
     /// chirp either way, and only its width says which demodulator reads
     /// it.
     pub(super) verdicts: Vec<(dsp::Modulation, f64)>,
+    /// Where in its watch cycle a sampled span-wide front end is, in
+    /// samples, and how long since it last read anything. See
+    /// [`Protocol::watch`].
+    pub(super) watched: usize,
+    pub(super) since_read: f64,
+    /// Whether this front end can produce a packet at all, and so whether
+    /// the ring and the levels behind it are worth keeping.
+    ///
+    /// A picture is not a packet: the video front end publishes fields and
+    /// nothing else, so every sample copied into its ring is copied to be
+    /// thrown away. At 20 MS/s the ring is [`RING_MAX_S`] seconds of complex
+    /// samples, which is 320 MB held and rewritten for a member that has no
+    /// packet to hang it on, and the memory traffic was most of what the
+    /// video front end appeared to cost.
+    keeps_samples: bool,
     /// Samples still to be read before the live ones: what a decoder placed
     /// late has to catch up on, and every block that arrives while it does.
     /// Read a bounded amount a block. Two seconds of history through six
@@ -148,7 +170,21 @@ impl Member {
         extra: &Settings,
         reg: &Registry,
     ) -> Result<Self> {
-        let mut chain = p.chain(at);
+        Self::place_behind(p, spec, at, &[], extra, reg)
+    }
+
+    /// The same, with stages in front of the protocol's own: what the span
+    /// is cut down with before a span-wide decoder reads it.
+    pub(super) fn place_behind(
+        p: &'static dyn Protocol,
+        spec: StreamSpec,
+        at: Placed,
+        pre: &[NodeSpec],
+        extra: &Settings,
+        reg: &Registry,
+    ) -> Result<Self> {
+        let mut chain = pre.to_vec();
+        chain.extend(p.chain(at));
         if let Some(last) = chain.last_mut() {
             last.settings.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
@@ -179,6 +215,8 @@ impl Member {
             .order()
             .filter_map(|(id, _)| graph.node(id).map(|n| n.flush_s()))
             .fold(0.25, f64::max);
+        let (pulses_empty, frames_empty, packets_empty) =
+            (pulses.is_empty(), frames.is_empty(), packets.is_empty());
         Ok(Self {
             name,
             protocol,
@@ -189,6 +227,7 @@ impl Member {
             voice,
             video,
             band: None,
+            placed_band: None,
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
@@ -199,7 +238,43 @@ impl Member {
             noise_pow: f32::NAN,
             verdicts: Vec::new(),
             backlog: VecDeque::new(),
+            watched: 0,
+            since_read: f64::INFINITY,
+            keeps_samples: !pulses_empty || !frames_empty || !packets_empty || router.is_some(),
         })
+    }
+
+    /// Whether this front end wants this block, and account for it either
+    /// way.
+    ///
+    /// A protocol that watches everything always does. One that samples
+    /// reads a window of every cycle until it decodes something, and then
+    /// reads everything until it has been quiet for its hold.
+    pub(super) fn wants(&mut self, samples: usize, rate: f64) -> bool {
+        let watch = match self.protocol.map(|p| p.watch()) {
+            Some(w) => w,
+            None => return true,
+        };
+        let (on_s, every_s, hold_s) = match watch {
+            crate::protocol::Watch::Everything => return true,
+            crate::protocol::Watch::Sampled { on_s, every_s, hold_s } => (on_s, every_s, hold_s),
+        };
+        let block_s = samples as f64 / rate.max(1.0);
+        self.since_read += block_s;
+        if self.since_read <= hold_s {
+            return true;
+        }
+        let period = (every_s * rate) as usize;
+        let on = (on_s * rate) as usize;
+        let at = self.watched % period.max(1);
+        self.watched = self.watched.wrapping_add(samples);
+        at < on
+    }
+
+    /// Say that this front end read something, which puts it back on the
+    /// whole stream for its hold.
+    pub(super) fn read_something(&mut self) {
+        self.since_read = 0.0;
     }
 
     /// Give a member placed late the samples it missed. They are read a
@@ -232,7 +307,7 @@ impl Member {
 
     fn run_now(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
         let rate = self.graph.input_spec().rate;
-        if !iq.is_empty() {
+        if !iq.is_empty() && self.keeps_samples {
             let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
             self.peak_pow = self.peak_pow.max(pow);
             // The floor follows the quietest block and climbs a hundredth

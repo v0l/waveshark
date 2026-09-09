@@ -36,6 +36,9 @@ pub(super) struct VideoState {
     /// Which transmission is being watched, by the key the bus keeps it
     /// under, or `None` for whatever is best.
     watching: Option<String>,
+    /// What that channel was called when it was picked, so the chooser still
+    /// names it after it has faded out of the live list.
+    watching_label: Option<String>,
 }
 
 pub(super) struct VideoPane<'a> {
@@ -52,30 +55,64 @@ pub(super) struct VideoPane<'a> {
 impl VideoPane<'_> {
     pub fn show(self, ui: &mut egui::Ui) {
         let st = self.st;
-        // Which picture, when there is more than one. One channel needs no
-        // chooser, and a row of buttons over an empty pane says nothing.
-        if self.inputs.len() > 1 {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("watching").color(theme::LEGEND).size(11.0));
-                let mut want = st.watching.clone();
-                if ui.selectable_label(want.is_none(), "best").clicked() {
-                    want = None;
-                }
-                for (key, label, complete) in &self.inputs {
-                    let text = format!("{label}  {:.0}%", complete * 100.0);
-                    if ui.selectable_label(want.as_deref() == Some(key.as_str()), text).clicked() {
-                        want = Some(key.clone());
+        // The chooser is always there, including with nothing on the air: a
+        // pane whose only control appears once two transmitters happen to be
+        // up at once looks like a pane with no controls at all.
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            theme::Line::new().legend("watching").show(ui);
+            let mut want = st.watching.clone();
+            let shown = match &want {
+                Some(k) => match self.inputs.iter().find(|(key, _, _)| key == k) {
+                    Some((_, label, complete)) => format!("{label}  {:.0}%", complete * 100.0),
+                    // Off the air, but still what was asked for.
+                    None => format!(
+                        "{}  (waiting)",
+                        st.watching_label.clone().unwrap_or_else(|| k.clone())
+                    ),
+                },
+                None => "best picture".to_string(),
+            };
+            egui::ComboBox::from_id_salt("video-channel")
+                .selected_text(theme::value(shown))
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut want, None, "best picture");
+                    for (key, label, complete) in &self.inputs {
+                        ui.selectable_value(
+                            &mut want,
+                            Some(key.clone()),
+                            format!("{label}  {:.0}%", complete * 100.0),
+                        );
                     }
-                }
-                if want != st.watching {
-                    st.watching = want.clone();
-                    self.cmds.push(Cmd::WatchVideo(match want {
-                        Some(k) => vec![crate::videobus::Rule::Channel(k)],
-                        None => vec![crate::videobus::Rule::Everything],
-                    }));
-                }
-            });
-        }
+                    if self.inputs.is_empty() {
+                        ui.label(
+                            egui::RichText::new("nothing receiving")
+                                .color(theme::LEGEND)
+                                .size(11.0),
+                        );
+                    }
+                });
+            ui.add_space(12.0);
+            let count = match self.inputs.len() {
+                0 => "no channels".to_string(),
+                1 => "1 channel".to_string(),
+                n => format!("{n} channels"),
+            };
+            theme::Line::new().legend(&count).show(ui);
+            if want != st.watching {
+                st.watching_label = want
+                    .as_ref()
+                    .and_then(|k| self.inputs.iter().find(|(key, _, _)| key == k))
+                    .map(|(_, label, _)| label.clone());
+                st.watching = want.clone();
+                self.cmds.push(Cmd::WatchVideo(match want {
+                    Some(k) => vec![crate::videobus::Rule::Channel(k)],
+                    None => vec![crate::videobus::Rule::Everything],
+                }));
+            }
+        });
+        ui.add_space(4.0);
         if let Some(f) = self.frame {
             let new = st.shown.as_ref().is_none_or(|s| s.sequence != f.sequence);
             if new {

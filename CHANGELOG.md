@@ -16,6 +16,10 @@ the code is in the commit log; what a decoder can and cannot do is in
   airframe by the serial printed on it, with its position, height, home point
   and the operator's position where the aircraft has a fix. Needs 15.36 MS/s,
   so a HackRF or a LimeSDR and not an RTL-SDR.
+- The picture pane has a channel chooser: pick a transmission to watch from
+  the dropdown, or leave it on the most complete picture the receiver has.
+  It is there whether or not anything is on the air, and says how many
+  channels are being received.
 - `iq_clipper`, which cuts a recording to the bursts in it and can tune it
   onto one channel first, replacing the `cut` example.
 
@@ -137,6 +141,35 @@ the code is in the commit log; what a decoder can and cannot do is in
   home. The API name and token go in the WiGLE dialog on the devices pane,
   which also shows what is waiting, what has been sent and why an upload
   failed.
+
+### Fixed
+
+- Weak analogue video decodes. The picture was read off the whole sampled
+  span, so a 4.6 MHz camera arrived with 20 MHz of noise on it; it is band
+  limited first, which turned a 5.8 GHz link that produced nothing into one
+  that produces a picture, and halved what the front end costs.
+- Only one video front end is placed on a span. The 5.8 GHz plan names 5865
+  and 5866 as different channels, so a receiver on either read the span
+  twice and published every field twice.
+- Mode S on a wide span reads the 2.4 MS/s it asks for instead of everything
+  the radio is sampling. On a 20 MS/s span it was 127% of a processor core
+  looking at an empty band, and is now 37%.
+- Wi-Fi samples the air, a fifth of a second in every second, until it hears
+  something. Every network beacons ten times a second so they are all still
+  found within a second, and a band with no Wi-Fi on it no longer costs more
+  than everything else the receiver is doing put together.
+- A scanner block added in the interface now demodulates the channel typed
+  into it. It kept the protocol's own default frequency instead, so a camera
+  asked for on 5800 MHz was read on 5865 and nothing appeared.
+- While a camera owns the span, the Wi-Fi and other span-wide decoders stop
+  reading it. An OFDM search through an FM picture was eighteen times real
+  time, which is what kept the picture breaking up.
+- A picture that goes away gives the band back, so a receiver that locked onto
+  a moment of noise recovers after a few seconds instead of staying deaf for
+  the session.
+- A front end that reads the whole span is left out, with a reason, when the
+  span is too narrow for it. It used to be built anyway and take the whole
+  receiver down with it.
 
 ### Changed
 
