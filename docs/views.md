@@ -97,9 +97,9 @@ back; the strip is one click, and it shows which view is open without being
 opened itself. `Ctrl` and a digit selects one, the digit being the tab's own position on the
 strip so that hiding the dashboard puts the spectrum back on 1, and
 ``Ctrl+` `` swaps with the last view, which is the movement an operator makes
-most. There are twelve views and ten digits, so the last two tabs, the
-satellites and the keys, have no shortcut; they are the two nobody reaches
-for in a hurry.
+most. There are thirteen views and ten digits, so the last three tabs, the
+control links, the satellites and the keys, have no shortcut; they are the
+ones nobody reaches for in a hurry.
 
 A tab carries a dot when its view has taken something in since it was last
 looked at: a track, a call, a message, a device, a picture. Not when it holds
@@ -231,6 +231,20 @@ because traffic does not collect there.
   a second arrive and most of them are the same beacon. Selecting a row draws
   that device's sightings on the map. `crates/app/src/ui/devices_pane.rs`,
   over `crates/survey`.
+
+- **Control**: where the sticks are, on every model control link in earshot.
+  One card per handset, not one row per frame: an ExpressLRS link sends a
+  hundred frames a second and a stick moves by a few microseconds between
+  them, so a list of frames is unreadable and a bar per channel is not. Each
+  card carries the sixteen channels in microseconds against a fixed 900 to
+  2100 span with the centre marked, the frame rate measured rather than
+  configured, the level it was heard at, and `armed` in the fault colour
+  because that is the one thing worth seeing from across a room. Channels are
+  merged across frames rather than replaced, since no link sends all sixteen
+  every frame, and a channel that stopped arriving keeps its last position
+  dimmed rather than dropping to zero. Fed by `ReportDetail::Control`, so it
+  knows no protocol. `crates/app/src/ui/control_pane.rs`, over
+  `crates/app/src/control.rs`.
 
 - **Links**: who is talking to whom, on every protocol at once. Wireshark's
   conversation list and follow-stream for radio: a table of links, most
@@ -587,24 +601,6 @@ the work is a `ReportDetail::Sensor` carrying the readings with their units and
 the decoders filling it in. Plotting `field("temperature_C")` would put the
 chart on a name and a unit nothing checks, and a second sensor decoder spelling
 it `temp_c` would be absent from the chart with nothing to say so.
-
-### Control links
-
-`decode::elrs`, `decode::frsky` and `decode::flysky` all recover stick
-positions, and none of them are drawn anywhere: the values reach the packet
-list as fields and stop there. A control link is state rather than a stream,
-and reading it out of a list that takes a hundred rows a second is impossible,
-so the view is one row per transmitter holding the last frame, aged out, with a
-bar per channel and the arm state called out.
-
-The typed part it reads is there: `ReportDetail::Control`, filled in by
-`decode::elrs` through `nodes::elrs_nodes` and by `frsky::Packet::control` and
-`flysky::Packet::control` for when those two get front ends. What is left is
-the pane: one row per transmitter, keyed on the identity the decode names,
-merging each frame's channels into what is held rather than replacing them,
-since FrSky sends 1 to 8 and 9 to 16 in alternate frames and ExpressLRS's
-ordinary rate sends four. Aged out like the device list, since a handset that
-stopped transmitting is not a handset with its sticks centred.
 
 ### More into the message view
 

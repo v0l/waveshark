@@ -29,6 +29,7 @@ mod beacondb;
 mod calls;
 mod chain;
 mod chainview;
+mod control;
 mod data;
 mod devices;
 mod dial;
@@ -703,6 +704,10 @@ struct Args {
     #[arg(long)]
     links: bool,
 
+    /// Open on the control links: where the sticks are on every handset heard
+    #[arg(long)]
+    control: bool,
+
     /// Open on the picture, for analogue video
     #[arg(long)]
     video: bool,
@@ -1110,6 +1115,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.links {
                 app.show_links();
+            }
+            if args.control {
+                app.show_control();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

@@ -922,6 +922,11 @@ pub struct DecodeRecord {
     /// as the decoder recovered it: an aircraft's altitude, a vessel's
     /// heading, a handset's sticks. Typed for the same reason `link` is.
     pub report: common::ReportDetail,
+    /// Who transmitted, where the decoder could say. The device database rows
+    /// on this, and a view holding one row per transmitter needs it for the
+    /// same reason: an identifier read out of a display field is a number two
+    /// protocols can both produce.
+    pub identity: Option<common::Identity>,
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
@@ -972,6 +977,7 @@ impl DecodeRecord {
             crc: Some(true),
             link: None,
             report: common::ReportDetail::Bare,
+            identity: None,
             iq: None,
             audio: None,
         }
@@ -4269,6 +4275,7 @@ pub(crate) mod tests {
             crc: None,
             link: None,
             report: common::ReportDetail::Bare,
+            identity: None,
             iq: None,
             audio: None,
         }

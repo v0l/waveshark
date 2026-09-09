@@ -3924,6 +3924,7 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         crc: d.crc_ok,
         link: d.link.clone(),
         report: d.report.clone(),
+        identity: d.identity.clone(),
         iq: d.iq.clone(),
         audio: d.audio.clone(),
     }

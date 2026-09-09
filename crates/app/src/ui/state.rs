@@ -630,6 +630,12 @@ pub(super) struct LinksState {
     pub error: Option<String>,
 }
 
+/// The control view: the handsets heard, and where their sticks are.
+#[derive(Default)]
+pub(super) struct ControlState {
+    pub list: crate::control::Controls,
+}
+
 /// The key manager: the keys known, and what the operator is typing. The
 /// store exists only with the `tea` feature (there is no key material to keep
 /// without it); the view itself is always present as an encryption monitor.
