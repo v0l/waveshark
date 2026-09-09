@@ -20,7 +20,9 @@ pub use catalogue::{
     DeviceEntry, Family, Model, DEFAULT_MODEL, MODELS,
 };
 pub use engine::Engine;
-pub use model::{ensure, fetch, Files, Flavour, DEFAULT_REPO};
+pub use model::{
+    ensure, ensure_with, fetch, fetch_with, Fetching, Files, Flavour, OnProgress, DEFAULT_REPO,
+};
 pub use whisper::{Segment, Transcript, Whisper, WINDOW_S};
 
 /// What Whisper wants, and what the codecs give us.

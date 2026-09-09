@@ -1,3 +1,13 @@
+//! WaveShark.
+//!
+//! On Windows a release build is a windows-subsystem binary, so double
+//! clicking it opens the receiver and not a console behind it. A debug build
+//! keeps the console, which is where its logging goes, and the command line
+//! options still work either way: a console application started from a
+//! terminal writes to it, and this one attaches to the parent console when
+//! there is one, so `--help` and the offline tools still print.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
@@ -905,7 +915,28 @@ fn m17_dump(path: &std::path::Path) {
     }
 }
 
+/// Write to the console that started this, if one did.
+///
+/// A windows-subsystem binary has no console of its own, which is the point:
+/// double clicking it must not put a black window behind the receiver. Run
+/// from a terminal it should still answer `--help` and print what the
+/// offline tools say, and that needs the parent's console attached by hand.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: no arguments, no handles, and a failure (there is no parent
+    // console) is reported by the return value rather than by anything
+    // happening.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() -> eframe::Result<()> {
+    attach_console();
     let args = Args::parse();
 
     // Registered before anything enumerates: a radio on the network is

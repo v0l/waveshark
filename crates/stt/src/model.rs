@@ -140,21 +140,89 @@ fn gguf_in(dir: &Path) -> Result<PathBuf> {
 /// anything does. A bigger one is a directory away.
 pub const DEFAULT_REPO: &str = "openai/whisper-base.en";
 
+/// How far a download has got, reported as it goes.
+///
+/// A model is between 74 MB and several gigabytes over somebody's home
+/// connection, and without this the interface can only say "downloading" for
+/// as long as it takes, which is indistinguishable from a fetch that has
+/// hung.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fetching {
+    /// The file being fetched now.
+    pub file: String,
+    /// Bytes of it that have arrived, and what it is altogether. The total
+    /// is zero until the hub answers with a length.
+    pub done: u64,
+    pub total: u64,
+    /// Files finished before this one, and how many there are to do. The
+    /// count is only known as the fetch walks the repository, so it grows.
+    pub files_done: usize,
+    pub files: usize,
+}
+
+/// What the hub calls as bytes arrive, folded into a [`Fetching`] and handed
+/// on. Held by reference so one report survives every file of a fetch.
+struct Report<'a, 'b> {
+    seen: &'a std::cell::RefCell<Fetching>,
+    on: &'a std::cell::RefCell<OnProgress<'b>>,
+}
+
+impl hf_hub::api::Progress for Report<'_, '_> {
+    fn init(&mut self, size: usize, filename: &str) {
+        let mut f = self.seen.borrow_mut();
+        f.file = filename.to_string();
+        f.done = 0;
+        f.total = size as u64;
+        (self.on.borrow_mut())(&f);
+    }
+
+    fn update(&mut self, size: usize) {
+        let mut f = self.seen.borrow_mut();
+        f.done += size as u64;
+        (self.on.borrow_mut())(&f);
+    }
+
+    fn finish(&mut self) {
+        let mut f = self.seen.borrow_mut();
+        f.done = f.total;
+        (self.on.borrow_mut())(&f);
+    }
+}
+
+/// Somewhere to report progress to. A closure rather than a trait, because
+/// the one caller keeps it behind a mutex the interface reads.
+pub type OnProgress<'a> = &'a mut dyn FnMut(&Fetching);
+
 /// The files in `dir`, fetching them first if they are not there.
 ///
 /// The download happens on the worker thread, on the first call worth
 /// reading, so a receiver that never hears speech never reaches the network
 /// and one that does is not made to wait at startup.
 pub fn ensure(repo: &str, dir: impl AsRef<Path>) -> Result<Files> {
+    ensure_with(repo, dir, &mut |_| {})
+}
+
+/// The same, telling `on` how the download is going.
+pub fn ensure_with(repo: &str, dir: impl AsRef<Path>, on: OnProgress<'_>) -> Result<Files> {
     let dir = dir.as_ref();
     match Files::in_dir(dir) {
         Ok(f) => Ok(f),
-        Err(_) => fetch(repo, "main", dir),
+        Err(_) => fetch_with(repo, "main", dir, on),
     }
 }
 
 /// Fetch a model from the hub into `dir`, once.
 pub fn fetch(repo: &str, revision: &str, dir: impl AsRef<Path>) -> Result<Files> {
+    fetch_with(repo, revision, dir, &mut |_| {})
+}
+
+/// The same, reporting each file's progress to `on`.
+pub fn fetch_with(
+    repo: &str,
+    revision: &str,
+    dir: impl AsRef<Path>,
+    on: OnProgress<'_>,
+) -> Result<Files> {
     use hf_hub::api::sync::ApiBuilder;
 
     let dir = dir.as_ref();
@@ -166,8 +234,25 @@ pub fn fetch(repo: &str, revision: &str, dir: impl AsRef<Path>) -> Result<Files>
             revision.to_string(),
         ),
     );
+    let seen = std::cell::RefCell::new(Fetching::default());
+    let on = std::cell::RefCell::new(on);
     let get = |name: &str| -> Result<PathBuf> {
-        let src = api.get(name).map_err(|e| Error::other(format!("hub {name}: {e}")))?;
+        {
+            let mut f = seen.borrow_mut();
+            f.file = name.to_string();
+            f.done = 0;
+            f.total = 0;
+            f.files = f.files.max(f.files_done + 1);
+        }
+        let src = api
+            .download_with_progress(name, Report { seen: &seen, on: &on })
+            .map_err(|e| Error::other(format!("hub {name}: {e}")))?;
+        {
+            let mut f = seen.borrow_mut();
+            f.files_done += 1;
+            f.done = f.total;
+        }
+        (on.borrow_mut())(&seen.borrow());
         let dst = dir.join(name);
         if !dst.exists() {
             std::fs::copy(&src, &dst)?;

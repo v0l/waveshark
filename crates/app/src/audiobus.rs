@@ -444,7 +444,6 @@ impl AudioBus {
         if v.pcm.is_empty() || gain <= 0.0 {
             return false;
         }
-        let key = Self::key_of(v.system, v.channel_hz, v.to);
         // Resampling state is per carrier, not per group: only one group on a
         // channel is ever speaking, and a map keyed by group would grow for
         // as long as the receiver runs.
@@ -467,9 +466,6 @@ impl AudioBus {
         for (m, s) in self.voice.iter_mut().zip(self.scratch.iter()) {
             *m += s * gain;
         }
-        let peak = self.scratch.iter().fold(0.0f32, |a, s| a.max((s * gain).abs()));
-        let e = self.peaks.entry(key).or_insert(0.0);
-        *e = e.max(peak);
         self.last = Some(match v.from {
             Some(f) => format!("{f} to {}", v.to),
             None => v.to.to_string(),
@@ -525,6 +521,15 @@ impl AudioBus {
         };
         let key = live_key(v.system, v.channel_hz, to, v.from.as_deref());
         let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        // The meter for the call list, here rather than in `push`, because
+        // this is the one place every voice passes: `push` sees only speech
+        // the subscriptions mix, so an analogue channel on the strip, whose
+        // audio reaches the speaker through `feed`, had a row in the calls
+        // list with a meter that never moved. What it shows is the level the
+        // call arrived at, which is a fact about the transmission rather
+        // than about whose fader is up.
+        let m = self.peaks.entry(Self::key_of(v.system, v.channel_hz, to)).or_insert(0.0);
+        *m = m.max(peak);
         let talking = peak > SPEECH_FLOOR;
         let now = std::time::Instant::now();
         match self.live.get_mut(&key) {
@@ -1072,7 +1077,6 @@ mod tests {
         assert!(!b.push(voice("ALL", "M0ABC", &pcm)));
         b.set_calls(0.5, false);
         assert!(b.push(voice("ALL", "M0ABC", &pcm)));
-        assert!(b.levels().iter().any(|(_, v)| *v > 0.0), "the meter saw it");
     }
 
     #[test]
@@ -1093,6 +1097,19 @@ mod tests {
         // the whole column moved whenever anybody spoke.
         let mut b = bus(&[Rule::System("M17".into())]);
         let pcm = vec![0.5f32; 160];
+        // Through `track`, which is where a meter is filled: every voice the
+        // bus hears passes it, mixed or not.
+        b.track(
+            &common::Voice {
+                system: "M17",
+                channel_hz: 433_475_000.0,
+                to: Some("TG100".into()),
+                from: Some("M0ABC".into()),
+                rate: 8_000.0,
+                pcm: pcm.clone(),
+            },
+            0.02,
+        );
         assert!(b.push(voice("TG100", "M0ABC", &pcm)));
         let levels = b.levels();
         let loud = AudioBus::key_of("M17", 433_475_000.0, "TG100");
@@ -1410,6 +1427,64 @@ mod tests {
             "{frames} frames for {want} of air: {:.3}% out",
             100.0 * (frames as f64 - want as f64) / want as f64
         );
+    }
+
+
+    /// The call list's meter moves for every call the bus hears, whichever
+    /// way its audio arrived.
+    ///
+    /// Analogue speech from a channel on the strip reaches the speaker
+    /// through `feed`, never through `push`, so a meter filled in `push` was
+    /// dead for exactly the rows an operator was listening to: an NFM
+    /// channel had an airtime, a level bar and no movement in it.
+    #[test]
+    fn a_call_has_a_meter_whichever_way_its_audio_arrived() {
+        let mut b = bus(&[]);
+        let pcm = vec![0.4f32; 480];
+        let analogue = common::Voice {
+            system: "Audio",
+            channel_hz: 446_049_100.0,
+            to: Some("PMR5".into()),
+            from: None,
+            rate: 48_000.0,
+            pcm: pcm.clone(),
+        };
+        b.track(&analogue, 0.01);
+        let key = AudioBus::key_of("Audio", 446_049_100.0, "PMR5");
+        let level = |b: &AudioBus| {
+            b.levels().into_iter().find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or(0.0)
+        };
+        assert!(level(&b) > 0.3, "{:?}", b.levels());
+
+        // And it falls back when the transmission stops, so the column is a
+        // meter rather than a high-water mark.
+        for _ in 0..16 {
+            b.clear();
+        }
+        assert_eq!(level(&b), 0.0, "{:?}", b.levels());
+
+        // A call nobody has subscribed to is still measured: the row is
+        // there whether or not its audio is being mixed.
+        assert!(b.gain_for(&Voice {
+            system: "M17",
+            channel_hz: 433e6,
+            to: "M17-M17 C",
+            from: None,
+            pcm: &pcm,
+            rate: 8_000.0,
+        })
+        .is_none());
+        let digital = common::Voice {
+            system: "M17",
+            channel_hz: 433e6,
+            to: Some("M17-M17 C".into()),
+            from: Some("M0ABC".into()),
+            rate: 8_000.0,
+            pcm,
+        };
+        b.track(&digital, 0.01);
+        let k2 = AudioBus::key_of("M17", 433e6, "M17-M17 C");
+        assert!(b.levels().iter().any(|(k, v)| *k == k2 && *v > 0.3), "{:?}", b.levels());
     }
 
 }
