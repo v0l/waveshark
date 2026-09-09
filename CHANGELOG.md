@@ -32,6 +32,10 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
+- The transcript view and the call list fill in as speech is read. Both
+  were only read under the soak option, so a model that read every word
+  showed "0 lines" and the call list stayed empty.
+
 - A channel marked as voice is heard through its own fader like any other
   channel, and listed in the calls view from the audio bus. It used to be
   wrapped in an empty packet so the call list would see it, which put a
