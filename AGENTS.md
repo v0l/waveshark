@@ -281,13 +281,24 @@ invisible on synthesised M17.
    cut those, or the whole band appears to switch on at once and every source
    opens in the same frame.
 
-   `cargo run --release -p sources --example cut` does both cuts. With
-   `--bursts` it keeps the samples the transmissions were in and drops the
-   silence, which on a packet capture is most of the file: the BLE fixture is
-   a seventeenth of what was recorded and every packet still decodes. With
-   `--seconds N` (and `--skip N`) it keeps a window, which is all a continuous
-   signal allows. It copies bytes straight out of the input, so the output is
-   the same recording at the same scale.
+   `cargo run --release -p sources --bin iq_clipper` does the cutting, and
+   `--help` lists everything. With `--bursts` it keeps the samples the
+   transmissions were in and drops the silence, which on a packet capture is
+   most of the file: the BLE fixture is a seventeenth of what was recorded and
+   every packet still decodes. With `--seconds N` (and `--skip N`) it keeps a
+   window, which is all a continuous signal allows. Clipping copies bytes
+   straight out of the input, so the output is the same recording at the same
+   scale.
+
+   It also tunes. `--center-hz` and `--rate` mix and resample, which is what a
+   wideband recording needs before it can be cut at all: 61.44 MS/s of 2.4 GHz
+   is mostly Wi-Fi whatever else is in it, so clipping on power keeps three
+   quarters of the file, while the same recording tuned to the 15.36 MS/s a
+   DroneID frame lives at clips to a twenty-sixth and every burst still
+   decodes to the same bytes. Tuning breaks the promise above: the output is a
+   filtered, shifted, resampled view of one channel rather than the band, so
+   name it for what it now holds and say in the manifest entry that it was
+   tuned.
 
    Two things to check before uploading a cut. The margin either side of a
    burst is not decoration: a detector takes its noise floor from a percentile
