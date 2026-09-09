@@ -317,6 +317,9 @@ impl Transcript<'_> {
                     if let ModelState::Failed(why) = &e.state {
                         theme::Line::new().words(why).tint(theme::FAULT).wrapped(ui);
                     }
+                    if !e.note.is_empty() {
+                        theme::Line::new().words(&e.note).tint(theme::READOUT).wrapped(ui);
+                    }
                     // What the last window came back as, whether or not it
                     // became a line. A card saying "read 8" over an empty
                     // pane is a receiver that looks broken; the same card

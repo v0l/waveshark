@@ -30,6 +30,33 @@ impl Engine {
         }
     }
 
+    /// Load onto what `choice` names, and say what that turned out to be.
+    ///
+    /// `Auto` promised the fastest thing that works, and a card with no
+    /// room for the weights, or one that opens and then refuses, is not it:
+    /// the CPU is slower and not nothing, so Auto falls back to it and the
+    /// second string says why. A card picked by name fails outright, since
+    /// the operator who chose it would rather know than read slowly.
+    pub fn load_on(
+        files: &Files,
+        choice: crate::DeviceChoice,
+        language: Option<&str>,
+    ) -> Result<(Self, String, String)> {
+        let device = choice.open()?;
+        let label = crate::device_label(&device);
+        let on_gpu = !matches!(device, Device::Cpu);
+        match Self::load(files, device, language) {
+            Err(e) if on_gpu && choice == crate::DeviceChoice::Auto => {
+                tracing::warn!("{label} could not load the model ({e}); using the CPU");
+                let note = format!("{label} could not load it: {e}");
+                let m = Self::load(files, Device::Cpu, language)?;
+                Ok((m, crate::device_label(&Device::Cpu), note))
+            }
+            Err(e) => Err(e),
+            Ok(m) => Ok((m, label, String::new())),
+        }
+    }
+
     pub fn family(&self) -> Family {
         match self {
             Self::Whisper(_) => Family::Whisper,

@@ -352,6 +352,9 @@ pub struct Engine {
     pub state: ModelState,
     /// What it is running on, once it has loaded: CPU, CUDA or Metal.
     pub device: String,
+    /// Why that is not what Auto reached for first, when it is not: the
+    /// card had no room, or opened and could not run.
+    pub note: String,
     /// Windows read since it loaded, and what the last one cost against how
     /// much audio it was. A receiver whose model is slower than real time is
     /// a receiver that will fall behind, and this is where that shows.
@@ -468,6 +471,8 @@ pub struct LiveTranscribeNode {
 struct Health {
     state: ModelState,
     device: String,
+    /// Why it is not where it was asked to be, when it is not.
+    note: String,
     reads: u64,
     last_ms: u64,
     last_audio_s: f64,
@@ -619,6 +624,7 @@ impl LiveTranscribeNode {
             let h = self.health.lock();
             e.state = h.state.clone();
             e.device = h.device.clone();
+            e.note = h.note.clone();
             e.reads = h.reads;
             e.last_ms = h.last_ms;
             e.last_audio_s = h.last_audio_s;
@@ -935,15 +941,18 @@ mod work {
         let have = stt::Files::in_dir(&dir).is_ok();
         health.lock().state = if have { ModelState::Loading } else { ModelState::Fetching };
         let mut label = String::new();
-        let loaded = choice.open().and_then(|device| {
-            label = stt::device_label(&device);
-            stt::ensure(&repo, &dir).and_then(|f| {
-                {
-                    let mut h = health.lock();
-                    h.describe(Some(&f));
-                    h.state = ModelState::Loading;
-                }
-                stt::Engine::load(&f, device, None)
+        let mut note = String::new();
+        let files = stt::ensure(&repo, &dir).map(|f| {
+            let mut h = health.lock();
+            h.describe(Some(&f));
+            h.state = ModelState::Loading;
+            f
+        });
+        let loaded = files.and_then(|f| {
+            stt::Engine::load_on(&f, choice, None).map(|(m, on, why)| {
+                label = on;
+                note = why;
+                m
             })
         });
         let mut model = match loaded {
@@ -951,6 +960,7 @@ mod work {
                 let mut h = health.lock();
                 h.state = ModelState::Ready;
                 h.device = label;
+                h.note = note;
                 drop(h);
                 m
             }

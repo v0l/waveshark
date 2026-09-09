@@ -28,9 +28,11 @@ fn main() -> common::Result<()> {
     println!("{} in {}", files.family.label(), dir.display());
 
     let (pcm, rate) = read_wav(&wav)?;
-    let dev = device.open()?;
-    println!("on {}", stt::device_label(&dev));
-    let mut w = stt::Engine::load(&files, dev, None)?;
+    let (mut w, on, note) = stt::Engine::load_on(&files, device, None)?;
+    println!("on {on}");
+    if !note.is_empty() {
+        println!("{note}");
+    }
     // Twice, because the first read on a GPU is mostly the driver compiling
     // kernels and says nothing about how fast the model is.
     let t0 = std::time::Instant::now();
