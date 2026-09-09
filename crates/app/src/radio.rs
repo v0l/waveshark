@@ -505,11 +505,6 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Utterances republished for the interface. Enough for a pane showing what
-/// has been said this hour; the whole log stays in the node.
-#[cfg(feature = "stt")]
-const SAID_WINDOW: usize = 200;
-
 /// Largest sample in a buffer, which is what a meter reads.
 fn peak_of(pcm: &[f32]) -> f32 {
     pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
@@ -1354,15 +1349,6 @@ pub struct Status {
     /// The aircraft the tracker in the graph is holding, republished at the
     /// display's frame rate.
     pub track_list: parking_lot::Mutex<Vec<crate::tracks::Track>>,
-    /// What has been said lately, from the transcriber on the audio bus tap,
-    /// newest last. A window rather than the whole log: the log is in the
-    /// node, keyed by conversation, and a view that wants the history of one
-    /// asks for that key.
-    pub said: parking_lot::Mutex<Vec<crate::transcripts::Utterance>>,
-    /// Bumped whenever that window is replaced, so the interface can fold it
-    /// in when it changes rather than cloning two hundred lines of text on
-    /// every frame it draws.
-    pub said_seq: AtomicU64,
     /// The transcriber itself: which model, where it is, what it is running
     /// on and whether it is reading anything. `None` where the graph has no
     /// transcriber, which is every build made without the `stt` feature.
@@ -1609,8 +1595,6 @@ impl Default for Status {
             aircraft: AtomicU64::new(0),
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
-            said: parking_lot::Mutex::new(Vec::new()),
-            said_seq: AtomicU64::new(0),
             transcriber: parking_lot::Mutex::new(None),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
@@ -2820,11 +2804,6 @@ fn run(
             }
             #[cfg(feature = "stt")]
             {
-                let said = rx.said(SAID_WINDOW);
-                if !said.is_empty() || !status.said.lock().is_empty() {
-                    *status.said.lock() = said;
-                    status.said_seq.fetch_add(1, Ordering::Relaxed);
-                }
                 *status.transcriber.lock() = rx.transcriber();
             }
             if !plan.feeds.is_empty() {
@@ -4636,15 +4615,25 @@ pub(crate) mod tests {
             voice: true,
             tx: None,
         }];
+        // The transcript is one for the whole program, so what this test
+        // reads is what arrived after it started.
+        let log = crate::transcripts::log();
+        let since = std::time::Instant::now();
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
         let _ = replay_blocks(&mut rx, &buf);
         // The model runs on its own thread, so the answer arrives after the
         // samples have run out, the way it does in the receiver.
         let silence = vec![C32::default(); 16_384];
-        let mut said = Vec::new();
+        let mut said: Vec<crate::transcripts::Utterance> = Vec::new();
         for _ in 0..600 {
             let _ = rx.process(&silence);
-            said = rx.said(64);
+            said = log
+                .lock()
+                .recent(usize::MAX)
+                .into_iter()
+                .filter(|u| u.at >= since && u.key.contains(&format!("{}", CHANNEL_HZ as u64)))
+                .cloned()
+                .collect();
             if said.iter().any(|u| u.settled) {
                 break;
             }

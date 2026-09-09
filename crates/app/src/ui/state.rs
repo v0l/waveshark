@@ -598,11 +598,9 @@ pub(super) struct MessagesState {
 
 /// The transcript view: what was said, as the model read it.
 ///
-/// The log is kept here as well as in the node because the radio thread
-/// publishes a window of the newest utterances and the interface wants the
-/// afternoon: folding each window in as it arrives builds that back, and an
-/// utterance is one start time on one conversation so the same window
-/// arriving twice replaces rather than repeats.
+/// `log` is a copy of the program's one transcript (`transcripts::log`),
+/// taken whenever its sequence number moves, so the pane draws from
+/// something it owns rather than holding the shared lock while it draws.
 #[derive(Default)]
 pub(super) struct TranscriptState {
     pub log: crate::transcripts::TranscriptLog,
@@ -614,7 +612,7 @@ pub(super) struct TranscriptState {
     /// Whether the model has been asked to load, so the button says so once
     /// rather than every frame.
     pub asked: bool,
-    /// The published window this has already folded in.
+    /// The transcript's sequence number the copy was taken at.
     pub seq: u64,
 }
 

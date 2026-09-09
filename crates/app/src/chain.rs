@@ -1924,29 +1924,6 @@ impl Receiver {
             .unwrap_or_default()
     }
 
-    /// What has been said lately, newest last.
-    ///
-    /// Read off the node rather than published on the status, because the
-    /// text of a busy afternoon is larger than anything else the interface
-    /// polls and a view wants a window of it rather than all of it.
-    #[cfg(feature = "stt")]
-    pub fn said(&self, n: usize) -> Vec<crate::transcripts::Utterance> {
-        self.transcripts
-            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
-            .map(|t| t.log().recent(n).into_iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// What was said on one conversation, oldest first. The key is
-    /// `{proto}:{freq}:{chan}:{speaker}`; see `crate::transcripts`.
-    #[cfg(feature = "stt")]
-    pub fn said_on(&self, key: &str) -> Vec<crate::transcripts::Utterance> {
-        self.transcripts
-            .and_then(|id| downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id))
-            .map(|t| t.log().of(key).to_vec())
-            .unwrap_or_default()
-    }
-
     /// What the transcriber is, where its model is, and what it is doing.
     ///
     /// `None` when there is no transcriber in the graph at all, which is a
@@ -4099,6 +4076,39 @@ mod tests {
         assert_eq!(fed.len(), 1);
         assert!(fed[0].voice, "the strip is named as a conversation");
         assert_eq!(fed[0].label, "CH1");
+    }
+
+    /// The transcript outlives the graph. The transcriber is a stage wired
+    /// off the audio bus, and the bus is rebuilt whenever a channel comes or
+    /// goes, so a transcript kept inside the node was emptied by adding a
+    /// channel: on screen, three reads and no lines.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_transcript_survives_a_rebuild() {
+        let log = crate::transcripts::log();
+        let key = format!("Audio:{}:CH-rebuild:", 145_000_000u64);
+        log.lock().push(crate::transcripts::Utterance {
+            key: key.clone(),
+            at: std::time::Instant::now(),
+            seconds: 1.0,
+            text: "still here".into(),
+            settled: true,
+            confidence: -0.2,
+            credible: true,
+        });
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let first = rx.transcriber().expect("a transcriber");
+        plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
+        rx.rebuild(&plan).expect("a rebuild");
+        let second = rx.transcriber().expect("a transcriber");
+        // The node's own state did not survive: this is the rebuild that
+        // used to take the transcript with it.
+        assert_eq!(second.reads, 0);
+        assert_eq!(first.reads, 0);
+        assert_eq!(log.lock().latest(&key).map(|u| u.text.as_str()), Some("still here"));
     }
 
     /// Without the mark it is audio and nothing else, which is what an
