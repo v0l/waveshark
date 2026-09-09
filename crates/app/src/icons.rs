@@ -38,6 +38,19 @@ pub enum Icon {
     Data,
     /// Open the page a dataset comes from, in a browser.
     Link,
+    /// The views, one glyph each. They are tabs rather than a list, so each
+    /// one has to be told apart from the other nine at 22 points: no two of
+    /// them share a silhouette.
+    Spectrum,
+    Chain,
+    Map,
+    Calls,
+    Messages,
+    Video,
+    Links,
+    Devices,
+    Satellite,
+    Key,
 }
 
 /// Side of the clickable square, in points.
@@ -255,6 +268,196 @@ impl Icon {
                     s,
                 );
             }
+            Icon::Spectrum => {
+                // A trace with one signal standing out of the noise, which
+                // is what the pane shows. Distinct from `Decode`'s three
+                // bars because the two sit in the same bar.
+                let n = 16;
+                let pts: Vec<Pos2> = (0..=n)
+                    .map(|i| {
+                        let t = i as f32 / n as f32;
+                        let x = b.left() + b.width() * t;
+                        // A narrow peak at 0.55, on a floor that wobbles.
+                        let d = (t - 0.55) / 0.09;
+                        let peak = (-d * d).exp();
+                        let floor = 0.12 * ((t * 27.0).sin() * 0.5 + 0.5);
+                        let y = b.bottom() - b.height() * (0.1 + floor + 0.8 * peak);
+                        Pos2::new(x, y)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, Stroke::new(sw * 0.9, col)));
+            }
+            Icon::Chain => {
+                // Two stages and a wire between them: the graph, drawn as
+                // the chain view draws it.
+                let h = b.height() * 0.34;
+                let w = b.width() * 0.34;
+                let left = Rect::from_min_size(
+                    Pos2::new(b.left(), b.top() + b.height() * 0.08),
+                    Vec2::new(w, h),
+                );
+                let right = Rect::from_min_size(
+                    Pos2::new(b.right() - w, b.bottom() - h - b.height() * 0.08),
+                    Vec2::new(w, h),
+                );
+                p.rect_stroke(left, 1.0, s, egui::StrokeKind::Middle);
+                p.rect_stroke(right, 1.0, s, egui::StrokeKind::Middle);
+                p.line_segment([left.right_center(), Pos2::new(right.left(), left.center().y)], s);
+                p.line_segment(
+                    [Pos2::new(right.left(), left.center().y), right.left_center()],
+                    s,
+                );
+            }
+            Icon::Map => {
+                // The pin every map has dropped since maps were on screens.
+                let head = Pos2::new(c.x, b.top() + b.height() * 0.34);
+                let rad = b.width() * 0.27;
+                p.circle_stroke(head, rad, s);
+                for side in [-1.0f32, 1.0] {
+                    p.line_segment(
+                        [
+                            Pos2::new(head.x + side * rad * 0.86, head.y + rad * 0.5),
+                            Pos2::new(c.x, b.bottom()),
+                        ],
+                        s,
+                    );
+                }
+            }
+            Icon::Calls => {
+                // A microphone: who is talking, not what is coming out of
+                // the speaker, which is what `Sound` already means.
+                let w = b.width() * 0.34;
+                let cap = Rect::from_min_size(
+                    Pos2::new(c.x - w * 0.5, b.top()),
+                    Vec2::new(w, b.height() * 0.52),
+                );
+                p.rect_stroke(cap, w * 0.5, s, egui::StrokeKind::Middle);
+                let cradle = b.height() * 0.28;
+                let pts: Vec<Pos2> = (0..=10)
+                    .map(|i| {
+                        let a = std::f32::consts::PI * i as f32 / 10.0;
+                        Pos2::new(c.x + cradle * a.cos(), cap.bottom() + cradle * a.sin() * 0.8)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, s));
+                p.line_segment([Pos2::new(c.x, cap.bottom() + cradle * 0.8), Pos2::new(c.x, b.bottom())], s);
+            }
+            Icon::Messages => {
+                // A bubble with a tail. Lines inside it would close up at
+                // this size, so the shape carries it alone.
+                let body = Rect::from_min_max(
+                    Pos2::new(b.left(), b.top() + b.height() * 0.08),
+                    Pos2::new(b.right(), b.bottom() - b.height() * 0.3),
+                );
+                p.rect_stroke(body, b.width() * 0.18, s, egui::StrokeKind::Middle);
+                p.add(egui::Shape::line(
+                    vec![
+                        Pos2::new(body.left() + body.width() * 0.24, body.bottom()),
+                        Pos2::new(body.left() + body.width() * 0.18, b.bottom()),
+                        Pos2::new(body.left() + body.width() * 0.52, body.bottom()),
+                    ],
+                    s,
+                ));
+            }
+            Icon::Video => {
+                // A screen on a stand. A film frame with sprocket holes is
+                // the other convention and it fills in at this size.
+                let screen = Rect::from_min_max(
+                    Pos2::new(b.left(), b.top() + b.height() * 0.06),
+                    Pos2::new(b.right(), b.bottom() - b.height() * 0.34),
+                );
+                p.rect_stroke(screen, 1.0, s, egui::StrokeKind::Middle);
+                p.line_segment([Pos2::new(c.x, screen.bottom()), Pos2::new(c.x, b.bottom())], s);
+                p.line_segment(
+                    [
+                        Pos2::new(b.left() + b.width() * 0.24, b.bottom()),
+                        Pos2::new(b.right() - b.width() * 0.24, b.bottom()),
+                    ],
+                    s,
+                );
+            }
+            Icon::Links => {
+                // Two ends and the traffic between them: who is talking to
+                // whom. The boxes of `Chain` are stages; these are parties.
+                let rad = b.width() * 0.16;
+                let (l, r) = (
+                    Pos2::new(b.left() + rad, b.top() + rad),
+                    Pos2::new(b.right() - rad, b.bottom() - rad),
+                );
+                p.circle_stroke(l, rad, s);
+                p.circle_stroke(r, rad, s);
+                let dir = (r - l).normalized();
+                let (a, z) = (l + dir * rad * 1.4, r - dir * rad * 1.4);
+                p.line_segment([a, z], s);
+                // One arrowhead, so the line reads as a direction rather
+                // than a rod.
+                let back = -dir * b.width() * 0.16;
+                let n = Vec2::new(-dir.y, dir.x) * b.width() * 0.1;
+                p.line_segment([z, z + back + n], s);
+                p.line_segment([z, z + back - n], s);
+            }
+            Icon::Devices => {
+                // A handset: a body with a stub antenna, which is what the
+                // survey is a list of.
+                let w = b.width() * 0.52;
+                let body = Rect::from_min_max(
+                    Pos2::new(c.x - w * 0.5, b.top() + b.height() * 0.3),
+                    Pos2::new(c.x + w * 0.5, b.bottom()),
+                );
+                p.rect_stroke(body, b.width() * 0.1, s, egui::StrokeKind::Middle);
+                let ant = Pos2::new(body.right() - w * 0.22, body.top());
+                p.line_segment([ant, Pos2::new(ant.x + b.width() * 0.12, b.top())], s);
+                p.line_segment(
+                    [
+                        Pos2::new(body.left() + w * 0.22, body.center().y),
+                        Pos2::new(body.right() - w * 0.22, body.center().y),
+                    ],
+                    s,
+                );
+            }
+            Icon::Satellite => {
+                // A dish looking up, with the pass it is following above it.
+                // Two shapes that were tried first and do not survive 22
+                // points: a spacecraft between two panels closes into a
+                // dumbbell, and a tilted orbit ring around a dot reads as an
+                // eye.
+                let rim = b.width() * 0.46;
+                let pivot = Pos2::new(c.x - b.width() * 0.06, c.y + b.height() * 0.2);
+                // The dish, as an arc open towards the upper right.
+                let dish: Vec<Pos2> = (0..=12)
+                    .map(|i| {
+                        let a = -1.75 + 1.9 * i as f32 / 12.0;
+                        Pos2::new(pivot.x + rim * a.cos(), pivot.y + rim * a.sin())
+                    })
+                    .collect();
+                p.add(egui::Shape::line(dish.clone(), s));
+                p.line_segment([dish[0], dish[dish.len() - 1]], Stroke::new(sw * 0.8, col));
+                // The mount, and the feed the dish points at.
+                p.line_segment([pivot, Pos2::new(pivot.x, b.bottom())], s);
+                p.line_segment(
+                    [
+                        Pos2::new(pivot.x - b.width() * 0.17, b.bottom()),
+                        Pos2::new(pivot.x + b.width() * 0.17, b.bottom()),
+                    ],
+                    s,
+                );
+                p.circle_filled(
+                    Pos2::new(b.right() - b.width() * 0.08, b.top() + b.height() * 0.08),
+                    sw * 1.4,
+                    col,
+                );
+            }
+            Icon::Key => {
+                // A key: a bow, a shaft and two teeth.
+                let rad = b.width() * 0.22;
+                let bow = Pos2::new(b.left() + rad, c.y);
+                p.circle_stroke(bow, rad, s);
+                p.line_segment([Pos2::new(bow.x + rad, c.y), Pos2::new(b.right(), c.y)], s);
+                for at in [0.72f32, 0.92] {
+                    let x = b.left() + b.width() * at;
+                    p.line_segment([Pos2::new(x, c.y), Pos2::new(x, c.y + b.height() * 0.22)], s);
+                }
+            }
             Icon::Log => {
                 // Rows with a mark against each, which is what the log is.
                 for i in 0..3 {
@@ -324,6 +527,51 @@ pub fn icon_button_sized(
         // not, having no border to read as a button.
         resp.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
     }
+    resp
+}
+
+/// A tab in the view strip: an icon button with a dot in its corner when the
+/// view behind it has something to show.
+///
+/// The dot is the whole point of a strip over a dropdown. Ten tabs are only
+/// worth their width if the operator can see, without opening any of them,
+/// which ones are holding traffic.
+pub fn icon_tab(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    selected: bool,
+    live: bool,
+    size: f32,
+) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let hovered = resp.hovered();
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        // The strip is already a well, so the selected button cannot be a
+        // second well: it would be the same colour as its own background.
+        // A raised face and a bar under it is what a tab has always been.
+        if selected {
+            p.rect_filled(rect, 3.0, theme::PANEL);
+            let bar = Rect::from_min_max(
+                Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0),
+                Pos2::new(rect.right() - 2.0, rect.bottom() - 0.5),
+            );
+            p.rect_filled(bar, 1.0, theme::READOUT);
+        } else if hovered {
+            p.rect_filled(rect, 3.0, theme::ETCH);
+        }
+        icon.paint(p, rect.translate(Vec2::new(0.0, -1.0)), tint(true, selected, hovered));
+        // The dot is the whole point of a strip over a dropdown: it says
+        // which views are holding traffic without opening any of them. Not
+        // drawn on the open tab, where the traffic is already on screen.
+        if live && !selected {
+            let at = Pos2::new(rect.right() - size * 0.17, rect.top() + size * 0.17);
+            p.circle_filled(at, (size * 0.09).max(1.5), theme::TRACE);
+        }
+    }
+    resp = resp.on_hover_text(tip);
+    resp.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
     resp
 }
 

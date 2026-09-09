@@ -39,6 +39,28 @@ does not need to know which protocol produced the packet.
 `PNG`, and `Decoded::matches_media` handles `image/*` style patterns. A view
 claims what it can render.
 
+## Getting to one
+
+The views are tabs in the top bar, in one row of ten with a gap in the
+middle: what the receiver is doing and what it heard on the left of it, who is
+out there on the right, in the order of their shortcuts. A
+dropdown was there first and cost two clicks and a read of a ten-item menu
+each way, which is most of a second to glance at the map and another to come
+back; the strip is one click, and it shows which view is open without being
+opened itself. `Ctrl` and a digit in reading order selects one, and
+``Ctrl+` `` swaps with the last view, which is the movement an operator makes
+most.
+
+A tab carries a dot when its view has taken something in since it was last
+looked at: a track, a call, a message, a device, a picture. Not when it holds
+something, which was the first rule and is useless on a real band, where every
+list is non-empty a minute after the radio starts and every dot is then lit for
+the rest of the session. `App::view_mark` gives each view one number that moves
+when it fills up, `read_views` records that number for the open view on every
+frame, and the dot is the difference. Both have to stay cheap, since they are
+asked for every view on every frame; the spectrum and the chain answer nothing,
+because traffic does not collect there.
+
 ## The views
 
 - **Packet list**: every record, newest at the bottom, with a detail pane

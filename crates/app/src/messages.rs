@@ -86,6 +86,10 @@ impl Messages {
         self.seen.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
     pub fn clear(&mut self) {
         self.seen.clear();
     }
