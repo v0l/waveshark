@@ -35,6 +35,10 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
+- With the device on Auto, a card that has no room for the model, or that
+  opens and then cannot run it, hands the model to the CPU and the card
+  says why. It used to be a failed model.
+
 - The model and device picked on the transcript card, and any setting
   changed in the chain inspector, are remembered across a restart. They
   reached the receiver but were never written to the edits file.
