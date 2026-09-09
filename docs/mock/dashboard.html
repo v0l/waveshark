@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WaveShark dashboard mock</title>
+<style>
+:root {
+  --chassis: #17191D;
+  --panel:   #21242A;
+  --well:    #141619;
+  --etch:    #333841;
+  --legend:  #8B929C;
+  --value:   #D5DBE3;
+  --readout: #F5A63B;
+  --readout-dim: #67461A;
+  --trace:   #5CD0E8;
+  --fault:   #E26D5A;
+  --ok:      #5CB07A;
+
+  --legend-face: "Liberation Sans Narrow", "DejaVu Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body-face:   "DejaVu Sans Condensed", "Liberation Sans Narrow", system-ui, sans-serif;
+  --readout-face:"DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
+
+  --gap: 10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--chassis);
+  color: var(--value);
+  font-family: var(--body-face);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- shared panel language ------------------------------------------- */
+
+.panel {
+  background: linear-gradient(#242830, var(--panel));
+  border: 1px solid var(--etch);
+  border-radius: 3px;
+}
+
+.well {
+  background: var(--well);
+  border: 1px solid var(--etch);
+  border-radius: 2px;
+}
+
+.legend {
+  font-family: var(--legend-face);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .13em;
+  font-size: 10.5px;
+  color: var(--legend);
+}
+
+.readout {
+  font-family: var(--readout-face);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--readout);
+}
+
+.trace { color: var(--trace); }
+
+/* rivet: a dark punched hole with a lit upper rim */
+.rivet {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: #0D0F11;
+  box-shadow: inset 0 1px 0 #454B55, 0 1px 0 #0a0b0d;
+}
+
+/* ---- page shell ------------------------------------------------------- */
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 18px 16px 48px;
+}
+
+/* the etched scale across the head of the pane, like a dial skirt */
+.skirt {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--etch);
+  position: relative;
+}
+.skirt h1 {
+  font-family: var(--legend-face);
+  text-transform: uppercase;
+  letter-spacing: .22em;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--value);
+  margin: 0;
+}
+.skirt .sub { color: var(--legend); font-size: 12.5px; }
+.skirt .ruler { flex: 1; height: 12px; opacity: .8; }
+.skirt .corner { display: flex; gap: 5px; align-self: center; }
+
+/* a quiet text control, for something you do once */
+.quiet {
+  font-family: var(--legend-face); font-weight: 700;
+  text-transform: uppercase; letter-spacing: .12em; font-size: 10.5px;
+  color: var(--legend);
+  background: none; border: 0; padding: 3px 4px; cursor: pointer;
+  border-radius: 2px;
+}
+.quiet:hover { color: var(--value); background: #23272E; }
+.quiet:focus-visible { outline: 2px solid var(--trace); outline-offset: 1px; }
+
+/* ---- hidden state ---------------------------------------------------- */
+
+.gone { margin-top: 60px; text-align: center; padding: 28px 18px; }
+.gone h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; font-family: var(--body-face); }
+.gone p { margin: 0 auto 14px; color: var(--legend); max-width: 52ch; }
+
+/* the settings row this mirrors, drawn as it would sit in Settings, App */
+.setting {
+  display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+  padding: 11px 13px; margin-top: var(--gap);
+}
+.setting .what { color: var(--value); font-size: 13.5px; }
+.setting .why { color: var(--legend); font-size: 12.5px; }
+.switch {
+  width: 42px; height: 20px; border-radius: 10px; position: relative; cursor: pointer;
+  background: var(--well); border: 1px solid var(--etch);
+}
+.switch i {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: #4A515B; transition: left .12s ease, background .12s ease;
+}
+.switch[aria-checked="true"] { border-color: #8A5C1D; }
+.switch[aria-checked="true"] i { left: 24px; background: var(--readout); }
+.switch:focus-visible { outline: 2px solid var(--trace); outline-offset: 2px; }
+
+/* ---- status rack ----------------------------------------------------- */
+
+.rack {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1fr;
+  gap: var(--gap);
+  margin-top: var(--gap);
+}
+.rack .panel { padding: 10px 12px 11px; position: relative; }
+
+.tile-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.big {
+  font-family: var(--readout-face);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--readout);
+}
+.big.hear { color: var(--trace); }
+.big .unit {
+  font-family: var(--legend-face);
+  font-size: 11px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--legend);
+  margin-left: 5px;
+}
+
+.note { color: var(--legend); font-size: 12px; margin-top: 5px; }
+
+/* lamp inset in the panel */
+.lamp {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #0E1013;
+  box-shadow: inset 0 0 0 1px #0a0b0d;
+  display: inline-block; flex: none;
+}
+.lamp.on  { background: var(--ok);      box-shadow: 0 0 7px rgba(92,176,122,.75), inset 0 0 0 1px #16391f; }
+.lamp.hot { background: var(--readout); box-shadow: 0 0 7px rgba(245,166,59,.7),  inset 0 0 0 1px #3b2a0d; }
+.lamp.bad { background: var(--fault);   box-shadow: 0 0 7px rgba(226,109,90,.7),  inset 0 0 0 1px #3d1c17; }
+
+.lamprow { display: flex; align-items: center; gap: 7px; }
+
+/* real-time factor plot */
+.plot { height: 44px; width: 100%; display: block; }
+
+/* the meter: an etched scale with a filled bar, not a rounded progress pill */
+.meter { margin-top: 8px; }
+.meter .track {
+  height: 7px; background: var(--well);
+  border: 1px solid var(--etch); border-radius: 1px;
+  position: relative; overflow: hidden;
+}
+.meter .fill { position: absolute; inset: 0 auto 0 0; background: var(--trace); }
+.meter .fill.set { background: var(--readout); }
+.meter .ticks { display: flex; justify-content: space-between; margin-top: 3px; }
+.meter .ticks span { font-family: var(--readout-face); font-size: 9.5px; color: #5D646E; }
+
+/* small keyed list inside a tile */
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
+.kv dt { color: var(--legend); font-size: 12.5px; }
+.kv dd {
+  margin: 0; font-family: var(--readout-face); font-weight: 700;
+  font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--value);
+}
+.kv dd.hear { color: var(--trace); }
+
+/* ---- cold start ------------------------------------------------------ */
+
+.cold {
+  margin-top: var(--gap);
+  padding: 16px 18px;
+  display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center;
+}
+.cold h2 {
+  margin: 0 0 4px; font-size: 17px; font-weight: 600; color: var(--value);
+  font-family: var(--body-face);
+}
+.cold p { margin: 0; color: var(--legend); max-width: 62ch; }
+.cold .picker { display: flex; gap: 8px; align-items: center; }
+
+select, .btn {
+  font-family: var(--body-face); font-size: 13px;
+  background: linear-gradient(#2A2E36, #22262C);
+  color: var(--value);
+  border: 1px solid var(--etch); border-radius: 3px;
+  padding: 7px 12px;
+}
+.btn { cursor: pointer; }
+.btn:hover { border-color: #454B55; }
+.btn.go {
+  color: #1A1206; background: linear-gradient(#F7B457, var(--readout));
+  border-color: #8A5C1D; font-weight: 700;
+}
+.btn:focus-visible, select:focus-visible, .placard:focus-visible {
+  outline: 2px solid var(--trace); outline-offset: 2px;
+}
+
+/* ---- quickstart placards -------------------------------------------- */
+
+.section-rule {
+  display: flex; align-items: center; gap: 12px;
+  margin: 22px 0 10px;
+}
+.section-rule .line { flex: 1; height: 1px; background: var(--etch); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap);
+}
+
+.placard {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 12px;
+  padding: 12px 12px 13px 14px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  background: linear-gradient(#242830, var(--panel));
+  border: 1px solid var(--etch);
+  border-left: 2px solid var(--readout-dim);
+  border-radius: 3px;
+  transition: transform .12s ease, border-color .12s ease, background .12s ease;
+}
+.placard.hear { border-left-color: #2A5E6B; }
+.placard:hover { transform: translateY(-1px); background: linear-gradient(#282D36, #23272E); }
+.placard.set:hover  { border-left-color: var(--readout); }
+.placard.hear:hover { border-left-color: var(--trace); }
+
+.placard .eyebrow { display: block; margin-bottom: 3px; }
+.placard h3 {
+  margin: 0 0 3px; font-size: 14.5px; font-weight: 600; color: var(--value);
+  font-family: var(--body-face);
+}
+.placard p { margin: 0; color: var(--legend); font-size: 12.5px; }
+
+/* the little diagram, drawn in the chassis language rather than an icon font */
+.placard .dia { width: 46px; height: 34px; margin-top: 2px; }
+
+.key {
+  position: absolute; top: 10px; right: 10px;
+  font-family: var(--readout-face); font-size: 10px; font-weight: 700;
+  color: #7E858F;
+  background: var(--well);
+  border: 1px solid var(--etch); border-bottom-width: 2px;
+  border-radius: 3px; padding: 1px 5px;
+}
+.placard:hover .key { color: var(--value); }
+
+/* ---- secondary list -------------------------------------------------- */
+
+.more { margin-top: var(--gap); padding: 4px 0; }
+.more ul { list-style: none; margin: 0; padding: 0; }
+.more li {
+  display: grid; grid-template-columns: 15px 1fr auto;
+  gap: 10px; align-items: baseline;
+  padding: 8px 12px;
+  border-bottom: 1px solid #23272E;
+}
+.more li:last-child { border-bottom: 0; }
+.more li:hover { background: #1E2127; }
+.more .n { font-family: var(--readout-face); font-size: 10.5px; color: #5D646E; }
+.more .what { color: var(--value); font-size: 13px; }
+.more .what em { font-style: normal; color: var(--legend); }
+.more .where { font-family: var(--legend-face); text-transform: uppercase; letter-spacing: .1em; font-size: 10px; color: var(--legend); }
+
+/* ---- mock chrome ----------------------------------------------------- */
+
+.mockbar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #101215; border-top: 1px solid var(--etch);
+  padding: 7px 14px; display: flex; gap: 12px; align-items: center;
+  font-size: 12px; color: var(--legend); z-index: 9;
+}
+.mockbar strong { font-family: var(--legend-face); text-transform: uppercase; letter-spacing: .14em; font-size: 10px; color: #6B7280; }
+
+@media (max-width: 900px) {
+  .rack { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  .cold { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .grid { grid-template-columns: 1fr; }
+  .skirt .ruler { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="skirt">
+    <h1>Dashboard</h1>
+    <svg class="ruler" viewBox="0 0 600 12" preserveAspectRatio="none" aria-hidden="true">
+      <g stroke="#333841" stroke-width="1">
+        <line x1="0" y1="11.5" x2="600" y2="11.5"></line>
+        <g id="ticks"></g>
+      </g>
+    </svg>
+    <span class="sub" id="skirt-state">Radio stopped</span>
+    <button class="quiet" id="hide">Hide dashboard</button>
+    <span class="corner"><i class="rivet"></i><i class="rivet"></i></span>
+  </div>
+
+  <div id="board">
+
+  <!-- ========== COLD: no radio running ========== -->
+  <section id="cold">
+    <div class="panel cold">
+      <div>
+        <h2>Nothing is being received yet.</h2>
+        <p>Pick a radio and start it. The receiver opens on 433.92 MHz with the scanner
+           table already watching the span, so sensors, remotes and beacons appear in the
+           packet list without anything else being set.</p>
+      </div>
+      <div class="picker">
+        <select aria-label="Radio">
+          <option>RTL-SDR Blog V4 &mdash; 00000001</option>
+          <option>HackRF One</option>
+          <option>rtl_tcp 10.0.0.9:1234</option>
+        </select>
+        <button class="btn go" id="start">Start</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== RUNNING: status rack ========== -->
+  <section id="running" hidden>
+    <div class="rack">
+
+      <!-- what you set -->
+      <div class="panel">
+        <div class="tile-head">
+          <span class="legend">Tuned</span>
+          <span class="lamprow"><span class="lamp on"></span><span class="legend">Running</span></span>
+        </div>
+        <div class="big">433.920 000<span class="unit">MHz</span></div>
+        <dl class="kv" style="margin-top:9px">
+          <dt>Radio</dt><dd>RTL-SDR V4</dd>
+          <dt>Span</dt><dd>2.304 MS/s &times;1</dd>
+          <dt>Gain</dt><dd>32.8 dB auto</dd>
+        </dl>
+      </div>
+
+      <!-- can it keep up -->
+      <div class="panel">
+        <div class="tile-head">
+          <span class="legend">Real time</span>
+          <span class="readout" style="font-size:12.5px" id="rtf">1.84&times;</span>
+        </div>
+        <svg class="plot" id="plot" viewBox="0 0 220 44" preserveAspectRatio="none" aria-label="Real-time factor over the last few seconds"></svg>
+        <div class="note">Headroom for about three more channels.</div>
+      </div>
+
+      <!-- what it heard -->
+      <div class="panel">
+        <div class="tile-head">
+          <span class="legend">Decoded</span>
+          <span class="legend">since 14:02</span>
+        </div>
+        <div class="big hear">4 812<span class="unit">packets</span></div>
+        <div class="meter">
+          <div class="track"><div class="fill" style="width:46%"></div></div>
+          <div class="ticks"><span>0</span><span>128 ch scanned</span><span>296</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rack" style="grid-template-columns:1fr 1fr 1fr 1fr">
+      <div class="panel">
+        <span class="legend">On the air now</span>
+        <dl class="kv" style="margin-top:7px">
+          <dt>Sources open</dt><dd class="hear">3</dd>
+          <dt>Calls in progress</dt><dd class="hear">1</dd>
+          <dt>Tracks held</dt><dd class="hear">27</dd>
+          <dt>Devices seen</dt><dd class="hear">411</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <span class="legend">Strongest this minute</span>
+        <dl class="kv" style="margin-top:7px">
+          <dt>Fine Offset WH31</dt><dd>-38 dBFS</dd>
+          <dt>BLE adv 4C:9E:&hellip;</dt><dd>-52 dBFS</dd>
+          <dt>TPMS Renault</dt><dd>-61 dBFS</dd>
+          <dt>Unknown OOK</dt><dd>-74 dBFS</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <span class="legend">Health</span>
+        <div class="lamprow" style="margin-top:9px"><span class="lamp on"></span><span>No samples dropped</span></div>
+        <div class="lamprow" style="margin-top:6px"><span class="lamp on"></span><span>Audio bus 12 ms behind</span></div>
+        <div class="lamprow" style="margin-top:6px"><span class="lamp hot"></span><span>Airport data 3 days old</span></div>
+        <div class="lamprow" style="margin-top:6px"><span class="lamp"></span><span>No GPS fix</span></div>
+      </div>
+
+      <div class="panel">
+        <span class="legend">Written to disc</span>
+        <dl class="kv" style="margin-top:7px">
+          <dt>Packet log</dt><dd>184.2 MB</dd>
+          <dt>Bursts kept</dt><dd>61.7 MB</dd>
+          <dt>Of a limit</dt><dd>2.0 GB</dd>
+        </dl>
+        <div class="meter">
+          <div class="track"><div class="fill set" style="width:12%"></div></div>
+          <div class="ticks"><span>0</span><span></span><span>2 GB</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== QUICKSTART ========== -->
+  <div class="section-rule">
+    <span class="legend">Quick start</span>
+    <span class="line"></span>
+    <span class="legend" style="color:var(--readout-dim)">Amber: you set it up</span>
+    <span class="legend" style="color:#2A5E6B">Cyan: it shows what was heard</span>
+  </div>
+
+  <div class="grid">
+
+    <button class="placard set">
+      <span class="key">Ctrl 1</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <path d="M3 26 L9 25 L13 20 L15 26 L21 9 L27 26 L31 22 L36 26 L43 25" fill="none" stroke="#5CD0E8" stroke-width="1.3"/>
+        <line x1="21" y1="4" x2="21" y2="31" stroke="#F5A63B" stroke-width="1" stroke-dasharray="2 2"/>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Spectrum</span>
+        <h3>Turn the dial and look</h3>
+        <p>Drag the span, scroll to zoom, click a signal to put a channel on it.</p>
+      </span>
+    </button>
+
+    <button class="placard set">
+      <span class="key">Settings</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <g stroke="#333841"><line x1="1" y1="12" x2="45" y2="12"/><line x1="1" y1="23" x2="45" y2="23"/></g>
+        <g fill="#F5A63B"><rect x="5" y="5" width="12" height="3"/><rect x="5" y="16" width="18" height="3"/><rect x="5" y="27" width="8" height="3"/></g>
+        <g fill="#5CD0E8"><rect x="34" y="5" width="7" height="3"/><rect x="30" y="16" width="11" height="3"/><rect x="36" y="27" width="5" height="3"/></g>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Scanner table</span>
+        <h3>Let it watch the whole span</h3>
+        <p>Give a band to a decoder once and every burst in it is read while you do something else.</p>
+      </span>
+    </button>
+
+    <button class="placard hear">
+      <span class="key">Ctrl 6</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <g stroke="#333841" stroke-width=".7"><line x1="1" y1="11" x2="45" y2="11"/><line x1="1" y1="22" x2="45" y2="22"/><line x1="16" y1="1" x2="16" y2="33"/><line x1="31" y1="1" x2="31" y2="33"/></g>
+        <circle cx="23" cy="17" r="9" fill="none" stroke="#2A5E6B" stroke-width=".8"/>
+        <circle cx="23" cy="17" r="1.6" fill="#F5A63B"/>
+        <path d="M12 8 l4 1.6 -4 1.6 1-1.6z" fill="#5CD0E8"/>
+        <circle cx="35" cy="25" r="1.8" fill="#5CD0E8"/>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Map</span>
+        <h3>See who is out there</h3>
+        <p>Aircraft, vessels, APRS stations and mesh nodes, on tiles, with rings from your antenna.</p>
+      </span>
+    </button>
+
+    <button class="placard hear">
+      <span class="key">Ctrl 3</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <g fill="#5CD0E8">
+          <rect x="6" y="14" width="2" height="6"/><rect x="10" y="10" width="2" height="14"/>
+          <rect x="14" y="6" width="2" height="22"/><rect x="18" y="12" width="2" height="10"/>
+          <rect x="22" y="8" width="2" height="18"/><rect x="26" y="15" width="2" height="4"/>
+        </g>
+        <g fill="#F5A63B"><rect x="32" y="12" width="9" height="2"/><rect x="32" y="17" width="6" height="2"/></g>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Calls</span>
+        <h3>Hear a conversation</h3>
+        <p>DMR, TETRA and M17 voice as rows you can click to listen, with what was said beside it.</p>
+      </span>
+    </button>
+
+    <button class="placard hear">
+      <span class="key">Ctrl 4</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <g fill="#333841"><rect x="5" y="6" width="14" height="2"/><rect x="5" y="17" width="12" height="2"/></g>
+        <g fill="#5CD0E8"><rect x="5" y="10" width="30" height="2"/><rect x="5" y="13" width="22" height="2"/><rect x="5" y="21" width="27" height="2"/><rect x="5" y="24" width="16" height="2"/></g>
+        <rect x="38" y="10" width="3" height="14" fill="#F5A63B"/>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Messages</span>
+        <h3>Read text sent over the air</h3>
+        <p>Pagers, TETRA, APRS and mesh, all in one column, repeats folded into one line.</p>
+      </span>
+    </button>
+
+    <button class="placard hear">
+      <span class="key">Ctrl 8</span>
+      <svg class="dia" viewBox="0 0 46 34" aria-hidden="true">
+        <rect x="1" y="1" width="44" height="32" fill="#141619" stroke="#333841"/>
+        <path d="M4 28 C14 28 12 12 22 12 C32 12 30 22 42 20" fill="none" stroke="#333841" stroke-width="1.2"/>
+        <circle cx="9" cy="27" r="1.7" fill="#5CD0E8"/><circle cx="16" cy="19" r="2.3" fill="#5CD0E8"/>
+        <circle cx="24" cy="12" r="3" fill="#5CD0E8"/><circle cx="33" cy="15" r="2" fill="#5CD0E8"/>
+        <circle cx="24" cy="12" r="7" fill="none" stroke="#F5A63B" stroke-width=".8" stroke-dasharray="2 2"/>
+      </svg>
+      <span>
+        <span class="legend eyebrow">Devices</span>
+        <h3>Survey while you drive</h3>
+        <p>One row per transmitter rather than per burst, and a fitted position from the levels.</p>
+      </span>
+    </button>
+  </div>
+
+  <div class="panel more" id="more">
+    <ul>
+      <li><span class="n">&rsaquo;</span><span class="what">Build the receiver by hand <em>&mdash; unlock the graph and wire a demodulator yourself</em></span><span class="where">Signal chain &middot; Ctrl 2</span></li>
+      <li><span class="n">&rsaquo;</span><span class="what">Catch a satellite pass <em>&mdash; when it rises, where to point, and the Doppler</em></span><span class="where">Satellites &middot; Ctrl 9</span></li>
+      <li><span class="n">&rsaquo;</span><span class="what">Record the band <em>&mdash; raw IQ of the span, or just the bursts in it</em></span><span class="where">Radio settings</span></li>
+      <li><span class="n">&rsaquo;</span><span class="what">Bring in another receiver <em>&mdash; Beast or AVR over TCP, joining the same packet bus</em></span><span class="where">Packet log settings</span></li>
+      <li><span class="n">&rsaquo;</span><span class="what">Save a channel you will come back to <em>&mdash; mode, width and squelch, in a group</em></span><span class="where">Memory</span></li>
+    </ul>
+  </div>
+
+  </div><!-- /board -->
+
+  <!-- ========== HIDDEN ========== -->
+  <section id="gone" hidden>
+    <div class="panel gone">
+      <h2>Dashboard hidden</h2>
+      <p>The receiver now opens on the spectrum, and the dashboard tab is gone.
+         Turn it back on under Settings, App.</p>
+      <button class="btn" id="unhide">Show the dashboard again</button>
+    </div>
+
+    <div class="section-rule"><span class="legend">Settings &middot; App</span><span class="line"></span></div>
+    <div class="panel setting">
+      <span>
+        <span class="what">Open on the dashboard</span><br>
+        <span class="why">Quick start and receiver status, as the first tab. Off opens on the spectrum.</span>
+      </span>
+      <button class="switch" role="switch" aria-checked="false" id="sw" aria-label="Open on the dashboard"><i></i></button>
+    </div>
+  </section>
+
+</div>
+
+<div class="mockbar">
+  <strong>Mock</strong>
+  <span>docs/mock/dashboard.html</span>
+  <button class="btn" id="toggle" style="margin-left:auto">Show radio running</button>
+</div>
+
+<script>
+// ruler ticks on the skirt: a dial skirt, minor every 10, major every 50
+(function () {
+  const g = document.getElementById('ticks');
+  let s = '';
+  for (let x = 0; x <= 600; x += 10) {
+    const major = x % 50 === 0;
+    s += `<line x1="${x + .5}" y1="${major ? 4 : 8}" x2="${x + .5}" y2="12"></line>`;
+  }
+  g.innerHTML = s;
+})();
+
+// real-time factor trace: cyan, because it is measured rather than set
+(function () {
+  const svg = document.getElementById('plot');
+  const data = [];
+  for (let i = 0; i < 60; i++) data.push(1.7 + Math.sin(i / 4) * 0.18 + Math.random() * 0.12);
+  function draw() {
+    const w = 220, h = 44, lo = 0.8, hi = 2.6;
+    const y = v => h - 2 - ((v - lo) / (hi - lo)) * (h - 6);
+    const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${y(v).toFixed(1)}`).join(' ');
+    svg.innerHTML =
+      `<rect x="0" y="0" width="${w}" height="${h}" fill="#141619" stroke="#333841"/>` +
+      `<line x1="0" y1="${y(1).toFixed(1)}" x2="${w}" y2="${y(1).toFixed(1)}" stroke="#E26D5A" stroke-width="1" stroke-dasharray="3 3"/>` +
+      `<text x="3" y="${(y(1) - 3).toFixed(1)}" font-family="monospace" font-size="7" fill="#8B929C">1.0 real time</text>` +
+      `<polyline points="${pts}" fill="none" stroke="#5CD0E8" stroke-width="1.4"/>`;
+    document.getElementById('rtf').textContent = data[data.length - 1].toFixed(2) + '\u00d7';
+  }
+  draw();
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!still) setInterval(() => {
+    data.shift();
+    data.push(1.7 + Math.sin(Date.now() / 900) * 0.18 + Math.random() * 0.12);
+    if (!document.getElementById('running').hidden) draw();
+  }, 500);
+})();
+
+// mock state toggle
+(function () {
+  const cold = document.getElementById('cold'), run = document.getElementById('running');
+  const btn = document.getElementById('toggle'), state = document.getElementById('skirt-state');
+  function set(running) {
+    cold.hidden = running; run.hidden = !running;
+    btn.textContent = running ? 'Show radio stopped' : 'Show radio running';
+    state.textContent = running ? 'RTL-SDR V4 \u00b7 running 6 min' : 'Radio stopped';
+  }
+  btn.onclick = () => set(run.hidden);
+  document.getElementById('start').onclick = () => set(true);
+  set(false);
+})();
+
+// hide and bring back
+(function () {
+  const board = document.getElementById('board'), gone = document.getElementById('gone');
+  const skirt = document.getElementById('hide'), sw = document.getElementById('sw');
+  const state = document.getElementById('skirt-state');
+  function set(on) {
+    board.hidden = !on; gone.hidden = on;
+    skirt.hidden = !on;
+    sw.setAttribute('aria-checked', String(on));
+    if (!on) state.textContent = 'Not shown';
+  }
+  skirt.onclick = () => set(false);
+  document.getElementById('unhide').onclick = () => set(true);
+  sw.onclick = () => set(sw.getAttribute('aria-checked') !== 'true');
+  set(true);
+})();
+</script>
+</body>
+</html>
