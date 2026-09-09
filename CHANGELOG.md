@@ -12,6 +12,18 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
+- A channel marked as voice is heard again, and appears in the call list.
+  Every over was arriving with what the front end had concluded about it
+  overwritten, so no call row was ever created, nothing subscribed to it, and
+  the channel was silent however loud the transmission.
+
+- The speaker is fed a block of silence rather than nothing at all when the
+  only thing on the bus is speech nobody has subscribed to, which used to
+  starve the sound card.
+
+- An over on a voice channel now starts and ends where the squelch says,
+  rather than where the audio's own level happens to cross a threshold.
+
 - Speech is transcribed as it is spoken instead of piling up: nothing is
   held longer than the thirty seconds the model reads in one pass, and a
   transmission that runs past that is cut at a pause and written down as far

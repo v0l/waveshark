@@ -3321,8 +3321,10 @@ fn audio_channel_stages(
     v.insert("channel_hz".into(), V::Float(center + spec.offset_hz));
     v.insert("label".into(), V::Text(spec.label.clone()));
     let voice = at(p, "chan_voice", "voice", v);
-    p.connect(Source::Stage(i, 0), (voice, 0));
-    p.connect(Source::Stage(hb, 0), (voice, 1));
+    // The audio first, because the graph hands a node the tags on its first
+    // input and the squelch's verdict rides the audio chain.
+    p.connect(Source::Stage(hb, 0), (voice, 0));
+    p.connect(Source::Stage(i, 0), (voice, 1));
     voice
 }
 

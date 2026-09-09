@@ -4673,6 +4673,101 @@ pub(crate) mod tests {
         assert_eq!(who.freq_hz, CHANNEL_HZ as u64, "read on {key}");
     }
 
+    /// A channel marked as voice is listed and heard, not merely decoded.
+    ///
+    /// Three things in one path, all of which were broken together, and each
+    /// of which looks on screen like a receiver that is not receiving:
+    ///
+    /// The over has to reach the packet bus as a call. It did not: the
+    /// protocols node overwrote every packet's decodes with what it could
+    /// read out of the bytes, and an analogue over carries its speech beside
+    /// an empty frame, so the front end's own conclusion was thrown away and
+    /// no row ever appeared in the call list.
+    ///
+    /// The bus has to keep the speaker fed. With one voice input and nothing
+    /// subscribed it produced no samples at all rather than a block of
+    /// silence, so the sound card starved.
+    ///
+    /// And once the call is subscribed, as the call list does for any group
+    /// it has not been told to ignore, the speech has to reach the mix.
+    #[test]
+    fn a_voice_channel_is_listed_and_heard() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.audio.master = 1.0;
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "PMR1".into(),
+            offset_hz: 446_049_100.0 - buf.center.as_f64(),
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: true,
+            tx: None,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+
+        let mut calls: Vec<DecodeRecord> = Vec::new();
+        let mut pcm: Vec<f32> = Vec::new();
+        let mut silent_blocks = 0;
+        for block in buf.samples.chunks(16_384) {
+            if rx.process(block).is_err() {
+                break;
+            }
+            let out = rx.audio_out().0;
+            if out.is_empty() {
+                silent_blocks += 1;
+            }
+            pcm.extend(out.iter().step_by(2));
+            for d in rx.decodes(std::time::Instant::now()) {
+                // What the call list does with a group it has not been told
+                // to ignore: subscribe to it, so the next block is audible.
+                if let Some(common::Value::Text(to)) =
+                    d.fields.iter().find(|(k, _)| k == "to").map(|(_, v)| v.clone())
+                {
+                    if let Some(b) = rx.audio_mut() {
+                        b.bus_mut().set_subscriptions(vec![crate::audiobus::Subscription::new(
+                            crate::audiobus::Rule::Group(to),
+                        )]);
+                    }
+                }
+                calls.push(d);
+            }
+        }
+
+        // One over: announced as it starts, and again with its length when
+        // the squelch closes. Both rows say what channel they were on.
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        let field = |c: &DecodeRecord, name: &str| {
+            c.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        };
+        for c in &calls {
+            assert_eq!(field(c, "to"), Some(common::Value::Text("PMR1".into())));
+            assert_eq!(field(c, "voice"), Some(common::Value::Bool(true)));
+        }
+        assert_eq!(field(&calls[0], "live"), Some(common::Value::Bool(true)));
+        let seconds = match field(&calls[1], "seconds") {
+            Some(common::Value::Float(s)) => s,
+            other => panic!("the closed over has no length: {other:?}"),
+        };
+        // The transmission is four seconds of a six second capture.
+        assert!((3.5..4.5).contains(&seconds), "the over ran {seconds:.2} s");
+
+        assert_eq!(
+            silent_blocks, 0,
+            "the bus handed the speaker nothing on {silent_blocks} blocks"
+        );
+        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
+        assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
+    }
+
     fn pmr446_fixture() -> Option<common::IqBuf> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/pmr446_test_446.0M_512k.cs8");

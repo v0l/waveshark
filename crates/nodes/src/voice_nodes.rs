@@ -15,6 +15,13 @@
 //! said is in the audio, and how strong it was is in the IF. A level taken
 //! off demodulated audio is a level of the demodulator's gain structure and
 //! says nothing about the transmitter.
+//!
+//! The audio is input 0 and the IF is input 1, and that order is not
+//! arbitrary: the graph hands a node the tags of its first input only, and
+//! the squelch's own open-or-shut decision is a tag on the audio chain.
+//! Wired the other way round this node never saw it and judged the audio's
+//! level for itself instead, which is a different decision from the one the
+//! operator hears.
 
 use common::{Decoded, Frame, Packet, Result, Speech, Value};
 use pipeline::event::media;
@@ -147,15 +154,15 @@ impl Node for VoiceChannelNode {
     }
 
     fn negotiate(&mut self, i: &[PortSpec]) -> Result<Vec<StreamSpec>> {
-        let (iq, audio) = match (i.first(), i.get(1)) {
+        let (audio, iq) = match (i.first(), i.get(1)) {
             (Some(a), Some(b)) => (a, b),
-            _ => return Err(common::Error::other("voice needs the channel IF and its audio")),
+            _ => return Err(common::Error::other("voice needs the channel audio and its IF")),
         };
-        if iq.spec.kind != PortKind::Iq {
-            return Err(common::Error::other("voice input 0 is the channel IF, before demodulation"));
-        }
         if audio.spec.kind != PortKind::Real {
-            return Err(common::Error::other("voice input 1 is the channel's audio"));
+            return Err(common::Error::other("voice input 0 is the channel's audio"));
+        }
+        if iq.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("voice input 1 is the channel IF, before demodulation"));
         }
         self.audio_rate = audio.spec.rate;
         self.meter = FrameMeter::new(iq.spec.rate, self.channel_hz as u64, 0.0);
@@ -175,10 +182,10 @@ impl Node for VoiceChannelNode {
         outputs: &mut [Payload],
         c: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        if let Some(iq) = inputs[0].as_iq() {
+        if let Some(iq) = inputs.get(1).and_then(|p| p.as_iq()) {
             self.meter.feed(iq);
         }
-        let audio = inputs[1].as_real().unwrap_or(&[]);
+        let audio = inputs[0].as_real().unwrap_or(&[]);
         let block_s = audio.len() as f64 / self.audio_rate.max(1.0);
         self.at_us += (block_s * 1e6) as u64;
 
@@ -300,7 +307,9 @@ mod tests {
         let mut iq = StreamSpec::iq(IF_RATE, Hz(145_000_000));
         iq.bandwidth = 12_500.0;
         let audio = iq.with_kind(PortKind::Real).with_rate(AUDIO_RATE);
-        vec![PortSpec { spec: iq, latency: 0 }, PortSpec { spec: audio, latency: 0 }]
+        // Audio first, as the graph wires it: the squelch's tag rides the
+        // audio chain and a node is handed the tags of its first input.
+        vec![PortSpec { spec: audio, latency: 0 }, PortSpec { spec: iq, latency: 0 }]
     }
 
     /// One block through the node, with the squelch saying whether the
@@ -310,7 +319,7 @@ mod tests {
         // open, which is what the floor is measured from.
         let iq = Payload::Iq(vec![C32::new(level.max(0.002), 0.0); samples * 2]);
         let audio = Payload::Real(vec![level; samples]);
-        let ins: Vec<&Payload> = vec![&iq, &audio];
+        let ins: Vec<&Payload> = vec![&audio, &iq];
         let mut outs = vec![Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
         let specs = specs();
         let tags = vec![Tag::new(0, "squelch_open", TagValue::Int(open as i64))];
