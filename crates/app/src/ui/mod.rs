@@ -2694,6 +2694,7 @@ mod tests {
             bytes: vec![0xab, 0xcd],
             crc,
             link: None,
+            report: common::ReportDetail::Bare,
             iq: None,
             audio: None,
         }

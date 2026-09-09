@@ -23,6 +23,7 @@ the ones not built yet would need.
 | `media_type` | what `bytes` holds | routing |
 | `fields` | the decoder's own fields, in the order it emitted them | the packet list's detail column and the burst pane, for a person to read |
 | `link` | who the transmission was between, as a kind and an identifier | links directory |
+| `report` | what the transmission said about the transmitter besides where it was | map, control links |
 | `bytes` | the raw frame | hex dump, image pane |
 | `iq` | the burst's own samples, where the front end kept them | the packet list's burst detail |
 | `audio` | decoded speech, with the call it belongs to | call list, audio bus |
@@ -62,6 +63,16 @@ name.** Put it on `Decoded` (a new `ReportDetail` variant where it describes
 the transmitter, a new sidecar where it does not), fill it in the decoders that
 can say it, carry it through `DecodeRecord`, and read that. The fields stay as
 they are, since a person still wants to see what the frame held.
+
+`ReportDetail::Control` is the newest of them and shows what the conversion
+buys. It carries sixteen optional channels in microseconds, so `decode::elrs`
+turns its ten bit counts into pulse widths where it knows the scale, FrSky and
+FlySky pass on the widths they already send, and a channel a frame did not
+carry is `None` rather than zero. Writing that as fields cost a `bank` string,
+two spellings of the same channel and two scales, none of which the compiler
+could see. Pinning it also found a decoder bug: `frsky::microseconds` clamped
+at `0x7ff` before masking the bank bit off, so every channel of an upper-bank
+frame read as full deflection.
 
 What is still on the old footing: the call list (`crates/app/src/calls.rs`)
 matches `voice`, `to`, `from`, `encryption`, `seconds` and `live` as strings,
@@ -586,14 +597,14 @@ and reading it out of a list that takes a hundred rows a second is impossible,
 so the view is one row per transmitter holding the last frame, aged out, with a
 bar per channel and the arm state called out.
 
-What it needs first is the typed part above, since the three decoders do not
-agree and cannot be made to agree by convention: ExpressLRS emits raw ten bit
-counts as `chN`, the other two emit microseconds as `chN_us`, and FrSky sends
-channels 1 to 8 and 9 to 16 in alternate frames with a `bank` string saying
-which. As one type that is a fixed array of sixteen optional microsecond
-values, partly filled, which the view merges per transmitter rather than
-replaces; the conversion from counts happens once, in the ExpressLRS decoder.
-The transmitter it belongs to is the link the decode already names.
+The typed part it reads is there: `ReportDetail::Control`, filled in by
+`decode::elrs` through `nodes::elrs_nodes` and by `frsky::Packet::control` and
+`flysky::Packet::control` for when those two get front ends. What is left is
+the pane: one row per transmitter, keyed on the identity the decode names,
+merging each frame's channels into what is held rather than replacing them,
+since FrSky sends 1 to 8 and 9 to 16 in alternate frames and ExpressLRS's
+ordinary rate sends four. Aged out like the device list, since a handset that
+stopped transmitting is not a handset with its sticks centred.
 
 ### More into the message view
 

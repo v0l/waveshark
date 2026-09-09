@@ -97,6 +97,10 @@ impl Sensor {
     }
 }
 
+/// What a failsafe packet sends for a channel the receiver should hold at
+/// wherever it was, rather than drive to a width.
+pub const HOLD: u16 = 0x0fff;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
     pub kind: Kind,
@@ -105,7 +109,8 @@ pub struct Packet {
     /// The receiver's, which it is given at bind time.
     pub rx_id: [u8; 4],
     /// Sixteen channels in microseconds, present on stick and failsafe
-    /// packets. 0x0fff is the failsafe "hold" marker rather than a position.
+    /// packets. [`HOLD`] marks a channel the receiver holds rather than a
+    /// position.
     pub channels: [u16; 16],
     /// What a telemetry packet carried.
     pub sensors: Vec<Sensor>,
@@ -128,13 +133,30 @@ impl Packet {
             Kind::Sticks => self
                 .channels
                 .iter()
-                .all(|&c| (700..=2300).contains(&c) || c == 0x0fff),
+                .all(|&c| (700..=2300).contains(&c) || c == HOLD),
             Kind::Bind(_) => self
                 .hops
                 .as_ref()
                 .is_some_and(|h| h.iter().all(|&c| (1..=164).contains(&c))),
             _ => true,
         }
+    }
+
+    /// The sticks this packet carried, for the views that draw a control
+    /// link.
+    ///
+    /// `None` for a packet that carries none. A failsafe packet does carry
+    /// positions, and the channels it holds rather than drives are the
+    /// marker rather than a width, so those are absent.
+    pub fn control(&self) -> Option<common::ReportDetail> {
+        if !matches!(self.kind, Kind::Sticks | Kind::Failsafe) {
+            return None;
+        }
+        let mut channels = [None; common::CONTROL_CHANNELS];
+        for (slot, &us) in channels.iter_mut().zip(&self.channels) {
+            *slot = (us != HOLD).then_some(us);
+        }
+        Some(common::ReportDetail::Control { channels, armed: None, uplink_power_mw: None })
     }
 }
 
@@ -352,4 +374,24 @@ mod tests {
         p[0] = 0x42;
         assert!(!parse(&p).expect("a packet").plausible());
     }
+
+    /// A failsafe packet says "hold" for a channel rather than a width, and a
+    /// held channel is absent rather than a pulse of four microseconds.
+    #[test]
+    fn a_held_channel_is_absent_from_the_report() {
+        let mut values = [1500u16; 16];
+        values[2] = HOLD;
+        let p = parse(&sticks(values)).expect("a packet");
+        let Some(common::ReportDetail::Control { channels, .. }) = p.control() else {
+            panic!("no control report")
+        };
+        assert_eq!(channels[0], Some(1500));
+        assert_eq!(channels[2], None);
+
+        // Telemetry carries no sticks at all.
+        let mut t = sticks([1500; 16]);
+        t[0] = 0xaa;
+        assert!(parse(&t).expect("a packet").control().is_none());
+    }
+
 }
