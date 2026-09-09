@@ -1,0 +1,39 @@
+iq_clipper: tune a capture onto one channel, clip it to what a test needs.
+
+    iq_clipper <input> [output] [options]
+
+The input's format, sample rate and centre are read from its filename
+(<what>_<centre>M_<rate>k.<cu8|cs8|cs16|cf32>); the output's format comes from
+its own extension. Name the output for what it holds after tuning, since every
+reader downstream believes the filename.
+
+Tuning
+  --center-hz N      retune to this centre (default: the input's)
+  --rate N           resample to this rate (default: the input's)
+
+Clipping
+  --bursts           keep transmissions, drop the silence between them
+  --seconds N        keep a window of N seconds instead
+  --skip N           start N seconds in
+  --margin-ms N      quiet kept either side of a burst (default 2)
+  --bridge-ms N      bursts closer than this stay one span (default 5)
+  --threshold-db N   how far over the noise floor is a burst (default 6)
+  --min-us N         anything shorter is not a burst (default 100)
+  --max-bursts N     keep only the N loudest
+
+Overrides
+  --rate-in N        input sample rate, when the filename does not say
+  --center-in-hz N   input centre, when the filename does not say
+
+Clipping alone copies bytes straight out of the input, so the output is the
+same recording at the same scale. Tuning mixes and resamples: the result is
+evidence about one channel, not about the band, and the manifest entry should
+say so.
+
+Examples
+  # A packet capture down to its bursts, keeping 4 ms of floor either side.
+  iq_clipper ble_2426M_20000k.cs8 out.cs8 --bursts --margin-ms 4
+
+  # One DroneID channel out of a wideband recording, then its bursts.
+  iq_clipper wide_2442M_61440k.cs16 droneid_2444.5M_15360k.cs16 \
+      --center-hz 2444500000 --rate 15360000 --bursts --min-us 400

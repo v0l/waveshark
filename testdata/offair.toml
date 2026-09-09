@@ -14,7 +14,7 @@
 # than none.
 #
 # Most of these are cut down from what the radio wrote, with
-# `cargo run --release -p sources --example cut`: to the bursts themselves
+# `cargo run --release -p sources --bin iq_clipper`: to the bursts themselves
 # where the capture is packets, and to the first fraction of a second where it
 # is something continuous. A recording is of a real band at a real place and
 # time, and the parts no test looks at are the parts nobody has looked at, so
