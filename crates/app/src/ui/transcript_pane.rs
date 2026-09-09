@@ -341,10 +341,12 @@ fn line(ui: &mut egui::Ui, u: &Utterance, now: std::time::Instant, name: bool) {
     if live {
         l = l.legend("...");
     }
-    // Whisper's own mean log probability. Below -1.0 the words are usually
-    // wrong, which is the threshold its decoder retries at, so a reader is
-    // told rather than left to trust it.
-    if u.confidence < -1.0 {
+    // The model's own verdict on itself: below about -1.0 mean log
+    // probability, or a high chance the window was not speech at all. The
+    // words are shown either way, because a doubtful reading of a fading
+    // handheld is worth more than a blank pane, but a reader is told rather
+    // than left to trust it.
+    if !u.credible || u.confidence < -1.0 {
         l = l.legend("unsure").tint(theme::FAULT);
     }
     l.wrapped(ui);

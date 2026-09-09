@@ -605,6 +605,7 @@ mod tests {
             text: "go ahead".into(),
             settled: true,
             confidence: -0.3,
+            credible: true,
         }];
         c.read_transcripts(&said);
         assert_eq!(c.active(t(0))[0].transcript.as_deref(), Some("go ahead"));

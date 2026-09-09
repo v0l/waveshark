@@ -13,7 +13,7 @@ mod model;
 mod whisper;
 
 pub use model::{ensure, fetch, Files, Flavour, DEFAULT_REPO};
-pub use whisper::{Segment, Transcript, Whisper};
+pub use whisper::{Segment, Transcript, Whisper, WINDOW_S};
 
 /// What Whisper wants, and what the codecs give us.
 ///

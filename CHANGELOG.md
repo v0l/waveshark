@@ -10,6 +10,22 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ## [Unreleased]
 
+### Fixed
+
+- Speech is transcribed as it is spoken instead of piling up: nothing is
+  held longer than the thirty seconds the model reads in one pass, and a
+  transmission that runs past that is cut at a pause and written down as far
+  as it got. A repeater left keyed used to collect a minute and a half of
+  audio and show nothing.
+
+- A reading the model was unsure of is shown, marked "unsure", rather than
+  thrown away. A weak or fading handheld produced an empty transcript before,
+  which looked like a receiver that was not listening.
+
+- A channel carrying noise rather than speech, an open squelch or a hiss, is
+  left alone after two windows the model finds no speech in, instead of being
+  read over and over for as long as it hisses.
+
 ### Added
 
 - A Transcript view (Ctrl+T): what the local Whisper model read off
