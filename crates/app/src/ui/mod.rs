@@ -1188,6 +1188,16 @@ impl App {
             if self.chain.patch_sent.as_ref() != Some(&running) {
                 self.chain.patch = running;
             }
+            // A setting changed by parameter, from the chain inspector or
+            // the transcript card, is an edit the receiver made on the
+            // interface's behalf: it comes back here as the running graph
+            // and has to be written out like one drawn by hand, or the
+            // model picked is the model until the program is restarted.
+            let edits = crate::patch::Edits::diff(&self.chain.patch, &self.chain.base);
+            if edits != self.chain.edits {
+                self.chain.edits = edits;
+                self.chain.save_patch();
+            }
         }
         // A level set in the chain view lands on the node, and the strip
         // has to follow or the next thing it sends puts the level back.
