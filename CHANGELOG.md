@@ -36,6 +36,10 @@ the code is in the commit log; what a decoder can and cannot do is in
   channels are being received.
 - `iq_clipper`, which cuts a recording to the bursts in it and can tune it
   onto one channel first, replacing the `cut` example.
+- `--bench-iq FILE`, which replays a capture through the receiver a block at
+  a time and reports where the throughput drops: the slowest blocks, how
+  regularly they come, and which stage the time went into. For finding what
+  causes a lag spike without a radio and with the same answer every run.
 
 - The WaveShark mark is the window's icon, so the dock, the task bar and the
   window switcher show it instead of a blank default. On Windows it is in the

@@ -1617,6 +1617,17 @@ impl Receiver {
         self.graph.topology()
     }
 
+    /// Microseconds spent in each top-level node since the graph was built,
+    /// in execution order.
+    ///
+    /// Cumulative rather than per call, so a caller can difference it across
+    /// one block and say which stage a slow block was spent in. A composite
+    /// node reports the whole of its inner graph.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn node_costs(&self) -> Vec<(String, u64)> {
+        self.graph.total_costs().into_iter().map(|(l, us)| (l.to_string(), us)).collect()
+    }
+
     /// The latest readings of every scope in the graph, by node id, for the
     /// inspector to draw. Reading takes the fresh flag, so a caller polling
     /// faster than a scope refreshes sees the same frame again unchanged.

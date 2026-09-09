@@ -336,6 +336,201 @@ fn bench_audio() {
     }
 }
 
+/// Replay a capture through the whole receiver, block by block, and report
+/// where throughput drops.
+///
+/// A lag spike is one block that took longer than the samples in it, so a mean
+/// says nothing: the worst blocks, how often they come and which stage was in
+/// them are the whole of the answer. The graph is the one the scanner table
+/// puts on the capture's frequency, the same as `--replay`, so what is timed
+/// is what the live receiver runs.
+fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
+    let src = sources::FileSource::open(std::path::Path::new(path))?;
+    let buf = src.read_all()?;
+    if buf.samples.is_empty() {
+        anyhow::bail!("{path} holds no samples");
+    }
+    let rate = buf.rate.as_f64().max(1.0);
+    let block = block.clamp(1, buf.samples.len());
+    let block_secs = block as f64 / rate;
+    let per_pass = buf.samples.len() / block;
+    // Enough blocks that a percentile means something, and a bound so a long
+    // capture is not run twice for nothing.
+    let passes = (200usize.div_ceil(per_pass.max(1))).clamp(1, 20);
+
+    let mut rx = radio::replay_receiver(&buf, None)?;
+    let labels: Vec<String> = rx.node_costs().into_iter().map(|(l, _)| l).collect();
+    println!(
+        "{path}\n{:.4} MHz at {:.3} MS/s, {:.2} s, {} nodes",
+        buf.center.as_f64() / 1e6,
+        rate / 1e6,
+        buf.samples.len() as f64 / rate,
+        labels.len(),
+    );
+    println!(
+        "block {block} samples ({:.2} ms), {} blocks a pass, {passes} pass(es){}\n",
+        block_secs * 1e3,
+        per_pass,
+        if passes > 1 { ", so the file repeats" } else { "" },
+    );
+
+    /// One block's measurement: how long it took and where it went.
+    struct Blk {
+        us: f64,
+        top: [(usize, u64); 3],
+    }
+    let mut blocks: Vec<Blk> = Vec::with_capacity(per_pass * passes);
+    let mut prev: Vec<u64> = rx.node_costs().into_iter().map(|(_, us)| us).collect();
+    let mut delta = vec![0u64; prev.len()];
+    let wall = std::time::Instant::now();
+    for _ in 0..passes {
+        for chunk in buf.samples.chunks(block) {
+            if chunk.len() < block {
+                break;
+            }
+            let t = std::time::Instant::now();
+            if rx.process(chunk).is_err() {
+                anyhow::bail!("the graph refused a block");
+            }
+            let us = t.elapsed().as_secs_f64() * 1e6;
+            // Read outside the timed region: the strings it allocates would
+            // otherwise be counted as the graph's own cost.
+            let now = rx.node_costs();
+            for (i, d) in delta.iter_mut().enumerate() {
+                *d = now.get(i).map(|(_, us)| *us).unwrap_or(0).saturating_sub(prev[i]);
+            }
+            let mut top = [(0usize, 0u64); 3];
+            for (i, &d) in delta.iter().enumerate() {
+                if d > top[2].1 {
+                    top[2] = (i, d);
+                    top.sort_by(|a, b| b.1.cmp(&a.1));
+                }
+            }
+            for (i, (_, us)) in now.iter().enumerate() {
+                prev[i] = *us;
+            }
+            let _ = rx.decodes(std::time::Instant::now());
+            blocks.push(Blk { us, top });
+        }
+    }
+    let wall = wall.elapsed().as_secs_f64();
+    if blocks.len() < 8 {
+        anyhow::bail!("only {} blocks: use a longer capture or a smaller --bench-block", blocks.len());
+    }
+
+    // The first blocks allocate, fault in pages and open the sources the
+    // detector finds, so they say nothing about a steady state.
+    const WARM: usize = 4;
+    let timed = &blocks[WARM..];
+    let mut sorted: Vec<f64> = timed.iter().map(|b| b.us).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f64| sorted[(((sorted.len() - 1) as f64) * q) as usize];
+    let x = |us: f64| block_secs * 1e6 / us.max(1e-9);
+    let median = at(0.5);
+    println!(
+        "{} blocks timed, {:.2} s of signal in {wall:.2} s wall, {:.1}x mean",
+        timed.len(),
+        timed.len() as f64 * block_secs,
+        timed.len() as f64 * block_secs / wall.max(1e-9),
+    );
+    println!(
+        "\n{:>8} {:>10} {:>10}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}",
+        "", "x real", "ms",
+        "median", x(median), median / 1e3,
+        "p90", x(at(0.90)), at(0.90) / 1e3,
+        "p99", x(at(0.99)), at(0.99) / 1e3,
+        "worst", x(sorted[sorted.len() - 1]), sorted[sorted.len() - 1] / 1e3,
+        "best", x(sorted[0]), sorted[0] / 1e3,
+    );
+    let over = timed.iter().filter(|b| b.us > block_secs * 1e6).count();
+    println!(
+        "{over} block(s) slower than real time, {} over three times the median",
+        timed.iter().filter(|b| b.us > 3.0 * median).count(),
+    );
+
+    // A trace of the whole run, with the slowest block in each column, since
+    // it is the lows that are being looked for and a mean hides them.
+    const COLS: usize = 96;
+    let bars = [' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+    let per_col = timed.len().div_ceil(COLS).max(1);
+    let worst_x = sorted[sorted.len() - 1];
+    let trace: String = timed
+        .chunks(per_col)
+        .map(|c| {
+            let slow = c.iter().map(|b| b.us).fold(0.0f64, f64::max);
+            let f = (slow / worst_x).clamp(0.0, 1.0);
+            bars[(f * (bars.len() - 1) as f64).round() as usize]
+        })
+        .collect();
+    println!(
+        "\ntime in a block, tall is slow, full height is {:.1} ms\n{trace}",
+        worst_x / 1e3
+    );
+
+    // How regularly the slow blocks arrive. A spike that comes every N blocks
+    // is something running on a period, and the period says which thing.
+    let slow: Vec<usize> = timed
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.us > 2.0 * median)
+        .map(|(i, _)| i)
+        .collect();
+    if slow.len() > 2 {
+        let mut gaps: Vec<usize> = slow.windows(2).map(|w| w[1] - w[0]).collect();
+        gaps.sort_unstable();
+        let g = gaps[gaps.len() / 2];
+        println!(
+            "\n{} slow blocks, typically {g} blocks apart ({:.0} ms), spread {}..{}",
+            slow.len(),
+            g as f64 * block_secs * 1e3,
+            gaps[0],
+            gaps[gaps.len() - 1],
+        );
+    }
+
+    let name = |i: usize| labels.get(i).map(String::as_str).unwrap_or("?");
+    println!("\n{:>7} {:>9} {:>8}  {}", "block", "ms", "x real", "where the time went");
+    let mut order: Vec<usize> = (0..timed.len()).collect();
+    order.sort_by(|&a, &b| timed[b].us.partial_cmp(&timed[a].us).unwrap());
+    for &i in order.iter().take(12) {
+        let b = &timed[i];
+        let where_ = b
+            .top
+            .iter()
+            .filter(|(_, us)| *us > 0)
+            .map(|(n, us)| format!("{} {:.2} ms", name(*n), *us as f64 / 1e3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{:>7} {:>9.2} {:>7.2}x  {where_}", i + WARM, b.us / 1e3, x(b.us));
+    }
+
+    // Past a hundred per cent between them: independent nodes run beside
+    // each other, so the shares are of one core's time and not of the wall.
+    println!("\n{:>12} {:>10} {:>9}  {}", "total ms", "% of wall", "us/block", "node");
+    let mut totals: Vec<(String, u64)> = rx.node_costs();
+    totals.sort_by(|a, b| b.1.cmp(&a.1));
+    for (label, us) in totals.into_iter().take(15).filter(|(_, us)| *us > 0) {
+        println!(
+            "{:>12.1} {:>9.1}% {:>9.0}  {label}",
+            us as f64 / 1e3,
+            us as f64 / 1e6 / wall * 100.0,
+            us as f64 / blocks.len() as f64,
+        );
+    }
+
+    // Inside the composites, where a node reports its own parts. The p95 is
+    // what the chain view shows and is the number a spike lives in.
+    for n in rx.topology().nodes.iter().filter(|n| !n.phases.is_empty()) {
+        println!("\n{:>10} {:>10} {:>9}  {} phases", "p95 us", "mean us", "calls", n.label);
+        let mut ph = n.phases.clone();
+        ph.sort_by(|a, b| b.1.p95_us.cmp(&a.1.p95_us));
+        for (name, c) in ph.iter().filter(|(_, c)| c.calls > 0) {
+            println!("{:>10} {:>10.0} {:>9}  {name}", c.p95_us, c.mean_us, c.calls);
+        }
+    }
+    Ok(())
+}
+
 /// How long a retune actually costs, which decides whether a drag can send one
 /// per frame.
 fn bench_tune() {
@@ -821,6 +1016,17 @@ struct Args {
     #[arg(long)]
     bench_audio: bool,
 
+    /// Replay a capture through the receiver and report where throughput
+    /// drops, which is where a lag spike comes from
+    #[arg(long, value_name = "PATH")]
+    bench_iq: Option<String>,
+
+    /// Samples a block for `--bench-iq`. The default is a HackRF transfer,
+    /// which is the parcel the live radio hands the graph, so anything that
+    /// runs once a block keeps its period
+    #[arg(long, value_name = "SAMPLES", default_value_t = 131_072)]
+    bench_block: usize,
+
     /// Download or revalidate the cached datasets and exit, for warming the
     /// cache before going somewhere without a connection
     #[arg(long)]
@@ -968,6 +1174,13 @@ fn main() -> eframe::Result<()> {
     }
     if args.bench_audio {
         bench_audio();
+        return Ok(());
+    }
+    if let Some(path) = &args.bench_iq {
+        if let Err(e) = bench_iq(path, args.bench_block) {
+            eprintln!("bench failed: {e}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
     if let Some(mhz) = args.mpx {
