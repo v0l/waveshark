@@ -302,6 +302,11 @@ pub struct Engine {
     pub reads: u64,
     pub last_ms: u64,
     pub last_audio_s: f64,
+    /// What the last window came back as, verbatim, and whether the model
+    /// thought it was speech. Shown on the card so a read that produced no
+    /// line can be told from one that never happened.
+    pub last_text: String,
+    pub last_speech: bool,
     /// Speech being collected right now, and on how many conversations.
     pub holding_s: f64,
     pub speakers: usize,
@@ -397,6 +402,8 @@ struct Health {
     reads: u64,
     last_ms: u64,
     last_audio_s: f64,
+    last_text: String,
+    last_speech: bool,
     present: bool,
     bytes: u64,
     weights: String,
@@ -482,6 +489,8 @@ impl LiveTranscribeNode {
             e.reads = h.reads;
             e.last_ms = h.last_ms;
             e.last_audio_s = h.last_audio_s;
+            e.last_text = h.last_text.clone();
+            e.last_speech = h.last_speech;
             e.present = h.present;
             e.bytes = h.bytes;
             e.weights = h.weights.clone();
@@ -815,8 +824,18 @@ mod work {
                 return;
             }
         };
+        // What the model is handed, as files, when asked. The one way to
+        // tell a model that reads nothing from audio that has nothing in it.
+        let dump = std::env::var_os("WAVESHARK_DUMP_STT").map(std::path::PathBuf::from);
+        let mut dumped = 0u32;
         while let Ok(job) = jobs.recv() {
             let seconds = job.pcm.len() as f64 / job.rate.max(1.0);
+            if let Some(dir) = &dump {
+                let name = format!("{dumped:04}_{}_{seconds:.1}s.wav", job.key.replace(':', "_"));
+                let speech = common::Speech { pcm: job.pcm.clone(), rate: job.rate };
+                let _ = crate::audiobus::write_wav(&dir.join(name), &speech);
+                dumped += 1;
+            }
             let started = Instant::now();
             let result = model.transcribe(&job.pcm, job.rate);
             {
@@ -824,6 +843,10 @@ mod work {
                 h.reads += 1;
                 h.last_ms = started.elapsed().as_millis() as u64;
                 h.last_audio_s = seconds;
+                if let Ok(t) = &result {
+                    h.last_text = t.text.trim().to_string();
+                    h.last_speech = t.speech();
+                }
             }
             if done
                 .send(Done { key: job.key, at: job.at, seconds, settled: job.settled, result })
@@ -1037,7 +1060,7 @@ mod tests {
             text: text.into(),
             settled,
             confidence: -0.2,
-                credible: true,
+            credible: true,
         };
         log.push(u("all stations", false));
         log.push(u("all stations this is", false));
@@ -1131,7 +1154,7 @@ mod tests {
                     text: text.into(),
                     settled: true,
                     confidence: -0.2,
-                credible: true,
+                    credible: true,
                 },
                 Utterance {
                     key: "DMR:435000000:9:1234567".into(),
@@ -1140,7 +1163,7 @@ mod tests {
                     text: "go ahead".into(),
                     settled: false,
                     confidence: -0.4,
-                credible: true,
+                    credible: true,
                 },
             ]
         };

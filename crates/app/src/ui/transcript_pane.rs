@@ -272,6 +272,25 @@ impl Transcript<'_> {
                     if let ModelState::Failed(why) = &e.state {
                         theme::Line::new().words(why).tint(theme::FAULT).wrapped(ui);
                     }
+                    // What the last window came back as, whether or not it
+                    // became a line. A card saying "read 8" over an empty
+                    // pane is a receiver that looks broken; the same card
+                    // saying the eight reads came back empty and the model
+                    // heard no speech in them is a receiver being handed
+                    // silence, which is a different problem in a different
+                    // place.
+                    if e.reads > 0 {
+                        let (text, tint) = match (e.last_text.is_empty(), e.last_speech) {
+                            (true, _) => ("(nothing)".to_string(), theme::LEGEND),
+                            (false, true) => (e.last_text.clone(), theme::VALUE),
+                            (false, false) => (e.last_text.clone(), theme::FAULT),
+                        };
+                        let mut l = theme::Line::new().legend("last read").words(text).tint(tint);
+                        if !e.last_speech {
+                            l = l.legend("no speech").tint(theme::FAULT);
+                        }
+                        l.size(11.0).wrapped(ui);
+                    }
                     // Loading it by hand is the only way to find out whether
                     // transcription works on this machine without waiting
                     // for somebody to key up: the model is fetched and
