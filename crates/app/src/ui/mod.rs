@@ -1513,6 +1513,31 @@ impl App {
         video_pane::VideoPane { st: &mut self.video, frame, inputs, cmds: &mut self.cmds }.show(ui);
     }
 
+    /// Fold in who the audio bus is hearing, and subscribe to anything new.
+    ///
+    /// The call list is fed from here for everything that talks, analogue or
+    /// digital, because every demodulator's audio goes through the bus first
+    /// and the bus is the one thing that knows who is on the air now. What a
+    /// decoder knows besides, the cipher, the codec, arrives on the packet
+    /// side through `log_decodes` and lands on the same row.
+    fn read_heard(&mut self) {
+        let Some(r) = &self.radio else {
+            return;
+        };
+        let heard = std::mem::take(&mut *r.status.heard.lock());
+        if heard.is_empty() {
+            return;
+        }
+        for c in &heard {
+            self.calls.list.hear(c);
+        }
+        let active: Vec<crate::calls::Call> =
+            self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
+        let mut cmds = std::mem::take(&mut self.cmds);
+        self.calls.subscribe_new(&active, &mut cmds);
+        self.cmds = cmds;
+    }
+
     /// Fold the window of utterances the radio publishes into the interface's
     /// own log, and give the call list the newest line for each call.
     ///
@@ -1543,16 +1568,10 @@ impl App {
 
     /// Draw the transcript, then do what its buttons asked for.
     fn transcript_view(&mut self, ui: &mut egui::Ui) {
-        let engine = self
-            .radio
-            .as_ref()
-            .and_then(|r| r.status.transcriber.lock().clone());
-        let act = transcript_pane::Transcript {
-            st: &mut self.transcript,
-            engine,
-            cmds: &mut self.cmds,
-        }
-        .show(ui);
+        let engine = self.radio.as_ref().and_then(|r| r.status.transcriber.lock().clone());
+        let act =
+            transcript_pane::Transcript { st: &mut self.transcript, engine, cmds: &mut self.cmds }
+                .show(ui);
         match act {
             Some(transcript_pane::Action::Clear) => {
                 self.transcript.log.clear();
@@ -2205,6 +2224,7 @@ impl App {
     /// shell and the number that matters is over a steady-state window.
     fn soak_check(&mut self, ctx: &egui::Context) {
         let Some(secs) = self.soak else { return };
+        self.read_heard();
         self.read_said();
         if self.shot_sent {
             return;
@@ -2329,8 +2349,7 @@ impl App {
         // whether a picture is live only moves while it is being drawn, so a
         // transmission that came and went while the spectrum was open would
         // never have been counted.
-        let sending =
-            self.radio.as_ref().is_some_and(|r| !r.status.video_inputs().is_empty());
+        let sending = self.radio.as_ref().is_some_and(|r| !r.status.video_inputs().is_empty());
         if sending {
             self.video_live_was = true;
         } else if std::mem::take(&mut self.video_live_was) {
@@ -3000,10 +3019,7 @@ mod tests {
         let key = "DMR:435000000:9:1234567".to_string();
         a.read_views();
         assert!(!a.view_live(View::Transcript), "nothing has been said yet");
-        assert!(
-            !a.transcript.log.has(&key),
-            "and so no row would offer a way in"
-        );
+        assert!(!a.transcript.log.has(&key), "and so no row would offer a way in");
 
         for (n, text) in ["go ahead", "received, out"].into_iter().enumerate() {
             a.transcript.log.push(crate::transcripts::Utterance {
@@ -3017,20 +3033,14 @@ mod tests {
             });
         }
         assert!(a.transcript.log.has(&key));
-        assert!(
-            a.view_live(View::Transcript),
-            "two lines arrived while elsewhere"
-        );
+        assert!(a.view_live(View::Transcript), "two lines arrived while elsewhere");
 
         a.show_transcript(Some(key.clone()));
         assert_eq!(a.view, View::Transcript);
         assert_eq!(a.transcript.only.as_deref(), Some(key.as_str()));
         assert_eq!(a.transcript.log.of(&key).len(), 2);
         a.read_views();
-        assert!(
-            !a.view_live(View::Transcript),
-            "the view has been looked at"
-        );
+        assert!(!a.view_live(View::Transcript), "the view has been looked at");
     }
 
     /// Going back is one key, which is the whole reason the previous view is

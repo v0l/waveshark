@@ -1444,6 +1444,11 @@ pub struct Status {
     /// "nothing was decoded" from "it was decoded and you still cannot hear
     /// it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    /// Who the bus is hearing, and who it has just stopped hearing, since the
+    /// interface last took them. Appended by the radio thread every block
+    /// and drained by the interface every frame: the ending of a call is
+    /// reported once and must not be lost between two frames.
+    pub heard: parking_lot::Mutex<Vec<crate::audiobus::LiveCall>>,
     /// The TETRA cells heard and their key state, for the key manager.
     tetra_keys: parking_lot::Mutex<Vec<nodes::tetra_nodes::KeyStatus>>,
     /// Peak of the whole mix as it left for the speaker, and of the call
@@ -1582,6 +1587,7 @@ impl Default for Status {
             replaying: AtomicBool::new(false),
             call_heard: parking_lot::Mutex::new(None),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            heard: parking_lot::Mutex::new(Vec::new()),
             tetra_keys: parking_lot::Mutex::new(Vec::new()),
             out_level: AtomicU32::new(0),
             call_level: AtomicU32::new(0),
@@ -2995,6 +3001,20 @@ fn run(
         status.set_channel_states(rx.channel_states());
         status.set_strips(rx.audio_node_id(), rx.strips());
         *status.tetra_keys.lock() = rx.tetra_key_status();
+        if let Some(b) = rx.audio_mut().map(|n| n.bus_mut()) {
+            let calls = b.take_calls();
+            if !calls.is_empty() {
+                let mut heard = status.heard.lock();
+                // A running call replaces its last report; an ended one is
+                // kept, since it is the only report that says so.
+                for c in calls {
+                    match heard.iter_mut().find(|h| !h.over && h.key() == c.key()) {
+                        Some(h) => *h = c,
+                        None => heard.push(c),
+                    }
+                }
+            }
+        }
         if let Some(b) = rx.audio().map(|n| n.bus()) {
             Status::set_level(&status.call_level, b.voice_peak());
             *status.call_levels.lock() = b.levels();
@@ -4673,25 +4693,18 @@ pub(crate) mod tests {
         assert_eq!(who.freq_hz, CHANNEL_HZ as u64, "read on {key}");
     }
 
-    /// A channel marked as voice is listed and heard, not merely decoded.
+    /// A channel marked as voice is heard through its own fader and listed
+    /// as a call off the audio bus, and nothing of it touches the packet bus.
     ///
-    /// Three things in one path, all of which were broken together, and each
-    /// of which looks on screen like a receiver that is not receiving:
-    ///
-    /// The over has to reach the packet bus as a call. It did not: the
-    /// protocols node overwrote every packet's decodes with what it could
-    /// read out of the bytes, and an analogue over carries its speech beside
-    /// an empty frame, so the front end's own conclusion was thrown away and
-    /// no row ever appeared in the call list.
-    ///
-    /// The bus has to keep the speaker fed. With one voice input and nothing
-    /// subscribed it produced no samples at all rather than a block of
-    /// silence, so the sound card starved.
-    ///
-    /// And once the call is subscribed, as the call list does for any group
-    /// it has not been told to ignore, the speech has to reach the mix.
+    /// The bus is the first stop for every demodulator's audio, and the one
+    /// place that knows who is talking now. An analogue over used to be
+    /// wrapped in an empty packet so the call list, which read only the
+    /// packet bus, would see it: that put a row saying nothing into the
+    /// packet log for every transmission, made the channel inaudible until
+    /// something subscribed to it, and was wrong in principle, since there
+    /// is no packet in analogue speech.
     #[test]
-    fn a_voice_channel_is_listed_and_heard() {
+    fn a_voice_channel_is_heard_and_listed_off_the_audio_bus() {
         let Some(buf) = pmr446_fixture() else {
             eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
             return;
@@ -4713,8 +4726,13 @@ pub(crate) mod tests {
             tx: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert!(
+            !rx.topology().nodes.iter().any(|n| n.kind == "packet_bus"),
+            "an analogue channel put something on the packet bus"
+        );
 
-        let mut calls: Vec<DecodeRecord> = Vec::new();
+        let mut calls = crate::calls::Calls::new();
+        let mut heard: Vec<crate::audiobus::LiveCall> = Vec::new();
         let mut pcm: Vec<f32> = Vec::new();
         let mut silent_blocks = 0;
         for block in buf.samples.chunks(16_384) {
@@ -4726,46 +4744,37 @@ pub(crate) mod tests {
                 silent_blocks += 1;
             }
             pcm.extend(out.iter().step_by(2));
-            for d in rx.decodes(std::time::Instant::now()) {
-                // What the call list does with a group it has not been told
-                // to ignore: subscribe to it, so the next block is audible.
-                if let Some(common::Value::Text(to)) =
-                    d.fields.iter().find(|(k, _)| k == "to").map(|(_, v)| v.clone())
-                {
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_subscriptions(vec![crate::audiobus::Subscription::new(
-                            crate::audiobus::Rule::Group(to),
-                        )]);
-                    }
-                }
-                calls.push(d);
+            assert!(rx.decodes(std::time::Instant::now()).is_empty(), "speech is not a packet");
+            for c in rx.audio_mut().expect("the bus").bus_mut().take_calls() {
+                calls.hear(&c);
+                heard.push(c);
             }
         }
 
-        // One over: announced as it starts, and again with its length when
-        // the squelch closes. Both rows say what channel they were on.
-        assert_eq!(calls.len(), 2, "{calls:?}");
-        let field = |c: &DecodeRecord, name: &str| {
-            c.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
-        };
-        for c in &calls {
-            assert_eq!(field(c, "to"), Some(common::Value::Text("PMR1".into())));
-            assert_eq!(field(c, "voice"), Some(common::Value::Bool(true)));
-        }
-        assert_eq!(field(&calls[0], "live"), Some(common::Value::Bool(true)));
-        let seconds = match field(&calls[1], "seconds") {
-            Some(common::Value::Float(s)) => s,
-            other => panic!("the closed over has no length: {other:?}"),
-        };
-        // The transmission is four seconds of a six second capture.
-        assert!((3.5..4.5).contains(&seconds), "the over ran {seconds:.2} s");
-
+        // Heard, with no subscription to anything: the fader is the strip's.
         assert_eq!(
             silent_blocks, 0,
             "the bus handed the speaker nothing on {silent_blocks} blocks"
         );
         let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
         assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
+
+        // Listed, once, as one over of about four seconds on the channel it
+        // was heard on, and the row is the same conversation the transcriber
+        // keys its lines by.
+        let over: Vec<&crate::audiobus::LiveCall> = heard.iter().filter(|c| c.over).collect();
+        assert_eq!(over.len(), 1, "{heard:?}");
+        assert_eq!(over[0].to, "PMR1");
+        assert_eq!(over[0].system, crate::audiobus::ANALOGUE);
+        assert!((3.5..4.5).contains(&over[0].seconds), "the over ran {:.2} s", over[0].seconds);
+        assert_eq!(over[0].key(), "Audio:446049100:PMR1:");
+        let now = std::time::Instant::now();
+        let rows = calls.active(now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].to, "PMR1");
+        assert_eq!(rows[0].overs, 1);
+        assert!((3.5..4.5).contains(&rows[0].seconds), "the row says {:.2} s", rows[0].seconds);
+        assert_eq!(rows[0].transcript_key(), over[0].key());
     }
 
     fn pmr446_fixture() -> Option<common::IqBuf> {

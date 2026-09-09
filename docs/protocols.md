@@ -539,16 +539,20 @@ codewords the message text can be read back out of.
 | FM with CTCSS/DCS | any | FM plus subaudible tone | 12.5 kHz | table | mod | Trivial next to the rest: a Goertzel on the discriminator output |
 
 An analogue channel says nothing about itself, so the strip has a `voice`
-switch per channel and that is what turns one into a front end. Switched on,
-`nodes::VoiceChannelNode` ends an over where the squelch does, puts the whole
-transmission on the packet bus with its audio, and the call appears in the
-call list beside the digital ones. It is on by default for the modes people
-talk on, NFM, AM and SSB, and off for broadcast FM, which would otherwise
-transcribe a music station for as long as the receiver runs; the switch is on
-the strip, for a channel that turns out to be data. It takes two wires, the channel's IF and
-its audio, because what was said is in the audio and how strong it was is only
-in the IF: a level read off a demodulator's output is a level of the
-demodulator.
+switch per channel. It is not a front end and it makes no packet: there is no
+packeting in analogue speech, so nothing of it ever touches the packet bus or
+the packet log. What the switch does is name the strip's audio as a
+conversation on the audio bus, `Audio:{hz}:{label}:`, so the bus's tap
+carries it labelled and the bus counts it as a call. The audio bus is the
+first stop for every demodulator's audio, FM or M17 alike, and it is the one
+place that knows who is talking now: `app::audiobus::AudioBus::track` keeps
+that table and the call list is fed from it, for digital and analogue calls
+the same way. A digital decoder's packet still goes to the packet bus and
+still makes its row in the log, and what only the decoder knows, the cipher,
+the codec, the kind of call, lands on the same call row from that side. The
+switch is on by default for the modes people talk on, NFM, AM and SSB, and
+off for broadcast FM, which would otherwise transcribe a music station for as
+long as the receiver runs.
 
 What was said is read by `crates/stt`, a local Whisper model through candle,
 as `app::transcripts::LiveTranscribeNode` on the audio bus rather than on the
