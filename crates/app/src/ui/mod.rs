@@ -3013,6 +3013,7 @@ mod tests {
                 text: text.into(),
                 settled: true,
                 confidence: -0.3,
+                credible: true,
             });
         }
         assert!(a.transcript.log.has(&key));

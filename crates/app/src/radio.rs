@@ -4599,6 +4599,88 @@ pub(crate) mod tests {
             assert!((r - 48_000.0).abs() < 12_000.0, "{} gave {r} Hz", mode.label());
         }
     }
+
+    /// A PMR446 handheld through the whole receiver, from IQ to words.
+    ///
+    /// The path this proves is the one that has no test anywhere else: the
+    /// span is decimated to a channel, the channel is demodulated as narrow
+    /// FM, its audio goes on the bus as speech because the channel says it
+    /// is voice, the transcriber on the bus tap collects it, and a line of
+    /// text comes out with the words that were spoken into the handheld. Any
+    /// one of those failing shows up here as an empty transcript, which is
+    /// exactly what it looks like on screen.
+    ///
+    /// Skipped without a model, since fetching one is not something a test
+    /// should do to somebody's machine.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn a_handheld_on_pmr446_arrives_as_words() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let dir = crate::chain::default_model_dir();
+        if !dir.join("config.json").exists() {
+            eprintln!("skipping: no whisper model in {}", dir.display());
+            return;
+        }
+        // PMR446 channel 1. The capture is tuned 49.1 kHz below it, which is
+        // what the dial was set to rather than anything about the signal.
+        const CHANNEL_HZ: f64 = 446_049_100.0;
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "PMR1".into(),
+            offset_hz: CHANNEL_HZ - buf.center.as_f64(),
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 1.0,
+            muted: false,
+            // Open: the transmission is what the file holds, and a squelch
+            // decision is not what this test is about.
+            squelch_db: Some(-200.0),
+            agc: true,
+            voice: true,
+            tx: None,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        let _ = replay_blocks(&mut rx, &buf);
+        // The model runs on its own thread, so the answer arrives after the
+        // samples have run out, the way it does in the receiver.
+        let silence = vec![C32::default(); 16_384];
+        let mut said = Vec::new();
+        for _ in 0..600 {
+            let _ = rx.process(&silence);
+            said = rx.said(64);
+            if said.iter().any(|u| u.settled) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let text = said.iter().map(|u| u.text.as_str()).collect::<Vec<_>>().join(" ");
+        let words = text.to_lowercase();
+        // One transmission is one line. More than one means the utterance
+        // was cut where nobody paused, which is the failure this count is
+        // here to catch; none means nothing reached the model at all.
+        assert_eq!(said.len(), 1, "read as {text:?}");
+        assert!(words.contains("123"), "read as {text:?}");
+        assert!(words.contains("test"), "read as {text:?}");
+        // On the channel it was heard on, since the key is what the call
+        // list and the transcript view meet on.
+        let key = said[0].key.clone();
+        let who = crate::transcripts::Speaker::parse(&key).expect("a key");
+        assert_eq!(who.freq_hz, CHANNEL_HZ as u64, "read on {key}");
+    }
+
+    fn pmr446_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/pmr446_test_446.0M_512k.cs8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
 }
 
 #[cfg(test)]

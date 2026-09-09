@@ -28,6 +28,22 @@
 //! makes it feel live; the final pass is the one worth reading, because a
 //! model given the whole sentence punctuates and corrects what it guessed
 //! from half of it.
+//!
+//! Nothing is held for longer than the model's own window ([`stt::WINDOW_S`],
+//! thirty seconds). A repeater left keyed used to grow one buffer until it
+//! hit a two-minute cap, and every partial re-read all of it: ninety seconds
+//! held meant three windows decoded every two seconds, for one line that had
+//! not been written yet. So a run of speech that reaches the window is cut
+//! and the part before the cut is settled: the cut is placed at the quietest
+//! moment in the last few seconds, which is a pause if there is one, and what
+//! comes after it starts the next line. The words carry on; what stops
+//! growing is the buffer.
+//!
+//! An open channel that is not speech is stopped by the model rather than by
+//! a threshold. Squelch noise is loud enough to collect, so the level test
+//! alone read a hissing repeater as somebody talking for as long as it hissed;
+//! after two windows come back with nothing credible in them, that
+//! conversation is left alone until it goes quiet again.
 
 use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -47,9 +63,28 @@ const HANG_S: f64 = 0.8;
 /// open one delivers noise, and the noise is what has to be rejected.
 const FLOOR: f32 = 0.004;
 
-/// Longest run of speech kept as one utterance. A repeater left keyed would
-/// otherwise grow a buffer without bound.
-const MAX_UTTERANCE_S: f64 = 120.0;
+/// Longest run of speech held before it is cut into a settled line and a
+/// fresh one. The model's own window: holding more is holding audio that
+/// cannot be read in one pass, and paying for the whole of it again on every
+/// partial.
+#[cfg(feature = "stt")]
+const HOLD_S: f64 = stt::WINDOW_S;
+#[cfg(not(feature = "stt"))]
+const HOLD_S: f64 = 30.0;
+
+/// How far back from the cut a pause is looked for. Long enough to find the
+/// gap between two sentences, short enough that the line before the cut is
+/// most of the window.
+const CUT_SEARCH_S: f64 = 3.0;
+
+/// Windows a conversation may come back empty before it is left alone. Two,
+/// because one window of a caller thinking is not evidence of anything.
+const DUDS_BEFORE_DEAF: u8 = 2;
+
+/// Hard cap on what is held when the model is behind. Beyond this the audio
+/// is dropped rather than queued: a transcript of what was said ten minutes
+/// ago is worth less than keeping up with what is being said now.
+const MAX_HELD_S: f64 = 90.0;
 
 /// Conversations kept before the oldest is forgotten.
 const MAX_KEYS: usize = 512;
@@ -71,6 +106,11 @@ pub struct Utterance {
     /// The model's own mean log probability, near zero for a confident read
     /// and below about -1 for a guess.
     pub confidence: f32,
+    /// Whether the model believed this was speech it read correctly, by its
+    /// own two thresholds. False is a reading worth showing and worth
+    /// doubting, which is why the words are kept and this is carried beside
+    /// them.
+    pub credible: bool,
 }
 
 /// Who is talking, in the parts the receiver knows.
@@ -290,6 +330,41 @@ struct Talking {
     waiting: bool,
     /// The speech has stopped and the last reading is owed.
     finished: bool,
+    /// Windows in a row the model has found nothing credible in.
+    duds: u8,
+    /// The model has said, twice, that this is not speech. Nothing more is
+    /// collected until the channel goes quiet, which is what ends it.
+    deaf: bool,
+}
+
+impl Talking {
+    fn seconds(&self) -> f64 {
+        self.pcm.len() as f64 / self.rate
+    }
+}
+
+/// Where to cut a run of speech that has filled the model's window.
+///
+/// The quietest twentieth of a second in the last [`CUT_SEARCH_S`], which is
+/// the pause between two sentences where there is one. Cutting at the end of
+/// the buffer instead splits whatever word was being said across two lines,
+/// and the model reads each half as a different word.
+fn cut_point(pcm: &[f32], rate: f64) -> usize {
+    let step = ((rate * 0.05) as usize).max(1);
+    let back = ((rate * CUT_SEARCH_S) as usize).min(pcm.len());
+    let from = pcm.len() - back;
+    let mut best = pcm.len();
+    let mut quietest = f32::INFINITY;
+    let mut at = from;
+    while at + step <= pcm.len() {
+        let energy: f32 = pcm[at..at + step].iter().map(|s| s.abs()).sum();
+        if energy < quietest {
+            quietest = energy;
+            best = at + step / 2;
+        }
+        at += step;
+    }
+    best
 }
 
 /// The streaming transcriber, as a node on the audio bus tap.
@@ -440,7 +515,19 @@ impl LiveTranscribeNode {
             asked_at_s: 0.0,
             waiting: false,
             finished: false,
+            duds: 0,
+            deaf: false,
         });
+        // A conversation the model has twice said is not speech collects
+        // nothing until it goes quiet, which is the channel closing.
+        if entry.deaf {
+            if !loud {
+                entry.pcm.clear();
+                entry.deaf = false;
+                entry.duds = 0;
+            }
+            return false;
+        }
         if loud {
             entry.quiet_s = 0.0;
             entry.pcm.extend_from_slice(&v.pcm);
@@ -454,8 +541,26 @@ impl LiveTranscribeNode {
             // that were not said together and the model reads them as one.
             entry.pcm.extend_from_slice(&v.pcm);
         }
-        let seconds = entry.pcm.len() as f64 / entry.rate;
-        entry.quiet_s >= HANG_S || seconds >= MAX_UTTERANCE_S
+        entry.quiet_s >= HANG_S || entry.seconds() >= MAX_HELD_S
+    }
+
+    /// What the model made of a settled window, so a conversation it found
+    /// nothing in twice is left alone. Squelch noise is loud enough to
+    /// collect and there is no threshold that tells it from speech; the model
+    /// already decides, and this is that decision being used.
+    fn read_back(&mut self, key: &str, anything: bool) {
+        let Some(t) = self.talking.get_mut(key) else {
+            return;
+        };
+        if anything {
+            t.duds = 0;
+            return;
+        }
+        t.duds = t.duds.saturating_add(1);
+        if t.duds >= DUDS_BEFORE_DEAF {
+            t.deaf = true;
+            t.pcm.clear();
+        }
     }
 
     /// Seconds of audio held for a key, for tests and for a status line.
@@ -533,11 +638,27 @@ mod work {
                 if let Some(t) = self.talking.get_mut(&done.key) {
                     t.waiting = false;
                 }
-                // The last reading of an utterance is the end of it: what was
-                // held is now text, and holding it into the next one would
-                // read the same words again with somebody else's in front.
                 if done.settled {
-                    self.talking.remove(&done.key);
+                    if let Ok(t) = &done.result {
+                        // Whether it was speech, not whether it was read
+                        // well: the model returns a plausible sentence for a
+                        // fan or an open squelch, so words alone are not
+                        // evidence of anybody talking, and a weak handheld
+                        // read badly is still somebody talking.
+                        self.read_back(&done.key, t.speech());
+                    }
+                    // The last reading of an utterance is the end of it, and
+                    // holding it into the next one would read the same words
+                    // again with somebody else's in front. Unless what is
+                    // held is already the next one: a run of speech that
+                    // filled the window was cut, and what came after the cut
+                    // is a line of its own that is still being spoken.
+                    let carried = self.talking.get(&done.key).is_some_and(|t| t.started != done.at);
+                    if carried {
+                        self.pump(&done.key);
+                    } else {
+                        self.talking.remove(&done.key);
+                    }
                 } else {
                     self.pump(&done.key);
                 }
@@ -552,6 +673,7 @@ mod work {
                                 text,
                                 settled: done.settled,
                                 confidence: t.avg_logprob() as f32,
+                                credible: t.credible(),
                             });
                         }
                     }
@@ -589,8 +711,40 @@ mod work {
                 } else {
                     self.ask(key, true);
                 }
+            } else if seconds >= HOLD_S {
+                // Somebody is still talking and the buffer has reached what
+                // the model reads in one pass. Settle what is there and keep
+                // only what came after the pause it was cut at, so the next
+                // read is one window and not two.
+                self.cut(key);
             } else if !short && seconds - t.asked_at_s >= PARTIAL_EVERY_S {
                 self.ask(key, false);
+            }
+        }
+
+        /// Settle the speech held so far and carry the rest into a new line.
+        pub(super) fn cut(&mut self, key: &str) {
+            let Some(t) = self.talking.get_mut(key) else {
+                return;
+            };
+            if t.waiting {
+                return;
+            }
+            let at = cut_point(&t.pcm, t.rate);
+            let head: Vec<f32> = t.pcm[..at].to_vec();
+            let tail: Vec<f32> = t.pcm[at..].to_vec();
+            let job =
+                Job { key: key.to_string(), at: t.started, pcm: head, rate: t.rate, settled: true };
+            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
+                if let Some(t) = self.talking.get_mut(key) {
+                    // The tail is a new utterance, with its own start time,
+                    // and it waits for the head to come back rather than
+                    // queueing a second window behind it.
+                    t.pcm = tail;
+                    t.started = Instant::now();
+                    t.asked_at_s = 0.0;
+                    t.waiting = true;
+                }
             }
         }
 
@@ -609,7 +763,7 @@ mod work {
                 rate: t.rate,
                 settled,
             };
-            let asked = t.pcm.len() as f64 / t.rate;
+            let asked = t.seconds();
             if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
                 if let Some(t) = self.talking.get_mut(key) {
                     t.waiting = true;
@@ -883,6 +1037,7 @@ mod tests {
             text: text.into(),
             settled,
             confidence: -0.2,
+                credible: true,
         };
         log.push(u("all stations", false));
         log.push(u("all stations this is", false));
@@ -976,6 +1131,7 @@ mod tests {
                     text: text.into(),
                     settled: true,
                     confidence: -0.2,
+                credible: true,
                 },
                 Utterance {
                     key: "DMR:435000000:9:1234567".into(),
@@ -984,6 +1140,7 @@ mod tests {
                     text: "go ahead".into(),
                     settled: false,
                     confidence: -0.4,
+                credible: true,
                 },
             ]
         };
@@ -1039,6 +1196,62 @@ mod tests {
         );
     }
 
+    /// A run of speech that fills the window is cut where it is quietest, so
+    /// the line before the cut ends at a pause rather than in the middle of a
+    /// word.
+    #[test]
+    fn a_full_window_is_cut_at_the_pause_and_not_at_the_end() {
+        let rate = 8_000.0;
+        let mut pcm = vec![0.2f32; (rate * 30.0) as usize];
+        // A gap two seconds from the end, which is inside the search.
+        let gap = pcm.len() - (rate * 2.0) as usize;
+        for s in &mut pcm[gap..gap + (rate * 0.2) as usize] {
+            *s = 0.0;
+        }
+        let at = cut_point(&pcm, rate);
+        assert!(at >= gap && at <= gap + (rate * 0.2) as usize, "cut at {at}, gap at {gap}");
+        // And with nothing quieter than anything else it still cuts inside
+        // the search rather than losing the last seconds.
+        let flat = vec![0.2f32; (rate * 30.0) as usize];
+        let at = cut_point(&flat, rate);
+        assert!(at >= flat.len() - (rate * CUT_SEARCH_S) as usize);
+        assert!(at <= flat.len());
+    }
+
+    /// Squelch noise is loud enough to collect and no threshold tells it from
+    /// speech, so the model's own verdict is what stops it: two windows with
+    /// nothing credible in them and the conversation is left alone until the
+    /// channel closes. Without this a hissing repeater is read for as long as
+    /// it hisses, which is what a receiver holding ninety seconds of nothing
+    /// looks like on screen.
+    #[test]
+    fn a_channel_the_model_finds_nothing_in_is_left_alone() {
+        let mut n = LiveTranscribeNode::new();
+        let key = "Audio:145500000::".to_string();
+        let noise = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.02, 800);
+        let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
+        for _ in 0..50 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert!(n.held_seconds(&key) > 4.0, "noise is collected, since it is loud");
+
+        n.read_back(&key, false);
+        assert!(n.held_seconds(&key) > 4.0, "one empty window is not evidence");
+        n.read_back(&key, false);
+        assert_eq!(n.held_seconds(&key), 0.0, "the second one is");
+        for _ in 0..50 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert_eq!(n.held_seconds(&key), 0.0, "and nothing more is collected");
+
+        // Until the channel closes, which is what starts it listening again.
+        n.collect(key.clone(), &quiet, 0.1, Instant::now());
+        for _ in 0..20 {
+            n.collect(key.clone(), &noise, 0.1, Instant::now());
+        }
+        assert!(n.held_seconds(&key) > 1.0);
+    }
+
     #[test]
     fn conversations_are_kept_apart_and_the_oldest_is_forgotten() {
         let mut log = TranscriptLog::default();
@@ -1050,6 +1263,7 @@ mod tests {
                 text: format!("{i}"),
                 settled: true,
                 confidence: -0.2,
+                credible: true,
             });
         }
         assert_eq!(log.keys().len(), MAX_KEYS);
