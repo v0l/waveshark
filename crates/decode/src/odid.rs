@@ -40,6 +40,27 @@ pub const SERVICE_UUID: u16 = 0xfffa;
 /// rather than anything else using the same UUID.
 pub const APP_CODE: u8 = 0x0d;
 
+/// The OUI ASD-STAN registered, which is what a Wi-Fi beacon's vendor
+/// specific element opens with, and the type byte behind it.
+///
+/// Not to be confused with 6A:5C:35 type 0x01, which is the French national
+/// scheme: a different OUI carrying a different, TLV encoded, message set.
+pub const WIFI_OUI: [u8; 3] = [0xfa, 0x0b, 0xbc];
+pub const WIFI_OUI_TYPE: u8 = 0x0d;
+
+/// The Wi-Fi Alliance OUI and the type that says Neighbour Aware Networking,
+/// which is what carries a pack in a public action frame.
+const NAN_OUI: [u8; 3] = [0x50, 0x6f, 0x9a];
+const NAN_OUI_TYPE: u8 = 0x13;
+
+/// "org.opendroneid.remoteid" hashed. A NAN service descriptor names the
+/// service by this rather than by any text, so it is what tells a Remote ID
+/// frame from every other NAN service sharing the frame format.
+pub const NAN_SERVICE_ID: [u8; 6] = [0x88, 0x69, 0x19, 0x9d, 0x92, 0x09];
+
+/// The attribute id of a NAN service descriptor.
+const NAN_SERVICE_DESCRIPTOR: u8 = 0x03;
+
 /// Altitude and height are sent as a half-metre count above this floor, and
 /// this exact value is the specification's "unknown".
 const ALT_INVALID: f64 = -1000.0;
@@ -352,6 +373,53 @@ pub fn from_service_data(value: &[u8]) -> Option<Vec<Parsed>> {
     parse_pack(body).or_else(|| parse_message(body).map(|m| vec![m]))
 }
 
+/// Read a Wi-Fi beacon's vendor specific element, given the OUI, the vendor's
+/// type byte and the bytes behind them.
+///
+/// A beacon carries either a single message or a pack, so both are tried:
+/// the reference transmitter builds a pack and the sample configuration
+/// shipped with it broadcasts one location message on its own.
+pub fn from_vendor_element(oui: [u8; 3], kind: u8, data: &[u8]) -> Option<Vec<Parsed>> {
+    if oui != WIFI_OUI || kind != WIFI_OUI_TYPE || data.is_empty() {
+        return None;
+    }
+    // The first byte is the transmitter's own message counter, which is not
+    // part of any message and is dropped here, as it is on Bluetooth.
+    let body = &data[1..];
+    parse_pack(body).or_else(|| parse_message(body).map(|m| vec![m]))
+}
+
+/// Read a message pack out of a Wi-Fi NAN public action frame, given the
+/// action frame's category, its code, and the bytes after them.
+///
+/// The attributes are walked rather than assumed to be in the reference
+/// implementation's order, since what has to be found is one service
+/// descriptor whose service id is Remote ID's and nothing about the rest.
+pub fn from_nan_action(category: u8, code: u8, body: &[u8]) -> Option<Vec<Parsed>> {
+    // 0x04 is a public action frame and 0x09 is its vendor specific code.
+    if category != 0x04 || code != 0x09 {
+        return None;
+    }
+    if body.len() < 4 || body[..3] != NAN_OUI || body[3] != NAN_OUI_TYPE {
+        return None;
+    }
+    let mut b = &body[4..];
+    while b.len() >= 3 {
+        let len = u16::from_le_bytes([b[1], b[2]]) as usize;
+        let value = b.get(3..3 + len)?;
+        // A descriptor is the service id, an instance id, the instance it
+        // answers, the service control byte and the length of the service
+        // info; the info itself opens with a message counter.
+        if b[0] == NAN_SERVICE_DESCRIPTOR && value.len() > 11 && value[..6] == NAN_SERVICE_ID {
+            if let Some(pack) = parse_pack(&value[11..]) {
+                return Some(pack);
+            }
+        }
+        b = &b[3 + len..];
+    }
+    None
+}
+
 /// The fields a log or a bus carries, in the order they are worth reading.
 pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
     let mut f: Vec<(String, Value)> = Vec::new();
@@ -600,6 +668,106 @@ mod tests {
         let mut body = vec![(0x0f << 4) | 2, MESSAGE_LEN as u8, 4];
         body.extend_from_slice(&basic_id("OPDRONE1"));
         assert!(parse_pack(&body).is_none());
+    }
+
+    /// The vendor specific element from `beacon.conf` in
+    /// `opendroneid/transmitter-linux`, which is what that project feeds to
+    /// hostapd to broadcast one location message. Read against their bytes
+    /// rather than against bytes written here, so a wrong offset fails.
+    #[test]
+    fn a_wifi_beacon_element_carries_a_single_message() {
+        let ie: Vec<u8> = (0..)
+            .step_by(2)
+            .take_while(|i| i + 2 <= 60)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"FA0BBC0D00102038000058D6DF1D9055A308820DC10ACF072803D20F0100"[i..i + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        let msgs = from_vendor_element([ie[0], ie[1], ie[2]], ie[3], &ie[4..]).expect("a message");
+        assert_eq!(msgs.len(), 1);
+        let Message::Location(l) = &msgs[0].message else {
+            panic!("read as {:?}", msgs[0].message)
+        };
+        assert_eq!(msgs[0].version, 0);
+        assert_eq!(l.status, 2);
+        assert_eq!(l.track_deg, Some(56));
+        assert!((l.latitude.unwrap() - 50.1208664).abs() < 1e-7);
+        assert!((l.longitude.unwrap() - 14.4922).abs() < 1e-7);
+        assert!((l.geodetic_alt_m.unwrap() - 376.5).abs() < 1e-9);
+        assert_eq!(l.timestamp_tenths, Some(4050));
+    }
+
+    /// The OUI is what says whose element it is. The French national scheme
+    /// uses element 221 too, under 6A:5C:35, and its bytes are not these.
+    #[test]
+    fn a_vendor_element_under_another_oui_is_not_read() {
+        let mut data = vec![0u8];
+        data.extend_from_slice(&basic_id("OPDRONE1"));
+        assert!(from_vendor_element([0x6a, 0x5c, 0x35], 0x01, &data).is_none());
+        assert!(from_vendor_element(WIFI_OUI, 0x01, &data).is_none());
+        assert!(from_vendor_element(WIFI_OUI, WIFI_OUI_TYPE, &data).is_some());
+    }
+
+    /// A NAN action frame as `odid_wifi_build_message_pack_nan_action_frame`
+    /// builds it, from the category byte onward.
+    fn nan_action() -> Vec<u8> {
+        let mut pack = vec![(0x0f << 4) | 2, MESSAGE_LEN as u8, 2];
+        pack.extend_from_slice(&basic_id("OPDRONE1"));
+        pack.extend_from_slice(&location());
+
+        let mut sda = NAN_SERVICE_ID.to_vec();
+        sda.push(0x01); // instance id
+        sda.push(0x00); // the instance this answers, none
+        sda.push(0x10); // service control: a follow-up
+        sda.push((1 + pack.len()) as u8); // service info length
+        sda.push(0x07); // the transmitter's message counter
+        sda.extend_from_slice(&pack);
+
+        let mut body = vec![0x50, 0x6f, 0x9a, 0x13];
+        body.push(NAN_SERVICE_DESCRIPTOR);
+        body.extend_from_slice(&(sda.len() as u16).to_le_bytes());
+        body.extend_from_slice(&sda);
+        // The service descriptor extension attribute the sender appends,
+        // which is walked past rather than assumed to be absent.
+        body.extend_from_slice(&[0x0e, 0x04, 0x00, 0x01, 0x00, 0x02, 0x07]);
+        body
+    }
+
+    #[test]
+    fn a_nan_action_frame_carries_a_pack() {
+        let msgs = from_nan_action(0x04, 0x09, &nan_action()).expect("a pack");
+        assert_eq!(msgs.len(), 2);
+        let f = fields(&msgs);
+        assert!(f
+            .iter()
+            .any(|(k, v)| k == "uas_id" && v.to_string() == "OPDRONE1"));
+        assert!(f.iter().any(|(k, _)| k == "latitude"));
+    }
+
+    /// Every other NAN service uses the same frame and the same attributes,
+    /// so the service id is the only thing that says the info behind it is a
+    /// message pack and not somebody's file sharing.
+    #[test]
+    fn another_nan_service_is_not_read_as_a_pack() {
+        let mut body = nan_action();
+        body[7] ^= 0xff;
+        assert!(from_nan_action(0x04, 0x09, &body).is_none());
+        assert!(from_nan_action(0x04, 0x08, &nan_action()).is_none());
+        assert!(from_nan_action(0x0d, 0x09, &nan_action()).is_none());
+    }
+
+    /// An attribute length past the end of the frame is truncated reception,
+    /// and walking it reads whatever follows as an attribute.
+    #[test]
+    fn a_nan_attribute_that_overruns_is_refused() {
+        let mut body = nan_action();
+        let len = (body.len() as u16) + 8;
+        body[5..7].copy_from_slice(&len.to_le_bytes());
+        assert!(from_nan_action(0x04, 0x09, &body).is_none());
     }
 
     /// A version past what is published means the offsets below are a guess.
