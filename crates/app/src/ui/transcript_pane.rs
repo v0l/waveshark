@@ -218,13 +218,14 @@ impl Transcript<'_> {
                     });
                 },
                 |ui| {
-                    // The pick, and where it runs. Sent as ids rather than
-                    // positions, so what the patch records survives the
-                    // list growing.
-                    ui.horizontal(|ui| {
-                        ui.label(theme::legend("model"));
+                    // The pick, and where it runs, as two settings rows so
+                    // the legends make a column and the boxes make another.
+                    // Sent as ids rather than positions, so what the patch
+                    // records survives the list growing.
+                    let small = |t: &str| egui::RichText::new(t).size(11.0);
+                    widgets::row(ui, "model", |ui| {
                         egui::ComboBox::from_id_salt("stt-model")
-                            .selected_text(e.label.clone())
+                            .selected_text(small(&e.label))
                             .width(300.0)
                             .show_ui(ui, |ui| {
                                 for m in &e.models {
@@ -237,13 +238,14 @@ impl Transcript<'_> {
                                             super::human_bytes(m.bytes)
                                         ));
                                     }
-                                    if ui.selectable_label(m.id == e.model, text).clicked() {
+                                    if ui.selectable_label(m.id == e.model, small(&text)).clicked()
+                                    {
                                         want.borrow_mut().2 = Some(m.id.clone());
                                     }
                                 }
                             });
-                        ui.add_space(8.0);
-                        ui.label(theme::legend("run on"));
+                    });
+                    widgets::row(ui, "run on", |ui| {
                         let now = e
                             .devices
                             .iter()
@@ -251,11 +253,13 @@ impl Transcript<'_> {
                             .map(|(_, l)| l.clone())
                             .unwrap_or_else(|| e.device_choice.clone());
                         egui::ComboBox::from_id_salt("stt-device")
-                            .selected_text(now)
-                            .width(220.0)
+                            .selected_text(small(&now))
+                            .width(300.0)
                             .show_ui(ui, |ui| {
                                 for (id, label) in &e.devices {
-                                    if ui.selectable_label(*id == e.device_choice, label).clicked()
+                                    if ui
+                                        .selectable_label(*id == e.device_choice, small(label))
+                                        .clicked()
                                     {
                                         want.borrow_mut().3 = Some(id.clone());
                                     }
