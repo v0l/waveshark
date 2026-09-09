@@ -1,16 +1,18 @@
-//! Line-drawn icons for the top bar.
+//! The app's icons: Phosphor glyphs, drawn by the painter.
 //!
-//! Drawn with the painter rather than set from an icon font. A font is a
-//! second asset to ship, a second thing to fall back from when a glyph is
-//! missing, and it renders at whatever weight the font was designed for; these
-//! are a dozen strokes each and match the panel's own line weight because they
-//! use it.
+//! Phosphor (`egui-phosphor`) is one font, one weight, one grid, so the whole
+//! set is consistent in a way a dozen hand-drawn glyphs never were: they were
+//! each tuned against the size the first caller used and drifted in weight
+//! between the top bar and the strip. The font is bound as its own family
+//! (`theme::ICON_FONT`) so an icon is always served by Phosphor and never by
+//! whichever text font happens to have something at that code point.
 //!
 //! Every icon carries its label as hover text. An icon alone is a rebus, and
 //! the label is what makes the first use of the app possible.
 
 use crate::theme;
-use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Ui, Vec2};
+use egui_phosphor::regular as ph;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
@@ -32,15 +34,16 @@ pub enum Icon {
     Mute,
     /// Write the raw span to a file.
     Capture,
-    /// Key the transmitter: a mast with waves off it.
+    /// Key the transmitter.
     Transmit,
     /// The dataset cache: somebody else's files kept on this machine.
     Data,
     /// Open the page a dataset comes from, in a browser.
     Link,
     /// The views, one glyph each. They are tabs rather than a list, so each
-    /// one has to be told apart from the other nine at 22 points: no two of
+    /// one has to be told apart from the other ten at 22 points: no two of
     /// them share a silhouette.
+    Dashboard,
     Spectrum,
     Chain,
     Map,
@@ -59,420 +62,68 @@ pub enum Icon {
 /// icon the size of a full stop is a smaller target than the text button it
 /// replaced, which is a worse control however clean it looks.
 pub const SIZE: f32 = 28.0;
-/// Fraction of the square the glyph is inset by.
+
+/// Glyph height as a fraction of the square.
 ///
-/// Measured against the screen rather than chosen: at the first inset the
-/// drawing area was eleven points across, and a five-transition waveform in
-/// eleven points is a filled rectangle.
-const INSET: f32 = 0.2;
+/// Phosphor draws its icons across the whole em, so this is the ink height
+/// directly. Below about 0.6 the icon is a smaller target than the button it
+/// sits in; above 0.75 adjacent icons appear to touch.
+const GLYPH: f32 = 0.68;
 
 impl Icon {
-    /// Draw the glyph inside `r`. Public so the panes can settle their corner
+    /// The Phosphor code point this icon is drawn with.
+    fn glyph(self) -> &'static str {
+        match self {
+            Icon::Play => ph::PLAY,
+            Icon::Stop => ph::STOP,
+            Icon::Sliders => ph::FADERS,
+            Icon::Setup => ph::GEAR_SIX,
+            Icon::Decode => ph::SCAN,
+            Icon::Log => ph::LIST_DASHES,
+            Icon::Sound => ph::SPEAKER_HIGH,
+            Icon::Mute => ph::SPEAKER_SLASH,
+            Icon::Capture => ph::RECORD,
+            Icon::Transmit => ph::BROADCAST,
+            Icon::Data => ph::DATABASE,
+            Icon::Link => ph::ARROW_SQUARE_OUT,
+            Icon::Dashboard => ph::GAUGE,
+            Icon::Spectrum => ph::WAVEFORM,
+            Icon::Chain => ph::TREE_STRUCTURE,
+            Icon::Map => ph::MAP_PIN,
+            Icon::Calls => ph::MICROPHONE,
+            Icon::Messages => ph::CHAT_TEXT,
+            Icon::Video => ph::MONITOR_PLAY,
+            Icon::Links => ph::SHARE_NETWORK,
+            Icon::Devices => ph::DEVICE_MOBILE,
+            Icon::Key => ph::KEY,
+            // A ringed planet rather than a dish, which Phosphor has not got.
+            // A dish drawn by hand to match the font read as an umbrella at
+            // tab size, where the mast crossed the arm and the two signal
+            // arcs closed up into the rim.
+            Icon::Satellite => ph::PLANET,
+        }
+    }
+
+    /// Draw the icon inside `r`. Public so the panes can settle their corner
+    /// affordance with the same shape the top bar uses: two drawings of the
+    /// same idea is one of them being wrong.
+    /// Draw the icon inside `r`. Public so the panes can settle their corner
     /// affordance with the same shape the top bar uses: two drawings of the
     /// same idea is one of them being wrong.
     pub fn paint(self, p: &egui::Painter, r: Rect, col: Color32) {
-        // Everything is drawn inside a box inset from the hit area, so
-        // adjacent icons do not appear to touch.
-        let b = r.shrink(r.width() * INSET);
-        // Proportional so the whole set can be resized from `SIZE` alone. A
-        // fixed weight makes a larger icon look hollow and a smaller one
-        // makes it a blob.
-        let sw = (b.width() * 0.115).max(1.5);
-        let s = Stroke::new(sw, col);
-        let c = b.center();
-        match self {
-            Icon::Play => {
-                p.add(egui::Shape::convex_polygon(
-                    vec![
-                        Pos2::new(b.left() + b.width() * 0.1, b.top()),
-                        Pos2::new(b.right(), c.y),
-                        Pos2::new(b.left() + b.width() * 0.1, b.bottom()),
-                    ],
-                    col,
-                    Stroke::NONE,
-                ));
-            }
-            Icon::Stop => {
-                p.rect_filled(b.shrink(b.width() * 0.06), 1.0, col);
-            }
-            Icon::Sliders => {
-                // Two rails with a knob on each, the knobs at different
-                // positions so it reads as a mixer rather than a list.
-                for (i, at) in [0.62f32, 0.34].into_iter().enumerate() {
-                    let y = b.top() + b.height() * (0.3 + 0.4 * i as f32);
-                    p.line_segment([Pos2::new(b.left(), y), Pos2::new(b.right(), y)], s);
-                    let x = b.left() + b.width() * at;
-                    p.line_segment(
-                        [Pos2::new(x, y - b.height() * 0.2), Pos2::new(x, y + b.height() * 0.2)],
-                        Stroke::new(sw * 1.7, col),
-                    );
-                }
-            }
-            Icon::Setup => {
-                // A hex nut, not a cogwheel.
-                //
-                // The cog is the default answer and it does not survive being
-                // drawn small: six teeth on a ring at fourteen points is a
-                // fuzzy circle, which is what it looked like on screen. A
-                // slotted screw was the next try and reads as a no-entry sign,
-                // because a bar across a ring is that sign. A hexagon has a
-                // silhouette nothing else in this set shares, it holds its
-                // shape down to a dozen points, and it belongs to the same
-                // machined-panel world as the rest of the instrument.
-                let rad = b.width() * 0.5;
-                let pts: Vec<Pos2> = (0..6)
-                    .map(|i| {
-                        let a = (60.0 * i as f32 + 90.0).to_radians();
-                        let (sn, cs) = a.sin_cos();
-                        Pos2::new(c.x + cs * rad, c.y + sn * rad)
-                    })
-                    .collect();
-                p.add(egui::Shape::closed_line(pts, s));
-                p.circle_filled(c, rad * 0.22, col);
-            }
-            Icon::Decode => {
-                // Signals standing in a span, which is what decoding the whole
-                // span is about. A waveform was the first idea and it does not
-                // survive being fourteen points wide: the transitions close up
-                // and it reads as a solid block.
-                let bar = Stroke::new(sw * 1.45, col);
-                for (at, h) in [(0.08f32, 0.55f32), (0.5, 1.0), (0.92, 0.75)] {
-                    let x = b.left() + b.width() * at;
-                    p.line_segment(
-                        [Pos2::new(x, b.bottom()), Pos2::new(x, b.bottom() - b.height() * h)],
-                        bar,
-                    );
-                }
-            }
-            Icon::Sound | Icon::Mute => {
-                // A speaker: a box and a cone. Drawn filled rather than
-                // stroked because at fourteen points an outlined cone closes
-                // up into a blob, and this shape has to be recognisable at
-                // the size the strip uses.
-                let w = b.width();
-                let h = b.height();
-                let body = Rect::from_min_max(
-                    Pos2::new(b.left(), c.y - h * 0.18),
-                    Pos2::new(b.left() + w * 0.3, c.y + h * 0.18),
-                );
-                p.rect_filled(body, 1.0, col);
-                p.add(egui::Shape::convex_polygon(
-                    vec![
-                        Pos2::new(b.left() + w * 0.28, c.y - h * 0.18),
-                        Pos2::new(b.left() + w * 0.6, b.top()),
-                        Pos2::new(b.left() + w * 0.6, b.bottom()),
-                        Pos2::new(b.left() + w * 0.28, c.y + h * 0.18),
-                    ],
-                    col,
-                    Stroke::NONE,
-                ));
-                if self == Icon::Sound {
-                    // Two arcs for sound coming out of it, as short strokes
-                    // rather than curves: a curve this small is a smudge.
-                    for (i, at) in [0.72f32, 0.9].into_iter().enumerate() {
-                        let x = b.left() + w * at;
-                        let dy = h * (0.16 + 0.12 * i as f32);
-                        p.line_segment([Pos2::new(x, c.y - dy), Pos2::new(x, c.y + dy)], s);
-                    }
-                } else {
-                    // A cross where the sound would have come out, rather
-                    // than a slash laid over the speaker. The slash version
-                    // crosses the cone, and at fourteen points the two fills
-                    // merge into one blob that reads as neither.
-                    let (x0, x1) = (b.left() + w * 0.66, b.right());
-                    let d = h * 0.17;
-                    let x = Stroke::new(sw * 1.1, col);
-                    p.line_segment([Pos2::new(x0, c.y - d), Pos2::new(x1, c.y + d)], x);
-                    p.line_segment([Pos2::new(x0, c.y + d), Pos2::new(x1, c.y - d)], x);
-                }
-            }
-            Icon::Capture => {
-                // The recording dot every tape machine has had, with a ring
-                // around it so an off state is still a shape rather than a
-                // dim smudge.
-                let rad = b.width() * 0.46;
-                p.circle_stroke(c, rad, s);
-                p.circle_filled(c, rad * 0.45, col);
-            }
-            Icon::Transmit => {
-                // A mast, a dot at its tip, and two arcs either side of the
-                // tip: the mark on every PTT the trade has made.
-                let tip = Pos2::new(c.x, b.top() + b.height() * 0.28);
-                p.line_segment([tip, Pos2::new(c.x, b.bottom())], s);
-                p.circle_filled(tip, sw * 0.9, col);
-                for (k, rad) in [(0.28f32, 1.0f32), (0.46, 1.0)] {
-                    let r = b.width() * k;
-                    for side in [-1.0f32, 1.0] {
-                        let pts: Vec<Pos2> = (0..=8)
-                            .map(|i| {
-                                let a = -0.9 + 1.8 * i as f32 / 8.0;
-                                Pos2::new(tip.x + side * r * a.cos() * rad, tip.y - r * a.sin())
-                            })
-                            .collect();
-                        p.add(egui::Shape::line(pts, s));
-                    }
-                }
-            }
-            Icon::Data => {
-                // The stacked cylinder every database has been drawn as
-                // since tape reels: a top ellipse, two sides, and two more
-                // ellipses under it for the stack.
-                let (rx, ry) = (b.width() * 0.42, b.height() * 0.14);
-                let (top, bot) = (b.top() + ry + sw * 0.5, b.bottom() - ry - sw * 0.5);
-                let ring = |y: f32| -> Vec<Pos2> {
-                    (0..=28)
-                        .map(|i| {
-                            let a = std::f32::consts::TAU * i as f32 / 28.0;
-                            Pos2::new(c.x + rx * a.cos(), y + ry * a.sin())
-                        })
-                        .collect()
-                };
-                p.add(egui::Shape::line(ring(top), s));
-                for side in [-1.0f32, 1.0] {
-                    let x = c.x + side * rx;
-                    p.line_segment([Pos2::new(x, top), Pos2::new(x, bot)], s);
-                }
-                // Only the front halves of the lower rims: a whole ellipse
-                // there reads as a second cylinder rather than a shelf.
-                for k in [0.5f32, 1.0] {
-                    let y = top + (bot - top) * k;
-                    let pts: Vec<Pos2> = (0..=14)
-                        .map(|i| {
-                            let a = std::f32::consts::PI * i as f32 / 14.0;
-                            Pos2::new(c.x + rx * a.cos(), y + ry * a.sin())
-                        })
-                        .collect();
-                    p.add(egui::Shape::line(pts, s));
-                }
-            }
-            Icon::Link => {
-                // Two rounded links of a chain on a diagonal, the shape a
-                // browser has meant by a link since it meant anything.
-                let d = b.width() * 0.16;
-                let len = b.width() * 0.30;
-                for side in [-1.0f32, 1.0] {
-                    let mid = Pos2::new(c.x + side * d, c.y - side * d);
-                    let dir = Vec2::new(0.62, -0.62);
-                    let a = mid - dir * len * 0.5;
-                    let z = mid + dir * len * 0.5;
-                    p.line_segment([a, z], s);
-                    p.circle_stroke(z, sw * 0.9, s);
-                }
-                // The bar between them, which is what makes it a chain
-                // rather than two ticks.
-                p.line_segment(
-                    [
-                        Pos2::new(c.x - d * 0.7, c.y + d * 0.7),
-                        Pos2::new(c.x + d * 0.7, c.y - d * 0.7),
-                    ],
-                    s,
-                );
-            }
-            Icon::Spectrum => {
-                // A trace with one signal standing out of the noise, which
-                // is what the pane shows. Distinct from `Decode`'s three
-                // bars because the two sit in the same bar.
-                let n = 16;
-                let pts: Vec<Pos2> = (0..=n)
-                    .map(|i| {
-                        let t = i as f32 / n as f32;
-                        let x = b.left() + b.width() * t;
-                        // A narrow peak at 0.55, on a floor that wobbles.
-                        let d = (t - 0.55) / 0.09;
-                        let peak = (-d * d).exp();
-                        let floor = 0.12 * ((t * 27.0).sin() * 0.5 + 0.5);
-                        let y = b.bottom() - b.height() * (0.1 + floor + 0.8 * peak);
-                        Pos2::new(x, y)
-                    })
-                    .collect();
-                p.add(egui::Shape::line(pts, Stroke::new(sw * 0.9, col)));
-            }
-            Icon::Chain => {
-                // Two stages and a wire between them: the graph, drawn as
-                // the chain view draws it.
-                let h = b.height() * 0.34;
-                let w = b.width() * 0.34;
-                let left = Rect::from_min_size(
-                    Pos2::new(b.left(), b.top() + b.height() * 0.08),
-                    Vec2::new(w, h),
-                );
-                let right = Rect::from_min_size(
-                    Pos2::new(b.right() - w, b.bottom() - h - b.height() * 0.08),
-                    Vec2::new(w, h),
-                );
-                p.rect_stroke(left, 1.0, s, egui::StrokeKind::Middle);
-                p.rect_stroke(right, 1.0, s, egui::StrokeKind::Middle);
-                p.line_segment([left.right_center(), Pos2::new(right.left(), left.center().y)], s);
-                p.line_segment(
-                    [Pos2::new(right.left(), left.center().y), right.left_center()],
-                    s,
-                );
-            }
-            Icon::Map => {
-                // The pin every map has dropped since maps were on screens.
-                let head = Pos2::new(c.x, b.top() + b.height() * 0.34);
-                let rad = b.width() * 0.27;
-                p.circle_stroke(head, rad, s);
-                for side in [-1.0f32, 1.0] {
-                    p.line_segment(
-                        [
-                            Pos2::new(head.x + side * rad * 0.86, head.y + rad * 0.5),
-                            Pos2::new(c.x, b.bottom()),
-                        ],
-                        s,
-                    );
-                }
-            }
-            Icon::Calls => {
-                // A microphone: who is talking, not what is coming out of
-                // the speaker, which is what `Sound` already means.
-                let w = b.width() * 0.34;
-                let cap = Rect::from_min_size(
-                    Pos2::new(c.x - w * 0.5, b.top()),
-                    Vec2::new(w, b.height() * 0.52),
-                );
-                p.rect_stroke(cap, w * 0.5, s, egui::StrokeKind::Middle);
-                let cradle = b.height() * 0.28;
-                let pts: Vec<Pos2> = (0..=10)
-                    .map(|i| {
-                        let a = std::f32::consts::PI * i as f32 / 10.0;
-                        Pos2::new(c.x + cradle * a.cos(), cap.bottom() + cradle * a.sin() * 0.8)
-                    })
-                    .collect();
-                p.add(egui::Shape::line(pts, s));
-                p.line_segment([Pos2::new(c.x, cap.bottom() + cradle * 0.8), Pos2::new(c.x, b.bottom())], s);
-            }
-            Icon::Messages => {
-                // A bubble with a tail. Lines inside it would close up at
-                // this size, so the shape carries it alone.
-                let body = Rect::from_min_max(
-                    Pos2::new(b.left(), b.top() + b.height() * 0.08),
-                    Pos2::new(b.right(), b.bottom() - b.height() * 0.3),
-                );
-                p.rect_stroke(body, b.width() * 0.18, s, egui::StrokeKind::Middle);
-                p.add(egui::Shape::line(
-                    vec![
-                        Pos2::new(body.left() + body.width() * 0.24, body.bottom()),
-                        Pos2::new(body.left() + body.width() * 0.18, b.bottom()),
-                        Pos2::new(body.left() + body.width() * 0.52, body.bottom()),
-                    ],
-                    s,
-                ));
-            }
-            Icon::Video => {
-                // A screen on a stand. A film frame with sprocket holes is
-                // the other convention and it fills in at this size.
-                let screen = Rect::from_min_max(
-                    Pos2::new(b.left(), b.top() + b.height() * 0.06),
-                    Pos2::new(b.right(), b.bottom() - b.height() * 0.34),
-                );
-                p.rect_stroke(screen, 1.0, s, egui::StrokeKind::Middle);
-                p.line_segment([Pos2::new(c.x, screen.bottom()), Pos2::new(c.x, b.bottom())], s);
-                p.line_segment(
-                    [
-                        Pos2::new(b.left() + b.width() * 0.24, b.bottom()),
-                        Pos2::new(b.right() - b.width() * 0.24, b.bottom()),
-                    ],
-                    s,
-                );
-            }
-            Icon::Links => {
-                // Two ends and the traffic between them: who is talking to
-                // whom. The boxes of `Chain` are stages; these are parties.
-                let rad = b.width() * 0.16;
-                let (l, r) = (
-                    Pos2::new(b.left() + rad, b.top() + rad),
-                    Pos2::new(b.right() - rad, b.bottom() - rad),
-                );
-                p.circle_stroke(l, rad, s);
-                p.circle_stroke(r, rad, s);
-                let dir = (r - l).normalized();
-                let (a, z) = (l + dir * rad * 1.4, r - dir * rad * 1.4);
-                p.line_segment([a, z], s);
-                // One arrowhead, so the line reads as a direction rather
-                // than a rod.
-                let back = -dir * b.width() * 0.16;
-                let n = Vec2::new(-dir.y, dir.x) * b.width() * 0.1;
-                p.line_segment([z, z + back + n], s);
-                p.line_segment([z, z + back - n], s);
-            }
-            Icon::Devices => {
-                // A handset: a body with a stub antenna, which is what the
-                // survey is a list of.
-                let w = b.width() * 0.52;
-                let body = Rect::from_min_max(
-                    Pos2::new(c.x - w * 0.5, b.top() + b.height() * 0.3),
-                    Pos2::new(c.x + w * 0.5, b.bottom()),
-                );
-                p.rect_stroke(body, b.width() * 0.1, s, egui::StrokeKind::Middle);
-                let ant = Pos2::new(body.right() - w * 0.22, body.top());
-                p.line_segment([ant, Pos2::new(ant.x + b.width() * 0.12, b.top())], s);
-                p.line_segment(
-                    [
-                        Pos2::new(body.left() + w * 0.22, body.center().y),
-                        Pos2::new(body.right() - w * 0.22, body.center().y),
-                    ],
-                    s,
-                );
-            }
-            Icon::Satellite => {
-                // A dish looking up, with the pass it is following above it.
-                // Two shapes that were tried first and do not survive 22
-                // points: a spacecraft between two panels closes into a
-                // dumbbell, and a tilted orbit ring around a dot reads as an
-                // eye.
-                let rim = b.width() * 0.46;
-                let pivot = Pos2::new(c.x - b.width() * 0.06, c.y + b.height() * 0.2);
-                // The dish, as an arc open towards the upper right.
-                let dish: Vec<Pos2> = (0..=12)
-                    .map(|i| {
-                        let a = -1.75 + 1.9 * i as f32 / 12.0;
-                        Pos2::new(pivot.x + rim * a.cos(), pivot.y + rim * a.sin())
-                    })
-                    .collect();
-                p.add(egui::Shape::line(dish.clone(), s));
-                p.line_segment([dish[0], dish[dish.len() - 1]], Stroke::new(sw * 0.8, col));
-                // The mount, and the feed the dish points at.
-                p.line_segment([pivot, Pos2::new(pivot.x, b.bottom())], s);
-                p.line_segment(
-                    [
-                        Pos2::new(pivot.x - b.width() * 0.17, b.bottom()),
-                        Pos2::new(pivot.x + b.width() * 0.17, b.bottom()),
-                    ],
-                    s,
-                );
-                p.circle_filled(
-                    Pos2::new(b.right() - b.width() * 0.08, b.top() + b.height() * 0.08),
-                    sw * 1.4,
-                    col,
-                );
-            }
-            Icon::Key => {
-                // A key: a bow, a shaft and two teeth.
-                let rad = b.width() * 0.22;
-                let bow = Pos2::new(b.left() + rad, c.y);
-                p.circle_stroke(bow, rad, s);
-                p.line_segment([Pos2::new(bow.x + rad, c.y), Pos2::new(b.right(), c.y)], s);
-                for at in [0.72f32, 0.92] {
-                    let x = b.left() + b.width() * at;
-                    p.line_segment([Pos2::new(x, c.y), Pos2::new(x, c.y + b.height() * 0.22)], s);
-                }
-            }
-            Icon::Log => {
-                // Rows with a mark against each, which is what the log is.
-                for i in 0..3 {
-                    let y = b.top() + b.height() * (0.15 + 0.35 * i as f32);
-                    p.line_segment(
-                        [Pos2::new(b.left(), y), Pos2::new(b.left() + b.width() * 0.18, y)],
-                        s,
-                    );
-                    p.line_segment(
-                        [Pos2::new(b.left() + b.width() * 0.34, y), Pos2::new(b.right(), y)],
-                        s,
-                    );
-                }
-            }
-        }
+        let font = FontId::new(r.height() * GLYPH, FontFamily::Name(theme::ICON_FONT.into()));
+        let galley = p.layout_no_wrap(self.glyph().to_string(), font, col);
+        // Centre the ink, not the line box. The box carries the font's ascent
+        // and descent, which is the same height for every glyph while the ink
+        // is not, so centring on it hangs each icon at its own offset in the
+        // square.
+        let ink = galley.mesh_bounds;
+        let at = if ink.is_positive() {
+            r.center() - ink.center().to_vec2()
+        } else {
+            r.center() - (galley.size() * 0.5)
+        };
+        p.galley(at, galley, col);
     }
 }
 
@@ -578,6 +229,73 @@ pub fn icon_tab(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every icon in the top bar and the view strip, in the order they are
+    /// drawn. Listed rather than derived so a new variant has to be added
+    /// here, which is where the tests below then check it.
+    const ALL: [Icon; 23] = [
+        Icon::Play,
+        Icon::Stop,
+        Icon::Sliders,
+        Icon::Setup,
+        Icon::Decode,
+        Icon::Log,
+        Icon::Sound,
+        Icon::Mute,
+        Icon::Capture,
+        Icon::Transmit,
+        Icon::Data,
+        Icon::Link,
+        Icon::Dashboard,
+        Icon::Spectrum,
+        Icon::Chain,
+        Icon::Map,
+        Icon::Calls,
+        Icon::Messages,
+        Icon::Video,
+        Icon::Links,
+        Icon::Devices,
+        Icon::Satellite,
+        Icon::Key,
+    ];
+
+    #[test]
+    fn no_two_icons_share_a_glyph() {
+        // A tab strip is only worth its width if each tab is told apart from
+        // the others without reading the hover text.
+        let mut seen: Vec<&str> = ALL.iter().map(|i| i.glyph()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), ALL.len(), "two icons are drawn with the same glyph");
+    }
+
+    /// The failure this catches is a glyph the icon font does not have, which
+    /// egui draws as a replacement box: still ink, but a fraction of the size
+    /// a Phosphor icon covers, and it would go unnoticed until somebody
+    /// opened that pane.
+    #[test]
+    fn every_glyph_fills_the_square_it_is_given() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        // No fonts exist until a frame has been run.
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let size = SIZE * GLYPH;
+        for icon in ALL {
+            let font = FontId::new(size, FontFamily::Name(theme::ICON_FONT.into()));
+            let g = icon.glyph().to_string();
+            let galley = ctx.fonts_mut(|f| f.layout_no_wrap(g, font, Color32::WHITE));
+            let ink = galley.mesh_bounds;
+            assert!(ink.is_positive(), "an icon drew nothing");
+            // Phosphor draws across the em box, so a real icon is most of the
+            // requested size in its longer axis. A replacement box is half.
+            let long = ink.width().max(ink.height());
+            assert!(
+                long > size * 0.7,
+                "an icon covers {long:.1} pt of {size:.1}, which is a missing glyph"
+            );
+            assert!(long <= size * 1.1, "an icon overflows its square at {long:.1} pt");
+        }
+    }
 
     #[test]
     fn a_disabled_icon_cannot_be_confused_with_an_active_one() {

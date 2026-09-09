@@ -38,6 +38,10 @@ pub const OK: Color32 = Color32::from_rgb(0x5C, 0xB0, 0x7A);
 /// way a panel legend is silkscreened.
 pub const READOUT_FONT: &str = "readout";
 pub const LEGEND_FONT: &str = "legend";
+/// Phosphor, the icon set, bound on its own so a glyph drawn as an icon is
+/// never served by a text font that happens to have something at that code
+/// point.
+pub const ICON_FONT: &str = "icons";
 
 fn load(paths: &[&str]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
@@ -92,11 +96,19 @@ pub fn install(ctx: &egui::Context) {
         ],
     );
 
+    fonts.font_data.insert("phosphor".into(), egui_phosphor::Variant::Regular.font_data().into());
+    fonts.families.insert(FontFamily::Name(ICON_FONT.into()), vec!["phosphor".into()]);
+
     if let Some(d) = load(&["/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"]) {
         fonts.font_data.insert("body".into(), egui::FontData::from_owned(d).into());
         if let Some(f) = fonts.families.get_mut(&FontFamily::Proportional) {
             f.insert(0, "body".into());
         }
+    }
+    // Last in the proportional stack, so an icon can sit inline in a label
+    // without taking a code point off any text font.
+    if let Some(f) = fonts.families.get_mut(&FontFamily::Proportional) {
+        f.push("phosphor".into());
     }
     ctx.set_fonts(fonts);
 

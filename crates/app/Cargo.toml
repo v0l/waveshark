@@ -16,6 +16,7 @@ winresource = "0.1"
 [dependencies]
 eframe = "0.35"
 egui = "0.35"
+egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }
 
 common.workspace = true
 dsp.workspace = true
