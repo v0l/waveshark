@@ -2,26 +2,35 @@
 //! receiver depends on it.
 //!
 //! ```sh
-//! cargo run --release -p stt --example transcribe -- jfk.wav
+//! cargo run --release -p stt --example transcribe -- jfk.wav [model-id] [device]
 //! ```
+//!
+//! The model is a catalogue id (`whisper-base.en`, `qwen3-asr-0.6b`) or a
+//! directory; the device is `auto`, `cpu`, `cuda:0` or `metal`.
 
 use std::path::PathBuf;
 
 fn main() -> common::Result<()> {
     let mut args = std::env::args().skip(1);
     let wav = args.next().unwrap_or_else(|| {
-        eprintln!("usage: transcribe <file.wav> [model-dir]");
+        eprintln!("usage: transcribe <file.wav> [model-id|model-dir] [device]");
         std::process::exit(2)
     });
-    let dir: PathBuf = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| stt::default_dir().join("whisper"));
+    let model = args.next().unwrap_or_else(|| stt::DEFAULT_MODEL.to_string());
+    let device = stt::DeviceChoice::parse(&args.next().unwrap_or_default());
+    let dir: PathBuf = if PathBuf::from(&model).join("config.json").exists() {
+        PathBuf::from(&model)
+    } else {
+        stt::model_dir(&stt::default_dir(), &model)
+    };
 
-    let files = stt::ensure(stt::DEFAULT_REPO, &dir)?;
+    let files = stt::ensure(&stt::repo_of(&model), &dir)?;
+    println!("{} in {}", files.family.label(), dir.display());
 
     let (pcm, rate) = read_wav(&wav)?;
-    let mut w = stt::Whisper::load(&files, stt::best_device(), None)?;
+    let dev = device.open()?;
+    println!("on {}", stt::device_label(&dev));
+    let mut w = stt::Engine::load(&files, dev, None)?;
     let t0 = std::time::Instant::now();
     let out = w.transcribe(&pcm, rate)?;
     let secs = pcm.len() as f64 / rate;
@@ -36,6 +45,9 @@ fn main() -> common::Result<()> {
             s.text.trim()
         );
     }
+    if let Some(l) = &out.language {
+        println!("language: {l}");
+    }
     println!("\n{}", out.text);
     Ok(())
 }
@@ -49,15 +61,9 @@ fn read_wav(path: &str) -> common::Result<(Vec<f32>, f64)> {
         hound::SampleFormat::Float => r.into_samples::<f32>().filter_map(|s| s.ok()).collect(),
         hound::SampleFormat::Int => {
             let scale = 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32;
-            r.into_samples::<i32>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 * scale)
-                .collect()
+            r.into_samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 * scale).collect()
         }
     };
-    let mono = pcm
-        .chunks(ch)
-        .map(|f| f.iter().sum::<f32>() / ch as f32)
-        .collect();
+    let mono = pcm.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
     Ok((mono, spec.sample_rate as f64))
 }

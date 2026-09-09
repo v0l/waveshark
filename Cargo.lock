@@ -5598,6 +5598,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "stt"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "audio",
  "byteorder",
  "candle-core",
@@ -5606,9 +5607,21 @@ dependencies = [
  "common",
  "hf-hub",
  "hound",
+ "rustfft",
+ "serde",
  "serde_json",
+ "stt-cuda",
  "tokenizers",
  "tracing",
+]
+
+[[package]]
+name = "stt-cuda"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
 ]
 
 [[package]]

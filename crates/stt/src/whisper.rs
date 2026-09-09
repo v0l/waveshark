@@ -53,6 +53,9 @@ impl Segment {
 pub struct Transcript {
     pub text: String,
     pub segments: Vec<Segment>,
+    /// The language the model said it heard, where it says. Whisper is
+    /// told or assumes; Qwen3-ASR names it.
+    pub language: Option<String>,
 }
 
 impl Transcript {
@@ -74,10 +77,7 @@ impl Transcript {
     /// The model's own probability that none of this was speech, worst
     /// window first.
     pub fn no_speech_prob(&self) -> f64 {
-        self.segments
-            .iter()
-            .map(|s| s.no_speech_prob)
-            .fold(f64::NAN, f64::min)
+        self.segments.iter().map(|s| s.no_speech_prob).fold(f64::NAN, f64::min)
     }
 
     /// Whether any window held speech at all, whatever the model made of the
@@ -175,13 +175,7 @@ impl Whisper {
         );
 
         let suppress: Vec<f32> = (0..config.vocab_size as u32)
-            .map(|i| {
-                if config.suppress_tokens.contains(&i) {
-                    f32::NEG_INFINITY
-                } else {
-                    0f32
-                }
-            })
+            .map(|i| if config.suppress_tokens.contains(&i) { f32::NEG_INFINITY } else { 0f32 })
             .collect();
         let suppress = Tensor::new(suppress.as_slice(), &device).map_err(candle)?;
 
@@ -290,10 +284,7 @@ impl Whisper {
                 .map_err(candle)?
                 .unsqueeze(0)
                 .map_err(candle)?;
-            let ys = self
-                .weights
-                .decoder(&t, &features, i == 0)
-                .map_err(candle)?;
+            let ys = self.weights.decoder(&t, &features, i == 0).map_err(candle)?;
 
             if i == 0 {
                 let logits = self
@@ -360,9 +351,7 @@ impl Whisper {
 }
 
 fn token(tokenizer: &Tokenizer, t: &str) -> Result<u32> {
-    tokenizer
-        .token_to_id(t)
-        .ok_or_else(|| Error::other(format!("no token id for {t}")))
+    tokenizer.token_to_id(t).ok_or_else(|| Error::other(format!("no token id for {t}")))
 }
 
 fn candle(e: candle_core::Error) -> Error {
@@ -378,11 +367,7 @@ mod tests {
         let pcm = vec![0.0f32; 8000];
         let out = crate::to_whisper_rate(&pcm, 8000.0);
         let ratio = out.len() as f64 / pcm.len() as f64;
-        assert!(
-            (ratio - 2.0).abs() < 0.01,
-            "{} samples from 8 kHz second",
-            out.len()
-        );
+        assert!((ratio - 2.0).abs() < 0.01, "{} samples from 8 kHz second", out.len());
     }
 
     #[test]

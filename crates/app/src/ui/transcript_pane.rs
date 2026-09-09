@@ -190,21 +190,17 @@ impl Transcript<'_> {
         // The header and the body of a card are drawn by two closures at
         // once, so what they ask for is collected rather than pushed.
         let asked = self.st.asked;
-        let want: std::cell::RefCell<(Option<bool>, bool)> = std::cell::RefCell::new((None, false));
+        let want: std::cell::RefCell<(Option<bool>, bool, Option<String>, Option<String>)> =
+            std::cell::RefCell::new((None, false, None, None));
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
             widgets::card(
                 ui,
                 Some(rail),
                 |ui| {
-                    // What is on disc is what runs, so that is what is
-                    // named. The repository is only where files would be
-                    // fetched from, and naming it while a different model
-                    // sits in the directory is the card telling a lie about
-                    // the one thing it exists to say.
-                    let mut head = theme::Line::new().legend("model").set(match e.present {
-                        true => local_name(&e.dir),
-                        false => e.repo.clone(),
-                    });
+                    // The model by its short name. What is on disc is what
+                    // runs, and where a directory holds something other
+                    // than the pick, the files line below says so.
+                    let mut head = theme::Line::new().legend("model").set(e.label.clone());
                     head = head.legend("state").value(e.state.label()).tint(rail);
                     if !e.device.is_empty() {
                         head = head.legend("on").value(&e.device);
@@ -222,28 +218,66 @@ impl Transcript<'_> {
                     });
                 },
                 |ui| {
-                    // Wrapped, because the path is as long as somebody's
-                    // home directory makes it and a clipped path is a path
-                    // that cannot be checked.
-                    let where_ = if e.dir.is_empty() { "unset" } else { e.dir.as_str() };
-                    let mut l = theme::Line::new().legend("files").set(where_);
+                    // The pick, and where it runs. Sent as ids rather than
+                    // positions, so what the patch records survives the
+                    // list growing.
+                    ui.horizontal(|ui| {
+                        ui.label(theme::legend("model"));
+                        egui::ComboBox::from_id_salt("stt-model")
+                            .selected_text(e.label.clone())
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for m in &e.models {
+                                    let mut text = m.label.clone();
+                                    if m.present {
+                                        text.push_str("  (on disc)");
+                                    } else if m.bytes > 0 {
+                                        text.push_str(&format!(
+                                            "  ({})",
+                                            super::human_bytes(m.bytes)
+                                        ));
+                                    }
+                                    if ui.selectable_label(m.id == e.model, text).clicked() {
+                                        want.borrow_mut().2 = Some(m.id.clone());
+                                    }
+                                }
+                            });
+                        ui.add_space(8.0);
+                        ui.label(theme::legend("run on"));
+                        let now = e
+                            .devices
+                            .iter()
+                            .find(|(id, _)| *id == e.device_choice)
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| e.device_choice.clone());
+                        egui::ComboBox::from_id_salt("stt-device")
+                            .selected_text(now)
+                            .width(220.0)
+                            .show_ui(ui, |ui| {
+                                for (id, label) in &e.devices {
+                                    if ui.selectable_label(*id == e.device_choice, label).clicked()
+                                    {
+                                        want.borrow_mut().3 = Some(id.clone());
+                                    }
+                                }
+                            });
+                    });
+                    // What is on disc, not what would be fetched: a
+                    // directory filled by hand holds whatever was put there,
+                    // and that is what runs. The path is on hover, where
+                    // somebody checking the files can read it and nobody
+                    // else has to.
+                    let mut l = theme::Line::new();
                     l = if e.present {
-                        // What is on disc, not what would be fetched. A
-                        // directory filled by an earlier run, or by hand,
-                        // holds a different model from the one named above,
-                        // and the one on disc is the one that runs.
                         l.legend("on disc")
                             .value(super::human_bytes(e.bytes))
                             .value(&e.weights)
                             .value(&e.flavour)
                     } else {
-                        l.legend("to fetch")
-                            .set(&e.repo)
-                            .legend("on disc")
-                            .value("nothing")
-                            .tint(theme::READOUT)
+                        l.legend("on disc").value("nothing yet").tint(theme::READOUT)
                     };
-                    l.size(11.0).wrapped(ui);
+                    let where_ = if e.dir.is_empty() { "unset".to_string() } else { e.dir.clone() };
+                    l.size(11.0).show(ui).on_hover_text(where_);
                     ui.horizontal(|ui| {
                         let mut l = theme::Line::new().legend("read").value(e.reads.to_string());
                         if let Some(x) = e.speed() {
@@ -308,14 +342,44 @@ impl Transcript<'_> {
                                 want.borrow_mut().1 = true;
                             }
                             if !e.present {
-                                hint(ui, "Tens of megabytes, over the network, once.");
+                                let size = e
+                                    .models
+                                    .iter()
+                                    .find(|m| m.id == e.model)
+                                    .filter(|m| m.bytes > 0)
+                                    .map(|m| super::human_bytes(m.bytes));
+                                hint(
+                                    ui,
+                                    &match size {
+                                        Some(s) => {
+                                            format!("{s} from {}, over the network, once.", e.repo)
+                                        }
+                                        None => {
+                                            format!("From {}, over the network, once.", e.repo)
+                                        }
+                                    },
+                                );
                             }
                         });
                     }
                 },
             );
         });
-        let (enabled, load) = want.into_inner();
+        let (enabled, load, model, device) = want.into_inner();
+        if let Some(id) = model {
+            self.cmds.push(Cmd::NodeParam(
+                e.node,
+                "model".into(),
+                pipeline::param::ParamValue::Text(id),
+            ));
+        }
+        if let Some(id) = device {
+            self.cmds.push(Cmd::NodeParam(
+                e.node,
+                "device".into(),
+                pipeline::param::ParamValue::Text(id),
+            ));
+        }
         if let Some(on) = enabled {
             self.cmds.push(Cmd::NodeParam(
                 e.node,
@@ -369,16 +433,6 @@ fn line(ui: &mut egui::Ui, u: &Utterance, now: std::time::Instant, name: bool) {
         l = l.legend("unsure").tint(theme::FAULT);
     }
     l.wrapped(ui);
-}
-
-/// What the model in a directory is called, which is the directory's own
-/// name: the files carry no name of their own and the repository they came
-/// from is not recorded beside them.
-fn local_name(dir: &str) -> String {
-    std::path::Path::new(dir)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| dir.to_string())
 }
 
 /// A conversation key, as a person reads it.

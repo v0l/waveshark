@@ -300,6 +300,18 @@ impl ModelState {
     }
 }
 
+/// One model a pane can offer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+    /// Roughly what it takes to fetch, in bytes, or 0 for a model that is
+    /// not in the catalogue.
+    pub bytes: u64,
+    /// Whether its files are already on disc.
+    pub present: bool,
+}
+
 /// What the transcriber is and what it is doing, for the view that shows it.
 ///
 /// Which model, where its files are, whether they are there at all, what it
@@ -312,10 +324,20 @@ pub struct Engine {
     /// The node in the running graph, so a view can set its parameters.
     pub node: usize,
     pub enabled: bool,
-    /// The repository the files come from when they have to be fetched.
+    /// Which model, by catalogue id, and the repository it is fetched from.
+    pub model: String,
     pub repo: String,
-    /// Where they are kept.
+    /// Where its files are kept.
     pub dir: String,
+    /// What the chosen model is called.
+    pub label: String,
+    /// Every model that can be picked: the catalogue, plus anything on disc
+    /// under the models directory that is not in it.
+    pub models: Vec<ModelChoice>,
+    /// Where it was asked to run, and every device it could be asked to run
+    /// on, as ids and labels.
+    pub device_choice: String,
+    pub devices: Vec<(String, String)>,
     /// Whether a usable model is in that directory already, and what it
     /// takes up.
     pub present: bool,
@@ -418,10 +440,21 @@ pub struct LiveTranscribeNode {
     min_speech_s: f64,
     #[cfg(feature = "stt")]
     worker: Option<Worker>,
+    /// The models directory; each model has a directory of its own in it.
     #[cfg(feature = "stt")]
-    dir: std::path::PathBuf,
+    root: std::path::PathBuf,
+    /// A directory named outright, which wins over root and model. What a
+    /// test hands the node so it reads whatever is there.
     #[cfg(feature = "stt")]
-    repo: String,
+    explicit_dir: Option<std::path::PathBuf>,
+    #[cfg(feature = "stt")]
+    model_id: String,
+    #[cfg(feature = "stt")]
+    device: stt::DeviceChoice,
+    /// What is on disc under `root`, read when something changes rather
+    /// than every time a pane asks.
+    #[cfg(feature = "stt")]
+    installed: Vec<String>,
     #[cfg(feature = "stt")]
     reported: bool,
     /// What the model is doing, written by the thread that has it.
@@ -455,9 +488,12 @@ impl Health {
         self.weights = files
             .and_then(|f| f.weights.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
-        self.flavour = match files.map(|f| f.flavour) {
-            Some(stt::Flavour::English) => "English only".into(),
-            Some(stt::Flavour::Multilingual) => "multilingual".into(),
+        self.flavour = match files.map(|f| (f.family, f.flavour)) {
+            Some((stt::Family::Qwen3Asr, _)) => "Qwen3-ASR, multilingual".into(),
+            Some((stt::Family::Whisper, stt::Flavour::English)) => "Whisper, English only".into(),
+            Some((stt::Family::Whisper, stt::Flavour::Multilingual)) => {
+                "Whisper, multilingual".into()
+            }
             None => String::new(),
         };
     }
@@ -479,9 +515,15 @@ impl LiveTranscribeNode {
             #[cfg(feature = "stt")]
             worker: None,
             #[cfg(feature = "stt")]
-            dir: std::path::PathBuf::new(),
+            root: std::path::PathBuf::new(),
             #[cfg(feature = "stt")]
-            repo: stt::DEFAULT_REPO.to_string(),
+            explicit_dir: None,
+            #[cfg(feature = "stt")]
+            model_id: stt::DEFAULT_MODEL.to_string(),
+            #[cfg(feature = "stt")]
+            device: stt::DeviceChoice::Auto,
+            #[cfg(feature = "stt")]
+            installed: Vec::new(),
             #[cfg(feature = "stt")]
             reported: false,
             #[cfg(feature = "stt")]
@@ -489,20 +531,70 @@ impl LiveTranscribeNode {
         }
     }
 
+    /// Read whatever model is in one directory, whatever it is called.
     #[cfg(feature = "stt")]
     pub fn in_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.dir = dir.into();
+        self.explicit_dir = Some(dir.into());
         self.look();
         self
+    }
+
+    /// Keep models under `root`, one directory each.
+    #[cfg(feature = "stt")]
+    pub fn under(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.root = root.into();
+        self.look();
+        self
+    }
+
+    /// Where the chosen model's files are, or would be fetched to.
+    #[cfg(feature = "stt")]
+    fn dir(&self) -> std::path::PathBuf {
+        match &self.explicit_dir {
+            Some(d) => d.clone(),
+            None => stt::model_dir(&self.root, &self.model_id),
+        }
+    }
+
+    /// The catalogue and what is on disc beside it, for the pick list.
+    #[cfg(feature = "stt")]
+    fn models(&self) -> Vec<ModelChoice> {
+        let here = &self.installed;
+        let mut out: Vec<ModelChoice> = stt::MODELS
+            .iter()
+            .map(|m| ModelChoice {
+                id: m.id.to_string(),
+                label: m.label.to_string(),
+                bytes: m.mb as u64 * 1_000_000,
+                present: here.iter().any(|h| h == m.id),
+            })
+            .collect();
+        for h in here {
+            if !out.iter().any(|m| m.id == *h) {
+                out.push(ModelChoice { id: h.clone(), label: h.clone(), bytes: 0, present: true });
+            }
+        }
+        out
     }
 
     /// Whether a model is on disc where this node would look, and how large
     /// it is. Three stats, taken when the directory changes rather than per
     /// block.
     #[cfg(feature = "stt")]
-    fn look(&self) {
+    fn look(&mut self) {
+        self.installed = stt::installed(&self.root);
         let mut h = self.health.lock();
-        h.describe(stt::Files::in_dir(&self.dir).ok().as_ref());
+        h.describe(stt::Files::in_dir(self.dir()).ok().as_ref());
+    }
+
+    /// Forget the loaded model, so the next thing worth reading loads the
+    /// one now chosen on the device now chosen.
+    #[cfg(feature = "stt")]
+    fn reload(&mut self) {
+        self.worker = None;
+        self.reported = false;
+        *self.health.lock() = Health::default();
+        self.look();
     }
 
     /// What this node is and what it is doing, for the transcript view.
@@ -517,8 +609,13 @@ impl LiveTranscribeNode {
         };
         #[cfg(feature = "stt")]
         {
-            e.repo = self.repo.clone();
-            e.dir = self.dir.display().to_string();
+            e.model = self.model_id.clone();
+            e.label = stt::label_of(&self.model_id);
+            e.repo = stt::repo_of(&self.model_id);
+            e.dir = self.dir().display().to_string();
+            e.models = self.models();
+            e.device_choice = self.device.id();
+            e.devices = stt::devices().into_iter().map(|d| (d.choice.id(), d.label)).collect();
             let h = self.health.lock();
             e.state = h.state.clone();
             e.device = h.device.clone();
@@ -535,9 +632,17 @@ impl LiveTranscribeNode {
         e
     }
 
+    /// Which model, by catalogue id or by any Whisper repository name.
     #[cfg(feature = "stt")]
-    pub fn model(mut self, repo: &str) -> Self {
-        self.repo = repo.to_string();
+    pub fn model(mut self, id: &str) -> Self {
+        self.model_id = id.to_string();
+        self.look();
+        self
+    }
+
+    #[cfg(feature = "stt")]
+    pub fn on(mut self, device: stt::DeviceChoice) -> Self {
+        self.device = device;
         self
     }
 
@@ -668,13 +773,14 @@ mod work {
             if self.worker.is_none() {
                 let (jobs_tx, jobs_rx) = bounded::<Job>(32);
                 let (done_tx, done_rx) = bounded::<Done>(32);
-                let dir = self.dir.clone();
-                let repo = self.repo.clone();
+                let dir = self.dir();
+                let repo = stt::repo_of(&self.model_id);
+                let device = self.device;
                 let health = self.health.clone();
                 let log = self.log.clone();
                 std::thread::Builder::new()
                     .name("whisper-live".into())
-                    .spawn(move || run(dir, repo, health, log, jobs_rx, done_tx))
+                    .spawn(move || run(dir, repo, device, health, log, jobs_rx, done_tx))
                     .ok()?;
                 self.worker = Some(Worker { jobs: jobs_tx, done: done_rx });
             }
@@ -820,6 +926,7 @@ mod work {
     fn run(
         dir: std::path::PathBuf,
         repo: String,
+        choice: stt::DeviceChoice,
         health: std::sync::Arc<parking_lot::Mutex<Health>>,
         log: SharedLog,
         jobs: Receiver<Job>,
@@ -827,26 +934,28 @@ mod work {
     ) {
         let have = stt::Files::in_dir(&dir).is_ok();
         health.lock().state = if have { ModelState::Loading } else { ModelState::Fetching };
-        let device = stt::best_device();
-        let label = stt::device_label(&device);
-        let loaded = stt::ensure(&repo, &dir).and_then(|f| {
-            {
-                let mut h = health.lock();
-                h.describe(Some(&f));
-                h.state = ModelState::Loading;
-            }
-            stt::Whisper::load(&f, device, None)
+        let mut label = String::new();
+        let loaded = choice.open().and_then(|device| {
+            label = stt::device_label(&device);
+            stt::ensure(&repo, &dir).and_then(|f| {
+                {
+                    let mut h = health.lock();
+                    h.describe(Some(&f));
+                    h.state = ModelState::Loading;
+                }
+                stt::Engine::load(&f, device, None)
+            })
         });
         let mut model = match loaded {
             Ok(m) => {
                 let mut h = health.lock();
                 h.state = ModelState::Ready;
-                h.device = label.to_string();
+                h.device = label;
                 drop(h);
                 m
             }
             Err(e) => {
-                let msg = format!("whisper in {}: {e}", dir.display());
+                let msg = format!("{}: {e}", stt::label_of(&repo));
                 health.lock().state = ModelState::Failed(msg.clone());
                 while let Ok(job) = jobs.recv() {
                     let _ = done.send(Done {
@@ -985,12 +1094,32 @@ impl Simple for LiveTranscribeNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![
+        #[allow(unused_mut)]
+        let mut out = vec![
             Param::bool("enabled", self.enabled).label("Transcribe what is heard"),
             Param::float("min_speech_s", self.min_speech_s, 0.1..=5.0)
                 .unit("s")
                 .label("Shortest speech worth reading"),
-        ]
+        ];
+        // Offered as choices so the chain inspector draws a list, and set
+        // by id so what the patch records is a name and not a position in
+        // a list that grows.
+        #[cfg(feature = "stt")]
+        {
+            let models = self.models();
+            let at = models.iter().position(|m| m.id == self.model_id).unwrap_or(0);
+            out.push(
+                Param::choice("model", at, models.into_iter().map(|m| m.label).collect())
+                    .label("Model"),
+            );
+            let devices = stt::devices();
+            let at = devices.iter().position(|d| d.choice == self.device).unwrap_or(0);
+            out.push(
+                Param::choice("device", at, devices.into_iter().map(|d| d.label).collect())
+                    .label("Run on"),
+            );
+        }
+        out
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -998,20 +1127,35 @@ impl Simple for LiveTranscribeNode {
             "enabled" => self.enabled = v.as_bool().unwrap_or(self.enabled),
             "min_speech_s" => self.min_speech_s = v.as_f64().unwrap_or(self.min_speech_s),
             #[cfg(feature = "stt")]
+            "root" => {
+                self.root = std::path::PathBuf::from(v.as_str().unwrap_or_default());
+                self.look();
+            }
+            #[cfg(feature = "stt")]
             "dir" => {
-                self.dir = std::path::PathBuf::from(v.as_str().unwrap_or_default());
+                self.explicit_dir = v.as_str().filter(|s| !s.is_empty()).map(Into::into);
                 self.look();
             }
             #[cfg(feature = "stt")]
             "model" => {
-                if let Some(t) = v.as_str() {
-                    if t != self.repo {
-                        self.repo = t.to_string();
-                        self.worker = None;
-                        self.reported = false;
-                        *self.health.lock() = Health::default();
-                        self.look();
-                    }
+                let id = match &v {
+                    ParamValue::Choice(i) => self.models().get(*i).map(|m| m.id.clone()),
+                    _ => v.as_str().map(str::to_string),
+                };
+                if let Some(id) = id.filter(|id| *id != self.model_id) {
+                    self.model_id = id;
+                    self.reload();
+                }
+            }
+            #[cfg(feature = "stt")]
+            "device" => {
+                let choice = match &v {
+                    ParamValue::Choice(i) => stt::devices().get(*i).map(|d| d.choice),
+                    _ => v.as_str().map(stt::DeviceChoice::parse),
+                };
+                if let Some(c) = choice.filter(|c| *c != self.device) {
+                    self.device = c;
+                    self.reload();
                 }
             }
             // Load it now rather than on the first thing worth reading. The
@@ -1362,7 +1506,7 @@ mod tests {
         let up = n.engine();
         assert_eq!(up.state, ModelState::Ready, "the model never loaded");
         assert!(
-            ["CPU", "CUDA", "Metal"].contains(&up.device.as_str()),
+            ["CPU", "GPU", "Metal"].iter().any(|d| up.device.starts_with(d)),
             "running on {:?}",
             up.device
         );

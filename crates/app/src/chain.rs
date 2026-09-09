@@ -2941,7 +2941,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     #[cfg(feature = "stt")]
     {
         let mut t = Settings::new();
-        t.insert("dir".into(), V::Text(default_model_dir().display().to_string()));
+        t.insert("root".into(), V::Text(models_root().display().to_string()));
         t.insert("enabled".into(), V::Bool(true));
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(bus, 1), (id, 0));
@@ -3497,9 +3497,15 @@ pub fn registry() -> pipeline::registry::Registry {
         },
         |s: &pipeline::registry::Settings| {
             use pipeline::SettingsExt;
+            let root = std::path::PathBuf::from(s.str_or("root", ""));
+            let fallback = stt::default_model_in(&root);
             let mut n = crate::transcripts::LiveTranscribeNode::new()
-                .in_dir(s.str_or("dir", ""))
-                .model(s.str_or("model", stt::DEFAULT_REPO));
+                .under(root)
+                .model(s.str_or("model", &fallback))
+                .on(stt::DeviceChoice::parse(s.str_or("device", "auto")));
+            if let Some(dir) = s.get("dir").and_then(|v| v.as_str()).filter(|d| !d.is_empty()) {
+                n = n.in_dir(dir);
+            }
             pipeline::node::Node::set_param(
                 &mut n,
                 "enabled",
@@ -3925,27 +3931,21 @@ fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
 
 /// Where raw span captures go when nobody says otherwise: beside the packet
 /// log, since both are recordings of what was on the air.
-/// Where a Whisper model is looked for.
-///
-/// `models/whisper` beside the packet log, or the first directory under
-/// `models` that holds a `config.json`, which is what a model fetched by
-/// name looks like: `models/whisper-tiny.en`.
+/// Where speech models are kept: `models` beside the packet log, one
+/// directory per model.
+#[cfg(feature = "stt")]
+pub fn models_root() -> PathBuf {
+    crate::packetlog::PacketLog::default_dir()
+        .map(|d| d.with_file_name("models"))
+        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"))
+}
+
+/// Where the files of the model that runs when none was chosen are, or
+/// would be fetched to.
 #[cfg(feature = "stt")]
 pub fn default_model_dir() -> PathBuf {
-    let models = crate::packetlog::PacketLog::default_dir()
-        .map(|d| d.with_file_name("models"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"));
-    let named = models.join("whisper");
-    if named.join("config.json").exists() {
-        return named;
-    }
-    std::fs::read_dir(&models)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("config.json").exists())
-        .min()
-        .unwrap_or(named)
+    let root = models_root();
+    stt::model_dir(&root, &stt::default_model_in(&root))
 }
 
 pub fn default_capture_dir() -> PathBuf {
