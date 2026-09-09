@@ -12,6 +12,13 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- DJI DroneID: a DJI aircraft's own broadcast is read, so a row names the
+  airframe by the serial printed on it, with its position, height, home point
+  and the operator's position where the aircraft has a fix. Needs 15.36 MS/s,
+  so a HackRF or a LimeSDR and not an RTL-SDR.
+- `iq_clipper`, which cuts a recording to the bursts in it and can tune it
+  onto one channel first, replacing the `cut` example.
+
 - The WaveShark mark is the window's icon, so the dock, the task bar and the
   window switcher show it instead of a blank default. On Windows it is in the
   executable as well, and the release archives carry the icon file for a
@@ -133,6 +140,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The toolbar and view tabs use the Phosphor icon set, so the icons share one
+  weight and one grid at every size instead of drifting between the top bar
+  and the channel strip.
 - The keying column spells every modulation one way, so a pager and a meter
   keyed the same both read `2-FSK` where one used to say `FSK` and the other
   `2-FSK`.

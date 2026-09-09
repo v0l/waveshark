@@ -405,3 +405,47 @@ fields_min = 4
 full_lines_min = 250
 colour = true
 channel = "A1 or B8"
+
+[[capture]]
+name = "droneid_mini4k_2444.5M_15360k.cs8"
+sha256 = "626b82be90c7f1bc56c7f4dd8fba925c54e757a4d9571ab41a8fd023a569c109"
+url = "https://nostr.download/626b82be90c7f1bc56c7f4dd8fba925c54e757a4d9571ab41a8fd023a569c109.xz"
+compression = "xz"
+center_hz = 2_444_500_000
+rate_sps = 15_360_000
+format = "cs8"
+description = """
+DJI DroneID from a DJI Mini 4K on the bench, powered up indoors with no GNSS
+fix and no controller linked. Recorded with a LimeSDR at 61.44 MS/s centred on
+2442 MHz, which covers the whole 2.4 GHz band, then tuned to 2444.5 MHz and
+decimated to the 15.36 MS/s the frame is defined at and cut to its bursts:
+
+    iq_clipper capture_2442.0000M_61440k.cs16 droneid_mini4k_2444.5M_15360k.cs8 \\
+        --center-hz 2444500000 --rate 15360000 --bursts --min-us 600 \\
+        --margin-ms 1.5 --threshold-db 14
+
+Five thousand times smaller than the recording, and unlike every other capture
+here it is not the same samples: it has been mixed, filtered and resampled, so
+it is evidence about one 10 MHz channel rather than about the band. The
+untuned recording holds the same bursts at 4.1 to 11.8 seconds, 639 ms apart,
+alongside the Wi-Fi that made cutting it any other way pointless.
+
+What makes it evidence: every frame carries a CRC-16 over 89 bytes, inside a
+code block whose own CRC-24 also checks, neither of which this project
+constructed, and the serial number they carry is the one printed on the
+airframe. The aircraft was indoors, so it reports no position at all, which is
+the correct behaviour and is asserted below: an aircraft with no fix sends
+zeros and a decoder that turns those into a position off Africa has invented
+evidence.
+
+Thirteen bursts correlate in the recording and seven decode to this packet
+type. The rest are the other packet type DJI sends interleaved with it, whose
+layout differs and which is not read yet.
+"""
+
+[capture.expect]
+frames = 7
+serial = "F8PJC254J001JR4R"
+sequence_first = 437
+sequence_last = 444
+position_reported = false
