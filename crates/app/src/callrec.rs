@@ -1,10 +1,13 @@
 //! Speech files, one per over, assembled from the packets that carried it.
 //!
-//! A voice front end logs one packet per burst, each with its slice of
-//! speech, the way the packet log wants it. A listener wants the over in one
-//! file. So the bursts of one call are appended here while they arrive and
-//! written out when the transmission says it ended, or when nothing more
+//! A digital voice front end logs one packet per burst, each with its slice
+//! of speech, the way the packet log wants it. A listener wants the over in
+//! one file. So the bursts of one call are appended here while they arrive
+//! and written out when the transmission says it ended, or when nothing more
 //! has come for as long as the call list keeps a call live.
+//!
+//! Analogue speech makes no packet, so it does not arrive here. Recording it
+//! belongs to a node on the audio bus, which is not written yet.
 
 use crate::radio::DecodeRecord;
 use common::{Speech, Value};

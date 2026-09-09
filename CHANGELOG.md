@@ -12,17 +12,16 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Fixed
 
-- A channel marked as voice is heard again, and appears in the call list.
-  Every over was arriving with what the front end had concluded about it
-  overwritten, so no call row was ever created, nothing subscribed to it, and
-  the channel was silent however loud the transmission.
+- A channel marked as voice is heard through its own fader like any other
+  channel, and listed in the calls view from the audio bus. It used to be
+  wrapped in an empty packet so the call list would see it, which put a
+  "voice" row saying nothing into the packet list and the log for every
+  transmission, and left the channel silent until something subscribed to
+  it. Analogue speech is audio, not a packet, and no longer touches the
+  packet log at all.
 
-- The speaker is fed a block of silence rather than nothing at all when the
-  only thing on the bus is speech nobody has subscribed to, which used to
-  starve the sound card.
-
-- An over on a voice channel now starts and ends where the squelch says,
-  rather than where the audio's own level happens to cross a threshold.
+- The speaker is fed a block of silence rather than nothing at all when
+  nothing on the bus is playing, which used to starve the sound card.
 
 - Speech is transcribed as it is spoken instead of piling up: nothing is
   held longer than the thirty seconds the model reads in one pass, and a

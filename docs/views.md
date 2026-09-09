@@ -87,11 +87,17 @@ because traffic does not collect there.
   still picture of a transmitter that has gone away is the worst thing this
   pane could do. `crates/app/src/ui/video_pane.rs`.
 
-- **Calls**: who is talking, from anything that decodes speech. Its own header
-  says what makes it a view rather than a protocol pane: it is fed from the
-  bus, not from a protocol, and reads `from`, `to`, `seconds`, `call_type` and
-  the codec off the record. A DMR call, a TETRA call and an M17 call are the
-  same row with different fields filled in. `crates/app/src/calls.rs`.
+- **Calls**: who is talking, from anything that produces speech. It is fed
+  from two buses and keyed so both land on one row. The audio bus, which
+  every demodulator's audio passes through first, says who is talking now
+  and for how long (`AudioBus::track`, published as `Status::heard`), and
+  that is where every analogue call and the airtime of every digital one
+  comes from. The packet bus says what only a decoder knows, `call_type`,
+  the cipher, the codec, off a decode marked `voice`. A DMR call, a TETRA
+  call, an M17 call and an FM channel marked as voice are the same row with
+  different fields filled in. An analogue over is never a packet: there is
+  no packeting in it, and it goes nowhere near the packet log.
+  `crates/app/src/calls.rs`.
 
 - **Transcript**: what was said, as the model on the audio bus tap read it,
   newest at the bottom. A conversation is the transcriber's key,

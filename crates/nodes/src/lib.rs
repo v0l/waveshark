@@ -35,7 +35,6 @@ pub mod source_nodes;
 pub mod survey_nodes;
 pub mod beacondb_nodes;
 pub mod wigle_nodes;
-pub mod voice_nodes;
 pub mod wfm;
 pub mod lora_nodes;
 pub mod mod_nodes;
@@ -45,7 +44,6 @@ pub mod wmbus_nodes;
 pub use bank::{ChannelBank, ChannelEvent, Gating};
 pub use capture_nodes::IqCaptureNode;
 pub use video_nodes::VideoNode;
-pub use voice_nodes::VoiceChannelNode;
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
@@ -929,24 +927,6 @@ pub fn registry() -> Registry {
             if let Some(v) = s.get("max_gain_db") {
                 pipeline::node::Node::set_param(&mut n, "max_gain_db", v.clone())?;
             }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "voice",
-            summary: "Treat a channel's audio as speech: one call per over, on \
-                      the packet bus with what was said in it",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut n = VoiceChannelNode::new(s.f64_or("channel_hz", 0.0), s.str_or("label", ""));
-            n.set_param("hang_s", pipeline::ParamValue::Float(s.f64_or("hang_s", 0.7)))?;
-            n.set_param(
-                "min_over_s",
-                pipeline::ParamValue::Float(s.f64_or("min_over_s", 0.3)),
-            )?;
             Ok(Box::new(n) as Box<dyn Node>)
         },
     );
