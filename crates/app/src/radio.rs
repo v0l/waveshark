@@ -3427,7 +3427,10 @@ pub(crate) mod tests {
         let heard = rx.voices();
         let sound = heard.iter().find(|v| v.system == "analogue video").expect("no sound");
         assert!(sound.rate > 30e3 && sound.rate < 60e3, "{} Hz", sound.rate);
-        assert_eq!(sound.to.as_deref(), Some("A1 or B8"));
+        // It names no party, because it has none: the sound half of a
+        // transmission is not a call, and a row for it would say only that a
+        // transmitter is on the air, which the picture says already.
+        assert_eq!(sound.to, None);
         let peak = sound.pcm.iter().fold(0.0f32, |a: f32, s: &f32| a.max(s.abs()));
         // The capture is a quiet room, so this is small; what it may not be
         // is zero, which is what a subcarrier nobody demodulated sounds

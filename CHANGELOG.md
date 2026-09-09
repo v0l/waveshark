@@ -13,10 +13,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 ### Added
 
 - A camera's sound. Analogue video links carry audio on a subcarrier of the
-  same transmission, 6.5 MHz on the one recorded here, and it now arrives as
-  speech: heard through the strip, listed with the picture's channel and
-  written down by the transcriber. A picture with no sound was half a
-  receiver.
+  same transmission, 6.5 MHz on the one recorded here, and it is now heard
+  alongside the picture. A picture with no sound was half a receiver. It is
+  not listed as a call: nobody keyed up to start it and it names nobody.
 - The model card shows a download as it happens: which file, how much of it
   and how many files are left, with a bar. It used to say "downloading" and
   nothing else for as long as a multi-gigabyte model takes.
