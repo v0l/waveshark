@@ -68,7 +68,17 @@ impl PacketDecodeNode {
     pub fn annotate(&mut self, packets: &mut [Packet]) {
         self.decode_all(packets);
         for (p, hits) in packets.iter_mut().zip(self.per_packet()) {
-            p.decodes = hits.to_vec();
+            // Replaced only where there is something to replace it with, so
+            // annotating twice is still idempotent. A conclusion the
+            // protocols cannot reach from the bytes is the front end's, and
+            // overwriting it lost the only copy: an analogue voice channel
+            // carries an empty frame with its speech beside it, so every over
+            // arrived here as a packet nothing could read and left as a
+            // packet saying nothing. No call row, nothing to subscribe to,
+            // and a channel marked as voice that could not be heard.
+            if !hits.is_empty() {
+                p.decodes = hits.to_vec();
+            }
         }
     }
 

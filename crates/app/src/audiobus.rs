@@ -569,8 +569,14 @@ impl AudioBus {
             }
         }
         self.voice_peak = self.voice.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-        if self.mix.len() < self.voice.len() * 2 {
-            self.mix.resize(self.voice.len() * 2, 0.0);
+        // The block's worth of silence when nothing is playing, rather than
+        // nothing at all. The sink is driven by what comes out of here, so a
+        // bus whose only input is speech nobody has subscribed to handed the
+        // sound card no samples and the speaker starved: the same symptom as
+        // a receiver that is not running.
+        let want = self.voice.len().max(frames);
+        if self.mix.len() < want * 2 {
+            self.mix.resize(want * 2, 0.0);
         }
         for (i, v) in self.voice.iter().enumerate() {
             self.mix[i * 2] += v;
