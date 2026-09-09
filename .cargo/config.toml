@@ -1,0 +1,13 @@
+# The CUDA kernels are built as PTX for compute 8.0 (Ampere) whatever card
+# this machine has. Left unset, candle's build asks nvidia-smi and builds for
+# that card alone, with an arch-specific suffix on anything recent
+# (sm_120a) that no other card will load; a binary built on one machine then
+# fails on the next with a PTX error that reads like a driver fault. PTX for
+# 8.0 is finished by the driver for any later card at first load. Not 7.5:
+# candle's shim for pre-Ampere half precision collides with the CUDA 13
+# headers, which define the same functions for every arch. The release
+# workflow builds against CUDA 12.8 and sets 7.5 itself, which the shell
+# environment wins over this file. Override the same way to build for one
+# card only.
+[env]
+CUDA_COMPUTE_CAP = "80"

@@ -28,7 +28,7 @@ decode.workspace = true
 datasets.workspace = true
 pipeline.workspace = true
 crossbeam-channel.workspace = true
-stt = { workspace = true, optional = true, default-features = false }
+stt = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

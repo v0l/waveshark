@@ -587,7 +587,11 @@ build can use that actually launches a kernel, and below it are the CPU and
 every CUDA card the driver lists by name, or Metal on a Mac. CUDA is on by
 default in a build from source (`cuda` feature; it needs `nvcc` on the path
 and a driver at least as new as the toolkit, which is what
-`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` on the first read means) and the
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` on the first read means: on Debian
+`update-alternatives --set cuda /usr/local/cuda-X.Y` picks the toolkit the
+driver matches). The kernels are built for compute 8.0 by `.cargo/config.toml`
+rather than for the card in the machine, so a build runs on any card since
+Ampere and the
 release workflow publishes it as a separate `-cuda` asset built against
 CUDA 12.8, which wants that runtime installed and a 570 driver. A card that is picked outright and fails is an error on the card,
 not a silent fall back to the CPU. Any front end that carries speech is transcribed, not
