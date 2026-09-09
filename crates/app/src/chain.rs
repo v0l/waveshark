@@ -3923,6 +3923,7 @@ fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord 
         bytes: d.payload.clone(),
         crc: d.crc_ok,
         link: d.link.clone(),
+        report: d.report.clone(),
         iq: d.iq.clone(),
         audio: d.audio.clone(),
     }

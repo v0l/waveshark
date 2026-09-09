@@ -100,6 +100,24 @@ impl Packet {
         let raw = f64::from(self.channels.get(index)? & 0x7ff);
         Some((raw - 1024.0) * 4.0 / 3.0 / 2.0 + 1500.0)
     }
+
+    /// The sticks this packet carried, for the views that draw a control
+    /// link.
+    ///
+    /// Eight of the sixteen, since a frame carries one bank and the next
+    /// carries the other. The eight it did not carry are absent, which is
+    /// what lets a view merge the two frames instead of watching half the
+    /// channels drop to zero every other frame.
+    pub fn control(&self) -> common::ReportDetail {
+        let mut channels = [None; common::CONTROL_CHANNELS];
+        let base = if self.upper_bank() { 8 } else { 0 };
+        for i in 0..8 {
+            if let (Some(us), Some(slot)) = (self.microseconds(i), channels.get_mut(base + i)) {
+                *slot = Some(us.round() as u16);
+            }
+        }
+        common::ReportDetail::Control { channels, armed: None, uplink_power_mw: None }
+    }
 }
 
 /// Read a packet, refusing anything whose CRC does not agree.
@@ -253,21 +271,6 @@ mod tests {
         assert!(!p.upper_bank());
     }
 
-    /// Bit 11 marks the bank rather than the position, so a channel of an
-    /// upper-bank frame is the same width as the same value in a lower one.
-    /// Clamping to 0x7ff instead of masking read every one of them as full
-    /// deflection, which on a sixteen channel model is every other frame.
-    #[test]
-    fn the_bank_bit_is_not_part_of_the_position() {
-        let mut p = parse(&PACKET).expect("a packet");
-        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
-        for c in &mut p.channels {
-            *c |= 0x800;
-        }
-        assert!(p.upper_bank());
-        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
-    }
-
     /// One bit changed inside the CRC and the packet is refused. Sixteen
     /// bits over twenty-five is what makes a decode here evidence rather
     /// than a plausible shape.
@@ -340,4 +343,44 @@ mod tests {
         assert_eq!(seq.len(), HOP_CHANNELS);
         assert!(!seq.iter().any(|&c| matches!(c, 0x00 | 0x5a | 0xdc)));
     }
+
+    /// Bit 11 marks the bank rather than the position, so a channel of an
+    /// upper-bank frame is the same width as the same value in a lower one.
+    /// Clamping to 0x7ff instead of masking read every one of them as full
+    /// deflection, which on a sixteen channel model is every other frame.
+    #[test]
+    fn the_bank_bit_is_not_part_of_the_position() {
+        let mut p = parse(&PACKET).expect("a packet");
+        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
+        for c in &mut p.channels {
+            *c |= 0x800;
+        }
+        assert!(p.upper_bank());
+        assert_eq!(p.microseconds(0).unwrap().round(), 1500.0);
+    }
+
+    /// A frame carries one bank of eight, so the other eight are absent and
+    /// not zero: a view merges the two frames, and a zero would be a stick
+    /// slammed to its stop every other frame.
+    #[test]
+    fn a_frame_reports_the_bank_it_carried_and_no_more() {
+        let mut p = parse(&PACKET).expect("a packet");
+        let common::ReportDetail::Control { channels, .. } = p.control() else {
+            panic!("not a control report")
+        };
+        assert!(channels[..8].iter().all(Option::is_some), "{channels:?}");
+        assert!(channels[8..].iter().all(Option::is_none), "{channels:?}");
+        // Every channel of this packet is centred, which is 1500 us.
+        assert_eq!(channels[0], Some(1500));
+
+        for c in &mut p.channels {
+            *c |= 0x800;
+        }
+        let common::ReportDetail::Control { channels, .. } = p.control() else {
+            panic!("not a control report")
+        };
+        assert!(channels[..8].iter().all(Option::is_none), "{channels:?}");
+        assert_eq!(channels[8], Some(1500));
+    }
+
 }

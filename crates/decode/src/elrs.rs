@@ -579,6 +579,71 @@ pub fn sf_from_chirp_rate(rate_hz_per_s: f64, bandwidth_hz: f64) -> Option<u8> {
     })
 }
 
+/// A ten bit over-the-air channel as microseconds of servo pulse.
+///
+/// The link packs CRSF's eleven bit tick into ten bits by dropping the low
+/// one, and CRSF puts 992 ticks at 1500 us with five eighths of a microsecond
+/// per tick, so its 172 to 1811 span is 988 to 2012 us. Converting here rather
+/// than in a view is the point of the type: FrSky and FlySky send pulse widths
+/// already, and a pane cannot be asked to know which link scaled what.
+pub fn microseconds(raw: u16) -> u16 {
+    let ticks = f64::from(raw.min(0x3ff)) * 2.0;
+    ((ticks - 992.0) * 5.0 / 8.0 + 1500.0).round().clamp(0.0, f64::from(u16::MAX)) as u16
+}
+
+/// The transmit power an uplink power index stands for, in milliwatts.
+///
+/// The firmware's `PowerLevels_e`, in its own order. An index it does not
+/// define is `None` rather than a guess. Not confirmed against a handset set
+/// to a known power: the bench capture reads index 0 and nobody wrote down
+/// what the TX16S was on.
+fn uplink_power_mw(index: u8) -> Option<u16> {
+    const POWER_MW: [u16; 8] = [10, 25, 50, 100, 250, 500, 1000, 2000];
+    POWER_MW.get(usize::from(index)).copied()
+}
+
+/// The sticks this packet carried, for the views that draw a control link.
+///
+/// `None` for anything that is not an RC packet: a sync or a telemetry packet
+/// says nothing about where the sticks are, and a report of zeros would be a
+/// centred handset that nothing transmitted.
+pub fn control(packet: &Packet) -> Option<common::ReportDetail> {
+    let mut out = [None; common::CONTROL_CHANNELS];
+    match packet {
+        // The four channels the ordinary rate sends are the sticks. The rest
+        // of the model's switches ride in `switches` in a form that depends
+        // on the switch mode, and are not unpacked, so they are absent rather
+        // than reported as centred.
+        Packet::Rc { channels, armed, .. } => {
+            for (slot, raw) in out.iter_mut().zip(channels) {
+                *slot = Some(microseconds(*raw));
+            }
+            Some(common::ReportDetail::Control {
+                channels: out,
+                armed: Some(*armed),
+                uplink_power_mw: None,
+            })
+        }
+        Packet::RcFull { channels, armed, uplink_power, high_aux } => {
+            // The low four are always the sticks; the high four are AUX2-5 or
+            // AUX6-9, which the packet says.
+            let base = if *high_aux { 8 } else { 4 };
+            for (i, raw) in channels.iter().enumerate() {
+                let slot = if i < 4 { i } else { base + i - 4 };
+                if let Some(c) = out.get_mut(slot) {
+                    *c = Some(microseconds(*raw));
+                }
+            }
+            Some(common::ReportDetail::Control {
+                channels: out,
+                armed: Some(*armed),
+                uplink_power_mw: uplink_power_mw(*uplink_power),
+            })
+        }
+        Packet::Sync(_) | Packet::Data { .. } | Packet::Unknown(_) => None,
+    }
+}
+
 /// The fields a log or a bus carries.
 pub fn fields(d: &Decoded) -> Vec<(String, Value)> {
     let mut f: Vec<(String, Value)> = Vec::new();
@@ -1114,4 +1179,79 @@ mod tests {
         let raw: Vec<u8> = (0..5).map(|i| (bits >> (8 * i)) as u8).collect();
         assert_eq!(unpack_channels(&raw), [1023, 0, 1023, 0]);
     }
+
+    /// The scale is CRSF's, one step down: 992 ticks is 1500 us and the ends
+    /// of the CRSF span are the ends of a servo pulse. Pinned because a view
+    /// draws these against a fixed range, so an error here is a stick that
+    /// never reaches its stop.
+    #[test]
+    fn a_channel_reads_as_microseconds_on_the_crsf_scale() {
+        assert_eq!(microseconds(496), 1500);
+        assert_eq!(microseconds(86), 988);
+        assert_eq!(microseconds(905), 2011);
+        // Ten bits is all there is, so anything above is the same as the top.
+        assert_eq!(microseconds(0xffff), microseconds(0x3ff));
+    }
+
+    /// The ordinary rate sends the four sticks and puts the switches in a
+    /// field this does not unpack, so the report says four channels and
+    /// leaves the rest absent rather than centred.
+    #[test]
+    fn an_rc_packet_reports_the_sticks_it_carried() {
+        let packet = Packet::Rc { channels: [496, 86, 905, 496], switches: 0, armed: true };
+        let Some(common::ReportDetail::Control { channels, armed, uplink_power_mw }) =
+            control(&packet)
+        else {
+            panic!("an rc packet with no control report")
+        };
+        assert_eq!(channels[..4], [Some(1500), Some(988), Some(2011), Some(1500)]);
+        assert!(channels[4..].iter().all(Option::is_none), "{channels:?}");
+        assert_eq!(armed, Some(true));
+        assert_eq!(uplink_power_mw, None);
+    }
+
+    /// A Full packet sends the sticks and one of two groups of aux channels,
+    /// and which group it is decides where they land.
+    #[test]
+    fn a_full_packet_puts_its_aux_group_where_the_packet_says() {
+        let packet = Packet::RcFull {
+            channels: [496; 8],
+            armed: false,
+            high_aux: false,
+            uplink_power: 5,
+        };
+        let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) =
+            control(&packet)
+        else {
+            panic!("no control report")
+        };
+        assert!(channels[..8].iter().all(Option::is_some));
+        assert!(channels[8..].iter().all(Option::is_none));
+        assert_eq!(uplink_power_mw, Some(500));
+
+        let high = Packet::RcFull {
+            channels: [496; 8],
+            armed: false,
+            high_aux: true,
+            uplink_power: 9,
+        };
+        let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) = control(&high)
+        else {
+            panic!("no control report")
+        };
+        assert!(channels[..4].iter().all(Option::is_some));
+        assert!(channels[4..8].iter().all(Option::is_none));
+        assert!(channels[8..12].iter().all(Option::is_some));
+        // An index the firmware does not define is not a power.
+        assert_eq!(uplink_power_mw, None);
+    }
+
+    /// Sync and telemetry say nothing about the sticks, and a report of
+    /// centred channels for them would be an invention.
+    #[test]
+    fn a_packet_without_sticks_reports_no_control() {
+        assert!(control(&Packet::Data { package_index: 1, payload: vec![0] }).is_none());
+        assert!(control(&Packet::Unknown(3)).is_none());
+    }
+
 }

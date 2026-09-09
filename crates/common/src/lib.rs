@@ -22,6 +22,7 @@ pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
 pub use decode::{
     media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
+    CONTROL_CHANNELS,
 };
 pub use modulation::Modulation;
 pub use pulse::{

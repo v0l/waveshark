@@ -918,6 +918,10 @@ pub struct DecodeRecord {
     /// is a kind and an identifier, and reading one out of a display string
     /// is how a talkgroup and a callsign end up in the same row.
     pub link: Option<pipeline::event::Link>,
+    /// What the transmission said about the transmitter besides where it was,
+    /// as the decoder recovered it: an aircraft's altitude, a vessel's
+    /// heading, a handset's sticks. Typed for the same reason `link` is.
+    pub report: common::ReportDetail,
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
@@ -967,6 +971,7 @@ impl DecodeRecord {
             bytes: vec![1, 2, 3],
             crc: Some(true),
             link: None,
+            report: common::ReportDetail::Bare,
             iq: None,
             audio: None,
         }
@@ -4263,6 +4268,7 @@ pub(crate) mod tests {
             bytes: vec![1, 2, 3],
             crc: None,
             link: None,
+            report: common::ReportDetail::Bare,
             iq: None,
             audio: None,
         }
