@@ -342,11 +342,13 @@ pub fn card<R>(
 
 /// A line of explanation under a control.
 ///
-/// Added through `Label` with wrapping asked for explicitly: inside a modal
-/// the surrounding layout justifies text, which spreads a wrapped sentence
-/// across the full width and leaves holes in the middle of it.
+/// A `theme::Line` like everything else that puts words on the screen, so a
+/// hint beside a reading sits on the same baseline as the reading. It is
+/// wrapped rather than shown, because the surrounding layout justifies text
+/// inside a modal, which spreads a wrapped sentence across the full width and
+/// leaves holes in the middle of it.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::LEGEND)).wrap());
+    theme::Line::new().note(text).size(10.0).wrapped(ui);
 }
 
 /// A "?" carrying, on hover, the explanation that would otherwise sit under a
