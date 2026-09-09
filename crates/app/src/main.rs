@@ -4,7 +4,6 @@ use std::path::PathBuf;
 mod audiobus;
 mod bands;
 mod beacondb;
-mod callrec;
 mod calls;
 mod chain;
 mod chainview;

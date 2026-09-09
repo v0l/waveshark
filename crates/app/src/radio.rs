@@ -1455,8 +1455,6 @@ pub struct Status {
     /// bus's share of it, for the meters beside the master and call faders.
     out_level: AtomicU32,
     call_level: AtomicU32,
-    /// Voice transmissions written to disk since the receiver started.
-    pub calls_written: AtomicU64,
     /// What the call bus's gain control is adding, in dB, as f32 bits.
     call_gain_db: AtomicU32,
 }
@@ -1591,7 +1589,6 @@ impl Default for Status {
             tetra_keys: parking_lot::Mutex::new(Vec::new()),
             out_level: AtomicU32::new(0),
             call_level: AtomicU32::new(0),
-            calls_written: AtomicU64::new(0),
             call_gain_db: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
@@ -2121,7 +2118,6 @@ fn run(
     let mut calls = BusSettings::default();
     // The same for the video bus: what is being watched outlives the node.
     let mut watching: Vec<crate::videobus::Rule> = vec![crate::videobus::Rule::Everything];
-    let mut call_dir: Option<std::path::PathBuf> = None;
     // Who the WiGLE feed uploads as, which outlives a rebuild for the same
     // reason the survey path does.
     let mut wigle_account: Option<survey::Account> = None;
@@ -2132,7 +2128,6 @@ fn run(
     // all; it runs for as long as the program does, in `crate::station`, and
     // this thread reads the same fix the interface does.
     let mut survey_path: Option<std::path::PathBuf> = None;
-    let mut call_rec = crate::callrec::CallRecorder::default();
     let gap = tune_gap();
     let mut last_tune = std::time::Instant::now() - gap;
     // The radio's own transmit gain, and the commands an over held back
@@ -2521,10 +2516,6 @@ fn run(
                 Cmd::TetraIdSecret { colour, c } => rx.set_tetra_id_secret(colour, c),
                 Cmd::PacketLog(dir) => {
                     plan.log = dir.is_some();
-                    // Voice is written beside the log rather than into it: a
-                    // record of what was on the air stays small, and what it
-                    // sounded like is a file per transmission.
-                    call_dir = dir.clone().map(|d| d.join("calls"));
                     rx.set_packet_log(dir);
                     rebuild = true;
                 }
@@ -2946,25 +2937,6 @@ fn run(
 
         records.clear();
         records.extend(rx.decodes(at));
-        // Speech goes to a file per over, assembled from the bursts that
-        // carried it and written when the over ends or goes quiet.
-        if let Some(dir) = &call_dir {
-            let mut done: Vec<crate::callrec::Finished> = Vec::new();
-            for r in &records {
-                done.extend(call_rec.feed(r, at, dir));
-            }
-            done.extend(call_rec.tick(at, dir));
-            for f in done {
-                match crate::audiobus::write_wav(&f.path, &f.speech) {
-                    Ok(()) => status.calls_written.fetch_add(1, Ordering::Relaxed),
-                    Err(e) => {
-                        *status.error.lock() =
-                            Some(format!("cannot write {}: {e}", f.path.display()));
-                        0
-                    }
-                };
-            }
-        }
         dedupe_neighbours(&mut records);
         records.retain(|r| !r.model.is_empty() && dedupe.accept(r, at));
         if let Some(r) = rx.recorder_mut() {

@@ -3000,7 +3000,7 @@ fn channel_stages(
     rate: f64,
 ) -> u64 {
     match &spec.mode {
-        ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, center, rate),
+        ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, rate),
         ChanMode::Decode(kind) => decode_channel_stages(p, head, spec, kind, center, rate),
         ChanMode::Auto => auto_channel_stages(p, head, spec, center, rate),
     }
@@ -3168,7 +3168,6 @@ fn audio_channel_stages(
     head: crate::patch::Source,
     spec: &ChannelSpec,
     mode: Demod,
-    center: f64,
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
