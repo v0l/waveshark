@@ -110,23 +110,30 @@ impl Transcript<'_> {
 
         // Newest at the bottom and stuck there, which is how a conversation
         // reads: the line being spoken now is where the eye already is, and
-        // a partial that grows is the same line getting longer.
+        // a partial that grows is the same row getting taller.
+        let wall = std::time::SystemTime::now();
+        let width = ui.available_width().max(COLS.iter().map(|(_, w)| w).sum::<f32>() + 300.0);
+        let text_w = width - 24.0 - COLS.iter().map(|(_, w)| w).sum::<f32>();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+        {
+            let p = ui.painter_at(rect);
+            let mut x = rect.left() + 12.0;
+            for (name, w) in COLS {
+                widgets::cell(&p, rect, x, w, name, theme::LEGEND);
+                x += w;
+            }
+            widgets::cell(&p, rect, x, text_w, "text", theme::LEGEND);
+            p.line_segment(
+                [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
+                Stroke::new(1.0, theme::ETCH),
+            );
+        }
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(
             ui,
             |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                    let mut last: Option<&str> = None;
-                    for u in &shown {
-                        // The speaker is written once above a run of lines
-                        // from the same conversation. Repeated over every
-                        // line it is most of the pane, and what somebody is
-                        // reading here is the words.
-                        let same = last == Some(u.key.as_str());
-                        line(ui, u, now, !same);
-                        last = Some(u.key.as_str());
-                    }
-                });
+                for (n, u) in shown.iter().enumerate() {
+                    row(ui, u, n, now, wall, width, text_w);
+                }
                 ui.add_space(8.0);
             },
         );
@@ -408,35 +415,95 @@ impl Transcript<'_> {
     }
 }
 
-/// One line of the log: who said it when the speaker changed, the words, and
-/// how well they were read.
-fn line(ui: &mut egui::Ui, u: &Utterance, now: std::time::Instant, name: bool) {
-    if name {
-        ui.add_space(4.0);
-        theme::Line::new().legend("from").set(who(&u.key)).size(11.0).show(ui);
-    }
+/// Columns before the text, and how wide each is. The text takes the rest.
+const COLS: [(&str, f32); 4] =
+    [("time", 76.0), ("freq", 96.0), ("speaker", 120.0), ("group / chan", 120.0)];
+
+/// One row of the log: when, where, who, to whom, and the words. The words
+/// wrap and the row grows to hold them, since a transmission is a sentence
+/// or three and a clipped sentence is not a transcript.
+fn row(
+    ui: &mut egui::Ui,
+    u: &Utterance,
+    n: usize,
+    now: std::time::Instant,
+    wall: std::time::SystemTime,
+    width: f32,
+    text_w: f32,
+) {
     let age = now.saturating_duration_since(u.at);
-    // A line still being spoken is dim and marked, because it will be
+    // A row still being spoken is dim and marked, because it will be
     // replaced: reading a partial as final is how a half sentence gets
     // written down as what somebody said.
     let live = !u.settled && age < LIVE;
-    let mut l = theme::Line::new().legend(&when(age)).words(&u.text).tint(if live {
-        theme::READOUT
-    } else {
-        theme::VALUE
-    });
-    if live {
-        l = l.legend("...");
-    }
     // The model's own verdict on itself: below about -1.0 mean log
     // probability, or a high chance the window was not speech at all. The
     // words are shown either way, because a doubtful reading of a fading
-    // handheld is worth more than a blank pane, but a reader is told rather
-    // than left to trust it.
-    if !u.credible || u.confidence < -1.0 {
-        l = l.legend("unsure").tint(theme::FAULT);
+    // handheld is worth more than a blank row, but a reader is told.
+    let unsure = !u.credible || u.confidence < -1.0;
+    let tint = if live {
+        theme::READOUT
+    } else if unsure {
+        theme::FAULT
+    } else {
+        theme::VALUE
+    };
+    let mut text = u.text.clone();
+    if live {
+        text.push_str(" ...");
+    } else if unsure {
+        text.push_str("  (unsure)");
     }
-    l.wrapped(ui);
+    let font = egui::FontId::new(11.0, egui::FontFamily::Name(theme::READOUT_FONT.into()));
+    let galley = ui.painter().layout(text, font, tint, text_w - 6.0);
+    let h = (galley.size().y + 4.0).max(widgets::ROW_H);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let p = ui.painter_at(rect);
+    if n % 2 == 1 {
+        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+    }
+    if live {
+        p.rect_filled(
+            Rect::from_min_max(rect.left_top(), Pos2::new(rect.left() + 3.0, rect.bottom())),
+            0.0,
+            theme::READOUT,
+        );
+    }
+    // Wall time from the receiver's clock: the utterance is stamped with an
+    // Instant so it can be aged, and the difference is what puts it on a
+    // clock somebody can read.
+    let when = wall
+        .checked_sub(age)
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| crate::sats::utc_hms(d.as_secs() as i64))
+        .unwrap_or_default();
+    let sp = Speaker::parse(&u.key).unwrap_or_default();
+    let freq =
+        if sp.freq_hz > 0 { format!("{:.4}", sp.freq_hz as f64 / 1e6) } else { String::new() };
+    let speaker = sp.speaker.clone().unwrap_or_default();
+    let chan = match (&sp.channel, sp.proto.as_str()) {
+        (Some(c), _) => c.clone(),
+        (None, "") => String::new(),
+        (None, proto) => proto.to_string(),
+    };
+    // Cells are drawn on the first line of the row, which is the row's
+    // top rather than its middle when the text has wrapped.
+    let line = Rect::from_min_size(rect.min, Vec2::new(rect.width(), widgets::ROW_H));
+    let mut x = rect.left() + 12.0;
+    let cells = [
+        (when, theme::LEGEND),
+        (freq, theme::VALUE),
+        (speaker, theme::VALUE),
+        (chan, theme::VALUE),
+    ];
+    for ((_, w), (t, col)) in COLS.iter().zip(cells) {
+        widgets::cell(&p, line, x, *w, &t, col);
+        x += w;
+    }
+    p.galley(Pos2::new(x, rect.top() + 2.0), galley, tint);
 }
 
 /// A conversation key, as a person reads it.
@@ -452,14 +519,4 @@ pub(super) fn who(key: &str) -> String {
         out.push_str(&format!("  < {from}"));
     }
     out
-}
-
-/// How long ago, short enough for the head of a line.
-fn when(d: std::time::Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        0..=59 => format!("{s}s"),
-        60..=3599 => format!("{}m", s / 60),
-        _ => format!("{}h", s / 3600),
-    }
 }

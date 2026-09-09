@@ -22,6 +22,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The transcript is a table: time, frequency, speaker, group or channel,
+  and the words, which wrap.
+
 - CUDA is on by default in a build from source, and the release publishes
   a `-cuda` build for Linux and Windows beside the plain one. Building
   needs the CUDA toolkit; `--no-default-features --features limesdr,stt`
@@ -31,6 +34,10 @@ the code is in the commit log; what a decoder can and cannot do is in
   files; the path is on hover over the "on disc" line.
 
 ### Fixed
+
+- The model and device picked on the transcript card, and any setting
+  changed in the chain inspector, are remembered across a restart. They
+  reached the receiver but were never written to the edits file.
 
 - The transcript view and the call list fill in as speech is read. Both
   were only read under the soak option, so a model that read every word
