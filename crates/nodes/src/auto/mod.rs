@@ -23,7 +23,7 @@
 //! about where things are that the node keeps, because it is knowledge about
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
-use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceState, C32};
+use common::{Hz, Packet, Result, SourceBlock};
 use dsp::{SourceConfig, SourceDetector, SourceEvent};
 use pipeline::event::{Event, Request};
 use pipeline::graph::Topology;
@@ -47,7 +47,7 @@ mod watch;
 
 use member::{Member, Ring};
 use memory::{Memory, STICKY_ID_BASE};
-use place::Slot;
+use place::{Slot, SlotResult};
 use watch::Watch;
 
 /// SNR a bin must reach before the auto node opens a source there.
@@ -292,38 +292,6 @@ struct WideResult {
     events: Vec<Event>,
     packets: Vec<Packet>,
     spent_us: u64,
-}
-
-/// What one front end on one source made of a block.
-struct MemberResult {
-    name: &'static str,
-    /// Each event with the front end that produced it, since they are merged
-    /// with the other members' before anything is answered.
-    events: Vec<(&'static str, Event)>,
-    packets: Vec<Packet>,
-    /// The channel width this front end was placed for, when it read
-    /// something. The classifier measuring a burst is not reading it.
-    read: Option<f64>,
-    spent_us: u64,
-}
-
-/// What the front ends on one source made of a block.
-struct SlotResult {
-    /// Which slot, since the fanout returns them in whatever order they
-    /// finished.
-    k: usize,
-    /// Each event with the front end that produced it, so a request is
-    /// answered to the one that asked rather than to a name a node inside it
-    /// wrote about itself.
-    events: Vec<(&'static str, Event)>,
-    packets: Vec<Packet>,
-    /// The source has closed and nothing is still catching up on it.
-    done: bool,
-    /// The front ends that read something, and the channel width each was
-    /// placed for.
-    heard: Vec<(&'static str, f64)>,
-    /// Processor time per front end, for the cost view.
-    spent: Vec<(&'static str, u64)>,
 }
 
 fn now_us() -> u64 {
@@ -591,99 +559,7 @@ impl Node for AutoNode {
                     .par_iter_mut()
                     .enumerate()
                     .filter_map(|(k, slot)| {
-                        // A source with no block this time is one that has
-                        // closed; its decoders run on only while one of
-                        // them is still reading history.
-                        let b = blocks.iter().find(|b| b.id == slot.id);
-                        if b.is_none() && !slot.members.iter().any(|m| m.behind()) {
-                            return None;
-                        }
-                        let (samples, rate, state) = match b {
-                            Some(b) => (&b.samples[..], b.rate, b.state),
-                            None => (&[][..], slot.spec.rate, SourceState::Closed),
-                        };
-                        // The flush is fed once, on the block that closed
-                        // the source, not on every block after it.
-                        let closed = b.is_some() && state == SourceState::Closed;
-                        // The samples are kept for the evidence row too: a
-                        // row that cannot say what it was read from is half a
-                        // row, whether a classifier or the detector measured
-                        // it.
-                        slot.ring.keeps = slot.evidence.is_some()
-                            || slot.members.iter().any(|m| m.keeps_samples);
-                        slot.ring.push(samples);
-                        let ring = &slot.ring;
-                        let per: Vec<MemberResult> = slot
-                            .members
-                            .par_iter_mut()
-                            .map(|m| {
-                                let mut pk = Vec::new();
-                                let t = Instant::now();
-                                let mut ev = m.run(samples, at_us, &mut pk, ring);
-                                if closed {
-                                    let quiet =
-                                        vec![C32::new(0.0, 0.0); (m.flush_s * rate) as usize];
-                                    ev.extend(m.run(&quiet, at_us, &mut pk, ring));
-                                }
-                                let us = t.elapsed().as_micros() as u64;
-                                let read = m.router.is_none() && !pk.is_empty();
-                                // Which front end spoke, taken from the one
-                                // that was run rather than from a name a node
-                                // inside it wrote about itself: a request
-                                // routed by that is routed by a spelling.
-                                MemberResult {
-                                    name: m.name,
-                                    events: ev.into_iter().map(|e| (m.name, e)).collect(),
-                                    packets: pk,
-                                    read: read.then_some(m.channel_hz),
-                                    spent_us: us,
-                                }
-                            })
-                            .collect();
-                        let mut events = Vec::new();
-                        let mut packets = Vec::new();
-                        let mut heard = Vec::new();
-                        let mut spent = Vec::new();
-                        // What the detector measured, where nothing else
-                        // measured anything: the row an unknown wideband
-                        // signal leaves.
-                        if let Some(e) = slot.evidence.as_mut() {
-                            e.push(samples);
-                            let ended = matches!(
-                                state,
-                                SourceState::Closed | SourceState::Superseded
-                            );
-                            packets.extend(e.row(at_us, ended, &slot.ring));
-                        }
-                        for r in per {
-                            events.extend(r.events);
-                            packets.extend(r.packets);
-                            spent.push((r.name, r.spent_us));
-                            if let Some(width) = r.read {
-                                slot.heard = true;
-                                heard.push((r.name, width));
-                            }
-                        }
-                        // A measurement of a source a front end reads is
-                        // not news.
-                        if slot.heard {
-                            packets.retain(|p| {
-                                !(p.measure.is_some()
-                                    && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
-                            });
-                        }
-                        // Done once the source has closed and nothing is
-                        // still catching up on it.
-                        let done = matches!(state, SourceState::Closed | SourceState::Superseded)
-                            && !slot.members.iter().any(|m| m.behind());
-                        if state == SourceState::Superseded {
-                            // A wider stream for the same transmitter takes over
-                            // from its start. Whatever this one made of the sliver it
-                            // had is half a burst, and half a burst is not evidence.
-                            packets.clear();
-                            events.retain(|(_, e)| !matches!(e, Event::Decoded(_)));
-                        }
-                        Some(SlotResult { k, events, packets, done, heard, spent })
+                        slot.run_block(k, blocks.iter().find(|b| b.id == slot.id), at_us)
                     })
                     .collect()
             },
@@ -910,6 +786,7 @@ impl Node for AutoNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::{SourceState, C32};
     use pipeline::node::Node;
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
