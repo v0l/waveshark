@@ -11,6 +11,16 @@
 //! 15.36 MS/s and occupies about 10 MHz, so this is a channel a HackRF can
 //! hold whole and an RTL-SDR cannot reach at all.
 //!
+//! Those centres are fixed, so this reads the span and cuts them out of it
+//! the way `wifi_nodes` reads its channels: one energy gate off one
+//! transform a block, and a correlator per centre that runs only while that
+//! centre is lit. It was placed per source instead, on anything the detector
+//! opened between five and fifteen megahertz wide, and on a busy 2.4 GHz
+//! band that is Wi-Fi splatter: eleven sources over the same spectrum, each
+//! extracted at 15.36 MS/s and each correlating for the same five possible
+//! bursts. A drone sits inside a Wi-Fi channel rather than taking turns with
+//! it, so both front ends read the span at once, always.
+//!
 //! # What a row is evidence of
 //!
 //! A frame that reaches the bus passed a CRC-16 over 89 bytes this project
@@ -19,8 +29,7 @@
 //! sends zeros, which `decode::droneid` reports as absent rather than as a
 //! position off Africa.
 
-use crate::frame_meter::FrameMeter;
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape, Stickiness};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
 use common::Result;
 use pipeline::event::Decoded;
@@ -29,7 +38,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
 /// The occupied bandwidth: 600 carriers 15 kHz apart, plus guards.
-pub const WIDTH_HZ: f64 = 10_000_000.0;
+pub const WIDTH_HZ: f64 = dsp::droneid::WIDTH_HZ;
 
 /// The rate the frame is defined at, which is also the rate this asks for.
 pub const RATE_HZ: f64 = dsp::droneid::RATE;
@@ -42,15 +51,6 @@ pub const DEFAULT_HZ: f64 = 2_444_500_000.0;
 /// scores 0.88 to 0.99 and nothing else in a busy 2.4 GHz band comes near
 /// half of that, so this is not a knife edge.
 const THRESHOLD: f32 = 0.5;
-
-/// Samples kept behind the receiver, so a frame carries the samples it was
-/// read from.
-///
-/// A burst is nine symbols, about 720 us, but the ring has to outlast a whole
-/// block as well: measured with 4 ms of ring and 64k sample blocks, every
-/// frame fell out of the ring before it was measured and reported the block's
-/// level instead of its own. Twenty milliseconds is four blocks at this rate.
-const KEEP_S: f64 = 0.02;
 
 /// Every centre DroneID has been seen on, 2.4 GHz then 5.8.
 pub fn channels() -> Vec<f64> {
@@ -72,15 +72,8 @@ pub fn wrap(frame: &[u8]) -> Vec<u8> {
 }
 
 pub struct DroneIdNode {
-    meter: Option<FrameMeter>,
-    finder: Option<dsp::droneid::BurstFinder>,
-    carry: Vec<common::C32>,
-    at: usize,
-    rate: f64,
-    /// Where the last burst reported began, so the one straddling a block
-    /// boundary is not reported twice: the tail of every block is handed to
-    /// the next one, and a burst inside it correlates in both.
-    last: Option<usize>,
+    span: Option<dsp::droneid::DroneIdSpan>,
+    bursts: Vec<dsp::droneid::SpanBurst>,
 }
 
 impl Default for DroneIdNode {
@@ -91,7 +84,7 @@ impl Default for DroneIdNode {
 
 impl DroneIdNode {
     pub fn new() -> Self {
-        Self { meter: None, finder: None, carry: Vec::new(), at: 0, rate: RATE_HZ, last: None }
+        Self { span: None, bursts: Vec::new() }
     }
 }
 
@@ -104,96 +97,67 @@ impl Simple for DroneIdNode {
         if input.spec.kind != PortKind::Iq {
             return Err(common::Error::other("droneid reads complex baseband"));
         }
-        let rate = input.spec.rate;
+        let (rate, center) = (input.spec.rate, input.spec.center.as_f64());
         if rate + 1.0 < RATE_HZ {
             return Err(common::Error::other(
                 "droneid needs 15.36 MS/s: the frame is 600 carriers 15 kHz apart",
             ));
         }
-        self.rate = rate;
-        self.meter = Some(FrameMeter::new(rate, input.spec.center.0, KEEP_S));
-        self.finder = Some(dsp::droneid::BurstFinder::new(rate, THRESHOLD));
+        let Some(span) = dsp::droneid::DroneIdSpan::new(rate, center, &channels(), THRESHOLD)
+        else {
+            return Err(common::Error::other("droneid needs a whole 10 MHz centre in the span"));
+        };
+        // Where the port says the frames came from: the one centre when the
+        // span holds one, and the span itself when it holds several, because
+        // a frame cannot then be placed by the port alone. The rule
+        // `wifi_nodes` and `ble_nodes` follow, and each frame carries its own
+        // centre.
+        let heard = span.channels();
+        let hz = match heard.as_slice() {
+            [one] => *one,
+            _ => center,
+        };
+        self.span = Some(span);
         let mut out = input.spec.with_kind(PortKind::Frames);
+        out.center = common::Hz(hz as u64);
         out.bandwidth = WIDTH_HZ;
         Ok(out)
     }
 
     fn process(&mut self, input: &Payload, output: &mut Payload, ctx: &mut NodeCtx) -> Result<()> {
-        let Payload::Iq(iq) = input else {
+        let (Payload::Iq(iq), Some(span)) = (input, self.span.as_mut()) else {
             return Ok(());
         };
-        let out = output.frames_mut();
-        let Some(meter) = self.meter.as_mut() else {
-            return Ok(());
-        };
-        meter.feed(iq);
         let _ = ctx;
-
-        // A burst can straddle a block, so the tail of the previous one is
-        // carried: nine symbols is 9384 samples at this rate.
-        let carried = self.carry.len();
-        let mut window = std::mem::take(&mut self.carry);
-        window.extend_from_slice(iq);
-        let Some(finder) = self.finder.as_mut() else {
-            return Ok(());
-        };
-        for found in finder.find(&window) {
-            let Some(start) = found.zc4_at.checked_sub(dsp::droneid::symbol_offset(self.rate, 4))
-            else {
-                continue;
-            };
-            let absolute_start = self.at + start;
-            if self.last.is_some_and(|l| {
-                absolute_start.saturating_sub(l) < dsp::droneid::burst_len(self.rate)
-            }) {
+        self.bursts.clear();
+        span.process(iq, &mut self.bursts);
+        let out = output.frames_mut();
+        for b in &self.bursts {
+            // The bits are a frame when the CRC-16 the aircraft computed says
+            // so; a correlation peak that was not a burst does not get that
+            // far.
+            if decode::droneid::parse(&b.frame).is_none() {
                 continue;
             }
-            let Some(frame) = dsp::droneid::frame_bits(&window, start, self.rate) else {
-                continue;
-            };
-            if decode::droneid::parse(&frame).is_none() {
-                continue;
-            }
-            // The whole burst is the frame's own samples, and its level is
-            // measured over exactly those: a 10 MHz channel that is quiet
-            // between bursts would otherwise report the noise it sat in.
-            self.last = Some(absolute_start);
-            let absolute = absolute_start as u64;
-            let len = dsp::droneid::burst_len(self.rate);
-            // The floor next to the burst rather than the meter's own,
-            // which on a channel a link keeps busy is the link. A burst
-            // length of quiet a burst length before it is what a detector
-            // would have measured against.
-            let signal = meter.power_dbfs_at(absolute, len);
-            let noise =
-                absolute.checked_sub(2 * len as u64).and_then(|at| meter.power_dbfs_at(at, len));
-            let snr = match (signal, noise) {
-                (Some(s), Some(n)) => s - n,
-                // Nothing to measure against is a level of nothing, not a
-                // level of zero: the correlation is all that is left.
-                _ => 20.0 * found.score.max(1e-6).log10(),
-            };
-            out.push(meter.frame_measured(wrap(&frame), absolute, len, snr));
+            let mut frame = common::Frame::measured(wrap(&b.frame), b.rssi_dbfs, b.snr_db)
+                .at(b.center_hz as u64);
+            // The whole burst is the frame's own samples, at the rate the
+            // centre was read at rather than the span's.
+            frame.iq = Some(std::sync::Arc::new(common::IqBurst {
+                rate: b.rate,
+                center_hz: b.center_hz as u64,
+                samples: b.samples.clone(),
+            }));
+            out.push(frame);
         }
-        // What the next call will see as window[0]: everything but the tail
-        // kept for a burst that straddles the boundary. Advancing by the
-        // block rather than by the window loses the carried prefix, and the
-        // frames then name samples the meter no longer holds, so every one
-        // of them reports the block's level instead of its own.
-        let keep = window.len().min(dsp::droneid::burst_len(self.rate) * 2);
-        self.at += window.len() - keep;
-        self.carry = window[window.len() - keep..].to_vec();
-        let _ = carried;
         Ok(())
     }
 
     fn reset(&mut self) {
-        if let Some(m) = self.meter.as_mut() {
-            m.reset();
+        if let Some(s) = self.span.as_mut() {
+            s.reset();
         }
-        self.carry.clear();
-        self.at = 0;
-        self.last = None;
+        self.bursts.clear();
     }
 }
 
@@ -247,21 +211,21 @@ impl Protocol for DroneId {
     fn placement(&self) -> Placement {
         Placement::Channels(channels())
     }
-    /// A burst is 600 carriers of 15 kHz, and the detector measures it
-    /// within 20 dB of its peak, so a source under half its width is not
-    /// one. Without the floor every Wi-Fi beacon on the band, measured a
-    /// few hundred kilohertz to a few megahertz wide, was extracted at
-    /// 15.36 MS/s and correlated, 3 ms of every 6.5 ms block for nothing.
-    fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
-        source_width_hz >= WIDTH_HZ / 2.0
-            && source_width_hz <= WIDTH_HZ * crate::protocol::CHANNEL_WIDTH_TOLERANCE
+    /// The front end puts its own tag in front of the frame, which is the
+    /// most specific claim there is and the only one that tells a DroneID
+    /// frame from the 91 bytes anything else might read on a 2.4 GHz centre.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Tagged
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        droneid_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[WIDTH_HZ],
             min_rate_hz: RATE_HZ,
             feed_rate_hz: RATE_HZ,
-            span_wide: false,
+            span_wide: true,
             families: &[],
         }
     }
@@ -269,9 +233,27 @@ impl Protocol for DroneId {
         DEFAULT_HZ
     }
     /// A burst is 720 us roughly twice a second, so a decoder that owns its
-    /// channel between bursts owns 10 MHz of a shared band for nothing.
+    /// channel between bursts owns 10 MHz of a shared band for nothing. The
+    /// band is shared: 2.4 GHz holds Wi-Fi, Bluetooth and every ISM device
+    /// there is, and an aircraft transmits inside a Wi-Fi channel rather
+    /// than instead of one.
     fn stickiness(&self) -> Stickiness {
         Stickiness::Forget
+    }
+    /// Nothing while the detector has found nothing at all, and everything
+    /// once it has.
+    ///
+    /// A burst is 720 us, which is longer than a detector frame at any rate
+    /// this front end runs at, so anything worth reading has been on the air
+    /// long enough for a source to be open somewhere in the span; the front
+    /// end is handed the lead-in it missed out of the span's ring. The gate
+    /// is any source and not one 10 MHz wide, for the reason in
+    /// [`crate::protocol::Wake`]: the detector's extent is every bin within
+    /// 20 dB of a run's peak, which is far narrower than the transmission.
+    /// The hold covers the gap between one aircraft's bursts, which is half
+    /// a second.
+    fn wakes_on(&self) -> crate::protocol::Wake {
+        crate::protocol::Wake::Detected { hold_s: 1.0 }
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.1} DRONEID", hz / 1e6)

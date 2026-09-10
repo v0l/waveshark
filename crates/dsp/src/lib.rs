@@ -22,6 +22,7 @@ pub mod filter;
 pub mod fir;
 pub mod fourlevel;
 pub mod fsk;
+pub mod gate;
 pub mod gsm;
 pub mod hdlc;
 pub mod lora;

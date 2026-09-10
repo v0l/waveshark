@@ -44,9 +44,11 @@
 //! reports here was received on the channel it says it was.
 
 use crate::fir::{lowpass, FirDecim};
+use crate::gate::{ChannelGate, SpanGate};
 use crate::mixer::Mixer;
 use crate::pulse::LevelGate;
 use common::C32;
+use rayon::prelude::*;
 
 /// Symbol rate. Uncoded BLE, which is the only rate advertising uses on the
 /// primary channels.
@@ -71,6 +73,11 @@ const PASSBAND_HZ: f64 = 700_000.0;
 /// count stops moving: 87 against 89 at sixteen, and 51 through the
 /// microsecond pulse path.
 const TARGET_SPS: f64 = 4.0;
+
+/// The shortest advertisement on the air: eight preamble bits, thirty-two of
+/// access address, a six byte address behind a two byte header, and the
+/// CRC-24, at a microsecond a bit. What the energy gate must not step over.
+const MIN_ADVERTISEMENT_S: f64 = 128e-6;
 
 /// Largest advertising PDU: two header bytes and 37 of payload.
 const MAX_PDU: usize = 39;
@@ -256,6 +263,10 @@ pub struct BleFrame {
 /// One advertising channel: mix down, decimate, gate, read what is inside.
 struct ChannelRx {
     channel: u8,
+    /// Whether this channel has anything on it this block. A mixer and a
+    /// filter over the whole span is what a channel costs before a bit is
+    /// sliced, and on a quiet band it buys nothing.
+    gate: ChannelGate,
     rate: f64,
     sps: f64,
     /// Input samples per channel sample, so a burst is reported at the index
@@ -263,7 +274,7 @@ struct ChannelRx {
     factor: usize,
     mixer: Mixer,
     decim: FirDecim,
-    gate: LevelGate,
+    level: LevelGate,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
     /// The burst being collected, with the samples either side that the
@@ -281,18 +292,26 @@ struct ChannelRx {
 }
 
 impl ChannelRx {
-    fn new(channel: u8, channel_hz: f64, rate: f64, center_hz: f64, cfg: &BleConfig) -> Self {
+    fn new(
+        channel: u8,
+        channel_hz: f64,
+        rate: f64,
+        center_hz: f64,
+        cfg: &BleConfig,
+        span: &SpanGate,
+    ) -> Self {
         let factor = (rate / (BAUD * TARGET_SPS)).floor().max(1.0) as usize;
         let work = rate / factor as f64;
         let margin = (work * 60e-6) as usize;
         Self {
             channel,
+            gate: ChannelGate::new(span, channel_hz - center_hz, PASSBAND_HZ),
             rate: work,
             sps: work / BAUD,
             factor,
             mixer: Mixer::new(center_hz - channel_hz, rate),
             decim: FirDecim::new(channel_filter(rate, factor), factor),
-            gate: LevelGate::new(work, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
+            level: LevelGate::new(work, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
             mixed: Vec::new(),
             narrow: Vec::new(),
             burst: Vec::new(),
@@ -318,7 +337,7 @@ impl ChannelRx {
         let mut low_run = 0usize;
         let narrow = std::mem::take(&mut self.narrow);
         for &x in &narrow {
-            let high = self.gate.update(x.norm());
+            let high = self.level.update(x.norm());
             self.sample += 1;
             if high {
                 low_run = 0;
@@ -388,7 +407,7 @@ impl ChannelRx {
 
         let level = burst[self.body_start..].iter().map(|c| c.norm()).sum::<f32>()
             / (burst.len() - self.body_start).max(1) as f32;
-        let snr_db = self.gate.snr_db();
+        let snr_db = self.level.snr_db();
         let rssi_dbfs = 20.0 * level.max(1e-9).log10();
 
         let sync = sync_bits();
@@ -499,9 +518,23 @@ impl ChannelRx {
         (crc24(pdu) == want).then(|| pdu.to_vec())
     }
 
+    /// Pass over a block this channel has nothing on it for.
+    ///
+    /// The clock carries on, because a frame is reported at the sample of the
+    /// caller's own stream it began at, and a channel whose clock stopped
+    /// while it slept reports every later frame from before the gap. What it
+    /// was holding is dropped: it is not continuous with what arrives next.
+    fn doze(&mut self, span_samples: usize) {
+        self.sample += (span_samples / self.factor) as u64;
+        self.pre.clear();
+        self.burst.clear();
+        self.in_burst = false;
+    }
+
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
+        self.level.reset();
         self.gate.reset();
         self.pre.clear();
         self.burst.clear();
@@ -539,6 +572,11 @@ pub fn data_channel_hz(index: u8) -> Option<f64> {
 pub struct BleDetector {
     cfg: BleConfig,
     chans: Vec<ChannelRx>,
+    /// The one transform every channel's energy gate reads. Without it each
+    /// channel mixed and filtered the whole span on every block whatever was
+    /// on the air: measured at 61.44 MS/s, 1.8 ms of a 2.13 ms block for two
+    /// channels.
+    span: SpanGate,
 }
 
 impl BleDetector {
@@ -550,20 +588,21 @@ impl BleDetector {
     /// one that reports three and hears one badly.
     pub fn new(rate: f64, center_hz: f64, cfg: BleConfig) -> Self {
         let edge = rate / 2.0 - PASSBAND_HZ;
+        let span = SpanGate::new(rate, MIN_ADVERTISEMENT_S);
         let mut chans: Vec<ChannelRx> = ADV_CHANNELS
             .iter()
             .filter(|(_, hz)| (hz - center_hz).abs() <= edge)
-            .map(|&(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg))
+            .map(|&(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg, &span))
             .collect();
         if cfg.data_channels {
             chans.extend(
                 (0..37u8)
                     .filter_map(|ch| data_channel_hz(ch).map(|hz| (ch, hz)))
                     .filter(|(_, hz)| (hz - center_hz).abs() <= edge)
-                    .map(|(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg)),
+                    .map(|(ch, hz)| ChannelRx::new(ch, hz, rate, center_hz, &cfg, &span)),
             );
         }
-        Self { cfg, chans }
+        Self { cfg, chans, span }
     }
 
     /// Which advertising channels this detector is reading.
@@ -571,10 +610,30 @@ impl BleDetector {
         self.chans.iter().map(|c| c.channel).collect()
     }
 
+    /// Read every lit channel, appending what each one heard.
+    ///
+    /// The channels are independent, so they run in parallel: each holds its
+    /// own mixer, filter and gate, and nothing is shared but the samples they
+    /// all read. Serial, the two channels a 61.44 MS/s span holds were 1.15 ms
+    /// of a 2.13 ms block on one thread while the Wi-Fi front end beside them
+    /// had the other three.
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<BleFrame>) {
-        for c in &mut self.chans {
-            c.process(iq, &self.cfg, out);
-        }
+        self.span.measure(iq);
+        let (cfg, span) = (&self.cfg, &self.span);
+        let heard: Vec<Vec<BleFrame>> = self
+            .chans
+            .par_iter_mut()
+            .map(|c| {
+                let mut mine = Vec::new();
+                if !c.gate.awake(span) {
+                    c.doze(iq.len());
+                    return mine;
+                }
+                c.process(iq, cfg, &mut mine);
+                mine
+            })
+            .collect();
+        out.extend(heard.into_iter().flatten());
     }
 
     pub fn reset(&mut self) {
