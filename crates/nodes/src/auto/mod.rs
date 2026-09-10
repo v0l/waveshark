@@ -36,7 +36,7 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-use crate::protocol;
+use crate::protocol::{self, Wake};
 
 mod evidence;
 mod member;
@@ -526,9 +526,18 @@ impl Node for AutoNode {
         let claimant =
             |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
         // The span, kept once for every front end over it rather than once
-        // each: they are all handed the same block.
-        self.wide_ring.keeps = self.wide.iter().any(|m| m.keeps_samples);
+        // each: they are all handed the same block. A gated front end needs
+        // it whether or not it produces packets, since the lead-in it wakes
+        // on comes out of it.
+        self.wide_ring.keeps = self
+            .wide
+            .iter()
+            .any(|m| m.keeps_samples || m.protocol.is_some_and(|p| p.wakes_on() != Wake::Always));
         self.wide_ring.push(iq);
+        // What the detector has open, which is what a gated span-wide front
+        // end runs on, and how much of the lead-in it missed getting there.
+        let detecting = self.watch.detecting();
+        let lead = self.watch.latency_samples();
         let wide_ring = &self.wide_ring;
         let wide = &mut self.wide;
         let slots = &mut self.slots;
@@ -537,10 +546,23 @@ impl Node for AutoNode {
             || {
                 wide.par_iter_mut()
                     .map(|m| {
-                        // Not this block: something else owns the span, or
-                        // this front end is sampling the air rather than
-                        // reading all of it.
-                        if (watching && !claimant(m)) || !m.wants(iq.len(), rate) {
+                        // Not this block: nothing the detector can see is on
+                        // the air, something else owns the span, or this
+                        // front end is sampling the air rather than reading
+                        // all of it.
+                        let awake = m.awake(detecting, iq.len(), rate)
+                            && (!watching || claimant(m));
+                        if !awake {
+                            m.sleep(iq.len());
+                            return WideResult {
+                                name: m.name,
+                                events: Vec::new(),
+                                packets: Vec::new(),
+                                spent_us: 0,
+                            };
+                        }
+                        m.wake(wide_ring, lead, iq.len());
+                        if !m.wants(iq.len(), rate) {
                             m.skip(iq.len());
                             return WideResult {
                                 name: m.name,
@@ -912,8 +934,15 @@ mod tests {
     /// Noise with a keyed carrier `offset` hertz up from the centre for the
     /// last stretch of it.
     fn keyed(rate: f64, offset: f64) -> Vec<C32> {
+        keyed_for(rate, offset, 600_000)
+    }
+
+    /// The same, as long as the detector needs at the span's own rate: the
+    /// floor is not measured for the first thirty-two frames, and a frame at
+    /// 20 MS/s is eight times the samples it is at 2.4.
+    fn keyed_for(rate: f64, offset: f64, samples: usize) -> Vec<C32> {
         let mut seed = 0x51u64;
-        let mut iq: Vec<C32> = (0..600_000)
+        let mut iq: Vec<C32> = (0..samples)
             .map(|_| {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -926,10 +955,11 @@ mod tests {
                 C32::new(a * 0.05, b * 0.05)
             })
             .collect();
-        for i in 0..100_000usize {
+        let from = samples / 2;
+        for i in 0..samples / 6 {
             if (i / 500) % 2 == 0 {
                 let ph = std::f64::consts::TAU * offset * i as f64 / rate;
-                iq[300_000 + i] += C32::new(0.3 * ph.cos() as f32, 0.3 * ph.sin() as f32);
+                iq[from + i] += C32::new(0.3 * ph.cos() as f32, 0.3 * ph.sin() as f32);
             }
         }
         iq
@@ -991,9 +1021,12 @@ mod tests {
         Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
         assert!(n.wide().contains(&"video") && n.wide().contains(&"wifi"), "{:?}", n.wide());
 
-        let run = |n: &mut AutoNode| -> Vec<(String, u64)> {
+        // Something on the air, since both of these are gated on the
+        // detector having found something; see [`protocol::Wake`].
+        let busy = keyed_for(rate, 4e6, 2_000_000);
+        let run = |n: &mut AutoNode, block: &[C32]| -> Vec<(String, u64)> {
             let ins = [spec(rate, center)];
-            let input = Payload::Iq(vec![C32::new(0.01, -0.01); 16_384]);
+            let input = Payload::Iq(block.to_vec());
             let mut out = [
                 Payload::Packets(Vec::new()),
                 Payload::Voice(Vec::new()),
@@ -1010,8 +1043,12 @@ mod tests {
             ph.iter().find(|(k, _)| k == name).map(|(_, v)| *v).unwrap_or(0)
         };
 
-        let before = run(&mut n);
+        let mut before = Vec::new();
+        for block in busy.chunks(16_384) {
+            before = run(&mut n, block);
+        }
         assert!(spent(&before, "wifi") > 0, "{before:?}");
+        let block = &busy[busy.len() - 16_384..];
 
         // The camera says the span is its picture.
         let mut out = Vec::new();
@@ -1021,13 +1058,13 @@ mod tests {
             Request::Claim { lo_hz: center.as_f64() - rate, hi_hz: center.as_f64() + rate },
             &mut out,
         );
-        let after = run(&mut n);
+        let after = run(&mut n, block);
         assert_eq!(spent(&after, "wifi"), 0, "{after:?}");
         assert!(spent(&after, "video") > 0, "the claimant still reads {after:?}");
 
         // And giving it back puts everything else back on the span.
         n.answer(None, "video", Request::Release, &mut out);
-        let back = run(&mut n);
+        let back = run(&mut n, block);
         assert!(spent(&back, "wifi") > 0, "{back:?}");
     }
 
@@ -1061,21 +1098,13 @@ mod tests {
         assert_eq!(node.inputs[0].1.rate, 20e6);
     }
 
-    /// A front end whose traffic repeats samples the air rather than reading
-    /// all of it. Wi-Fi read 7.5 seconds of an empty 5.8 GHz band in 3.1
-    /// seconds of CPU for no frames at all, which is an afternoon spent
-    /// proving a band is quiet.
-    #[test]
-    fn a_sampling_front_end_reads_a_fraction_of_the_air() {
-        let (rate, center) = (20e6, Hz::mhz(5805));
-        let mut n = AutoNode::new("auto", SourceConfig::default());
-        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
-        let block = 131_072usize;
+    /// How many of `blocks` blocks of `iq` a span-wide front end read.
+    fn blocks_read(n: &mut AutoNode, rate: f64, center: Hz, iq: &[C32], name: &str) -> (usize, usize) {
         let ins = [spec(rate, center)];
         let mut read = 0usize;
-        let blocks = (2.0 * rate / block as f64) as usize;
-        for _ in 0..blocks {
-            let input = Payload::Iq(vec![C32::new(0.0, 0.0); block]);
+        let mut blocks = 0usize;
+        for block in iq.chunks(131_072) {
+            let input = Payload::Iq(block.to_vec());
             let mut out = [
                 Payload::Packets(Vec::new()),
                 Payload::Voice(Vec::new()),
@@ -1083,17 +1112,60 @@ mod tests {
             ];
             let (mut events, mut tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
-            Node::process(&mut n, &[&input], &mut out, &mut ctx).unwrap();
-            if n.phase_sum.iter().any(|(k, v)| *k == "wifi" && *v > 0) {
+            Node::process(n, &[&input], &mut out, &mut ctx).unwrap();
+            blocks += 1;
+            if n.phase_sum.iter().any(|(k, v)| *k == name && *v > 0) {
                 read += 1;
             }
         }
-        // A fifth of a second in every second, so a fifth of the blocks,
-        // give or take where the window falls in a block.
+        (read, blocks)
+    }
+
+    /// A front end gated on the detector reads none of a band nothing is
+    /// transmitting in. Wi-Fi read 7.5 seconds of an empty 5.8 GHz band in
+    /// 3.1 seconds of CPU for no frames at all, which is an afternoon spent
+    /// proving a band is quiet, and the camera beside it cost most of a core
+    /// demodulating a picture nobody was sending.
+    #[test]
+    fn a_gated_front_end_reads_nothing_while_nothing_is_transmitting() {
+        let (rate, center) = (20e6, Hz::mhz(5805));
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        let quiet = vec![C32::new(0.0, 0.0); (2.0 * rate) as usize];
+        for name in ["wifi", "video"] {
+            let (read, blocks) = blocks_read(&mut n, rate, center, &quiet, name);
+            assert_eq!(read, 0, "{name} read {read} of {blocks} empty blocks");
+        }
+    }
+
+    /// And once something is transmitting, a front end whose traffic repeats
+    /// samples the air rather than reading all of it: every network beacons
+    /// ten times a second, so a fifth of the air names them all.
+    #[test]
+    fn a_sampling_front_end_reads_a_fraction_of_the_air() {
+        let (rate, center) = (20e6, Hz::mhz(5805));
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(rate, center)]).unwrap();
+        // A fifth of a second in every second is the cycle, so this has to
+        // run for seconds to measure it: a fifth of a second of 20 MS/s
+        // played over and over, which is what a band with something on it
+        // looks like without holding gigabytes of it. The first pass wakes
+        // the front end and is not counted.
+        let busy = keyed_for(rate, 4e6, 4_000_000);
+        let (_, warm) = blocks_read(&mut n, rate, center, &busy, "wifi");
+        assert!(warm > 0);
+        let (mut read, mut blocks) = (0, 0);
+        for _ in 0..12 {
+            let (r, b) = blocks_read(&mut n, rate, center, &busy, "wifi");
+            read += r;
+            blocks += b;
+        }
+        // A fifth of the blocks, give or take where the window falls in a
+        // block.
         let share = read as f64 / blocks as f64;
-        assert!((0.1..0.35).contains(&share), "{read} of {blocks} blocks");
+        assert!((0.1..0.4).contains(&share), "{read} of {blocks} blocks");
         // And the camera, which reads a carrier that is there all the time,
-        // is handed every block.
+        // is handed every block it is awake for.
         let video = n.wide.iter().find(|m| m.name == "video").expect("a camera front end");
         assert!(matches!(
             video.protocol.map(|p| p.watch()),

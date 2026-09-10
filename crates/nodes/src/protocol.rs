@@ -121,6 +121,45 @@ impl Stickiness {
     pub const SESSION: Stickiness = Stickiness::Latch { hold_s: None };
 }
 
+/// What has to be transmitting before a span-wide decoder is handed a block
+/// at all.
+///
+/// A source cut out of the span is only read while something is on the air
+/// there, because the detector found it first. A span-wide decoder has no
+/// such thing in front of it: it is handed every sample for as long as the
+/// receiver runs, and on an empty band that is a core spent proving the band
+/// is empty. Measured on the 5.8 GHz camera capture, the Wi-Fi front end
+/// read 7.5 seconds of air in 3.1 seconds of CPU and returned no frames at
+/// all, because there was no Wi-Fi there.
+///
+/// The detector is the thing in front of it. What decides whether that works
+/// is how long the traffic lasts against how long the detector takes to
+/// notice: a Wi-Fi frame is over 200 us and a camera's carrier is on for
+/// seconds, so the detector has a source open before either decoder needs
+/// one, while a Mode S reply is 120 us and would be over before anything
+/// opened.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wake {
+    /// Every block, whatever the detector has found. What it reads is
+    /// shorter than the detector takes to find it, or is on a channel the
+    /// detector is kept out of and will therefore never open: Mode S, AIS,
+    /// and Bluetooth advertising, which owns its three channels from the
+    /// moment the span reaches them.
+    Always,
+    /// While the detector has any source open in the span, and for `hold_s`
+    /// after the last one closed.
+    ///
+    /// Any source, rather than one as wide as the signal this decoder
+    /// reads, because the detector's extent is every bin within 20 dB of a
+    /// run's peak and that is far narrower than the transmission: measured,
+    /// one 802.11b beacon capture opens sources of 9 kHz, 181 kHz, 571 kHz
+    /// and 1.9 MHz for the same access point, and a camera's 20 MHz carrier
+    /// opens runs of 55 kHz to 1.4 MHz and never one wider. A width
+    /// threshold that let both of those through would let everything
+    /// through.
+    Detected { hold_s: f64 },
+}
+
 /// How much of the stream a span-wide decoder needs while nothing has been
 /// read on it.
 ///
@@ -386,6 +425,15 @@ pub trait Protocol: Send + Sync {
     /// of the air finds it just as surely.
     fn watch(&self) -> Watch {
         Watch::Everything
+    }
+
+    /// What has to be on the air before this decoder is handed a block.
+    ///
+    /// Only asked of a span-wide decoder: everything else is placed on a
+    /// source and so is gated on the detector already. [`Wake::Always`]
+    /// unless what it reads lasts longer than the detector takes to find it.
+    fn wakes_on(&self) -> Wake {
+        Wake::Always
     }
 
     /// Of the channel widths that each read something on one source, the
