@@ -590,6 +590,9 @@ impl Tracks {
                 humidity_pct: *humidity_pct,
                 pressure_hpa: *pressure_hpa,
             },
+            // A control link reports where the sticks are, not where
+            // anything is, so it is not a moving thing on a map.
+            common::ReportDetail::Control { .. } => return false,
             common::ReportDetail::Bare => match id {
                 TrackId::Icao(_) => Detail::new_aircraft(),
                 TrackId::Mesh(_) => Detail::Mesh {

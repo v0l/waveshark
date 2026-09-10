@@ -1378,6 +1378,41 @@ impl App {
         Ok(())
     }
 
+    /// Ask for a capture and make it the receiver.
+    ///
+    /// The file dialog is the whole interface: which recording to replay is a
+    /// choice somebody makes once, and a folder scanned for candidates would
+    /// list every capture ever written next to the radios that are actually
+    /// plugged in. The filename has to carry the sample rate and the format,
+    /// because a guessed rate rescales every pulse width downstream and the
+    /// receiver then decodes nothing for a reason nobody can see.
+    pub(super) fn open_capture(&mut self, ctx: &egui::Context) {
+        let start = crate::chain::default_capture_dir();
+        let _ = std::fs::create_dir_all(&start);
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Replay a capture")
+            .set_directory(&start)
+            .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(c) = crate::devices::add_capture(path.clone()) else {
+            self.err = Some(format!(
+                "{}: cannot tell its sample rate and format. Name it like \
+                 <what>_<centre>_<rate>.<format>, e.g. bench_433.92M_250k.cu8",
+                path.display()
+            ));
+            self.err_at = Some(std::time::Instant::now());
+            return;
+        };
+        self.devices = crate::devices::list();
+        if let Some(e) = self.devices.iter().find(|d| d.path.as_deref() == Some(c.path.as_path())) {
+            let e = e.clone();
+            self.select_device(ctx, e);
+        }
+    }
+
     /// Build the device list again, keeping the chosen radio if it is still
     /// there. Connects only when nothing was chosen, so a rescan cannot pull
     /// the receiver off the radio it is running.

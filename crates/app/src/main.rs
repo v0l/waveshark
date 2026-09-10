@@ -29,6 +29,7 @@ mod beacondb;
 mod calls;
 mod chain;
 mod chainview;
+mod control;
 mod data;
 mod devices;
 mod dial;
@@ -866,6 +867,11 @@ struct Args {
     #[arg(long, value_name = "HOST")]
     stream: Vec<String>,
 
+    /// Open a recorded capture as the receiver and replay it at the rate it
+    /// was recorded at, which is what the receiver list's file dialog does
+    #[arg(long, value_name = "FILE")]
+    capture: Vec<PathBuf>,
+
     /// Write a PNG of the interface and exit
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "/tmp/shot.png")]
     shot: Option<String>,
@@ -897,6 +903,14 @@ struct Args {
     /// Open on the data links: who is talking to whom, and what passed
     #[arg(long)]
     links: bool,
+
+    /// Open on the control links: where the sticks are on every handset heard
+    #[arg(long)]
+    control: bool,
+
+    /// Start the radio as soon as the window opens, without a click on play
+    #[arg(long)]
+    run: bool,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1155,6 +1169,16 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     }
+    for c in &args.capture {
+        if devices::add_capture(c.clone()).is_none() {
+            eprintln!(
+                "--capture {}: name it like <what>_<centre>_<rate>.<format>, \
+                 e.g. bench_433.92M_250k.cu8",
+                c.display()
+            );
+            std::process::exit(1);
+        }
+    }
 
     if args.fetch_data {
         data::fetch_all();
@@ -1339,6 +1363,12 @@ fn main() -> eframe::Result<()> {
             }
             if args.links {
                 app.show_links();
+            }
+            if args.control {
+                app.show_control();
+            }
+            if args.run {
+                app.start_on_open();
             }
             app.soak = args.soak;
             Ok(Box::new(app))

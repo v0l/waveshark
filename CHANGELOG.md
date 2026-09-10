@@ -12,6 +12,16 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- "Open capture…" in the receiver list. Pick a recorded capture and it
+  becomes the receiver, playing back at the rate it was recorded at through
+  the same graph, detector and panes as an aerial, looping so a few seconds of
+  signal can be watched more than once. Its dial is a readout, since a
+  recording cannot be retuned. `--capture FILE` opens one from the command
+  line and `--run` starts the radio without a click on play.
+- A control view: where the sticks are on every model control link heard, a
+  bar per channel in microseconds with the frame rate, the level and whether
+  the handset is asking to arm. ExpressLRS is the link the receiver places for
+  itself; FrSky and FlySky are read but have no front end yet.
 - A camera's sound. Analogue video links carry audio on a subcarrier of the
   same transmission, 6.5 MHz on the one recorded here, and it is now heard
   alongside the picture. A picture with no sound was half a receiver. It is

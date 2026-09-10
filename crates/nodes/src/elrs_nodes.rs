@@ -383,6 +383,9 @@ pub fn elrs_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         to: Some(common::Party::unit(format!("elrs {link_id} rx"))),
     });
     out.identity = Some(common::Identity::new("elrs", link_id));
+    if let Some(control) = elrs::control(&d.packet) {
+        out.report = control;
+    }
     Some(out)
 }
 

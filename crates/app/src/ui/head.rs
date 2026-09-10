@@ -52,6 +52,16 @@ const SPEED_W: f32 = 100.0;
 const PANELS_W: f32 = 88.0;
 const UPDATE_W: f32 = 72.0;
 
+/// A receiver the interface put in the list itself, and can take out again.
+///
+/// A radio on the bus is dropped by unplugging it. These two were opened
+/// here, so the × beside them is the only way to be rid of them.
+#[derive(Clone, Debug)]
+enum Forget {
+    Remote(String),
+    Capture(std::path::PathBuf),
+}
+
 impl App {
     /// The readout and the controls that set it.
     pub(super) fn head(&mut self, ui: &mut egui::Ui) {
@@ -131,8 +141,9 @@ impl App {
     fn receiver_cell(&mut self, ui: &mut egui::Ui) {
         let mut pick = None;
         let mut rescan = false;
-        let mut forget = None;
+        let mut forget: Option<Forget> = None;
         let mut add_remote = false;
+        let mut open_capture = false;
         let mut open_radio = false;
         let mut connect = false;
         let mut stop = false;
@@ -148,8 +159,17 @@ impl App {
                         // A remote radio was created here rather than plugged
                         // in, so it is dropped here too: nothing else in the
                         // interface knows it exists.
-                        match &d.addr {
-                            Some(addr) => {
+                        // A remote radio and a capture were both opened
+                        // here rather than plugged in, so both are dropped
+                        // here too: nothing else in the interface knows they
+                        // exist.
+                        let forgettable = d
+                            .addr
+                            .clone()
+                            .map(Forget::Remote)
+                            .or_else(|| d.path.clone().map(Forget::Capture));
+                        match forgettable {
+                            Some(what) => {
                                 ui.horizontal(|ui| {
                                     if ui.selectable_label(on, &d.label).clicked() {
                                         pick = Some(d.clone());
@@ -158,7 +178,7 @@ impl App {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             if ui.small_button("×").clicked() {
-                                                forget = Some(addr.clone());
+                                                forget = Some(what.clone());
                                             }
                                         },
                                     );
@@ -177,6 +197,14 @@ impl App {
                     }
                     if ui.selectable_label(false, "Add remote…").clicked() {
                         add_remote = true;
+                    }
+                    // A recording is a receiver: the same graph, detector and
+                    // panes, played at the rate it was recorded at. Opened
+                    // through the file dialog rather than by scanning a
+                    // folder, since which capture is wanted is a choice and a
+                    // list of every recording ever made is not.
+                    if ui.selectable_label(false, "Open capture…").clicked() {
+                        open_capture = true;
                     }
                 },
             );
@@ -219,10 +247,17 @@ impl App {
         if add_remote {
             self.remote = Some(RemoteEdit::default());
         }
-        if let Some(addr) = forget {
-            crate::devices::remove_stream(&addr);
+        if let Some(what) = forget {
+            match what {
+                Forget::Remote(addr) => crate::devices::remove_stream(&addr),
+                Forget::Capture(path) => crate::devices::remove_capture(&path),
+            }
             let c = ui.ctx().clone();
             self.rescan(&c);
+        }
+        if open_capture {
+            let c = ui.ctx().clone();
+            self.open_capture(&c);
         }
         if rescan {
             let c = ui.ctx().clone();
