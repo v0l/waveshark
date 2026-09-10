@@ -193,6 +193,9 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- Less processor for the same signal on a wide span. Watching a 20 MS/s band
+  costs about a third less than it did, hearing a camera about a fifth less,
+  and every capture in the corpus decodes exactly what it did before.
 - The Wi-Fi and video front ends stop reading a band nothing is transmitting
   on, and start again the moment something does, so a quiet 2.4 or 5.8 GHz
   span costs almost nothing. They used to demodulate an empty band all day.
