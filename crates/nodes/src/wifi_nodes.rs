@@ -370,6 +370,20 @@ impl Protocol for Wifi {
     /// shared spectrum: 2.4 GHz holds Bluetooth and every ISM device there
     /// is, and 5.8 GHz holds the FPV video channels. Owning it would keep
     /// the detector out of all of them for a beacon.
+    ///
+    /// Nor a claim after a frame has decoded, which is the camera's
+    /// arrangement and would say something true: the megahertz-wide runs the
+    /// detector opens inside a Wi-Fi carrier are pieces of what this front
+    /// end is already reading, and each of them costs an extraction and a
+    /// DroneID correlator at 15.36 MS/s, since a source that wide could be a
+    /// DroneID burst. Measured on the 61.44 MS/s capture of a busy 2.4 GHz
+    /// band, it is still the wrong trade. Frames decode on channels 1 and 6
+    /// there, so a claim would close 2402 to 2422 and 2427 to 2447 MHz: two
+    /// of the eleven sources wide enough for DroneID, and twenty of the
+    /// twenty-nine visits of the ExpressLRS handset hopping through the same
+    /// band. The nine that cost the most sit at 2459 MHz, which is the lower
+    /// two thirds of channel 11 with the span's edge through it, so this
+    /// front end cannot read that channel and would never claim it.
     fn stickiness(&self) -> Stickiness {
         Stickiness::Forget
     }

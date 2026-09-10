@@ -29,6 +29,17 @@
 //! follow the hop sequence and reads whatever channel it was placed on; a
 //! phrase or a full UID given as a setting does both.
 //!
+//! # What it can predict without the sequence
+//!
+//! Two bytes are enough to say *where* the handset will be, if not when. The
+//! eighty 2.4 GHz channels are a megahertz apart from 2400.4 MHz whatever the
+//! UID is, and every one of them is keyed 812.5 kHz wide. So once a link has
+//! decoded here, the node publishes a [`pipeline::Lock`] over that raster,
+//! and the auto node hands it every hop the detector opens without
+//! classifying any of them; see [`crate::auto`]. Which hop is next needs
+//! `decode::elrs::hop_sequence`, and that needs four UID bytes, so a lock
+//! carries no schedule.
+//!
 //! # Only one rate decodes
 //!
 //! The long interleaved coding is measured at SF7 and 4/8, which is the
@@ -41,7 +52,8 @@ use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::{Result, C32};
 use decode::elrs;
-use pipeline::event::Decoded;
+use pipeline::event::{Decoded, Request};
+use pipeline::lock::{Lock, Raster};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -49,6 +61,23 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// The one bandwidth every ExpressLRS LoRa rate on 2.4 GHz uses.
 pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
+
+/// How much of a channel a source may measure and still be one of this
+/// link's visits: a chirp fills its channel, a source measures it a little
+/// over, and a strong one up to twice. What [`Elrs::accepts_width`] tests
+/// and what a lock claims on, which are the same question.
+const WIDTH_SHARE: (f64, f64) = (0.7, 2.0);
+
+/// How far off a channel of the hop set a source may be measured and still
+/// be that channel.
+///
+/// A source is the power centroid of the bins that stood over the floor, so
+/// it lands near a channel rather than on it, and always a little above:
+/// measured on the 61.44 MS/s capture of one handset, the twenty-nine
+/// visits sat 9 to 195 kHz above their channel. A quarter of the megahertz
+/// spacing covers that with margin and leaves no source that two channels
+/// could both claim.
+const RASTER_TOLERANCE_HZ: f64 = 250_000.0;
 
 /// The spreading factors the 2.4 GHz LoRa rates use.
 const SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 5..=8;
@@ -79,6 +108,10 @@ pub struct ElrsNode {
     /// for the link to be recovered from. Consecutive on one channel,
     /// since this node reads one source.
     unplaced: Vec<Vec<u8>>,
+    /// Whether the lock over the hop set has been published. Once, on the
+    /// first packet that decodes: before that there is no link to lock on,
+    /// and after it the statement does not change.
+    published: bool,
 }
 
 /// Packets held back for the link to be recovered from. Two settle the
@@ -102,6 +135,34 @@ impl ElrsNode {
             decoded: 0,
             refused: 0,
             unplaced: Vec::new(),
+            published: false,
+        }
+    }
+
+    /// What this node can predict about the link it has read: which eighty
+    /// channels it will be on and how wide each visit is.
+    ///
+    /// Published once a packet of the link has decoded, which is the whole
+    /// of the evidence there is that a link is on the air here. Two UID
+    /// bytes are enough for this and not for the hop sequence, so the lock
+    /// says where and not when.
+    fn lock(&self, uid: [u8; 6]) -> Lock {
+        let link = format!("{:02x}{:02x}", uid[4], uid[5]);
+        let mut settings = Settings::new();
+        settings.insert(LINK.into(), ParamValue::Text(link.clone()));
+        Lock {
+            transmitter: link,
+            raster: Raster {
+                start_hz: elrs::FREQ_START_HZ as f64,
+                step_hz: (elrs::FREQ_STOP_HZ - elrs::FREQ_START_HZ) as f64
+                    / (elrs::CHANNEL_COUNT - 1) as f64,
+                count: elrs::CHANNEL_COUNT,
+            },
+            tolerance_hz: RASTER_TOLERANCE_HZ,
+            width_hz: CHANNEL_WIDTH_HZ,
+            width_share: WIDTH_SHARE,
+            confidence: 1.0,
+            settings,
         }
     }
 
@@ -239,6 +300,10 @@ impl Simple for ElrsNode {
                     continue;
                 };
                 self.decoded += 1;
+                if !self.published {
+                    self.published = true;
+                    c.request(Request::Lock(self.lock(uid)));
+                }
                 let bus =
                     to_bytes(packet.sf, CHANNEL_WIDTH_HZ, self.ota_version, &uid, d.nonce, &bytes);
                 let mut f = common::Frame::measured(bus, rssi_dbfs, snr_db)
@@ -288,11 +353,32 @@ impl Simple for ElrsNode {
                 self.uid = (!t.is_empty()).then(|| elrs::uid_from_phrase(&t));
                 self.uid_whole = self.uid.is_some();
             }
+            LINK => {
+                self.uid = parse_link(v.as_str().unwrap_or(""));
+                self.uid_whole = false;
+            }
             "ota_version" => self.ota_version = v.as_f64().unwrap_or(4.0) as u8,
             _ => return Err(common::Error::other(format!("elrs: unknown parameter {name:?}"))),
         }
         Ok(())
     }
+}
+
+/// The two UID bytes a link is known by here, as four hex digits: what a
+/// sync packet names and what the CRC seed recovers, which is as much of a
+/// UID as this node ever learns off the air.
+///
+/// Kept apart from [`parse_uid`] because they mean different things: a whole
+/// UID generates the hop sequence and a link id does not, and a node that
+/// took two bytes for six would say it could follow a handset it cannot.
+pub fn parse_link(text: &str) -> Option<[u8; 6]> {
+    let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() != 4 {
+        return None;
+    }
+    let hi = u8::from_str_radix(&hex[..2], 16).ok()?;
+    let lo = u8::from_str_radix(&hex[2..], 16).ok()?;
+    Some([0, 0, 0, 0, hi, lo])
 }
 
 /// Twelve hex digits, with or without separators, as a UID.
@@ -447,9 +533,8 @@ impl Protocol for Elrs {
         crate::protocol::Stickiness::Forget
     }
     fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
-        // A chirp fills its channel; a source measures it a little over
-        // and a strong one up to twice.
-        (CHANNEL_WIDTH_HZ * 0.7..=CHANNEL_WIDTH_HZ * 2.0).contains(&source_width_hz)
+        let (least, most) = WIDTH_SHARE;
+        (CHANNEL_WIDTH_HZ * least..=CHANNEL_WIDTH_HZ * most).contains(&source_width_hz)
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("elrs")]
@@ -586,6 +671,7 @@ mod tests {
 /// The setting names this stage reads.
 const UID: &str = "uid";
 const PHRASE: &str = "phrase";
+const LINK: &str = "link";
 
 pub const DESC: StageDesc = StageDesc {
     name: "elrs",
@@ -601,6 +687,14 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let phrase = s.str_or(PHRASE, "");
     if !phrase.is_empty() {
         Simple::set_param(&mut n, PHRASE, ParamValue::Text(phrase.into()))?;
+    }
+    // The link a lock carries, so a decoder placed on a claimed hop starts
+    // knowing it rather than recovering it again from the first packets of
+    // every visit. Two bytes, and the node still knows it cannot follow the
+    // sequence with them.
+    let link = s.str_or(LINK, "");
+    if !link.is_empty() && n.uid.is_none() {
+        Simple::set_param(&mut n, LINK, ParamValue::Text(link.into()))?;
     }
     Ok(Box::new(n))
 }

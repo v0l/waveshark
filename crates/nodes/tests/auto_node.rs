@@ -39,6 +39,44 @@ fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Pa
     out
 }
 
+/// The same, with what the auto node had learned by the end: the
+/// transmitters a front end inside claimed the bursts of.
+fn run_auto(rate: f64, center: Hz, iq: &[C32]) -> Ran {
+    let mut g = build_chain(StreamSpec::iq(rate, center), &[NodeSpec::new("auto")], &registry())
+        .expect("build");
+    let mut packets = Vec::new();
+    let silence = vec![C32::new(0.0, 0.0); 16_384];
+    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
+        g.feed_iq(block).expect("run");
+        if let pipeline::Payload::Packets(p) = g.output() {
+            packets.extend_from_slice(p);
+        }
+    }
+    let auto = g
+        .order()
+        .find_map(|(id, _)| g.node(id)?.as_any().downcast_ref::<nodes::AutoNode>())
+        .expect("the auto node");
+    Ran {
+        locked: auto
+            .locked_transmitters()
+            .into_iter()
+            .map(|(p, t, c)| (p.to_string(), t.to_string(), c))
+            .collect(),
+        sources: auto.built(),
+        packets,
+    }
+}
+
+/// What one run of the auto node over a capture left behind.
+struct Ran {
+    packets: Vec<common::Packet>,
+    /// The transmitters a front end inside had learned by the end, as
+    /// (front end, what it calls the transmitter, how sure it still is).
+    locked: Vec<(String, String, f32)>,
+    /// Sources the node built decoders for over the run.
+    sources: u64,
+}
+
 fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
     let protocols = decode::Protocols::all();
     let mut out = Vec::new();
@@ -412,7 +450,9 @@ fn auto_finds_lora_in_a_real_capture() {
 /// An ExpressLRS handset heard through the whole auto path: the source
 /// opened a megahertz wide, the burst of four packets named a chirp, the
 /// front end placed on the verdict, the link recovered from the packets'
-/// own CRC seeds with no sync packet in the span, and the sticks read.
+/// own CRC seeds with no sync packet in the span, the sticks read, and the
+/// hop set locked so the visits after the first two cost one extraction
+/// each and nothing else.
 ///
 /// Three separate faults kept this at zero before there was a capture:
 /// the detector refused any source wider than 600 kHz, the classifier
@@ -427,7 +467,7 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
         return;
     }
     let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
-    let pk = packets(NodeSpec::new("auto"), buf.rate.as_f64(), buf.center, &buf.samples);
+    let Ran { packets: pk, locked, .. } = run_auto(buf.rate.as_f64(), buf.center, &buf.samples);
     let rows: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
@@ -435,23 +475,36 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
             _ => None,
         })
         .collect();
-    let chirps = pk.iter().filter(|p| p.modulation() == Some(common::Modulation::Chirp)).count();
-    // Fifteen packets on four channel visits; the first two of each visit
-    // are what the link is recovered from and come out with it.
-    // Fifteen of the nineteen rows the capture produces are the handset.
-    // Pinned exactly: the two that are lost to a floor or a splice are the
-    // ones a change would take next, and "twelve or more" would not say so.
-    // The nineteenth is one channel visit, 44 ms and 1.4 MHz wide, measured
-    // as a chirp: it read as unknown, and left no row, while the classifier
-    // found the burst's edges on every sample rather than a thinned copy.
+    let measured = pk.iter().filter(|p| p.measure.is_some()).count();
+    // Sixteen packets on four channel visits, four to a visit, and eighteen
+    // rows in all. Pinned exactly: the way this breaks is a packet lost to a
+    // floor or a splice, and "twelve or more" would not say so.
+    //
+    // It was fifteen of nineteen before the hop set could be locked, and
+    // both numbers moved for the same reason. The link decodes on the first
+    // visit and a lock over the eighty channels goes up, so the third and
+    // fourth visits are claimed: each is read by an ExpressLRS front end
+    // that already knows the link, with no classifier beside it. Knowing the
+    // link is the extra packet, since a visit whose link has to be recovered
+    // holds its first packets back and drops one that repeats; and the two
+    // rows fewer are the classifier's own chirp measurements of those two
+    // visits, which are not news about a source a front end read. The first
+    // two visits overlap in time, so the second opens before the first has
+    // finished decoding and neither is claimed; their chirp rows stay.
     assert_eq!(
         rows.len(),
-        15,
-        "{} ExpressLRS rows of {} packets, {chirps} chirps",
+        16,
+        "{} ExpressLRS rows of {} packets, {measured} measurements",
         rows.len(),
         pk.len()
     );
-    assert_eq!(pk.len(), 19, "{} packets in all", pk.len());
+    assert_eq!(pk.len(), 18, "{} packets in all", pk.len());
+    assert_eq!(measured, 2, "the classifier's measurement of the visits nothing claimed");
+    // And the lock the front end published, still believed at the end.
+    assert_eq!(locked.len(), 1, "{locked:?}");
+    assert_eq!(locked[0].0, "elrs");
+    assert_eq!(locked[0].1, "6f37");
+    assert_eq!(locked[0].2, 1.0, "the lock lost confidence: {locked:?}");
     for r in &rows {
         assert_eq!(r.identity.as_ref().map(|i| i.id.as_str()), Some("6f37"), "{r:?}");
         let detail = r.detail.as_deref().unwrap_or("");
@@ -484,6 +537,63 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
         rows.iter().map(|r| r.center.0 / 100_000).collect();
     // The four channel visits in the capture, in hundreds of kilohertz.
     assert_eq!(channels, [24084, 24114, 24125, 24224].into_iter().collect(), "{channels:?}");
+}
+
+/// The same handset on a whole 2.4 GHz band, hopping through it: one
+/// transmitter, thirty channel visits in two seconds, and a lock that turns
+/// every visit after the first into one extraction and one decoder.
+///
+/// This is the capture the lock layer exists for. Without it the detector
+/// opens fifty-three sources in two seconds and nothing joins them up: each
+/// hop gets a burst classifier, a LoRa decoder and an ExpressLRS decoder
+/// built, run and torn down, and the receiver runs at 0.38 times real time on
+/// four threads. What is pinned here is what it reads, which is what an
+/// optimisation may not change.
+#[test]
+fn a_hopping_link_is_one_transmitter_on_a_busy_band() {
+    let Some(buf) = fixture("ism24_busy_2431M_61440k.cs16") else {
+        return;
+    };
+    let Ran { packets: pk, locked, sources } =
+        run_auto(buf.rate.as_f64(), buf.center, &buf.samples);
+    let rows: Vec<_> = pk
+        .iter()
+        .filter_map(|p| match &p.body {
+            PacketBody::Frame(f) => nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(p.center_hz())),
+            _ => None,
+        })
+        .collect();
+    let visits: std::collections::BTreeSet<u64> = rows.iter().map(|r| r.center.0).collect();
+    assert_eq!(rows.len(), 107, "{} ExpressLRS rows of {} packets", rows.len(), pk.len());
+    assert_eq!(visits.len(), 30, "{visits:?}");
+    // The fifty-three sources the detector opens in two seconds, which is the
+    // number the lock layer was built for: a lock does not stop a source
+    // opening, it decides what is built on one.
+    assert_eq!(sources, 53, "sources opened");
+    // One handset, and it is the same one throughout: a second link id here
+    // would be a CRC seeded from the wrong two bytes agreeing by chance.
+    assert!(
+        rows.iter().all(|r| r.identity.as_ref().map(|i| i.id.as_str()) == Some("6f37")),
+        "more than one link"
+    );
+    // The lock the handset's front end published, still believed after every
+    // claim it made: the eighty channels are a megahertz apart from
+    // 2400.4 MHz and the visits sit within 195 kHz of one of them.
+    assert_eq!(locked.len(), 1, "{locked:?}");
+    assert_eq!((locked[0].0.as_str(), locked[0].1.as_str()), ("elrs", "6f37"));
+    assert_eq!(locked[0].2, 1.0, "the lock lost confidence: {locked:?}");
+    // Every visit is on a channel of the hop set, bar the first: it opens
+    // while the detector's floor is still settling and its centroid lands
+    // 463 kHz below the channel, which is what the lock is published too
+    // late to claim anyway.
+    let off_raster = visits
+        .iter()
+        .filter(|hz| {
+            let k = ((**hz as f64 - 2_400_400_000.0) / 1e6).round();
+            (**hz as f64 - (2_400_400_000.0 + k * 1e6)).abs() > 250_000.0
+        })
+        .count();
+    assert_eq!(off_raster, 1, "{visits:?}");
 }
 
 /// A channel a front end has read is kept for the session. The Meshtastic

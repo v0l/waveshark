@@ -39,12 +39,14 @@ use std::time::Instant;
 use crate::protocol::{self, Wake};
 
 mod evidence;
+mod locks;
 mod member;
 mod memory;
 mod place;
 mod requests;
 mod watch;
 
+use locks::Locks;
 use member::{Member, Ring};
 use memory::{Memory, STICKY_ID_BASE};
 use place::{Slot, SlotResult};
@@ -84,6 +86,9 @@ pub struct AutoNode {
     built: u64,
     /// The channels the receiver has decided to keep listening on.
     memory: Memory,
+    /// The transmitters a front end has learned well enough to claim their
+    /// bursts before anything else runs.
+    locks: Locks,
     /// What each channel has announced about itself, so a source that
     /// closes and opens again, or decoders rebuilt with the graph, do not
     /// log the same cell's identity a second time.
@@ -113,6 +118,7 @@ impl AutoNode {
             blocks: Vec::new(),
             built: 0,
             memory: Memory::default(),
+            locks: Locks::default(),
             announced: HashMap::new(),
             phases: BTreeMap::new(),
             phase_sum: BTreeMap::new(),
@@ -461,13 +467,20 @@ impl Node for AutoNode {
                 });
             }
         }
-        for b in &self.blocks {
+        // Every source is offered to the locks before anything is built on
+        // it: a transmitter a front end has already learned is read by that
+        // front end alone, and costs one extraction and nothing else. See
+        // [`locks`].
+        let blocks = std::mem::take(&mut self.blocks);
+        for b in &blocks {
             if !self.slots.iter().any(|s| s.id == b.id) {
-                let slot = self.open(b)?;
+                let claimed = self.locks.claim(b);
+                let slot = self.open(b, claimed)?;
                 self.slots.push(slot);
                 self.built += 1;
             }
         }
+        self.blocks = blocks;
 
         // Every member of every source is a task of its own, not one task
         // per source: the members share nothing but the block they read, and
@@ -629,6 +642,20 @@ impl Node for AutoNode {
             // it has.
             if done && !self.slots[k].members.iter().any(|m| m.behind()) {
                 closed.push(self.slots[k].id);
+                // What became of a claimed source: a lock is right about
+                // this transmitter exactly as often as the front end it
+                // handed the burst to read something.
+                if let Some(id) = self.slots[k].locked {
+                    let heard = self.slots[k].heard;
+                    if let Some((protocol, transmitter)) = self.locks.scored(id, heard) {
+                        c.emit(Event::Warning {
+                            message: format!(
+                                "{protocol} {transmitter}: too few of the bursts it claimed \
+                                 decoded; giving them back to the detector"
+                            ),
+                        });
+                    }
+                }
             }
         }
         self.slots.retain(|s| !closed.contains(&s.id));
@@ -1173,7 +1200,7 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let slot = n.open(&b).unwrap();
+        let slot = n.open(&b, None).unwrap();
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
         assert!(names.contains(&"m17"), "{names:?}");
         assert!(names.contains(&"pocsag"), "{names:?}");
@@ -1203,17 +1230,17 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let wide = n.open(&source(1, 6.5e6)).unwrap();
+        let wide = n.open(&source(1, 6.5e6), None).unwrap();
         assert!(wide.members.iter().all(|m| m.router.is_none()), "a 6.5 MHz source was classified");
         assert!(wide.evidence.is_some(), "and left no evidence of itself");
 
         // An ExpressLRS channel visit measures over a megahertz and must
         // keep its verdict: that is what places the decoder.
-        let elrs = n.open(&source(2, 1.4e6)).unwrap();
+        let elrs = n.open(&source(2, 1.4e6), None).unwrap();
         assert!(elrs.members.iter().any(|m| m.router.is_some()), "a chirp channel");
         assert!(elrs.evidence.is_none(), "the classifier is the evidence here");
 
-        let sensor = n.open(&source(3, 40e3)).unwrap();
+        let sensor = n.open(&source(3, 40e3), None).unwrap();
         assert!(sensor.members.iter().any(|m| m.router.is_some()), "a sensor channel");
     }
 
@@ -1247,7 +1274,7 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let slot = n.open(&b).unwrap();
+        let slot = n.open(&b, None).unwrap();
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
         assert_eq!(
             names,
@@ -1281,7 +1308,7 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let slot = n.open(&b).unwrap();
+        let slot = n.open(&b, None).unwrap();
         n.slots.push(slot);
         let router = n.slots[0]
             .members
@@ -1422,7 +1449,7 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let slot = n.open(&b).unwrap();
+        let slot = n.open(&b, None).unwrap();
         n.slots.push(slot);
         let mut said = Vec::new();
         let ask = Request::OpenChannel {
@@ -1485,7 +1512,7 @@ mod tests {
             snr_db: 20.0,
             samples: Vec::new(),
         };
-        let slot = n.open(&b).unwrap();
+        let slot = n.open(&b, None).unwrap();
         let m = &slot.members[0];
         let gsm = m
             .graph
