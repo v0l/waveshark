@@ -315,6 +315,12 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- The receiver no longer stops when a band is busy enough for a decoder to
+  ask for a channel in the same block that its source closes. The request
+  was remembered by position in the list of open sources, which is compacted
+  when one closes, so an ask from a source near the end of the list could be
+  read against another source or off the end of the list and stop the
+  radio.
 - A DJI drone broadcasting its serial is read while Wi-Fi is on the band. The
   DroneID front end now reads the five 2.4 GHz centres straight off the span,
   the way the Wi-Fi one reads its channels, and what it reads reaches the

@@ -50,6 +50,7 @@ use locks::Locks;
 use member::{Member, Ring};
 use memory::{Memory, STICKY_ID_BASE};
 use place::{Slot, SlotResult};
+use requests::AskAt;
 use watch::Watch;
 
 /// SNR a bin must reach before the auto node opens a source there.
@@ -576,11 +577,11 @@ impl Node for AutoNode {
         self.phase_sum.clear();
         // What was asked, by the source it was asked on and the front end
         // that asked. Answered once the slots have settled.
-        let mut asked: Vec<(Option<usize>, &'static str, Request)> = Vec::new();
+        let mut asked: Vec<(AskAt, &'static str, Request)> = Vec::new();
         for w in wide_results {
             for e in w.events {
                 match e {
-                    Event::Request(request) => asked.push((None, w.name, request)),
+                    Event::Request(request) => asked.push((AskAt::Span, w.name, request)),
                     e => events.push(e),
                 }
             }
@@ -611,6 +612,7 @@ impl Node for AutoNode {
         }
         let mut closed = Vec::new();
         for SlotResult { k, events: ev, packets: pk, done, heard, .. } in results {
+            let slot_id = self.slots[k].id;
             let center = self.slots[k].center_hz;
             let named = self.slots[k]
                 .members
@@ -632,7 +634,7 @@ impl Node for AutoNode {
             }
             for (name, e) in ev {
                 match e {
-                    Event::Request(request) => asked.push((Some(k), name, request)),
+                    Event::Request(request) => asked.push((AskAt::Source(slot_id), name, request)),
                     e => events.push(e),
                 }
             }
@@ -658,13 +660,15 @@ impl Node for AutoNode {
                 }
             }
         }
+        // The requests carry the source they came from, so they are answered
+        // after the list is compacted without an index that has moved.
         self.slots.retain(|s| !closed.contains(&s.id));
         // What the decoders asked for, answered here where it can be, and
         // handed on where it cannot. After the slots are settled, so a
         // release or a reshape closes what is there now.
-        for (k, name, r) in asked {
+        for (at, name, r) in asked {
             let mut said = Vec::new();
-            if let Some(r) = self.answer(k, name, r, &mut said) {
+            if let Some(r) = self.answer(at, name, r, &mut said) {
                 c.emit(Event::Request(r));
             }
             for e in said {
@@ -952,7 +956,7 @@ mod tests {
         // The camera says the span is its picture.
         let mut out = Vec::new();
         n.answer(
-            None,
+            AskAt::Span,
             "video",
             Request::Claim { lo_hz: center.as_f64() - rate, hi_hz: center.as_f64() + rate },
             &mut out,
@@ -962,7 +966,7 @@ mod tests {
         assert!(spent(&after, "video") > 0, "the claimant still reads {after:?}");
 
         // And giving it back puts everything else back on the span.
-        n.answer(None, "video", Request::Release, &mut out);
+        n.answer(AskAt::Span, "video", Request::Release, &mut out);
         let back = run(&mut n, block);
         assert!(spent(&back, "wifi") > 0, "{back:?}");
     }
@@ -1394,6 +1398,116 @@ mod tests {
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
+    /// A request is answered against the source it came from, not against
+    /// whatever is at that position in the slot list by the time it is
+    /// answered.
+    ///
+    /// The requests a block produced are answered after the sources that
+    /// closed in it have been dropped, which shifts every later source down
+    /// the list. An index taken when the request was made then names another
+    /// source, or one past the end: this panicked with `len is 3 but the
+    /// index is 3`, and before that it recorded another carrier's frequency
+    /// as the parent of a channel.
+    #[test]
+    fn a_request_is_answered_against_the_source_it_came_from() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(395))]).unwrap();
+        let at = |id: u64, center_hz: u64| SourceBlock {
+            id: common::SourceId(id),
+            state: SourceState::Opened,
+            center_hz,
+            bandwidth_hz: 25_000.0,
+            signal_hz: 25_000.0,
+            rate: n.cfg.min_rate_hz,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let first = at(1, 395_100_000);
+        let second = at(2, 395_300_000);
+        n.slots.push(n.open(&first, None).unwrap());
+        n.slots.push(n.open(&second, None).unwrap());
+
+        // The first source closed in the same block, which is what the
+        // retain at the end of `process` does to the list.
+        n.slots.retain(|s| s.id != first.id);
+        assert_eq!(n.slots.len(), 1);
+
+        // A channel asked for from the surviving source is tied to the
+        // surviving source.
+        let ask = Request::OpenChannel {
+            protocol: "tetra".into(),
+            center_hz: 395_500_000.0,
+            width_hz: 25_000.0,
+            role: "traffic".into(),
+            hold_s: Some(30.0),
+            settings: Default::default(),
+        };
+        let mut said = Vec::new();
+        assert!(n.answer(AskAt::Source(second.id), "tetra", ask, &mut said).is_none());
+        let opened = n
+            .memory
+            .channels()
+            .iter()
+            .find(|c| (c.center_hz - 395_500_000.0).abs() < 1.0)
+            .expect("the channel was not remembered");
+        assert_eq!(
+            opened.parent,
+            Some(("tetra", 395_300_000.0)),
+            "the parent is the source that asked, not the one that took its place"
+        );
+
+        // And an ask from a source that has gone is answered without one,
+        // rather than against a source that is there now.
+        let ask = Request::OpenChannel {
+            protocol: "tetra".into(),
+            center_hz: 395_700_000.0,
+            width_hz: 25_000.0,
+            role: "traffic".into(),
+            hold_s: Some(30.0),
+            settings: Default::default(),
+        };
+        assert!(n.answer(AskAt::Source(first.id), "tetra", ask, &mut said).is_none());
+        let opened = n
+            .memory
+            .channels()
+            .iter()
+            .find(|c| (c.center_hz - 395_700_000.0).abs() < 1.0)
+            .expect("the channel was not remembered");
+        assert_eq!(opened.parent, None, "a source that has gone is nobody's parent");
+    }
+
+    /// A release or a claim from a source that has closed is not taken as a
+    /// release or a claim of the band.
+    ///
+    /// Both arms read "no slot" as "the decoder was over the span, so this is
+    /// about the whole band", so a source that had gone would have handed the
+    /// span back on behalf of a front end that is no longer running.
+    #[test]
+    fn a_request_from_a_closed_source_does_not_speak_for_the_span() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(5865))]).unwrap();
+        let mut said = Vec::new();
+        n.answer(
+            AskAt::Span,
+            "video",
+            Request::Claim { lo_hz: 5_855_000_000.0, hi_hz: 5_875_000_000.0 },
+            &mut said,
+        );
+        assert!(n.claimed_whole_span());
+
+        let gone = AskAt::Source(common::SourceId(99));
+        n.answer(gone, "video", Request::Release, &mut said);
+        assert!(n.claimed_whole_span(), "a claim was given back by a source that had gone");
+        n.answer(
+            gone,
+            "video",
+            Request::Claim { lo_hz: 5_855_000_000.0, hi_hz: 5_875_000_000.0 },
+            &mut said,
+        );
+        assert!(n.claimed_whole_span());
+    }
+
     /// A camera owns the span while it is reading a picture. Before this the
     /// detector opened the pieces of the carrier as sources and every front
     /// end ran on each of them, which cost more than the camera did.
@@ -1411,7 +1525,7 @@ mod tests {
         assert!(!n.claimed_whole_span());
         let mut said = Vec::new();
         let left = n.answer(
-            None,
+            AskAt::Span,
             "video",
             Request::Claim { lo_hz: 5_855_000_000.0, hi_hz: 5_875_000_000.0 },
             &mut said,
@@ -1427,7 +1541,7 @@ mod tests {
         // every field.
         assert!(n.claimed_whole_span(), "a claim over the span leaves nothing to detect");
         // What needs the dial is handed back.
-        let left = n.answer(None, "video", Request::Retune { center_hz: 1e9 }, &mut said);
+        let left = n.answer(AskAt::Span, "video", Request::Retune { center_hz: 1e9 }, &mut said);
         assert_eq!(left, Some(Request::Retune { center_hz: 1e9 }));
     }
 
@@ -1463,7 +1577,8 @@ mod tests {
             hold_s: Some(30.0),
             settings: Default::default(),
         };
-        assert!(n.answer(Some(0), "tetra", ask, &mut said).is_none());
+        let asking = AskAt::Source(n.slots[0].id);
+        assert!(n.answer(asking, "tetra", ask, &mut said).is_none());
         let at: Vec<f64> = n.remembered().into_iter().map(|(_, hz, _)| hz).collect();
         assert_eq!(at, [395_100_000.0, 395_300_000.0]);
         // Outside the span it is not this node's to open.
@@ -1475,7 +1590,7 @@ mod tests {
             hold_s: None,
             settings: Default::default(),
         };
-        assert_eq!(n.answer(Some(0), "tetra", far.clone(), &mut said), Some(far));
+        assert_eq!(n.answer(asking, "tetra", far.clone(), &mut said), Some(far));
         // The parent goes, and the traffic channel with it.
         let parent = n.memory.channels()[0].id;
         n.forget(&[parent]);
@@ -1503,7 +1618,7 @@ mod tests {
             hold_s: Some(60.0),
             settings,
         };
-        assert!(n.answer(None, "gsm", ask, &mut said).is_none());
+        assert!(n.answer(AskAt::Span, "gsm", ask, &mut said).is_none());
         let b = SourceBlock {
             id: n.memory.channels()[0].id,
             state: SourceState::Opened,
