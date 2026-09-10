@@ -667,17 +667,31 @@ impl SourceDetector {
         }
 
         let rows = std::mem::take(&mut self.rows);
+        // The frames either side too: the converter clips a symbol
+        // or two after the signal's edge lit the band, and it is that
+        // edge frame's splash, read with the ordinary margin, that
+        // opened a 12 kHz signal 70 kHz wide.
+        let sat: Vec<bool> = (0..count)
+            .map(|f| {
+                let lo = f.saturating_sub(SATURATION_SMEAR);
+                let hi = (f + SATURATION_SMEAR).min(count - 1);
+                saturated[lo..=hi].iter().any(|s| *s)
+            })
+            .collect();
+        // Every frame's runs at once, since a frame's segmentation reads its
+        // own bins and nothing else: the tracking that follows is a state
+        // machine in frame order and has to be serial, but this was two
+        // thirds of that serial pass, and at 20 MS/s the pass was most of
+        // what detection cost.
+        let mut per_frame: Vec<Vec<Segment>> = (0..count)
+            .into_par_iter()
+            .map(|f| self.segment(&Bins { rows: &rows, f }, sat[f]))
+            .collect();
         for (f, step) in steps.iter().enumerate() {
-            // The frames either side too: the converter clips a symbol
-            // or two after the signal's edge lit the band, and it is that
-            // edge frame's splash, read with the ordinary margin, that
-            // opened a 12 kHz signal 70 kHz wide.
-            let lo = f.saturating_sub(SATURATION_SMEAR);
-            let hi = (f + SATURATION_SMEAR).min(count - 1);
-            self.frame_saturated = saturated[lo..=hi].iter().any(|s| *s);
+            self.frame_saturated = sat[f];
             self.frame = step.frame;
             let bins = Bins { rows: &rows, f };
-            self.segment(&bins);
+            self.segs = std::mem::take(&mut per_frame[f]);
             self.track(&bins);
         }
         if let Some(last) = steps.last() {
@@ -877,8 +891,8 @@ impl SourceDetector {
     }
 
     /// Group the hot bins of this frame into runs.
-    fn segment(&mut self, bins: &Bins) {
-        self.segs.clear();
+    fn segment(&self, bins: &Bins, frame_saturated: bool) -> Vec<Segment> {
+        let mut segs = Vec::new();
         let close = self.cfg.close_db;
         let close_r = 10f32.powf(close / 10.0);
         let guard = self.cfg.guard_bins;
@@ -918,7 +932,7 @@ impl SourceDetector {
         // and a pair's distance; a LaCrosse sensor keying 120 kHz apart
         // saturates the same way and is still two tones. The rest is what
         // the converter made of it.
-        if self.frame_saturated && !runs.is_empty() {
+        if frame_saturated && !runs.is_empty() {
             let peak = |r: &(usize, usize)| (r.0..=r.1).map(|i| bins.ratio(i)).fold(0.0f32, f32::max);
             let best = runs.iter().copied().max_by(|a, b| peak(a).total_cmp(&peak(b))).unwrap();
             let top = peak(&best);
@@ -928,7 +942,7 @@ impl SourceDetector {
                 peak(r) * 10f32.powf(SATURATED_PAIR_DB / 10.0) >= top && gap <= pair_bins
             });
         }
-        let extent_db = if self.frame_saturated { SATURATED_EXTENT_DB } else { self.cfg.extent_db };
+        let extent_db = if frame_saturated { SATURATED_EXTENT_DB } else { self.cfg.extent_db };
 
         for (lo, hi) in runs {
             let mut peak_r = 0.0f32;
@@ -988,7 +1002,7 @@ impl SourceDetector {
             }
             // The run of a saturated frame is the whole band; matched on
             // that, the source would take every later run in the span.
-            let (lo, hi) = if self.frame_saturated {
+            let (lo, hi) = if frame_saturated {
                 (a.saturating_sub(guard).max(lo), (b + guard).min(hi))
             } else {
                 (lo, hi)
@@ -1001,8 +1015,9 @@ impl SourceDetector {
                 w_all += w;
             }
             let centroid = if w_all > 0.0 { wsum / w_all } else { (a + b) as f64 / 2.0 };
-            self.segs.push(Segment { lo, hi, occ_lo: a, occ_hi: b, peak_db, raw_db, centroid });
+            segs.push(Segment { lo, hi, occ_lo: a, occ_hi: b, peak_db, raw_db, centroid });
         }
+        segs
     }
 
     /// Match this frame's runs to the sources being followed, open the
