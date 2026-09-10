@@ -286,6 +286,13 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A source the receiver opens from its history no longer arrives all at
+  once. A signal that had sat below the opening threshold for a while was
+  handed to its decoders from the moment it was first seen, half a second
+  of a 20 MHz span in one block, which stalled the receiver for 170 ms; a
+  stream now starts from when the source was confirmed and catches up over
+  a few blocks. DJI DroneID is also no longer tried on every narrow burst on
+  the band.
 - A 2.4 GHz span with DJI DroneID on it no longer stalls the receiver:
   the DroneID search correlated sample by sample whenever the band was
   busy, which on 2.4 GHz is always, and cost six times real time. It is a

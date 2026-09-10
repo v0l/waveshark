@@ -1322,6 +1322,7 @@ impl SourceDetector {
         // Extents are kept in hertz on the source so they survive the bins
         // moving, and updated from whatever the track saw this frame.
         let hop = self.hop as u64;
+        let frame = self.frame;
         let min_frames = self.cfg.min_frames;
         let steady_db = self.cfg.steady_db;
         // Candidates born before this frame appeared with the floor cap,
@@ -1435,6 +1436,17 @@ impl SourceDetector {
                     if room && fits && t.hits >= min_frames && (moved || t.born >= fixture_until) {
                         *open_now += 1;
                         t.open = true;
+                        // From when it was confirmed, not from when it was
+                        // first seen. A candidate can sit unopened for as
+                        // long as it is present, too wide or with no room,
+                        // and opening it from its birth handed the front
+                        // ends the whole ring at once: half a second of a
+                        // 20 MHz span in one block, measured at 170 ms on
+                        // a 2.4 GHz capture, for a stream nothing was
+                        // waiting to read the start of. A burst is what
+                        // the confirmation frames cover, and they still do.
+                        let confirmed = frame.saturating_sub(min_frames as u64) * hop;
+                        t.src.start_sample = t.src.start_sample.max(confirmed);
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = hz_of_bin(c, n, bin_hz);
                         t.opened_hz = t.src.bandwidth_hz();
