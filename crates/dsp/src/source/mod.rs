@@ -52,10 +52,9 @@ mod bank;
 mod detect;
 mod extract;
 
+pub use bank::{BANK_CHANNEL_HZ, BANK_MIN_CHANNELS};
 pub use detect::SourceDetector;
 pub use extract::SourceExtractor;
-
-use bank::{BANK_CHANNEL_HZ, BANK_MIN_CHANNELS};
 use common::SourceId;
 
 /// Everything the pair is built with.

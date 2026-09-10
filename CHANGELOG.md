@@ -193,6 +193,16 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The Wi-Fi and video front ends stop reading a band nothing is transmitting
+  on, and start again the moment something does, so a quiet 2.4 or 5.8 GHz
+  span costs almost nothing. They used to demodulate an empty band all day.
+  A camera that has claimed the span now closes the sources found inside its
+  own carrier as well, which was most of what the receiver spent a picture on.
+- A wide signal nobody can decode leaves a row of its own: the centre, the
+  width, how long it was on the air and how strong it was, as the detector
+  measured them. The burst classifier no longer runs on a signal megahertz
+  wide, because nothing it could say about one is readable by any front end,
+  and 2.4 GHz keeps up far better for it.
 - The type line under a box in the chain view names the stage type, so the
   automatic stage reads "auto", a channel bank "bank" and the source decoder
   "source_decode". Three of them repeated the label above instead, which said
@@ -276,6 +286,13 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A source the receiver opens from its history no longer arrives all at
+  once. A signal that had sat below the opening threshold for a while was
+  handed to its decoders from the moment it was first seen, half a second
+  of a 20 MHz span in one block, which stalled the receiver for 170 ms; a
+  stream now starts from when the source was confirmed and catches up over
+  a few blocks. DJI DroneID is also no longer tried on every narrow burst on
+  the band.
 - A 2.4 GHz span with DJI DroneID on it no longer stalls the receiver:
   the DroneID search correlated sample by sample whenever the band was
   busy, which on 2.4 GHz is always, and cost six times real time. It is a

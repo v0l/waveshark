@@ -365,7 +365,11 @@ impl Classifier {
         // sample packet spent 2 ms here, a log per sample, for a mean of
         // 6 ms a burst on a busy 2.4 GHz span. Thinning keeps the loudest
         // sample of each run, so an edge is still where the carrier is.
-        let stride = iq.len().div_ceil(EDGE_SAMPLES).max(1);
+        let stride = iq
+            .len()
+            .div_ceil(EDGE_SAMPLES)
+            .max((self.rate / EDGE_RATE_HZ).ceil() as usize)
+            .max(1);
         let thin: Vec<C32>;
         let (edge_iq, edge_rate) = if stride > 1 {
             thin = thin_peaks(iq, stride);
@@ -412,8 +416,15 @@ impl Classifier {
         // bandwidth first. In the channel bank this never fires, because the
         // channelizer has already done it; on a capture it is the difference
         // between measuring the transmission and measuring the channel.
-        let (occ, centre) = self.survey(&trimmed);
-        let mut f = if occ < self.cfg.zoom_below && occ > 0.0 {
+        //
+        // The survey is a transform of its own, and its only use is that
+        // decision, so with zooming off it is a transform for nothing: it is
+        // off wherever a channel arrives already cut to its signal, which is
+        // everywhere the receiver runs this.
+        let zoom = (self.cfg.zoom_below > 0.0)
+            .then(|| self.survey(&trimmed))
+            .filter(|(occ, _)| *occ < self.cfg.zoom_below && *occ > 0.0);
+        let mut f = if let Some((occ, centre)) = zoom {
             let (z, zrate) = zoom::to_signal(&trimmed, self.rate, centre, occ, self.cfg.zoom_below);
             let outer = self.rate;
             self.rate = zrate;
@@ -623,6 +634,22 @@ impl Classifier {
         // know which lags are meaningful: inside a signal's own correlation
         // width every burst correlates with itself, and a lag floor of a fixed
         // number of samples measures the bandwidth instead of the structure.
+        //
+        // And not at all where nothing could read it. Two correlations over
+        // the burst are a fifth of what classifying one costs, and the only
+        // hypotheses that look at what repeats are the three that ask what a
+        // noise-like signal is: the prefixed one and the flat one both
+        // require [`Evidence::noise_like`], and the spread one requires a
+        // filled window at a constant envelope. A burst that is none of those
+        // is a burst all three score zero on whatever the correlation says,
+        // and no mode is named from a period outside those families either.
+        let plain = {
+            let e = Evidence::from(&f);
+            e.noise_like == 0.0 && e.filled * e.constant_envelope == 0.0
+        };
+        if plain {
+            return f;
+        }
         let occupied = if self.rate > 0.0 {
             (f.bandwidth_hz as f64 / self.rate).clamp(0.001, 1.0) as f32
         } else {
@@ -986,6 +1013,18 @@ fn longest_transmission(iq: &[C32], rate: f64, min_samples: usize) -> Option<std
 /// this first. Half a second at 250 kS/s, so no burst of the corpus is
 /// thinned: at a quarter of this the GT-WT02 capture read as unknown.
 const EDGE_SAMPLES: usize = 1 << 17;
+
+/// The finest the edge finding is walked at, in samples per second.
+///
+/// The edges decide which [`ClassifyConfig::max_samples`] of the burst are
+/// measured, so they have to be right to within a symbol and not to within a
+/// sample. Sample count alone leaves that resolution tied to the stream's
+/// rate: a 2 ms burst of a 20 MS/s span is 40000 samples and was walked
+/// whole, a hundred times finer than the same burst wants at 250 kS/s and
+/// the largest single cost of classifying it. At or below this rate nothing
+/// is thinned by it, which is every capture in `classify_corpus` and every
+/// channel the bank cuts.
+const EDGE_RATE_HZ: f64 = 2_000_000.0;
 
 /// One sample per `stride`: the loudest of each run, so keying survives the
 /// thinning where a plain decimation would sample the gaps.

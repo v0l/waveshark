@@ -72,10 +72,10 @@ pub(super) struct Bank {
 /// megasamples here against sixteen from the ring, which is still the bulk
 /// of the saving; below that the second stage is the same one the ring path
 /// runs.
-pub(super) const BANK_CHANNEL_HZ: f64 = 1_000_000.0;
+pub const BANK_CHANNEL_HZ: f64 = 1_000_000.0;
 /// Below this many channels the direct path costs so little that the bank
 /// is not worth its fixed cost.
-pub(super) const BANK_MIN_CHANNELS: usize = 8;
+pub const BANK_MIN_CHANNELS: usize = 8;
 /// Taps per branch. Sets the transition width and so how much of each
 /// channel reads flat, not the stopband, which the Kaiser window fixes at
 /// the attenuation asked for. Eight leaves about half of each channel flat
