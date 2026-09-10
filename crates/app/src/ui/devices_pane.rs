@@ -26,6 +26,8 @@ pub(super) struct Devices<'a> {
 pub(super) enum Action {
     /// Show this device's sightings on the map, or none.
     Select(Option<i64>),
+    /// Start or stop recording the survey, at its default path.
+    Record(bool),
     /// Write the survey out as WiGLE CSV, beside the survey file.
     Export,
     /// Open the wigle.net feed's settings.
@@ -124,6 +126,21 @@ impl Devices<'_> {
                         .hint_text("filter")
                         .desired_width(160.0),
                 );
+                // The switch that fills this pane, on the pane: the same
+                // value Setup shows beside the GPS, since the position is
+                // what a survey is for, but this is where its absence is
+                // noticed.
+                let mut on = self.st.path.is_some();
+                if ui
+                    .checkbox(&mut on, "Record")
+                    .on_hover_text(
+                        "One row per transmitter heard, with the places it was heard from. \
+                         The packet log keeps the transmissions; this keeps the transmitters.",
+                    )
+                    .changed()
+                {
+                    act = Some(Action::Record(on));
+                }
             });
         });
         ui.add_space(6.0);
@@ -133,8 +150,8 @@ impl Devices<'_> {
             ui.vertical_centered(|ui| {
                 hint(
                     ui,
-                    "No survey is being recorded. Start one with --survey, or turn it on in \
-                     settings. Every transmitter that identifies itself is recorded once, with \
+                    "No survey is being recorded. Switch Record on above, or start one with \
+                     --survey. Every transmitter that identifies itself is recorded once, with \
                      the places it was heard from.",
                 );
             });

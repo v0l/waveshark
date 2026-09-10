@@ -1748,6 +1748,7 @@ impl App {
                 };
                 self.survey.estimate = survey::locate(&self.survey.trail);
             }
+            Some(devices_pane::Action::Record(on)) => self.set_survey(!on, None),
             Some(devices_pane::Action::Export) => self.export_survey(),
             Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
             Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
