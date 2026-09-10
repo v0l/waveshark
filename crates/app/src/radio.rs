@@ -5134,19 +5134,25 @@ mod zoom_tests {
         const KNOWN_SLOW: &[(&str, &str)] = &[
             (
                 "ism24_busy_2431M_61440k.cs16",
-                "a whole 2.4 GHz band at 61.44 MS/s, which is four things at once: the Wi-Fi \
-                 front end reading the channels it is on, a DroneID correlator at 15.36 MS/s on \
-                 each of the eleven sources wide enough to be a burst (nine of them the lower \
-                 two thirds of Wi-Fi channel 11, cut through by the span's edge), the BLE front \
-                 end on two advertising channels, and the detector itself over 61 MS/s: 2.3, \
-                 2.1, 1.8 and 1.2 ms of a 2.13 ms block. The ExpressLRS handset hopping through \
-                 it is no longer among them, since its link is locked 55 ms in and its visits \
-                 cost one extraction and one decoder each",
+                "a whole 2.4 GHz band at 61.44 MS/s, which is five things at once, measured on \
+                 four threads as processor time in a 2.13 ms block: the Wi-Fi front end on the \
+                 channels it is on, 2.3 ms; the BLE front end on two advertising channels, \
+                 1.0; the detector over 61 MS/s, 1.2, of which half is eight 32768 point \
+                 transforms and a third the floor pass; cutting the fifty-three sources the \
+                 band opens out of the span, 0.9; and the DroneID correlator on the three \
+                 centres the span holds, 0.6. Six milliseconds of processor time for a two \
+                 millisecond block, and the phases are sequential, so four threads return 1.4 \
+                 rather than 4. Nothing here is a spike any more: the front ends were 4.2 ms \
+                 and the worst block 127",
             ),
             (
                 "droneid_mini4k_2444.5M_15360k.cs8",
-                "the DroneID correlator over a source megahertz wide and the classifier behind \
-                 it, 1.6 and 1.9 ms of an 8.5 ms block, under a source opening from its lead-in",
+                "the DroneID correlator over the 10 MHz centre the aircraft is on, 1.8 ms of an \
+                 8.5 ms block, and the classifier behind the source the burst opens, 1.9. The \
+                 correlator runs whenever anything is transmitting in that channel, which on \
+                 this capture is the aircraft's own link in nearly every block; what it buys is \
+                 the seven bursts, which the receiver did not read at all while the front end \
+                 was placed on a source instead of on the span",
             ),
             (
                 "odid_bt5lr_holybro_2474M_20000k.cs8",
@@ -5173,13 +5179,15 @@ mod zoom_tests {
             ),
             (
                 "offair/ofdm_wifi_frames_2462M_20000k.cs8",
-                "the same, and DroneID correlating over each of the two 5 MHz sources the \
-                 Wi-Fi opens, since a source that wide could be a DroneID burst",
+                "the same, and DroneID correlating over the 2459.5 MHz centre the span holds, \
+                 which the Wi-Fi traffic lights in every block",
             ),
             (
                 "offair/gfsk_ble_2426M_20000k.cs8",
-                "the closest of them: 2.9x on four threads with the BLE front end and the \
-                 detector at about 1.2 ms each of 6.5, and one block in ten at half that speed",
+                "the closest of them: about 2.7x on four threads with the BLE front end and \
+                 the detector at 1.0 and 0.9 ms each of 6.5, and one block in ten at half that \
+                 speed. The span holds a DroneID centre too, and the advertising channel sits \
+                 inside it, so every advertisement lights that correlator as well",
             ),
             (
                 "pal_camera_5865M_20000k.cs8",

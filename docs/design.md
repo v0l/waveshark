@@ -533,9 +533,38 @@ could score. The corpus is unchanged at 46 of 52 by name and so is every
 off-air share.
 
 What is left, measured per capture at 20 MS/s, is the front ends themselves:
-the DroneID correlator on a source megahertz wide, the classifier on a
-Bluetooth coded-PHY burst or an ExpressLRS channel visit, and the video
-demodulator. Those are the reasons beside each entry of `KNOWN_SLOW`.
+the classifier on a Bluetooth coded-PHY burst or an ExpressLRS channel visit,
+the Wi-Fi receiver on the channel it is on, and the video demodulator. Those
+are the reasons beside each entry of `KNOWN_SLOW`.
+
+### A front end that reads fixed channels reads them off the span
+
+Wi-Fi, Bluetooth advertising and DJI DroneID all live on channels a standard
+or an observation fixed, and all three share 2.4 GHz. A drone transmits
+inside a Wi-Fi channel rather than instead of one, so the front ends run at
+once, always, over the same spectrum, and none of them waits on another.
+
+Each cuts its own channels out of the span, which is a mixer and a filter per
+channel per block before a bit is sliced, so each has an energy gate in front
+of it: one coarse transform a block (`dsp::gate`), a channel's own bins
+against that block's median window, and a channel at its own noise is not
+mixed at all. The loudest window against the median of the same block, rather
+than against a floor remembered across blocks, because the transmissions are
+short: a BLE advertisement is 128 us of a 2.1 ms block, so an average buries
+it, and on a capture read in megasample chunks every chunk holds a burst and a
+remembered floor becomes the burst. The windows are spaced by the shortest
+burst that must not be missed rather than by a count.
+
+DroneID was the front end this changed. It was placed on every source the
+detector opened between five and fifteen megahertz wide, and on a busy
+2.4 GHz band that is Wi-Fi splatter: eleven sources over the same spectrum,
+each extracted at 15.36 MS/s and each correlating for the same five possible
+bursts. It now reads the five 2.4 GHz centres and the three at 5.8 off the
+span itself, and on the 61.44 MS/s capture of a busy band it costs 605 us of
+a 2.13 ms block against 2.6 ms. What it also fixed is that the bench capture
+of a DJI Mini 4K decoded nothing at all through the whole receiver: the
+source a detector opens for a 720 us burst is not the 10 MHz channel the
+frame occupies. All seven of the aircraft's bursts are read now.
 
 A second pass took what was left of the fixed cost. Finding the runs in a
 frame reads that frame's bins and nothing else, so every frame's runs are

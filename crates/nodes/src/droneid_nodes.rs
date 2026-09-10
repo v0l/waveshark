@@ -74,7 +74,6 @@ pub fn wrap(frame: &[u8]) -> Vec<u8> {
 pub struct DroneIdNode {
     span: Option<dsp::droneid::DroneIdSpan>,
     bursts: Vec<dsp::droneid::SpanBurst>,
-    accepted: u64,
 }
 
 impl Default for DroneIdNode {
@@ -85,17 +84,7 @@ impl Default for DroneIdNode {
 
 impl DroneIdNode {
     pub fn new() -> Self {
-        Self { span: None, bursts: Vec::new(), accepted: 0 }
-    }
-
-    /// Frames that passed their CRC since the node was built.
-    pub fn accepted(&self) -> u64 {
-        self.accepted
-    }
-
-    /// The centres being read: every one the span holds whole.
-    pub fn channels(&self) -> Vec<f64> {
-        self.span.as_ref().map(|s| s.channels()).unwrap_or_default()
+        Self { span: None, bursts: Vec::new() }
     }
 }
 
@@ -150,7 +139,6 @@ impl Simple for DroneIdNode {
             if decode::droneid::parse(&b.frame).is_none() {
                 continue;
             }
-            self.accepted += 1;
             let mut frame = common::Frame::measured(wrap(&b.frame), b.rssi_dbfs, b.snr_db)
                 .at(b.center_hz as u64);
             // The whole burst is the frame's own samples, at the rate the
