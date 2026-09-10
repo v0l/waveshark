@@ -68,7 +68,7 @@ jobs:
       # What the release workflow ships on Linux is built without CUDA, so
       # that set has to keep building too, or a release breaks on a Tuesday.
       - name: Build the shipped feature set
-        run: cargo build --release -p app --no-default-features --features limesdr,stt
+        run: cargo build --release -p app --no-default-features --features limesdr,stt,mcp
 
   changelog:
     runs-on: ubuntu-latest

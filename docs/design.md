@@ -36,7 +36,7 @@ manager: it turns on `decode/tea` and `nodes/tea`, which is what
 last of those a wgpu compute shader searching TEA1's 32-bit fold. `ambe` is
 DMR speech through `crates/mbe`. Both are on when the workspace is built from
 source and neither is in a published binary, which is built with
-`--no-default-features --features limesdr,stt`: the vocoder is patent
+`--no-default-features --features limesdr,stt,mcp`: the vocoder is patent
 encumbered and the cipher is a cipher, and compiling one for yourself is not
 the same act as a project shipping it. A binary without them links no TETRA
 cipher and no GPU stack, and its keys view is an encryption monitor with

@@ -20,6 +20,14 @@ the code is in the commit log; what a decoder can and cannot do is in
   keeping (`ism,wmbus` is your own sensors and meters) or a band full of
   phones will fill the house with devices that rotate their address every
   quarter of an hour.
+- `--mcp-listen 8931` serves the receiver to an agent over the Model Context
+  Protocol: it can tune, open channels, set gains, read the spectrum, the
+  packets, the calls, the transcript and the flight tracker, switch recording
+  on, change any setting in the signal chain and take a picture of the
+  window. It can also draw the chain by hand: add stages, wire them, delete
+  them, undo, and go back to the automatic graph. It drives the
+  receiver on the screen rather than one of its own, so what it does can be
+  watched. It cannot transmit. See [`docs/mcp.md`](docs/mcp.md).
 
 - "Open capture…" in the receiver list. Pick a recorded capture and it
   becomes the receiver, playing back at the rate it was recorded at through

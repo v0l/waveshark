@@ -23,6 +23,8 @@ fn window_icon() -> Option<egui::IconData> {
     Some(egui::IconData { rgba: img.into_raw(), width, height })
 }
 
+#[cfg(feature = "mcp")]
+mod agent;
 mod audiobus;
 mod bands;
 mod beacondb;
@@ -864,6 +866,18 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
     Ok(nodes::Publish { broker, spaces: String::new() })
 }
 
+/// `8931` or `127.0.0.1:8931`, for the MCP server's address.
+///
+/// A bare port means loopback: an agent socket that carries the whole
+/// receiver should not be offered to a network by leaving a host out.
+#[cfg(feature = "mcp")]
+fn parse_listen(s: &str) -> Result<std::net::SocketAddr, String> {
+    if let Ok(port) = s.parse::<u16>() {
+        return Ok(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    s.parse().map_err(|_| format!("{s:?} is not a port or a host:port"))
+}
+
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
@@ -958,6 +972,11 @@ struct Args {
     /// house's own sensors and meters without the street's handsets
     #[arg(long, value_name = "SPACES")]
     ha_spaces: Option<String>,
+    /// Serve MCP on this address, so an agent can drive this receiver:
+    /// a port, or host:port. Loopback unless a host is given
+    #[cfg(feature = "mcp")]
+    #[arg(long, value_name = "ADDR", value_parser = parse_listen)]
+    mcp_listen: Option<std::net::SocketAddr>,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1267,6 +1286,14 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if args.headless {
+        // The agent server hands out the interface's own state, so there is
+        // nothing to serve without one. Said rather than ignored: an agent
+        // waiting on a port that will never open is a worse failure.
+        #[cfg(feature = "mcp")]
+        if args.mcp_listen.is_some() {
+            eprintln!("--mcp-listen needs the window: it serves the receiver the interface holds");
+            std::process::exit(1);
+        }
         // Nothing is written down unless it was asked for. Headless has no
         // session to remember a choice in, so the choice is the command line.
         let log = args
@@ -1376,6 +1403,13 @@ fn main() -> eframe::Result<()> {
             if let Some(mut p) = args.ha_broker.clone() {
                 p.spaces = args.ha_spaces.clone().unwrap_or_default();
                 app.publish_to(p);
+            }
+            #[cfg(feature = "mcp")]
+            if let Some(addr) = args.mcp_listen {
+                if let Err(e) = app.serve_mcp(addr, &cc.egui_ctx) {
+                    eprintln!("--mcp-listen {addr}: {e}");
+                    std::process::exit(1);
+                }
             }
             app.shot = args.shot.clone();
             app.shot_after = args.shot_after;
