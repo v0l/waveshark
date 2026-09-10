@@ -1,7 +1,10 @@
-//! Which decoders a source gets, and when.
+//! Which decoders a source gets, when, and what they make of a block.
 
-use common::{Hz, Result, SourceBlock, SourceId, C32};
+use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
+use pipeline::event::Event;
 use pipeline::port::StreamSpec;
+use rayon::prelude::*;
+use std::time::Instant;
 
 use super::evidence::Evidence;
 use super::member::Ring;
@@ -45,18 +48,146 @@ pub(super) struct Slot {
     pub(super) evidence: Option<Evidence>,
 }
 
-impl AutoNode {
-    /// The decoders a source of this shape gets.
+/// What one front end on one source made of a block.
+struct MemberResult {
+    name: &'static str,
+    /// Each event with the front end that produced it, since they are merged
+    /// with the other members' before anything is answered.
+    events: Vec<(&'static str, Event)>,
+    packets: Vec<Packet>,
+    /// The channel width this front end was placed for, when it read
+    /// something. The classifier measuring a burst is not reading it.
+    read: Option<f64>,
+    spent_us: u64,
+}
+
+/// What the front ends on one source made of a block.
+pub(super) struct SlotResult {
+    /// Which slot, since the fanout returns them in whatever order they
+    /// finished.
+    pub(super) k: usize,
+    /// Each event with the front end that produced it, so a request is
+    /// answered to the one that asked rather than to a name a node inside it
+    /// wrote about itself.
+    pub(super) events: Vec<(&'static str, Event)>,
+    pub(super) packets: Vec<Packet>,
+    /// The source has closed and nothing is still catching up on it.
+    pub(super) done: bool,
+    /// The front ends that read something, and the channel width each was
+    /// placed for.
+    pub(super) heard: Vec<(&'static str, f64)>,
+    /// Processor time per front end, for the cost view.
+    pub(super) spent: Vec<(&'static str, u64)>,
+}
+
+impl Slot {
+    /// Run every front end on this source over one block of it, and say what
+    /// they made of it.
     ///
-    /// The burst front end always. Then every protocol whose placement
-    /// covers the frequency, whose declared channel the source could be
-    /// (the stream must carry it, and the measured width must be within
-    /// reach of it, so a fat or splattered measurement does not put a
-    /// 12.5 kHz decoder on a 200 kHz signal), and which does not wait for
-    /// the classifier's verdict; each decides for itself whether the bits
-    /// are its own. A decoder that will not build is left out rather than
-    /// fatal: the source still has the front end, and one decoder's refusal
-    /// is not a reason to stop the receiver.
+    /// `b` is the block the extractor cut for this source, or `None` where
+    /// the source has closed: its decoders run on, on nothing, only while
+    /// one of them is still reading history.
+    ///
+    /// One task per front end and not one per source: the members share
+    /// nothing but the block they read, and per-source tasks left an M17
+    /// member decoding voice alone on one lane while the others sat
+    /// finished.
+    pub(super) fn run_block(
+        &mut self,
+        k: usize,
+        b: Option<&SourceBlock>,
+        at_us: u64,
+    ) -> Option<SlotResult> {
+        if b.is_none() && !self.members.iter().any(|m| m.behind()) {
+            return None;
+        }
+        let (samples, rate, state) = match b {
+            Some(b) => (&b.samples[..], b.rate, b.state),
+            None => (&[][..], self.spec.rate, SourceState::Closed),
+        };
+        // The flush is fed once, on the block that closed the source, not on
+        // every block after it.
+        let closed = b.is_some() && state == SourceState::Closed;
+        // The samples are kept for the evidence row too: a row that cannot
+        // say what it was read from is half a row, whether a classifier or
+        // the detector measured it.
+        self.ring.keeps =
+            self.evidence.is_some() || self.members.iter().any(|m| m.keeps_samples);
+        self.ring.push(samples);
+        let ring = &self.ring;
+        let per: Vec<MemberResult> = self
+            .members
+            .par_iter_mut()
+            .map(|m| {
+                let mut pk = Vec::new();
+                let t = Instant::now();
+                let mut ev = m.run(samples, at_us, &mut pk, ring);
+                if closed {
+                    let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * rate) as usize];
+                    ev.extend(m.run(&quiet, at_us, &mut pk, ring));
+                }
+                let us = t.elapsed().as_micros() as u64;
+                let read = m.router.is_none() && !pk.is_empty();
+                // Which front end spoke, taken from the one that was run
+                // rather than from a name a node inside it wrote about
+                // itself: a request routed by that is routed by a spelling.
+                MemberResult {
+                    name: m.name,
+                    events: ev.into_iter().map(|e| (m.name, e)).collect(),
+                    packets: pk,
+                    read: read.then_some(m.channel_hz),
+                    spent_us: us,
+                }
+            })
+            .collect();
+        let mut events = Vec::new();
+        let mut packets = Vec::new();
+        let mut heard = Vec::new();
+        let mut spent = Vec::new();
+        // What the detector measured, where nothing else measured anything:
+        // the row an unknown wideband signal leaves.
+        if let Some(e) = self.evidence.as_mut() {
+            e.push(samples);
+            let ended = matches!(state, SourceState::Closed | SourceState::Superseded);
+            packets.extend(e.row(at_us, ended, &self.ring));
+        }
+        for r in per {
+            events.extend(r.events);
+            packets.extend(r.packets);
+            spent.push((r.name, r.spent_us));
+            if let Some(width) = r.read {
+                self.heard = true;
+                heard.push((r.name, width));
+            }
+        }
+        // A measurement of a source a front end reads is not news.
+        if self.heard {
+            packets.retain(|p| {
+                !(p.measure.is_some()
+                    && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
+            });
+        }
+        // Done once the source has closed and nothing is still catching up
+        // on it.
+        let done = matches!(state, SourceState::Closed | SourceState::Superseded)
+            && !self.members.iter().any(|m| m.behind());
+        if state == SourceState::Superseded {
+            // A wider stream for the same transmitter takes over from its
+            // start. Whatever this one made of the sliver it had is half a
+            // burst, and half a burst is not evidence.
+            packets.clear();
+            events.retain(|(_, e)| !matches!(e, Event::Decoded(_)));
+        }
+        Some(SlotResult { k, events, packets, done, heard, spent })
+    }
+}
+
+impl AutoNode {
+    /// The slot a source gets: where its stream sits in the span, and the
+    /// decoders on it.
+    ///
+    /// A channel this node remembered runs the one front end that earned it;
+    /// anything else gets what [`found`] says a source of that shape gets.
     pub(super) fn open(&self, b: &SourceBlock) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
@@ -87,7 +218,7 @@ impl AutoNode {
             // each burst shape once and skips the repeats.
             let mut members = vec![m];
             if routable(b) {
-                members.extend(self.classifier(b, spec).ok());
+                members.extend(classifier(b, spec, &self.reg).ok());
             }
             return Ok(Slot {
                 id: b.id,
@@ -104,38 +235,7 @@ impl AutoNode {
                 evidence: None,
             });
         }
-        let mut members = Vec::new();
-        let mut evidence = None;
-        if routable(b) {
-            members.push(self.classifier(b, spec)?);
-        } else {
-            evidence = Some(
-                Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
-                    .from_sample(b.start_sample),
-            );
-        }
-        let hz = b.center_hz as f64;
-        for p in protocol::all() {
-            let shape = p.shape();
-            if shape.span_wide || !shape.families.is_empty() {
-                continue;
-            }
-            if !candidate(*p, hz, b.bandwidth_hz, b.rate) {
-                continue;
-            }
-            for w in p.widths_for(hz, b.bandwidth_hz) {
-                let at = Placed {
-                    center_hz: hz,
-                    width_hz: w,
-                    rate: b.rate,
-                    snr_db: b.snr_db,
-                    origin: Some(origin),
-                };
-                if let Ok(m) = Member::place(*p, spec, at, &Default::default(), &self.reg) {
-                    members.push(m);
-                }
-            }
-        }
+        let (members, evidence) = found(b, spec, origin, &self.reg)?;
         Ok(Slot {
             id: b.id,
             center_hz: Hz(b.center_hz),
@@ -152,15 +252,6 @@ impl AutoNode {
         })
     }
 
-    /// The burst front end for a source, told how strong the detector found
-    /// it: a stream that begins inside a transmission is otherwise read as
-    /// noise from its first sample to its last.
-    fn classifier(&self, b: &SourceBlock, spec: StreamSpec) -> Result<Member> {
-        let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
-        let mut m = Member::classifier(spec, route, &self.reg)?;
-        m.source_snr_db = b.snr_db;
-        Ok(m)
-    }
 
     /// Place the decoders that wait for the classifier's verdict, once it
     /// has named a burst of this source, and read them the source's samples
@@ -242,6 +333,76 @@ impl AutoNode {
     }
 }
 
+/// The decoders a source nothing has read before gets, and the evidence it
+/// leaves if none of them can measure it.
+///
+/// The burst front end where the source is narrow enough for anything to
+/// read what it says ([`routable`]), and otherwise the detector's own
+/// measurement in its place. Then every protocol whose placement covers the
+/// frequency, whose declared channel the source could be, and which does not
+/// wait for the classifier's verdict.
+///
+/// A free function rather than a method, because the answer depends on the
+/// source, the registry and nothing else: it can be asked, and checked,
+/// without a detector or a running node.
+pub(super) fn found(
+    b: &SourceBlock,
+    spec: StreamSpec,
+    origin: Origin,
+    reg: &pipeline::registry::Registry,
+) -> Result<(Vec<Member>, Option<Evidence>)> {
+    let mut members = Vec::new();
+    let mut evidence = None;
+    if routable(b) {
+        members.push(classifier(b, spec, reg)?);
+    } else {
+        evidence = Some(
+            Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
+                .from_sample(b.start_sample),
+        );
+    }
+    let hz = b.center_hz as f64;
+    for p in protocol::all() {
+        let shape = p.shape();
+        if shape.span_wide || !shape.families.is_empty() {
+            continue;
+        }
+        if !candidate(*p, hz, b.bandwidth_hz, b.rate) {
+            continue;
+        }
+        for w in p.widths_for(hz, b.bandwidth_hz) {
+            let at = Placed {
+                center_hz: hz,
+                width_hz: w,
+                rate: b.rate,
+                snr_db: b.snr_db,
+                origin: Some(origin),
+            };
+            // A decoder that will not build is left out rather than fatal:
+            // the source still has the front end, and one decoder's refusal
+            // is not a reason to stop the receiver.
+            if let Ok(m) = Member::place(*p, spec, at, &Default::default(), reg) {
+                members.push(m);
+            }
+        }
+    }
+    Ok((members, evidence))
+}
+
+/// The burst front end for a source, told how strong the detector found it:
+/// a stream that begins inside a transmission is otherwise read as noise
+/// from its first sample to its last.
+fn classifier(
+    b: &SourceBlock,
+    spec: StreamSpec,
+    reg: &pipeline::registry::Registry,
+) -> Result<Member> {
+    let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
+    let mut m = Member::classifier(spec, route, reg)?;
+    m.source_snr_db = b.snr_db;
+    Ok(m)
+}
+
 /// Whether the burst router belongs on this source at all.
 ///
 /// It is a decoder with a width like any other, and its width is what its
@@ -258,4 +419,138 @@ pub(super) fn candidate(p: &dyn Protocol, hz: f64, width_hz: f64, rate: f64) -> 
     rate >= shape.min_rate_hz
         && p.placement().covers(hz, shape.widths[0])
         && p.accepts_width(hz, width_hz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry;
+
+    /// A slot built by hand, with one front end on it, so what the fanout
+    /// does with a block can be checked without a detector, an extractor or
+    /// a node around it.
+    fn slot(rate: f64, center: Hz, chain: Vec<NodeSpec>) -> Slot {
+        let spec = StreamSpec::iq(rate, center);
+        let m = Member::build("burst_route", None, spec, chain, &registry()).expect("a chain");
+        Slot {
+            id: SourceId(1),
+            center_hz: center,
+            members: vec![m],
+            heard: false,
+            spec,
+            signal_hz: 25_000.0,
+            tried: Vec::new(),
+            verdicts_seen: 0,
+            remembered: false,
+            origin: Origin { span_sample: 0, span_rate_hz: rate },
+            ring: Ring::new(spec),
+            evidence: None,
+        }
+    }
+
+    fn block(id: SourceId, rate: f64, state: SourceState, samples: Vec<C32>) -> SourceBlock {
+        SourceBlock {
+            id,
+            state,
+            center_hz: 433_920_000,
+            bandwidth_hz: 25_000.0,
+            signal_hz: 25_000.0,
+            rate,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples,
+        }
+    }
+
+    /// A block with no source behind it is only run while a front end is
+    /// still reading history, and a source that closes says so once.
+    #[test]
+    fn a_slot_runs_while_it_has_a_block_or_a_backlog() {
+        let rate = 250_000.0;
+        let mut s = slot(rate, Hz::mhz(434), vec![NodeSpec::new("burst_route")]);
+        assert!(s.run_block(0, None, 0).is_none(), "nothing to read and nothing behind");
+
+        let quiet = vec![C32::new(0.001, 0.0); 4_096];
+        let r = s.run_block(3, Some(&block(SourceId(1), rate, SourceState::Running, quiet.clone())), 0)
+            .expect("a running source is read");
+        assert_eq!(r.k, 3, "the slot is named in the result, since the fanout reorders");
+        assert!(!r.done);
+        assert_eq!(r.heard, [], "the classifier measuring a burst is not reading it");
+
+        let r = s
+            .run_block(3, Some(&block(SourceId(1), rate, SourceState::Closed, quiet)), 0)
+            .expect("the closing block is read");
+        assert!(r.done, "a closed source with nothing catching up is done");
+    }
+
+    /// What a source too wide for the burst router leaves: the detector's
+    /// measurement, once, when the source closes.
+    #[test]
+    fn a_slot_with_no_classifier_reports_what_the_detector_measured() {
+        let rate = 250_000.0;
+        let mut s = slot(rate, Hz::mhz(434), vec![NodeSpec::new("burst_route")]);
+        s.members.clear();
+        s.evidence = Some(Evidence::new(434_000_000, 5e6, 21.0, rate));
+        let loud = vec![C32::new(0.5, 0.0); 4_096];
+        let r = s
+            .run_block(0, Some(&block(SourceId(1), rate, SourceState::Running, loud.clone())), 0)
+            .expect("a running source is read");
+        assert!(r.packets.is_empty(), "nothing to say until it closes");
+        let r = s
+            .run_block(0, Some(&block(SourceId(1), rate, SourceState::Closed, loud)), 0)
+            .expect("the closing block is read");
+        assert_eq!(r.packets.len(), 1, "one row for the whole transmission");
+        let m = r.packets[0].measure.as_ref().expect("the measurement");
+        assert_eq!(m.bandwidth_hz, 5e6);
+        assert!(r.packets[0].iq.is_some(), "and the samples it was measured from");
+    }
+
+    /// What a source gets is decided by the source and the registry, and
+    /// can be asked without a node: the classifier where anything could read
+    /// what it says, and the channel decoders whose width it could be.
+    #[test]
+    fn what_a_source_gets_is_asked_of_the_registry_alone() {
+        let reg = registry();
+        let rate = 250_000.0;
+        let origin = Origin { span_sample: 0, span_rate_hz: rate };
+        let at = |hz: u64, width_hz: f64, rate: f64| {
+            let mut spec = StreamSpec::iq(rate, Hz(hz));
+            spec.bandwidth = width_hz;
+            let mut b = block(SourceId(1), rate, SourceState::Opened, Vec::new());
+            b.center_hz = hz;
+            b.bandwidth_hz = width_hz;
+            b.signal_hz = width_hz / 1.5;
+            found(&b, spec, origin, &reg).expect("a placement")
+        };
+
+        let (members, evidence) = at(433_920_000, 25_000.0, rate);
+        let names: Vec<&str> = members.iter().map(|m| m.name).collect();
+        assert!(names.contains(&"burst_route"), "{names:?}");
+        assert!(names.contains(&"pocsag"), "a 25 kHz channel could be a pager: {names:?}");
+        assert!(evidence.is_none(), "the classifier is the evidence here");
+
+        // Nothing here waits for a verdict: LoRa is placed later, on one.
+        assert!(!names.contains(&"lora"), "{names:?}");
+
+        // And a source no front end could read leaves the detector's own
+        // measurement instead of a classifier.
+        let (members, evidence) = at(2_462_000_000, 6.5e6, 20e6);
+        assert!(members.iter().all(|m| m.router.is_none()), "a 6.5 MHz source was classified");
+        assert!(evidence.is_some());
+    }
+
+    /// A stream a wider one supersedes leaves nothing: whatever was read off
+    /// the sliver is half a burst.
+    #[test]
+    fn a_superseded_slot_reports_nothing_it_read() {
+        let rate = 250_000.0;
+        let mut s = slot(rate, Hz::mhz(434), vec![NodeSpec::new("burst_route")]);
+        s.evidence = Some(Evidence::new(434_000_000, 5e6, 21.0, rate));
+        let loud = vec![C32::new(0.5, 0.0); 4_096];
+        let r = s
+            .run_block(0, Some(&block(SourceId(1), rate, SourceState::Superseded, loud)), 0)
+            .expect("the superseding block is read");
+        assert!(r.packets.is_empty(), "{:?}", r.packets.len());
+        assert!(r.done);
+    }
 }
