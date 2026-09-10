@@ -1489,6 +1489,15 @@ fn load(v: &[f32]) -> wide::f32x8 {
 /// The transform the per-channel energy test runs on. Coarse on purpose:
 /// 256 bins over a 61.44 MHz span is 240 kHz a bin, which places a 20 MHz
 /// channel to within a bin and costs a few microseconds a block.
+///
+/// This is [`crate::gate`]'s job, done here with a gate of its own, and the
+/// difference is the shortest thing that must not be missed. That gate spaces
+/// its windows by the burst, which for an acknowledgement of thirty
+/// microseconds is a window every 1300 samples at 61.44 MS/s: a hundred
+/// transforms a block against the eight here. A Wi-Fi channel can afford to
+/// sample instead, because its traffic repeats and the channel stays awake
+/// for eight blocks once it has woken; a Bluetooth advertisement or a DroneID
+/// burst may never be heard twice.
 const POWER_FFT: usize = 256;
 
 /// Every subcarrier a frame occupies, low first, DC skipped.

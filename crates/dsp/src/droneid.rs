@@ -503,11 +503,6 @@ impl DroneIdSpan {
         self.rxs.iter().map(|r| r.center_hz).collect()
     }
 
-    /// The rate each channel is correlated at.
-    pub fn channel_rate(&self) -> f64 {
-        self.rxs.first().map_or(RATE, |r| r.rate)
-    }
-
     pub fn reset(&mut self) {
         for r in self.rxs.iter_mut() {
             r.reset();
