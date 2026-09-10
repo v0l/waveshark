@@ -210,17 +210,6 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
     assert_eq!(pages[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
 }
 
-/// Run a stream through one stage and collect the events it emits.
-fn events(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<pipeline::event::Event> {
-    let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
-    let mut out = Vec::new();
-    let silence = vec![C32::new(0.0, 0.0); 16_384];
-    for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
-        out.extend(g.feed_iq(block).expect("run").iter().map(|e| e.event.clone()));
-    }
-    out
-}
-
 #[test]
 fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     // Chirp spread spectrum, 125 kHz wide at spreading factor 9: a symbol

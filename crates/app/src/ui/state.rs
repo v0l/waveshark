@@ -373,7 +373,6 @@ pub struct SurveyState {
     /// A GPS named by the operator, or `None` for the local gpsd the reader
     /// looks for on its own. The reader always runs.
     pub gps: Option<gps::Transport>,
-    pub open: bool,
     /// The row the pane is expanded on, which is the device whose sightings
     /// are drawn on the map.
     pub selected: Option<i64>,
@@ -536,7 +535,6 @@ impl Default for SurveyState {
         Self {
             path: None,
             gps: None,
-            open: false,
             selected: None,
             rows: Vec::new(),
             trail: Vec::new(),

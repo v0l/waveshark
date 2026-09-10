@@ -197,11 +197,13 @@ impl TranscriptLog {
 
     /// The last thing said on one conversation, whether or not it has
     /// finished.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn latest(&self, key: &common::ConversationKey) -> Option<&Utterance> {
         self.by_key.get(key).and_then(|v| v.last())
     }
 
     /// Conversations heard, most recent last.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn keys(&self) -> &[common::ConversationKey] {
         &self.order
     }
@@ -623,6 +625,7 @@ impl LiveTranscribeNode {
     /// Write into the caller's transcript rather than the one this node was
     /// built with. The receiver hands its own in on every rebuild, so what
     /// was said outlives the graph that heard it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn into_log(mut self, log: SharedLog) -> Self {
         self.set_log(log);
         self
@@ -632,6 +635,7 @@ impl LiveTranscribeNode {
         self.log = log;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn log(&self) -> &SharedLog {
         &self.log
     }
@@ -706,6 +710,7 @@ impl LiveTranscribeNode {
     }
 
     /// Seconds of audio held for a key, for tests and for a status line.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn held_seconds(&self, key: &common::ConversationKey) -> f64 {
         self.talking.get(key).map(|t| t.pcm.len() as f64 / t.rate).unwrap_or(0.0)
     }

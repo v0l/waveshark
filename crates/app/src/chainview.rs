@@ -1279,7 +1279,7 @@ fn paint_scope(
     // Level, on the same strip every fader carries, the held peak as a mark.
     let vu =
         Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, crate::ui::widgets::VU_H));
-    crate::ui::widgets::Vu::paint(p, vu, f.rms * 2f32.sqrt());
+    crate::ui::widgets::vu(p, vu, f.rms * 2f32.sqrt());
     let x = vu.left() + f.peak_hold.clamp(0.0, 1.0).sqrt() * vu.width();
     p.line_segment(
         [Pos2::new(x, vu.top()), Pos2::new(x, vu.bottom())],

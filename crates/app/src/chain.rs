@@ -1071,7 +1071,11 @@ impl Receiver {
     }
 
     /// What decoders asked of the receiver since the last call.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// Nothing reads this yet: a decoder can ask the receiver to move the
+    /// dial, and what it asked is kept here for whatever does that. See
+    /// `docs/design.md`.
+    #[allow(dead_code)]
     pub fn take_requests(&mut self) -> Vec<(String, pipeline::Request)> {
         std::mem::take(&mut self.requests)
     }
@@ -1286,6 +1290,7 @@ impl Receiver {
 
     /// Every voice front end running, talking or not, read off the ports
     /// they publish on.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn voices(&self) -> Vec<common::Voice> {
         self.graph
             .order()
@@ -1488,21 +1493,6 @@ impl Receiver {
             }
         }
         out
-    }
-
-    /// The waves the graph runs in, for debugging what runs beside what.
-    pub fn run_levels(&self) -> Vec<Vec<&str>> {
-        self.graph.run_levels()
-    }
-
-    /// Each node's smoothed cost per call, for finding where the time goes.
-    pub fn run_costs(&self) -> Vec<(&str, f32)> {
-        self.graph.run_costs()
-    }
-
-    /// Total microseconds each node has cost since the build.
-    pub fn total_costs(&self) -> Vec<(&str, u64)> {
-        self.graph.total_costs()
     }
 
     /// Set one node's own parameter, by the id the topology gave it.
@@ -1974,16 +1964,6 @@ impl Receiver {
         }
     }
 
-    /// Where the receiver is, with whatever the last fix said about how well
-    /// that is known.
-    pub fn fix(&self) -> Option<gps::Fix> {
-        self.station
-    }
-
-    pub fn location(&self) -> Option<(f64, f64)> {
-        self.station.map(|f| (f.lat, f.lon))
-    }
-
     /// Devices and sightings the survey holds, and how many receptions were
     /// attributed to a device since the receiver started.
     pub fn survey_counts(&self) -> Option<(u64, u64, u64)> {
@@ -1994,6 +1974,7 @@ impl Receiver {
     }
 
     /// The survey's rows, for a pane that draws them.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn survey_devices(&self, q: survey::Query) -> Vec<survey::Device> {
         self.survey_node()
             .and_then(|n| n.db())
@@ -2002,6 +1983,7 @@ impl Receiver {
     }
 
     /// Every sighting of one device, which is the trail it was heard along.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn survey_sightings(&self, device: i64) -> Vec<survey::Sighting> {
         self.survey_node()
             .and_then(|n| n.db())
@@ -2226,6 +2208,8 @@ pub mod derived {
     pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
     pub const CAPTURE: u64 = Patch::DERIVED_BASE + 8;
     pub const SURVEY: u64 = Patch::DERIVED_BASE + 14;
+    /// Where the live transcriber is drawn, when the build has one.
+    #[cfg(feature = "stt")]
     pub const TRANSCRIBE: u64 = Patch::DERIVED_BASE + 15;
     pub const AUDIO: u64 = Patch::DERIVED_BASE + 9;
     /// The transmit chain: its clock, what is modulated, the modulator, and
@@ -2748,6 +2732,7 @@ pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::
 /// a channel added or retuned afterwards was silent.
 fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     use crate::patch::{builtin, Source};
+    #[cfg(feature = "stt")]
     use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
     let rate = plan.eff_rate();
@@ -3898,6 +3883,7 @@ pub fn models_root() -> PathBuf {
 /// Where the files of the model that runs when none was chosen are, or
 /// would be fetched to.
 #[cfg(feature = "stt")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn default_model_dir() -> PathBuf {
     let root = models_root();
     stt::model_dir(&root, &stt::default_model_in(&root))
@@ -5300,6 +5286,7 @@ mod scan_mark_tests {
 /// Everything runs at the radio's rate, because there is no resampler on this
 /// side yet. Generating a 1 kHz tone at 2 MS/s is wasteful and honest; a
 /// resampler is the next thing this wants.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn transmit_graph(
     tx: &crate::radio::TxSpec,
     mode: crate::radio::TxMode,

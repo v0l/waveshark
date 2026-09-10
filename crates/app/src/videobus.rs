@@ -82,7 +82,6 @@ pub struct Channel {
     /// What to call it: the channel of the plan where the band has one, else
     /// the frequency.
     pub label: String,
-    pub channel_hz: f64,
     /// Ignore this one entirely.
     pub muted: bool,
     pub last: Option<VideoFrame>,
@@ -95,6 +94,7 @@ pub struct Channel {
 }
 
 impl Channel {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_fed(&self) -> bool {
         self.fields > 0
     }
@@ -144,10 +144,6 @@ impl VideoBus {
         &self.channels
     }
 
-    pub fn channel(&self, key: &str) -> Option<&Channel> {
-        self.channels.iter().find(|c| c.key == key)
-    }
-
     pub fn channel_mut(&mut self, key: &str) -> Option<&mut Channel> {
         self.channels.iter_mut().find(|c| c.key == key)
     }
@@ -164,12 +160,7 @@ impl VideoBus {
         let k = match self.channels.iter().position(|c| c.key == key) {
             Some(k) => k,
             None => {
-                self.channels.push(Channel {
-                    key: key.clone(),
-                    label,
-                    channel_hz: frame.channel_hz,
-                    ..Default::default()
-                });
+                self.channels.push(Channel { key: key.clone(), label, ..Default::default() });
                 while self.channels.len() > MAX_CHANNELS {
                     self.channels.remove(0);
                 }
@@ -231,12 +222,8 @@ impl VideoBus {
         }
     }
 
-    /// The channels with a picture in the last [`HOLD_S`], newest first.
-    pub fn live(&self) -> impl Iterator<Item = &Channel> {
-        self.channels.iter().filter(|c| c.live())
-    }
-
     /// The last field of every channel, for a view of everything at once.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn thumbnails(&self) -> impl Iterator<Item = (&str, &VideoFrame)> {
         self.channels.iter().filter_map(|c| c.last.as_ref().map(|f| (c.key.as_str(), f)))
     }
@@ -246,6 +233,7 @@ impl VideoBus {
     }
 
     /// The picture being shown, without forgetting the channels.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn forget_watched(&mut self) {
         self.out = None;
         self.held = None;

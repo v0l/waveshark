@@ -682,10 +682,10 @@ mod tests {
 
     #[test]
     fn gpu_search_runs_as_a_polled_promise() {
-        let Some(gpu) = GpuSearch::new() else {
+        if GpuSearch::new().is_none() {
             eprintln!("no GPU adapter; skipping");
             return;
-        };
+        }
         let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
         let frames = vec![
             Collision { ts: ts(6), ct: hex("151ef027") },

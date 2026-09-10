@@ -384,6 +384,7 @@ impl Which {
 
     /// What is held for the key at `index`, and where a new one is put.
     /// Empty for a dataset that needs none.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn key_value(self, index: usize) -> String {
         match (self, index) {
             (Which::CellTowers, 0) => opencellid_token(),

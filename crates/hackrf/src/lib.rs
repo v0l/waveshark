@@ -443,7 +443,6 @@ impl Device for HackRfDevice {
         Ok(Box::new(HackRfTxStream {
             handle: Some(handle),
             rate: self.rate,
-            center: self.center,
             bytes: Vec::new(),
             shared: self.shared.clone(),
             restore_rx: was_rx,
@@ -468,7 +467,6 @@ impl Device for HackRfDevice {
             center: self.center,
             rate: self.rate,
             seq: 0,
-            last_dropped: 0,
             samples: Vec::new(),
             noise: 0x9E37_79B9_7F4A_7C15,
             silence_at: None,
@@ -483,7 +481,6 @@ pub struct HackRfTxStream {
     /// released before the radio is reopened for receive.
     handle: Option<AsyncWriteHandle>,
     rate: Sps,
-    center: Hz,
     /// Reused so a block at the sample rate does not allocate per call.
     bytes: Vec<u8>,
     shared: std::sync::Arc<Shared>,
@@ -615,7 +612,6 @@ pub struct HackRfStream {
     center: Hz,
     rate: Sps,
     seq: u64,
-    last_dropped: u64,
     samples: Vec<C32>,
     /// State of the noise the silence is made of.
     noise: u64,
@@ -918,7 +914,6 @@ mod tests {
             center: Hz(433_920_000),
             rate: Sps(2_000_000),
             seq: 0,
-            last_dropped: 0,
             samples: Vec::new(),
             noise: 0x9E37_79B9_7F4A_7C15,
             silence_at: None,
@@ -966,7 +961,6 @@ mod tests {
             center: Hz(100_000_000),
             rate: Sps(2_000_000),
             seq: 0,
-            last_dropped: 0,
             samples: Vec::new(),
             noise: 1,
             silence_at: None,

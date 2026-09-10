@@ -107,6 +107,7 @@ impl Call {
 
     /// How long the conversation has been going, which is not its airtime: a
     /// group can be busy for a minute in six seconds of speech.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn span(&self) -> Duration {
         self.last.saturating_duration_since(self.first)
     }
@@ -119,6 +120,7 @@ impl Call {
     }
 
     /// The label a list shows: the group, with the caller beside it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn title(&self) -> String {
         match &self.from {
             Some(f) if self.group => format!("{} < {f}", self.to),
@@ -166,6 +168,7 @@ impl Calls {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }

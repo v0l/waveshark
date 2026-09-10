@@ -121,6 +121,7 @@ impl Link {
     }
 
     /// The span from the first packet to the last.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn duration(&self) -> Duration {
         self.last.saturating_duration_since(self.first)
     }
@@ -144,6 +145,7 @@ impl Link {
     }
 
     /// Whether the party called is many listeners rather than one radio.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn to_group(&self) -> bool {
         matches!(&self.to, Some(p) if p.kind == PartyKind::Group)
     }
@@ -234,6 +236,7 @@ impl Links {
 
     /// The links one end takes part in, whichever end it is: what a directory
     /// is for is picking a device and seeing everything it has said.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn involving<'a>(&'a self, who: &str, now: Instant) -> Vec<&'a Link> {
         self.active(now)
             .into_iter()
@@ -241,6 +244,7 @@ impl Links {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
@@ -275,16 +279,6 @@ impl Links {
             }
         }
         self.forget(Instant::now());
-    }
-
-    /// Rebuild from a slice of records, which is how a day of the packet log
-    /// becomes a directory.
-    pub fn from_records<'a>(recs: impl IntoIterator<Item = &'a DecodeRecord>) -> Self {
-        let mut links = Self::new();
-        for r in recs {
-            links.update(r, r.at);
-        }
-        links
     }
 }
 

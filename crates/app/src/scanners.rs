@@ -93,12 +93,14 @@ pub enum Front {
 
 impl Front {
     /// A protocol by registry name, at its own default frequency.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn named(id: &str) -> Option<Front> {
         let p = nodes::protocol::by_id(id)?;
         Some(Front::Protocol { id: p.id(), hz: p.default_hz() })
     }
 
     /// A protocol by registry name, on a channel.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn protocol(id: &str, hz: f64) -> Front {
         let p = nodes::protocol::by_id(id).unwrap_or_else(|| panic!("no protocol {id:?}"));
         Front::Protocol { id: p.id(), hz }

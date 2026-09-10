@@ -28,6 +28,7 @@ impl Band {
     /// table ships an `auto` block for. The colour is the tag: a band drawn
     /// as ISM and one scanned as ISM are the same set, and keeping a second
     /// list of names is how the two drift apart.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_ism(&self) -> bool {
         self.color == ISM
     }

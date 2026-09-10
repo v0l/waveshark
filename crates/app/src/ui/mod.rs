@@ -68,7 +68,7 @@ use settings_rows::{mhz_field, ScannerRow};
 use state::{Channel, Logged};
 use widgets::{
     bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title, reading, row,
-    row_help, Fader, Squelch, Vu,
+    row_help, Fader, Squelch,
 };
 
 pub struct App {
@@ -2629,10 +2629,6 @@ impl App {
 
     pub fn show_control(&mut self) {
         self.set_view(View::Control);
-    }
-
-    pub fn show_devices(&mut self) {
-        self.set_view(View::Devices);
     }
 
     /// Point the receiver at a frequency without opening a channel on it.
