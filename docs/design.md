@@ -494,8 +494,32 @@ off-air share.
 What is left, measured per capture at 20 MS/s, is the front ends themselves:
 the DroneID correlator on a source megahertz wide, the classifier on a
 Bluetooth coded-PHY burst or an ExpressLRS channel visit, and the video
-demodulator, which is 5.2 ms of every 6.5 ms block on its own. Those are the
-reasons beside each entry of `KNOWN_SLOW`.
+demodulator. Those are the reasons beside each entry of `KNOWN_SLOW`.
+
+A second pass took what was left of the fixed cost. Finding the runs in a
+frame reads that frame's bins and nothing else, so every frame's runs are
+found at once and only the tracking that follows them is serial: at 20 MS/s
+that is 29% off detection, which every wideband capture pays whatever is on
+the air. Hearing a camera cost a pair of double-precision sines a sample to
+mix its sound subcarrier down, which at 20 MS/s is forty million of them a
+second; it is a rotation now, as the chroma reference beside it already was,
+and the video front end went from 4.8 ms a block to 3.8. The classifier
+plans its transform once instead of once a frame and normalises each burst
+once instead of once per power law.
+
+Two things that looked like levers and were measured not to be, so they are
+not tried again. Cutting the wide sources out by fast convolution
+(`dsp::slice`) is slower, not faster: measured over a 131072 sample block at
+20 MS/s, one source at 10 MS/s costs 471 us through the mixer and the two
+filters and 650 through the slicer, three cost 1414 against 1483, and the
+widest sources cannot use it at all because their extraction does not
+decimate and a channel at the span's own rate does not fit inside the span
+once it is shifted. The slicer earns its place where a channel is a small
+fraction of the span and there are several of them, which is what it was
+written for. And the fan-out over sources is buying what it costs: on the
+802.11 frames capture the front ends spend 3.1 ms of wall against 6.8 ms of
+processor time, so four threads are returning 2.2, and where one front end
+holds the work the wall is its own time and nothing is lost.
 
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.
