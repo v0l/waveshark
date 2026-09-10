@@ -3,6 +3,7 @@
 use common::{Hz, Result, SourceBlock, SourceId, C32};
 use pipeline::port::StreamSpec;
 
+use super::evidence::Evidence;
 use super::member::Ring;
 use super::{AutoNode, Member};
 use crate::protocol::{self, Origin, Placed, Protocol};
@@ -38,6 +39,10 @@ pub(super) struct Slot {
     pub(super) origin: Origin,
     /// The stream itself, kept once for every front end reading it.
     pub(super) ring: Ring,
+    /// The detector's own measurement of this source, for a source too wide
+    /// for the burst router, which is then the only evidence there is that
+    /// anything transmitted. `None` where the router is reading it.
+    pub(super) evidence: Option<Evidence>,
 }
 
 impl AutoNode {
@@ -81,7 +86,9 @@ impl AutoNode {
             // exactly this. It is affordable because the router measures
             // each burst shape once and skips the repeats.
             let mut members = vec![m];
-            members.extend(self.classifier(b, spec).ok());
+            if routable(b) {
+                members.extend(self.classifier(b, spec).ok());
+            }
             return Ok(Slot {
                 id: b.id,
                 center_hz: Hz(b.center_hz),
@@ -94,9 +101,19 @@ impl AutoNode {
                 remembered: true,
                 origin,
                 ring: Ring::new(spec),
+                evidence: None,
             });
         }
-        let mut members = vec![self.classifier(b, spec)?];
+        let mut members = Vec::new();
+        let mut evidence = None;
+        if routable(b) {
+            members.push(self.classifier(b, spec)?);
+        } else {
+            evidence = Some(
+                Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
+                    .from_sample(b.start_sample),
+            );
+        }
         let hz = b.center_hz as f64;
         for p in protocol::all() {
             let shape = p.shape();
@@ -131,6 +148,7 @@ impl AutoNode {
             remembered: false,
             origin,
             ring: Ring::new(spec),
+            evidence,
         })
     }
 
@@ -222,6 +240,15 @@ impl AutoNode {
             }
         }
     }
+}
+
+/// Whether the burst router belongs on this source at all.
+///
+/// It is a decoder with a width like any other, and its width is what its
+/// consumers can read; see [`protocol::router_max_width_hz`]. A source wider
+/// than that gets [`Evidence`] instead.
+pub(super) fn routable(b: &SourceBlock) -> bool {
+    b.bandwidth_hz <= protocol::router_max_width_hz()
 }
 
 /// Whether a source at `hz`, measured `width_hz` wide and cut out at

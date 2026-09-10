@@ -288,6 +288,32 @@ pub struct Placed {
 /// the old ~40 kHz ceiling for a 12.5 kHz channel while scaling with width.
 pub const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 
+/// The widest source the burst router is placed on, in hertz.
+///
+/// The router is a decoder like every other and is placed where its width
+/// fits, except that its shape is decided by what reads its output rather
+/// than by a channel of its own: the pulse front ends inside it read sensor
+/// channels up to [`dsp::route::MAX_PULSE_CHANNEL_HZ`], and the protocols
+/// that wait for one of its verdicts ([`Shape::families`], so far LoRa and
+/// ExpressLRS) read channels of their declared widths. So it is asked of the
+/// registry, like everything else the auto node wants to know.
+///
+/// Above this nothing consumes the verdict. Measured on the 2.4 GHz DroneID
+/// capture, the detector opens a 20 MHz source for the Wi-Fi in the band and
+/// the router then ran its per-sample gate over the whole of it and
+/// classified every Wi-Fi frame at 3 to 6 ms each: 100 of the 147 million
+/// samples every router saw were that one source, and no front end could
+/// read a burst of it. A source wider than this leaves the detector's own
+/// measurement as its evidence row instead; see [`super::auto`].
+pub fn router_max_width_hz() -> f64 {
+    let widest = all()
+        .iter()
+        .filter(|p| !p.shape().families.is_empty())
+        .flat_map(|p| p.shape().widths.iter().copied())
+        .fold(dsp::route::MAX_PULSE_CHANNEL_HZ, f64::max);
+    widest * CHANNEL_WIDTH_TOLERANCE
+}
+
 pub trait Protocol: Send + Sync {
     /// The stage registry's name for the decoder, and the word a table or a
     /// saved channel names it by.
@@ -576,6 +602,28 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all().len());
+    }
+
+    /// The burst router is placed by what reads it, and both its consumers
+    /// are in the registry: a source wider than the widest of them holds
+    /// nothing either could read, and used to cost a per-sample gate over a
+    /// whole 20 MHz span.
+    #[test]
+    fn the_burst_router_is_as_wide_as_what_reads_it_and_no_wider() {
+        let max = router_max_width_hz();
+        let widest = all()
+            .iter()
+            .filter(|p| !p.shape().families.is_empty())
+            .flat_map(|p| p.shape().widths.iter().copied())
+            .fold(0.0, f64::max);
+        assert!(widest > 0.0, "nothing waits for a verdict any more");
+        assert!(max >= widest, "a chirp channel of {widest} Hz gets no verdict");
+        assert!(
+            max >= dsp::route::MAX_PULSE_CHANNEL_HZ,
+            "a sensor channel gets no pulse front end"
+        );
+        // And well under a span: this is the whole saving.
+        assert!(max < 5e6, "{max} Hz is most of a 20 MHz span");
     }
 
     #[test]
