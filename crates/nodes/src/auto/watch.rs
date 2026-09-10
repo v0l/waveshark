@@ -171,10 +171,17 @@ impl AutoNode {
     /// that grows into it supersedes the narrow source that was reading
     /// the transmission. The MeshCore advert at 51 dB in a 2.048 MS/s span
     /// is the capture that says so.
+    ///
+    /// A span-wide protocol's channel counts here even though no source is
+    /// ever cut out for it. What its width buys is the row an unread
+    /// carrier leaves: a 20 MHz signal nothing decodes is still a source
+    /// with a centre, a width and a level (`auto::evidence`), and asking
+    /// only the protocols placed on a source dropped the ceiling on a
+    /// 61.44 MS/s span from a quarter of the span to 1.8 MHz the day
+    /// DroneID stopped being one of them.
     pub(super) fn detector_cfg(&self) -> SourceConfig {
         let widest = protocol::all()
             .iter()
-            .filter(|p| !p.shape().span_wide)
             .flat_map(|p| p.shape().widths.iter().copied())
             .fold(0.0, f64::max);
         let mut cfg = self.cfg;
