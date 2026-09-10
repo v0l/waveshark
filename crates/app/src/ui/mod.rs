@@ -660,6 +660,14 @@ impl App {
         app.survey.wigle.donate = s.wigle_donate;
         app.survey.wigle.on = s.wigle_on;
         app.survey.beacondb.on = s.beacondb_on;
+        app.survey.homeassistant.host = s.ha_host.clone();
+        app.survey.homeassistant.port = s.ha_port.clone();
+        app.survey.homeassistant.username = s.ha_user.clone();
+        app.survey.homeassistant.password = s.ha_password.clone();
+        app.survey.homeassistant.prefix = s.ha_prefix.clone();
+        app.survey.homeassistant.topic = s.ha_topic.clone();
+        app.survey.homeassistant.spaces = s.ha_spaces.clone();
+        app.survey.homeassistant.on = s.ha_on;
         app.survey.beacondb.lookup = s.beacondb_lookup;
         crate::beacondb::set_lookup(s.beacondb_lookup);
         crate::beacondb::start();
@@ -718,6 +726,14 @@ impl App {
             wigle_donate: self.survey.wigle.donate,
             wigle_on: self.survey.wigle.on,
             beacondb_on: self.survey.beacondb.on,
+            ha_host: self.survey.homeassistant.host.clone(),
+            ha_port: self.survey.homeassistant.port.clone(),
+            ha_user: self.survey.homeassistant.username.clone(),
+            ha_password: self.survey.homeassistant.password.clone(),
+            ha_prefix: self.survey.homeassistant.prefix.clone(),
+            ha_topic: self.survey.homeassistant.topic.clone(),
+            ha_spaces: self.survey.homeassistant.spaces.clone(),
+            ha_on: self.survey.homeassistant.on,
             beacondb_lookup: self.survey.beacondb.lookup,
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
@@ -926,6 +942,20 @@ impl App {
 
     /// Start on the radio whose label contains `want`, for when several are
     /// plugged in and the saved one is not the one wanted.
+    /// Publish every device heard to this broker, from the command line.
+    pub fn publish_to(&mut self, publish: nodes::Publish) {
+        let ha = &mut self.survey.homeassistant;
+        ha.host = publish.broker.host.clone();
+        ha.port = publish.broker.port.to_string();
+        ha.username = publish.broker.username.clone();
+        ha.password = publish.broker.password.clone();
+        ha.prefix = publish.broker.prefix.clone();
+        ha.topic = publish.broker.topic.clone();
+        ha.spaces = publish.spaces.clone();
+        ha.on = true;
+        self.apply_homeassistant();
+    }
+
     /// Start the radio without waiting for the play button, which is what a
     /// capture being replayed usually wants and what a screenshot needs.
     pub fn start_on_open(&mut self) {
@@ -1056,6 +1086,9 @@ impl App {
         }
         if self.survey.beacondb.on {
             self.apply_beacondb();
+        }
+        if self.survey.homeassistant.on {
+            self.apply_homeassistant();
         }
         // Same for the feeds and the station position: they belong to the
         // graph, and a new radio thread has built a new one.
@@ -1690,6 +1723,9 @@ impl App {
             Some(devices_pane::Action::Export) => self.export_survey(),
             Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
             Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
+            Some(devices_pane::Action::HomeAssistant) => {
+                self.survey.homeassistant.open = true
+            }
             None => {}
         }
     }
@@ -1777,6 +1813,18 @@ impl App {
         // The lookup runs here rather than in the receiver: it answers the
         // map, not the graph.
         crate::beacondb::set_lookup(self.survey.beacondb.lookup);
+    }
+
+    /// Point the feed at a broker, or stop it.
+    ///
+    /// The broker goes to the radio thread rather than being kept here: the
+    /// feed is a node on the packet bus, and the connection belongs to it.
+    fn apply_homeassistant(&mut self) {
+        let publish = self.survey.homeassistant.publish();
+        self.survey.homeassistant.on =
+            self.survey.homeassistant.on && publish.broker.is_complete();
+        let on = self.survey.homeassistant.on;
+        self.send(Cmd::HomeAssistant(on.then_some(publish)));
     }
 
     /// Write the survey out as WiGLE CSV, beside the survey file.
@@ -2255,6 +2303,8 @@ impl eframe::App for App {
         self.survey.wigle.status = self.radio.as_ref().and_then(|r| r.status.wigle.lock().clone());
         self.survey.beacondb.status =
             self.radio.as_ref().and_then(|r| r.status.beacondb.lock().clone());
+        self.survey.homeassistant.status =
+            self.radio.as_ref().and_then(|r| r.status.homeassistant.lock().clone());
         // Whatever view is open: a pass does not stop moving because the
         // operator went to look at the spectrum.
         self.follow_doppler();
@@ -2304,6 +2354,7 @@ impl eframe::App for App {
         self.remote_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
         self.beacondb_modal(ui.ctx());
+        self.homeassistant_modal(ui.ctx());
         self.flush_cmds();
         self.restore_radio_settings();
         self.save_session();

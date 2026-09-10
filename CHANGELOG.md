@@ -12,6 +12,15 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Added
 
+- Publish what is heard to Home Assistant. Point it at the MQTT broker Home
+  Assistant already uses, in the device list or with `--ha-broker`, and every
+  transmitter the decoders can name becomes a device there: a weather
+  station's temperature and humidity, a meter's reading, a tyre sensor's
+  pressure, and the level each was heard at. Say which kinds are worth
+  keeping (`ism,wmbus` is your own sensors and meters) or a band full of
+  phones will fill the house with devices that rotate their address every
+  quarter of an hour.
+
 - "Open capture…" in the receiver list. Pick a recorded capture and it
   becomes the receiver, playing back at the rate it was recorded at through
   the same graph, detector and panes as an aerial, looping so a few seconds of
