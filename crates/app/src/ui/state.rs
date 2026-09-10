@@ -401,6 +401,8 @@ pub struct SurveyState {
     pub wigle: WigleState,
     /// The feed to beacondb.net: whether it is on, and what it has sent.
     pub beacondb: BeaconDbState,
+    /// The feed into Home Assistant: the broker, and what it has published.
+    pub homeassistant: HomeAssistantState,
 }
 
 /// The beaconDB feed, as the interface holds it.
@@ -414,6 +416,46 @@ pub struct BeaconDbState {
     /// Whether the map may ask where a decoded cell is.
     pub lookup: bool,
     pub status: Option<nodes::BeaconDbStatus>,
+}
+
+/// The feed into the house, as the interface holds it.
+///
+/// The broker as it is being typed, kept apart from the live one so a
+/// half-written hostname does not reconnect on every keystroke, and what the
+/// node last said it was doing.
+#[derive(Default)]
+pub struct HomeAssistantState {
+    pub open: bool,
+    pub on: bool,
+    pub host: String,
+    pub port: String,
+    pub username: String,
+    pub password: String,
+    pub prefix: String,
+    pub topic: String,
+    /// Identity spaces worth publishing, as typed: `ism,wmbus` is a house's
+    /// own sensors without the street's handsets.
+    pub spaces: String,
+    pub status: Option<nodes::HomeAssistantStatus>,
+}
+
+impl HomeAssistantState {
+    /// What is typed, as somewhere to publish. The port falls back to 1883
+    /// rather than refusing a field somebody cleared.
+    pub fn publish(&self) -> nodes::Publish {
+        nodes::Publish { broker: self.broker(), spaces: self.spaces.trim().to_string() }
+    }
+
+    fn broker(&self) -> nodes::Broker {
+        nodes::Broker {
+            host: self.host.trim().to_string(),
+            port: self.port.trim().parse().unwrap_or(1883),
+            username: self.username.trim().to_string(),
+            password: self.password.clone(),
+            prefix: self.prefix.trim().to_string(),
+            topic: self.topic.trim().to_string(),
+        }
+    }
 }
 
 /// The pass table, as the interface holds it. Everything in it is derived
@@ -504,6 +546,7 @@ impl Default for SurveyState {
             gps_edit: None,
             wigle: WigleState::default(),
             beacondb: BeaconDbState::default(),
+            homeassistant: HomeAssistantState::default(),
         }
     }
 }

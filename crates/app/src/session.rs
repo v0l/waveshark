@@ -161,6 +161,18 @@ pub struct Session {
     /// Whether observations are submitted to beacondb.net. No credential:
     /// beaconDB takes them from anybody, so this is the whole setting.
     pub beacondb_on: bool,
+    /// Where every device heard is published, for Home Assistant to build.
+    /// The password is in the clear here for the same reason the WiGLE token
+    /// is: a keyring this program has no other use for.
+    pub ha_host: String,
+    pub ha_port: String,
+    pub ha_user: String,
+    pub ha_password: String,
+    pub ha_prefix: String,
+    pub ha_topic: String,
+    /// Identity spaces published, comma separated, or empty for all of them.
+    pub ha_spaces: String,
+    pub ha_on: bool,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -258,6 +270,14 @@ impl Default for Session {
             wigle_donate: false,
             wigle_on: false,
             beacondb_on: false,
+            ha_host: String::new(),
+            ha_port: String::new(),
+            ha_user: String::new(),
+            ha_password: String::new(),
+            ha_prefix: String::new(),
+            ha_topic: String::new(),
+            ha_spaces: String::new(),
+            ha_on: false,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -422,6 +442,14 @@ impl Session {
             wigle_donate: kv.get("wigle_donate").map(|v| *v == "true").unwrap_or(false),
             wigle_on: kv.get("wigle_on").map(|v| *v == "true").unwrap_or(false),
             beacondb_on: kv.get("beacondb_on").map(|v| *v == "true").unwrap_or(false),
+            ha_host: kv.get("ha_host").map(|v| v.to_string()).unwrap_or_default(),
+            ha_port: kv.get("ha_port").map(|v| v.to_string()).unwrap_or_default(),
+            ha_user: kv.get("ha_user").map(|v| v.to_string()).unwrap_or_default(),
+            ha_password: kv.get("ha_password").map(|v| v.to_string()).unwrap_or_default(),
+            ha_prefix: kv.get("ha_prefix").map(|v| v.to_string()).unwrap_or_default(),
+            ha_topic: kv.get("ha_topic").map(|v| v.to_string()).unwrap_or_default(),
+            ha_spaces: kv.get("ha_spaces").map(|v| v.to_string()).unwrap_or_default(),
+            ha_on: kv.get("ha_on").map(|v| *v == "true").unwrap_or(false),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -474,6 +502,13 @@ impl Session {
             ("gps", &self.gps),
             ("wigle_name", &self.wigle_name),
             ("wigle_token", &self.wigle_token),
+            ("ha_host", &self.ha_host),
+            ("ha_port", &self.ha_port),
+            ("ha_user", &self.ha_user),
+            ("ha_password", &self.ha_password),
+            ("ha_prefix", &self.ha_prefix),
+            ("ha_topic", &self.ha_topic),
+            ("ha_spaces", &self.ha_spaces),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -507,6 +542,9 @@ impl Session {
         }
         if self.beacondb_on {
             s.push_str("beacondb_on = true\n");
+        }
+        if self.ha_on {
+            s.push_str("ha_on = true\n");
         }
         if self.beacondb_lookup {
             s.push_str("beacondb_lookup = true\n");
@@ -615,6 +653,14 @@ mod tests {
             wigle_on: true,
             beacondb_on: true,
             beacondb_lookup: true,
+            ha_host: "homeassistant.local".into(),
+            ha_port: "1883".into(),
+            ha_user: "waveshark".into(),
+            ha_password: "hunter2".into(),
+            ha_prefix: "homeassistant".into(),
+            ha_topic: "waveshark".into(),
+            ha_spaces: "ism,wmbus".into(),
+            ha_on: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             view: ViewPrefs {

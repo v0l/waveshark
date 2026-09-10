@@ -157,6 +157,8 @@ every time. A capture that decodes is a test fixture.
 --capture-iq           write the raw span from the moment the radio starts
 --replay [path]        decode a capture, a directory, or a packet log
 --headless             run with no window, scanning and logging as it would
+--ha-broker <broker>   publish every device heard to Home Assistant over MQTT
+--ha-spaces <kinds>    which kinds are worth publishing, e.g. ism,wmbus
 --print-log            print every packet as it arrives, window or not
 --fetch-data           warm the dataset cache before going somewhere offline
 --squelch-probe [mhz]  report what the squelch reads on a frequency

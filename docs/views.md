@@ -466,6 +466,49 @@ a band where this receiver demodulates nothing of the sort. Tuned to 433.92 MHz
 for weather sensors, with a Beast feed attached, the map fills from the rooftop
 receiver while the ISM decoders run locally.
 
+## Into the house
+
+`HomeAssistantNode` (`crates/nodes/src/homeassistant_nodes.rs`) is a fourth
+sink on the bus, beside the survey and the two wardriving feeds, and the one
+that makes what the receiver hears useful to something other than a person
+watching it. Every transmitter the decoders can name becomes a device in Home
+Assistant over MQTT discovery, and every number they recovered becomes an
+entity under it.
+
+It rows on the same identity the survey rows on, `(space, ident)`, for the
+same reason: a burst nothing identified is not a thing in a house, and the bus
+carries every unclaimed burst in the band.
+
+Four decisions are worth knowing.
+
+**One state topic per device, one configuration per entity.** Home Assistant
+builds entities from retained configuration messages under its discovery
+prefix; each of those points a template at the device's own state topic, which
+carries every field as one JSON object. A weather station with nine fields is
+one publication per reception rather than nine.
+
+**Units come off the field names.** The decoders in this tree already name a
+field after what it holds and what it is in, `temperature_c`, `humidity_pct`,
+`wind_avg_km_h`, so that convention is the whole mapping. A decoder added
+tomorrow gets its units right by naming its fields the way the others do, and
+one that does not gets an entity with no unit rather than a wrong one. A
+device class is set only where the unit and the name agree on it, because a
+wrong class makes Home Assistant refuse the entity.
+
+**The street is the problem, not the house.** A resolvable-private Bluetooth
+address rotates every quarter of an hour, so a receiver left running on 2.4
+GHz publishes a new device four times an hour for every handset that walks
+past, and Home Assistant keeps every one it is told about. Hence the `spaces`
+filter, which is a list of identity spaces worth a permanent entity:
+`ism,wmbus` is a house's own sensors and meters. Hence also the device cap and
+the interval between publications, which are node parameters like any other.
+
+**The connection outlives the graph.** The graph is rebuilt on every retune,
+so the broker connection is a process-wide thread the node publishes through,
+and the node keeps only which devices it has announced. Publishing is
+`try_publish` from the radio thread: a broker that has stopped reading costs a
+dropped reading, counted and shown, rather than a dropped block.
+
 ## The device database
 
 A second thing to do with the same bus: record the transmitters rather than

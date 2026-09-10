@@ -343,6 +343,9 @@ pub struct PlanSettings {
     pub wigle: Option<survey::Account>,
     /// Whether the beaconDB feed is collecting.
     pub beacondb: bool,
+    /// Where every device heard is published for Home Assistant to build,
+    /// when anywhere.
+    pub homeassistant: Option<nodes::Publish>,
 }
 
 impl Default for PlanSettings {
@@ -356,6 +359,7 @@ impl Default for PlanSettings {
             survey_path: None,
             wigle: None,
             beacondb: false,
+            homeassistant: None,
         }
     }
 }
@@ -1876,6 +1880,13 @@ impl Receiver {
         if let Some(n) = self.beacondb_node_mut() {
             n.set_on(beacondb);
         }
+        // A broker short of an address is no broker: the feed would announce
+        // devices into a connection that cannot be made.
+        let publish = want.homeassistant.clone().filter(|p| p.broker.is_complete());
+        if let Some(n) = self.homeassistant_node_mut() {
+            n.set_spaces(publish.as_ref().map(|p| p.spaces.as_str()).unwrap_or(""));
+            n.set_broker(publish.map(|p| p.broker));
+        }
         let calls = want.calls.clone();
         if let Some(n) = self.audio_mut() {
             n.bus_mut().set_subscriptions(calls);
@@ -1918,6 +1929,18 @@ impl Receiver {
 
     pub fn beacondb_status(&self) -> Option<nodes::BeaconDbStatus> {
         Some(self.beacondb_node()?.status())
+    }
+
+    pub fn homeassistant_status(&self) -> Option<nodes::HomeAssistantStatus> {
+        Some(self.homeassistant_node()?.status())
+    }
+
+    fn homeassistant_node(&self) -> Option<&nodes::HomeAssistantNode> {
+        self.stage::<nodes::HomeAssistantNode>(derived::HOMEASSISTANT)
+    }
+
+    fn homeassistant_node_mut(&mut self) -> Option<&mut nodes::HomeAssistantNode> {
+        self.stage_mut::<nodes::HomeAssistantNode>(derived::HOMEASSISTANT)
     }
 
     fn beacondb_node(&self) -> Option<&nodes::BeaconDbNode> {
@@ -2220,6 +2243,8 @@ pub mod derived {
     /// One row per burst, after the protocols and before everything that
     /// reads them.
     pub const DEDUPE: u64 = Patch::DERIVED_BASE + 20;
+    /// What is heard, on its way into the house over MQTT.
+    pub const HOMEASSISTANT: u64 = Patch::DERIVED_BASE + 21;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2619,6 +2644,12 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // not it is on for the same reason.
         let beacondb = p.add_derived(derived::BEACONDB, "beacondb", Settings::new());
         p.connect(Source::Stage(rows, 0), (beacondb, 0));
+
+        // And the house is a fourth. Drawn with no broker set for the same
+        // reason again: pointing it at one is a setting on a stage that is
+        // already there, not a rebuild under the packets.
+        let ha = p.add_derived(derived::HOMEASSISTANT, "homeassistant", Settings::new());
+        p.connect(Source::Stage(rows, 0), (ha, 0));
     }
 
     p
@@ -3384,6 +3415,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "transcribe_live" => "Transcribe".into(),
         "survey" => "Devices".into(),
         "wigle" => "WiGLE".into(),
+        "homeassistant" => "Home Assistant".into(),
         "beacondb" => "beaconDB".into(),
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
