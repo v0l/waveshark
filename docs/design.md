@@ -591,6 +591,39 @@ written for. And the fan-out over sources is buying what it costs: on the
 processor time, so four threads are returning 2.2, and where one front end
 holds the work the wall is its own time and nothing is lost.
 
+### What the Wi-Fi front end spends a block on
+
+Instrumented on the 61.44 MS/s busy 2.4 GHz capture, per 131072-sample block
+(2.13 ms of signal), because it is the largest single item on that band and
+the next thing to take on. `WifiSpan::process` sums over its awake channels:
+
+| stage | us | what it is |
+|---|---|---|
+| `measure` | 6 | eight 256-point transforms, the gate that decides which channels run |
+| the mixer | 128 | one channel mixed to baseband at the span's rate |
+| `decim` | 403 | the anti-alias filter, 61.44 to 20.48 MS/s, at the span's rate |
+| `resamp` | 752 | 20.48 to 20 MS/s, the ratio 125/128 |
+| DC block, mean power | 86 | on the decimated block |
+| `read_dsss` and the OFDM scan | 500 | the preamble searches, on the decimated block |
+
+Two things follow. The resampler's inner loop shifted its history a sample at
+a time, which is half a history of complex moves per input sample and as much
+work again as the taps; keeping the history twice over so a tap is one index
+below the last took the same measurement from 686 us to 390. And the decimator
+is per channel, so five channels 5 MHz apart and 20 MHz wide filter the same
+spectrum five times: the front end would be better off decimating the span
+once and mixing at the lower rate, which is a third of the work in each of the
+four channels that duplicates it. It is not done because each channel's filter
+is what band-limits it before the searches, so the change has to move that
+filtering after the mix and hold the frame counts while it does.
+
+A ratio within a few per cent of one still costs what any ratio costs: 24 taps
+per phase per output sample, because `Rational` sizes its filter for a real
+rate change and its design rate is the interpolation factor times the input.
+Folding the decimation and the resampling into one rational step from the
+span's rate to `RATE_HZ` would remove the `decim` stage entirely, at the price
+of a sharper prototype at a higher design rate; not measured.
+
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.
 
