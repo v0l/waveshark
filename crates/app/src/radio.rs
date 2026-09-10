@@ -4981,11 +4981,6 @@ mod zoom_tests {
                 "the same, beside the Wi-Fi front end reading the span it is on",
             ),
             (
-                "tetra_downlink_391.5M_2400k.cu8",
-                "one block in three hundred at 1.7x on four threads, with 15 ms of it outside \
-                 any node",
-            ),
-            (
                 "offair/gfsk_ble_2426M_20000k.cs8",
                 "one block at 1.3x on four threads, the BLE front end and the detector at \
                  1.2 ms each of 6.5 and 12 ms outside any node",
