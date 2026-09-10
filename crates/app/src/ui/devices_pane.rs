@@ -31,6 +31,8 @@ pub(super) enum Action {
     /// Open the wigle.net feed's settings.
     Wigle,
     BeaconDb,
+    /// Open the settings for the feed into Home Assistant.
+    HomeAssistant,
 }
 
 impl Devices<'_> {
@@ -105,6 +107,17 @@ impl Devices<'_> {
                 };
                 if ui.button(label).clicked() {
                     act = Some(Action::BeaconDb);
+                }
+                let h = self.st.homeassistant.status.as_ref();
+                let label = match (self.st.homeassistant.on, h) {
+                    (false, _) => "Home Assistant".to_string(),
+                    (true, Some(s)) if s.error.is_some() => "Home Assistant: failing".into(),
+                    (true, Some(s)) if !s.connected => "Home Assistant: connecting".into(),
+                    (true, Some(s)) => format!("Home Assistant: {} devices", s.devices),
+                    (true, None) => "Home Assistant: on".into(),
+                };
+                if ui.button(label).clicked() {
+                    act = Some(Action::HomeAssistant);
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.st.filter)
