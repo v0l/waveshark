@@ -64,7 +64,7 @@ That build has everything, including two decoders the published binaries do
 not carry:
 
 ```sh
-cargo run --release -p app --no-default-features --features limesdr,stt
+cargo run --release -p app --no-default-features --features limesdr,stt,mcp
 ```
 
 is what the release workflow runs, and it leaves out `tea` and `ambe`. `tea`
@@ -142,6 +142,20 @@ waveshark --replay captures
 Capture a band once, then replay after every change: no radio, same answer
 every time. A capture that decodes is a test fixture.
 
+## Letting an agent drive
+
+```sh
+waveshark --mcp-listen 8931
+```
+
+serves the receiver over the Model Context Protocol at
+`http://127.0.0.1:8931/mcp`. It is the receiver on the screen, not a second
+one: what the agent tunes, opens or switches on appears in the window, and it
+can take a picture of that window to see what it did. It can read the
+spectrum, the packets, the calls, the transcript and the tracker, and it can
+change anything in the signal chain. It cannot transmit.
+[`docs/mcp.md`](docs/mcp.md) has the tools and the reasoning.
+
 ## Command line
 
 `--help` has the rest.
@@ -157,6 +171,7 @@ every time. A capture that decodes is a test fixture.
 --capture-iq           write the raw span from the moment the radio starts
 --replay [path]        decode a capture, a directory, or a packet log
 --headless             run with no window, scanning and logging as it would
+--mcp-listen <addr>    serve this receiver to an agent over MCP, on loopback
 --print-log            print every packet as it arrives, window or not
 --fetch-data           warm the dataset cache before going somewhere offline
 --squelch-probe [mhz]  report what the squelch reads on a frequency
@@ -181,7 +196,8 @@ thirty-nine ISM decoders where the goal is hundreds, and the browser build
 
 [`docs/design.md`](docs/design.md) is how it works inside,
 [`docs/protocols.md`](docs/protocols.md) the protocol roadmap,
-[`docs/views.md`](docs/views.md) how a view attaches to the packet bus, and
+[`docs/views.md`](docs/views.md) how a view attaches to the packet bus,
+[`docs/mcp.md`](docs/mcp.md) how an agent drives it, and
 [`docs/references.md`](docs/references.md) everything this leans on that
 somebody else wrote.
 
