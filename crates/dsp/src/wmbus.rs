@@ -53,8 +53,8 @@ pub fn crc16(data: &[u8]) -> u16 {
 
 /// The 3-of-6 code: a nibble to six chips holding exactly three ones.
 const THREE_OF_SIX: [u8; 16] = [
-    0b010110, 0b001101, 0b001110, 0b001011, 0b011100, 0b011001, 0b011010, 0b010011,
-    0b101100, 0b100101, 0b100110, 0b100011, 0b110100, 0b110001, 0b110010, 0b101001,
+    0b010110, 0b001101, 0b001110, 0b001011, 0b011100, 0b011001, 0b011010, 0b010011, 0b101100,
+    0b100101, 0b100110, 0b100011, 0b110100, 0b110001, 0b110010, 0b101001,
 ];
 
 /// Six chips back to a nibble, or `None` for a pattern that is not in the

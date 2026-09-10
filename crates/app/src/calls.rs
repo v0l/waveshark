@@ -589,10 +589,7 @@ mod tests {
                 "M17-Voice",
                 433.475e6,
                 Link::between(Party::unit("M0ABC"), Party::group("ALL")),
-                Airtime {
-                    secrecy: Secrecy::Encrypted(Some("aes".into())),
-                    ..over(0.0)
-                },
+                Airtime { secrecy: Secrecy::Encrypted(Some("aes".into())), ..over(0.0) },
             ),
             t(0),
         );

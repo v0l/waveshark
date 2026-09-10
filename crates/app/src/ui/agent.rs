@@ -12,8 +12,8 @@
 //! that disagrees with the screen would be worse than no number at all.
 
 use super::*;
-use crate::agent::{Action, Ask, args};
-use serde_json::{Value, json};
+use crate::agent::{args, Action, Ask};
+use serde_json::{json, Value};
 
 /// Widest a screenshot is sent at. Wide enough that the spectrum's axis
 /// labels and a packet row are still legible; wider costs a lot, since a
@@ -96,7 +96,10 @@ fn param_value(p: &pipeline::param::Param) -> Value {
 /// The node decides the kind, not the caller: a float parameter given `3`
 /// takes 3.0 rather than becoming an integer, and a choice can be named by
 /// its word instead of by its index.
-fn param_from_json(p: &pipeline::param::Param, v: &Value) -> Result<pipeline::param::ParamValue, String> {
+fn param_from_json(
+    p: &pipeline::param::Param,
+    v: &Value,
+) -> Result<pipeline::param::ParamValue, String> {
     use pipeline::param::{ParamRange, ParamValue};
     match (&p.value, &p.range) {
         (_, ParamRange::Choices(opts)) => {
@@ -113,12 +116,14 @@ fn param_from_json(p: &pipeline::param::Param, v: &Value) -> Result<pipeline::pa
         (ParamValue::Float(_), _) => {
             v.as_f64().map(ParamValue::Float).ok_or_else(|| format!("{} takes a number", p.name))
         }
-        (ParamValue::Int(_), _) => {
-            v.as_i64().map(ParamValue::Int).ok_or_else(|| format!("{} takes a whole number", p.name))
-        }
-        (ParamValue::Bool(_), _) => {
-            v.as_bool().map(ParamValue::Bool).ok_or_else(|| format!("{} takes true or false", p.name))
-        }
+        (ParamValue::Int(_), _) => v
+            .as_i64()
+            .map(ParamValue::Int)
+            .ok_or_else(|| format!("{} takes a whole number", p.name)),
+        (ParamValue::Bool(_), _) => v
+            .as_bool()
+            .map(ParamValue::Bool)
+            .ok_or_else(|| format!("{} takes true or false", p.name)),
         (ParamValue::Text(_), _) => v
             .as_str()
             .map(|s| ParamValue::Text(s.to_string()))
@@ -138,7 +143,10 @@ fn secs(then: std::time::Instant, now: std::time::Instant) -> f64 {
 /// which the interface adopts, so the check is simply whether the change is
 /// still there a rebuild later.
 pub(super) enum Expect {
-    Stage { id: u64, present: bool },
+    Stage {
+        id: u64,
+        present: bool,
+    },
     Link(crate::patch::Link),
     Unlink((u64, usize)),
     /// Undo, redo and reset: whatever came back is the answer.
@@ -263,10 +271,7 @@ impl App {
                 // for, which is what a refusal looks like from here. The
                 // receiver says why in `refused`, which the drain has
                 // already put where the banner reads it.
-                let said = self
-                    .err
-                    .clone()
-                    .filter(|_| self.err_at.is_some_and(|at| at >= p.sent));
+                let said = self.err.clone().filter(|_| self.err_at.is_some_and(|at| at >= p.sent));
                 Err(said.unwrap_or_else(|| {
                     "the receiver refused the edit and put the last graph back".into()
                 }))
@@ -400,8 +405,8 @@ impl App {
         // megabyte of base64, which is most of what an agent can hold in one
         // reply, and the readouts it is looking at survive the reduction.
         let (w, h) = if w > SHOT_MAX_W { (SHOT_MAX_W, h * SHOT_MAX_W / w.max(1)) } else { (w, h) };
-        let png = image::RgbaImage::from_raw(img.width() as u32, img.height() as u32, buf).and_then(
-            |b| {
+        let png = image::RgbaImage::from_raw(img.width() as u32, img.height() as u32, buf)
+            .and_then(|b| {
                 let b = if b.width() == w {
                     b
                 } else {
@@ -410,8 +415,7 @@ impl App {
                 let mut out = std::io::Cursor::new(Vec::new());
                 b.write_to(&mut out, image::ImageFormat::Png).ok()?;
                 Some(out.into_inner())
-            },
-        );
+            });
         let answer = match png {
             Some(bytes) => {
                 use base64::Engine;
@@ -549,7 +553,9 @@ impl App {
             }
             Action::Location(a) => {
                 if !(-90.0..=90.0).contains(&a.lat) || !(-180.0..=180.0).contains(&a.lon) {
-                    return Err("a position is a latitude in -90..90 and a longitude in -180..180".into());
+                    return Err(
+                        "a position is a latitude in -90..90 and a longitude in -180..180".into()
+                    );
                 }
                 self.set_location(a.lat, a.lon);
                 Ok(ok())
@@ -736,14 +742,10 @@ impl App {
             .iter()
             .find(|n| n.id.0 == a.node)
             .ok_or_else(|| format!("no node {} in the running graph", a.node))?;
-        let param = node
-            .params
-            .iter()
-            .find(|p| p.name == a.name)
-            .ok_or_else(|| {
-                let names: Vec<&str> = node.params.iter().map(|p| p.name.as_str()).collect();
-                format!("{} has no parameter {:?}. It has {names:?}", node.label, a.name)
-            })?;
+        let param = node.params.iter().find(|p| p.name == a.name).ok_or_else(|| {
+            let names: Vec<&str> = node.params.iter().map(|p| p.name.as_str()).collect();
+            format!("{} has no parameter {:?}. It has {names:?}", node.label, a.name)
+        })?;
         let value = param_from_json(param, &a.value)?;
         self.cmds.push(Cmd::NodeParam(a.node, a.name, value));
         Ok(ok())
@@ -935,9 +937,9 @@ impl App {
             .rev()
             .filter(|l| {
                 a.within_seconds.is_none_or(|w| secs(l.rec.at, now) <= w)
-                    && want.as_ref().is_none_or(|w| {
-                        l.rec.protocol().to_lowercase().contains(w.as_str())
-                    })
+                    && want
+                        .as_ref()
+                        .is_none_or(|w| l.rec.protocol().to_lowercase().contains(w.as_str()))
             })
             .take(a.limit.unwrap_or(50))
             .map(|l| {
@@ -1419,11 +1421,7 @@ mod tests {
         for p in nodes::protocol::all() {
             assert_eq!(parse_mode(p.id()).unwrap(), ChanMode::Decode(p.id().into()), "{}", p.id());
             for alias in p.aliases() {
-                assert_eq!(
-                    parse_mode(alias).unwrap(),
-                    ChanMode::Decode(p.id().into()),
-                    "{alias}"
-                );
+                assert_eq!(parse_mode(alias).unwrap(), ChanMode::Decode(p.id().into()), "{alias}");
             }
         }
         // An unknown mode is refused with the whole list rather than becoming
@@ -1439,12 +1437,15 @@ mod tests {
     #[test]
     fn a_channel_outside_the_span_is_refused_with_the_span_in_the_message() {
         let mut a = app();
-        let err = call(&mut a, Action::AddChannel(args::AddChannel {
-            mhz: 123.4,
-            mode: Some("nfm".into()),
-            bandwidth_khz: None,
-            label: None,
-        }))
+        let err = call(
+            &mut a,
+            Action::AddChannel(args::AddChannel {
+                mhz: 123.4,
+                mode: Some("nfm".into()),
+                bandwidth_khz: None,
+                label: None,
+            }),
+        )
         .unwrap_err();
         assert!(err.contains("99.0000"), "{err}");
         assert!(err.contains("101.0000"), "{err}");
@@ -1455,12 +1456,15 @@ mod tests {
     #[test]
     fn a_channel_opens_changes_and_closes() {
         let mut a = app();
-        let id = call(&mut a, Action::AddChannel(args::AddChannel {
-            mhz: 100.4,
-            mode: Some("nfm".into()),
-            bandwidth_khz: Some(25.0),
-            label: Some("test".into()),
-        }))
+        let id = call(
+            &mut a,
+            Action::AddChannel(args::AddChannel {
+                mhz: 100.4,
+                mode: Some("nfm".into()),
+                bandwidth_khz: Some(25.0),
+                label: Some("test".into()),
+            }),
+        )
         .unwrap()["id"]
             .as_u64()
             .unwrap();
@@ -1469,19 +1473,22 @@ mod tests {
         assert_eq!(a.audio.channels[0].bandwidth_hz, Some(25_000.0));
         assert_eq!(a.audio.channels[0].label, "test");
 
-        call(&mut a, Action::SetChannel(args::SetChannel {
-            id,
-            mhz: Some(100.5),
-            mode: Some("lora".into()),
-            bandwidth_khz: None,
-            label: None,
-            on: None,
-            volume: Some(0.25),
-            muted: Some(true),
-            squelch_db: None,
-            agc: None,
-            voice: None,
-        }))
+        call(
+            &mut a,
+            Action::SetChannel(args::SetChannel {
+                id,
+                mhz: Some(100.5),
+                mode: Some("lora".into()),
+                bandwidth_khz: None,
+                label: None,
+                on: None,
+                volume: Some(0.25),
+                muted: Some(true),
+                squelch_db: None,
+                agc: None,
+                voice: None,
+            }),
+        )
         .unwrap();
         assert_eq!(a.audio.channels[0].freq, 100_500_000.0);
         assert_eq!(a.audio.channels[0].mode, ChanMode::Decode("lora".into()));
@@ -1490,19 +1497,22 @@ mod tests {
 
         // A channel that is not there is said so rather than silently doing
         // nothing, which from an agent's side are the same call.
-        assert!(call(&mut a, Action::SetChannel(args::SetChannel {
-            id: id + 99,
-            mhz: None,
-            mode: None,
-            bandwidth_khz: None,
-            label: None,
-            on: None,
-            volume: None,
-            muted: None,
-            squelch_db: None,
-            agc: None,
-            voice: None,
-        }))
+        assert!(call(
+            &mut a,
+            Action::SetChannel(args::SetChannel {
+                id: id + 99,
+                mhz: None,
+                mode: None,
+                bandwidth_khz: None,
+                label: None,
+                on: None,
+                volume: None,
+                muted: None,
+                squelch_db: None,
+                agc: None,
+                voice: None,
+            })
+        )
         .is_err());
 
         call(&mut a, Action::RemoveChannel(args::Channel { id })).unwrap();
@@ -1584,8 +1594,7 @@ mod tests {
         assert_eq!(peaks[1]["hz"], 100_500_000.0);
         // Two carriers, not eighteen: the shoulders of one peak are not
         // another peak.
-        let strongest: Vec<f64> =
-            peaks.iter().map(|p| p["dbfs"].as_f64().unwrap()).collect();
+        let strongest: Vec<f64> = peaks.iter().map(|p| p["dbfs"].as_f64().unwrap()).collect();
         assert_eq!(strongest, vec![-20.0, -35.0]);
     }
 
@@ -1631,8 +1640,8 @@ mod tests {
     fn an_agent_can_draw_a_graph() {
         let mut a = app();
         let before = a.chain.patch.stages().len();
-        let mixer = call(&mut a, Action::AddStage(args::StageKind { kind: "mixer".into() }))
-            .unwrap();
+        let mixer =
+            call(&mut a, Action::AddStage(args::StageKind { kind: "mixer".into() })).unwrap();
         assert_eq!(mixer["stages"].as_array().unwrap().len(), before + 1);
         let mix_id = a.chain.patch.stages().last().unwrap().id;
         call(&mut a, Action::AddStage(args::StageKind { kind: "decimate".into() })).unwrap();
@@ -1640,17 +1649,23 @@ mod tests {
         assert_ne!(mix_id, dec_id);
 
         // The span into the mixer, the mixer into the decimator.
-        call(&mut a, Action::Connect(args::Connect {
-            source: args::Tap::Span,
-            to_stage: mix_id,
-            to_port: 0,
-        }))
+        call(
+            &mut a,
+            Action::Connect(args::Connect {
+                source: args::Tap::Span,
+                to_stage: mix_id,
+                to_port: 0,
+            }),
+        )
         .unwrap();
-        let v = call(&mut a, Action::Connect(args::Connect {
-            source: args::Tap::Stage { id: mix_id, port: 0 },
-            to_stage: dec_id,
-            to_port: 0,
-        }))
+        let v = call(
+            &mut a,
+            Action::Connect(args::Connect {
+                source: args::Tap::Stage { id: mix_id, port: 0 },
+                to_stage: dec_id,
+                to_port: 0,
+            }),
+        )
         .unwrap();
         assert_eq!(v["links"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -1663,21 +1678,28 @@ mod tests {
 
         // A stage cannot feed itself, and the patch says so rather than
         // quietly drawing nothing.
-        assert!(call(&mut a, Action::Connect(args::Connect {
-            source: args::Tap::Stage { id: dec_id, port: 0 },
-            to_stage: dec_id,
-            to_port: 0,
-        }))
+        assert!(call(
+            &mut a,
+            Action::Connect(args::Connect {
+                source: args::Tap::Stage { id: dec_id, port: 0 },
+                to_stage: dec_id,
+                to_port: 0,
+            })
+        )
         .is_err());
         // Neither can a wire name a stage that is not there.
-        assert!(call(&mut a, Action::Connect(args::Connect {
-            source: args::Tap::Span,
-            to_stage: dec_id + 4096,
-            to_port: 0,
-        }))
+        assert!(call(
+            &mut a,
+            Action::Connect(args::Connect {
+                source: args::Tap::Span,
+                to_stage: dec_id + 4096,
+                to_port: 0,
+            })
+        )
         .is_err());
-        assert!(call(&mut a, Action::AddStage(args::StageKind { kind: "wobbulator".into() }))
-            .is_err());
+        assert!(
+            call(&mut a, Action::AddStage(args::StageKind { kind: "wobbulator".into() })).is_err()
+        );
         assert!(call(&mut a, Action::RemoveStage(args::StageId { stage: dec_id + 4096 })).is_err());
 
         // Deleting takes the wires with it: guessing that the stage after it

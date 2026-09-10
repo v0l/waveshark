@@ -89,9 +89,7 @@ fn viterbi(soft: &[i32], n: usize) -> Vec<u8> {
             }
             for b in 0u8..2 {
                 let o = branch((b << 4) | state);
-                let m: i32 = (0..3)
-                    .map(|k| if o[k] == 0 { s[k] } else { -s[k] })
-                    .sum::<i32>()
+                let m: i32 = (0..3).map(|k| if o[k] == 0 { s[k] } else { -s[k] }).sum::<i32>()
                     + metric[state as usize];
                 let ns = (((state << 1) | b) & 0xf) as usize;
                 if m > next[ns] {
@@ -194,7 +192,11 @@ fn crc7(bits: &[u8]) -> [u8; 8] {
 
 /// Build the 432 on-channel bits (type-5, scrambled) from two STEC frames.
 /// The counterpart of `decode`, for tests and the synthetic corpus.
-pub fn encode(scramb: u32, frame_a: &[u8; FRAME_BITS], frame_b: &[u8; FRAME_BITS]) -> [u8; CHAN_BITS] {
+pub fn encode(
+    scramb: u32,
+    frame_a: &[u8; FRAME_BITS],
+    frame_b: &[u8; FRAME_BITS],
+) -> [u8; CHAN_BITS] {
     let mut type2 = vec![0u8; TYPE2];
     for n in 0..FRAME_BITS {
         type2[TYPE2_A[n] as usize] = frame_a[n];
@@ -247,10 +249,7 @@ pub fn decode(scramb: u32, chan: &[u8; CHAN_BITS]) -> ([[u8; FRAME_BITS]; 2], bo
 
     let class2_speech: Vec<u8> = (214..274).map(|i| type2[i]).collect();
     let crc = crc7(&class2_speech);
-    let crc_ok = TYPE2_PARITY
-        .iter()
-        .zip(crc.iter())
-        .all(|(&i, &p)| type2[i as usize] == p);
+    let crc_ok = TYPE2_PARITY.iter().zip(crc.iter()).all(|(&i, &p)| type2[i as usize] == p);
 
     let mut frames = [[0u8; FRAME_BITS]; 2];
     for n in 0..FRAME_BITS {

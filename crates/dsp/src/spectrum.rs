@@ -286,7 +286,9 @@ mod tests {
         // Row of -100 kHz is below centre, +100 kHz above; find the loudest
         // row in the first and last columns.
         let loudest = |col: usize| {
-            (0..rows).max_by(|&a, &b| img[a * cols + col].partial_cmp(&img[b * cols + col]).unwrap()).unwrap()
+            (0..rows)
+                .max_by(|&a, &b| img[a * cols + col].partial_cmp(&img[b * cols + col]).unwrap())
+                .unwrap()
         };
         let lo = loudest(4);
         let hi = loudest(cols - 5);

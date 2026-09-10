@@ -18,10 +18,7 @@ fn main() {
         src.rate().as_f64() / 1e6,
         src.center().as_f64() / 1e6
     );
-    let spec = PortSpec {
-        spec: StreamSpec::iq(src.rate().as_f64(), src.center()),
-        latency: 0,
-    };
+    let spec = PortSpec { spec: StreamSpec::iq(src.rate().as_f64(), src.center()), latency: 0 };
     let mut node = nodes::droneid_nodes::DroneIdNode::new();
     node.negotiate(&spec).expect("15.36 MS/s or more");
     let ins = [spec];
@@ -30,8 +27,7 @@ fn main() {
     let mut rows = 0usize;
     for block in buf.samples.chunks(65_536) {
         let mut output = Payload::Frames(Vec::new());
-        node.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx)
-            .unwrap();
+        node.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx).unwrap();
         for f in output.as_frames().unwrap_or(&Vec::new()) {
             rows += 1;
             let d = nodes::droneid_nodes::droneid_decoded(&f.bytes, common::Hz(f.center_hz))

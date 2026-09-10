@@ -53,9 +53,9 @@ mod detect;
 mod extract;
 
 pub use bank::{BANK_CHANNEL_HZ, BANK_MIN_CHANNELS};
+use common::SourceId;
 pub use detect::SourceDetector;
 pub use extract::SourceExtractor;
-use common::SourceId;
 
 /// Everything the pair is built with.
 ///
@@ -364,7 +364,6 @@ impl SourceEvent {
     }
 }
 
-
 fn frame_start(frame: u64, hop: u64) -> u64 {
     frame * hop
 }
@@ -384,8 +383,8 @@ fn hz_of_bin(bin: f64, n: usize, bin_hz: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::detect::floor_bias;
+    use super::*;
     use common::{SourceBlock, SourceState, C32};
 
     fn noise(n: usize, amp: f32, seed: u64) -> Vec<C32> {
@@ -473,7 +472,8 @@ mod tests {
         let mut d = SourceDetector::new(RATE, RATE, cfg());
         let mut opened = 0;
         for chunk in noise(3_000_000, 0.1, 3).chunks(16384) {
-            opened += d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
+            opened +=
+                d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
         }
         assert_eq!(opened, 0, "noise alone opened {opened} sources");
     }
@@ -492,22 +492,35 @@ mod tests {
         for chunk in x.chunks(8192) {
             events.extend_from_slice(d.process(chunk));
         }
-        let opened: Vec<_> = events.iter().filter_map(|e| match e {
-            SourceEvent::Opened(s) => Some(*s),
-            _ => None,
-        }).collect();
+        let opened: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                SourceEvent::Opened(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
         assert_eq!(opened.len(), 1, "{events:?}");
         let s = opened[0];
         assert!((s.center_hz - 123_000.0).abs() < 2.0 * d.bin_hz(), "centre {}", s.center_hz);
         assert!(s.lo_hz < 123_000.0 && s.hi_hz > 123_000.0, "{s:?}");
-        assert!((s.start_sample as i64 - start as i64).abs() < 2 * d.fft_size() as i64, "start {}", s.start_sample);
-        let closed: Vec<_> = events.iter().filter_map(|e| match e {
-            SourceEvent::Closed(s) => Some(*s),
-            _ => None,
-        }).collect();
+        assert!(
+            (s.start_sample as i64 - start as i64).abs() < 2 * d.fft_size() as i64,
+            "start {}",
+            s.start_sample
+        );
+        let closed: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                SourceEvent::Closed(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
         assert_eq!(closed.len(), 1, "{events:?}");
         let end = closed[0].end_sample.unwrap();
-        assert!((end as i64 - (start + 50_000) as i64).abs() < 2 * d.fft_size() as i64, "end {end}");
+        assert!(
+            (end as i64 - (start + 50_000) as i64).abs() < 2 * d.fft_size() as i64,
+            "end {end}"
+        );
     }
 
     #[test]
@@ -617,7 +630,8 @@ mod tests {
         assert!(!blocks.is_empty(), "nothing extracted");
         let ids: std::collections::BTreeSet<_> = blocks.iter().map(|b| b.id).collect();
         assert_eq!(ids.len(), 1, "one source, got {ids:?}");
-        let states: Vec<_> = blocks.iter().map(|b| (b.state, b.start_sample, b.samples.len())).collect();
+        let states: Vec<_> =
+            blocks.iter().map(|b| (b.state, b.start_sample, b.samples.len())).collect();
         assert_eq!(blocks.first().unwrap().state, SourceState::Opened, "{states:?}");
         assert_eq!(blocks.last().unwrap().state, SourceState::Closed, "{states:?}");
         // Contiguous: every block starts where the previous one stopped.
@@ -756,7 +770,8 @@ mod tests {
         }
         let mut closed = 0;
         for chunk in x.chunks(8192) {
-            closed += d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Closed(_))).count();
+            closed +=
+                d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Closed(_))).count();
         }
         assert_eq!(closed, 0);
         assert_eq!(d.live().count(), 1);
@@ -775,7 +790,8 @@ mod tests {
         }
         let mut opened = 0;
         for chunk in x.chunks(8192) {
-            opened += d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
+            opened +=
+                d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
         }
         assert!(opened > 0, "a permanent carrier never opened a source");
     }
@@ -874,7 +890,11 @@ mod tests {
         let s = opened[0];
         assert!(s.lo_hz < f0 && s.hi_hz > f1, "extent {}..{} misses a tone", s.lo_hz, s.hi_hz);
         let mid = (f0 + f1) / 2.0;
-        assert!((s.center_hz - mid).abs() < 4.0 * d.bin_hz(), "centre {} for tones at {f0} and {f1}", s.center_hz);
+        assert!(
+            (s.center_hz - mid).abs() < 4.0 * d.bin_hz(),
+            "centre {} for tones at {f0} and {f1}",
+            s.center_hz
+        );
     }
 
     #[test]
@@ -951,7 +971,9 @@ mod tests {
             for e in d.process(chunk) {
                 match e {
                     SourceEvent::Opened(s) => open.push(s.id),
-                    SourceEvent::Closed(s) | SourceEvent::Superseded(s) => open.retain(|id| *id != s.id),
+                    SourceEvent::Closed(s) | SourceEvent::Superseded(s) => {
+                        open.retain(|id| *id != s.id)
+                    }
                 }
             }
             most = most.max(open.len());
@@ -1026,10 +1048,13 @@ mod tests {
             events.extend_from_slice(&ev);
             e.process(chunk, &ev, &mut blocks);
         }
-        let opened: Vec<Source> = events.iter().filter_map(|e| match e {
-            SourceEvent::Opened(s) => Some(*s),
-            _ => None,
-        }).collect();
+        let opened: Vec<Source> = events
+            .iter()
+            .filter_map(|e| match e {
+                SourceEvent::Opened(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
         assert!(opened.len() >= 2, "never reopened: {events:?}");
         let last = opened.last().unwrap();
         assert!(last.bandwidth_hz() > 150_000.0, "final width {}", last.bandwidth_hz());
@@ -1038,7 +1063,11 @@ mod tests {
         // noticed to be wide.
         let wide: Vec<&SourceBlock> = blocks.iter().filter(|b| b.id == last.id).collect();
         assert!(!wide.is_empty());
-        assert!(wide[0].start_sample < start as u64 + 20_000, "restarted at {}", wide[0].start_sample);
+        assert!(
+            wide[0].start_sample < start as u64 + 20_000,
+            "restarted at {}",
+            wide[0].start_sample
+        );
         assert!(wide[0].rate >= 375_000.0, "rate {}", wide[0].rate);
         let old: Vec<&SourceBlock> = blocks.iter().filter(|b| b.id == opened[0].id).collect();
         assert_eq!(old.last().unwrap().state, SourceState::Superseded);
@@ -1048,7 +1077,11 @@ mod tests {
         let mut expect = wide[0].start_sample;
         for b in &wide {
             let off = b.start_sample as i64 - expect as i64;
-            assert!(off.unsigned_abs() < factor, "reopened stream jumps at {} (expected {expect})", b.start_sample);
+            assert!(
+                off.unsigned_abs() < factor,
+                "reopened stream jumps at {} (expected {expect})",
+                b.start_sample
+            );
             expect = b.start_sample + b.samples.len() as u64 * factor;
         }
     }
@@ -1067,7 +1100,8 @@ mod tests {
         }
         let mut opened = 0;
         for chunk in x.chunks(8192) {
-            opened += d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
+            opened +=
+                d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
         }
         assert_eq!(opened, 0, "a one-bin spur opened a source");
     }

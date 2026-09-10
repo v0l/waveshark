@@ -23,12 +23,8 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 const ATTEN_DB: f64 = 70.0;
 
 /// The response names, in the order a control offers them.
-const RESPONSES: [Response; 4] = [
-    Response::Lowpass,
-    Response::Highpass,
-    Response::Bandpass,
-    Response::Bandstop,
-];
+const RESPONSES: [Response; 4] =
+    [Response::Lowpass, Response::Highpass, Response::Bandpass, Response::Bandstop];
 
 fn response_index(r: Response) -> usize {
     RESPONSES.iter().position(|x| *x == r).unwrap_or(0)
@@ -68,14 +64,7 @@ impl FirFilterNode {
     }
 
     fn taps_now(&self) -> Vec<f32> {
-        design(
-            self.response,
-            self.taps,
-            self.rate.max(1.0),
-            self.freq_hz,
-            self.width_hz,
-            ATTEN_DB,
-        )
+        design(self.response, self.taps, self.rate.max(1.0), self.freq_hz, self.width_hz, ATTEN_DB)
     }
 
     fn redesign(&mut self, channels: usize, iq: bool) {
@@ -84,9 +73,7 @@ impl FirFilterNode {
             self.iq = Fir::new(h);
             self.real.clear();
         } else {
-            self.real = (0..channels.max(1))
-                .map(|_| RealFir::new(h.clone()))
-                .collect();
+            self.real = (0..channels.max(1)).map(|_| RealFir::new(h.clone())).collect();
         }
     }
 }
@@ -145,11 +132,7 @@ impl Simple for FirFilterNode {
             Param::float("freq_hz", self.freq_hz, 10.0..=30e6)
                 .unit("Hz")
                 .log()
-                .label(if self.response.is_band() {
-                    "Band centre"
-                } else {
-                    "Cutoff"
-                }),
+                .label(if self.response.is_band() { "Band centre" } else { "Cutoff" }),
             Param::float("width_hz", self.width_hz, 10.0..=30e6)
                 .unit("Hz")
                 .log()
@@ -168,9 +151,7 @@ impl Simple for FirFilterNode {
             "width_hz" => self.width_hz = v.as_f64().unwrap_or(self.width_hz),
             "taps" => self.taps = v.as_i64().unwrap_or(self.taps as i64).clamp(3, 4095) as usize,
             _ => {
-                return Err(common::Error::other(format!(
-                    "fir_filter: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("fir_filter: unknown parameter {name:?}")))
             }
         }
         // Designed again rather than at the next negotiation: a filter that
@@ -193,10 +174,7 @@ pub struct RealFir {
 impl RealFir {
     pub fn new(taps: Vec<f32>) -> Self {
         let n = taps.len();
-        Self {
-            taps,
-            hist: vec![0.0; n],
-        }
+        Self { taps, hist: vec![0.0; n] }
     }
 
     pub fn reset(&mut self) {
@@ -239,14 +217,7 @@ pub struct IirFilterNode {
 
 impl IirFilterNode {
     pub fn new(response: Response, freq_hz: f64, q: f64) -> Self {
-        Self {
-            response,
-            freq_hz,
-            q: q.max(0.05),
-            rate: 0.0,
-            sections: Vec::new(),
-            iq: false,
-        }
+        Self { response, freq_hz, q: q.max(0.05), rate: 0.0, sections: Vec::new(), iq: false }
     }
 
     fn redesign(&mut self, n: usize) {
@@ -306,14 +277,8 @@ impl Simple for IirFilterNode {
             Param::float("freq_hz", self.freq_hz, 10.0..=30e6)
                 .unit("Hz")
                 .log()
-                .label(if self.response.is_band() {
-                    "Band centre"
-                } else {
-                    "Cutoff"
-                }),
-            Param::float("q", self.q, 0.1..=50.0)
-                .log()
-                .label("Resonance: higher is narrower"),
+                .label(if self.response.is_band() { "Band centre" } else { "Cutoff" }),
+            Param::float("q", self.q, 0.1..=50.0).log().label("Resonance: higher is narrower"),
         ]
     }
 
@@ -326,9 +291,7 @@ impl Simple for IirFilterNode {
             "freq_hz" => self.freq_hz = v.as_f64().unwrap_or(self.freq_hz),
             "q" => self.q = v.as_f64().unwrap_or(self.q).clamp(0.05, 200.0),
             _ => {
-                return Err(common::Error::other(format!(
-                    "iir_filter: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("iir_filter: unknown parameter {name:?}")))
             }
         }
         let n = self.sections.len();

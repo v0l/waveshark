@@ -479,10 +479,7 @@ impl HackRf {
             .filter(|d| d.vendor_id() == HACKRF_VID && is_hackrf_pid(d.product_id()))
             .collect();
 
-        let dev_info = devices
-            .into_iter()
-            .nth(index)
-            .ok_or(Error::DeviceNotFound)?;
+        let dev_info = devices.into_iter().nth(index).ok_or(Error::DeviceNotFound)?;
 
         // Extract USB API version from bcdDevice descriptor field
         let usb_api_version = dev_info.device_version();
@@ -495,19 +492,11 @@ impl HackRf {
             let _ = usb_device.detach_kernel_driver(0);
         }
 
-        let iface = usb_device
-            .claim_interface(0)
-            .wait()
-            .map_err(Error::ClaimFailed)?;
+        let iface = usb_device.claim_interface(0).wait().map_err(Error::ClaimFailed)?;
 
         tracing::info!("HackRF device opened successfully");
 
-        Ok(HackRf {
-            iface,
-            usb_device,
-            usb_api_version,
-            rx_endpoint: None,
-        })
+        Ok(HackRf { iface, usb_device, usb_api_version, rx_endpoint: None })
     }
 
     // ─── Device Info Queries ──────────────────────────────────────────────
@@ -571,10 +560,8 @@ impl HackRf {
         let serial_3 = u32::from_le_bytes(data[20..24].try_into().unwrap());
 
         // Format serial as 32-char hex string (matching hackrf_info output)
-        let serial_str = format!(
-            "{:08x}{:08x}{:08x}{:08x}",
-            serial_0, serial_1, serial_2, serial_3
-        );
+        let serial_str =
+            format!("{:08x}{:08x}{:08x}{:08x}", serial_0, serial_1, serial_2, serial_3);
 
         Ok((part_id_0, part_id_1, serial_str))
     }
@@ -586,9 +573,7 @@ impl HackRf {
     /// Reference: hackrf.c `hackrf_board_rev_read()` - vendor request 45
     pub fn board_rev(&self) -> Result<u8> {
         if self.usb_api_version < 0x0106 {
-            return Err(Error::ConfigFailed(
-                "board_rev requires USB API >= 0x0106".into(),
-            ));
+            return Err(Error::ConfigFailed("board_rev requires USB API >= 0x0106".into()));
         }
         let data = self.control_in(VendorRequest::BoardRevRead, 0, 0, 1)?;
         if data.is_empty() {
@@ -645,12 +630,7 @@ impl HackRf {
 
         self.control_out(VendorRequest::SetFreq, 0, 0, &data)?;
 
-        tracing::debug!(
-            "Set frequency to {} Hz ({}.{:06} MHz)",
-            freq_hz,
-            freq_mhz,
-            freq_remainder
-        );
+        tracing::debug!("Set frequency to {} Hz ({}.{:06} MHz)", freq_hz, freq_mhz, freq_remainder);
         Ok(())
     }
 
@@ -706,12 +686,7 @@ impl HackRf {
         let w_value = (bandwidth_hz & 0xFFFF) as u16;
         let w_index = (bandwidth_hz >> 16) as u16;
 
-        self.control_out(
-            VendorRequest::BasebandFilterBandwidthSet,
-            w_value,
-            w_index,
-            &[],
-        )?;
+        self.control_out(VendorRequest::BasebandFilterBandwidthSet, w_value, w_index, &[])?;
 
         tracing::debug!("Set baseband filter bandwidth to {} Hz", bandwidth_hz);
         Ok(())
@@ -724,9 +699,7 @@ impl HackRf {
     /// Reference: hackrf.c `hackrf_set_lna_gain()` - vendor request 19
     pub fn set_lna_gain(&self, gain_db: u32) -> Result<()> {
         if gain_db > 40 {
-            return Err(Error::ConfigFailed(format!(
-                "LNA gain must be 0-40, got {gain_db}"
-            )));
+            return Err(Error::ConfigFailed(format!("LNA gain must be 0-40, got {gain_db}")));
         }
         // Round down to 8 dB steps (mask off lower 3 bits)
         let value = gain_db & !0x07;
@@ -750,9 +723,7 @@ impl HackRf {
     /// Reference: hackrf.c `hackrf_set_vga_gain()` - vendor request 20
     pub fn set_vga_gain(&self, gain_db: u32) -> Result<()> {
         if gain_db > 62 {
-            return Err(Error::ConfigFailed(format!(
-                "VGA gain must be 0-62, got {gain_db}"
-            )));
+            return Err(Error::ConfigFailed(format!("VGA gain must be 0-62, got {gain_db}")));
         }
         // Round down to 2 dB steps (mask off LSB)
         let value = gain_db & !0x01;
@@ -775,10 +746,7 @@ impl HackRf {
     pub fn set_amp_enable(&self, enable: bool) -> Result<()> {
         let value = if enable { 1u16 } else { 0u16 };
         self.control_out(VendorRequest::AmpEnable, value, 0, &[])?;
-        tracing::debug!(
-            "RF amplifier {}",
-            if enable { "enabled" } else { "disabled" }
-        );
+        tracing::debug!("RF amplifier {}", if enable { "enabled" } else { "disabled" });
         Ok(())
     }
 
@@ -911,16 +879,8 @@ impl HackRf {
         num_transfers: usize,
         transfer_size: usize,
     ) -> Result<AsyncReadHandle> {
-        let num_transfers = if num_transfers == 0 {
-            DEFAULT_NUM_TRANSFERS
-        } else {
-            num_transfers
-        };
-        let transfer_size = if transfer_size == 0 {
-            TRANSFER_BUFFER_SIZE
-        } else {
-            transfer_size
-        };
+        let num_transfers = if num_transfers == 0 { DEFAULT_NUM_TRANSFERS } else { num_transfers };
+        let transfer_size = if transfer_size == 0 { TRANSFER_BUFFER_SIZE } else { transfer_size };
 
         if !transfer_size.is_multiple_of(512) {
             return Err(Error::StreamingError(format!(
@@ -958,13 +918,7 @@ impl HackRf {
             })
             .map_err(|e| Error::StreamingError(format!("failed to spawn streaming thread: {e}")))?;
 
-        Ok(AsyncReadHandle {
-            rx,
-            ctrl_tx,
-            stop,
-            dropped,
-            thread: Some(thread),
-        })
+        Ok(AsyncReadHandle { rx, ctrl_tx, stop, dropped, thread: Some(thread) })
     }
 
     /// Start transmitting and return a handle to feed samples into.
@@ -984,16 +938,8 @@ impl HackRf {
         num_transfers: usize,
         transfer_size: usize,
     ) -> Result<AsyncWriteHandle> {
-        let num_transfers = if num_transfers == 0 {
-            DEFAULT_NUM_TRANSFERS
-        } else {
-            num_transfers
-        };
-        let transfer_size = if transfer_size == 0 {
-            TRANSFER_BUFFER_SIZE
-        } else {
-            transfer_size
-        };
+        let num_transfers = if num_transfers == 0 { DEFAULT_NUM_TRANSFERS } else { num_transfers };
+        let transfer_size = if transfer_size == 0 { TRANSFER_BUFFER_SIZE } else { transfer_size };
 
         if !transfer_size.is_multiple_of(512) {
             return Err(Error::StreamingError(format!(
@@ -1029,14 +975,7 @@ impl HackRf {
             })
             .map_err(|e| Error::StreamingError(format!("failed to spawn transmit thread: {e}")))?;
 
-        Ok(AsyncWriteHandle {
-            tx,
-            ctrl_tx,
-            stop,
-            idle,
-            queued,
-            thread: Some(thread),
-        })
+        Ok(AsyncWriteHandle { tx, ctrl_tx, stop, idle, queued, thread: Some(thread) })
     }
 
     /// Read a chunk of RX data synchronously.
@@ -1530,11 +1469,7 @@ mod tx_tests {
     use super::*;
 
     fn filler() -> (TxFiller, AtomicU64, AtomicU64) {
-        (
-            TxFiller { pend: Vec::new() },
-            AtomicU64::new(0),
-            AtomicU64::new(0),
-        )
+        (TxFiller { pend: Vec::new() }, AtomicU64::new(0), AtomicU64::new(0))
     }
 
     #[test]

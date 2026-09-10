@@ -379,7 +379,8 @@ impl C4fmDetector {
         let center = if self.scratch.is_empty() {
             0.0
         } else {
-            self.scratch.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            self.scratch
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             self.scratch[self.scratch.len() / 2]
         };
 
@@ -502,7 +503,14 @@ mod tests {
     /// side. `offset_hz` is the tuning error every level rides on, and
     /// `clock_ppm` the difference between the transmitter's symbol clock and
     /// the one the detector is configured for.
-    fn burst(levels: &[u8], step_hz: f64, offset_hz: f64, clock_ppm: f64, amp: f32, noise: f32) -> Vec<C32> {
+    fn burst(
+        levels: &[u8],
+        step_hz: f64,
+        offset_hz: f64,
+        clock_ppm: f64,
+        amp: f32,
+        noise: f32,
+    ) -> Vec<C32> {
         let mut seed = 12345u64;
         let mut rng = move || {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -517,7 +525,8 @@ mod tests {
         let mut t = 0.0f64;
         let total = levels.len() as f64 * sps;
         while t < total {
-            let f = offset_hz + step_hz * super::fourlevel::IDEAL[levels[(t / sps) as usize] as usize] as f64;
+            let f = offset_hz
+                + step_hz * super::fourlevel::IDEAL[levels[(t / sps) as usize] as usize] as f64;
             phase = (phase + std::f64::consts::TAU * f / RATE).rem_euclid(std::f64::consts::TAU);
             v.push(C32::new(amp * phase.cos() as f32 + rng(), amp * phase.sin() as f32 + rng()));
             t += 1.0;

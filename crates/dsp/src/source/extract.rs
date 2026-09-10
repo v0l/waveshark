@@ -84,7 +84,13 @@ impl Chan {
 /// demodulator that could see the carrier and read nothing from it. When
 /// the rate is at the floor the stream is wider than the signal asked for,
 /// so it is filled.
-fn design_stages(rate: f64, bw: f64, want: f64, floored: bool, atten_db: f64) -> (Option<FirDecim>, FirDecim, f64) {
+fn design_stages(
+    rate: f64,
+    bw: f64,
+    want: f64,
+    floored: bool,
+    atten_db: f64,
+) -> (Option<FirDecim>, FirDecim, f64) {
     let total = ((rate / want).floor() as usize).max(1);
     let f1 = ((rate / (bw * 6.0)).floor() as usize).clamp(1, total);
     let (f1, f2) = if f1 >= 2 && total / f1 >= 1 { (f1, total / f1) } else { (1, total) };
@@ -143,12 +149,7 @@ pub struct SourceExtractor {
 /// between blocks lands in the same order, against the same ring, as the
 /// detector's own events do.
 enum Command {
-    Open {
-        id: SourceId,
-        offset_hz: f64,
-        width_hz: f64,
-        from: u64,
-    },
+    Open { id: SourceId, offset_hz: f64, width_hz: f64, from: u64 },
     Close(SourceId),
 }
 
@@ -470,7 +471,11 @@ impl SourceExtractor {
         let state = if !c.opened {
             SourceState::Opened
         } else if c.end.is_some_and(|e| stop >= g.at(e)) {
-            if c.superseded { SourceState::Superseded } else { SourceState::Closed }
+            if c.superseded {
+                SourceState::Superseded
+            } else {
+                SourceState::Closed
+            }
         } else {
             SourceState::Running
         };

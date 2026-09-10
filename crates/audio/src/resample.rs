@@ -189,9 +189,7 @@ mod tests {
         let mut out = Vec::new();
         r.process(&input, &mut out);
 
-        let worst = (100..1_100)
-            .map(|i| (out[i] - input[i]).abs())
-            .fold(0.0f32, f32::max);
+        let worst = (100..1_100).map(|i| (out[i] - input[i]).abs()).fold(0.0f32, f32::max);
         assert!(worst < 0.02, "unity resample is not transparent, worst error {worst:.4}");
     }
 }

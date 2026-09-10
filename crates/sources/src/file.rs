@@ -130,11 +130,7 @@ impl FileSource {
         let info = DeviceInfo {
             kind: DriverKind::File,
             id: path.display().to_string(),
-            label: path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("capture")
-                .to_string(),
+            label: path.file_name().and_then(|s| s.to_str()).unwrap_or("capture").to_string(),
             tuner: "file".into(),
             ranges: vec![TunerRange { range: Hz(0)..=Hz(u64::MAX), label: "file" }],
             rates: vec![rate],
@@ -147,16 +143,7 @@ impl FileSource {
             tx: None,
         };
 
-        Ok(Self {
-            path,
-            info,
-            center,
-            rate,
-            format,
-            block: 16384,
-            repeat: false,
-            realtime: false,
-        })
+        Ok(Self { path, info, center, rate, format, block: 16384, repeat: false, realtime: false })
     }
 
     pub fn with_rate(mut self, r: Sps) -> Self {
@@ -202,9 +189,7 @@ impl FileSource {
     }
 
     pub fn duration(&self) -> Result<std::time::Duration> {
-        Ok(std::time::Duration::from_secs_f64(
-            self.sample_count()? as f64 / self.rate.as_f64(),
-        ))
+        Ok(std::time::Duration::from_secs_f64(self.sample_count()? as f64 / self.rate.as_f64()))
     }
 
     /// Read the whole file into memory. Convenient for tests; a multi-gigabyte
@@ -309,8 +294,7 @@ impl RxStream for FileStream {
         self.format.convert(&self.raw[..usable], &mut samples);
 
         if self.realtime {
-            let want =
-                std::time::Duration::from_secs_f64(self.seq as f64 / self.rate.as_f64());
+            let want = std::time::Duration::from_secs_f64(self.seq as f64 / self.rate.as_f64());
             let elapsed = self.start.elapsed();
             if want > elapsed {
                 std::thread::sleep(want - elapsed);

@@ -13,14 +13,8 @@ fn mean_offset(frames: &[dsp::BleFrame]) -> f32 {
 
 fn main() {
     let path = std::env::args().nth(1).expect("file");
-    let rate: f64 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16e6);
-    let centre: f64 = std::env::args()
-        .nth(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2.43e9);
+    let rate: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(16e6);
+    let centre: f64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(2.43e9);
     let bytes = std::fs::read(&path).unwrap();
     let signed = path.ends_with(".cs8");
     let iq: Vec<C32> = bytes
@@ -50,11 +44,7 @@ fn main() {
     );
     let mut by: BTreeMap<String, usize> = BTreeMap::new();
     for f in &frames {
-        let mac: Vec<String> = f.pdu[2..8]
-            .iter()
-            .rev()
-            .map(|b| format!("{b:02X}"))
-            .collect();
+        let mac: Vec<String> = f.pdu[2..8].iter().rev().map(|b| format!("{b:02X}")).collect();
         *by.entry(mac.join(":")).or_default() += 1;
     }
     for (mac, n) in &by {

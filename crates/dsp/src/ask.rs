@@ -359,9 +359,8 @@ mod tests {
     fn a_steady_carrier_is_not_keying() {
         let mut d = AskDetector::new(RATE, AskConfig::default());
         let mut out = Vec::new();
-        let env: Vec<f32> = (0..250_000)
-            .map(|i| if (20_000..80_000).contains(&i) { 1.0 } else { 0.01 })
-            .collect();
+        let env: Vec<f32> =
+            (0..250_000).map(|i| if (20_000..80_000).contains(&i) { 1.0 } else { 0.01 }).collect();
         d.process(&env, &mut out);
         assert!(out.is_empty(), "a steady carrier produced {} packages", out.len());
         assert_eq!(d.take_stats().rejected_no_separation, 1, "rejection went unreported");
@@ -373,8 +372,7 @@ mod tests {
             let mut seed = 11u64;
             (0..250_000)
                 .map(|_| {
-                    seed =
-                        seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                     (seed >> 33) as f32 / (1u64 << 31) as f32 * 0.05
                 })
                 .collect()

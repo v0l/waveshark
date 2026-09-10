@@ -68,12 +68,7 @@ impl Framing {
     /// The first four bytes after the preamble, the candidate sync word, as
     /// hex. Two receptions of one device agree here; two devices do not.
     pub fn sync_hex(&self) -> String {
-        self.frame
-            .as_bytes()
-            .iter()
-            .take(4)
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        self.frame.as_bytes().iter().take(4).map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -116,10 +111,8 @@ pub fn frame_from_preamble(bits: &BitBuffer, min_bits: usize) -> Option<Framing>
         start,
         preamble_bits: len,
         frame: bits.slice(after, bits.len() - after),
-        rolled_back: bits.slice(
-            after.saturating_sub(ROLLBACK),
-            bits.len() - after + ROLLBACK.min(after),
-        ),
+        rolled_back: bits
+            .slice(after.saturating_sub(ROLLBACK), bits.len() - after + ROLLBACK.min(after)),
         repeats,
     })
 }
@@ -202,16 +195,10 @@ mod tests {
         // The observation this exists for: one transmitter received twice, the
         // detector triggering at a different edge each time. Before alignment
         // the two dumps share no byte.
-        let frame = [
-            0x55u8, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0xf7, 0x12, 0x34, 0x9a,
-        ];
+        let frame = [0x55u8, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0xf7, 0x12, 0x34, 0x9a];
         let a = frame_from_preamble(&shifted(0, &frame), MIN_PREAMBLE_BITS).expect("a");
         let b = frame_from_preamble(&shifted(3, &frame), MIN_PREAMBLE_BITS).expect("b");
-        assert_eq!(
-            a.frame.as_bytes(),
-            b.frame.as_bytes(),
-            "phase changed the frame"
-        );
+        assert_eq!(a.frame.as_bytes(), b.frame.as_bytes(), "phase changed the frame");
         assert_eq!(a.sync_hex(), b.sync_hex());
         // The cut runs into the sync for as many bits as it keeps
         // alternating, so what comes out is a fixed rotation of the sync, not
@@ -254,17 +241,12 @@ mod tests {
         // 868.49 MHz, and the second carried a counter one higher than the
         // first, which is the whole reason it is worth keeping.
         let mut air = vec![0x55u8, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0xf7, 0x12, 0x15];
-        air.extend_from_slice(&[
-            0x55, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0xf7, 0x12, 0x16, 0, 0,
-        ]);
+        air.extend_from_slice(&[0x55, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0xf7, 0x12, 0x16, 0, 0]);
         let f = frame_from_preamble(&shifted(0, &air), MIN_PREAMBLE_BITS).expect("framing");
         assert_eq!(f.repeats.len(), 1, "the second copy was dropped");
         let (a, b) = (f.frame.as_bytes(), f.repeats[0].as_bytes());
         assert_eq!(a[..4], b[..4], "the two copies disagree about the header");
-        assert_ne!(
-            a[4], b[4],
-            "the counter that differs between copies was lost"
-        );
+        assert_ne!(a[4], b[4], "the counter that differs between copies was lost");
     }
 
     #[test]
@@ -272,9 +254,7 @@ mod tests {
         // 0x55 in the middle of a payload is eight alternating bits and
         // nothing more. Calling that a preamble would report a second frame
         // made of the rest of the first one.
-        let air = [
-            0x55u8, 0x55, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0x55, 0x12, 0x9a, 0x33,
-        ];
+        let air = [0x55u8, 0x55, 0x55, 0x55, 0x55, 0x55, 0x48, 0xe9, 0x55, 0x12, 0x9a, 0x33];
         let f = frame_from_preamble(&shifted(0, &air), MIN_PREAMBLE_BITS).expect("framing");
         assert!(f.repeats.is_empty(), "invented {} repeats", f.repeats.len());
     }
@@ -287,10 +267,7 @@ mod tests {
         air.extend_from_slice(&[0; 12]);
         let f = frame_from_preamble(&shifted(0, &air), MIN_PREAMBLE_BITS).expect("framing");
         assert_eq!(f.content_bytes(), 4, "padding counted as content");
-        assert!(
-            f.frame.as_bytes().len() > 12,
-            "the padding was thrown away, not just excluded"
-        );
+        assert!(f.frame.as_bytes().len() > 12, "the padding was thrown away, not just excluded");
     }
 
     #[test]

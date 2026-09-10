@@ -54,25 +54,11 @@ pub struct Timing {
 
 impl Timing {
     pub fn pwm(short_us: u32, long_us: u32, reset_us: u32) -> Self {
-        Self {
-            coding: Coding::Pwm,
-            short_us,
-            long_us,
-            sync_us: 0,
-            tolerance_us: 0,
-            reset_us,
-        }
+        Self { coding: Coding::Pwm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
     }
 
     pub fn ppm(short_us: u32, long_us: u32, reset_us: u32) -> Self {
-        Self {
-            coding: Coding::Ppm,
-            short_us,
-            long_us,
-            sync_us: 0,
-            tolerance_us: 0,
-            reset_us,
-        }
+        Self { coding: Coding::Ppm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
     }
 
     /// PWM with a sync mark, which several protocols put before every frame.
@@ -81,14 +67,7 @@ impl Timing {
     /// package, so a burst of repeats slices into one long buffer and the
     /// decoder finds its frame in there by checksum.
     pub fn pwm_sync(short_us: u32, long_us: u32, sync_us: u32, reset_us: u32) -> Self {
-        Self {
-            coding: Coding::Pwm,
-            short_us,
-            long_us,
-            sync_us,
-            tolerance_us: 0,
-            reset_us,
-        }
+        Self { coding: Coding::Pwm, short_us, long_us, sync_us, tolerance_us: 0, reset_us }
     }
 
     pub fn with_tolerance(mut self, us: u32) -> Self {
@@ -137,10 +116,7 @@ impl std::fmt::Display for SliceError {
         match self {
             Self::TooFewPulses { got, need } => write!(f, "only {got} pulses, need {need}"),
             Self::BadWidth { index, width_us } => {
-                write!(
-                    f,
-                    "pulse {index} has an unclassifiable width of {width_us} us"
-                )
+                write!(f, "pulse {index} has an unclassifiable width of {width_us} us")
             }
         }
     }
@@ -158,10 +134,7 @@ pub fn slice(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
 
 fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     if pkg.pulses.len() < 8 {
-        return Err(SliceError::TooFewPulses {
-            got: pkg.pulses.len(),
-            need: 8,
-        });
+        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
     // In PWM the gap is fixed, so one much longer than the symbol it should be
@@ -199,16 +172,10 @@ fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
             continue;
         }
         if p.mark > hi {
-            return Err(SliceError::BadWidth {
-                index: i,
-                width_us: p.mark,
-            });
+            return Err(SliceError::BadWidth { index: i, width_us: p.mark });
         }
         if p.mark < lo {
-            return Err(SliceError::BadWidth {
-                index: i,
-                width_us: p.mark,
-            });
+            return Err(SliceError::BadWidth { index: i, width_us: p.mark });
         }
         b.push(p.mark < mid);
     }
@@ -217,10 +184,7 @@ fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
 
 fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     if pkg.pulses.len() < 8 {
-        return Err(SliceError::TooFewPulses {
-            got: pkg.pulses.len(),
-            need: 8,
-        });
+        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
     // A gap well past the long symbol is the space between repeats, not a bit.
@@ -261,10 +225,7 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
 /// triggered on and is not in the pulse list.
 fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     if pkg.pulses.len() < 4 {
-        return Err(SliceError::TooFewPulses {
-            got: pkg.pulses.len(),
-            need: 4,
-        });
+        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
     }
     let half = t.short_us.max(1);
     // One and a half half-symbols: past this, the edge is a data edge rather
@@ -275,11 +236,7 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
     let tolerance = t.tolerance_us;
     // Zero means the protocol named no reset gap, so nothing short of the end
     // of the package breaks a row.
-    let reset = if t.reset_us == 0 {
-        u32::MAX
-    } else {
-        t.reset_us
-    };
+    let reset = if t.reset_us == 0 { u32::MAX } else { t.reset_us };
     let last = pkg.pulses.len() - 1;
 
     let mut b = BitBuffer::with_capacity(pkg.pulses.len());
@@ -338,10 +295,7 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
 /// an explicit offset with [`manchester_decode`].
 pub fn slice_manchester_half(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     if pkg.pulses.len() < 4 {
-        return Err(SliceError::TooFewPulses {
-            got: pkg.pulses.len(),
-            need: 4,
-        });
+        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
     }
     let half = t.short_us.max(1);
     let mut b = BitBuffer::with_capacity(pkg.pulses.len());
@@ -470,10 +424,7 @@ mod tests {
 
     fn pkg(pulses: &[(u32, u32)]) -> Package {
         Package {
-            pulses: pulses
-                .iter()
-                .map(|(m, g)| Pulse { mark: *m, gap: *g })
-                .collect(),
+            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
             snr_db: 20.0,
             rssi_dbfs: -12.0,
             start_sample: 0,
@@ -573,10 +524,7 @@ mod tests {
     fn too_short_a_package_is_rejected_with_a_reason() {
         let t = Timing::pwm(544, 1524, 2800);
         let p = pkg(&[(544, 1000); 3]);
-        assert_eq!(
-            slice(&p, &t),
-            Err(SliceError::TooFewPulses { got: 3, need: 8 })
-        );
+        assert_eq!(slice(&p, &t), Err(SliceError::TooFewPulses { got: 3, need: 8 }));
     }
 
     // Build a Package from a bit stream in the convention the slicer uses,
@@ -632,10 +580,7 @@ mod tests {
             pulses.push((0, half));
         }
         Package {
-            pulses: pulses
-                .into_iter()
-                .map(|(m, g)| Pulse { mark: m, gap: g })
-                .collect(),
+            pulses: pulses.into_iter().map(|(m, g)| Pulse { mark: m, gap: g }).collect(),
             snr_db: 20.0,
             rssi_dbfs: -12.0,
             center_hz: 0,
@@ -689,10 +634,7 @@ mod tests {
 
     #[test]
     fn nrz_expands_multi_symbol_runs() {
-        let t = Timing {
-            coding: Coding::Nrz,
-            ..Timing::pwm(100, 100, 500)
-        };
+        let t = Timing { coding: Coding::Nrz, ..Timing::pwm(100, 100, 500) };
         // 2 symbols high, 1 low, 1 high, then a 300 us tail. The tail is
         // silence and silence is zeros, so it becomes three of them, capped by
         // the reset gap as rtl_433 caps it.

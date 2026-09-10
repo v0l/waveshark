@@ -53,9 +53,7 @@ impl Watch {
     /// of a second of Wi-Fi a gated front end would otherwise be deaf for
     /// after every retune.
     pub(super) fn detecting(&self) -> bool {
-        self.detector
-            .as_ref()
-            .is_some_and(|d| d.settling() || d.live().next().is_some())
+        self.detector.as_ref().is_some_and(|d| d.settling() || d.live().next().is_some())
     }
 
     /// How far behind the samples the detector's verdict is, which is the
@@ -65,10 +63,7 @@ impl Watch {
     }
 
     pub(super) fn live(&self) -> Vec<dsp::Source> {
-        self.detector
-            .as_ref()
-            .map(|d| d.live().copied().collect())
-            .unwrap_or_default()
+        self.detector.as_ref().map(|d| d.live().copied().collect()).unwrap_or_default()
     }
 
     /// Put a detector built with new thresholds in place of the running one,
@@ -97,7 +92,13 @@ impl Watch {
     /// `idle` when something else has claimed the whole span: there is
     /// nothing to find in a span that is one transmission, and the block goes
     /// by unread rather than being buffered.
-    pub(super) fn admit(&mut self, iq: &[C32], center_hz: f64, idle: bool, out: &mut Vec<SourceEvent>) {
+    pub(super) fn admit(
+        &mut self,
+        iq: &[C32],
+        center_hz: f64,
+        idle: bool,
+        out: &mut Vec<SourceEvent>,
+    ) {
         let Some(d) = self.detector.as_mut() else { return };
         if idle {
             d.idle(iq.len());
@@ -241,12 +242,8 @@ impl AutoNode {
         }
         let d = SourceDetector::new(self.rate, self.input_bw, self.detector_cfg());
         let keep = d.latency_samples();
-        self.watch.extractor = Some(SourceExtractor::new(
-            self.rate,
-            self.center.as_f64(),
-            keep,
-            self.cfg,
-        ));
+        self.watch.extractor =
+            Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
         self.watch.detector = Some(d);
         self.slots.clear();
         self.memory.cut_again();
@@ -274,8 +271,12 @@ impl AutoNode {
             // ran two full-span FM demodulators and published every field of
             // the picture twice. Where several bands cover, the one nearest
             // the centre is the one the span is really on.
-            let mut bands: Vec<(f64, f64)> =
-                p.placement().bands(shape.widths[0]).into_iter().filter(|(lo, hi)| covers(*lo, *hi)).collect();
+            let mut bands: Vec<(f64, f64)> = p
+                .placement()
+                .bands(shape.widths[0])
+                .into_iter()
+                .filter(|(lo, hi)| covers(*lo, *hi))
+                .collect();
             bands.sort_by(|a, b| {
                 let off = |(lo, hi): &(f64, f64)| ((lo + hi) / 2.0 - c).abs();
                 off(a).total_cmp(&off(b))

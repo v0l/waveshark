@@ -606,13 +606,11 @@ impl OokDetector {
                     if dur >= self.cfg.min_mark_us {
                         // Emit the *previous* pulse, whose gap is now complete.
                         if self.pending_mark > 0 {
-                            self.current.pulses.push(Pulse {
-                                mark: self.pending_mark,
-                                gap: self.gap_accum,
-                            });
+                            self.current
+                                .pulses
+                                .push(Pulse { mark: self.pending_mark, gap: self.gap_accum });
                         } else if self.current.pulses.is_empty() {
-                            self.current.start_sample =
-                                self.sample.saturating_sub(self.run);
+                            self.current.start_sample = self.sample.saturating_sub(self.run);
                         }
                         self.pending_mark = dur;
                         self.gap_accum = 0;
@@ -656,9 +654,7 @@ impl OokDetector {
 
     fn close(&mut self, out: &mut Vec<Package>) {
         if self.pending_mark >= self.cfg.min_mark_us {
-            self.current
-                .pulses
-                .push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
+            self.current.pulses.push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
         }
         self.pending_mark = 0;
         self.gap_accum = 0;
@@ -756,14 +752,8 @@ mod tests {
     #[test]
     fn recovers_pwm_timings() {
         // A typical PWM remote: 500 us short, 1000 us long, 500 us gaps.
-        let want = [
-            (500u32, 500u32),
-            (1000, 500),
-            (500, 500),
-            (1000, 500),
-            (1000, 500),
-            (500, 500),
-        ];
+        let want =
+            [(500u32, 500u32), (1000, 500), (500, 500), (1000, 500), (1000, 500), (500, 500)];
         let env = envelope(&want, 1.0, 0.02);
         let mut d = OokDetector::new(RATE, PulseConfig::default());
         let mut out = Vec::new();

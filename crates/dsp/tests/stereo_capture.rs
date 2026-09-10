@@ -28,12 +28,7 @@ fn mpx() -> Option<(Vec<f32>, f64)> {
     let raw = std::fs::read(FIXTURE).ok()?;
     let samples: Vec<C32> = raw
         .chunks_exact(2)
-        .map(|p| {
-            C32::new(
-                (p[0] as f32 - 127.5) / 127.5,
-                (p[1] as f32 - 127.5) / 127.5,
-            )
-        })
+        .map(|p| C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5))
         .collect();
     let rate = RATE;
     let mut m = Mixer::new(-300_000.0, rate);
@@ -76,7 +71,8 @@ fn a_mono_broadcast_does_not_produce_invented_separation() {
     let (mut l, mut r) = (Vec::new(), Vec::new());
     d.process(disc, &mut l, &mut r);
     let half = l.len() / 2;
-    let rms = |v: &[f32]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+    let rms =
+        |v: &[f32]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
     let (a, b) = (rms(&l[half..]), rms(&r[half..]));
     let diff = 20.0 * (a / b.max(1e-12)).log10();
     assert!(diff.abs() < 3.0, "channels differ by {diff:.1} dB on a mono station");

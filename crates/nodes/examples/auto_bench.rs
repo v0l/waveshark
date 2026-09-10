@@ -33,14 +33,8 @@ fn noise(n: usize, amp: f32, seed: &mut u64) -> Vec<C32> {
 }
 
 fn main() {
-    let rate: f64 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4_000_000.0);
-    let transmitters: usize = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let rate: f64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(4_000_000.0);
+    let transmitters: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let seconds = 4.0;
     let mut seed = 0x1234_5678_9abc_def1u64;
     let mut iq = noise((rate * seconds) as usize, 0.02, &mut seed);
@@ -69,10 +63,7 @@ fn main() {
         auto = auto.f("bank_min_channels", 0.0);
     }
     let mut g = build_chain(StreamSpec::iq(rate, Hz::mhz(868)), &[auto], &registry()).unwrap();
-    let block: usize = std::env::var("BLOCK")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(16_384);
+    let block: usize = std::env::var("BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(16_384);
     // Warm up on the first second, then time the rest.
     let warm = (rate as usize).min(iq.len());
     for b in iq[..warm].chunks(block) {
@@ -94,10 +85,7 @@ fn main() {
     if std::env::var_os("PHASES").is_some() {
         for n in &g.topology().nodes {
             for (name, c) in &n.phases {
-                println!(
-                    "    {:<18} p95 {:>8} us  mean {:>8.0} us",
-                    name, c.p95_us, c.mean_us
-                );
+                println!("    {:<18} p95 {:>8} us  mean {:>8.0} us", name, c.p95_us, c.mean_us);
             }
         }
     }

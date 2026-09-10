@@ -25,14 +25,14 @@ pub mod channel_keys;
 pub(crate) mod crypto;
 pub mod dmr;
 pub mod dmr_bp;
+pub mod droneid;
 pub mod elrs;
 pub mod flysky;
-pub mod video_channels;
 pub mod framing;
 pub mod frsky;
-pub mod gsm;
 #[cfg(feature = "tea")]
 pub mod gpu;
+pub mod gsm;
 #[cfg(feature = "tea")]
 pub mod keystream;
 pub mod lora;
@@ -43,7 +43,6 @@ pub mod meshcore;
 pub mod meshtastic;
 pub mod morse;
 pub mod nrf24;
-pub mod droneid;
 pub mod odid;
 pub mod pocsag;
 pub mod protocol;
@@ -56,6 +55,7 @@ pub mod ta61;
 #[cfg(feature = "tea")]
 pub mod tea;
 pub mod tetra;
+pub mod video_channels;
 pub mod vocoder;
 pub mod voice;
 pub mod whiten;

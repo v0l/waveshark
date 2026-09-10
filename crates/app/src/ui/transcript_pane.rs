@@ -311,7 +311,11 @@ impl Transcript<'_> {
                             l = l.value(super::human_bytes(f.done));
                         }
                         if f.files > 1 {
-                            l = l.legend("file").value(format!("{} of {}", f.files_done + 1, f.files));
+                            l = l.legend("file").value(format!(
+                                "{} of {}",
+                                f.files_done + 1,
+                                f.files
+                            ));
                         }
                         l.size(11.0).show(ui);
                         if let Some(x) = f.fraction() {
@@ -327,7 +331,8 @@ impl Transcript<'_> {
                         }
                     }
                     ui.horizontal(|ui| {
-                        let mut l = theme::Line::new().legend("read").value(e.health.reads.to_string());
+                        let mut l =
+                            theme::Line::new().legend("read").value(e.health.reads.to_string());
                         if let Some(x) = e.speed() {
                             // Against real time, because that is the number
                             // that decides whether the receiver keeps up:
@@ -335,7 +340,10 @@ impl Transcript<'_> {
                             // be read and the partials fall behind.
                             l = l
                                 .legend("last")
-                                .value(format!("{:.1} s in {} ms", e.health.last_audio_s, e.health.last_ms))
+                                .value(format!(
+                                    "{:.1} s in {} ms",
+                                    e.health.last_audio_s, e.health.last_ms
+                                ))
                                 .legend("speed")
                                 .value(format!("{x:.1}x real time"))
                                 .tint(if x < 1.0 { theme::FAULT } else { theme::VALUE });

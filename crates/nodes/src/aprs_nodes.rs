@@ -87,16 +87,13 @@ impl Simple for AprsNode {
         "aprs"
     }
 
-
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("aprs reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other(
-                "aprs needs its channel inside the span",
-            ));
+            return Err(common::Error::other("aprs needs its channel inside the span"));
         }
         // Decimate to an audio rate the tone correlators can work at. The
         // exact rate follows from the span, so the AFSK side is built from
@@ -162,10 +159,8 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 
     // The destination is not only an address: Mic-E hides half its latitude
     // in there, so the payload cannot be read without it.
-    let aprs_report = frame
-        .is_ui()
-        .then(|| aprs::parse(&frame.info, &frame.destination.call))
-        .flatten();
+    let aprs_report =
+        frame.is_ui().then(|| aprs::parse(&frame.info, &frame.destination.call)).flatten();
 
     let mut fix = None;
     let mut media = pipeline::event::media::BYTES;
@@ -223,8 +218,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
         // A callsign is both the address and the name: there is nothing else
         // to call an APRS station.
-        .by(common::Identity::new("aprs", frame.source.to_string())
-            .named(frame.source.to_string()))
+        .by(common::Identity::new("aprs", frame.source.to_string()).named(frame.source.to_string()))
         // The AX.25 addresses. A destination on APRS is usually a software
         // identifier rather than a station, which is why it is a group: it
         // is a label many senders share, not somebody listening.
@@ -248,7 +242,6 @@ fn round(v: f64, places: i32) -> f64 {
     let f = 10f64.powi(places);
     (v * f).round() / f
 }
-
 
 pub struct Aprs;
 
@@ -277,11 +270,7 @@ impl Protocol for Aprs {
             return None;
         }
         let center = common::Hz(p.center_hz());
-        Some(
-            ax25::parse(bytes)
-                .map(|f| vec![aprs_decoded(&f, bytes, center)])
-                .unwrap_or_default(),
-        )
+        Some(ax25::parse(bytes).map(|f| vec![aprs_decoded(&f, bytes, center)]).unwrap_or_default())
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -311,10 +300,7 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     /// A UI frame with an uncompressed position, as a tracker would send.
@@ -389,12 +375,7 @@ mod tests {
         assert_eq!(parsed.source.to_string(), "EI2ABC-9");
         let d = aprs_decoded(&parsed, &frames[0], Hz(144_800_000));
         assert_eq!(d.protocol, "APRS-Position");
-        let get = |k: &str| {
-            d.fields
-                .iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.clone())
-        };
+        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
         assert_eq!(get("lon"), Some(common::Value::Float(-6.25)));
         assert_eq!(get("from"), Some(common::Value::Text("EI2ABC-9".into())));

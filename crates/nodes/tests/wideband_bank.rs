@@ -28,9 +28,7 @@ const CHANNELS: usize = 8;
 const OCCUPIED: [usize; 4] = [0, 2, 3, 6];
 
 fn fixture() -> Option<common::IqBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata")
-        .join(FIXTURE);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(FIXTURE);
     if !p.exists() {
         return None;
     }
@@ -69,9 +67,7 @@ fn wideband(base: &[C32], bank: &ChannelBank) -> Vec<C32> {
 fn ook_chain() -> Vec<NodeSpec> {
     vec![
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -84,8 +80,7 @@ fn make_bank() -> ChannelBank {
 fn decodes_four_simultaneous_transmitters_in_one_pass() {
     let buf = need_fixture!(fixture());
     let mut bank = make_bank();
-    bank.set_all_chains(&ook_chain(), &registry())
-        .expect("build chains");
+    bank.set_all_chains(&ook_chain(), &registry()).expect("build chains");
     assert_eq!(bank.active_chains(), CHANNELS);
 
     let wide = wideband(&buf.samples, &bank);
@@ -100,10 +95,7 @@ fn decodes_four_simultaneous_transmitters_in_one_pass() {
         .collect();
 
     let channels: Vec<usize> = decodes.iter().map(|(c, _, _)| *c).collect();
-    assert_eq!(
-        channels, OCCUPIED,
-        "expected a decode on each occupied channel, got {decodes:#?}"
-    );
+    assert_eq!(channels, OCCUPIED, "expected a decode on each occupied channel, got {decodes:#?}");
 
     for (ch, center, text) in &decodes {
         assert!(text.contains("Fineoffset-WHx080"), "channel {ch}: {text}");
@@ -153,16 +145,9 @@ fn a_single_transmitter_lands_on_the_channel_its_frequency_implies() {
     m.process(&buf.samples, &mut wide);
 
     let events = bank.process(&wide).unwrap().to_vec();
-    let decoded: Vec<usize> = events
-        .iter()
-        .filter(|e| matches!(e.event, Event::Decoded(_)))
-        .map(|e| e.channel)
-        .collect();
-    assert_eq!(
-        decoded,
-        vec![target],
-        "decoded on {decoded:?}, expected [{target}]"
-    );
+    let decoded: Vec<usize> =
+        events.iter().filter(|e| matches!(e.event, Event::Decoded(_))).map(|e| e.channel).collect();
+    assert_eq!(decoded, vec![target], "decoded on {decoded:?}, expected [{target}]");
 
     // And the lookup agrees with where it actually landed.
     assert_eq!(bank.channel_for(bank.channel_center(target)), target);
@@ -189,10 +174,7 @@ fn detection_gating_finds_the_occupied_channels() {
     ranked.sort_by(|&a, &b| peaks[b].total_cmp(&peaks[a]));
     let top4: std::collections::BTreeSet<usize> = ranked[..4].iter().copied().collect();
     let want: std::collections::BTreeSet<usize> = OCCUPIED.iter().copied().collect();
-    assert_eq!(
-        top4, want,
-        "strongest channels {top4:?}, expected {want:?}, peaks {peaks:?}"
-    );
+    assert_eq!(top4, want, "strongest channels {top4:?}, expected {want:?}, peaks {peaks:?}");
 }
 
 #[test]
@@ -204,12 +186,8 @@ fn results_are_deterministic_despite_parallel_execution() {
     a.set_all_chains(&ook_chain(), &registry()).unwrap();
     let wide = wideband(&buf.samples, &a);
 
-    let first: Vec<(usize, String)> = a
-        .process(&wide)
-        .unwrap()
-        .iter()
-        .map(|e| (e.channel, format!("{:?}", e.event)))
-        .collect();
+    let first: Vec<(usize, String)> =
+        a.process(&wide).unwrap().iter().map(|e| (e.channel, format!("{:?}", e.event))).collect();
 
     for _ in 0..5 {
         let mut b = make_bank();
@@ -220,10 +198,7 @@ fn results_are_deterministic_despite_parallel_execution() {
             .iter()
             .map(|e| (e.channel, format!("{:?}", e.event)))
             .collect();
-        assert_eq!(
-            first, again,
-            "parallel execution produced a different result"
-        );
+        assert_eq!(first, again, "parallel execution produced a different result");
     }
 }
 
@@ -238,11 +213,7 @@ fn channels_without_a_chain_are_skipped() {
     let wide = wideband(&buf.samples, &bank);
     let events = bank.process(&wide).unwrap().to_vec();
     for e in &events {
-        assert_eq!(
-            e.channel, 2,
-            "an unconfigured channel produced {:?}",
-            e.event
-        );
+        assert_eq!(e.channel, 2, "an unconfigured channel produced {:?}", e.event);
     }
     assert!(events.iter().any(|e| matches!(e.event, Event::Decoded(_))));
 }
@@ -263,8 +234,7 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
     // channel, nothing chosen by hand.
     bank.set_gating(Gating::OnDetection);
     bank.set_detector_config(nodes::ism_detector_config());
-    bank.set_all_graphs(nodes::ism_decode_graph)
-        .expect("build graphs");
+    bank.set_all_graphs(nodes::ism_decode_graph).expect("build graphs");
     let wide = wideband(&base.samples, &bank);
 
     let mut decoder = nodes::PacketDecodeNode::default();
@@ -293,15 +263,9 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
             found.push((d.center.0, d.text.clone().unwrap_or_default()));
         }
     }
-    assert_eq!(
-        unknown, 0,
-        "the only bursts here are the transmission, and it decodes"
-    );
+    assert_eq!(unknown, 0, "the only bursts here are the transmission, and it decodes");
 
-    let mut channels: Vec<usize> = found
-        .iter()
-        .map(|(hz, _)| bank.channel_for(Hz(*hz)))
-        .collect();
+    let mut channels: Vec<usize> = found.iter().map(|(hz, _)| bank.channel_for(Hz(*hz))).collect();
     channels.sort_unstable();
     channels.dedup();
     assert_eq!(channels, OCCUPIED, "wrong channels decoded: {found:?}");
@@ -347,8 +311,5 @@ fn the_automatic_chain_measures_the_burst_before_choosing_a_front_end() {
     assert!(!kinds.contains(&"fsk_detect"), "{kinds:?}");
     // No decoder here: a channel finds bursts, and the protocols run once
     // on the packet bus over everything every front end produced.
-    assert!(
-        !kinds.contains(&"protocol_decode"),
-        "the protocols moved to the bus: {kinds:?}"
-    );
+    assert!(!kinds.contains(&"protocol_decode"), "the protocols moved to the bus: {kinds:?}");
 }

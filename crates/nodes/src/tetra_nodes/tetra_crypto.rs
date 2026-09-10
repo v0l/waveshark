@@ -206,14 +206,10 @@ mod imp {
                 return Recovery::NotTea1;
             }
             if let Some((_, _, job)) = &self.recovery {
-                return Recovery::Searching {
-                    gpu: matches!(job, RecoveryJob::Gpu(_, _)),
-                };
+                return Recovery::Searching { gpu: matches!(job, RecoveryJob::Gpu(_, _)) };
             }
             if !self.dead_sigs.is_empty() && self.collisions.is_empty() {
-                return Recovery::Exhausted {
-                    dropped: self.dead_sigs.len(),
-                };
+                return Recovery::Exhausted { dropped: self.dead_sigs.len() };
             }
             if let Some(most) = self.collisions.values().map(Vec::len).max() {
                 return Recovery::Gathering {
@@ -296,12 +292,7 @@ mod imp {
             };
             // A pair whose SSI or ESI is already held would double-count; keep
             // the set distinct so three pairs are three real constraints.
-            if self
-                .crypto
-                .id_pairs
-                .iter()
-                .any(|p| p.ssi == ssi || p.esi == esi)
-            {
+            if self.crypto.id_pairs.iter().any(|p| p.ssi == ssi || p.esi == esi) {
                 return;
             }
             self.crypto.id_pairs.push(IdPair { ssi, esi });
@@ -499,9 +490,7 @@ mod imp {
         /// The CPU form of the register search, used when the crypto worker
         /// reports no adapter.
         fn cpu_search(frames: Vec<Collision>) -> RecoveryJob {
-            let threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
             RecoveryJob::Cpu(Search::start(frames, threads))
         }
 
@@ -592,11 +581,8 @@ mod imp {
                     }
                     // Hand the search slot to the next message at quorum.
                     if let Some(cell) = self.rx.cell {
-                        if let Some((&next, frames)) = self
-                            .crypto
-                            .collisions
-                            .iter()
-                            .find(|(_, f)| f.len() >= COLLISION_QUORUM)
+                        if let Some((&next, frames)) =
+                            self.crypto.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
                         {
                             let frames = frames.clone();
                             self.start_recovery(cell.colour, next, frames);

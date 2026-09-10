@@ -160,15 +160,10 @@ mod tests {
     #[test]
     fn a_message_reads_back_the_fields_it_holds() {
         // field 1 varint 7, field 2 bytes "hi", field 4 fixed32 1.
-        let buf = [
-            0x08, 0x07, 0x12, 0x02, b'h', b'i', 0x25, 0x01, 0x00, 0x00, 0x00,
-        ];
+        let buf = [0x08, 0x07, 0x12, 0x02, b'h', b'i', 0x25, 0x01, 0x00, 0x00, 0x00];
         let mut f = Fields::new(&buf);
         assert_eq!(f.next().map(|(n, v)| (n, v.varint())), Some((1, Some(7))));
-        assert_eq!(
-            f.next().map(|(n, v)| (n, v.text())),
-            Some((2, Some("hi".into())))
-        );
+        assert_eq!(f.next().map(|(n, v)| (n, v.text())), Some((2, Some("hi".into()))));
         assert_eq!(f.next().map(|(n, v)| (n, v.fixed32())), Some((4, Some(1))));
         assert!(f.next().is_none());
         assert!(f.finished());

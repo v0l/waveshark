@@ -40,8 +40,6 @@ pub fn is_modes_band(center_hz: f64) -> bool {
     (center_hz - BAND_CENTER_HZ).abs() < 1_000_000.0
 }
 
-
-
 use crate::pulse::dbfs;
 use common::C32;
 
@@ -112,7 +110,14 @@ pub struct ModeSDetector {
 
 impl ModeSDetector {
     pub fn new(rate: f64, cfg: ModeSConfig) -> Self {
-        Self { cfg, spus: (rate / 1e6) as f32, tail: Vec::new(), tail_at: 0, seen: 0, next_start: 0 }
+        Self {
+            cfg,
+            spus: (rate / 1e6) as f32,
+            tail: Vec::new(),
+            tail_at: 0,
+            seen: 0,
+            next_start: 0,
+        }
     }
 
     /// Sample rate this detector was built for.
@@ -229,8 +234,7 @@ impl ModeSDetector {
 
     /// Preamble strength at `start`, or `None` when this is not one.
     fn preamble(&self, mag: &[f32], start: usize) -> Option<f32> {
-        let high: f32 =
-            PULSES_US.iter().map(|us| self.window(mag, start, *us)).sum::<f32>() / 4.0;
+        let high: f32 = PULSES_US.iter().map(|us| self.window(mag, start, *us)).sum::<f32>() / 4.0;
         if high < self.cfg.min_level {
             return None;
         }
@@ -332,12 +336,7 @@ impl ModeSDetector {
         if start + self.samples_for(bits) > mag.len() {
             return None;
         }
-        Some(ModeSFrame {
-            bytes,
-            at_sample: 0,
-            rssi_dbfs: dbfs(high),
-            weak_bits: weak,
-        })
+        Some(ModeSFrame { bytes, at_sample: 0, rssi_dbfs: dbfs(high), weak_bits: weak })
     }
 }
 
@@ -370,10 +369,8 @@ mod tests {
         for us in PULSES_US {
             put(us, &mut v);
         }
-        for (k, bit) in bytes
-            .iter()
-            .flat_map(|b| (0..8).map(move |i| b & (0x80 >> i) != 0))
-            .enumerate()
+        for (k, bit) in
+            bytes.iter().flat_map(|b| (0..8).map(move |i| b & (0x80 >> i) != 0)).enumerate()
         {
             let at = DATA_US + k as f32 + if bit { 0.0 } else { 0.5 };
             put(at, &mut v);
@@ -393,9 +390,8 @@ mod tests {
         }
     }
 
-    const LONG: [u8; 14] = [
-        0x8d, 0x40, 0x62, 0x1d, 0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac, 0x28, 0x63, 0xa7,
-    ];
+    const LONG: [u8; 14] =
+        [0x8d, 0x40, 0x62, 0x1d, 0x58, 0xc3, 0x82, 0xd6, 0x90, 0xc8, 0xac, 0x28, 0x63, 0xa7];
     const SHORT: [u8; 7] = [0x5d, 0x40, 0x62, 0x1d, 0x2a, 0x1b, 0x3c];
 
     fn demod(iq: &[C32], rate: f64) -> Vec<ModeSFrame> {

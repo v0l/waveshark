@@ -13,10 +13,7 @@ use pipeline::port::{PortKind, StreamSpec};
 const RATE: f64 = 96_000.0;
 
 fn stereo_spec() -> StreamSpec {
-    StreamSpec::iq(RATE, Hz::mhz(95))
-        .with_kind(PortKind::Real)
-        .with_rate(48_000.0)
-        .with_channels(2)
+    StreamSpec::iq(RATE, Hz::mhz(95)).with_kind(PortKind::Real).with_rate(48_000.0).with_channels(2)
 }
 
 /// Left carries a tone, right is silent.
@@ -46,12 +43,7 @@ fn channel_levels(v: &[f32]) -> (f64, f64) {
     let n = v.len() / 2;
     let skip = n / 4;
     let p = |c: usize| {
-        (v.iter()
-            .skip(c)
-            .step_by(2)
-            .skip(skip)
-            .map(|x| (*x as f64).powi(2))
-            .sum::<f64>()
+        (v.iter().skip(c).step_by(2).skip(skip).map(|x| (*x as f64).powi(2)).sum::<f64>()
             / (n - skip).max(1) as f64)
             .sqrt()
     };
@@ -90,10 +82,7 @@ fn the_deemphasis_corner_is_set_by_the_frame_rate_not_the_sample_rate() {
     };
     // 50 us is a 3183 Hz corner, so 10 kHz should sit about 10 dB down on 1 kHz.
     let db = 20.0 * (level(10_000.0) / level(1_000.0)).log10();
-    assert!(
-        (-13.0..-7.0).contains(&db),
-        "10 kHz was {db:.1} dB against 1 kHz"
-    );
+    assert!((-13.0..-7.0).contains(&db), "10 kHz was {db:.1} dB against 1 kHz");
 }
 
 #[test]
@@ -135,11 +124,6 @@ fn output_length_is_a_whole_number_of_frames() {
     for factor in [1, 2, 3, 7] {
         let g = build(|b| b.add(Box::new(RealDecimateNode::new(factor))));
         let out = run(g, &one_sided(20_000, 1_000.0));
-        assert_eq!(
-            out.len() % 2,
-            0,
-            "factor {factor} emitted {} samples",
-            out.len()
-        );
+        assert_eq!(out.len() % 2, 0, "factor {factor} emitted {} samples", out.len());
     }
 }

@@ -57,9 +57,8 @@ pub fn viterbi(soft: &[f32], steps: usize) -> Vec<u8> {
                     continue;
                 }
                 let (g0, g1) = outputs(u, from as u8);
-                let m = metric[from]
-                    + if g0 == 1 { s0 } else { -s0 }
-                    + if g1 == 1 { s1 } else { -s1 };
+                let m =
+                    metric[from] + if g0 == 1 { s0 } else { -s0 } + if g1 == 1 { s1 } else { -s1 };
                 if m > next[t] {
                     next[t] = m;
                     choice = choice & !(1 << t) | u16::from(from >= 8) << t;

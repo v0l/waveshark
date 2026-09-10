@@ -172,11 +172,7 @@ mod tests {
         agc.process(&mut buf);
         // Five milliseconds of attack, so by twenty the gain must be there.
         let after = &buf[(RATE * 0.02) as usize..];
-        assert!(
-            db(peak(after)) < db(0.25) + 2.0,
-            "still at {:.1} dBFS 20 ms in",
-            db(peak(after))
-        );
+        assert!(db(peak(after)) < db(0.25) + 2.0, "still at {:.1} dBFS 20 ms in", db(peak(after)));
     }
 
     #[test]
@@ -205,11 +201,7 @@ mod tests {
             .map(|i| 0.0001 * ((i * 2654435761) as f32 / u32::MAX as f32 - 0.5))
             .collect();
         agc.process(&mut buf);
-        assert!(
-            agc.gain_db() <= 40.5,
-            "gain reached {:.1} dB on noise alone",
-            agc.gain_db()
-        );
+        assert!(agc.gain_db() <= 40.5, "gain reached {:.1} dB on noise alone", agc.gain_db());
     }
 
     #[test]

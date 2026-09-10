@@ -59,14 +59,7 @@ impl Rational {
                 phase.push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
             }
         }
-        Self {
-            l,
-            m,
-            per_phase,
-            phases,
-            hist: vec![C32::default(); per_phase],
-            acc: 0,
-        }
+        Self { l, m, per_phase, phases, hist: vec![C32::default(); per_phase], acc: 0 }
     }
 
     /// Output samples per input sample, as the ratio it was built for.
@@ -154,11 +147,7 @@ mod tests {
             .map(|(i, x)| (i, x.norm()))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap();
-        let k = if i > n / 2 {
-            i as f64 - n as f64
-        } else {
-            i as f64
-        };
+        let k = if i > n / 2 { i as f64 - n as f64 } else { i as f64 };
         (k * rate / n as f64, p / n as f32)
     }
 
@@ -177,11 +166,7 @@ mod tests {
             r.process(block, &mut out);
         }
         let want = (iq.len() as f64 * r.ratio()) as usize;
-        assert!(
-            out.len().abs_diff(want) <= 2,
-            "{} against {want}",
-            out.len()
-        );
+        assert!(out.len().abs_diff(want) <= 2, "{} against {want}", out.len());
         let (hz, _) = peak(&out, rate_out);
         assert!((hz - 1_000_000.0).abs() < 5_000.0, "{hz} Hz");
         // The level of a tone is its own, not a bin's: 1 MHz does not land on

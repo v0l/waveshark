@@ -173,11 +173,7 @@ impl Node for WfmDemodNode {
         // Two interleaved channels. The port's sample rate is twice the frame
         // rate, which the channel count now says outright rather than leaving
         // downstream filters to infer it from a rate that looks too high.
-        Ok(vec![i
-            .spec
-            .with_kind(PortKind::Real)
-            .with_rate(rate)
-            .with_channels(2)])
+        Ok(vec![i.spec.with_kind(PortKind::Real).with_rate(rate).with_channels(2)])
     }
 
     fn process(
@@ -195,15 +191,10 @@ impl Node for WfmDemodNode {
         // than emitted so it rate-scales down the chain to whatever is
         // listening for it.
         let noise = self.noise.process(&self.mpx);
-        c.tag(Tag::new(
-            self.samples * 2,
-            "noise",
-            TagValue::Float(noise as f64),
-        ));
+        c.tag(Tag::new(self.samples * 2, "noise", TagValue::Float(noise as f64)));
 
         if self.stereo_enabled {
-            self.stereo
-                .process(&self.mpx, &mut self.left, &mut self.right);
+            self.stereo.process(&self.mpx, &mut self.left, &mut self.right);
         } else {
             self.stereo.process_mono(&self.mpx, &mut self.left);
             self.right.clear();
@@ -229,11 +220,7 @@ impl Node for WfmDemodNode {
         if locked != self.was_locked {
             // Tag the exact sample, so anything downstream knows where the
             // transition landed rather than only that it happened.
-            c.tag(Tag::new(
-                self.samples * 2,
-                "stereo_lock",
-                TagValue::Int(locked as i64),
-            ));
+            c.tag(Tag::new(self.samples * 2, "stereo_lock", TagValue::Int(locked as i64)));
             self.was_locked = locked;
         }
         self.samples += self.left.len() as u64;
@@ -270,9 +257,7 @@ impl Node for WfmDemodNode {
                 self.rds_enabled = v.as_bool().unwrap_or(true);
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "wfm_demod: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("wfm_demod: unknown parameter {name:?}"))),
         }
     }
 }

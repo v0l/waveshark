@@ -48,8 +48,8 @@ use common::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
-mod locate;
 pub mod beacondb;
+mod locate;
 pub mod wigle;
 pub use locate::{locate, Estimate};
 pub use wigle::{write_wigle, Account, Receipt};
@@ -181,13 +181,7 @@ impl Db {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(sql)?;
-        Ok(Self {
-            conn,
-            path,
-            last: Default::default(),
-            devices: Default::default(),
-            written: 0,
-        })
+        Ok(Self { conn, path, last: Default::default(), devices: Default::default(), written: 0 })
     }
 
     /// A survey held in memory, for a test or a replay whose result nobody
@@ -250,13 +244,7 @@ impl Db {
                 .map_err(sql)?;
             }
         }
-        Ok(Self {
-            conn,
-            path,
-            last: Default::default(),
-            devices: Default::default(),
-            written: 0,
-        })
+        Ok(Self { conn, path, last: Default::default(), devices: Default::default(), written: 0 })
     }
 
     pub fn path(&self) -> &Path {

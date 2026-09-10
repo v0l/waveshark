@@ -34,11 +34,8 @@ fn main() {
     println!("plateaus={plateaus} best_metric={best:.3}");
 
     for conj in [false, true] {
-        let samples: Vec<common::C32> = if conj {
-            buf.samples.iter().map(|x| x.conj()).collect()
-        } else {
-            buf.samples.clone()
-        };
+        let samples: Vec<common::C32> =
+            if conj { buf.samples.iter().map(|x| x.conj()).collect() } else { buf.samples.clone() };
         let mut cfg: dsp::wifi::WifiConfig = Default::default();
         if let Ok(v) = std::env::var("MINSNR") {
             cfg.min_level_db = v.parse().unwrap();

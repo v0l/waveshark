@@ -32,14 +32,7 @@ const SLOP: usize = 2;
 /// time, and it is what lets the burst detector split a repeat train into
 /// frame-aligned packages.
 pub fn pwm(short_us: u32, long_us: u32, reset_us: u32) -> Timing {
-    Timing {
-        coding: Coding::Pwm,
-        short_us,
-        long_us,
-        sync_us: 0,
-        tolerance_us: 0,
-        reset_us,
-    }
+    Timing { coding: Coding::Pwm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
 }
 
 /// Find a `frame_bits`-wide frame that `parse` accepts, then return what
@@ -76,11 +69,7 @@ pub fn find_and_parse(
     invert: bool,
     mut parse: impl FnMut(&[u8]) -> Option<Report>,
 ) -> Result<Report, DecodeError> {
-    let bits = if invert {
-        bits.inverted()
-    } else {
-        bits.clone()
-    };
+    let bits = if invert { bits.inverted() } else { bits.clone() };
     let want = frame_bits;
     if bits.len() < want {
         return Err(DecodeError::NotThisProtocol);
@@ -145,11 +134,7 @@ const MIN_TRANSITIONS: u32 = 3;
 /// which the corroboration in [`find_and_parse`] cannot catch either, because
 /// a run of one symbol trivially equals itself a frame later.
 pub fn plausible(code: u64, bits: u32) -> bool {
-    let mask = if bits >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << bits) - 1
-    };
+    let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
     let code = code & mask;
     if code == 0 || code == mask {
         return false;
@@ -206,10 +191,7 @@ mod tests {
                 v >>= (8 * b.len()) as u32 - frame_bits as u32;
                 plausible(v, frame_bits as u32).then(|| Report::new("test"))
             });
-            assert!(
-                got.is_err(),
-                "a {frame_bits}-bit protocol claimed part of a 64-bit frame"
-            );
+            assert!(got.is_err(), "a {frame_bits}-bit protocol claimed part of a 64-bit frame");
         }
     }
 
@@ -219,17 +201,12 @@ mod tests {
         // times must not be refused for being longer than one frame.
         let mut bits = BitBuffer::new();
         for _ in 0..3 {
-            for b in [
-                true, false, true, false, true, true, false, false, true, true, false, true,
-            ] {
+            for b in [true, false, true, false, true, true, false, false, true, true, false, true] {
                 bits.push(b);
             }
         }
         let got = find_and_parse(&bits, 12, false, |_| Some(Report::new("test")));
-        assert!(
-            got.is_ok(),
-            "three copies of one frame is exactly what a remote sends"
-        );
+        assert!(got.is_ok(), "three copies of one frame is exactly what a remote sends");
     }
 
     #[test]
@@ -259,9 +236,6 @@ mod tests {
         // reading is given up rather than guessed.
         assert!(!plausible(0b0000_1111_0000, 12));
         assert!(!plausible(0b0011_1111_1100, 12));
-        assert!(
-            plausible(0b0000_1111_0100, 12),
-            "three transitions is enough"
-        );
+        assert!(plausible(0b0000_1111_0100, 12), "three transitions is enough");
     }
 }

@@ -160,8 +160,7 @@ impl ChannelBank {
 
     /// The channel nearest a given RF frequency.
     pub fn channel_for(&self, f: Hz) -> usize {
-        self.ch
-            .channel_for_offset(f.as_f64() - self.center.as_f64(), self.input_rate)
+        self.ch.channel_for_offset(f.as_f64() - self.center.as_f64(), self.input_rate)
     }
 
     /// Retune the bank, keeping its graphs.
@@ -299,27 +298,24 @@ impl ChannelBank {
         const TILE: usize = 32;
         const FBLOCK: usize = 64;
         let frames = &self.frames;
-        self.lanes
-            .par_chunks_mut(TILE)
-            .enumerate()
-            .for_each(|(gi, group)| {
-                let c0 = gi * TILE;
-                for lane in group.iter_mut() {
-                    lane.clear();
-                    lane.reserve(count);
-                }
-                let mut f0 = 0;
-                while f0 < count {
-                    let fe = (f0 + FBLOCK).min(count);
-                    for f in f0..fe {
-                        let row = &frames[f * n..(f + 1) * n];
-                        for (j, lane) in group.iter_mut().enumerate() {
-                            lane.push(row[c0 + j]);
-                        }
+        self.lanes.par_chunks_mut(TILE).enumerate().for_each(|(gi, group)| {
+            let c0 = gi * TILE;
+            for lane in group.iter_mut() {
+                lane.clear();
+                lane.reserve(count);
+            }
+            let mut f0 = 0;
+            while f0 < count {
+                let fe = (f0 + FBLOCK).min(count);
+                for f in f0..fe {
+                    let row = &frames[f * n..(f + 1) * n];
+                    for (j, lane) in group.iter_mut().enumerate() {
+                        lane.push(row[c0 + j]);
                     }
-                    f0 = fe;
                 }
-            });
+                f0 = fe;
+            }
+        });
 
         // 3. Update the burst detector, in parallel over the now channel-major
         //    lanes. Doing this frame by frame instead is single-threaded and
@@ -357,9 +353,7 @@ impl ChannelBank {
                 buf.iq_mut().extend_from_slice(&lanes[c]);
                 let evs = match g.run() {
                     Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
-                    Err(e) => vec![Event::Warning {
-                        message: format!("channel {c}: {e}"),
-                    }],
+                    Err(e) => vec![Event::Warning { message: format!("channel {c}: {e}") }],
                 };
                 // Read back what the front end detected, before the protocols
                 // had their say. A burst nothing recognised leaves no event at
@@ -386,11 +380,7 @@ impl ChannelBank {
         for (c, evs, pkgs) in results {
             let center = self.channel_center(c);
             for e in evs {
-                self.out.push(ChannelEvent {
-                    channel: c,
-                    center,
-                    event: e,
-                });
+                self.out.push(ChannelEvent { channel: c, center, event: e });
             }
             self.packages.extend(pkgs);
         }
@@ -418,11 +408,8 @@ fn pulse_taps(g: &Graph) -> Vec<Out> {
     g.order()
         .filter_map(|(id, _)| {
             let out = id.o();
-            matches!(
-                g.spec_of(out).map(|s| s.kind),
-                Some(pipeline::PortKind::Pulses)
-            )
-            .then_some(out)
+            matches!(g.spec_of(out).map(|s| s.kind), Some(pipeline::PortKind::Pulses))
+                .then_some(out)
         })
         .collect()
 }

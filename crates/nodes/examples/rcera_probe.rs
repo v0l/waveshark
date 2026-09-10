@@ -67,16 +67,10 @@ fn main() {
     let path = std::path::Path::new(&a[1]);
     let meta = sources::parse_filename(path);
     let rate = meta.rate.map(|r| r.0 as f64).expect("rate not in filename");
-    let center = meta
-        .center
-        .map(|c| c.0 as f64)
-        .expect("centre not in filename");
+    let center = meta.center.map(|c| c.0 as f64).expect("centre not in filename");
     let channel: f64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(center);
     let secs: f64 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(4.0);
-    let baud: f64 = a
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(NOMINAL_BAUD);
+    let baud: f64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(NOMINAL_BAUD);
 
     let iq = read_iq(path, rate, secs);
     println!(
@@ -90,17 +84,9 @@ fn main() {
     // Filter before detecting, not just before demodulating. On a wideband
     // capture the envelope of the whole span is mostly other people's wifi,
     // and a burst found there is not a burst on this channel.
-    let shifted = filter(
-        &mix(&iq, (center - channel) / rate),
-        CHANNEL_CUTOFF_HZ / rate,
-    );
+    let shifted = filter(&mix(&iq, (center - channel) / rate), CHANNEL_CUTOFF_HZ / rate);
     let spans = find_bursts(&shifted, rate);
-    println!(
-        "{} bursts of {:.0}..{:.0} us",
-        spans.len(),
-        BURST_MIN_US,
-        BURST_MAX_US
-    );
+    println!("{} bursts of {:.0}..{:.0} us", spans.len(), BURST_MIN_US, BURST_MAX_US);
     if spans.is_empty() {
         return;
     }
@@ -213,29 +199,16 @@ fn carrier(iq: &[C32], rate: f64) -> f64 {
         buf.push(rustfft::num_complex::Complex::new(s.re * w, s.im * w));
     }
     buf.resize(n, rustfft::num_complex::Complex::new(0.0, 0.0));
-    rustfft::FftPlanner::new()
-        .plan_fft_forward(n)
-        .process(&mut buf);
-    let mag: Vec<f64> = buf
-        .iter()
-        .map(|c| (c.norm_sqr() as f64 + 1e-30).ln())
-        .collect();
+    rustfft::FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    let mag: Vec<f64> = buf.iter().map(|c| (c.norm_sqr() as f64 + 1e-30).ln()).collect();
     let k = (0..n).max_by(|&a, &b| mag[a].total_cmp(&mag[b])).unwrap();
     let (l, r) = (mag[(k + n - 1) % n], mag[(k + 1) % n]);
     // Quadratic fit across the peak. The denominator vanishes on a flat top,
     // and an unclamped offset there puts the carrier off the planet.
     let den = l - 2.0 * mag[k] + r;
-    let delta = if den.abs() > 1e-12 {
-        (0.5 * (l - r) / den).clamp(-0.5, 0.5)
-    } else {
-        0.0
-    };
+    let delta = if den.abs() > 1e-12 { (0.5 * (l - r) / den).clamp(-0.5, 0.5) } else { 0.0 };
     let bin = k as f64 + delta;
-    let bin = if bin > n as f64 / 2.0 {
-        bin - n as f64
-    } else {
-        bin
-    };
+    let bin = if bin > n as f64 / 2.0 { bin - n as f64 } else { bin };
     bin * rate / n as f64
 }
 
@@ -260,9 +233,7 @@ fn filter(iq: &[C32], cutoff_cycles: f64) -> Vec<C32> {
 /// Quadrature discriminator, in hertz per sample.
 fn discriminate(iq: &[C32], rate: f64) -> Vec<f32> {
     let scale = (rate / std::f64::consts::TAU) as f32;
-    iq.windows(2)
-        .map(|w| (w[1] * w[0].conj()).arg() * scale)
-        .collect()
+    iq.windows(2).map(|w| (w[1] * w[0].conj()).arg() * scale).collect()
 }
 
 fn demod(iq: &[C32], rate: f64, a0: usize, b0: usize, baud: f64) -> Option<Burst> {
@@ -323,10 +294,7 @@ fn demod(iq: &[C32], rate: f64, a0: usize, b0: usize, baud: f64) -> Option<Burst
     let centre = (lo + hi) / 2.0;
     let scale = ((hi - lo) / 2.0).max(1.0);
     let sign = if space < 0.0 { 1.0 } else { -1.0 };
-    let norm: Vec<f32> = f[start..]
-        .iter()
-        .map(|&v| sign * (v - centre) / scale)
-        .collect();
+    let norm: Vec<f32> = f[start..].iter().map(|&v| sign * (v - centre) / scale).collect();
 
     let (bits, recovered) = mueller_muller(&norm, sps);
     Some(Burst {
@@ -370,14 +338,7 @@ fn mueller_muller(x: &[f32], sps_nominal: f64) -> (Vec<u8>, f64) {
         sps_sum += sps;
         sps_n += 1.0;
     }
-    (
-        bits,
-        if sps_n > 0.0 {
-            sps_sum / sps_n
-        } else {
-            sps_nominal
-        },
-    )
+    (bits, if sps_n > 0.0 { sps_sum / sps_n } else { sps_nominal })
 }
 
 /// Catmull-Rom between the two samples either side of `t`. Linear
@@ -397,10 +358,8 @@ fn interpolate(x: &[f32], t: f64) -> f32 {
 fn scan_baud(iq: &[C32], rate: f64, spans: &[(usize, usize)]) {
     println!("\n  baud     frames   bits  median agreement  frac > 0.98  manchester");
     for baud in [125_000.0, 250_000.0, 500_000.0, 1_000_000.0] {
-        let bursts: Vec<Burst> = spans
-            .iter()
-            .filter_map(|&(a, b)| demod(iq, rate, a, b, baud))
-            .collect();
+        let bursts: Vec<Burst> =
+            spans.iter().filter_map(|&(a, b)| demod(iq, rate, a, b, baud)).collect();
         if bursts.len() < 4 {
             println!("{baud:9.0}   too few frames");
             continue;
@@ -414,11 +373,7 @@ fn scan_baud(iq: &[C32], rate: f64, spans: &[(usize, usize)]) {
         // A rate twice the true one produces bits that still repeat frame to
         // frame, so agreement alone cannot tell 500 kbaud from 1 M. The line
         // code can: only at the true rate does the payload pair up.
-        let coded = median(
-            bursts
-                .iter()
-                .map(|b| manchester(&b.bits).data.len() as f64 * 2.0),
-        );
+        let coded = median(bursts.iter().map(|b| manchester(&b.bits).data.len() as f64 * 2.0));
         println!(
             "{baud:9.0} {:8} {bits:6.0}  {mid:16.3}  {clean:11.2}  {:.0}% of frame",
             bursts.len(),
@@ -500,15 +455,9 @@ fn report(bursts: &[Burst]) {
         median(bursts.iter().map(|b| b.separation_hz)),
         median(bursts.iter().map(|b| b.preamble_us)),
     );
-    let gaps: Vec<f64> = bursts
-        .windows(2)
-        .map(|w| (w[1].at_s - w[0].at_s) * 1e3)
-        .collect();
+    let gaps: Vec<f64> = bursts.windows(2).map(|w| (w[1].at_s - w[0].at_s) * 1e3).collect();
     if !gaps.is_empty() {
-        println!(
-            "burst spacing median {:.3} ms",
-            median(gaps.iter().copied())
-        );
+        println!("burst spacing median {:.3} ms", median(gaps.iter().copied()));
     }
 
     let agree = adjacent_agreement(bursts);
@@ -548,12 +497,7 @@ fn stability(bursts: &[Burst]) {
             return;
         }
     };
-    println!(
-        "\n{} of {} frames aligned, {} bits compared",
-        aligned.len(),
-        bursts.len(),
-        n
-    );
+    println!("\n{} of {} frames aligned, {} bits compared", aligned.len(), bursts.len(), n);
 
     let ones: Vec<f64> = (0..n)
         .map(|i| aligned.iter().filter(|b| b[i] == 1).count() as f64 / aligned.len() as f64)
@@ -562,9 +506,7 @@ fn stability(bursts: &[Burst]) {
     println!("majority {}", hex(&majority, majority.len() / 8));
     println!(
         "constant {}/{} bits",
-        ones.iter()
-            .filter(|&&p| !(0.02..=0.98).contains(&p))
-            .count(),
+        ones.iter().filter(|&&p| !(0.02..=0.98).contains(&p)).count(),
         n
     );
     let m = manchester(&majority);
@@ -615,12 +557,7 @@ struct Manchester {
 
 fn manchester(bits: &[u8]) -> Manchester {
     const MAX_VIOLATIONS: f64 = 0.02;
-    let mut best = Manchester {
-        phase: 0,
-        start: 0,
-        violations: 1.0,
-        data: Vec::new(),
-    };
+    let mut best = Manchester { phase: 0, start: 0, violations: 1.0, data: Vec::new() };
     for phase in 0..2 {
         let pairs: Vec<&[u8]> = bits[phase..].chunks_exact(2).collect();
         // Prefix sums of violations, so any window's rate is two lookups.
@@ -667,9 +604,7 @@ fn decoded_stability(aligned: &[&[u8]], m: &Manchester) {
     println!(
         "\n{} frames decoded, {} of {n} data bits constant",
         frames.len(),
-        ones.iter()
-            .filter(|&&p| !(0.02..=0.98).contains(&p))
-            .count()
+        ones.iter().filter(|&&p| !(0.02..=0.98).contains(&p)).count()
     );
     for f in frames.iter().take(6) {
         println!("  {}", hex(f, n / 8));

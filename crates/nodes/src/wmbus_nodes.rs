@@ -33,11 +33,7 @@ impl Default for WmbusNode {
 
 impl WmbusNode {
     pub fn new() -> Self {
-        Self {
-            demod: None,
-            meter: crate::FrameMeter::new(1.0, 0, 0.05),
-            frames: 0,
-        }
+        Self { demod: None, meter: crate::FrameMeter::new(1.0, 0, 0.05), frames: 0 }
     }
 
     /// Frames that passed their CRCs since the node was made.
@@ -107,15 +103,9 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .collect();
     let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
     let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
-    let kind = r
-        .get("type_string")
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+    let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
     let enc = r.get("payload_encrypted").is_some();
-    let text = format!(
-        "{m} {kind} {id}{}",
-        if enc { ", payload encrypted" } else { "" }
-    );
+    let text = format!("{m} {kind} {id}{}", if enc { ", payload encrypted" } else { "" });
     d = d.with_text(text.clone()).with_detail(r.fields_line()).with_fields(fields);
     if !id.is_empty() {
         d = d

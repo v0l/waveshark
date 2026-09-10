@@ -57,13 +57,7 @@ impl LinkControl {
         if src == 0 {
             return None;
         }
-        Some(Self {
-            flco,
-            fid: b[1],
-            options: b[2],
-            dst,
-            src,
-        })
+        Some(Self { flco, fid: b[1], options: b[2], dst, src })
     }
 
     pub fn group(&self) -> bool {
@@ -119,11 +113,7 @@ pub fn emb(bits: &[u8]) -> Option<Emb> {
         code = (code << 1) | u32::from(b & 1);
     }
     let v = nearest(code, 7, 1, qr_encode)?;
-    Some(Emb {
-        colour: (v >> 3) as u8 & 0x0f,
-        pi: v & 0x04 != 0,
-        lcss: v as u8 & 0x03,
-    })
+    Some(Emb { colour: (v >> 3) as u8 & 0x0f, pi: v & 0x04 != 0, lcss: v as u8 & 0x03 })
 }
 
 /// Decode the 20 slot-type bits of a data burst into colour code and data
@@ -289,10 +279,7 @@ pub struct EmbeddedLc {
 
 impl Default for EmbeddedLc {
     fn default() -> Self {
-        Self {
-            raw: [0; 128],
-            have: 0,
-        }
+        Self { raw: [0; 128], have: 0 }
     }
 }
 
@@ -370,15 +357,7 @@ fn decode_embedded(raw: &[u8; 128]) -> Option<LinkControl> {
 
     let mut lc = [0u8; 72];
     let mut pos = 0usize;
-    for (from, to) in [
-        (0, 11),
-        (16, 27),
-        (32, 42),
-        (48, 58),
-        (64, 74),
-        (80, 90),
-        (96, 106),
-    ] {
+    for (from, to) in [(0, 11), (16, 27), (32, 42), (48, 58), (64, 74), (80, 90), (96, 106)] {
         lc[pos..pos + (to - from)].copy_from_slice(&d[from..to]);
         pos += to - from;
     }
@@ -510,10 +489,7 @@ mod tests {
     use super::*;
 
     fn unpack(bytes: &[u8]) -> Vec<u8> {
-        bytes
-            .iter()
-            .flat_map(|b| (0..8).map(move |i| (b >> (7 - i)) & 1))
-            .collect()
+        bytes.iter().flat_map(|b| (0..8).map(move |i| (b >> (7 - i)) & 1)).collect()
     }
 
     /// Encode a 96-bit payload the way a radio does, so the decoder can be
@@ -599,10 +575,7 @@ mod tests {
                 .collect();
             accept += u32::from(emb(&bits).is_some());
         }
-        assert!(
-            (300..900).contains(&accept),
-            "{accept} of 10000 random words accepted"
-        );
+        assert!((300..900).contains(&accept), "{accept} of 10000 random words accepted");
     }
 
     #[test]
@@ -650,15 +623,7 @@ mod tests {
         let lc_bits = unpack(&bytes);
         let mut d = [0u8; 128];
         let mut pos = 0usize;
-        for (from, to) in [
-            (0, 11),
-            (16, 27),
-            (32, 42),
-            (48, 58),
-            (64, 74),
-            (80, 90),
-            (96, 106),
-        ] {
+        for (from, to) in [(0, 11), (16, 27), (32, 42), (48, 58), (64, 74), (80, 90), (96, 106)] {
             for a in from..to {
                 d[a] = lc_bits[pos];
                 pos += 1;

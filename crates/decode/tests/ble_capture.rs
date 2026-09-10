@@ -38,11 +38,7 @@ fn read() -> Option<Vec<BleFrame>> {
 
 /// The address a device put on the air, most significant byte first.
 fn address(f: &BleFrame) -> String {
-    let s: Vec<String> = f.pdu[2..8]
-        .iter()
-        .rev()
-        .map(|b| format!("{b:02X}"))
-        .collect();
+    let s: Vec<String> = f.pdu[2..8].iter().rev().map(|b| format!("{b:02X}")).collect();
     s.join(":")
 }
 
@@ -51,21 +47,11 @@ fn the_advertisements_in_the_capture_are_read() {
     let Some(frames) = read() else { return };
     // Eight packets pass CRC in these two seconds. The floor is under that:
     // what this guards is a demodulator that stopped working.
-    assert!(
-        frames.len() >= 6,
-        "read {} packets, expected 8",
-        frames.len()
-    );
-    assert!(
-        frames.iter().all(|f| f.channel == 38),
-        "a packet was attributed elsewhere"
-    );
+    assert!(frames.len() >= 6, "read {} packets, expected 8", frames.len());
+    assert!(frames.iter().all(|f| f.channel == 38), "a packet was attributed elsewhere");
 
     let addrs: std::collections::BTreeSet<String> = frames.iter().map(address).collect();
-    assert!(
-        addrs.len() >= 2,
-        "expected more than one advertiser, found {addrs:?}"
-    );
+    assert!(addrs.len() >= 2, "expected more than one advertiser, found {addrs:?}");
 
     // The company identifier is the SIG's, and the transmitter put it there.
     let companies: std::collections::BTreeSet<u16> = frames
@@ -84,13 +70,7 @@ fn the_measured_frequency_error_is_the_tuners_own() {
     let Some(frames) = read() else { return };
     let offs: Vec<f32> = frames.iter().map(|f| f.freq_off_hz).collect();
     let mean = offs.iter().sum::<f32>() / offs.len() as f32;
-    assert!(
-        mean.abs() < 120_000.0,
-        "mean offset {mean} Hz is larger than any tuner's error"
-    );
+    assert!(mean.abs() < 120_000.0, "mean offset {mean} Hz is larger than any tuner's error");
     let spread = offs.iter().fold(0.0f32, |m, o| m.max((o - mean).abs()));
-    assert!(
-        spread < 120_000.0,
-        "offsets disagree by {spread} Hz across one capture"
-    );
+    assert!(spread < 120_000.0, "offsets disagree by {spread} Hz across one capture");
 }

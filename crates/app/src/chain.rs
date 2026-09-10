@@ -1231,10 +1231,7 @@ impl Receiver {
     /// and the frame rate it is at.
     pub fn audio_out(&self) -> (&[f32], f64) {
         let out = self.node_of_stage(derived::AUDIO).map(|id| id.o());
-        let pcm = out
-            .and_then(|o| self.graph.buf(o))
-            .and_then(|p| p.as_real())
-            .unwrap_or(&[]);
+        let pcm = out.and_then(|o| self.graph.buf(o)).and_then(|p| p.as_real()).unwrap_or(&[]);
         let rate = out
             .and_then(|o| self.graph.spec_of(o))
             .map(|s| s.frame_rate())
@@ -2883,10 +2880,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             // A channel's level is the strip's to say.
             Some((_, Some(spec), label)) => {
                 strip_settings(&mut s, k, spec.volume, spec.muted, label);
-                s.insert(
-                    StripParam::Speech.name(k),
-                    V::Bool(spec.voice && !spec.mode.is_decode()),
-                );
+                s.insert(StripParam::Speech.name(k), V::Bool(spec.voice && !spec.mode.is_decode()));
             }
             // A voice port's level is the subscriptions' business; the strip
             // itself passes it whole.
@@ -3216,11 +3210,8 @@ fn audio_channel_stages(
 
     if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
         let mut s = Settings::new();
-        let measure = if mode == Demod::Nfm {
-            nodes::SquelchKind::Noise
-        } else {
-            nodes::SquelchKind::Level
-        };
+        let measure =
+            if mode == Demod::Nfm { nodes::SquelchKind::Noise } else { nodes::SquelchKind::Level };
         s.insert("kind".into(), V::Text(measure.to_string()));
         s.insert("threshold_db".into(), V::Float(db as f64));
         let sq = at(p, "chan_squelch", "squelch", s);
@@ -4942,10 +4933,7 @@ mod tests {
             anywhere(Front::protocol("pocsag", 145_000_000.0)),
         ];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
-        assert!(
-            running(&rx, "aprs") && running(&rx, "pocsag"),
-            "both front ends should run"
-        );
+        assert!(running(&rx, "aprs") && running(&rx, "pocsag"), "both front ends should run");
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
         for label in ["144.800 APRS", "145.0000 pager"] {
@@ -5762,7 +5750,10 @@ mod tx_in_graph_tests {
         }
         // What went to the radio is on the transmitter's own port, which is
         // what the monitor at the head of the receive chain reads.
-        let sent = rx.node_of_stage(derived::TX_RADIO).and_then(|id| rx.graph.buf(id.o())).and_then(|b| b.as_iq());
+        let sent = rx
+            .node_of_stage(derived::TX_RADIO)
+            .and_then(|id| rx.graph.buf(id.o()))
+            .and_then(|b| b.as_iq());
         assert_eq!(sent.map(<[C32]>::len), Some(40_000), "the monitor port is empty while keyed");
         rx.unkey();
         assert!(!rx.keyed());
@@ -5770,7 +5761,10 @@ mod tx_in_graph_tests {
         // And nothing leaves that port once the key is up, so the monitor
         // stops drawing a transmission that has ended.
         rx.process(&block).unwrap();
-        let sent = rx.node_of_stage(derived::TX_RADIO).and_then(|id| rx.graph.buf(id.o())).and_then(|b| b.as_iq());
+        let sent = rx
+            .node_of_stage(derived::TX_RADIO)
+            .and_then(|id| rx.graph.buf(id.o()))
+            .and_then(|b| b.as_iq());
         assert_eq!(sent.map(<[C32]>::len), Some(0));
     }
 
@@ -5782,8 +5776,7 @@ mod tx_in_graph_tests {
         // above the centre, so that is where it has to land.
         let plan = plan_with_tx(TxSource::Tone);
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        let (mut dev, _c) =
-            sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
+        let (mut dev, _c) = sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
         assert!(rx.key(dev.start_tx().unwrap()));
         let quiet = vec![C32::new(0.0, 0.0); 40_000];
 

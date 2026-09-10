@@ -88,10 +88,7 @@ impl Control {
     /// healthy. `None` until there is a span to divide by, since one frame
     /// over no time is not a rate.
     pub fn frame_rate(&self) -> Option<f64> {
-        let span = self
-            .last
-            .saturating_duration_since(self.first)
-            .as_secs_f64();
+        let span = self.last.saturating_duration_since(self.first).as_secs_f64();
         (span > 0.25).then(|| self.frames as f64 / span)
     }
 
@@ -111,29 +108,16 @@ pub struct Controls {
 impl Controls {
     /// Fold one decode in, and say whether it carried sticks at all.
     pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let common::ReportDetail::Control {
-            channels,
-            armed,
-            uplink_power_mw,
-        } = &rec.report
-        else {
+        let common::ReportDetail::Control { channels, armed, uplink_power_mw } = &rec.report else {
             return false;
         };
         // Who sent it, or there is no row to put it in: a control report with
         // nobody attached would merge two handsets into one set of sticks.
-        let Some(id) = rec
-            .identity
-            .as_ref()
-            .map(|i| i.id.clone())
-            .filter(|i| !i.is_empty())
-        else {
+        let Some(id) = rec.identity.as_ref().map(|i| i.id.clone()).filter(|i| !i.is_empty()) else {
             return false;
         };
         let system = rec.system().to_string();
-        let found = self
-            .seen
-            .iter_mut()
-            .find(|c| c.system == system && c.id == id);
+        let found = self.seen.iter_mut().find(|c| c.system == system && c.id == id);
         let c = match found {
             Some(c) => c,
             None => {
@@ -211,11 +195,7 @@ mod tests {
         channels: [Option<u16>; common::CONTROL_CHANNELS],
     ) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(2_415e6, model);
-        r.report = ReportDetail::Control {
-            channels,
-            armed: Some(false),
-            uplink_power_mw: None,
-        };
+        r.report = ReportDetail::Control { channels, armed: Some(false), uplink_power_mw: None };
         r.identity = Some(common::Identity::new("elrs", id));
         r
     }
@@ -259,11 +239,7 @@ mod tests {
         c.update(&rec("ExpressLRS", "6f37", four), now);
         let row = c.active(now)[0];
         assert_eq!(row.channels[0], Some(988));
-        assert_eq!(
-            row.channels[7],
-            Some(1500),
-            "the aux channels are still where they were"
-        );
+        assert_eq!(row.channels[7], Some(1500), "the aux channels are still where they were");
         assert_eq!(row.carried(), 8);
     }
 
@@ -279,10 +255,7 @@ mod tests {
 
         let mut sync = DecodeRecord::for_test(2_415e6, "ExpressLRS");
         sync.identity = Some(common::Identity::new("elrs", "6f37"));
-        assert!(
-            !c.update(&sync, now),
-            "a sync packet is not a set of sticks"
-        );
+        assert!(!c.update(&sync, now), "a sync packet is not a set of sticks");
 
         // Nor is a control report from nobody in particular: two handsets
         // would merge into one row of sticks that were never sent together.
@@ -302,10 +275,7 @@ mod tests {
         let row = c.active(now)[0];
         assert!(row.live(now));
         assert!(!row.live(now + LIVE + Duration::from_millis(1)));
-        assert!(
-            c.active(now + FORGET).is_empty(),
-            "and eventually it is forgotten"
-        );
+        assert!(c.active(now + FORGET).is_empty(), "and eventually it is forgotten");
     }
 
     /// The rate is what tells one ExpressLRS mode from another, and one

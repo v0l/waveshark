@@ -248,9 +248,8 @@ pub fn validate(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Option<
     if PacketType::from_bits(packet[0]) == PacketType::Sync {
         return (crc14(&body, init) == sent).then_some(None);
     }
-    (0..=255u8).find_map(|nonce| {
-        (crc14(&body, init ^ u16::from(nonce)) == sent).then_some(Some(nonce))
-    })
+    (0..=255u8)
+        .find_map(|nonce| (crc14(&body, init ^ u16::from(nonce)) == sent).then_some(Some(nonce)))
 }
 
 /// Check a packet against a UID and a counter the caller already knows,
@@ -281,7 +280,8 @@ pub fn validate_full(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Op
     if PacketType::from_bits(packet[0]) == PacketType::Sync {
         return (crc16(body, init) == sent).then_some(None);
     }
-    (0..=255u8).find_map(|nonce| (crc16(body, init ^ u16::from(nonce)) == sent).then_some(Some(nonce)))
+    (0..=255u8)
+        .find_map(|nonce| (crc16(body, init ^ u16::from(nonce)) == sent).then_some(Some(nonce)))
 }
 
 /// Read a full resolution packet. The type is still the low two bits of the
@@ -345,10 +345,7 @@ pub fn parse(packet: &[u8]) -> Option<Packet> {
             gemini: b[3] & 0x10 != 0,
             uid45: [b[4], b[5]],
         }),
-        PacketType::Data => Packet::Data {
-            package_index: b[0] & 0x7f,
-            payload: b[1..].to_vec(),
-        },
+        PacketType::Data => Packet::Data { package_index: b[0] & 0x7f, payload: b[1..].to_vec() },
         PacketType::Unknown(k) => Packet::Unknown(k),
     })
 }
@@ -485,16 +482,86 @@ pub struct Rate {
 }
 
 pub const RATES_2G4: [Rate; 10] = [
-    Rate { name: "FLRC 1000 Hz", packet_hz: 1000, spreading_factor: None, bandwidth_hz: 1_200_000.0, packet_bytes: 8, hop_interval: 2 },
-    Rate { name: "FLRC 500 Hz", packet_hz: 500, spreading_factor: None, bandwidth_hz: 1_200_000.0, packet_bytes: 8, hop_interval: 2 },
-    Rate { name: "FLRC 500 Hz DVDA", packet_hz: 1000, spreading_factor: None, bandwidth_hz: 1_200_000.0, packet_bytes: 8, hop_interval: 2 },
-    Rate { name: "FLRC 250 Hz DVDA", packet_hz: 1000, spreading_factor: None, bandwidth_hz: 1_200_000.0, packet_bytes: 8, hop_interval: 2 },
-    Rate { name: "LoRa 500 Hz", packet_hz: 500, spreading_factor: Some(5), bandwidth_hz: 812_500.0, packet_bytes: 8, hop_interval: 4 },
-    Rate { name: "LoRa 333 Hz 8ch", packet_hz: 333, spreading_factor: Some(5), bandwidth_hz: 812_500.0, packet_bytes: 13, hop_interval: 4 },
-    Rate { name: "LoRa 250 Hz", packet_hz: 250, spreading_factor: Some(6), bandwidth_hz: 812_500.0, packet_bytes: 8, hop_interval: 4 },
-    Rate { name: "LoRa 150 Hz", packet_hz: 150, spreading_factor: Some(7), bandwidth_hz: 812_500.0, packet_bytes: 8, hop_interval: 4 },
-    Rate { name: "LoRa 100 Hz 8ch", packet_hz: 100, spreading_factor: Some(7), bandwidth_hz: 812_500.0, packet_bytes: 13, hop_interval: 4 },
-    Rate { name: "LoRa 50 Hz", packet_hz: 50, spreading_factor: Some(8), bandwidth_hz: 812_500.0, packet_bytes: 8, hop_interval: 2 },
+    Rate {
+        name: "FLRC 1000 Hz",
+        packet_hz: 1000,
+        spreading_factor: None,
+        bandwidth_hz: 1_200_000.0,
+        packet_bytes: 8,
+        hop_interval: 2,
+    },
+    Rate {
+        name: "FLRC 500 Hz",
+        packet_hz: 500,
+        spreading_factor: None,
+        bandwidth_hz: 1_200_000.0,
+        packet_bytes: 8,
+        hop_interval: 2,
+    },
+    Rate {
+        name: "FLRC 500 Hz DVDA",
+        packet_hz: 1000,
+        spreading_factor: None,
+        bandwidth_hz: 1_200_000.0,
+        packet_bytes: 8,
+        hop_interval: 2,
+    },
+    Rate {
+        name: "FLRC 250 Hz DVDA",
+        packet_hz: 1000,
+        spreading_factor: None,
+        bandwidth_hz: 1_200_000.0,
+        packet_bytes: 8,
+        hop_interval: 2,
+    },
+    Rate {
+        name: "LoRa 500 Hz",
+        packet_hz: 500,
+        spreading_factor: Some(5),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 8,
+        hop_interval: 4,
+    },
+    Rate {
+        name: "LoRa 333 Hz 8ch",
+        packet_hz: 333,
+        spreading_factor: Some(5),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 13,
+        hop_interval: 4,
+    },
+    Rate {
+        name: "LoRa 250 Hz",
+        packet_hz: 250,
+        spreading_factor: Some(6),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 8,
+        hop_interval: 4,
+    },
+    Rate {
+        name: "LoRa 150 Hz",
+        packet_hz: 150,
+        spreading_factor: Some(7),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 8,
+        hop_interval: 4,
+    },
+    Rate {
+        name: "LoRa 100 Hz 8ch",
+        packet_hz: 100,
+        spreading_factor: Some(7),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 13,
+        hop_interval: 4,
+    },
+    Rate {
+        name: "LoRa 50 Hz",
+        packet_hz: 50,
+        spreading_factor: Some(8),
+        bandwidth_hz: 812_500.0,
+        packet_bytes: 8,
+        hop_interval: 2,
+    },
 ];
 
 /// The rates that fit a measured spreading factor and bandwidth.
@@ -529,11 +596,7 @@ pub fn identify_rate(
     coverage: f64,
 ) -> Option<&'static Rate> {
     let candidates = rates_for(sf, bandwidth_hz);
-    let seen = if coverage > 0.0 {
-        packets_per_second / coverage
-    } else {
-        packets_per_second
-    };
+    let seen = if coverage > 0.0 { packets_per_second / coverage } else { packets_per_second };
     candidates
         .into_iter()
         // Ratio rather than difference: 150 against 100 is the pair to
@@ -668,16 +731,11 @@ pub fn fields(d: &Decoded) -> Vec<(String, Value)> {
             f.push(("fhss_index".into(), Value::Int(i64::from(s.fhss_index))));
             f.push(("nonce".into(), Value::Int(i64::from(s.nonce))));
             f.push(("rate".into(), {
-                let name = RATES_2G4
-                    .get(usize::from(s.rate_index))
-                    .map(|r| r.name)
-                    .unwrap_or("unknown");
+                let name =
+                    RATES_2G4.get(usize::from(s.rate_index)).map(|r| r.name).unwrap_or("unknown");
                 Value::Text(name.into())
             }));
-            f.push((
-                "uid45".into(),
-                Value::Text(format!("{:02x}{:02x}", s.uid45[0], s.uid45[1])),
-            ));
+            f.push(("uid45".into(), Value::Text(format!("{:02x}{:02x}", s.uid45[0], s.uid45[1]))));
         }
         Packet::Data { package_index, .. } => {
             f.push(("packet".into(), Value::Text("data".into())));
@@ -711,9 +769,7 @@ pub fn seeds_of(packet: &[u8]) -> Vec<u16> {
         let sent = u16::from_le_bytes([packet[11], packet[12]]);
         let body = &packet[..FULL_CRC_LEN];
         let want = sent ^ crc16(body, 0);
-        return solve(|init| crc16(&[0; FULL_CRC_LEN], init), 16, want)
-            .into_iter()
-            .collect();
+        return solve(|init| crc16(&[0; FULL_CRC_LEN], init), 16, want).into_iter().collect();
     }
     if packet.len() >= PACKET_LEN {
         let sent = ((u16::from(packet[0]) >> 2) << 8) | u16::from(packet[7]);
@@ -895,16 +951,10 @@ pub fn build_full(body: &[u8], uid: &[u8; 6], ota_version: u8, nonce: u8) -> [u8
 pub fn decode(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Decoded> {
     if packet.len() >= PACKET_LEN_FULL {
         let nonce = validate_full(packet, uid, ota_version)?;
-        return Some(Decoded {
-            packet: parse_full(packet)?,
-            nonce,
-        });
+        return Some(Decoded { packet: parse_full(packet)?, nonce });
     }
     let nonce = validate(packet, uid, ota_version)?;
-    Some(Decoded {
-        packet: parse(packet)?,
-        nonce,
-    })
+    Some(Decoded { packet: parse(packet)?, nonce })
 }
 
 #[cfg(test)]
@@ -960,7 +1010,10 @@ mod tests {
         assert!(seeds_of(&packets[0]).contains(&(init ^ 200)));
         let refs: Vec<&[u8]> = packets.iter().map(|p| &p[..]).collect();
         // Fourteen bits of CRC cannot see the top two bits of uid[4].
-        assert_eq!(recover_link(&refs, OTA_VERSION), Some(Recovered { uid4: UID[4] & 0x3f, uid5: None }));
+        assert_eq!(
+            recover_link(&refs, OTA_VERSION),
+            Some(Recovered { uid4: UID[4] & 0x3f, uid5: None })
+        );
 
         // The full packet's sixteen bits give the seed outright.
         let full: Vec<[u8; 13]> = (0..3)
@@ -978,7 +1031,10 @@ mod tests {
         let steady: Vec<[u8; 13]> =
             (0..3).map(|_| build_full(&[0; 11], &UID, OTA_VERSION, 0)).collect();
         let refs: Vec<&[u8]> = steady.iter().map(|p| &p[..]).collect();
-        assert_eq!(recover_link(&refs, OTA_VERSION), Some(Recovered { uid4: UID[4], uid5: Some(UID[5]) }));
+        assert_eq!(
+            recover_link(&refs, OTA_VERSION),
+            Some(Recovered { uid4: UID[4], uid5: Some(UID[5]) })
+        );
         // And what was recovered checks the packets it came from, the way
         // a sync packet's two bytes would.
         let learned = [0, 0, 0, 0, UID[4], 0];
@@ -986,7 +1042,10 @@ mod tests {
 
         // Packets of two different links do not agree on a high byte.
         let other = [0x11, 0x22, 0x33, 0x44, 0x99, 0x66];
-        let mixed = [build_full(&[0; 11], &UID, OTA_VERSION, 40), build_full(&[0; 11], &other, OTA_VERSION, 41)];
+        let mixed = [
+            build_full(&[0; 11], &UID, OTA_VERSION, 40),
+            build_full(&[0; 11], &other, OTA_VERSION, 41),
+        ];
         let refs: Vec<&[u8]> = mixed.iter().map(|p| &p[..]).collect();
         assert_eq!(recover_link(&refs, OTA_VERSION), None);
     }
@@ -1008,9 +1067,7 @@ mod tests {
     fn a_sync_packet_needs_no_counter_and_says_where_the_link_is() {
         let p = build(&[0b10, 37, 200, 6, 0x00, 0x55, 0x66], &UID, 0);
         assert_eq!(validate(&p, &UID, OTA_VERSION), Some(None));
-        let Some(Packet::Sync(s)) = parse(&p) else {
-            panic!("not read as sync")
-        };
+        let Some(Packet::Sync(s)) = parse(&p) else { panic!("not read as sync") };
         assert_eq!(s.fhss_index, 37);
         assert_eq!(s.nonce, 200);
         assert_eq!(s.rate_index, 6);
@@ -1115,9 +1172,7 @@ mod tests {
         let crc = crc16(&p[..FULL_CRC_LEN], crc_initializer(&UID, OTA_VERSION));
         p[11..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(validate_full(&p, &UID, OTA_VERSION), Some(None));
-        let Some(Packet::Sync(s)) = parse_full(&p) else {
-            panic!("not read as sync")
-        };
+        let Some(Packet::Sync(s)) = parse_full(&p) else { panic!("not read as sync") };
         assert_eq!(s.fhss_index, 40);
         assert_eq!(RATES_2G4[usize::from(s.rate_index)].name, "LoRa 100 Hz 8ch");
         assert_eq!(RATES_2G4[usize::from(s.rate_index)].packet_bytes, PACKET_LEN_FULL);
@@ -1214,12 +1269,8 @@ mod tests {
     /// and which group it is decides where they land.
     #[test]
     fn a_full_packet_puts_its_aux_group_where_the_packet_says() {
-        let packet = Packet::RcFull {
-            channels: [496; 8],
-            armed: false,
-            high_aux: false,
-            uplink_power: 5,
-        };
+        let packet =
+            Packet::RcFull { channels: [496; 8], armed: false, high_aux: false, uplink_power: 5 };
         let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) =
             control(&packet)
         else {
@@ -1229,12 +1280,8 @@ mod tests {
         assert!(channels[8..].iter().all(Option::is_none));
         assert_eq!(uplink_power_mw, Some(500));
 
-        let high = Packet::RcFull {
-            channels: [496; 8],
-            armed: false,
-            high_aux: true,
-            uplink_power: 9,
-        };
+        let high =
+            Packet::RcFull { channels: [496; 8], armed: false, high_aux: true, uplink_power: 9 };
         let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) = control(&high)
         else {
             panic!("no control report")
@@ -1253,5 +1300,4 @@ mod tests {
         assert!(control(&Packet::Data { package_index: 1, payload: vec![0] }).is_none());
         assert!(control(&Packet::Unknown(3)).is_none());
     }
-
 }

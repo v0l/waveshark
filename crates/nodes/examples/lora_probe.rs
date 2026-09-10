@@ -45,10 +45,7 @@ fn main() {
         step
     );
     for sf in dsp::lora::SPREADING_FACTORS {
-        let mut demod = dsp::lora::Demod::new(dsp::lora::Config {
-            sf,
-            ..Default::default()
-        });
+        let mut demod = dsp::lora::Demod::new(dsp::lora::Config { sf, ..Default::default() });
         match demod.detect(&out, 0) {
             None => eprintln!("SF{sf}: nothing (resume {})", demod.resume()),
             Some(p) => {

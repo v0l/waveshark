@@ -59,11 +59,8 @@ pub const ADV_ACCESS_ADDRESS: u32 = 0x8E89_BED6;
 
 /// The three primary advertising channels: index as the whitening uses it,
 /// and where it sits.
-pub const ADV_CHANNELS: [(u8, f64); 3] = [
-    (37, 2_402_000_000.0),
-    (38, 2_426_000_000.0),
-    (39, 2_480_000_000.0),
-];
+pub const ADV_CHANNELS: [(u8, f64); 3] =
+    [(37, 2_402_000_000.0), (38, 2_426_000_000.0), (39, 2_480_000_000.0)];
 
 /// Half the width one channel occupies. Neighbouring channels are 2 MHz away
 /// and the modulation is about 1 MHz wide, so this passes the signal and stops
@@ -295,13 +292,7 @@ impl ChannelRx {
             factor,
             mixer: Mixer::new(center_hz - channel_hz, rate),
             decim: FirDecim::new(channel_filter(rate, factor), factor),
-            gate: LevelGate::new(
-                work,
-                cfg.tau_us,
-                0.3,
-                cfg.min_snr_db,
-                cfg.noise_threshold_ratio,
-            ),
+            gate: LevelGate::new(work, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
             mixed: Vec::new(),
             narrow: Vec::new(),
             burst: Vec::new(),
@@ -395,10 +386,7 @@ impl ChannelRx {
         }
         let freq_off_hz = (dc as f64 * self.rate / std::f64::consts::TAU) as f32;
 
-        let level = burst[self.body_start..]
-            .iter()
-            .map(|c| c.norm())
-            .sum::<f32>()
+        let level = burst[self.body_start..].iter().map(|c| c.norm()).sum::<f32>()
             / (burst.len() - self.body_start).max(1) as f32;
         let snr_db = self.gate.snr_db();
         let rssi_dbfs = 20.0 * level.max(1e-9).log10();
@@ -733,10 +721,7 @@ mod tests {
     #[test]
     fn a_packet_whitened_for_another_channel_is_not_accepted() {
         let iq = modulate(&encode_packet(37, &adv_ind()), 2_426_000_000.0, CENTER, 0.0);
-        assert!(
-            run(&iq, CENTER).is_empty(),
-            "the wrong channel's whitening decoded"
-        );
+        assert!(run(&iq, CENTER).is_empty(), "the wrong channel's whitening decoded");
     }
 
     /// A HackRF at 2.4 GHz is tens of kHz out, which is a fifth of the
@@ -760,10 +745,7 @@ mod tests {
         let mut bits = encode_packet(38, &adv_ind());
         bits[80] = !bits[80];
         let iq = modulate(&bits, 2_426_000_000.0, CENTER, 0.0);
-        assert!(
-            run(&iq, CENTER).is_empty(),
-            "a corrupted packet was accepted"
-        );
+        assert!(run(&iq, CENTER).is_empty(), "a corrupted packet was accepted");
     }
 
     /// The index a frame reports is into the caller's own stream, not into

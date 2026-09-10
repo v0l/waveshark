@@ -188,8 +188,8 @@ pub fn locate_cell(c: Cell, radio: &str) -> Result<Option<(f64, f64, f64)>, Stri
     if !status.is_success() {
         return Err(format!("beaconDB answered {}: {}", status.as_u16(), first_line(&text)));
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| "beaconDB sent something that is not JSON".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "beaconDB sent something that is not JSON".to_string())?;
     let loc = v.get("location").ok_or_else(|| "no location in the answer".to_string())?;
     let (Some(lat), Some(lon)) = (
         loc.get("lat").and_then(serde_json::Value::as_f64),
@@ -222,7 +222,10 @@ mod tests {
 
     #[test]
     fn a_cell_reads_as_the_four_numbers_the_api_wants() {
-        assert_eq!(cell("272-1-1234-56789"), Some(Cell { mcc: 272, mnc: 1, lac: 1234, cid: 56789 }));
+        assert_eq!(
+            cell("272-1-1234-56789"),
+            Some(Cell { mcc: 272, mnc: 1, lac: 1234, cid: 56789 })
+        );
         // A three digit MNC is a different network from the same digits
         // padded, so nothing here rewrites one.
         assert_eq!(cell("310-260-1-2").map(|c| c.mnc), Some(260));

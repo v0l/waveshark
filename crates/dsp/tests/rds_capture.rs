@@ -65,9 +65,11 @@ fn decode() -> Option<Decoded> {
     let mut chunk: Vec<C32> = Vec::with_capacity(BLOCK);
     for bytes in raw.chunks(BLOCK * 2) {
         chunk.clear();
-        chunk.extend(bytes.chunks_exact(2).map(|p| {
-            C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5)
-        }));
+        chunk.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|p| C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5)),
+        );
         iq.clear();
         iff.process(&chunk, &mut iq);
         disc.clear();

@@ -80,13 +80,7 @@ pub fn parse(info: &[u8], destination: &str) -> Option<Report> {
 
 fn text(b: &[u8]) -> String {
     b.iter()
-        .map(|&c| {
-            if (32..127).contains(&c) {
-                c as char
-            } else {
-                '.'
-            }
-        })
+        .map(|&c| if (32..127).contains(&c) { c as char } else { '.' })
         .collect::<String>()
         .trim_end()
         .to_string()
@@ -98,10 +92,7 @@ fn message(info: &[u8]) -> Option<Report> {
     if info.len() < 11 || info[10] != b':' {
         return None;
     }
-    Some(Report::Message {
-        to: text(&info[1..10]),
-        text: text(&info[11..]),
-    })
+    Some(Report::Message { to: text(&info[1..10]), text: text(&info[11..]) })
 }
 
 /// A position report, compressed or not, with or without a timestamp.
@@ -109,11 +100,7 @@ fn position(info: &[u8], kind: char) -> Option<Report> {
     // The timestamped forms put seven characters of time first, which nothing
     // here reads: the packet's own arrival time is better evidence than a
     // clock somebody else set.
-    let body = if kind == '/' || kind == '@' {
-        info.get(8..)?
-    } else {
-        info.get(1..)?
-    };
+    let body = if kind == '/' || kind == '@' { info.get(8..)? } else { info.get(1..)? };
     // A digit here is degrees, so the report is uncompressed. Anything else
     // is a compressed symbol table selector.
     if body.first()?.is_ascii_digit() {
@@ -145,13 +132,7 @@ fn uncompressed(b: &[u8]) -> Option<Report> {
     let symbol_code = s.as_bytes()[18] as char;
 
     let rest = &b[19..];
-    let mut pos = Position {
-        lat,
-        lon,
-        symbol_table,
-        symbol_code,
-        ..Position::default()
-    };
+    let mut pos = Position { lat, lon, symbol_table, symbol_code, ..Position::default() };
     // `nnn/nnn` immediately after the symbol is course and speed in knots.
     let comment_at = if rest.len() >= 7 && rest[3] == b'/' {
         let cs = std::str::from_utf8(&rest[..7]).ok()?;
@@ -165,10 +146,7 @@ fn uncompressed(b: &[u8]) -> Option<Report> {
     };
     let comment = text(&rest[comment_at.min(rest.len())..]);
     pos.altitude_ft = altitude(&comment);
-    Some(Report::Position {
-        position: pos,
-        comment: (!comment.is_empty()).then_some(comment),
-    })
+    Some(Report::Position { position: pos, comment: (!comment.is_empty()).then_some(comment) })
 }
 
 /// `DDMM.hh` with `deg` leading degree digits, followed by the hemisphere.
@@ -215,10 +193,7 @@ fn compressed(b: &[u8]) -> Option<Report> {
         }
     }
     let comment = text(&b[13..]);
-    Some(Report::Position {
-        position: pos,
-        comment: (!comment.is_empty()).then_some(comment),
-    })
+    Some(Report::Position { position: pos, comment: (!comment.is_empty()).then_some(comment) })
 }
 
 fn base91(b: &[u8]) -> Option<f64> {
@@ -316,10 +291,7 @@ fn mic_e(info: &[u8], destination: &str) -> Option<Report> {
         symbol_code: info[7] as char,
         symbol_table: info[8] as char,
     };
-    Some(Report::Position {
-        position: pos,
-        comment: (!comment.is_empty()).then_some(comment),
-    })
+    Some(Report::Position { position: pos, comment: (!comment.is_empty()).then_some(comment) })
 }
 
 /// `/A=001234` anywhere in a comment is altitude in feet.
@@ -359,9 +331,7 @@ mod tests {
         let p = pos(&r);
         assert_eq!(p.course_deg, Some(88.0));
         assert_eq!(p.speed_kt, Some(36.0));
-        let Report::Position { comment, .. } = &r else {
-            panic!()
-        };
+        let Report::Position { comment, .. } = &r else { panic!() };
         assert_eq!(comment.as_deref(), Some("heading out"));
     }
 
@@ -412,24 +382,14 @@ mod tests {
         let dest: String = digits
             .iter()
             .zip(bits)
-            .map(|(d, b)| {
-                if b {
-                    (b'P' + *d as u8) as char
-                } else {
-                    (b'0' + *d as u8) as char
-                }
-            })
+            .map(|(d, b)| if b { (b'P' + *d as u8) as char } else { (b'0' + *d as u8) as char })
             .collect();
 
         let lon_min = minutes_of(alon);
         let lon_hun = hundredths_of(alon);
         let mut info = vec![b'`'];
         info.push(lon_byte as u8);
-        info.push(if lon_min < 10 {
-            lon_min + 88
-        } else {
-            lon_min + 28
-        } as u8);
+        info.push(if lon_min < 10 { lon_min + 88 } else { lon_min + 28 } as u8);
         info.push((lon_hun + 28) as u8);
         info.push((speed / 10 + 28) as u8);
         info.push(((speed % 10) * 10 + course / 100 + 28) as u8);
@@ -465,23 +425,11 @@ mod tests {
             let (dest, info) = encode_mic_e(lat, lon, speed, course);
             let r = parse(&info, &dest).unwrap_or_else(|| panic!("{lat},{lon} did not parse"));
             let p = pos(&r);
-            assert!(
-                (p.lat - lat).abs() < 0.001,
-                "latitude {} wanted {lat}",
-                p.lat
-            );
-            assert!(
-                (p.lon - lon).abs() < 0.001,
-                "longitude {} wanted {lon}",
-                p.lon
-            );
+            assert!((p.lat - lat).abs() < 0.001, "latitude {} wanted {lat}", p.lat);
+            assert!((p.lon - lon).abs() < 0.001, "longitude {} wanted {lon}", p.lon);
             assert_eq!(p.speed_kt, Some(f64::from(speed)), "speed for {lat},{lon}");
             if course > 0 {
-                assert_eq!(
-                    p.course_deg,
-                    Some(f64::from(course)),
-                    "course for {lat},{lon}"
-                );
+                assert_eq!(p.course_deg, Some(f64::from(course)), "course for {lat},{lon}");
             }
         }
     }
@@ -496,10 +444,7 @@ mod tests {
         let mut south: Vec<char> = dest.chars().collect();
         south[3] = (south[3] as u8 - b'P' + b'0') as char;
         let south: String = south.into_iter().collect();
-        assert!(
-            pos(&parse(&info, &south).unwrap()).lat < 0.0,
-            "the bit was ignored"
-        );
+        assert!(pos(&parse(&info, &south).unwrap()).lat < 0.0, "the bit was ignored");
     }
 
     #[test]
@@ -510,18 +455,9 @@ mod tests {
 
     #[test]
     fn a_status_and_a_message_are_not_positions() {
-        assert_eq!(
-            parse(b">on the air", "APRS"),
-            Some(Report::Status("on the air".into()))
-        );
+        assert_eq!(parse(b">on the air", "APRS"), Some(Report::Status("on the air".into())));
         let m = parse(b":EI2ABC   :hello", "APRS").unwrap();
-        assert_eq!(
-            m,
-            Report::Message {
-                to: "EI2ABC".into(),
-                text: "hello".into()
-            }
-        );
+        assert_eq!(m, Report::Message { to: "EI2ABC".into(), text: "hello".into() });
     }
 
     /// Nothing here may panic on a truncated payload.

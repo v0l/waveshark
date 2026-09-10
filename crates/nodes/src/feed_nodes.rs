@@ -19,12 +19,12 @@
 use common::{Error, Hz, Packet, Result};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use pipeline::StreamSpec;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// One wire format, as a table entry.
 ///
@@ -84,11 +84,7 @@ pub struct FeedSpec {
 
 impl FeedSpec {
     pub fn new(host: impl Into<String>, port: u16, kind: &'static FeedKind) -> Self {
-        Self {
-            host: host.into(),
-            port,
-            kind,
-        }
+        Self { host: host.into(), port, kind }
     }
 
     pub fn address(&self) -> String {
@@ -147,13 +143,7 @@ impl FeedNode {
                 .spawn(move || run(spec, tx, state, stop))
                 .ok()
         };
-        Self {
-            spec,
-            rx,
-            state,
-            stop,
-            thread,
-        }
+        Self { spec, rx, state, stop, thread }
     }
 
     pub fn spec(&self) -> &FeedSpec {
@@ -189,9 +179,6 @@ impl Node for FeedNode {
     fn name(&self) -> &str {
         "feed"
     }
-
-
-
 
     fn num_inputs(&self) -> usize {
         0
@@ -444,10 +431,7 @@ pub fn parse_avr(buf: &mut Vec<u8>) -> Vec<WireFrame> {
         let Some(bytes) = from_hex(hex) else { continue };
         // Short reply, extended squitter, or nothing this cares about.
         if bytes.len() == 7 || bytes.len() == 14 {
-            out.push(WireFrame {
-                bytes,
-                rssi_dbfs: f32::NAN,
-            });
+            out.push(WireFrame { bytes, rssi_dbfs: f32::NAN });
         }
     }
     if consumed > 0 {
@@ -463,9 +447,7 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) || s.is_empty() {
         return None;
     }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect()
+    (0..s.len() / 2).map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()).collect()
 }
 
 /// Build a Beast message, for tests and for anything that wants to speak the
@@ -497,9 +479,8 @@ pub fn beast_message(bytes: &[u8], level: u8, timestamp: u64) -> Result<Vec<u8>>
 mod tests {
     use super::*;
 
-    const LONG: [u8; 14] = [
-        0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3, 0x71, 0xc3, 0x2c, 0xe0, 0x57, 0x60, 0x98,
-    ];
+    const LONG: [u8; 14] =
+        [0x8d, 0x48, 0x40, 0xd6, 0x20, 0x2c, 0xc3, 0x71, 0xc3, 0x2c, 0xe0, 0x57, 0x60, 0x98];
 
     #[test]
     fn a_beast_message_round_trips() {
@@ -507,15 +488,8 @@ mod tests {
         let out = parse_beast(&mut buf);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].bytes, LONG);
-        assert!(
-            out[0].rssi_dbfs < 0.0 && out[0].rssi_dbfs > -3.0,
-            "{}",
-            out[0].rssi_dbfs
-        );
-        assert!(
-            buf.is_empty(),
-            "the whole message should have been consumed"
-        );
+        assert!(out[0].rssi_dbfs < 0.0 && out[0].rssi_dbfs > -3.0, "{}", out[0].rssi_dbfs);
+        assert!(buf.is_empty(), "the whole message should have been consumed");
     }
 
     /// The escape is the only hard part of the format: a `0x1a` in the frame
@@ -536,10 +510,7 @@ mod tests {
     fn a_message_split_across_two_reads_survives() {
         let msg = beast_message(&LONG, 100, 7).unwrap();
         let mut buf = msg[..8].to_vec();
-        assert!(
-            parse_beast(&mut buf).is_empty(),
-            "half a message is not a frame"
-        );
+        assert!(parse_beast(&mut buf).is_empty(), "half a message is not a frame");
         buf.extend_from_slice(&msg[8..]);
         let out = parse_beast(&mut buf);
         assert_eq!(out.len(), 1);
@@ -607,10 +578,7 @@ mod tests {
                 k.name
             );
         }
-        assert!(
-            feed_kind("basestation").is_none(),
-            "conclusions are not a feed"
-        );
+        assert!(feed_kind("basestation").is_none(), "conclusions are not a feed");
     }
 
     #[test]

@@ -29,12 +29,12 @@
 use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use pipeline::registry::{Category, Settings, StageDesc};
 
 pub use survey::Account;
 
@@ -118,9 +118,7 @@ impl Uploader {
             return;
         }
         let up = self.clone();
-        let _ = std::thread::Builder::new()
-            .name("wigle-upload".into())
-            .spawn(move || up.run());
+        let _ = std::thread::Builder::new().name("wigle-upload".into()).spawn(move || up.run());
     }
 
     pub fn set_account(&self, account: Option<Account>) {
@@ -364,7 +362,6 @@ impl WigleNode {
         self.counted.borrow_mut().0 = None;
         self.opened = Instant::now();
     }
-
 }
 
 impl Drop for WigleNode {
@@ -488,8 +485,8 @@ mod tests {
         // A Samsung monitor's ADV_IND, dewhitened and CRC checked.
         packet(
             vec![
-                0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff,
-                0xe1, 0x02, 0x10, 0x00, 0x26, 0xc0,
+                0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff, 0xe1,
+                0x02, 0x10, 0x00, 0x26, 0xc0,
             ],
             2_426_000_000,
         )

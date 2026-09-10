@@ -89,12 +89,8 @@ pub(crate) fn rows_of(
     row_bits: std::ops::RangeInclusive<usize>,
 ) -> impl Iterator<Item = Vec<u8>> + '_ {
     let starts: Vec<usize> = bits.rows().to_vec();
-    let ends: Vec<usize> = starts
-        .iter()
-        .skip(1)
-        .copied()
-        .chain(std::iter::once(bits.len()))
-        .collect();
+    let ends: Vec<usize> =
+        starts.iter().skip(1).copied().chain(std::iter::once(bits.len())).collect();
     starts
         .into_iter()
         .zip(ends)
@@ -157,9 +153,7 @@ pub(crate) fn find_frame_bits(
         }
         // Another copy at another row start, which noise does not produce and
         // a misread row cannot fake.
-        let corroborated = rows
-            .iter()
-            .any(|&at| at != start && bits.slice(at, want) == frame);
+        let corroborated = rows.iter().any(|&at| at != start && bits.slice(at, want) == frame);
         // Or the rows themselves repeating at this frame's own period, which
         // is the same evidence without needing the copies to be identical.
         // Acurite's weather stations number their repeats, so no two copies in
@@ -167,9 +161,7 @@ pub(crate) fn find_frame_bits(
         // transmission that is plainly periodic. The slack is for the sync
         // mark between repeats, which leaves the copies a bit further apart
         // than the frame is long.
-        let periodic = rows
-            .iter()
-            .any(|&at| at != start && at.abs_diff(start).abs_diff(want) <= 2);
+        let periodic = rows.iter().any(|&at| at != start && at.abs_diff(start).abs_diff(want) <= 2);
         if alone || corroborated || periodic {
             return Some(frame.as_padded_bytes().to_vec());
         }

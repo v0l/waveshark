@@ -193,8 +193,7 @@ impl Simple for ElrsNode {
                 "elrs reads the 2.4 GHz link only: the 900 MHz coding has not been measured",
             ));
         }
-        self.reader
-            .design(i.spec.rate, center_hz, CHANNEL_WIDTH_HZ, SPREADING_FACTORS, true)?;
+        self.reader.design(i.spec.rate, center_hz, CHANNEL_WIDTH_HZ, SPREADING_FACTORS, true)?;
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         out.rate = 0.0;
@@ -251,7 +250,11 @@ impl Simple for ElrsNode {
                         samples,
                     }));
                 }
-                o.packets_mut().push(common::Packet::of_frame(now_us(), CHANNEL_WIDTH_HZ as u32, f));
+                o.packets_mut().push(common::Packet::of_frame(
+                    now_us(),
+                    CHANNEL_WIDTH_HZ as u32,
+                    f,
+                ));
             }
         }
         Ok(())
@@ -517,12 +520,14 @@ mod tests {
         let (uid, whole) = n.uid().expect("a link");
         assert_eq!(uid[4..], UID[4..]);
         assert!(!whole, "two bytes off a sync packet are not the whole UID");
-        let rows: Vec<Decoded> = frames
-            .iter()
-            .filter_map(|f| elrs_decoded(&f.bytes, Hz(f.center_hz)))
-            .collect();
+        let rows: Vec<Decoded> =
+            frames.iter().filter_map(|f| elrs_decoded(&f.bytes, Hz(f.center_hz))).collect();
         assert_eq!(rows.len(), 3);
-        assert!(rows[0].detail.as_deref().unwrap().contains("sync LoRa 250 Hz hop 37"), "{:?}", rows[0].detail);
+        assert!(
+            rows[0].detail.as_deref().unwrap().contains("sync LoRa 250 Hz hop 37"),
+            "{:?}",
+            rows[0].detail
+        );
         assert!(rows[1].detail.as_deref().unwrap().starts_with("SF7 rc:"), "{:?}", rows[1].detail);
         assert_eq!(rows[1].identity.as_ref().unwrap().id, "5566");
         assert!(frames.iter().all(|f| f.rssi_dbfs.is_finite() && f.iq.is_some()));

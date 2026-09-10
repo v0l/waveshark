@@ -52,8 +52,8 @@ pub const TRAIN_NORMAL_1: [u8; 22] =
 pub const TRAIN_NORMAL_2: [u8; 22] =
     [0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0];
 pub const TRAIN_SYNC: [u8; 38] = [
-    1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0,
-    0, 1, 1, 0, 0, 1, 1, 1,
+    1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1,
+    1, 0, 0, 1, 1, 1,
 ];
 
 /// Bit offsets inside a sync burst: block 1, sync training, broadcast, block 2.
@@ -366,18 +366,11 @@ impl TetraDemod {
             }
             if q > self.cfg.min_acquire {
                 // Walk to the top of the peak before trusting the position.
-                if let Some((t, BurstKind::Sync, q, rot)) =
-                    self.best_at(pos - lead, self.sps)
-                {
+                if let Some((t, BurstKind::Sync, q, rot)) = self.best_at(pos - lead, self.sps) {
                     if q > self.cfg.min_acquire {
                         self.stats.acquisitions += 1;
                         self.hunt = (t + self.sps) as usize;
-                        self.lock = Some(Lock {
-                            next: t,
-                            drift: rot,
-                            misses: 0,
-                            slot: 0,
-                        });
+                        self.lock = Some(Lock { next: t, drift: rot, misses: 0, slot: 0 });
                         return true;
                     }
                 }
@@ -615,11 +608,8 @@ impl TetraRx {
             BurstKind::Normal2 => {
                 let Some(cell) = self.cell else { return };
                 for range in [NDB_BLK1..NDB_BB1, NDB_BLK2..NDB_BLK2 + 216] {
-                    let blk = coding::decode_block(
-                        &coding::BLK_HALF,
-                        cell.scramb,
-                        &burst.bits[range],
-                    );
+                    let blk =
+                        coding::decode_block(&coding::BLK_HALF, cell.scramb, &burst.bits[range]);
                     self.take(blk, Lchan::SchHd, burst.slot, out);
                 }
             }
@@ -642,8 +632,7 @@ pub mod synth {
     }
 
     /// Normal training sequence 3, both ends of a continuous burst.
-    const TRAIN_Q: [u8; 22] =
-        [1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1];
+    const TRAIN_Q: [u8; 22] = [1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1];
 
     /// 9.4.4.2.6: a synchronization continuous downlink burst.
     ///
@@ -669,8 +658,11 @@ pub mod synth {
         b[..12].copy_from_slice(&TRAIN_Q[10..]);
         b[NDB_BLK1..NDB_BB1].copy_from_slice(bkn1);
         b[NDB_BB1..NDB_TRAIN].copy_from_slice(&bb[..14]);
-        b[NDB_TRAIN..NDB_BB2]
-            .copy_from_slice(if two_half { &TRAIN_NORMAL_2 } else { &TRAIN_NORMAL_1 });
+        b[NDB_TRAIN..NDB_BB2].copy_from_slice(if two_half {
+            &TRAIN_NORMAL_2
+        } else {
+            &TRAIN_NORMAL_1
+        });
         b[NDB_BB2..NDB_BLK2].copy_from_slice(&bb[14..]);
         b[NDB_BLK2..498].copy_from_slice(bkn2);
         b[500..].copy_from_slice(&TRAIN_Q[..10]);

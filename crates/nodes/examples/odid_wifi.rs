@@ -36,10 +36,8 @@ fn main() {
             continue;
         };
         for v in &m.vendor {
-            let key = format!(
-                "{:02X}:{:02X}:{:02X} type {:02X}",
-                v.oui[0], v.oui[1], v.oui[2], v.kind
-            );
+            let key =
+                format!("{:02X}:{:02X}:{:02X} type {:02X}", v.oui[0], v.oui[1], v.oui[2], v.kind);
             *ouis.entry(key).or_default() += 1;
             if let Some(msgs) = decode::odid::from_vendor_element(v.oui, v.kind, &v.data) {
                 odid += 1;

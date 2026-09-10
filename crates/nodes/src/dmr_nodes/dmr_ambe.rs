@@ -14,9 +14,7 @@ pub(crate) struct Vocoder {
 #[cfg(feature = "ambe")]
 impl Vocoder {
     pub(crate) fn new() -> Self {
-        Vocoder {
-            synth: mbe::ambe::AmbeSynthesizer::new(),
-        }
+        Vocoder { synth: mbe::ambe::AmbeSynthesizer::new() }
     }
 
     pub(crate) fn reset(&mut self) {

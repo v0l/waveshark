@@ -46,16 +46,10 @@ impl Protocol for X10Rf {
         let b = find_frame(bits, FRAME_BYTES, |b| {
             b[0] ^ b[1] == 0xff
                 && b[2] ^ b[3] == 0xff
-                && FIXED
-                    .iter()
-                    .zip(b)
-                    .all(|((mask, want), v)| v & mask == *want)
+                && FIXED.iter().zip(b).all(|((mask, want), v)| v & mask == *want)
         })
         .ok_or(match bits.len() {
-            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: FRAME_BYTES * 8,
-            },
+            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength { got: n, want: FRAME_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -141,9 +135,6 @@ mod tests {
     fn the_constant_bits_are_enforced() {
         // 0x62 sets a bit that is zero in every real frame. Without this check
         // the complement pair alone would accept it.
-        assert_eq!(
-            X10Rf.decode(&frame(0x62, 0x00)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(X10Rf.decode(&frame(0x62, 0x00)), Err(DecodeError::CrcFailed));
     }
 }

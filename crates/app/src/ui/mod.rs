@@ -986,7 +986,11 @@ impl App {
     /// Serve MCP on `addr`, so an agent drives this receiver rather than one
     /// of its own.
     #[cfg(feature = "mcp")]
-    pub fn serve_mcp(&mut self, addr: std::net::SocketAddr, ctx: &egui::Context) -> anyhow::Result<()> {
+    pub fn serve_mcp(
+        &mut self,
+        addr: std::net::SocketAddr,
+        ctx: &egui::Context,
+    ) -> anyhow::Result<()> {
         self.agent = Some(crate::agent::serve(addr, self.rt.handle(), ctx.clone())?);
         Ok(())
     }
@@ -1218,12 +1222,7 @@ impl App {
         // graph. Two slots because they are different in kind, and one banner
         // because there is one place to read a sentence: what went wrong wins
         // over a standing verdict on the chain.
-        let fault = radio
-            .status
-            .error
-            .lock()
-            .take()
-            .or_else(|| radio.status.refused.lock().take());
+        let fault = radio.status.error.lock().take().or_else(|| radio.status.refused.lock().take());
         if let Some(e) = fault {
             self.err = Some(e);
             self.err_at = Some(std::time::Instant::now());
@@ -1752,9 +1751,7 @@ impl App {
             Some(devices_pane::Action::Export) => self.export_survey(),
             Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
             Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
-            Some(devices_pane::Action::HomeAssistant) => {
-                self.survey.homeassistant.open = true
-            }
+            Some(devices_pane::Action::HomeAssistant) => self.survey.homeassistant.open = true,
             None => {}
         }
     }
@@ -1850,8 +1847,7 @@ impl App {
     /// feed is a node on the packet bus, and the connection belongs to it.
     fn apply_homeassistant(&mut self) {
         let publish = self.survey.homeassistant.publish();
-        self.survey.homeassistant.on =
-            self.survey.homeassistant.on && publish.broker.is_complete();
+        self.survey.homeassistant.on = self.survey.homeassistant.on && publish.broker.is_complete();
         let on = self.survey.homeassistant.on;
         self.send(Cmd::HomeAssistant(on.then_some(publish)));
     }
@@ -2375,9 +2371,7 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
-                    View::Control => {
-                        control_pane::ControlView { st: &mut self.control }.show(ui)
-                    }
+                    View::Control => control_pane::ControlView { st: &mut self.control }.show(ui),
                     View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),

@@ -14,9 +14,7 @@
 use dsp::tetra::{Block, Lchan, TdmaTime};
 
 fn bits(b: &[u8], at: usize, n: usize) -> u32 {
-    b[at..at + n]
-        .iter()
-        .fold(0, |acc, &v| acc << 1 | u32::from(v & 1))
+    b[at..at + n].iter().fold(0, |acc, &v| acc << 1 | u32::from(v & 1))
 }
 
 /// The SYNC PDU: the identity a cell repeats on every sync burst.
@@ -219,13 +217,7 @@ pub struct Neighbour {
 
 impl Neighbour {
     pub fn hz(&self, cell_band: (u8, u8)) -> f64 {
-        ChanAlloc {
-            timeslot: 0,
-            ul_dl: 0,
-            carrier: self.carrier,
-            band: self.band,
-        }
-        .hz(cell_band)
+        ChanAlloc { timeslot: 0, ul_dl: 0, carrier: self.carrier, band: self.band }.hz(cell_band)
     }
 }
 
@@ -238,9 +230,7 @@ pub struct NetworkPdu {
 impl NetworkPdu {
     fn parse(b: &[u8], at: &mut usize) -> Option<Self> {
         *at += 16 + 2;
-        let mut out = Self {
-            neighbours: Vec::new(),
-        };
+        let mut out = Self { neighbours: Vec::new() };
         if take(b, at, 1)? == 0 {
             return Some(out);
         }
@@ -257,14 +247,7 @@ impl NetworkPdu {
             let cell_id = take(b, at, 5)? as u8;
             *at += 2 + 1 + 2;
             let carrier = take(b, at, 12)? as u16;
-            let mut nb = Neighbour {
-                cell_id,
-                carrier,
-                band: None,
-                mcc: None,
-                mnc: None,
-                la: None,
-            };
+            let mut nb = Neighbour { cell_id, carrier, band: None, mcc: None, mnc: None, la: None };
             if take(b, at, 1)? == 1 {
                 if take(b, at, 1)? == 1 {
                     let band = take(b, at, 4)? as u8;
@@ -448,17 +431,9 @@ impl CallPdu {
     }
 
     pub fn encryption(&self) -> String {
-        let mut s = if self.aie == 0 {
-            "none".to_string()
-        } else {
-            format!("AIE-{}", self.aie)
-        };
+        let mut s = if self.aie == 0 { "none".to_string() } else { format!("AIE-{}", self.aie) };
         if self.e2e == Some(true) {
-            s = if self.aie == 0 {
-                "E2E".into()
-            } else {
-                format!("{s} E2E")
-            };
+            s = if self.aie == 0 { "E2E".into() } else { format!("{s} E2E") };
         }
         s
     }
@@ -549,12 +524,7 @@ impl Mac {
             // An augmented allocation carries a tail whose length depends
             // on fields this does not read; the SDU behind it is left.
             augmented = ul_dl == 0;
-            alloc = Some(ChanAlloc {
-                timeslot,
-                ul_dl,
-                carrier,
-                band,
-            });
+            alloc = Some(ChanAlloc { timeslot, ul_dl, carrier, band });
         }
         let mut pdu = CallPdu {
             pdu: RESOURCE,
@@ -596,11 +566,7 @@ impl Mac {
             2 => {}
             1 => {
                 let mm = take(b, &mut at, 4)? as u8;
-                return Some(Mac::Mm(MmPdu {
-                    pdu: mm,
-                    address: pdu.address,
-                    time,
-                }));
+                return Some(Mac::Mm(MmPdu { pdu: mm, address: pdu.address, time }));
             }
             5 => {
                 return match take(b, &mut at, 3)? {
@@ -741,10 +707,7 @@ fn sds_text(b: &[u8], at: &mut usize) -> Option<String> {
         _ => body
             .chunks(8)
             .map(|c| {
-                format!(
-                    "{:02x}",
-                    c.iter().fold(0u8, |a, v| a << 1 | (v & 1)) << (8 - c.len())
-                )
+                format!("{:02x}", c.iter().fold(0u8, |a, v| a << 1 | (v & 1)) << (8 - c.len()))
             })
             .collect::<Vec<_>>()
             .join(""),
@@ -757,10 +720,8 @@ fn sds_text(b: &[u8], at: &mut usize) -> Option<String> {
 fn gsm7(bits: &[u8]) -> String {
     const ALPHA: &str = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\u{1b}ÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
     let alpha: Vec<char> = ALPHA.chars().collect();
-    let octets: Vec<u8> = bits
-        .chunks_exact(8)
-        .map(|c| c.iter().fold(0u8, |a, v| a << 1 | (v & 1)))
-        .collect();
+    let octets: Vec<u8> =
+        bits.chunks_exact(8).map(|c| c.iter().fold(0u8, |a, v| a << 1 | (v & 1))).collect();
     let mut out = String::new();
     let n = octets.len() * 8 / 7;
     for i in 0..n {
@@ -844,9 +805,9 @@ impl Event {
         };
         match block.lchan {
             Lchan::Bsch => SyncPdu::parse(&block.bits).map(Event::Sync),
-            Lchan::SchHd => SysinfoPdu::parse(&block.bits)
-                .map(Event::Sysinfo)
-                .or_else(|| mac(block)),
+            Lchan::SchHd => {
+                SysinfoPdu::parse(&block.bits).map(Event::Sysinfo).or_else(|| mac(block))
+            }
             Lchan::SchF => mac(block),
             Lchan::Aach => AachPdu::parse(&block.bits, block.time).map(Event::Aach),
         }
@@ -855,14 +816,7 @@ impl Event {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Event::Sync(s) => {
-                let mut v = vec![
-                    1u8,
-                    s.system_code,
-                    s.colour,
-                    s.timeslot,
-                    s.frame,
-                    s.multiframe,
-                ];
+                let mut v = vec![1u8, s.system_code, s.colour, s.timeslot, s.frame, s.multiframe];
                 v.push(s.sharing_mode);
                 v.extend_from_slice(&s.mcc.to_be_bytes());
                 v.extend_from_slice(&s.mnc.to_be_bytes());
@@ -1011,16 +965,9 @@ impl Event {
                     5 => Address::UsageMarker(id as u8),
                     _ => return None,
                 };
-                let time = (r[6] != 0).then(|| TdmaTime {
-                    tn: r[6],
-                    frame: r[7],
-                    multiframe: r[8],
-                });
-                Some(Event::Mm(MmPdu {
-                    pdu: r[0],
-                    address,
-                    time,
-                }))
+                let time =
+                    (r[6] != 0).then(|| TdmaTime { tn: r[6], frame: r[7], multiframe: r[8] });
+                Some(Event::Mm(MmPdu { pdu: r[0], address, time }))
             }
             (3, n) if n >= 34 => {
                 let id = u32::from_be_bytes([r[3], r[4], r[5], r[6]]);
@@ -1126,14 +1073,7 @@ mod tests {
     #[test]
     fn a_sync_pdu_reads_its_identity() {
         let b = pdu_bits(
-            &[
-                (4, 6, 17),
-                (10, 2, 2),
-                (12, 5, 18),
-                (17, 6, 41),
-                (31, 10, 272),
-                (41, 14, 91),
-            ],
+            &[(4, 6, 17), (10, 2, 2), (12, 5, 18), (17, 6, 41), (31, 10, 272), (41, 14, 91)],
             60,
         );
         let s = SyncPdu::parse(&b).unwrap();
@@ -1145,14 +1085,7 @@ mod tests {
     fn a_sysinfo_pdu_names_the_main_carrier() {
         // Band 3, carrier 3612, +6.25 kHz: 390.30625 MHz.
         let b = pdu_bits(
-            &[
-                (0, 2, 0b10),
-                (2, 2, 0b00),
-                (4, 12, 3612),
-                (16, 4, 3),
-                (20, 2, 1),
-                (82, 14, 0x1234),
-            ],
+            &[(0, 2, 0b10), (2, 2, 0b00), (4, 12, 3612), (16, 4, 3), (20, 2, 1), (82, 14, 0x1234)],
             124,
         );
         let s = SysinfoPdu::parse(&b).unwrap();
@@ -1206,11 +1139,7 @@ mod tests {
 
     #[test]
     fn a_clear_setup_names_both_parties_and_the_call() {
-        let time = Some(TdmaTime {
-            tn: 1,
-            frame: 3,
-            multiframe: 7,
-        });
+        let time = Some(TdmaTime { tn: 1, frame: 3, multiframe: 7 });
         let c = CallPdu::parse(&d_setup_block(2001, 3_000_123, false), time).expect("a call");
         assert_eq!(c.pdu, D_SETUP);
         assert_eq!(c.address, Address::Ssi(2001));
@@ -1261,13 +1190,7 @@ mod tests {
 
     #[test]
     fn the_access_assign_field_says_what_a_slot_carries() {
-        let t = |frame: u8| {
-            Some(TdmaTime {
-                tn: 2,
-                frame,
-                multiframe: 1,
-            })
-        };
+        let t = |frame: u8| Some(TdmaTime { tn: 2, frame, multiframe: 1 });
         // Header 1: field 1 is the downlink usage.
         let b = pdu_bits(&[(0, 2, 1), (2, 6, 23), (8, 6, 5)], 14);
         let a = AachPdu::parse(&b, t(3)).unwrap();
@@ -1328,9 +1251,7 @@ mod tests {
             at += 6;
         }
         let b = pdu_bits(&f, 268);
-        let Some(Mac::Network(n)) = Mac::parse(&b, None) else {
-            panic!("not a network broadcast")
-        };
+        let Some(Mac::Network(n)) = Mac::parse(&b, None) else { panic!("not a network broadcast") };
         assert_eq!(n.neighbours.len(), 2);
         assert_eq!(n.neighbours[0].cell_id, 3);
         assert_eq!(n.neighbours[0].hz((3, 0)), 391_500_000.0);
@@ -1430,11 +1351,7 @@ mod tests {
         let mm = Event::Mm(MmPdu {
             pdu: D_AUTHENTICATION,
             address: Address::Ssi(1_234_567),
-            time: Some(TdmaTime {
-                tn: 2,
-                frame: 5,
-                multiframe: 9,
-            }),
+            time: Some(TdmaTime { tn: 2, frame: 5, multiframe: 9 }),
         });
         for e in [sync, si, mm] {
             assert_eq!(Event::parse(&e.to_bytes()).as_ref(), Some(&e));
@@ -1448,17 +1365,8 @@ mod tests {
             call_id: Some(77),
             from: Some(3_000_123),
             group: None,
-            time: Some(TdmaTime {
-                tn: 2,
-                frame: 5,
-                multiframe: 9,
-            }),
-            alloc: Some(ChanAlloc {
-                timeslot: 3,
-                ul_dl: 3,
-                carrier: 3668,
-                band: Some((3, 2)),
-            }),
+            time: Some(TdmaTime { tn: 2, frame: 5, multiframe: 9 }),
+            alloc: Some(ChanAlloc { timeslot: 3, ul_dl: 3, carrier: 3668, band: Some((3, 2)) }),
             marker: Some(17),
             seconds: 0.0,
             text: None,

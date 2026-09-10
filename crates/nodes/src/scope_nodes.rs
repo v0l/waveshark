@@ -122,16 +122,8 @@ impl ScopeNode {
     /// by the time it gets here, and a lowpass on a real signal made complex
     /// keeps the positive half, which is the half that is drawn.
     fn design(&mut self) {
-        let full = if self.real {
-            self.rate / 2.0
-        } else {
-            self.rate
-        };
-        let want = if self.span_hz > 0.0 {
-            self.span_hz.min(full)
-        } else {
-            full
-        };
+        let full = if self.real { self.rate / 2.0 } else { self.rate };
+        let want = if self.span_hz > 0.0 { self.span_hz.min(full) } else { full };
         // Twice the span of complex rate for IQ, since the span is the whole
         // width shown; a real stream shows only the top half of its
         // transform, so it needs twice that again.
@@ -218,11 +210,7 @@ impl Simple for ScopeNode {
         match input.spec.kind {
             PortKind::Iq => self.real = false,
             PortKind::Real => self.real = true,
-            _ => {
-                return Err(common::Error::other(
-                    "scope looks at samples: IQ or real audio",
-                ))
-            }
+            _ => return Err(common::Error::other("scope looks at samples: IQ or real audio")),
         }
         self.rate = input.spec.rate;
         self.center_hz = input.spec.center.as_f64();
@@ -329,9 +317,7 @@ impl Simple for ScopeNode {
                 }
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "scope: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("scope: unknown parameter {name:?}"))),
         }
     }
 }
@@ -366,22 +352,12 @@ mod tests {
         let mut n = ScopeNode::new(1024);
         let spec = StreamSpec::iq(rate, common::Hz(1_000_000));
         let out = run(&mut n, spec, Payload::Iq(iq.clone()));
-        assert_eq!(
-            out.as_iq().unwrap(),
-            &iq[..],
-            "the scope changed the stream"
-        );
+        assert_eq!(out.as_iq().unwrap(), &iq[..], "the scope changed the stream");
         let (f, fresh) = n.frame();
         assert!(fresh);
         assert!(!f.real);
         assert_eq!(f.spectrum.len(), 1024);
-        let peak = f
-            .spectrum
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap()
-            .0;
+        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         // +6 kHz of a 48 kHz span: an eighth of the way up from the centre.
         assert!((peak as i64 - 640).abs() <= 1, "peak in bin {peak}");
         assert!((f.peak - 0.5).abs() < 0.01 && (f.rms - 0.5).abs() < 0.01);
@@ -409,13 +385,7 @@ mod tests {
         // The default span on audio is 10 kHz, so the stream is brought
         // down to 24 kS/s and the half spectrum runs to 12 kHz.
         assert!((f.rate - 24_000.0).abs() < 1.0, "seen at {}", f.rate);
-        let peak = f
-            .spectrum
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap()
-            .0;
+        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         assert!((peak as i64 - 43).abs() <= 1, "peak in bin {peak}");
         assert!((f.peak - 0.25).abs() < 0.01);
         assert!((f.rms - 0.25 / 2f32.sqrt()).abs() < 0.01);
@@ -453,13 +423,7 @@ mod span_tests {
         let (f, _) = n.frame();
         assert!(f.rate < 30_000.0, "still looking at {} S/s", f.rate);
         let half = f.rate / 2.0;
-        let peak = f
-            .spectrum
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap()
-            .0;
+        let peak = f.spectrum.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         let hz = peak as f64 / f.spectrum.len() as f64 * half;
         assert!(
             (hz - 2_000.0).abs() < half / f.spectrum.len() as f64 * 2.0,

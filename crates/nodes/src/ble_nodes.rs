@@ -42,10 +42,7 @@ pub fn is_advertising_channel(center_hz: f64) -> bool {
 
 /// The advertising channel index a centre names, if it names one.
 pub fn channel_of(center_hz: f64) -> Option<u8> {
-    ADV_CHANNELS
-        .iter()
-        .find(|(_, hz)| (hz - center_hz).abs() < 500_000.0)
-        .map(|&(ch, _)| ch)
+    ADV_CHANNELS.iter().find(|(_, hz)| (hz - center_hz).abs() < 500_000.0).map(|&(ch, _)| ch)
 }
 
 pub struct BleNode {
@@ -112,11 +109,7 @@ impl Simple for BleNode {
                     "ble needs an advertising channel (2402, 2426 or 2480 MHz) inside the span",
                 ))
             }
-            [one] => ADV_CHANNELS
-                .iter()
-                .find(|(c, _)| c == one)
-                .map(|(_, hz)| *hz)
-                .unwrap(),
+            [one] => ADV_CHANNELS.iter().find(|(c, _)| c == one).map(|(_, hz)| *hz).unwrap(),
             _ => BAND_CENTER_HZ,
         };
         self.det = det;
@@ -180,11 +173,7 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .filter_map(|s| decode::odid::from_service_data(&s.value))
         .flatten()
         .collect();
-    let protocol = if odid.is_empty() {
-        "BLE-Adv"
-    } else {
-        "OpenDroneID"
-    };
+    let protocol = if odid.is_empty() { "BLE-Adv" } else { "OpenDroneID" };
     if !odid.is_empty() {
         let mut f = decode::odid::fields(&odid);
         f.append(&mut fields);
@@ -193,11 +182,7 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(ch) = channel_of(center.as_f64()) {
         fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
     }
-    let detail = fields
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     let link = pipeline::event::Link {
         from: Some(pipeline::event::Party::unit(adv.address.to_string())),
         to: Some(match adv.target {
@@ -221,7 +206,6 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             .with_crc(Some(true)),
     )
 }
-
 
 /// BLE advertising as the auto node and the tables know it: whichever of
 /// the three channels the span holds, read off the span because an
@@ -301,10 +285,7 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     #[test]

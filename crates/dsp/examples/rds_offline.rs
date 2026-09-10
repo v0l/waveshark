@@ -52,11 +52,7 @@ fn main() {
         .chunks_exact(2)
         .map(|p| C32::new((p[0] as f32 - 127.5) / 127.5, (p[1] as f32 - 127.5) / 127.5))
         .collect();
-    println!(
-        "{path}: {:.1}s at {:.0} kS/s",
-        samples.len() as f64 / rate,
-        rate / 1000.0
-    );
+    println!("{path}: {:.1}s at {:.0} kS/s", samples.len() as f64 / rate, rate / 1000.0);
 
     // The occupied bandwidth is 264 kHz: Carson with RDS at 57 kHz as the
     // highest modulating frequency, not audio at 15 kHz.

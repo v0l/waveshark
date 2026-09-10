@@ -39,10 +39,7 @@ impl Protocol for Rubicson {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let b = find_frame_bits(bits, FRAME_BITS, crc_ok).ok_or(match bits.len() {
-            n if n < FRAME_BITS => DecodeError::WrongLength {
-                got: n,
-                want: FRAME_BITS,
-            },
+            n if n < FRAME_BITS => DecodeError::WrongLength { got: n, want: FRAME_BITS },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -72,13 +69,7 @@ fn crc_ok(b: &[u8]) -> bool {
 /// The five bytes the CRC covers: seven data nibbles, a zero nibble, then the
 /// two CRC nibbles, which straddle a byte boundary in the frame.
 fn crc_input(b: &[u8]) -> [u8; 5] {
-    [
-        b[0],
-        b[1],
-        b[2],
-        b[3] & 0xf0,
-        ((b[3] & 0x0f) << 4) | (b[4] >> 4),
-    ]
+    [b[0], b[1], b[2], b[3] & 0xf0, ((b[3] & 0x0f) << 4) | (b[4] >> 4)]
 }
 
 #[cfg(test)]
@@ -131,11 +122,7 @@ mod tests {
         let f = frame(0x74, 1, 14.9, true);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 20 {
-                !f.get(i).unwrap()
-            } else {
-                f.get(i).unwrap()
-            });
+            broken.push(if i == 20 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
         }
         assert_eq!(Rubicson.decode(&broken), Err(DecodeError::CrcFailed));
     }

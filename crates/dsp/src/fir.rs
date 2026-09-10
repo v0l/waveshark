@@ -152,7 +152,14 @@ fn as_floats(v: &[C32]) -> &[f32] {
 /// Every output of one block, as dot products over `joined`.
 ///
 /// `lanes` is twice `win` long.
-fn decimate_block(joined: &[C32], lanes: &[f32], win: usize, first: usize, factor: usize, out: &mut Vec<C32>) {
+fn decimate_block(
+    joined: &[C32],
+    lanes: &[f32],
+    win: usize,
+    first: usize,
+    factor: usize,
+    out: &mut Vec<C32>,
+) {
     let x = as_floats(joined);
     let n2 = win * 2;
     debug_assert_eq!(lanes.len(), n2);
@@ -498,7 +505,6 @@ mod tests {
     }
 }
 
-
 /// Decimating FIR over real samples, the same shape as [`FirDecim`].
 #[derive(Clone)]
 pub struct FirDecimReal {
@@ -512,7 +518,14 @@ pub struct FirDecimReal {
     phase: usize,
 }
 
-fn decimate_block_real(joined: &[f32], lanes: &[f32], win: usize, first: usize, factor: usize, out: &mut Vec<f32>) {
+fn decimate_block_real(
+    joined: &[f32],
+    lanes: &[f32],
+    win: usize,
+    first: usize,
+    factor: usize,
+    out: &mut Vec<f32>,
+) {
     let dot = Dot::pick();
     let mut start = first;
     while start + win <= joined.len() {
@@ -529,15 +542,7 @@ impl FirDecimReal {
         let win = n.div_ceil(LANES) * LANES;
         let mut lanes = vec![0.0f32; win - n];
         lanes.extend(taps.iter().rev());
-        Self {
-            taps,
-            lanes,
-            win,
-            tail: vec![0.0; win - 1],
-            joined: Vec::new(),
-            factor,
-            phase: 0,
-        }
+        Self { taps, lanes, win, tail: vec![0.0; win - 1], joined: Vec::new(), factor, phase: 0 }
     }
 
     pub fn design_hz(rate: f64, factor: usize, passband_hz: f64, atten_db: f64) -> Self {
@@ -651,4 +656,3 @@ mod decim_hz_tests {
         assert!(rms(&keep[2000..]) > 0.6, "passband lost at {}", rms(&keep[2000..]));
     }
 }
-

@@ -100,10 +100,7 @@ pub fn infer(mb: &[u8]) -> Option<Report> {
     if mb.len() < 7 {
         return None;
     }
-    let p = mb
-        .iter()
-        .take(7)
-        .fold(0u64, |acc, b| (acc << 8) | *b as u64);
+    let p = mb.iter().take(7).fold(0u64, |acc, b| (acc << 8) | *b as u64);
     if p == 0 {
         return None;
     }
@@ -122,10 +119,7 @@ pub fn infer(mb: &[u8]) -> Option<Report> {
     // frames satisfy two of these, and there is no way to choose from one
     // frame alone.
     let mut found = None;
-    for r in [bds40(p), bds44(p), bds50(p), bds60(p)]
-        .into_iter()
-        .flatten()
-    {
+    for r in [bds40(p), bds44(p), bds50(p), bds60(p)].into_iter().flatten() {
         if found.is_some() {
             return None;
         }
@@ -177,9 +171,7 @@ fn bds10(p: u64) -> Option<Report> {
     if overlay != (version >= 5) {
         return None;
     }
-    Some(Report::Capability {
-        subnetwork_version: version,
-    })
+    Some(Report::Capability { subnetwork_version: version })
 }
 
 /// The six bit alphabet callsigns are packed in, shared with ADS-B.
@@ -199,9 +191,7 @@ fn bds20(p: u64) -> Option<Report> {
         }
         s.push(c as char);
     }
-    Some(Report::Identification {
-        callsign: s.trim_end().to_string(),
-    })
+    Some(Report::Identification { callsign: s.trim_end().to_string() })
 }
 
 fn bds40(p: u64) -> Option<Report> {
@@ -221,11 +211,7 @@ fn bds40(p: u64) -> Option<Report> {
     if mcp.is_none() && fms.is_none() && qnh.is_none() {
         return None;
     }
-    Some(Report::VerticalIntent {
-        selected_altitude_ft: mcp,
-        fms_altitude_ft: fms,
-        qnh_mb: qnh,
-    })
+    Some(Report::VerticalIntent { selected_altitude_ft: mcp, fms_altitude_ft: fms, qnh_mb: qnh })
 }
 
 fn bds44(p: u64) -> Option<Report> {
@@ -406,19 +392,14 @@ mod tests {
     fn a_callsign_register_names_the_aircraft() {
         assert_eq!(
             infer(&mb("A0001838201584F23468207CDFA5")),
-            Some(Report::Identification {
-                callsign: "EXS2MF".into()
-            })
+            Some(Report::Identification { callsign: "EXS2MF".into() })
         );
     }
 
     #[test]
     fn a_selected_altitude_register_decodes() {
-        let Some(Report::VerticalIntent {
-            selected_altitude_ft,
-            qnh_mb,
-            ..
-        }) = infer(&mb("A000029C85E42F313000007047D3"))
+        let Some(Report::VerticalIntent { selected_altitude_ft, qnh_mb, .. }) =
+            infer(&mb("A000029C85E42F313000007047D3"))
         else {
             panic!("not read as a vertical intent report")
         };

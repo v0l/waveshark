@@ -21,10 +21,7 @@ impl AutoNode {
             self.center.as_f64() - self.input_bw / 2.0,
             self.center.as_f64() + self.input_bw / 2.0,
         );
-        self.wide
-            .iter()
-            .filter_map(|m| m.band)
-            .any(|(a, b)| a <= lo && hi <= b)
+        self.wide.iter().filter_map(|m| m.band).any(|(a, b)| a <= lo && hi <= b)
     }
 
     /// Close the sources inside a band a front end has just claimed.
@@ -107,14 +104,7 @@ impl AutoNode {
                 }
                 None
             }
-            Request::OpenChannel {
-                protocol: p,
-                center_hz,
-                width_hz,
-                role,
-                hold_s,
-                settings,
-            } => {
+            Request::OpenChannel { protocol: p, center_hz, width_hz, role, hold_s, settings } => {
                 let Some(proto) = protocol::by_id(&p) else {
                     out.push(warn(format!(
                         "asked for a channel read by {p:?}, which is not a protocol"
@@ -159,7 +149,9 @@ impl AutoNode {
                 let id = self.slots[k].id;
                 self.forget(&[id]);
                 self.watch.close_channel(id);
-                if let Some(e) = self.remember_for(name, hz, w, hold_of(name), None, Default::default()) {
+                if let Some(e) =
+                    self.remember_for(name, hz, w, hold_of(name), None, Default::default())
+                {
                     out.push(e);
                 }
                 None

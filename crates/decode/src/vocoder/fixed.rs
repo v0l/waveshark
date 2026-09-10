@@ -282,9 +282,8 @@ pub fn norm_l(l: i32) -> i16 {
 
 // POW2[shift] = -(1<<shift): the reference builds shift-and-accumulate out of
 // L_mac0/L_msu0 against this table (fbas_tet.c).
-const POW2: [i16; 16] = [
-    -1, -2, -4, -8, -16, -32, -64, -128, -256, -512, -1024, -2048, -4096, -8192, -16384, -32768,
-];
+const POW2: [i16; 16] =
+    [-1, -2, -4, -8, -16, -32, -64, -128, -256, -512, -1024, -2048, -4096, -8192, -16384, -32768];
 
 /// `L_var2 - (var1 << shift)`, via the reference's `L_msu0` against POW2.
 pub fn load_sh(v: i16, shift: i16) -> i32 {

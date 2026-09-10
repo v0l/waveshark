@@ -79,9 +79,8 @@ pub const BURST_BITS: usize = 148;
 /// table 5.2.5-3. Longer than the 26 bit sequences a normal burst carries,
 /// because a receiver reading this burst has not synchronised yet.
 pub const SCH_TRAINING: [u8; 64] = [
-    1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
-    1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0,
-    1, 1,
+    1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+    0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1,
 ];
 
 /// Where the training sequence sits in the burst: three tail bits and 39
@@ -849,13 +848,16 @@ impl SchDetector {
         coded[39..].copy_from_slice(&soft[106..145]);
         let d = sch::decode(&coded);
         let sch = d?;
-        Some((SchHit {
-            sch,
-            freq_offset_hz: p.freq_offset_hz,
-            quality,
-            start_sample: at as u64,
-            samples: (BURST_SYMBOLS * self.sps) as usize,
-        }, at))
+        Some((
+            SchHit {
+                sch,
+                freq_offset_hz: p.freq_offset_hz,
+                quality,
+                start_sample: at as u64,
+                samples: (BURST_SYMBOLS * self.sps) as usize,
+            },
+            at,
+        ))
     }
 
     /// Sample 148 symbols from `start`, correct the frequency error,
@@ -1064,21 +1066,17 @@ pub fn hz_of_arfcn(arfcn: u16, near_hz: f64) -> Option<f64> {
 }
 
 /// The downlink bands, for telling which plan a frequency belongs to.
-const BANDS: [(f64, f64); 4] = [
-    (869.2e6, 894.2e6),
-    (925.2e6, 960.0e6),
-    (1805.2e6, 1880.0e6),
-    (1930.2e6, 1990.0e6),
-];
+const BANDS: [(f64, f64); 4] =
+    [(869.2e6, 894.2e6), (925.2e6, 960.0e6), (1805.2e6, 1880.0e6), (1930.2e6, 1990.0e6)];
 
 /// Each band plan: the first channel number, the frequency it sits at, and
 /// how many channels follow it.
 const PLANS: [(u16, f64, u16); 5] = [
-    (128, 869.2e6, 124),   // GSM 850
-    (1, 935.2e6, 124),     // P-GSM 900
-    (975, 925.2e6, 50),    // E-GSM 900, which counts up through 1023 to 0
-    (512, 1805.2e6, 374),  // DCS 1800
-    (512, 1930.2e6, 299),  // PCS 1900
+    (128, 869.2e6, 124),  // GSM 850
+    (1, 935.2e6, 124),    // P-GSM 900
+    (975, 925.2e6, 50),   // E-GSM 900, which counts up through 1023 to 0
+    (512, 1805.2e6, 374), // DCS 1800
+    (512, 1930.2e6, 299), // PCS 1900
 ];
 
 /// The channel number a downlink frequency carries, where it is one.
@@ -1192,10 +1190,9 @@ mod tests {
         // Measured over the middle of the burst, away from the ramps.
         let from = 20 * sps;
         let to = iq.len() - 20 * sps;
-        let mean: f64 = (from + 1..to)
-            .map(|i| f64::from((iq[i] * iq[i - 1].conj()).arg()))
-            .sum::<f64>()
-            / (to - from - 1) as f64;
+        let mean: f64 =
+            (from + 1..to).map(|i| f64::from((iq[i] * iq[i - 1].conj()).arg())).sum::<f64>()
+                / (to - from - 1) as f64;
         let hz = mean * (SYMBOL_RATE * sps as f64) / TAU;
         assert!((hz - FCCH_TONE_HZ).abs() < 50.0, "{hz} Hz, wanted {FCCH_TONE_HZ}");
     }
@@ -1237,9 +1234,8 @@ mod tests {
             let at = (at * sps as f64) as usize;
             base[at..at + wave.len()].copy_from_slice(wave);
         };
-        for (n, sch) in [*sch, Sch { frame_number: sch.frame_number + 10, ..*sch }]
-            .iter()
-            .enumerate()
+        for (n, sch) in
+            [*sch, Sch { frame_number: sch.frame_number + 10, ..*sch }].iter().enumerate()
         {
             let at = lead + 10.0 * n as f64 * FRAME_SYMBOLS;
             place(at, &modulate(&[0u8; BURST_BITS], sps));
@@ -1421,8 +1417,7 @@ mod tests {
         // System information type 3 for the test network: 001-01, location
         // area 1, cell 1. Octets go out low bit first, which `bcch` does.
         let mut block = [0x2Bu8; 23];
-        block[..10]
-            .copy_from_slice(&[0x49, 0x06, 0x1B, 0x00, 0x01, 0x00, 0xF1, 0x10, 0x00, 0x01]);
+        block[..10].copy_from_slice(&[0x49, 0x06, 0x1B, 0x00, 0x01, 0x00, 0xF1, 0x10, 0x00, 0x01]);
 
         let sps = 8;
         let lead = 200.0;

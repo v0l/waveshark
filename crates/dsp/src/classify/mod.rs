@@ -42,9 +42,9 @@
 mod amplitude;
 mod chirp;
 pub mod cyclo;
+mod dsss;
 mod frequency;
 pub mod hypothesis;
-mod dsss;
 pub mod mode;
 mod ofdm;
 mod phase;
@@ -345,8 +345,7 @@ impl Classifier {
         // Centre of mass of what stands above the noise floor.
         self.scratch.clear();
         self.scratch.extend_from_slice(&spec);
-        self.scratch
-            .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.scratch.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let floor = self.scratch[spec.len() / 2];
         let (mut num, mut den) = (0.0f64, 0.0f64);
         for (i, &v) in spec.iter().enumerate() {
@@ -354,11 +353,7 @@ impl Classifier {
             num += p * (i as f64 - spec.len() as f64 / 2.0);
             den += p;
         }
-        let centre = if den > 0.0 {
-            num / den / spec.len() as f64 * self.rate
-        } else {
-            0.0
-        };
+        let centre = if den > 0.0 { num / den / spec.len() as f64 * self.rate } else { 0.0 };
         self.spec = spec;
         ((bw / self.rate as f32).clamp(0.0, 1.0), centre)
     }
@@ -383,11 +378,8 @@ impl Classifier {
         // sample packet spent 2 ms here, a log per sample, for a mean of
         // 6 ms a burst on a busy 2.4 GHz span. Thinning keeps the loudest
         // sample of each run, so an edge is still where the carrier is.
-        let stride = iq
-            .len()
-            .div_ceil(EDGE_SAMPLES)
-            .max((self.rate / EDGE_RATE_HZ).ceil() as usize)
-            .max(1);
+        let stride =
+            iq.len().div_ceil(EDGE_SAMPLES).max((self.rate / EDGE_RATE_HZ).ceil() as usize).max(1);
         let thin: Vec<C32>;
         let (edge_iq, edge_rate) = if stride > 1 {
             thin = thin_peaks(iq, stride);
@@ -398,11 +390,8 @@ impl Classifier {
         let (a, b) = self.extent(edge_iq);
         let (a, b) = ((a * stride).min(iq.len()), (b * stride).min(iq.len()));
         let samples = iq.len();
-        let mut trimmed: &[C32] = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
-            &iq[a..b]
-        } else {
-            iq
-        };
+        let mut trimmed: &[C32] =
+            if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 { &iq[a..b] } else { iq };
         // A burst that is a few long transmissions with silence between
         // them is measured on one of them. The router holds a burst open
         // across ten milliseconds of silence so a sensor's repeats arrive
@@ -524,8 +513,7 @@ impl Classifier {
 
         self.amp.clear();
         self.amp.extend(iq.iter().map(|c| c.norm()));
-        let (ratio, modes, top, duty) =
-            envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
+        let (ratio, modes, top, duty) = envelope_levels(&mut self.scratch, &self.amp, &mut self.db);
         f.envelope_ratio = ratio;
         f.envelope_modes = modes;
         f.duty = duty;
@@ -823,7 +811,8 @@ impl Classifier {
             let seg = &self.trans[start..start + n];
             let mean = seg.iter().sum::<f32>() / n as f32;
             self.fft_buf.clear();
-            self.fft_buf.extend(seg.iter().zip(&self.win).map(|(v, w)| C32::new((v - mean) * w, 0.0)));
+            self.fft_buf
+                .extend(seg.iter().zip(&self.win).map(|(v, w)| C32::new((v - mean) * w, 0.0)));
             self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
             for i in 0..n / 2 {
                 self.spec_real[i] += self.fft_buf[i].norm_sqr();
@@ -995,7 +984,11 @@ fn median_high_run(amp: &[f32], level: f32) -> f32 {
 /// measured on that alone it is a carrier and not the keying it is. Four
 /// packets of seven milliseconds with two and a half between them are not
 /// symbols of anything.
-fn longest_transmission(iq: &[C32], rate: f64, min_samples: usize) -> Option<std::ops::Range<usize>> {
+fn longest_transmission(
+    iq: &[C32],
+    rate: f64,
+    min_samples: usize,
+) -> Option<std::ops::Range<usize>> {
     let least = ((OWN_TRANSMISSION_S * rate) as usize).max(min_samples);
     if iq.len() < least * 2 {
         return None;
@@ -1055,7 +1048,9 @@ fn thin_peaks(iq: &[C32], stride: usize) -> Vec<C32> {
         .map(|c| {
             c.iter()
                 .copied()
-                .max_by(|a, b| a.norm_sqr().partial_cmp(&b.norm_sqr()).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.norm_sqr().partial_cmp(&b.norm_sqr()).unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .unwrap_or_default()
         })
         .collect()
@@ -1116,7 +1111,12 @@ fn add_jumps(dst: &mut [f32], src: &[f32], smooth: usize) {
 /// Score every hypothesis and take the best, if it is far enough ahead.
 fn decide(f: &Features, cfg: &ClassifyConfig) -> BurstClass {
     if f.samples < cfg.min_samples {
-        return BurstClass { modulation: Modulation::Unknown, confidence: 0.0, score: 0.0, features: *f };
+        return BurstClass {
+            modulation: Modulation::Unknown,
+            confidence: 0.0,
+            score: 0.0,
+            features: *f,
+        };
     }
 
     let evidence = Evidence::from(f);
@@ -1457,7 +1457,8 @@ mod tests {
     /// `SR_BURST_RATE` its rate. Does nothing without them.
     #[test]
     fn score_a_dumped_burst() {
-        let (Some(path), Some(rate)) = (std::env::var_os("SR_BURST_FILE"), std::env::var("SR_BURST_RATE").ok())
+        let (Some(path), Some(rate)) =
+            (std::env::var_os("SR_BURST_FILE"), std::env::var("SR_BURST_RATE").ok())
         else {
             return;
         };
@@ -1499,7 +1500,8 @@ mod tests {
         }
 
         fn rng(&mut self) -> f32 {
-            self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.seed =
+                self.seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((self.seed >> 33) as f32 / (1u64 << 30) as f32 - 1.0) * self.noise
         }
 
@@ -1564,7 +1566,11 @@ mod tests {
         for _ in 0..300 {
             let sym = g.bit() % levels;
             let offset = if levels == 2 {
-                if sym == 0 { -deviation } else { deviation }
+                if sym == 0 {
+                    -deviation
+                } else {
+                    deviation
+                }
             } else {
                 deviation * crate::fourlevel::IDEAL[sym] as f64 / 3.0
             };
@@ -1671,7 +1677,11 @@ mod tests {
     fn finds_a_sweep_that_a_histogram_cannot() {
         let c = classify(&chirp());
         assert_eq!(c.modulation, Modulation::Chirp);
-        assert!(c.features.chirp_rate.abs() > 1e6, "sweep rate came out at {}", c.features.chirp_rate);
+        assert!(
+            c.features.chirp_rate.abs() > 1e6,
+            "sweep rate came out at {}",
+            c.features.chirp_rate
+        );
     }
 
     /// Four chirp packets on one channel with silence between them, which
@@ -1741,5 +1751,3 @@ mod tests {
         assert!(c.features.channel_fill > 1.0, "fill came out at {}", c.features.channel_fill);
     }
 }
-
-

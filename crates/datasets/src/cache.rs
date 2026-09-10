@@ -134,9 +134,8 @@ impl Fetch for Http {
         if code != 200 {
             return Err(Error::Status(self.url.clone(), code));
         }
-        let header = |k: &str| {
-            resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string)
-        };
+        let header =
+            |k: &str| resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
         // A publisher that redirects is telling us the URL is wrong, even
         // though following it worked: CelesTrak says outright that a 301
         // means a legacy query they will stop honouring. Nothing is failed
@@ -307,10 +306,9 @@ impl Cache {
             Some(p) => Ok(p),
             // Nothing is cached, so a source claiming nothing changed has
             // nothing to compare against and is answering the wrong question.
-            None => Err(Error::Fetch(
-                src.from.origin(),
-                "not modified, but nothing is cached".into(),
-            )),
+            None => {
+                Err(Error::Fetch(src.from.origin(), "not modified, but nothing is cached".into()))
+            }
         }
     }
 
@@ -582,8 +580,12 @@ mod tests {
         let (cache, src, from) = counted(&dir, Duration::ZERO);
         cache.read(&src).unwrap();
         let asked = from.fetches.load(Ordering::Relaxed);
-        let refusing =
-            Source { name: src.name, from: Arc::new(Refused), max_age: Duration::ZERO, check: None };
+        let refusing = Source {
+            name: src.name,
+            from: Arc::new(Refused),
+            max_age: Duration::ZERO,
+            check: None,
+        };
         assert!(cache.refresh(&refusing, When::Now).is_err());
         // Nothing is asked again on its own, and what was held is still
         // held: a halted dataset is stale, not empty.

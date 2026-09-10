@@ -111,8 +111,7 @@ impl Slot {
         // The samples are kept for the evidence row too: a row that cannot
         // say what it was read from is half a row, whether a classifier or
         // the detector measured it.
-        self.ring.keeps =
-            self.evidence.is_some() || self.members.iter().any(|m| m.keeps_samples);
+        self.ring.keeps = self.evidence.is_some() || self.members.iter().any(|m| m.keeps_samples);
         self.ring.push(samples);
         let ring = &self.ring;
         let per: Vec<MemberResult> = self
@@ -163,8 +162,7 @@ impl Slot {
         // A measurement of a source a front end reads is not news.
         if self.heard {
             packets.retain(|p| {
-                !(p.measure.is_some()
-                    && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
+                !(p.measure.is_some() && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
             });
         }
         // Done once the source has closed and nothing is still catching up
@@ -195,10 +193,7 @@ impl AutoNode {
         // timed from another carrier's decoder can say where in the span
         // its timing was measured, and the other can find that in its own
         // samples.
-        let origin = Origin {
-            span_sample: b.start_sample,
-            span_rate_hz: self.rate,
-        };
+        let origin = Origin { span_sample: b.start_sample, span_rate_hz: self.rate };
         if let Some(st) = self.memory.find(b.id) {
             let p = protocol::by_id(st.name)
                 .ok_or_else(|| common::Error::other(format!("no protocol {:?}", st.name)))?;
@@ -251,7 +246,6 @@ impl AutoNode {
             evidence,
         })
     }
-
 
     /// Place the decoders that wait for the classifier's verdict, once it
     /// has named a burst of this source, and read them the source's samples
@@ -357,8 +351,7 @@ pub(super) fn found(
         members.push(classifier(b, spec, reg)?);
     } else {
         evidence = Some(
-            Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
-                .from_sample(b.start_sample),
+            Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate).from_sample(b.start_sample),
         );
     }
     let hz = b.center_hz as f64;
@@ -471,7 +464,8 @@ mod tests {
         assert!(s.run_block(0, None, 0).is_none(), "nothing to read and nothing behind");
 
         let quiet = vec![C32::new(0.001, 0.0); 4_096];
-        let r = s.run_block(3, Some(&block(SourceId(1), rate, SourceState::Running, quiet.clone())), 0)
+        let r = s
+            .run_block(3, Some(&block(SourceId(1), rate, SourceState::Running, quiet.clone())), 0)
             .expect("a running source is read");
         assert_eq!(r.k, 3, "the slot is named in the result, since the fanout reorders");
         assert!(!r.done);

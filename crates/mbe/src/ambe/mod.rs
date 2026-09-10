@@ -13,12 +13,10 @@ use tables::{
 };
 
 // Interleave maps from the 72-bit frame into the coset vectors.
-const VECTOR_C0: [usize; 24] = [
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 1, 5, 9, 13, 17, 21,
-];
-const VECTOR_C1: [usize; 23] = [
-    25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42,
-];
+const VECTOR_C0: [usize; 24] =
+    [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 1, 5, 9, 13, 17, 21];
+const VECTOR_C1: [usize; 23] =
+    [25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69, 2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42];
 const VECTOR_C2: [usize; 11] = [46, 50, 54, 58, 62, 66, 70, 3, 7, 11, 15];
 const VECTOR_C3: [usize; 14] = [19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63, 67, 71];
 const VECTOR_U0: [usize; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
@@ -102,24 +100,15 @@ pub struct Tone {
     pub frequency2: f64,
 }
 
-pub const INVALID_TONE: Tone = Tone {
-    value: -1,
-    label: "INVALID",
-    frequency1: 0.0,
-    frequency2: 0.0,
-};
+pub const INVALID_TONE: Tone =
+    Tone { value: -1, label: "INVALID", frequency1: 0.0, frequency2: 0.0 };
 
 impl Tone {
     /// Port of `Tone.fromValue`: unknown values map to the INVALID tone.
     pub fn from_value(value: u32) -> Tone {
         for &(tone_value, label, frequency1, frequency2) in TONES.iter() {
             if tone_value == value as i32 {
-                return Tone {
-                    value: tone_value,
-                    label,
-                    frequency1,
-                    frequency2,
-                };
+                return Tone { value: tone_value, label, frequency1, frequency2 };
             }
         }
         INVALID_TONE
@@ -176,10 +165,7 @@ impl ToneGenerator {
 
     /// Port of `generate`; panics on an invalid tone like the Java throw.
     pub fn generate(&mut self, tone_parameters: &ToneParameters) -> [f32; SAMPLES_PER_FRAME] {
-        assert!(
-            tone_parameters.is_valid_tone(),
-            "Cannot generate tone audio - INVALID tone"
-        );
+        assert!(tone_parameters.is_valid_tone(), "Cannot generate tone audio - INVALID tone");
 
         let tone = tone_parameters.tone;
         let mut gain = tone_parameters.amplitude as f32 / 127.0;
@@ -225,11 +211,7 @@ impl AmbeModelParameters {
     /// Port of the no-arg constructor: W124 silence fundamental but frame
     /// type VOICE, unity spectral amplitudes, zero gain.
     pub fn new() -> Self {
-        let mut parameters = Self {
-            base: ModelParameters::new(),
-            fundamental: W124,
-            gain: 0.0,
-        };
+        let mut parameters = Self { base: ModelParameters::new(), fundamental: W124, gain: 0.0 };
         parameters.set_fundamental(W124);
         parameters.set_defaults(FrameType::Voice);
         parameters
@@ -242,11 +224,7 @@ impl AmbeModelParameters {
         errors: &[u32; 2],
         previous: &AmbeModelParameters,
     ) -> Self {
-        let mut parameters = Self {
-            base: ModelParameters::new(),
-            fundamental,
-            gain: 0.0,
-        };
+        let mut parameters = Self { base: ModelParameters::new(), fundamental, gain: 0.0 };
         parameters.set_fundamental(fundamental);
 
         // Alg 55 & 56
@@ -518,11 +496,8 @@ impl AmbeModelParameters {
             // Alg 46: spectral magnitude depends on the band's voicing
             // decision.
             let magnitude = ((0.693f32 * log_spectral_amplitudes[band]) as f64).exp() as f32;
-            spectral_amplitudes[band] = if self.base.voicing[band] {
-                magnitude
-            } else {
-                unvoiced_coefficient * magnitude
-            };
+            spectral_amplitudes[band] =
+                if self.base.voicing[band] { magnitude } else { unvoiced_coefficient * magnitude };
         }
 
         self.base.log2_spectral_amplitudes = log_spectral_amplitudes;
@@ -641,14 +616,7 @@ impl AmbeFrame {
             (None, 0)
         };
 
-        Self {
-            frame_type,
-            fundamental,
-            errors,
-            b,
-            tone,
-            tone_amplitude,
-        }
+        Self { frame_type, fundamental, errors, b, tone, tone_amplitude }
     }
 
     pub fn frame_type(&self) -> FrameType {
@@ -687,11 +655,10 @@ impl AmbeFrame {
     /// throw.
     pub fn tone_parameters(&self) -> ToneParameters {
         match self.tone {
-            Some(tone) => ToneParameters {
-                tone,
-                amplitude: self.tone_amplitude,
-            },
-            None => panic!("Frame type {:?} does not provide tone model parameters", self.frame_type),
+            Some(tone) => ToneParameters { tone, amplitude: self.tone_amplitude },
+            None => {
+                panic!("Frame type {:?} does not provide tone model parameters", self.frame_type)
+            }
         }
     }
 }
@@ -759,7 +726,11 @@ impl AmbeSynthesizer {
     }
 
     /// As [`Self::decode`], with a privacy keystream undone first.
-    pub fn decode_keyed(&mut self, frame_data: &[u8], keystream: &[bool; 49]) -> [f32; SAMPLES_PER_FRAME] {
+    pub fn decode_keyed(
+        &mut self,
+        frame_data: &[u8],
+        keystream: &[bool; 49],
+    ) -> [f32; SAMPLES_PER_FRAME] {
         let frame = BitFrame::from_bytes(frame_data, false);
         self.decode_frame(&AmbeFrame::from_bit_frame_keyed(&frame, Some(keystream)))
     }
@@ -782,8 +753,7 @@ impl AmbeSynthesizer {
                 // Java sets the repeat count to its current value here (no
                 // increment); ported as the same no-op.
                 if !self.previous_frame.base.is_max_frame_repeat() {
-                    self.mbe
-                        .get_voice(&self.previous_frame.base, &self.previous_frame.base)
+                    self.mbe.get_voice(&self.previous_frame.base, &self.previous_frame.base)
                 } else {
                     // Frame muting procedure
                     self.previous_frame = AmbeModelParameters::new();
@@ -877,21 +847,12 @@ mod tests {
         assert_eq!(w0.frequency(), expected);
 
         assert_eq!(FundamentalFrequency::from_value(119).l(), 56);
-        assert_eq!(
-            FundamentalFrequency::from_value(120).frame_type(),
-            FrameType::Erasure
-        );
+        assert_eq!(FundamentalFrequency::from_value(120).frame_type(), FrameType::Erasure);
         assert_eq!(FundamentalFrequency::from_value(120).frequency(), 0.0);
-        assert_eq!(
-            FundamentalFrequency::from_value(124).frame_type(),
-            FrameType::Silence
-        );
+        assert_eq!(FundamentalFrequency::from_value(124).frame_type(), FrameType::Silence);
         assert_eq!(FundamentalFrequency::from_value(124).l(), 15);
         assert_eq!(FundamentalFrequency::from_value(125).l(), 14);
-        assert_eq!(
-            FundamentalFrequency::from_value(127).frame_type(),
-            FrameType::Tone
-        );
+        assert_eq!(FundamentalFrequency::from_value(127).frame_type(), FrameType::Tone);
     }
 
     #[test]
@@ -996,11 +957,7 @@ mod tests {
         assert!(!parameters.base.voicing[8]);
         assert_eq!(parameters.base.voicing.len(), 18);
         assert_eq!(parameters.base.log2_spectral_amplitudes.len(), 18);
-        assert!(parameters
-            .base
-            .spectral_amplitudes
-            .iter()
-            .all(|a| a.is_finite()));
+        assert!(parameters.base.spectral_amplitudes.iter().all(|a| a.is_finite()));
 
         let mut synthesizer = AmbeSynthesizer::new();
         for _ in 0..4 {
@@ -1030,8 +987,14 @@ mod tests {
         let c1 = golay23_codeword(u1k) ^ modulation_vector(u0k);
         let bytes = build_frame(c0, c1, c2k, c3k);
 
-        let clear = AmbeFrame::new(&build_frame(golay24_codeword(u0), golay23_codeword(u1) ^ modulation_vector(u0), 0, 0));
-        let keyed = AmbeFrame::from_bit_frame_keyed(&BitFrame::from_bytes(&bytes, false), Some(&ks));
+        let clear = AmbeFrame::new(&build_frame(
+            golay24_codeword(u0),
+            golay23_codeword(u1) ^ modulation_vector(u0),
+            0,
+            0,
+        ));
+        let keyed =
+            AmbeFrame::from_bit_frame_keyed(&BitFrame::from_bytes(&bytes, false), Some(&ks));
         assert_eq!(keyed.errors(), [0, 0]);
         assert_eq!(keyed.b, clear.b);
         assert_ne!(AmbeFrame::new(&bytes).b, clear.b);

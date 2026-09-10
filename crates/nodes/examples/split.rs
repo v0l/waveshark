@@ -7,9 +7,8 @@ fn main() {
     let rate = 50e6;
     let secs = 1.0;
     let n = (rate * secs) as usize;
-    let sig: Vec<C32> = (0..n)
-        .map(|i| C32::new((i as f32 * 0.001).sin(), (i as f32 * 0.001).cos()))
-        .collect();
+    let sig: Vec<C32> =
+        (0..n).map(|i| C32::new((i as f32 * 0.001).sin(), (i as f32 * 0.001).cos())).collect();
     for &m in &[64usize, 512] {
         let mut ch = Channelizer::new(m, 12, 90.0);
         let mut frames: Vec<C32> = Vec::with_capacity(n * 2 / m * m);

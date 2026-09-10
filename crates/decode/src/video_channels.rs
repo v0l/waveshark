@@ -84,10 +84,8 @@ pub fn channels() -> Vec<Channel> {
 /// nothing in an analogue signal says. Reporting one of them would be
 /// inventing a fact.
 pub fn channels_at(hz: u64, tolerance_hz: u64) -> Vec<Channel> {
-    let mut near: Vec<Channel> = channels()
-        .into_iter()
-        .filter(|c| c.hz.abs_diff(hz) <= tolerance_hz)
-        .collect();
+    let mut near: Vec<Channel> =
+        channels().into_iter().filter(|c| c.hz.abs_diff(hz) <= tolerance_hz).collect();
     near.sort_by_key(|c| c.hz.abs_diff(hz));
     near
 }
@@ -96,12 +94,7 @@ pub fn channels_at(hz: u64, tolerance_hz: u64) -> Vec<Channel> {
 /// where two share it.
 pub fn name_at(hz: u64, tolerance_hz: u64) -> Option<String> {
     let near = channels_at(hz, tolerance_hz);
-    (!near.is_empty()).then(|| {
-        near.iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(" or ")
-    })
+    (!near.is_empty()).then(|| near.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" or "))
 }
 
 #[cfg(test)]

@@ -70,19 +70,23 @@ impl Fetch for Artemis {
         let fail = |e: String| Error::Fetch(RELEASES.into(), e);
         let mut resp = agent.get(RELEASES).call().map_err(|e| fail(e.to_string()))?;
         let body = resp.body_mut().read_to_string().map_err(|e| fail(e.to_string()))?;
-        let rel: serde_json::Value = serde_json::from_str(&body).map_err(|e| fail(e.to_string()))?;
+        let rel: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| fail(e.to_string()))?;
         let tag = rel["tag_name"].as_str().ok_or_else(|| fail("no tag_name".into()))?.to_string();
         if have.etag.as_deref() == Some(tag.as_str()) {
             return Ok(None);
         }
         let url = rel["assets"]
             .as_array()
-            .and_then(|a| a.iter().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".tar"))))
+            .and_then(|a| {
+                a.iter().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".tar")))
+            })
             .and_then(|a| a["browser_download_url"].as_str())
             .ok_or_else(|| fail(format!("{tag}: no .tar asset")))?
             .to_string();
         let published = rel["published_at"].as_str().map(str::to_string);
-        let mut resp = agent.get(&url).call().map_err(|e| Error::Fetch(url.clone(), e.to_string()))?;
+        let mut resp =
+            agent.get(&url).call().map_err(|e| Error::Fetch(url.clone(), e.to_string()))?;
         let mut body = resp.body_mut().with_config().limit(1 << 30).reader();
         match tar_entry(&mut body, "data.sqlite", to) {
             Ok(true) => Ok(Some(Seen { etag: Some(tag), last_modified: published })),
@@ -192,7 +196,9 @@ impl Db {
     /// nothing is within a plausible distance in frequency.
     pub fn matches(&self, q: &Query) -> Vec<Match<'_>> {
         let mut out: Vec<Match<'_>> = self.signals.iter().filter_map(|s| score(s, q)).collect();
-        out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.signal.name.cmp(&b.signal.name)));
+        out.sort_by(|a, b| {
+            b.score.total_cmp(&a.score).then_with(|| a.signal.name.cmp(&b.signal.name))
+        });
         out
     }
 }
@@ -293,7 +299,8 @@ fn score<'a>(s: &'a Signal, q: &Query) -> Option<Match<'a>> {
         }
     }
 
-    if let (Some(bw), Some(&wiki)) = (q.bandwidth_hz.filter(|b| *b > 0.0), s.bandwidths_hz.first()) {
+    if let (Some(bw), Some(&wiki)) = (q.bandwidth_hz.filter(|b| *b > 0.0), s.bandwidths_hz.first())
+    {
         if wiki > 0 {
             let r = (bw / wiki as f64).abs().log10().abs() as f32;
             let w = 0.2 * (1.0 - r.min(1.0));
@@ -348,7 +355,10 @@ pub fn refresh_artemis(cache: &Cache, when: When) -> Result<Option<Vec<Signal>>,
 /// Check the wiki list and reparse if it changed.
 pub fn refresh_unid(cache: &Cache, when: When) -> Result<Option<Vec<Signal>>, Error> {
     match cache.refresh(&unid_source(), when)? {
-        Some(p) => parse_unid(&std::fs::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))?).map(Some),
+        Some(p) => {
+            parse_unid(&std::fs::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))?)
+                .map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -367,12 +377,15 @@ pub fn load(cache: &Cache) -> Result<Db, Error> {
 fn read_sqlite(path: &Path) -> Result<Vec<Signal>, Error> {
     let name = path.display().to_string();
     let bad = |e: rusqlite::Error| Error::Parse(name.clone(), e.to_string());
-    let db = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(bad)?;
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(bad)?;
     let mut out: Vec<Signal> = Vec::new();
     let mut ids: Vec<i64> = Vec::new();
     {
-        let mut st = db.prepare("SELECT sig_id, name, url, description FROM signals ORDER BY sig_id").map_err(bad)?;
+        let mut st = db
+            .prepare("SELECT sig_id, name, url, description FROM signals ORDER BY sig_id")
+            .map_err(bad)?;
         let rows = st
             .query_map([], |r| {
                 Ok((
@@ -449,13 +462,18 @@ fn read_sqlite(path: &Path) -> Result<Vec<Signal>, Error> {
 fn parse_unid(raw: &[u8]) -> Result<Vec<Signal>, Error> {
     let bad = |e: String| Error::Parse("sigidwiki-unid.json".into(), e);
     let v: serde_json::Value = serde_json::from_slice(raw).map_err(|e| bad(e.to_string()))?;
-    let results = v["query"]["results"].as_object().ok_or_else(|| bad("no query.results".into()))?;
+    let results =
+        v["query"]["results"].as_object().ok_or_else(|| bad("no query.results".into()))?;
     let texts = |p: &serde_json::Value, key: &str| -> Vec<String> {
         let mut out: Vec<String> = p[key]
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()).or_else(|| x.as_f64().map(|n| n.to_string())))
+                    .filter_map(|x| {
+                        x.as_str()
+                            .map(|s| s.trim().to_string())
+                            .or_else(|| x.as_f64().map(|n| n.to_string()))
+                    })
                     .filter(|s| !s.is_empty())
                     .collect()
             })
@@ -466,7 +484,13 @@ fn parse_unid(raw: &[u8]) -> Result<Vec<Signal>, Error> {
     let numbers = |p: &serde_json::Value, key: &str| -> Vec<u64> {
         let mut out: Vec<u64> = p[key]
             .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_f64().or_else(|| x.as_str()?.parse().ok())).filter(|n| *n > 0.0).map(|n| n as u64).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_f64().or_else(|| x.as_str()?.parse().ok()))
+                    .filter(|n| *n > 0.0)
+                    .map(|n| n as u64)
+                    .collect()
+            })
             .unwrap_or_default();
         out.sort_unstable();
         out.dedup();
@@ -479,7 +503,10 @@ fn parse_unid(raw: &[u8]) -> Result<Vec<Signal>, Error> {
         bandwidths.extend(numbers(p, "Bandwidth max"));
         bandwidths.dedup();
         let picture = texts(p, "Picture").into_iter().next().map(|f| {
-            format!("https://www.sigidwiki.com/wiki/Special:FilePath/{}", encode(&f.replace(' ', "_")))
+            format!(
+                "https://www.sigidwiki.com/wiki/Special:FilePath/{}",
+                encode(&f.replace(' ', "_"))
+            )
         });
         out.push(Signal {
             name: title.clone(),
@@ -599,7 +626,8 @@ impl Observation {
     }
 
     fn plain(&self) -> String {
-        let mut parts = vec![format!("{} at {}", self.modulation.unwrap_or_default(), fmt_hz(self.center_hz))];
+        let mut parts =
+            vec![format!("{} at {}", self.modulation.unwrap_or_default(), fmt_hz(self.center_hz))];
         if let Some(bw) = self.bandwidth_hz.filter(|b| *b > 0.0) {
             parts.push(format!("{} wide", fmt_hz(bw)));
         }
@@ -626,7 +654,9 @@ pub fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -662,17 +692,30 @@ mod tests {
             signals: vec![
                 sig("LTE", &[450_000_000, 3_500_000_000], &["QPSK", "OFDM"], &[1_400_000]),
                 sig("Keyfob", &[868_300_000], &["FSK"], &[250_000]),
-                sig("LoRa", &[433_000_000, 863_000_000, 870_000_000, 915_000_000], &["CSS"], &[125_000]),
+                sig(
+                    "LoRa",
+                    &[433_000_000, 863_000_000, 870_000_000, 915_000_000],
+                    &["CSS"],
+                    &[125_000],
+                ),
                 sig("POCSAG", &[25_000_000, 932_000_000], &["FSK"], &[9_000]),
                 sig("HF thing", &[7_000_000], &["FSK"], &[3_000]),
             ],
         };
-        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some(common::Modulation::Fsk2), period_us: None };
+        let q = Query {
+            center_hz: 868_097_000.0,
+            bandwidth_hz: Some(28_000.0),
+            modulation: Some(common::Modulation::Fsk2),
+            period_us: None,
+        };
         let m = db.matches(&q);
         let names: Vec<&str> = m.iter().map(|m| m.signal.name.as_str()).collect();
         assert_eq!(names[0], "Keyfob", "{names:?}");
         assert!(!names.contains(&"HF thing"), "{names:?}");
-        assert!(names.iter().position(|n| *n == "LoRa") < names.iter().position(|n| *n == "LTE"), "{names:?}");
+        assert!(
+            names.iter().position(|n| *n == "LoRa") < names.iter().position(|n| *n == "LTE"),
+            "{names:?}"
+        );
         assert!(m[0].why.starts_with("868.300 MHz"), "{}", m[0].why);
     }
 
@@ -681,7 +724,8 @@ mod tests {
     #[test]
     fn a_blurb_skips_the_markdown_heading_artemis_keeps() {
         let mut s = sig("iDEN", &[869_000_000], &["QAM"], &[]);
-        s.description = "### SUMMARY\niDEN is a **TDMA** standard. It is trunked.\n### DETAILS\nmore".into();
+        s.description =
+            "### SUMMARY\niDEN is a **TDMA** standard. It is trunked.\n### DETAILS\nmore".into();
         assert_eq!(s.blurb(), "iDEN is a TDMA standard.");
     }
 
@@ -690,10 +734,20 @@ mod tests {
         let db = Db {
             signals: vec![
                 sig("Keyfob", &[868_300_000], &["FSK"], &[250_000]),
-                sig("LoRa", &[433_000_000, 863_000_000, 870_000_000, 915_000_000], &["CSS"], &[125_000]),
+                sig(
+                    "LoRa",
+                    &[433_000_000, 863_000_000, 870_000_000, 915_000_000],
+                    &["CSS"],
+                    &[125_000],
+                ),
             ],
         };
-        let q = Query { center_hz: 868_100_000.0, bandwidth_hz: Some(125_000.0), modulation: Some(common::Modulation::Chirp), period_us: None };
+        let q = Query {
+            center_hz: 868_100_000.0,
+            bandwidth_hz: Some(125_000.0),
+            modulation: Some(common::Modulation::Chirp),
+            period_us: None,
+        };
         assert_eq!(db.matches(&q)[0].signal.name, "LoRa");
     }
 
@@ -742,7 +796,10 @@ mod tests {
         assert_eq!(v[0].bandwidths_hz, [3000]);
         assert!(!v[0].identified);
         assert_eq!(v[0].blurb(), "Seen once.");
-        assert_eq!(v[0].picture_url.as_deref(), Some("https://www.sigidwiki.com/wiki/Special:FilePath/603_MHz.png"));
+        assert_eq!(
+            v[0].picture_url.as_deref(),
+            Some("https://www.sigidwiki.com/wiki/Special:FilePath/603_MHz.png")
+        );
     }
 
     #[test]
@@ -780,7 +837,10 @@ mod tests {
         let v = read_sqlite(&p).unwrap();
         assert!(v.len() > 500, "{}", v.len());
         let lora = v.iter().find(|s| s.name == "LoRa").expect("LoRa");
-        assert!(lora.frequencies_hz.contains(&868_000_000) || lora.frequencies_hz.contains(&863_000_000));
+        assert!(
+            lora.frequencies_hz.contains(&868_000_000)
+                || lora.frequencies_hz.contains(&863_000_000)
+        );
         assert_eq!(lora.modulations, ["CSS"]);
     }
 }
@@ -799,9 +859,20 @@ mod network {
         eprintln!("{} signals, {} identified", db.len(), db.identified());
         assert!(db.identified() > 500);
         assert!(db.len() - db.identified() > 300);
-        let q = Query { center_hz: 868_097_000.0, bandwidth_hz: Some(28_000.0), modulation: Some(common::Modulation::Fsk2), period_us: None };
+        let q = Query {
+            center_hz: 868_097_000.0,
+            bandwidth_hz: Some(28_000.0),
+            modulation: Some(common::Modulation::Fsk2),
+            period_us: None,
+        };
         for m in db.matches(&q).iter().take(8) {
-            eprintln!("{:.2} {} [{}] {}", m.score, m.signal.name, m.why, if m.signal.identified { "" } else { "UNID" });
+            eprintln!(
+                "{:.2} {} [{}] {}",
+                m.score,
+                m.signal.name,
+                m.why,
+                if m.signal.identified { "" } else { "UNID" }
+            );
         }
     }
 }

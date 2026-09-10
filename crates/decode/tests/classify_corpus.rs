@@ -23,12 +23,8 @@ use dsp::{Classifier, ClassifyConfig, Modulation};
 /// The captures whose device transmits FSK. Everything else in the corpus is
 /// on-off keyed. Both lists come from `docs/protocols.md`, which took them
 /// from rtl_433's device definitions.
-const FSK_CAPTURES: &[&str] = &[
-    "fineoffset_wh51",
-    "lacrosse_tx29it",
-    "lacrosse_tx35dthit",
-    "tpms_toyota",
-];
+const FSK_CAPTURES: &[&str] =
+    &["fineoffset_wh51", "lacrosse_tx29it", "lacrosse_tx35dthit", "tpms_toyota"];
 
 /// Captures the classifier is known to read wrong, with the reason.
 ///
@@ -95,10 +91,7 @@ fn family(m: Modulation) -> Family {
 fn the_classifier_agrees_with_the_device_table() {
     let fixtures = corpus::fixtures();
     if fixtures.is_empty() {
-        eprintln!(
-            "no fixtures in {}; run testdata/fetch.sh",
-            corpus::dir().display()
-        );
+        eprintln!("no fixtures in {}; run testdata/fetch.sh", corpus::dir().display());
         return;
     }
 
@@ -116,9 +109,7 @@ fn the_classifier_agrees_with_the_device_table() {
     let mut wrong: Vec<String> = Vec::new();
     let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
     for (name, expected, got, agreed, total) in &rows {
-        *counts
-            .entry((format!("{expected:?}"), got.label().to_string()))
-            .or_default() += 1;
+        *counts.entry((format!("{expected:?}"), got.label().to_string())).or_default() += 1;
         let ok = family(*got) == *expected;
         eprintln!(
             "{:>32}  want {:?}  got {:?}  ({agreed}/{total} bursts){}",
@@ -142,22 +133,10 @@ fn the_classifier_agrees_with_the_device_table() {
     }
 
     let known: Vec<&str> = KNOWN_MISSES.iter().map(|(n, _)| *n).collect();
-    let unexpected: Vec<&String> = wrong
-        .iter()
-        .filter(|n| !known.contains(&n.as_str()))
-        .collect();
-    let fixed: Vec<&&str> = known
-        .iter()
-        .filter(|n| !wrong.iter().any(|w| w == *n))
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "captures read as the wrong family: {unexpected:?}"
-    );
-    assert!(
-        fixed.is_empty(),
-        "these are on KNOWN_MISSES but now classify correctly: {fixed:?}"
-    );
+    let unexpected: Vec<&String> = wrong.iter().filter(|n| !known.contains(&n.as_str())).collect();
+    let fixed: Vec<&&str> = known.iter().filter(|n| !wrong.iter().any(|w| w == *n)).collect();
+    assert!(unexpected.is_empty(), "captures read as the wrong family: {unexpected:?}");
+    assert!(fixed.is_empty(), "these are on KNOWN_MISSES but now classify correctly: {fixed:?}");
 }
 
 /// Classify every burst in a capture and take the majority verdict.
@@ -174,10 +153,7 @@ fn classify_capture(path: &std::path::Path) -> (Modulation, usize, usize) {
     let pkgs = corpus::packages(path);
     let windows = corpus::windows(&pkgs, rate, buf.samples.len());
 
-    let cfg = ClassifyConfig {
-        channel_hz: rate as f32,
-        ..Default::default()
-    };
+    let cfg = ClassifyConfig { channel_hz: rate as f32, ..Default::default() };
     let mut classifier = Classifier::new(rate, cfg);
     let mut votes: std::collections::BTreeMap<String, (usize, Modulation)> = Default::default();
     let mut total = 0;
@@ -193,9 +169,7 @@ fn classify_capture(path: &std::path::Path) -> (Modulation, usize, usize) {
         let c = classifier.classify(&shifted);
         total += 1;
         if c.modulation != Modulation::Unknown {
-            let e = votes
-                .entry(format!("{:?}", c.modulation))
-                .or_insert((0, c.modulation));
+            let e = votes.entry(format!("{:?}", c.modulation)).or_insert((0, c.modulation));
             e.0 += 1;
         }
     }

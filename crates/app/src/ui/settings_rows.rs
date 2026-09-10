@@ -118,7 +118,6 @@ pub(super) fn mhz_field(ui: &mut egui::Ui, v: &mut f64) {
     ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=6000.0).max_decimals(4));
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

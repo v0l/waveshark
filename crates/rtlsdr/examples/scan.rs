@@ -22,12 +22,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rate = Sps(2_400_000);
     sdr.set_rate(rate)?;
     sdr.set_center(Hz((center_mhz * 1e6) as u64))?;
-    sdr.set_gain("tuner", match gain {
-        Some(g) => GainMode::Manual(g),
-        None => GainMode::Auto,
-    })?;
+    sdr.set_gain(
+        "tuner",
+        match gain {
+            Some(g) => GainMode::Manual(g),
+            None => GainMode::Auto,
+        },
+    )?;
 
-    println!("tuned to {} (actual {}), rate {}", sdr.center(), sdr.actual_center(), sdr.actual_rate());
+    println!(
+        "tuned to {} (actual {}), rate {}",
+        sdr.center(),
+        sdr.actual_center(),
+        sdr.actual_rate()
+    );
 
     const CHANNELS: usize = 64;
     let mut ch = Channelizer::new(CHANNELS, 12, 90.0);
@@ -55,10 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total as f64 / secs / 1e6,
         rx.dropped()
     );
-    println!("channelizer: {frames} frames, {} channels @ {:.1} kS/s each, {:.1} kHz wide",
+    println!(
+        "channelizer: {frames} frames, {} channels @ {:.1} kS/s each, {:.1} kHz wide",
         CHANNELS,
         ch.channel_rate(rate.as_f64()) / 1e3,
-        ch.channel_bandwidth(rate.as_f64()) / 1e3);
+        ch.channel_bandwidth(rate.as_f64()) / 1e3
+    );
 
     let mut idx: Vec<usize> = (0..CHANNELS).collect();
     idx.sort_by(|&a, &b| power[b].total_cmp(&power[a]));
@@ -72,8 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &m in idx.iter().take(12) {
         let f = sdr.center().as_f64() + ch.channel_offset_hz(m, rate.as_f64());
         let snr = 10.0 * (power[m] / floor).log10();
-        println!("  ch{m:3}  {:9.4} MHz   {:+7.1} dB over floor  {}",
-            f / 1e6, snr, "#".repeat((snr.max(0.0) / 2.0) as usize).chars().take(40).collect::<String>());
+        println!(
+            "  ch{m:3}  {:9.4} MHz   {:+7.1} dB over floor  {}",
+            f / 1e6,
+            snr,
+            "#".repeat((snr.max(0.0) / 2.0) as usize).chars().take(40).collect::<String>()
+        );
     }
     Ok(())
 }

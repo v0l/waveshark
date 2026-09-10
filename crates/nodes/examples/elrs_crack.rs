@@ -27,11 +27,7 @@ fn crc16(data: &[u8], init: u16) -> u16 {
     for &b in data {
         crc ^= u16::from(b) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ CRC16_POLY
-            } else {
-                crc << 1
-            };
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ CRC16_POLY } else { crc << 1 };
         }
     }
     crc
@@ -39,9 +35,7 @@ fn crc16(data: &[u8], init: u16) -> u16 {
 
 /// Every seed that would make this body and CRC agree. Normally exactly one.
 fn seeds_for(body: &[u8], sent: u16) -> Vec<u16> {
-    (0..=u16::MAX)
-        .filter(|&init| crc16(body, init) == sent)
-        .collect()
+    (0..=u16::MAX).filter(|&init| crc16(body, init) == sent).collect()
 }
 
 /// Symbols to bytes under one hypothesis about the coding.
@@ -84,11 +78,7 @@ fn decode_under(symbols: &[u16], h: &Hypothesis) -> Vec<u8> {
         for (r, &v) in vals.iter().enumerate() {
             for c in 0..ppm {
                 if v & (1 << c) != 0 {
-                    let dst = if h.shift_up {
-                        (c + r) % ppm
-                    } else {
-                        (c + ppm - r % ppm) % ppm
-                    };
+                    let dst = if h.shift_up { (c + r) % ppm } else { (c + ppm - r % ppm) % ppm };
                     words[dst] |= 1 << r;
                 }
             }

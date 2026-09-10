@@ -223,11 +223,7 @@ const QPP: [(usize, u32, u32); 188] = [
 pub fn interleaver(k: usize) -> Option<Vec<usize>> {
     let &(_, f1, f2) = QPP.iter().find(|(size, _, _)| *size == k)?;
     let (f1, f2) = (f1 as u64, f2 as u64);
-    Some(
-        (0..k as u64)
-            .map(|i| ((f1 * i + f2 * i * i) % k as u64) as usize)
-            .collect(),
-    )
+    Some((0..k as u64).map(|i| ((f1 * i + f2 * i * i) % k as u64) as usize).collect())
 }
 
 /// The inter-column permutation of the sub-block interleaver, table 5.1.4-1.
@@ -249,13 +245,10 @@ fn sub_block_map(d: usize, third: bool) -> Vec<Option<usize>> {
     let v = rows * COLUMNS;
     let shift = v - d;
     // Positions of the padded input, as indices into the D-long stream.
-    let padded: Vec<Option<usize>> = (0..v)
-        .map(|i| if i < shift { None } else { Some(i - shift) })
-        .collect();
+    let padded: Vec<Option<usize>> =
+        (0..v).map(|i| if i < shift { None } else { Some(i - shift) }).collect();
     if third {
-        (0..v)
-            .map(|k| padded[(PERMUTE[k / rows] + COLUMNS * (k % rows) + 1) % v])
-            .collect()
+        (0..v).map(|k| padded[(PERMUTE[k / rows] + COLUMNS * (k % rows) + 1) % v]).collect()
     } else {
         // Written in by rows, columns permuted, read out by columns.
         let mut scrambled = vec![None; v];
@@ -279,11 +272,7 @@ fn sub_block_map(d: usize, third: bool) -> Vec<Option<usize>> {
 fn buffer_map(d: usize) -> Vec<Option<(usize, usize)>> {
     let rows = d.div_ceil(COLUMNS);
     let v = rows * COLUMNS;
-    let maps = [
-        sub_block_map(d, false),
-        sub_block_map(d, false),
-        sub_block_map(d, true),
-    ];
+    let maps = [sub_block_map(d, false), sub_block_map(d, false), sub_block_map(d, true)];
     (0..3 * v)
         .map(|n| {
             if n < v {
@@ -590,9 +579,8 @@ fn bcjr(systematic: &[f32], parity: &[f32], apriori: &[f32], tail: &[[f32; 2]; 3
                         continue;
                     }
                     let x = if u == 0 { 1.0 } else { -1.0 };
-                    let m = alpha[i][s]
-                        + 0.5 * (x * (s_i + a_i) + emit[s][u] * p_i)
-                        + beta[i + 1][t];
+                    let m =
+                        alpha[i][s] + 0.5 * (x * (s_i + a_i) + emit[s][u] * p_i) + beta[i + 1][t];
                     if m > best[u] {
                         best[u] = m;
                     }
@@ -746,10 +734,8 @@ mod tests {
     fn a_block_survives_the_rate_matcher() {
         let bits = block(1408);
         let d = encode(&bits).expect("an LTE block size");
-        let e: Vec<f32> = rate_match(&d, 7200)
-            .into_iter()
-            .map(|b| if b == 0 { 1.0 } else { -1.0 })
-            .collect();
+        let e: Vec<f32> =
+            rate_match(&d, 7200).into_iter().map(|b| if b == 0 { 1.0 } else { -1.0 }).collect();
         let back = rate_dematch(&e, 1412);
         let out = decode(&back, 1408, 4).expect("a decode");
         assert_eq!(out, bits);
@@ -774,7 +760,14 @@ mod noise_tests {
 
     fn block(k: usize) -> Vec<u8> {
         let mut seed = 2463534242u32;
-        (0..k).map(|_| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; (seed & 1) as u8 }).collect()
+        (0..k)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed & 1) as u8
+            })
+            .collect()
     }
 
     #[test]
@@ -784,12 +777,21 @@ mod noise_tests {
         let e = rate_match(&d, 7200);
         let mut seed = 99u32;
         for pct in [0usize, 2, 5, 10] {
-            let soft: Vec<f32> = e.iter().map(|&b| {
-                seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-                let flip = (seed % 100) < pct as u32;
-                let b = b ^ u8::from(flip);
-                if b == 0 { 1.0 } else { -1.0 }
-            }).collect();
+            let soft: Vec<f32> = e
+                .iter()
+                .map(|&b| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let flip = (seed % 100) < pct as u32;
+                    let b = b ^ u8::from(flip);
+                    if b == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                })
+                .collect();
             let back = rate_dematch(&soft, 1412);
             let out = decode(&back, 1408, 6).expect("decode");
             let wrong = out.iter().zip(&bits).filter(|(a, b)| a != b).count();

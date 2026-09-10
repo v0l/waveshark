@@ -47,11 +47,7 @@ impl Protocol for Princeton {
             let mut r = Report::new("Princeton");
             r.crc_valid = None;
             r.raw = b.to_vec();
-            Some(
-                r.int("code", code as i64)
-                    .int("serial", serial as i64)
-                    .int("btn", btn as i64),
-            )
+            Some(r.int("code", code as i64).int("serial", serial as i64).int("btn", btn as i64))
         })
     }
 }
@@ -103,9 +99,6 @@ mod tests {
 
     #[test]
     fn a_zero_code_is_not_this_protocol() {
-        assert_eq!(
-            Princeton.decode(&input(0)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(Princeton.decode(&input(0)), Err(DecodeError::NotThisProtocol));
     }
 }

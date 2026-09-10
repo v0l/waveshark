@@ -16,9 +16,8 @@ const RANDOMIZER_SEED: [usize; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 const VECTOR_B0: [usize; 8] = [0, 1, 2, 3, 4, 5, 141, 142];
 
 /// Coefficient offsets for bit lengths 0 to 10: (2 ^ (bit length - 1)) - 0.5.
-const COEFFICIENT_OFFSET: [f32; 11] = [
-    0.0, 0.5, 1.5, 3.5, 7.5, 15.5, 31.5, 63.5, 127.5, 255.5, 511.5,
-];
+const COEFFICIENT_OFFSET: [f32; 11] =
+    [0.0, 0.5, 1.5, 3.5, 7.5, 15.5, 31.5, 63.5, 127.5, 255.5, 511.5];
 
 const MAX_HEADROOM_THRESHOLD: i32 = 3;
 
@@ -39,9 +38,7 @@ impl ImbeFundamentalFrequency {
     /// Port of `fromValue`: values 0 to 207 are valid, all else is INVALID.
     pub fn from_value(value: u32) -> Self {
         if value <= 207 {
-            Self {
-                index: value as i32,
-            }
+            Self { index: value as i32 }
         } else {
             Self::INVALID
         }
@@ -85,11 +82,8 @@ impl ImbeModelParameters {
     /// enhancement is not run here; the Java constructor assigns the raw
     /// amplitudes to both the plain and enhanced fields directly.
     pub fn with_fundamental(fundamental: ImbeFundamentalFrequency) -> Self {
-        let mut parameters = Self {
-            base: ModelParameters::new(),
-            fundamental,
-            error_count_coset0: 0,
-        };
+        let mut parameters =
+            Self { base: ModelParameters::new(), fundamental, error_count_coset0: 0 };
         parameters.set_fundamental(fundamental);
 
         let lplus1 = parameters.base.l + 1;
@@ -140,8 +134,7 @@ impl ImbeModelParameters {
             // kept and the repeat count stays at zero.
             let local_energy = self.base.local_energy;
             let amplitude_threshold = self.base.amplitude_threshold;
-            self.base
-                .set_spectral_amplitudes(vec![1.0; lplus1], local_energy, amplitude_threshold);
+            self.base.set_spectral_amplitudes(vec![1.0; lplus1], local_energy, amplitude_threshold);
         } else {
             self.set_fundamental(previous.fundamental);
             self.base.voicing = previous.base.voicing.clone();
@@ -185,10 +178,7 @@ impl Default for ImbeModelParameters {
 /// Port of `Gain.fromValue().getGain()`: Annex E value plus the 1.0 the Java
 /// constructor adds. Panics outside 0 to 63 like the Java throw.
 fn gain_from_value(value: u32) -> f32 {
-    assert!(
-        value <= 63,
-        "Value must be in range 0-63. Unsupported value: {value}"
-    );
+    assert!(value <= 63, "Value must be in range 0-63. Unsupported value: {value}");
     GAINS[value as usize] + 1.0
 }
 
@@ -231,12 +221,7 @@ impl ImbeFrame {
 
         let fundamental = ImbeFundamentalFrequency::from_value(frame.get_int(&VECTOR_B0));
 
-        Self {
-            frame,
-            fundamental,
-            errors,
-            error_count_total,
-        }
+        Self { frame, fundamental, errors, error_count_total }
     }
 
     pub fn fundamental_frequency(&self) -> ImbeFundamentalFrequency {
@@ -347,10 +332,8 @@ impl ImbeFrame {
             for m in 2..=6usize {
                 // Java mixes f64 Math.PI with f32 subterms; the cos argument
                 // is computed in f64 and the result narrowed to f32.
-                let angle = std::f64::consts::PI
-                    * (m - 1) as f64
-                    * ((i as f32 - 0.5f32) as f64)
-                    / 6.0;
+                let angle =
+                    std::f64::consts::PI * (m - 1) as f64 * ((i as f32 - 0.5f32) as f64) / 6.0;
                 c[i][1] += 2.0f32 * g[m] * angle.cos() as f32;
             }
         }
@@ -385,10 +368,9 @@ impl ImbeFrame {
 
                 if ji >= 2 {
                     for k in 2..=ji {
-                        let angle = std::f64::consts::PI
-                            * (k - 1) as f64
-                            * ((j as f32 - 0.5f32) as f64)
-                            / (ji as f32 as f64);
+                        let angle =
+                            std::f64::consts::PI * (k - 1) as f64 * ((j as f32 - 0.5f32) as f64)
+                                / (ji as f32 as f64);
                         t[l_index] += 2.0f32 * c[i][k] * angle.cos() as f32;
                     }
                 }
@@ -421,10 +403,8 @@ impl ImbeFrame {
 
         let previous_l = previous.base.l;
 
-        let previous_log2m = Self::resize(
-            &previous.base.log2_spectral_amplitudes,
-            l_int.max(previous_l) + 1,
-        );
+        let previous_log2m =
+            Self::resize(&previous.base.log2_spectral_amplitudes, l_int.max(previous_l) + 1);
 
         let t = self.spectral_amplitude_prediction_residuals();
 
@@ -477,10 +457,7 @@ impl ImbeFrame {
     /// Inverse log2: M[l] = 2 ^ log2M[l], computed with f64 pow and
     /// narrowed like Java's Math.pow cast. Index 0 becomes 1.0.
     fn spectral_amplitudes(log2_spectral_amplitudes: &[f32]) -> Vec<f32> {
-        log2_spectral_amplitudes
-            .iter()
-            .map(|value| 2.0f64.powf(*value as f64) as f32)
-            .collect()
+        log2_spectral_amplitudes.iter().map(|value| 2.0f64.powf(*value as f64) as f32).collect()
     }
 
     /// Voiced/unvoiced flag per harmonic 1 to L; index 0 unused.
@@ -505,10 +482,7 @@ pub struct ImbeSynthesizer {
 
 impl ImbeSynthesizer {
     pub fn new() -> Self {
-        Self {
-            mbe: MbeSynthesizer::new(),
-            previous: ImbeModelParameters::new(),
-        }
+        Self { mbe: MbeSynthesizer::new(), previous: ImbeModelParameters::new() }
     }
 
     /// Resets the previous frame to the defaults, matching
@@ -552,10 +526,7 @@ mod tests {
     use super::*;
 
     fn frame_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|x| u8::from_str_radix(&hex[x..x + 2], 16).unwrap())
-            .collect()
+        (0..hex.len()).step_by(2).map(|x| u8::from_str_radix(&hex[x..x + 2], 16).unwrap()).collect()
     }
 
     const FRAME_1: &str = "7C57B79E016C72542611A1E329DDE3A3DCFE";
@@ -571,10 +542,7 @@ mod tests {
         assert!(w207.is_valid());
         assert_eq!(w207.l(), 56);
 
-        assert_eq!(
-            ImbeFundamentalFrequency::from_value(208),
-            ImbeFundamentalFrequency::INVALID
-        );
+        assert_eq!(ImbeFundamentalFrequency::from_value(208), ImbeFundamentalFrequency::INVALID);
 
         // The Java DEFAULT comment claims L = 30 but the constructor formula
         // gives 39; the port matches the formula.
@@ -602,11 +570,7 @@ mod tests {
             let table = l - 9;
             // Coefficients b3 to b(L + 1).
             assert_eq!(STEP_SIZES[table].len(), l - 1, "step sizes for L {l}");
-            assert_eq!(
-                QUANTIZED_VALUE_INDEXES[table].len(),
-                l - 1,
-                "quantized indexes for L {l}"
-            );
+            assert_eq!(QUANTIZED_VALUE_INDEXES[table].len(), l - 1, "quantized indexes for L {l}");
             // Six J blocks whose harmonic counts sum to L.
             let allocations = HARMONIC_ALLOCATIONS[table];
             assert_eq!(allocations.len(), 6);
@@ -631,11 +595,7 @@ mod tests {
         let parameters = frame.model_parameters(&previous);
         assert_eq!(parameters.base.l, l);
         assert_eq!(parameters.base.enhanced_spectral_amplitudes.len(), l + 1);
-        assert!(parameters
-            .base
-            .enhanced_spectral_amplitudes
-            .iter()
-            .all(|a| a.is_finite()));
+        assert!(parameters.base.enhanced_spectral_amplitudes.iter().all(|a| a.is_finite()));
     }
 
     #[test]

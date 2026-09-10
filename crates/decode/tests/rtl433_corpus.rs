@@ -30,11 +30,7 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
          only the first number is reported. The reading itself is the same in \
          all three",
     ),
-    (
-        "acurite_5n1",
-        "sequence_num:2",
-        "as above, the third repeat of the same reading",
-    ),
+    ("acurite_5n1", "sequence_num:2", "as above, the third repeat of the same reading"),
     (
         "honeywell_5816",
         "id:231303",
@@ -72,10 +68,8 @@ fn agrees_with_rtl_433() {
                 (false, Some((_, _, why))) => {
                     eprintln!("known gap in {}: {want}\n    {why}", f.name)
                 }
-                (true, Some(_)) => failures.push(format!(
-                    "{}: {want} now decodes; remove its KNOWN_GAPS entry",
-                    f.name
-                )),
+                (true, Some(_)) => failures
+                    .push(format!("{}: {want} now decodes; remove its KNOWN_GAPS entry", f.name)),
                 (true, None) => {}
             }
         }

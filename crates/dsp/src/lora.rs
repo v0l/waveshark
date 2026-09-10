@@ -127,13 +127,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            sf: 7,
-            peak_min: 10.0,
-            preamble_min: 6,
-            max_symbols: 600,
-            inverted: false,
-        }
+        Self { sf: 7, peak_min: 10.0, preamble_min: 6, max_symbols: 600, inverted: false }
     }
 }
 
@@ -257,10 +251,7 @@ impl Demod {
     /// energy back in the bin it belongs to.
     fn peak(&mut self, iq: &[C32], at: usize, up_ref: bool, fine: bool) -> Peak {
         if at + self.step > iq.len() {
-            return Peak {
-                bin: 0.0,
-                peak_mean: 0.0,
-            };
+            return Peak { bin: 0.0, peak_mean: 0.0 };
         }
         let zp = if fine { 4 } else { 1 };
         let len = self.step * zp;
@@ -303,11 +294,7 @@ impl Demod {
         let a = self.mag[(k + bins - 1) % bins];
         let c = self.mag[(k + 1) % bins];
         let curve = a - 2.0 * best.1 + c;
-        let delta = if curve.abs() > 1e-12 {
-            0.5 * (a - c) / curve
-        } else {
-            0.0
-        };
+        let delta = if curve.abs() > 1e-12 { 0.5 * (a - c) / curve } else { 0.0 };
         Peak {
             bin: (k as f32 + delta.clamp(-0.5, 0.5)) / zp as f32,
             peak_mean: if mean > 0.0 { best.1 / mean } else { 0.0 },
@@ -383,11 +370,7 @@ impl Demod {
                 self.resume = (start + down_sym * sym).max(rise + sym / 4);
                 return None;
             }
-            if self
-                .peak(iq, start + down_sym * sym, false, false)
-                .peak_mean
-                > self.cfg.peak_min
-            {
+            if self.peak(iq, start + down_sym * sym, false, false).peak_mean > self.cfg.peak_min {
                 break;
             }
             down_sym += 1;
@@ -430,8 +413,7 @@ impl Demod {
         let sync_word = (((hi / SYNC_STEP) << 4) | (lo / SYNC_STEP)) as u8;
 
         let (data, mean, complete) = self.symbols(iq, start, down_sym, reference);
-        let end =
-            start + ((down_sym as f64 + DOWNCHIRPS) * sym as f64) as usize + data.len() * sym;
+        let end = start + ((down_sym as f64 + DOWNCHIRPS) * sym as f64) as usize + data.len() * sym;
         Some(Packet {
             sf: self.cfg.sf,
             start,
@@ -502,11 +484,7 @@ impl Demod {
             sum += p.peak_mean;
             bins.push(p.bin - reference);
         }
-        let mean = if bins.is_empty() {
-            0.0
-        } else {
-            sum / bins.len() as f32
-        };
+        let mean = if bins.is_empty() { 0.0 } else { sum / bins.len() as f32 };
         (self.round(&bins), mean, ended || bins.len() >= self.cfg.max_symbols)
     }
 
@@ -671,10 +649,7 @@ mod tests {
     fn a_synthetic_packet_gives_back_its_symbols() {
         let values: Vec<u16> = (0..16).map(|i| i * 7 + 3).collect();
         let iq = synth(7, 8, 0x12, &values);
-        let mut d = Demod::new(Config {
-            sf: 7,
-            ..Default::default()
-        });
+        let mut d = Demod::new(Config { sf: 7, ..Default::default() });
         let p = d.detect(&iq, 0).expect("packet");
         assert_eq!(p.preamble_syms, 8, "preamble length");
         assert_eq!(p.sync_word, 0x12, "sync word");
@@ -706,10 +681,7 @@ mod tests {
         let iq = synth(5, 8, 0x12, &values);
         let mut d = Demod::new(Config { sf: 5, ..Default::default() });
         let found = d.detect(&iq, 0);
-        assert!(
-            found.is_none_or(|p| p.symbols.is_empty()),
-            "SF5 should starve at SF7's floor"
-        );
+        assert!(found.is_none_or(|p| p.symbols.is_empty()), "SF5 should starve at SF7's floor");
     }
 
     #[test]
@@ -728,13 +700,8 @@ mod tests {
                     )
                 })
                 .collect();
-            let mut d = Demod::new(Config {
-                sf: 7,
-                ..Default::default()
-            });
-            let Some(p) = d.detect(&iq, 0) else {
-                panic!("cfo {cfo}: no packet")
-            };
+            let mut d = Demod::new(Config { sf: 7, ..Default::default() });
+            let Some(p) = d.detect(&iq, 0) else { panic!("cfo {cfo}: no packet") };
             eprintln!(
                 "cfo {cfo}: pre {} sync {:02x} cfo_est {} sto {} syms {:?}",
                 p.preamble_syms,
@@ -750,10 +717,7 @@ mod tests {
     #[test]
     fn silence_holds_no_packet() {
         let iq = vec![C32::default(); 1 << 14];
-        let mut d = Demod::new(Config {
-            sf: 7,
-            ..Default::default()
-        });
+        let mut d = Demod::new(Config { sf: 7, ..Default::default() });
         assert!(d.detect(&iq, 0).is_none());
     }
 

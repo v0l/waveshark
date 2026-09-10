@@ -190,12 +190,9 @@ impl Sat {
     /// speaks the old format. What is downloaded is CSV, because the
     /// catalogue outgrew the two-line format in 2026.
     pub fn from_lines(name: &str, line1: &str, line2: &str) -> Result<Self, Error> {
-        let e = sgp4::Elements::from_tle(
-            Some(name.to_string()),
-            line1.as_bytes(),
-            line2.as_bytes(),
-        )
-        .map_err(|e| Error::Elements(e.to_string()))?;
+        let e =
+            sgp4::Elements::from_tle(Some(name.to_string()), line1.as_bytes(), line2.as_bytes())
+                .map_err(|e| Error::Elements(e.to_string()))?;
         Self::wind(name.to_string(), e)
     }
 
@@ -335,13 +332,7 @@ impl Sat {
     /// can work, and listing it hides the ones that matter. The rise and set
     /// times are still the horizon crossings, not the crossings of that
     /// threshold, because that is what an operator points an antenna by.
-    pub fn passes(
-        &self,
-        from: Station,
-        start_s: i64,
-        window_s: i64,
-        min_el_deg: f64,
-    ) -> Vec<Pass> {
+    pub fn passes(&self, from: Station, start_s: i64, window_s: i64, min_el_deg: f64) -> Vec<Pass> {
         let el = |t: f64| self.look(from, t as i64).map(|l| l.el_deg).unwrap_or(-90.0);
         let mut out = Vec::new();
         let end = (start_s + window_s) as f64;
@@ -448,9 +439,7 @@ fn gmst_rad(at_s: i64) -> f64 {
     // kilometre.
     let jd = at_s as f64 / 86_400.0 + 2_440_587.5;
     let t = (jd - 2_451_545.0) / 36_525.0;
-    let secs = 67_310.548_41
-        + (876_600.0 * 3600.0 + 8_640_184.812_866) * t
-        + 0.093_104 * t * t
+    let secs = 67_310.548_41 + (876_600.0 * 3600.0 + 8_640_184.812_866) * t + 0.093_104 * t * t
         - 6.2e-6 * t * t * t;
     let rad = (secs % 86_400.0) * (2.0 * PI / 86_400.0);
     (rad % (2.0 * PI) + 2.0 * PI) % (2.0 * PI)
@@ -477,11 +466,7 @@ fn geodetic_to_ecef(lat_deg: f64, lon_deg: f64, alt_km: f64) -> [f64; 3] {
     let (lat, lon) = (lat_deg * RAD, lon_deg * RAD);
     let (sl, cl) = lat.sin_cos();
     let n = A_KM / (1.0 - E2 * sl * sl).sqrt();
-    [
-        (n + alt_km) * cl * lon.cos(),
-        (n + alt_km) * cl * lon.sin(),
-        (n * (1.0 - E2) + alt_km) * sl,
-    ]
+    [(n + alt_km) * cl * lon.cos(), (n + alt_km) * cl * lon.sin(), (n * (1.0 - E2) + alt_km) * sl]
 }
 
 /// Bowring's method, iterated. Converges in three passes to well under a
@@ -592,7 +577,8 @@ mod tests {
         assert!((35_500.0..36_200.0).contains(&first.alt_km), "{} km", first.alt_km);
         for h in [1, 3, 6, 12] {
             let l = s.look(Station::new(0.0, 0.0), at + h * 3600).unwrap();
-            let drift = (l.lon_deg - first.lon_deg).abs().min(360.0 - (l.lon_deg - first.lon_deg).abs());
+            let drift =
+                (l.lon_deg - first.lon_deg).abs().min(360.0 - (l.lon_deg - first.lon_deg).abs());
             assert!(drift < 1.0, "drifted {drift} degrees in {h} h");
             assert!(l.lat_deg.abs() < 1.0, "wandered to {} deg", l.lat_deg);
         }
@@ -633,7 +619,10 @@ mod tests {
             assert!(p.max_el_deg >= 10.0);
             assert!(s.look(here, p.peak_s).unwrap().el_deg >= p.max_el_deg - 0.5);
             for edge in [p.rise_s, p.set_s] {
-                assert!(s.look(here, edge).unwrap().el_deg.abs() < 1.0, "{edge} is not the horizon");
+                assert!(
+                    s.look(here, edge).unwrap().el_deg.abs() < 1.0,
+                    "{edge} is not the horizon"
+                );
             }
         }
         // Fifteen and a half orbits a day, of which a mid-latitude station
@@ -651,7 +640,10 @@ mod tests {
         let high = s.passes(here, epoch(), 86_400, 30.0);
         assert!(high.len() <= all.len());
         for p in &high {
-            assert!(all.iter().any(|a| (a.peak_s - p.peak_s).abs() < 2), "{p:?} is not in the full list");
+            assert!(
+                all.iter().any(|a| (a.peak_s - p.peak_s).abs() < 2),
+                "{p:?} is not in the full list"
+            );
             assert!(p.max_el_deg >= 30.0);
         }
     }

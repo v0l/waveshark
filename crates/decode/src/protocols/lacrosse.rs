@@ -55,10 +55,9 @@ impl Protocol for LacrosseTx141thBv2 {
             b[0] != 0 && lfsr_digest8_reflect(&b[..4], 0x31, 0xf4) == b[4]
         })
         .ok_or(match bits.len() {
-            n if n < TX141TH_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: TX141TH_BYTES * 8,
-            },
+            n if n < TX141TH_BYTES * 8 => {
+                DecodeError::WrongLength { got: n, want: TX141TH_BYTES * 8 }
+            }
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -99,17 +98,11 @@ pub struct LacrosseIt {
 
 impl LacrosseIt {
     pub fn tx29() -> Self {
-        Self {
-            name: "LaCrosse-TX29IT",
-            bit_us: 55,
-        }
+        Self { name: "LaCrosse-TX29IT", bit_us: 55 }
     }
 
     pub fn tx35() -> Self {
-        Self {
-            name: "LaCrosse-TX35DTHIT",
-            bit_us: 105,
-        }
+        Self { name: "LaCrosse-TX35DTHIT", bit_us: 105 }
     }
 }
 
@@ -140,9 +133,7 @@ impl Protocol for LacrosseIt {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        let at = bits
-            .find(&IT_SYNC, 24)
-            .ok_or(DecodeError::NotThisProtocol)?;
+        let at = bits.find(&IT_SYNC, 24).ok_or(DecodeError::NotThisProtocol)?;
         let start = at + IT_SYNC_LEAD;
         // A frame whose last bits are zeros ends with the carrier already off,
         // and a detector cannot see how long silence was meant to last: the
@@ -153,10 +144,7 @@ impl Protocol for LacrosseIt {
         // recording of one does.
         let have = bits.len().saturating_sub(start);
         if have + 8 < IT_BYTES * 8 {
-            return Err(DecodeError::WrongLength {
-                got: have,
-                want: IT_BYTES * 8,
-            });
+            return Err(DecodeError::WrongLength { got: have, want: IT_BYTES * 8 });
         }
         let frame = bits.slice(start, IT_BYTES * 8);
         let b = frame.as_padded_bytes();
@@ -220,9 +208,7 @@ mod tests {
 
     #[test]
     fn decodes_a_tx141th_frame() {
-        let r = LacrosseTx141thBv2
-            .decode(&on_air(&tx141th(0x9c, 1, 23.6, 44, false)))
-            .unwrap();
+        let r = LacrosseTx141thBv2.decode(&on_air(&tx141th(0x9c, 1, 23.6, 44, false))).unwrap();
         assert_eq!(r.get("id"), Some(&Value::Int(0x9c)));
         assert_eq!(r.get("channel"), Some(&Value::Int(1)));
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.6)));
@@ -233,9 +219,7 @@ mod tests {
 
     #[test]
     fn a_tx141th_frame_below_zero_decodes() {
-        let r = LacrosseTx141thBv2
-            .decode(&on_air(&tx141th(0x9c, 0, -15.2, 88, true)))
-            .unwrap();
+        let r = LacrosseTx141thBv2.decode(&on_air(&tx141th(0x9c, 0, -15.2, 88, true))).unwrap();
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(-15.2)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
     }
@@ -261,10 +245,7 @@ mod tests {
     fn a_corrupt_tx141th_frame_fails_its_digest() {
         let mut f = tx141th(0x9c, 1, 23.6, 44, false);
         f[2] ^= 0x08;
-        assert_eq!(
-            LacrosseTx141thBv2.decode(&on_air(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(LacrosseTx141thBv2.decode(&on_air(&f)), Err(DecodeError::CrcFailed));
     }
 
     /// An IT+ frame: preamble, sync word, then the five payload bytes.
@@ -299,9 +280,7 @@ mod tests {
 
     #[test]
     fn decodes_a_tx29_frame_behind_its_sync_word() {
-        let r = LacrosseIt::tx29()
-            .decode(&it_frame(0x25, 21.3, 57, false, false))
-            .unwrap();
+        let r = LacrosseIt::tx29().decode(&it_frame(0x25, 21.3, 57, false, false)).unwrap();
         assert_eq!(r.get("id"), Some(&Value::Int(0x25)));
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.3)));
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(57)));
@@ -321,9 +300,8 @@ mod tests {
 
     #[test]
     fn a_temperature_only_sensor_reports_no_humidity() {
-        let r = LacrosseIt::tx29()
-            .decode(&it_frame(0x25, -4.5, IT_NO_HUMIDITY, true, true))
-            .unwrap();
+        let r =
+            LacrosseIt::tx29().decode(&it_frame(0x25, -4.5, IT_NO_HUMIDITY, true, true)).unwrap();
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(-4.5)));
         assert!(r.get("humidity_pct").is_none());
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
@@ -332,9 +310,7 @@ mod tests {
 
     #[test]
     fn the_second_probe_channel_gets_its_own_id() {
-        let r = LacrosseIt::tx29()
-            .decode(&it_frame(0x25, 45.0, IT_PROBE, false, false))
-            .unwrap();
+        let r = LacrosseIt::tx29().decode(&it_frame(0x25, 45.0, IT_PROBE, false, false)).unwrap();
         assert_eq!(r.get("id"), Some(&Value::Int(0x25 + 0x40)));
         assert!(r.get("humidity_pct").is_none());
     }
@@ -344,24 +320,14 @@ mod tests {
         let f = it_frame(0x25, 21.3, 57, false, false);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 40 {
-                !f.get(i).unwrap()
-            } else {
-                f.get(i).unwrap()
-            });
+            broken.push(if i == 40 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
         }
-        assert_eq!(
-            LacrosseIt::tx29().decode(&broken),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(LacrosseIt::tx29().decode(&broken), Err(DecodeError::CrcFailed));
     }
 
     #[test]
     fn a_burst_without_the_sync_word_is_not_this_protocol() {
         let b = BitBuffer::from_bytes(&[0x55; 12]);
-        assert_eq!(
-            LacrosseIt::tx29().decode(&b),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(LacrosseIt::tx29().decode(&b), Err(DecodeError::NotThisProtocol));
     }
 }

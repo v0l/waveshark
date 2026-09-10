@@ -70,18 +70,11 @@ fn the_fields_lock_and_carry_a_picture() {
     assert!(fields.len() >= 4, "only {} fields locked", fields.len());
 
     let full = fields.iter().filter(|f| f.lines_seen >= 250).count();
-    assert!(
-        full >= 2,
-        "{full} fields of {} carried most of their lines",
-        fields.len()
-    );
+    assert!(full >= 2, "{full} fields of {} carried most of their lines", fields.len());
 
     // A picture, not a flat grey: a room with a window has both ends of the
     // range in it, and a separator that lost lock produces neither.
-    let f = fields
-        .iter()
-        .max_by_key(|f| f.lines_seen)
-        .expect("a field");
+    let f = fields.iter().max_by_key(|f| f.lines_seen).expect("a field");
     let dark = f.luma.iter().filter(|&&v| v < 40).count();
     let bright = f.luma.iter().filter(|&&v| v > 200).count();
     assert!(
@@ -101,10 +94,7 @@ fn the_fields_lock_and_carry_a_picture() {
             max - min > 40
         })
         .count();
-    assert!(
-        saturated > rgb.len() / 300,
-        "only {saturated} pixels carry colour"
-    );
+    assert!(saturated > rgb.len() / 300, "only {saturated} pixels carry colour");
 }
 
 /// The channel plan names the frequency the capture was taken on, and names

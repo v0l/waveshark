@@ -91,14 +91,7 @@ impl Default for DroneIdNode {
 
 impl DroneIdNode {
     pub fn new() -> Self {
-        Self {
-            meter: None,
-            finder: None,
-            carry: Vec::new(),
-            at: 0,
-            rate: RATE_HZ,
-            last: None,
-        }
+        Self { meter: None, finder: None, carry: Vec::new(), at: 0, rate: RATE_HZ, last: None }
     }
 }
 
@@ -145,17 +138,14 @@ impl Simple for DroneIdNode {
             return Ok(());
         };
         for found in finder.find(&window) {
-            let Some(start) = found
-                .zc4_at
-                .checked_sub(dsp::droneid::symbol_offset(self.rate, 4))
+            let Some(start) = found.zc4_at.checked_sub(dsp::droneid::symbol_offset(self.rate, 4))
             else {
                 continue;
             };
             let absolute_start = self.at + start;
-            if self
-                .last
-                .is_some_and(|l| absolute_start.saturating_sub(l) < dsp::droneid::burst_len(self.rate))
-            {
+            if self.last.is_some_and(|l| {
+                absolute_start.saturating_sub(l) < dsp::droneid::burst_len(self.rate)
+            }) {
                 continue;
             }
             let Some(frame) = dsp::droneid::frame_bits(&window, start, self.rate) else {
@@ -175,9 +165,8 @@ impl Simple for DroneIdNode {
             // length of quiet a burst length before it is what a detector
             // would have measured against.
             let signal = meter.power_dbfs_at(absolute, len);
-            let noise = absolute
-                .checked_sub(2 * len as u64)
-                .and_then(|at| meter.power_dbfs_at(at, len));
+            let noise =
+                absolute.checked_sub(2 * len as u64).and_then(|at| meter.power_dbfs_at(at, len));
             let snr = match (signal, noise) {
                 (Some(s), Some(n)) => s - n,
                 // Nothing to measure against is a level of nothing, not a
@@ -220,11 +209,7 @@ pub fn droneid_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let f = decode::droneid::parse(&bytes[4..])?;
     let mut fields = decode::droneid::fields(&f);
     fields.push(("protocol".into(), Value::Text("DJI DroneID".into())));
-    let detail = fields
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
 
     // The row is filed under the airframe's serial, which is the identity
     // this protocol exists to broadcast and is printed on the aircraft.
@@ -292,11 +277,7 @@ impl Protocol for DroneId {
         format!("{:.1} DRONEID", hz / 1e6)
     }
     fn marks(&self, hz: f64) -> Vec<Mark> {
-        vec![Mark {
-            hz,
-            width_hz: WIDTH_HZ,
-            label: "DRONEID".into(),
-        }]
+        vec![Mark { hz, width_hz: WIDTH_HZ, label: "DRONEID".into() }]
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("droneid")]

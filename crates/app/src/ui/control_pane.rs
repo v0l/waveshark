@@ -57,19 +57,17 @@ impl ControlView<'_> {
             return;
         }
 
-        egui::ScrollArea::vertical()
-            .id_salt("control-links")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Frame::NONE
-                    .inner_margin(egui::Margin::symmetric(12, 0))
-                    .show(ui, |ui| {
-                        for c in &links {
-                            link_card(ui, c, now);
-                        }
-                    });
+        egui::ScrollArea::vertical().id_salt("control-links").auto_shrink([false, false]).show(
+            ui,
+            |ui| {
+                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+                    for c in &links {
+                        link_card(ui, c, now);
+                    }
+                });
                 ui.add_space(8.0);
-            });
+            },
+        );
     }
 }
 
@@ -91,11 +89,7 @@ fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
             // among the numbers. It is what the handset is asking for, not
             // what the aircraft did, and the caption says so.
             if c.armed == Some(true) {
-                theme::Line::new()
-                    .legend("armed")
-                    .tint(theme::FAULT)
-                    .size(11.0)
-                    .show(ui);
+                theme::Line::new().legend("armed").tint(theme::FAULT).size(11.0).show(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme::Line::new().legend(&age(c.age(now))).show(ui);
@@ -113,16 +107,11 @@ fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
                 .value(format!("{:.4} MHz", c.channel_hz / 1e6))
                 .size(11.0);
             if let Some(rate) = c.frame_rate() {
-                line = line
-                    .legend("rate")
-                    .value(format!("{rate:.0} Hz"))
-                    .size(11.0);
+                line = line.legend("rate").value(format!("{rate:.0} Hz")).size(11.0);
             }
             if c.last_rssi_dbfs.is_finite() {
-                line = line
-                    .legend("rssi")
-                    .value(format!("{:.0} dBFS", c.last_rssi_dbfs))
-                    .size(11.0);
+                line =
+                    line.legend("rssi").value(format!("{:.0} dBFS", c.last_rssi_dbfs)).size(11.0);
             }
             if let Some(mw) = c.uplink_power_mw {
                 line = line.legend("uplink").value(format!("{mw} mW")).size(11.0);
@@ -141,11 +130,7 @@ fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
 /// gap in the grid would make a sixteen channel model look like an eight
 /// channel one every other frame.
 fn channels(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
-    let carried = c
-        .channels
-        .iter()
-        .rposition(Option::is_some)
-        .map_or(0, |i| i + 1);
+    let carried = c.channels.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
     if carried == 0 {
         return;
     }
@@ -185,14 +170,7 @@ fn channel_row(
 ) {
     let label_w = 34.0;
     let value_w = 56.0;
-    widgets::cell(
-        p,
-        row,
-        row.left(),
-        label_w,
-        &format!("ch{}", index + 1),
-        theme::LEGEND,
-    );
+    widgets::cell(p, row, row.left(), label_w, &format!("ch{}", index + 1), theme::LEGEND);
 
     let bar = egui::Rect::from_min_max(
         egui::Pos2::new(row.left() + label_w, row.top() + 3.0),
@@ -202,22 +180,14 @@ fn channel_row(
         return;
     }
     p.rect_filled(bar, 1.0, theme::WELL);
-    p.rect_stroke(
-        bar,
-        1.0,
-        egui::Stroke::new(1.0, theme::ETCH),
-        egui::StrokeKind::Inside,
-    );
+    p.rect_stroke(bar, 1.0, egui::Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
     // The centre mark, since a stick's rest position is the reading a person
     // checks first and a bar without it is a length with nothing to compare.
     let (lo, hi) = (f32::from(RANGE_US.0), f32::from(RANGE_US.1));
     let at_us = |v: f32| bar.left() + ((v - lo) / (hi - lo)).clamp(0.0, 1.0) * bar.width();
     let mid = at_us(1500.0);
     p.line_segment(
-        [
-            egui::Pos2::new(mid, bar.top()),
-            egui::Pos2::new(mid, bar.bottom()),
-        ],
+        [egui::Pos2::new(mid, bar.top()), egui::Pos2::new(mid, bar.bottom())],
         egui::Stroke::new(1.0, theme::ETCH),
     );
 
@@ -229,11 +199,7 @@ fn channel_row(
     // drawn dimmed, which is the honest reading: this is where it was, and
     // nothing has said otherwise since.
     let stale = at.is_none_or(|t| now.saturating_duration_since(t) > crate::control::LIVE);
-    let colour = if stale {
-        theme::READOUT_DIM
-    } else {
-        theme::READOUT
-    };
+    let colour = if stale { theme::READOUT_DIM } else { theme::READOUT };
     let x = at_us(f32::from(us));
     let fill = egui::Rect::from_min_max(
         egui::Pos2::new(mid.min(x), bar.top() + 1.0),
@@ -241,10 +207,7 @@ fn channel_row(
     );
     p.rect_filled(fill, 0.0, colour.gamma_multiply(0.55));
     p.line_segment(
-        [
-            egui::Pos2::new(x, bar.top()),
-            egui::Pos2::new(x, bar.bottom()),
-        ],
+        [egui::Pos2::new(x, bar.top()), egui::Pos2::new(x, bar.bottom())],
         egui::Stroke::new(2.0, colour),
     );
     widgets::cell(

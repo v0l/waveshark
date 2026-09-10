@@ -33,13 +33,8 @@ pub const RATE: f64 = 15_360_000.0;
 
 /// Where a 2.4 GHz burst has been seen. The list is `proto17/dji_droneid`'s,
 /// which is observation rather than specification: there may be others.
-pub const CENTERS_2G4_HZ: [f64; 5] = [
-    2_399_500_000.0,
-    2_414_500_000.0,
-    2_429_500_000.0,
-    2_444_500_000.0,
-    2_459_500_000.0,
-];
+pub const CENTERS_2G4_HZ: [f64; 5] =
+    [2_399_500_000.0, 2_414_500_000.0, 2_429_500_000.0, 2_444_500_000.0, 2_459_500_000.0];
 
 /// And at 5.8 GHz.
 pub const CENTERS_5G8_HZ: [f64; 3] = [5_756_500_000.0, 5_776_500_000.0, 5_796_500_000.0];
@@ -54,19 +49,14 @@ pub fn fft_size(rate: f64) -> usize {
 /// Both are LTE's: the long one is 1/192000 of a second and the short one
 /// 4.6875 us, which at 15.36 MS/s is 80 and 72 samples.
 pub fn cyclic_prefix(rate: f64) -> (usize, usize) {
-    (
-        (rate / 192_000.0).round() as usize,
-        (rate * 0.0000046875).round() as usize,
-    )
+    ((rate / 192_000.0).round() as usize, (rate * 0.0000046875).round() as usize)
 }
 
 /// Which FFT bins carry data, in the order the carriers were mapped, for a
 /// spectrum that has been shifted so DC sits in the middle.
 pub fn data_carriers(fft: usize) -> Vec<usize> {
     let dc = fft / 2;
-    (dc - CARRIERS / 2..dc)
-        .chain(dc + 1..=dc + CARRIERS / 2)
-        .collect()
+    (dc - CARRIERS / 2..dc).chain(dc + 1..=dc + CARRIERS / 2).collect()
 }
 
 /// The Zadoff-Chu sequence for symbol 4 or 6, in the frequency domain, with
@@ -357,9 +347,7 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
     // copy at the end of the symbol. The first symbol is skipped because some
     // aircraft do not send it.
     let sym2 = symbol_offset(rate, 2);
-    let acc: C32 = (0..short_cp)
-        .map(|i| burst[sym2 + i].conj() * burst[sym2 + fft + i])
-        .sum();
+    let acc: C32 = (0..short_cp).map(|i| burst[sym2 + i].conj() * burst[sym2 + fft + i]).sum();
     let per_sample = acc.im.atan2(acc.re) as f64 / fft as f64;
     let cfo_hz = per_sample * rate / (2.0 * std::f64::consts::PI);
 
@@ -407,9 +395,8 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
     };
     let ch4 = channel(4);
     let ch6 = channel(6);
-    let mean_phase = |c: &[C32]| -> f32 {
-        c.iter().map(|v| v.im.atan2(v.re)).sum::<f32>() / c.len() as f32
-    };
+    let mean_phase =
+        |c: &[C32]| -> f32 { c.iter().map(|v| v.im.atan2(v.re)).sum::<f32>() / c.len() as f32 };
     // Half the difference is the per-symbol phase step, so a symbol N away
     // from the fourth is turned by N times it.
     let mut step = (mean_phase(&ch4) - mean_phase(&ch6)) / 2.0;
@@ -455,12 +442,8 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
     // is split off here: it is scrambled on its own and carries nothing.
     let head: Vec<u8> = bits.drain(..CARRIERS * 2).collect();
     let first = gold_sequence(head.len(), SCRAMBLER_X2_INIT);
-    let zeros = head
-        .iter()
-        .zip(&first)
-        .filter(|(b, s)| *b == *s)
-        .count() as f32
-        / head.len() as f32;
+    let zeros =
+        head.iter().zip(&first).filter(|(b, s)| *b == *s).count() as f32 / head.len() as f32;
 
     let scrambler = gold_sequence(CODED_BITS, SCRAMBLER_X2_INIT);
     for (b, s) in bits.iter_mut().zip(scrambler) {
@@ -493,19 +476,13 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
 /// detection.
 pub fn frame_bits(iq: &[C32], start: usize, rate: f64) -> Option<Vec<u8>> {
     let d = demodulate(iq, start, rate)?;
-    let e: Vec<f32> = d
-        .bits
-        .iter()
-        .map(|&b| if b == 0 { 1.0 } else { -1.0 })
-        .collect();
+    let e: Vec<f32> = d.bits.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
     let streams = crate::lte_turbo::dematch_at(&e, BLOCK_LEN + 4, RATE_MATCH_START);
     Some(
         streams[0][..BLOCK_LEN]
             .chunks(8)
             .map(|c| {
-                c.iter()
-                    .enumerate()
-                    .fold(0u8, |a, (i, &v)| a | (u8::from(v < 0.0) << (7 - i)))
+                c.iter().enumerate().fold(0u8, |a, (i, &v)| a | (u8::from(v < 0.0) << (7 - i)))
             })
             .collect(),
     )

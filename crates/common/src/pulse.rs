@@ -367,7 +367,6 @@ impl std::fmt::Display for FrontEnd {
 }
 
 impl Measure {
-
     /// One line a list can show: what it was, how sure, and the numbers
     /// that identify it.
     ///
@@ -474,12 +473,7 @@ pub const CHANNEL_MATCH_HZ: f64 = 500.0;
 
 impl ConversationKey {
     pub fn new(system: impl Into<String>, channel_hz: f64) -> Self {
-        Self {
-            system: system.into(),
-            channel_hz: channel_hz.max(0.0) as u64,
-            to: None,
-            from: None,
-        }
+        Self { system: system.into(), channel_hz: channel_hz.max(0.0) as u64, to: None, from: None }
     }
 
     pub fn to(mut self, to: Option<String>) -> Self {

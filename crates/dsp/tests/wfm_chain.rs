@@ -133,11 +133,7 @@ fn pilot_frequency_lands_within_a_few_hz() {
         }
         f += 1.0;
     }
-    assert!(
-        (best.0 - 19_000.0).abs() <= 3.0,
-        "pilot found at {:.0} Hz, expected 19000",
-        best.0
-    );
+    assert!((best.0 - 19_000.0).abs() <= 3.0, "pilot found at {:.0} Hz, expected 19000", best.0);
 }
 
 #[test]

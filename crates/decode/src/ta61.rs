@@ -198,24 +198,15 @@ mod tests {
         // number, so a narrow window reaches it fast.
         let c = [0x03u8, 0x11, 0x02, 0x00, 0x77, 0x01, 0x00, 0x88];
         let ssis = [0x12_3456u32, 0x00_4321, 0xab_cdef];
-        let pairs: Vec<IdPair> = ssis
-            .iter()
-            .map(|&ssi| IdPair {
-                ssi,
-                esi: encrypt_id(&c, ssi),
-            })
-            .collect();
+        let pairs: Vec<IdPair> =
+            ssis.iter().map(|&ssi| IdPair { ssi, esi: encrypt_id(&c, ssi) }).collect();
 
         // Guess packs c0 | c2<<8 | c3<<16 | c5<<24 | c6<<32
         // = 03 | 02<<8 | 00<<16 | 01<<24 | 00<<32 = 0x0100_0203.
         let g = 0x0100_0203u64;
         let hits = recover_c_range(&pairs, g - 4..g + 4);
         assert!(hits.contains(&c), "recovered the true c: {hits:02x?}");
-        assert_eq!(
-            hits.len(),
-            1,
-            "three pairs leave one candidate in the window"
-        );
+        assert_eq!(hits.len(), 1, "three pairs leave one candidate in the window");
 
         // And the recovered c decrypts every ESI back to its SSI.
         for p in &pairs {

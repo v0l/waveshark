@@ -265,11 +265,7 @@ impl BlockSync {
                 return None;
             }
             self.groups += 1;
-            return Some(Group {
-                words: self.words,
-                valid: self.valid,
-                c_prime: self.c_prime,
-            });
+            return Some(Group { words: self.words, valid: self.valid, c_prime: self.c_prime });
         }
         None
     }
@@ -279,8 +275,7 @@ impl BlockSync {
 mod tests {
     use super::*;
 
-    const ALL: [Offset; 5] =
-        [Offset::A, Offset::B, Offset::C, Offset::CPrime, Offset::D];
+    const ALL: [Offset; 5] = [Offset::A, Offset::B, Offset::C, Offset::CPrime, Offset::D];
 
     #[test]
     fn encoded_blocks_produce_the_standard_syndromes() {

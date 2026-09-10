@@ -322,8 +322,7 @@ impl M17Demod {
             SYNC_LSF => (Kind::Lsf, Kind::Stream),
             _ => (Kind::Bert, Kind::Packet),
         };
-        let (upright, inverted) =
-            if best > 0.0 { (pair.0, pair.1) } else { (pair.1, pair.0) };
+        let (upright, inverted) = if best > 0.0 { (pair.0, pair.1) } else { (pair.1, pair.0) };
 
         self.slice(at);
         let mut got = None;
@@ -735,8 +734,7 @@ mod tests {
     /// two apart: inverted, a link setup frame correlates as a stream frame.
     /// Only the contents resolve it.
     #[test]
-    fn an_inverted_signal_reads_the_same(
-    ) {
+    fn an_inverted_signal_reads_the_same() {
         let symbols: Vec<f32> = transmission(6).iter().map(|s| -s).collect();
         let audio = modulate(&symbols, RATE / BAUD, 1.0, 0.0, 0.0);
         let frames = run(&audio);
@@ -767,7 +765,10 @@ mod tests {
         let frames = run(&audio);
         assert!(frames.len() >= 20, "only {} of 25 frames survived", frames.len());
         assert!(frames.iter().any(|f| matches!(f.body, Body::Lsf(_))));
-        assert!(frames.iter().all(|f| f.ber < 0.06), "a surviving frame read worse than noise does");
+        assert!(
+            frames.iter().all(|f| f.ber < 0.06),
+            "a surviving frame read worse than noise does"
+        );
     }
 
     #[test]

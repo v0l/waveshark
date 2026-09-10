@@ -38,13 +38,7 @@ pub struct Report {
 
 impl Report {
     pub fn new(model: &'static str) -> Self {
-        Self {
-            model,
-            fields: BTreeMap::new(),
-            crc_valid: None,
-            raw: Vec::new(),
-            device: None,
-        }
+        Self { model, fields: BTreeMap::new(), crc_valid: None, raw: Vec::new(), device: None }
     }
 
     pub fn set(mut self, k: &str, v: Value) -> Self {
@@ -80,11 +74,7 @@ impl Report {
     /// Just the fields, for a list that already has a column naming the
     /// protocol and another showing the integrity check.
     pub fn fields_line(&self) -> String {
-        self.fields
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(" ")
+        self.fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")
     }
 }
 
@@ -220,19 +210,13 @@ impl Protocols {
     /// operator should see, not something to be silently resolved by
     /// registration order.
     pub fn decode_all(&self, pkg: &Package) -> Vec<Report> {
-        self.list
-            .iter()
-            .filter_map(|p| p.decode_package(pkg).ok())
-            .collect()
+        self.list.iter().filter_map(|p| p.decode_package(pkg).ok()).collect()
     }
 
     /// Try every protocol, reporting failures too. For diagnosing an unknown
     /// signal: knowing that six protocols matched the timing but failed CRC is
     /// far more useful than an empty result.
     pub fn diagnose(&self, pkg: &Package) -> Vec<(&'static str, Result<Report, DecodeError>)> {
-        self.list
-            .iter()
-            .map(|p| (p.name(), p.decode_package(pkg)))
-            .collect()
+        self.list.iter().map(|p| (p.name(), p.decode_package(pkg))).collect()
     }
 }

@@ -50,10 +50,7 @@ pub struct MixerNode {
 
 impl MixerNode {
     pub fn new(shift_hz: f64) -> Self {
-        Self {
-            shift_hz,
-            mixer: Mixer::new(shift_hz, 1.0),
-        }
+        Self { shift_hz, mixer: Mixer::new(shift_hz, 1.0) }
     }
 }
 
@@ -71,9 +68,7 @@ impl Simple for MixerNode {
         // reporting "where did this come from" stays correct.
         let mut out = i.spec;
         out.center = common::Hz(
-            (i.spec.center.get() as i64)
-                .saturating_sub(self.shift_hz as i64)
-                .max(0) as u64,
+            (i.spec.center.get() as i64).saturating_sub(self.shift_hz as i64).max(0) as u64,
         );
         Ok(out)
     }
@@ -104,14 +99,11 @@ impl Simple for MixerNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
             SHIFT_HZ => {
-                self.shift_hz = v
-                    .as_f64()
-                    .ok_or_else(|| common::Error::other("expected a number"))?;
+                self.shift_hz =
+                    v.as_f64().ok_or_else(|| common::Error::other("expected a number"))?;
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "mixer: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("mixer: unknown parameter {name:?}"))),
         }
     }
 }
@@ -200,9 +192,7 @@ impl Simple for DecimateNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::int(FACTOR, self.factor as i64, 1..=1024)
-                .label("Decimation")
-                .affects_rate(),
+            Param::int(FACTOR, self.factor as i64, 1..=1024).label("Decimation").affects_rate(),
             Param::float(PASSBAND, self.passband, 0.5..=0.99).label("Passband fraction"),
             Param::float(ATTEN_DB, self.atten_db, 30.0..=120.0)
                 .unit("dB")
@@ -224,9 +214,7 @@ impl Simple for DecimateNode {
                 self.atten_db = v.as_f64().unwrap_or(STOPBAND_DB).clamp(20.0, 150.0);
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "decimate: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("decimate: unknown parameter {name:?}"))),
         }
     }
 }
@@ -247,8 +235,7 @@ impl Simple for EnvelopeNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        o.real_mut()
-            .extend(i.as_iq().unwrap().iter().map(|c| c.norm()));
+        o.real_mut().extend(i.as_iq().unwrap().iter().map(|c| c.norm()));
         Ok(())
     }
 }
@@ -265,10 +252,7 @@ pub struct FmDemodNode {
 
 impl FmDemodNode {
     pub fn new(deviation_hz: f64) -> Self {
-        Self {
-            deviation_hz,
-            demod: FmDemod::new(1.0, deviation_hz),
-        }
+        Self { deviation_hz, demod: FmDemod::new(1.0, deviation_hz) }
     }
 
     /// Broadcast WFM: 75 kHz peak deviation.
@@ -305,12 +289,10 @@ impl Simple for FmDemodNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![
-            Param::float(DEVIATION_HZ, self.deviation_hz, 500.0..=200_000.0)
-                .unit("Hz")
-                .label("Peak deviation")
-                .log(),
-        ]
+        vec![Param::float(DEVIATION_HZ, self.deviation_hz, 500.0..=200_000.0)
+            .unit("Hz")
+            .label("Peak deviation")
+            .log()]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -319,9 +301,7 @@ impl Simple for FmDemodNode {
                 self.deviation_hz = v.as_f64().unwrap_or(WIDE_DEVIATION_HZ).max(1.0);
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "fm_demod: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("fm_demod: unknown parameter {name:?}"))),
         }
     }
 }
@@ -341,10 +321,7 @@ pub struct DeemphasisNode {
 
 impl DeemphasisNode {
     pub fn new(tau_us: f64) -> Self {
-        Self {
-            tau_us,
-            filt: vec![Deemphasis::new(1.0, tau_us)],
-        }
+        Self { tau_us, filt: vec![Deemphasis::new(1.0, tau_us)] }
     }
 }
 
@@ -358,9 +335,7 @@ impl Simple for DeemphasisNode {
             return Err(common::Error::other("deemphasis needs a real input"));
         }
         let ch = i.spec.channels.max(1);
-        self.filt = (0..ch)
-            .map(|_| Deemphasis::new(i.spec.frame_rate(), self.tau_us))
-            .collect();
+        self.filt = (0..ch).map(|_| Deemphasis::new(i.spec.frame_rate(), self.tau_us)).collect();
         Ok(i.spec)
     }
 
@@ -394,9 +369,7 @@ impl Simple for DeemphasisNode {
                 self.tau_us = v.as_f64().unwrap_or(EUROPE_TAU_US).clamp(1.0, 1000.0);
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "deemphasis: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("deemphasis: unknown parameter {name:?}"))),
         }
     }
 }
@@ -439,9 +412,8 @@ impl Simple for RealDecimateNode {
             return Err(common::Error::other("real_decimate needs a real input"));
         }
         let ch = i.spec.channels.max(1);
-        self.dec = (0..ch)
-            .map(|_| FirDecim::design(self.factor, self.passband, STOPBAND_DB))
-            .collect();
+        self.dec =
+            (0..ch).map(|_| FirDecim::design(self.factor, self.passband, STOPBAND_DB)).collect();
         Ok(i.spec.with_rate(i.spec.frame_rate() / self.factor as f64))
     }
 
@@ -456,8 +428,7 @@ impl Simple for RealDecimateNode {
         let base = out.len();
         for c in 0..ch {
             self.scratch.clear();
-            self.scratch
-                .extend((0..frames).map(|k| C32::new(src[k * ch + c], 0.0)));
+            self.scratch.extend((0..frames).map(|k| C32::new(src[k * ch + c], 0.0)));
             self.out.clear();
             self.dec[c].process(&self.scratch, &mut self.out);
             if c == 0 {
@@ -474,9 +445,7 @@ impl Simple for RealDecimateNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::int(FACTOR, self.factor as i64, 1..=1024)
-            .label("Decimation")
-            .affects_rate()]
+        vec![Param::int(FACTOR, self.factor as i64, 1..=1024).label("Decimation").affects_rate()]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -485,9 +454,7 @@ impl Simple for RealDecimateNode {
                 self.factor = v.as_i64().unwrap_or(1).max(1) as usize;
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "real_decimate: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("real_decimate: unknown parameter {name:?}"))),
         }
     }
 }
@@ -514,10 +481,7 @@ impl Default for HighBlendNode {
 
 impl HighBlendNode {
     pub fn new() -> Self {
-        Self {
-            blend: Vec::new(),
-            noise: 0.0,
-        }
+        Self { blend: Vec::new(), noise: 0.0 }
     }
 
     /// Current cutoff, for display.
@@ -536,9 +500,7 @@ impl Simple for HighBlendNode {
             return Err(common::Error::other("high_blend needs a real input"));
         }
         let ch = i.spec.channels.max(1);
-        self.blend = (0..ch)
-            .map(|_| HighBlend::new(i.spec.frame_rate()))
-            .collect();
+        self.blend = (0..ch).map(|_| HighBlend::new(i.spec.frame_rate())).collect();
         Ok(i.spec)
     }
 
@@ -641,9 +603,7 @@ impl Simple for SsbDemodNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float(LOW_HZ, self.low_hz, 50.0..=3_000.0)
-                .unit("Hz")
-                .label("Filter low edge"),
+            Param::float(LOW_HZ, self.low_hz, 50.0..=3_000.0).unit("Hz").label("Filter low edge"),
             Param::float(HIGH_HZ, self.high_hz, 100.0..=6_000.0)
                 .unit("Hz")
                 .label("Filter high edge"),
@@ -655,9 +615,7 @@ impl Simple for SsbDemodNode {
             LOW_HZ => self.low_hz = v.as_f64().unwrap_or(VOICE_LOW_HZ),
             HIGH_HZ => self.high_hz = v.as_f64().unwrap_or(VOICE_HIGH_HZ),
             _ => {
-                return Err(common::Error::other(format!(
-                    "ssb_demod: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("ssb_demod: unknown parameter {name:?}")))
             }
         }
         self.demod = SsbDemod::new(self.demod_rate(), self.sideband, self.low_hz, self.high_hz);
@@ -739,9 +697,7 @@ impl std::str::FromStr for AgcPreset {
         match s.trim().to_ascii_lowercase().as_str() {
             "voice" => Ok(Self::Voice),
             "cw" => Ok(Self::Cw),
-            other => Err(common::Error::other(format!(
-                "no gain preset called {other:?}"
-            ))),
+            other => Err(common::Error::other(format!("no gain preset called {other:?}"))),
         }
     }
 }
@@ -800,11 +756,7 @@ impl Simple for AgcNode {
         // Reported rather than hidden: on a weak signal the gain is the
         // difference between "the band is dead" and "the receiver is deaf",
         // and only one of those is worth acting on.
-        c.tag(Tag::new(
-            c.sample_index,
-            "agc_gain_db",
-            TagValue::Float(self.agc.gain_db() as f64),
-        ));
+        c.tag(Tag::new(c.sample_index, "agc_gain_db", TagValue::Float(self.agc.gain_db() as f64)));
         Ok(())
     }
 
@@ -814,16 +766,12 @@ impl Simple for AgcNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float(ATTACK_MS, self.attack_ms, 0.5..=50.0)
-                .unit("ms")
-                .label("Attack"),
+            Param::float(ATTACK_MS, self.attack_ms, 0.5..=50.0).unit("ms").label("Attack"),
             Param::float(RELEASE_MS, self.release_ms, 50.0..=5_000.0)
                 .unit("ms")
                 .label("Release")
                 .log(),
-            Param::float(HANG_MS, self.hang_ms, 0.0..=2_000.0)
-                .unit("ms")
-                .label("Hang"),
+            Param::float(HANG_MS, self.hang_ms, 0.0..=2_000.0).unit("ms").label("Hang"),
             Param::float(MAX_GAIN_DB, self.max_gain_db as f64, 0.0..=90.0)
                 .unit("dB")
                 .label("Maximum gain"),
@@ -846,11 +794,7 @@ impl Simple for AgcNode {
                 self.set_enabled(v.as_bool().unwrap_or(true));
                 return Ok(());
             }
-            _ => {
-                return Err(common::Error::other(format!(
-                    "agc: unknown parameter {name:?}"
-                )))
-            }
+            _ => return Err(common::Error::other(format!("agc: unknown parameter {name:?}"))),
         }
         let rate = self.agc.rate();
         self.agc = Agc::new(rate, self.attack_ms, self.release_ms, self.hang_ms);
@@ -885,9 +829,7 @@ impl std::str::FromStr for SquelchKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "noise" => Ok(Self::Noise),
             "level" => Ok(Self::Level),
-            other => Err(common::Error::other(format!(
-                "no squelch measurement called {other:?}"
-            ))),
+            other => Err(common::Error::other(format!("no squelch measurement called {other:?}"))),
         }
     }
 }
@@ -1006,11 +948,7 @@ impl Simple for SquelchNode {
         out.extend_from_slice(input);
         self.squelch.apply(out);
         let at = c.sample_index;
-        c.tag(Tag::new(
-            at,
-            "squelch_open",
-            TagValue::Int(self.open as i64),
-        ));
+        c.tag(Tag::new(at, "squelch_open", TagValue::Int(self.open as i64)));
         c.tag(Tag::new(at, "squelch_db", TagValue::Float(measured as f64)));
         Ok(())
     }
@@ -1040,14 +978,9 @@ impl Simple for SquelchNode {
             HYSTERESIS_DB => {
                 self.hysteresis_db = v.as_f64().unwrap_or(DEFAULT_HYSTERESIS_DB) as f32
             }
-            _ => {
-                return Err(common::Error::other(format!(
-                    "squelch: unknown parameter {name:?}"
-                )))
-            }
+            _ => return Err(common::Error::other(format!("squelch: unknown parameter {name:?}"))),
         }
-        self.squelch
-            .set_thresholds(self.threshold_db, self.threshold_db - self.hysteresis_db);
+        self.squelch.set_thresholds(self.threshold_db, self.threshold_db - self.hysteresis_db);
         Ok(())
     }
 }
@@ -1089,9 +1022,7 @@ pub const REAL_DECIMATE: StageDesc = StageDesc {
 };
 
 pub fn build_real_decimate(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(RealDecimateNode::new(
-        s.i64_or(FACTOR, 1).max(1) as usize
-    )))
+    Ok(Box::new(RealDecimateNode::new(s.i64_or(FACTOR, 1).max(1) as usize)))
 }
 
 pub const ENVELOPE: StageDesc = StageDesc {
@@ -1113,9 +1044,7 @@ pub const FM_DEMOD: StageDesc = StageDesc {
 };
 
 pub fn build_fm_demod(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(FmDemodNode::new(
-        s.f64_or(DEVIATION_HZ, WIDE_DEVIATION_HZ),
-    )))
+    Ok(Box::new(FmDemodNode::new(s.f64_or(DEVIATION_HZ, WIDE_DEVIATION_HZ))))
 }
 
 pub const DEEMPHASIS: StageDesc = StageDesc {
@@ -1137,10 +1066,7 @@ pub const SSB_DEMOD: StageDesc = StageDesc {
 };
 
 pub fn build_ssb_demod(s: &Settings) -> Result<Box<dyn Node>> {
-    let sideband = s
-        .str_or(SIDEBAND, Sideband::Upper.label())
-        .parse()
-        .unwrap_or(Sideband::Upper);
+    let sideband = s.str_or(SIDEBAND, Sideband::Upper.label()).parse().unwrap_or(Sideband::Upper);
     // A CW filter is the same stage with its passband put around the pitch
     // the operator hears rather than around speech.
     if s.get(PITCH_HZ).is_some() {
@@ -1200,12 +1126,6 @@ pub const SQUELCH: StageDesc = StageDesc {
 };
 
 pub fn build_squelch(s: &Settings) -> Result<Box<dyn Node>> {
-    let kind = s
-        .str_or(KIND, SquelchKind::Noise.label())
-        .parse()
-        .unwrap_or(SquelchKind::Noise);
-    Ok(Box::new(SquelchNode::new(
-        kind,
-        s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32,
-    )))
+    let kind = s.str_or(KIND, SquelchKind::Noise.label()).parse().unwrap_or(SquelchKind::Noise);
+    Ok(Box::new(SquelchNode::new(kind, s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32)))
 }

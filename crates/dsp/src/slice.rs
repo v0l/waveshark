@@ -81,7 +81,11 @@ impl Slicer {
     ) -> Option<Self> {
         let m_exact = n as f64 * rate_out / rate_in;
         let m = m_exact.round() as usize;
-        if m < 8 || (m_exact - m as f64).abs() > 1e-9 || !n.is_multiple_of(2) || !m.is_multiple_of(2) {
+        if m < 8
+            || (m_exact - m as f64).abs() > 1e-9
+            || !n.is_multiple_of(2)
+            || !m.is_multiple_of(2)
+        {
             return None;
         }
         let hz_per_bin = rate_in / n as f64;
@@ -141,10 +145,9 @@ impl Slicer {
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<Slice>) {
         if out.len() != self.channels.len() {
             out.clear();
-            out.extend(self.channels.iter().map(|&(_, hz)| Slice {
-                center_hz: hz,
-                samples: Vec::new(),
-            }));
+            out.extend(
+                self.channels.iter().map(|&(_, hz)| Slice { center_hz: hz, samples: Vec::new() }),
+            );
         }
         for s in out.iter_mut() {
             s.samples.clear();
@@ -186,9 +189,7 @@ impl Slicer {
                 // The middle is the part the circular convolution did not
                 // wrap into.
                 let edge = (self.m - self.keep) / 2;
-                slice
-                    .samples
-                    .extend(band[edge..edge + self.keep].iter().map(|&x| x * spin));
+                slice.samples.extend(band[edge..edge + self.keep].iter().map(|&x| x * spin));
             }
             self.block += 1;
         }
@@ -271,11 +272,7 @@ mod tests {
                 .map(|(i, x)| (i, x.norm()))
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
-            let k = if i > n / 2 {
-                i as f64 - n as f64
-            } else {
-                i as f64
-            };
+            let k = if i > n / 2 { i as f64 - n as f64 } else { i as f64 };
             (k * rate_out / n as f64, p / n as f32)
         };
         let (hz, amp) = peak(&ch11.samples);

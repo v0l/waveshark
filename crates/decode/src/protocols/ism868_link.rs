@@ -54,10 +54,7 @@ impl Protocol for Ism868Link {
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let need = PREAMBLE_MIN + SYNC_BITS + MIN_BYTES * 8;
         if bits.len() < need {
-            return Err(DecodeError::WrongLength {
-                got: bits.len(),
-                want: need,
-            });
+            return Err(DecodeError::WrongLength { got: bits.len(), want: need });
         }
         for at in PREAMBLE_MIN..bits.len() - SYNC_BITS - MIN_BYTES * 8 {
             if bits.extract(at, SYNC_BITS) != Some(SYNC) {
@@ -83,10 +80,7 @@ impl Protocol for Ism868Link {
                 body.pop();
             }
             if body.len() < MIN_BYTES {
-                return Err(DecodeError::WrongLength {
-                    got: body.len(),
-                    want: MIN_BYTES,
-                });
+                return Err(DecodeError::WrongLength { got: body.len(), want: MIN_BYTES });
             }
             let id = u16::from_be_bytes([body[0], body[1]]);
             let mut r = Report::new(self.name());
@@ -96,13 +90,7 @@ impl Protocol for Ism868Link {
                 .text("node", format!("{:04x}", id >> 2))
                 .int("slot", i64::from(id & 3))
                 .int("length", body.len() as i64 - 2)
-                .text(
-                    "body",
-                    body[2..]
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>(),
-                )
+                .text("body", body[2..].iter().map(|b| format!("{b:02x}")).collect::<String>())
                 .bool("encrypted", true));
         }
         Err(DecodeError::NotThisProtocol)

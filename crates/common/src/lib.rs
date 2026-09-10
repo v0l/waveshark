@@ -11,24 +11,24 @@ pub mod iq;
 pub mod modulation;
 pub mod pulse;
 pub mod source;
-pub mod value;
 pub mod units;
+pub mod value;
 
+pub use decode::{
+    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
+    Secrecy, CONTROL_CHANNELS,
+};
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
     TxInfo, TxStream,
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
-pub use decode::{
-    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail, Secrecy,
-    CONTROL_CHANNELS,
-};
 pub use modulation::Modulation;
 pub use pulse::{
     ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse,
     Speech, VideoFrame, Voice, CHANNEL_MATCH_HZ,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
-pub use value::Value;
 pub use units::{Hz, Sps};
+pub use value::Value;

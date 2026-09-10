@@ -6,11 +6,7 @@ use nodes::lora_nodes::lora_decoded;
 
 fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
     let frame = Frame {
-        header: Header {
-            length: payload.len(),
-            coding_rate: 1,
-            has_crc: true,
-        },
+        header: Header { length: payload.len(), coding_rate: 1, has_crc: true },
         payload,
         crc_ok: Some(true),
         bin_offset: 0,
@@ -21,17 +17,11 @@ fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
 }
 
 fn field(d: &pipeline::event::Decoded, k: &str) -> Option<String> {
-    d.fields
-        .iter()
-        .find(|(n, _)| n == k)
-        .map(|(_, v)| v.to_string())
+    d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
 
 /// The published `lora-packet` README example, through the whole row path.
@@ -62,18 +52,8 @@ fn a_join_request_names_the_device_in_the_row() {
     let d = row(v);
     assert_eq!(d.protocol, "LoRaWAN");
     assert_eq!(field(&d, "type").as_deref(), Some("join request"));
-    assert_eq!(
-        field(&d, "dev_eui").as_deref(),
-        Some("88-77-66-55-44-33-22-11")
-    );
-    assert_eq!(
-        field(&d, "join_eui").as_deref(),
-        Some("08-07-06-05-04-03-02-01")
-    );
+    assert_eq!(field(&d, "dev_eui").as_deref(), Some("88-77-66-55-44-33-22-11"));
+    assert_eq!(field(&d, "join_eui").as_deref(), Some("08-07-06-05-04-03-02-01"));
     assert_eq!(field(&d, "dev_nonce").as_deref(), Some("4660"));
-    assert!(d
-        .detail
-        .as_deref()
-        .unwrap_or_default()
-        .contains("device 88-77-66-55-44-33-22-11"));
+    assert!(d.detail.as_deref().unwrap_or_default().contains("device 88-77-66-55-44-33-22-11"));
 }

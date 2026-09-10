@@ -43,8 +43,8 @@ pub fn crc16(data: &[u8]) -> u16 {
 
 /// Puncturing for the link setup frame: 368 bits kept from 488.
 pub const P1: [u8; 61] = [
-    1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0,
-    1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1,
+    1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1,
+    1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1,
 ];
 
 /// Puncturing for stream frame contents: every twelfth bit dropped.
@@ -56,10 +56,9 @@ pub const P3: [u8; 8] = [1, 1, 1, 1, 1, 1, 1, 0];
 /// The randomiser sequence: 46 bytes, XORed over the 368 payload bits most
 /// significant bit first, and repeated for every frame.
 pub const RANDOMIZER: [u8; 46] = [
-    0xD6, 0xB5, 0xE2, 0x30, 0x82, 0xFF, 0x84, 0x62, 0xBA, 0x4E, 0x96, 0x90, 0xD8, 0x98, 0xDD,
-    0x5D, 0x0C, 0xC8, 0x52, 0x43, 0x91, 0x1D, 0xF8, 0x6E, 0x68, 0x2F, 0x35, 0xDA, 0x14, 0xEA,
-    0xCD, 0x76, 0x19, 0x8D, 0xD5, 0x80, 0xD1, 0x33, 0x87, 0x13, 0x57, 0x18, 0x2D, 0x29, 0x78,
-    0xC3,
+    0xD6, 0xB5, 0xE2, 0x30, 0x82, 0xFF, 0x84, 0x62, 0xBA, 0x4E, 0x96, 0x90, 0xD8, 0x98, 0xDD, 0x5D,
+    0x0C, 0xC8, 0x52, 0x43, 0x91, 0x1D, 0xF8, 0x6E, 0x68, 0x2F, 0x35, 0xDA, 0x14, 0xEA, 0xCD, 0x76,
+    0x19, 0x8D, 0xD5, 0x80, 0xD1, 0x33, 0x87, 0x13, 0x57, 0x18, 0x2D, 0x29, 0x78, 0xC3,
 ];
 
 /// Payload bits in a frame, which is also the interleaver's period.
@@ -182,9 +181,8 @@ pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
                     continue;
                 }
                 let (g1, g2) = outputs(u, from as u8);
-                let m = metric[from]
-                    + if g1 == 1 { s1 } else { -s1 }
-                    + if g2 == 1 { s2 } else { -s2 };
+                let m =
+                    metric[from] + if g1 == 1 { s1 } else { -s1 } + if g2 == 1 { s2 } else { -s2 };
                 if m > next[t] {
                     next[t] = m;
                     choice = choice & !(1 << t) | u16::from(from >= 8) << t;
@@ -227,9 +225,8 @@ pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
 /// bit first, with each row holding its eleven check bits and the overall
 /// parity bit in bit 0. Encoding is then a sum of the rows the data selects,
 /// which is all a linear code ever is.
-const GOLAY_P: [u16; 12] = [
-    0x8EB, 0x93E, 0xA97, 0xDC6, 0x367, 0x6CD, 0xD99, 0x3DA, 0x7B4, 0xF68, 0x63B, 0xC75,
-];
+const GOLAY_P: [u16; 12] =
+    [0x8EB, 0x93E, 0xA97, 0xDC6, 0x367, 0x6CD, 0xD99, 0x3DA, 0x7B4, 0xF68, 0x63B, 0xC75];
 
 /// Golay(24,12): twelve data bits into a 24 bit codeword, data in the top
 /// half.
@@ -335,7 +332,8 @@ mod tests {
 
     #[test]
     fn the_randomizer_and_interleaver_undo_themselves() {
-        let mut soft: Vec<f32> = (0..PAYLOAD_BITS).map(|i| if i % 3 == 0 { 1.0 } else { -0.5 }).collect();
+        let mut soft: Vec<f32> =
+            (0..PAYLOAD_BITS).map(|i| if i % 3 == 0 { 1.0 } else { -0.5 }).collect();
         let want = soft.clone();
         let mut mid = vec![0.0f32; PAYLOAD_BITS];
         derandomize(&mut soft);
@@ -413,7 +411,11 @@ mod tests {
         let soft: Vec<f32> = (0..368)
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if seed >> 60 & 1 == 1 { 1.0 } else { -1.0 }
+                if seed >> 60 & 1 == 1 {
+                    1.0
+                } else {
+                    -1.0
+                }
             })
             .collect();
         let (_, ber) = viterbi(&soft, &P1, 240);
@@ -434,12 +436,7 @@ mod tests {
         for data in [0u16, 1, 0x555, 0xABC, 0xFFF] {
             let word = golay_encode(data);
             assert_eq!(golay_decode(word), Some((data, 0)));
-            for bits in [
-                [0usize, 1, 2].as_slice(),
-                &[5, 13, 23],
-                &[0, 12, 22],
-                &[9, 10, 11],
-            ] {
+            for bits in [[0usize, 1, 2].as_slice(), &[5, 13, 23], &[0, 12, 22], &[9, 10, 11]] {
                 let damaged = bits.iter().fold(word, |w, &b| w ^ 1 << b);
                 assert_eq!(golay_decode(damaged), Some((data, 3)), "three errors at {bits:?}");
             }

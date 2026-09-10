@@ -52,9 +52,7 @@ fn crc_entry(v: u8) -> u16 {
 }
 
 pub fn crc(data: &[u8]) -> u16 {
-    data.iter().fold(0u16, |c, &b| {
-        (c << 8) ^ crc_entry(((c >> 8) as u8) ^ b)
-    })
+    data.iter().fold(0u16, |c, &b| (c << 8) ^ crc_entry(((c >> 8) as u8) ^ b))
 }
 
 /// A data packet: stick positions and where the link is.
@@ -222,10 +220,7 @@ pub fn fields(p: &Packet) -> Vec<(String, Value)> {
         ("rx_number".into(), Value::Int(i64::from(p.rx_number))),
         ("hop_index".into(), Value::Int(i64::from(p.hop_index))),
         ("chanskip".into(), Value::Int(i64::from(p.chanskip))),
-        (
-            "bank".into(),
-            Value::Text(if p.upper_bank() { "9-16" } else { "1-8" }.into()),
-        ),
+        ("bank".into(), Value::Text(if p.upper_bank() { "9-16" } else { "1-8" }.into())),
     ];
     for i in 0..8 {
         if let Some(us) = p.microseconds(i) {
@@ -382,5 +377,4 @@ mod tests {
         assert!(channels[..8].iter().all(Option::is_none), "{channels:?}");
         assert_eq!(channels[8], Some(1500));
     }
-
 }

@@ -20,8 +20,8 @@ use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
-use pipeline::Graph;
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+use pipeline::Graph;
 
 /// Bytes of text in, Morse timings out.
 pub struct MorseKeyNode {
@@ -36,9 +36,7 @@ impl Default for MorseKeyNode {
 
 impl MorseKeyNode {
     pub fn new(wpm: f32) -> Self {
-        Self {
-            wpm: wpm.clamp(1.0, 60.0),
-        }
+        Self { wpm: wpm.clamp(1.0, 60.0) }
     }
 }
 
@@ -86,9 +84,7 @@ impl Simple for MorseKeyNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float(WPM, self.wpm as f64, 1.0..=60.0)
-            .label("Speed")
-            .unit("wpm")]
+        vec![Param::float(WPM, self.wpm as f64, 1.0..=60.0).label("Speed").unit("wpm")]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
@@ -97,9 +93,7 @@ impl Simple for MorseKeyNode {
                 self.wpm = value.as_f64().unwrap_or(20.0).clamp(1.0, 60.0) as f32;
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "morse_key: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("morse_key: unknown parameter {name:?}"))),
         }
     }
 }
@@ -138,9 +132,7 @@ impl MorseTxNode {
         b.source(key.i());
         b.link(key, modu);
         b.output(modu.o());
-        Self {
-            inner: b.build().expect("morse_tx graph is fixed and acyclic"),
-        }
+        Self { inner: b.build().expect("morse_tx graph is fixed and acyclic") }
     }
 }
 
@@ -159,9 +151,7 @@ impl Node for MorseTxNode {
             return Err(common::Error::other("morse_tx takes text as bytes"));
         }
         if i.spec.rate <= 0.0 {
-            return Err(common::Error::other(
-                "morse_tx needs the rate it should key at",
-            ));
+            return Err(common::Error::other("morse_tx needs the rate it should key at"));
         }
         *self.inner.input_buf() = Payload::Bytes(Vec::new());
         self.inner.set_input_spec(StreamSpec {
@@ -227,9 +217,7 @@ impl Node for MorseTxNode {
                 return n.set_param(name, value);
             }
         }
-        Err(common::Error::other(format!(
-            "morse_tx: unknown parameter {name:?}"
-        )))
+        Err(common::Error::other(format!("morse_tx: unknown parameter {name:?}")))
     }
 }
 
@@ -249,22 +237,13 @@ pub struct ToneNode {
 
 impl Default for ToneNode {
     fn default() -> Self {
-        Self {
-            hz: 1_000.0,
-            level: 0.5,
-            rate: 0.0,
-            phase: 0.0,
-        }
+        Self { hz: 1_000.0, level: 0.5, rate: 0.0, phase: 0.0 }
     }
 }
 
 impl ToneNode {
     pub fn new(hz: f64, level: f32) -> Self {
-        Self {
-            hz,
-            level: level.clamp(0.0, 1.0),
-            ..Self::default()
-        }
+        Self { hz, level: level.clamp(0.0, 1.0), ..Self::default() }
     }
 }
 
@@ -309,9 +288,7 @@ impl Simple for ToneNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float(HZ, self.hz, 20.0..=20_000.0)
-                .label("Tone")
-                .unit("Hz"),
+            Param::float(HZ, self.hz, 20.0..=20_000.0).label("Tone").unit("Hz"),
             Param::float(LEVEL, self.level as f64, 0.0..=1.0).label("Level"),
         ]
     }
@@ -321,11 +298,7 @@ impl Simple for ToneNode {
         match name {
             HZ => self.hz = v.max(0.0),
             LEVEL => self.level = v.clamp(0.0, 1.0) as f32,
-            _ => {
-                return Err(common::Error::other(format!(
-                    "tone: unknown parameter {name:?}"
-                )))
-            }
+            _ => return Err(common::Error::other(format!("tone: unknown parameter {name:?}"))),
         }
         Ok(())
     }
@@ -358,13 +331,7 @@ pub struct TxSinkNode {
 impl TxSinkNode {
     /// A transmitter with no radio yet: in the graph, and off.
     pub fn idle() -> Self {
-        Self {
-            stream: None,
-            rate: common::Sps(0),
-            center: common::Hz(0),
-            written: 0,
-            failed: 0,
-        }
+        Self { stream: None, rate: common::Sps(0), center: common::Hz(0), written: 0, failed: 0 }
     }
 
     /// Hand it a radio: the key going down.
@@ -547,8 +514,6 @@ impl Node for TxMonitorNode {
         "tx_monitor"
     }
 
-
-
     fn num_inputs(&self) -> usize {
         2
     }
@@ -624,9 +589,7 @@ impl Node for TxMonitorNode {
             }
             ENABLED => self.enabled = value.as_bool().unwrap_or(false),
             _ => {
-                return Err(common::Error::other(format!(
-                    "tx_monitor: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("tx_monitor: unknown parameter {name:?}")))
             }
         }
         Ok(())
@@ -716,10 +679,7 @@ impl MicNode {
         level: f32,
         band: (f64, f64),
     ) -> Self {
-        Self {
-            band,
-            ..Self::new(src, level)
-        }
+        Self { band, ..Self::new(src, level) }
     }
 
     /// Speech, at a level the operator sets against the meter.
@@ -928,14 +888,10 @@ impl Simple for MicNode {
             return Err(common::Error::other("mic runs on a real audio stream"));
         }
         if input.spec.rate <= 0.0 {
-            return Err(common::Error::other(
-                "mic needs the rate it should produce at",
-            ));
+            return Err(common::Error::other("mic needs the rate it should produce at"));
         }
         if self.src.rate() <= 0.0 {
-            return Err(common::Error::other(
-                "the microphone reports no sample rate",
-            ));
+            return Err(common::Error::other("the microphone reports no sample rate"));
         }
         self.rate = input.spec.rate;
         self.src_rate = self.src.rate();
@@ -961,8 +917,7 @@ impl Simple for MicNode {
         let want = (n as f64 * step).ceil() as usize + 4;
         self.pending.reserve(want);
         let mut got = Vec::with_capacity(want);
-        self.src
-            .take(&mut got, want.saturating_sub(self.pending.len()));
+        self.src.take(&mut got, want.saturating_sub(self.pending.len()));
         // Measured before anything is done to it, so the meter shows what the
         // microphone heard rather than what the limiter made of it.
         self.peak = got.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -1024,9 +979,7 @@ impl Simple for MicNode {
             // The band is here rather than fixed because what sounds right
             // depends on the microphone, the voice and what is listening: a
             // telephone band is the safe default and not the only answer.
-            Param::float("low_hz", self.band.0, 0.0..=1_000.0)
-                .label("Mic low cut")
-                .unit("Hz"),
+            Param::float("low_hz", self.band.0, 0.0..=1_000.0).label("Mic low cut").unit("Hz"),
             Param::float("high_hz", self.band.1, 1_000.0..=20_000.0)
                 .label("Mic high cut")
                 .unit("Hz"),
@@ -1036,10 +989,7 @@ impl Simple for MicNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
             "level" => {
-                self.level = value
-                    .as_f64()
-                    .unwrap_or(1.0)
-                    .clamp(0.0, MIC_GAIN_MAX as f64) as f32;
+                self.level = value.as_f64().unwrap_or(1.0).clamp(0.0, MIC_GAIN_MAX as f64) as f32;
                 Ok(())
             }
             "low_hz" => {
@@ -1057,9 +1007,7 @@ impl Simple for MicNode {
                 self.design();
                 Ok(())
             }
-            _ => Err(common::Error::other(format!(
-                "mic: unknown parameter {name:?}"
-            ))),
+            _ => Err(common::Error::other(format!("mic: unknown parameter {name:?}"))),
         }
     }
 }
@@ -1082,21 +1030,11 @@ mod mic_tests {
 
     fn run(node: &mut MicNode, rate: f64, n: usize) -> Vec<f32> {
         let s = spec(rate);
-        Simple::negotiate(
-            node,
-            &PortSpec {
-                spec: s,
-                latency: 0,
-            },
-        )
-        .unwrap();
+        Simple::negotiate(node, &PortSpec { spec: s, latency: 0 }).unwrap();
         let input = Payload::Real(vec![0.0; n]);
         let mut out = Payload::Real(Vec::new());
         let (mut ev, mut tg) = (Vec::new(), Vec::new());
-        let ins = [PortSpec {
-            spec: s,
-            latency: 0,
-        }];
+        let ins = [PortSpec { spec: s, latency: 0 }];
         let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
         Simple::process(node, &input, &mut out, &mut ctx).unwrap();
         match out {
@@ -1119,11 +1057,7 @@ mod mic_tests {
         let out = run(&mut node, out_rate, 48_000);
 
         assert_eq!(out.len(), 48_000);
-        assert_eq!(
-            node.starved(),
-            0,
-            "the source had plenty and was read short"
-        );
+        assert_eq!(node.starved(), 0, "the source had plenty and was read short");
         // Pitch, by zero crossings past the interpolator's first few samples.
         let seg = &out[100..];
         let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
@@ -1133,10 +1067,7 @@ mod mic_tests {
         let hz = crossings as f64 * out_rate / seg.len() as f64;
         assert!((hz - 1_000.0).abs() < 15.0, "1 kHz came out at {hz:.0} Hz");
         let peak = seg.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(
-            (peak - 1.0).abs() < 0.05,
-            "level changed on the way through: {peak}"
-        );
+        assert!((peak - 1.0).abs() < 0.05, "level changed on the way through: {peak}");
     }
 
     fn tone_peak(hz: f32, amp: f32, gain: f32, emphasis_us: f64) -> f32 {
@@ -1159,24 +1090,15 @@ mod mic_tests {
         let low = tone_peak(800.0, 0.01, 1.0, 750.0);
         let high = tone_peak(2_500.0, 0.01, 1.0, 750.0);
         let db = 20.0 * (high / low).log10();
-        assert!(
-            (1.5..=6.0).contains(&db),
-            "2.5 kHz sits {db:.1} dB over 800 Hz"
-        );
+        assert!((1.5..=6.0).contains(&db), "2.5 kHz sits {db:.1} dB over 800 Hz");
         // And the octave under 630 Hz is well down, the way a handheld's is.
         let bass = tone_peak(300.0, 0.01, 1.0, 750.0);
         let bass_db = 20.0 * (bass / low).log10();
-        assert!(
-            bass_db < -8.0,
-            "300 Hz is only {bass_db:.1} dB under 800 Hz"
-        );
+        assert!(bass_db < -8.0, "300 Hz is only {bass_db:.1} dB under 800 Hz");
         let flat_low = tone_peak(800.0, 0.01, 1.0, 0.0);
         let flat_high = tone_peak(2_500.0, 0.01, 1.0, 0.0);
         let flat = 20.0 * (flat_high / flat_low).log10();
-        assert!(
-            flat.abs() < 1.5,
-            "with emphasis off the band tilts {flat:.1} dB"
-        );
+        assert!(flat.abs() < 1.5, "with emphasis off the band tilts {flat:.1} dB");
     }
 
     /// Driven hard, the audio limits at full deviation and the limiter's
@@ -1185,10 +1107,7 @@ mod mic_tests {
     #[test]
     fn the_limiter_holds_full_deviation_and_the_filter_cleans_up_after_it() {
         let peak = tone_peak(1_000.0, 0.5, 3.0, 0.0);
-        assert!(
-            peak <= 1.05 && peak > 0.9,
-            "overdriven audio came out at {peak}"
-        );
+        assert!(peak <= 1.05 && peak > 0.9, "overdriven audio came out at {peak}");
         // A hard-clipped 1 kHz tone has its third harmonic 10 dB down; the
         // 3.4 kHz filter leaves a fundamental with a little third in it, so
         // the waveform's zero crossings are still 2000 a second.
@@ -1202,10 +1121,7 @@ mod mic_tests {
         let seg = &out[4_000..];
         let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f64;
         let hz = crossings * 48_000.0 / seg.len() as f64;
-        assert!(
-            (hz - 1_000.0).abs() < 15.0,
-            "clipping put the tone at {hz:.0} Hz"
-        );
+        assert!((hz - 1_000.0).abs() < 15.0, "clipping put the tone at {hz:.0} Hz");
         // Above the band there is nothing: the fifth harmonic at 5 kHz is
         // what the clipper made and the filter took away.
         let bin = |f: f64| {
@@ -1218,10 +1134,7 @@ mod mic_tests {
             (re * re + im * im).sqrt() / seg.len() as f64
         };
         let fifth_db = 20.0 * (bin(5_000.0) / bin(1_000.0)).log10();
-        assert!(
-            fifth_db < -40.0,
-            "the fifth harmonic is only {fifth_db:.0} dB down"
-        );
+        assert!(fifth_db < -40.0, "the fifth harmonic is only {fifth_db:.0} dB down");
     }
 
     /// A capture already clipping is reported as such; clean speech is not.
@@ -1249,10 +1162,7 @@ mod mic_tests {
         let out = run(&mut node, 48_000.0, 4_000);
         assert!(node.starved() > 0, "the source ran out and nothing noticed");
         let tail = &out[out.len() - 500..];
-        assert!(
-            tail.iter().all(|v| v.abs() < 1e-6),
-            "the tail is not silent"
-        );
+        assert!(tail.iter().all(|v| v.abs() < 1e-6), "the tail is not silent");
     }
 
     #[test]
@@ -1267,10 +1177,7 @@ mod mic_tests {
         let mut node = MicNode::new(src, 2.0);
         let out = run(&mut node, 48_000.0, 4_000);
         let peak = out[1_000..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(
-            (peak - 1.0).abs() < 0.05,
-            "0.5 at twice gain came out at {peak}"
-        );
+        assert!((peak - 1.0).abs() < 0.05, "0.5 at twice gain came out at {peak}");
     }
 }
 
@@ -1299,9 +1206,7 @@ impl Simple for TxClockNode {
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
         if input.spec.rate <= 0.0 {
-            return Err(common::Error::other(
-                "tx_clock needs a stream to take its clock from",
-            ));
+            return Err(common::Error::other("tx_clock needs a stream to take its clock from"));
         }
         self.rate = input.spec.rate;
         Ok(StreamSpec {
@@ -1377,10 +1282,7 @@ pub const TONE: StageDesc = StageDesc {
 };
 
 pub fn build_tone(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(ToneNode::new(
-        s.f64_or(HZ, 1_000.0),
-        s.f64_or(LEVEL, 0.8) as f32,
-    )))
+    Ok(Box::new(ToneNode::new(s.f64_or(HZ, 1_000.0), s.f64_or(LEVEL, 0.8) as f32)))
 }
 
 pub const MORSE_TX: StageDesc = StageDesc {
@@ -1405,7 +1307,5 @@ pub const MORSE_KEY: StageDesc = StageDesc {
 };
 
 pub fn build_morse_key(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(MorseKeyNode::new(
-        s.f64_or(WPM, DEFAULT_WPM as f64) as f32,
-    )))
+    Ok(Box::new(MorseKeyNode::new(s.f64_or(WPM, DEFAULT_WPM as f64) as f32)))
 }

@@ -1,7 +1,7 @@
 //! Name-to-constructor map, so chains can be built from config or the UI.
 
-use crate::param::ParamValue;
 use crate::node::Node;
+use crate::param::ParamValue;
 use common::{Error, Result};
 use std::collections::BTreeMap;
 use std::fmt;

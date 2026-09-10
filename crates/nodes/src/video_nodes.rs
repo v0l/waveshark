@@ -145,7 +145,6 @@ impl VideoNode {
     pub fn lock(&self) -> Option<Lock> {
         self.lock
     }
-
 }
 
 impl VideoNode {
@@ -158,15 +157,12 @@ impl VideoNode {
     pub fn locked(&self) -> bool {
         self.sep.is_some() && self.lock.is_some()
     }
-
 }
 
 impl pipeline::node::Node for VideoNode {
     fn name(&self) -> &str {
         "video"
     }
-
-
 
     fn num_inputs(&self) -> usize {
         1
@@ -386,9 +382,7 @@ impl pipeline::node::Node for VideoNode {
                     Some(Standard::Pal) => 1,
                     Some(Standard::Ntsc) => 2,
                 },
-                [AUTO, Standard::Pal.label(), Standard::Ntsc.label()]
-                    .map(String::from)
-                    .to_vec(),
+                [AUTO, Standard::Pal.label(), Standard::Ntsc.label()].map(String::from).to_vec(),
             )
             .label("Standard"),
         ]
@@ -416,7 +410,6 @@ impl pipeline::node::Node for VideoNode {
         Ok(())
     }
 }
-
 
 /// Analogue video as the auto node knows it: on the span, where the
 /// channel plan reaches, and owning the band only once it has a picture.
@@ -460,10 +453,7 @@ impl Protocol for Video {
     }
     fn placement(&self) -> Placement {
         Placement::Channels(
-            decode::video_channels::channels()
-                .iter()
-                .map(|ch| ch.hz as f64)
-                .collect(),
+            decode::video_channels::channels().iter().map(|ch| ch.hz as f64).collect(),
         )
     }
     fn shape(&self) -> Shape {
@@ -532,8 +522,7 @@ mod tests {
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            let mut out =
-                [Payload::empty_of(PortKind::Video), Payload::empty_of(PortKind::Voice)];
+            let mut out = [Payload::empty_of(PortKind::Video), Payload::empty_of(PortKind::Voice)];
             let input = Payload::Iq(chunk.to_vec());
             Node::process(n, &[&input], &mut out, &mut ctx).expect("process");
             fields.extend(out[0].as_video().unwrap_or(&[]).iter().cloned());
@@ -547,10 +536,7 @@ mod tests {
     }
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     /// Modulate composite video onto a carrier the way a transmitter does,

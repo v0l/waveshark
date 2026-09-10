@@ -38,10 +38,7 @@ pub fn fixtures() -> Vec<Fixture> {
         // `nodes`' own capture test, not by the pulse path these fixtures
         // feed, and their reference model has no decoder here.
         .filter(|p| p.extension().is_some_and(|e| e == "cu8"))
-        .filter(|p| {
-            !p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("wmbus_"))
-        })
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("wmbus_")))
         .collect();
     paths.sort();
     paths.iter().filter_map(|p| Fixture::load(p)).collect()
@@ -99,10 +96,7 @@ impl Fixture {
 
     /// Did rtl_433 report this device, under its own name for it?
     pub fn rtl_433_saw(&self, ours: &str) -> bool {
-        self.reference_models
-            .iter()
-            .filter_map(|m| spec_for(m))
-            .any(|s| s.ours == ours)
+        self.reference_models.iter().filter_map(|m| spec_for(m)).any(|s| s.ours == ours)
     }
 
     /// Run the capture through both front ends and every protocol, exactly as
@@ -112,10 +106,7 @@ impl Fixture {
         let mut reports: Vec<Report> = Vec::new();
         for pkg in packages(&self.path) {
             for r in protocols.decode_all(&pkg) {
-                if !reports
-                    .iter()
-                    .any(|p| p.model == r.model && p.fields == r.fields)
-                {
+                if !reports.iter().any(|p| p.model == r.model && p.fields == r.fields) {
                     reports.push(r);
                 }
             }
@@ -256,12 +247,8 @@ fn detect(iq: &[C32], rate: f64, out: &mut Vec<Package>) {
         for reset_us in resets {
             // Switchable so a change to the detector can be measured against
             // the same corpus without two builds.
-            let merge = std::env::var("SR_MERGE_DROPOUTS")
-                .map(|v| v != "0")
-                .unwrap_or(true);
-            let floor = std::env::var("SR_MEASURED_FLOOR")
-                .map(|v| v != "0")
-                .unwrap_or(false);
+            let merge = std::env::var("SR_MERGE_DROPOUTS").map(|v| v != "0").unwrap_or(true);
+            let floor = std::env::var("SR_MEASURED_FLOOR").map(|v| v != "0").unwrap_or(false);
             let ook = PulseConfig {
                 reset_us,
                 min_pulses: 8,
@@ -270,11 +257,7 @@ fn detect(iq: &[C32], rate: f64, out: &mut Vec<Package>) {
                 ..Default::default()
             };
             OokDetector::new(rate, ook).process(&env, out);
-            let fsk = FskConfig {
-                reset_us,
-                min_pulses: 8,
-                ..Default::default()
-            };
+            let fsk = FskConfig { reset_us, min_pulses: 8, ..Default::default() };
             FskDetector::new(rate, fsk).process(&iq, out);
         }
     }
@@ -284,11 +267,7 @@ pub fn describe(reports: &[Report]) -> String {
     if reports.is_empty() {
         return "nothing".into();
     }
-    reports
-        .iter()
-        .map(|r| r.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
+    reports.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; ")
 }
 
 /// One decode rtl_433 reported, expressed in our field names and units.
@@ -323,24 +302,14 @@ impl Expect {
         }
         let source = format!(
             "{{{}}}",
-            obj.iter()
-                .map(|(k, v)| format!("{k}:{v}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            obj.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" ")
         );
-        Expect {
-            model: spec.ours,
-            fields,
-            source,
-        }
+        Expect { model: spec.ours, fields, source }
     }
 
     pub fn matches(&self, r: &Report) -> bool {
         r.model == self.model
-            && self
-                .fields
-                .iter()
-                .all(|(k, want)| r.get(k).is_some_and(|v| want.agrees(v)))
+            && self.fields.iter().all(|(k, want)| r.get(k).is_some_and(|v| want.agrees(v)))
     }
 }
 
@@ -616,31 +585,11 @@ pub static SPECS: &[ModelSpec] = &[
             ("battery_ok", "battery_ok", Bool),
         ],
     },
-    ModelSpec {
-        rtl: "Oregon-THGR122N",
-        ours: "Oregon-THGR122N",
-        fields: OREGON_TH,
-    },
-    ModelSpec {
-        rtl: "Oregon-THN132N",
-        ours: "Oregon-THN132N",
-        fields: OREGON_TH,
-    },
-    ModelSpec {
-        rtl: "Oregon-RTGN318",
-        ours: "Oregon-RTGN318",
-        fields: OREGON_TH,
-    },
-    ModelSpec {
-        rtl: "Oregon-RTHN129",
-        ours: "Oregon-RTHN129",
-        fields: OREGON_TH,
-    },
-    ModelSpec {
-        rtl: "Oregon-THN129",
-        ours: "Oregon-THN129",
-        fields: OREGON_TH,
-    },
+    ModelSpec { rtl: "Oregon-THGR122N", ours: "Oregon-THGR122N", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-THN132N", ours: "Oregon-THN132N", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-RTGN318", ours: "Oregon-RTGN318", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-RTHN129", ours: "Oregon-RTHN129", fields: OREGON_TH },
+    ModelSpec { rtl: "Oregon-THN129", ours: "Oregon-THN129", fields: OREGON_TH },
     ModelSpec {
         rtl: "Oregon-WGR800",
         ours: "Oregon-WGR800",
@@ -692,29 +641,17 @@ pub static SPECS: &[ModelSpec] = &[
     ModelSpec {
         rtl: "Somfy-RTS",
         ours: "Somfy-RTS",
-        fields: &[
-            ("id", "id", Num),
-            ("control", "control", Within),
-            ("counter", "counter", Num),
-        ],
+        fields: &[("id", "id", Num), ("control", "control", Within), ("counter", "counter", Num)],
     },
     ModelSpec {
         rtl: "X10-RF",
         ours: "X10-RF",
-        fields: &[
-            ("id", "unit", Num),
-            ("channel", "channel", Text),
-            ("state", "state", Text),
-        ],
+        fields: &[("id", "unit", Num), ("channel", "channel", Text), ("state", "state", Text)],
     },
     ModelSpec {
         rtl: "Generic-Remote",
         ours: "Generic-Remote",
-        fields: &[
-            ("id", "id", Num),
-            ("cmd", "cmd", Num),
-            ("tristate", "tristate", Text),
-        ],
+        fields: &[("id", "id", Num), ("cmd", "cmd", Num), ("tristate", "tristate", Text)],
     },
 ];
 

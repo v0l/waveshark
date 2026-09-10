@@ -5,13 +5,13 @@
 //! interface can be touched; what lives here is the name, the schema and the
 //! sentence an agent reads before choosing.
 
-use super::{Action, Desk, args};
+use super::{args, Action, Desk};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ServerCapabilities, ServerInfo,
 };
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 #[derive(Clone)]
 pub struct Tools {
@@ -34,11 +34,9 @@ impl Tools {
 
 #[tool_router]
 impl Tools {
-    #[tool(
-        description = "What the receiver is: which radio, where it is pointed, how wide, what \
+    #[tool(description = "What the receiver is: which radio, where it is pointed, how wide, what \
                        it is decoding, what it has heard, and every gain, switch and setting \
-                       the radio itself offers. Start here."
-    )]
+                       the radio itself offers. Start here.")]
     async fn status(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::Status).await
     }
@@ -48,10 +46,8 @@ impl Tools {
         self.ask(Action::Devices).await
     }
 
-    #[tool(
-        description = "The spectrum as the waterfall is drawing it: the span reduced to a few \
-                       bins by peak, the noise floor, and the strongest signals by frequency."
-    )]
+    #[tool(description = "The spectrum as the waterfall is drawing it: the span reduced to a few \
+                       bins by peak, the noise floor, and the strongest signals by frequency.")]
     async fn spectrum(
         &self,
         Parameters(a): Parameters<args::Spectrum>,
@@ -59,15 +55,15 @@ impl Tools {
         self.ask(Action::Spectrum(a)).await
     }
 
-    #[tool(description = "The channels open on the strip: where each is, what it does, and what it hears.")]
+    #[tool(
+        description = "The channels open on the strip: where each is, what it does, and what it hears."
+    )]
     async fn list_channels(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::Channels).await
     }
 
-    #[tool(
-        description = "Packets decoded anywhere in the span, newest first, with the level and \
-                       the signal to noise each was heard at."
-    )]
+    #[tool(description = "Packets decoded anywhere in the span, newest first, with the level and \
+                       the signal to noise each was heard at.")]
     async fn packets(
         &self,
         Parameters(a): Parameters<args::Packets>,
@@ -75,7 +71,9 @@ impl Tools {
         self.ask(Action::Packets(a)).await
     }
 
-    #[tool(description = "Voice traffic: who called whom, on what, for how long, and whether it was enciphered.")]
+    #[tool(
+        description = "Voice traffic: who called whom, on what, for how long, and whether it was enciphered."
+    )]
     async fn calls(
         &self,
         Parameters(a): Parameters<args::Limit>,
@@ -107,12 +105,16 @@ impl Tools {
         self.ask(Action::Links(a)).await
     }
 
-    #[tool(description = "Model control links in earshot: the handset, its frame rate, and where its sticks are.")]
+    #[tool(
+        description = "Model control links in earshot: the handset, its frame rate, and where its sticks are."
+    )]
     async fn control_links(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::ControlLinks).await
     }
 
-    #[tool(description = "Aircraft and vessels the tracker is holding, with position, altitude and course.")]
+    #[tool(
+        description = "Aircraft and vessels the tracker is holding, with position, altitude and course."
+    )]
     async fn tracks(
         &self,
         Parameters(a): Parameters<args::Limit>,
@@ -206,19 +208,15 @@ impl Tools {
         self.ask(Action::RedoEdit).await
     }
 
-    #[tool(
-        description = "Throw away every edit and go back to the graph the receiver draws for \
-                       itself from the dial, the scanner table and the strip."
-    )]
+    #[tool(description = "Throw away every edit and go back to the graph the receiver draws for \
+                       itself from the dial, the scanner table and the strip.")]
     async fn reset_graph(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::ResetGraph).await
     }
 
-    #[tool(
-        description = "Unlock the graph in the window so a person can drag and wire it. Edits \
+    #[tool(description = "Unlock the graph in the window so a person can drag and wire it. Edits \
                        made through these tools apply either way; this only changes what the \
-                       chain view lets a hand do."
-    )]
+                       chain view lets a hand do.")]
     async fn set_manual(
         &self,
         Parameters(a): Parameters<args::Switch>,
@@ -226,7 +224,9 @@ impl Tools {
         self.ask(Action::Manual(a)).await
     }
 
-    #[tool(description = "The scanner table: which front end the receiver places on which frequency.")]
+    #[tool(
+        description = "The scanner table: which front end the receiver places on which frequency."
+    )]
     async fn scanners(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::Scanners).await
     }
@@ -246,7 +246,11 @@ impl Tools {
 
     #[tool(description = "A PNG of the interface as it is now.")]
     async fn screenshot(&self) -> Result<CallToolResult, ErrorData> {
-        let v = self.desk.ask(Action::Screenshot).await.map_err(|e| ErrorData::internal_error(e, None))?;
+        let v = self
+            .desk
+            .ask(Action::Screenshot)
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         let png = v.get("png_base64").and_then(|p| p.as_str()).unwrap_or_default().to_string();
         Ok(CallToolResult::success(vec![ContentBlock::image(png, "image/png")]))
     }
@@ -261,7 +265,9 @@ impl Tools {
         self.ask(Action::Stop).await
     }
 
-    #[tool(description = "Use a different radio, by any part of its label. Restarts the graph on it.")]
+    #[tool(
+        description = "Use a different radio, by any part of its label. Restarts the graph on it."
+    )]
     async fn select_device(
         &self,
         Parameters(a): Parameters<args::Device>,
@@ -277,7 +283,9 @@ impl Tools {
         self.ask(Action::Tune(a)).await
     }
 
-    #[tool(description = "Work in a span this wide, in kHz. The nearest the radio can manage is used.")]
+    #[tool(
+        description = "Work in a span this wide, in kHz. The nearest the radio can manage is used."
+    )]
     async fn set_span(
         &self,
         Parameters(a): Parameters<args::Span>,
@@ -285,7 +293,9 @@ impl Tools {
         self.ask(Action::Span(a)).await
     }
 
-    #[tool(description = "Set one gain stage on the radio, or hand it back to the hardware's own control.")]
+    #[tool(
+        description = "Set one gain stage on the radio, or hand it back to the hardware's own control."
+    )]
     async fn set_gain(
         &self,
         Parameters(a): Parameters<args::Gain>,
@@ -301,7 +311,9 @@ impl Tools {
         self.ask(Action::Toggle(a)).await
     }
 
-    #[tool(description = "Pick one of the radio's list settings, such as which antenna port the cable is in.")]
+    #[tool(
+        description = "Pick one of the radio's list settings, such as which antenna port the cable is in."
+    )]
     async fn set_choice(
         &self,
         Parameters(a): Parameters<args::Choice>,
@@ -309,7 +321,9 @@ impl Tools {
         self.ask(Action::Choice(a)).await
     }
 
-    #[tool(description = "Correct the reference oscillator of the radio in use, in parts per million.")]
+    #[tool(
+        description = "Correct the reference oscillator of the radio in use, in parts per million."
+    )]
     async fn set_ppm(
         &self,
         Parameters(a): Parameters<args::Ppm>,
@@ -328,10 +342,8 @@ impl Tools {
         self.ask(Action::Location(a)).await
     }
 
-    #[tool(
-        description = "Open a channel inside the span: a demodulator to listen to, a protocol \
-                       decoder, or the auto front end to find whatever transmits in it. Returns its id."
-    )]
+    #[tool(description = "Open a channel inside the span: a demodulator to listen to, a protocol \
+                       decoder, or the auto front end to find whatever transmits in it. Returns its id.")]
     async fn add_channel(
         &self,
         Parameters(a): Parameters<args::AddChannel>,
@@ -371,10 +383,8 @@ impl Tools {
         self.ask(Action::Volume(a)).await
     }
 
-    #[tool(
-        description = "Decode every channel in the span, or stop. This is the most expensive \
-                       thing the receiver does."
-    )]
+    #[tool(description = "Decode every channel in the span, or stop. This is the most expensive \
+                       thing the receiver does.")]
     async fn set_decode(
         &self,
         Parameters(a): Parameters<args::Switch>,
@@ -382,7 +392,9 @@ impl Tools {
         self.ask(Action::Decode(a)).await
     }
 
-    #[tool(description = "Remove the centre spur a direct-conversion receiver produces, or leave it in.")]
+    #[tool(
+        description = "Remove the centre spur a direct-conversion receiver produces, or leave it in."
+    )]
     async fn set_dc_block(
         &self,
         Parameters(a): Parameters<args::Switch>,
@@ -390,7 +402,9 @@ impl Tools {
         self.ask(Action::DcBlock(a)).await
     }
 
-    #[tool(description = "Show a view in the window, which is what a following screenshot then holds.")]
+    #[tool(
+        description = "Show a view in the window, which is what a following screenshot then holds."
+    )]
     async fn set_view(
         &self,
         Parameters(a): Parameters<args::View>,
@@ -440,7 +454,7 @@ impl ServerHandler for Tools {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("waveshark", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-            "WaveShark, a wideband software radio receiver. The tools drive the receiver a \
+                "WaveShark, a wideband software radio receiver. The tools drive the receiver a \
              person is looking at: what you tune, open or switch on appears in its window, and \
              what you read is what it is showing.\n\n\
              Start with `status`. The receiver must be running before anything is heard: \
@@ -457,6 +471,6 @@ impl ServerHandler for Tools {
              difference from the graph the receiver draws for itself, so it survives a retune. \
              Ids from `patch` are not the node ids `chain` reports; `chain` carries the patch id \
              beside each node as `stage`.",
-        )
+            )
     }
 }

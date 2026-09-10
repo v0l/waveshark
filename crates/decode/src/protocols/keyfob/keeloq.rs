@@ -182,19 +182,14 @@ mod tests {
 
     fn package(pulses: &[(u32, u32)]) -> Package {
         Package {
-            pulses: pulses
-                .iter()
-                .map(|&(mark, gap)| Pulse { mark, gap })
-                .collect(),
+            pulses: pulses.iter().map(|&(mark, gap)| Pulse { mark, gap }).collect(),
             ..Default::default()
         }
     }
 
     #[test]
     fn a_remote_off_the_air_decodes() {
-        let r = KeeLoq
-            .decode_package(&package(&OFF_AIR))
-            .expect("a KeeLoq frame");
+        let r = KeeLoq.decode_package(&package(&OFF_AIR)).expect("a KeeLoq frame");
         assert_eq!(r.get("serial"), Some(&Value::Int(0x01c4a39)));
         assert_eq!(r.get("btn"), Some(&Value::Int(2)));
         assert_eq!(r.get("hop"), Some(&Value::Int(0x697b4d73)));
@@ -240,16 +235,10 @@ mod tests {
         // claimed however well its bits fit.
         let mut p = frame(0x1234_5678, 0x0abc_def, 0x4, false, false);
         p[12].1 = TE;
-        assert_eq!(
-            KeeLoq.decode_package(&package(&p)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(KeeLoq.decode_package(&package(&p)), Err(DecodeError::NotThisProtocol));
         // And a frame cut short is not one either.
         let short: Vec<(u32, u32)> =
             frame(0x1234_5678, 0x0abc_def, 0x4, false, false)[..40].to_vec();
-        assert_eq!(
-            KeeLoq.decode_package(&package(&short)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(KeeLoq.decode_package(&package(&short)), Err(DecodeError::NotThisProtocol));
     }
 }

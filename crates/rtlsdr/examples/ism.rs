@@ -44,8 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // produces silence rather than a clue.
     let mut fsk = FskDetector::new(ENV_RATE, FskConfig::default());
 
-    let (mut shifted, mut iq, mut env, mut pkgs) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut shifted, mut iq, mut env, mut pkgs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut total = 0usize;
     let mut fsk_total = 0usize;
 
@@ -81,27 +80,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gh = p.gap_histogram(40);
             println!("  mark clusters: {:?}", &mh[..mh.len().min(6)]);
             println!("  gap  clusters: {:?}", &gh[..gh.len().min(6)]);
-            let show: Vec<String> = p
-                .pulses
-                .iter()
-                .take(16)
-                .map(|x| format!("{}/{}", x.mark, x.gap))
-                .collect();
+            let show: Vec<String> =
+                p.pulses.iter().take(16).map(|x| format!("{}/{}", x.mark, x.gap)).collect();
             println!("  first pulses:  {}", show.join(" "));
         }
     }
     rx.stop();
 
-    println!("\n{total} packages in {secs}s ({fsk_total} FSK). \
+    println!(
+        "\n{total} packages in {secs}s ({fsk_total} FSK). \
               noise {:.4} signal {:.4} ({:.1} dB)",
-        ook.noise_level(), ook.signal_level(), ook.snr_db());
+        ook.noise_level(),
+        ook.signal_level(),
+        ook.snr_db()
+    );
     if fsk_total > 0 {
         println!("last FSK tone separation: {:.0} Hz", fsk.separation_hz());
     }
     if total == 0 {
-        println!("Nothing seen on either front end. Check the frequency and the gain:\n\
+        println!(
+            "Nothing seen on either front end. Check the frequency and the gain:\n\
                   an FSK burst would have shown up as a flat envelope with a\n\
-                  measurable tone separation.");
+                  measurable tone separation."
+        );
     }
     Ok(())
 }

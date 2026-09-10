@@ -290,9 +290,7 @@ pub fn parse(psdu: &[u8]) -> Option<Frame> {
         // A probe request has no fixed fields, and the SSID it asks for is
         // the first element.
         Kind::Management(4) => Some(Network {
-            ssid: elements(&body[24..])
-                .find(|(id, _)| *id == 0)
-                .map(|(_, v)| ssid(v)),
+            ssid: elements(&body[24..]).find(|(id, _)| *id == 0).map(|(_, v)| ssid(v)),
             ..Default::default()
         }),
         _ => None,
@@ -304,11 +302,9 @@ pub fn parse(psdu: &[u8]) -> Option<Frame> {
         _ => Vec::new(),
     };
     let action = match kind {
-        Kind::Management(13) if body.len() >= 26 => Some(Action {
-            category: body[24],
-            code: body[25],
-            body: body[26..].to_vec(),
-        }),
+        Kind::Management(13) if body.len() >= 26 => {
+            Some(Action { category: body[24], code: body[25], body: body[26..].to_vec() })
+        }
         _ => None,
     };
 
@@ -331,11 +327,7 @@ pub fn parse(psdu: &[u8]) -> Option<Frame> {
 fn vendors(b: &[u8]) -> Vec<Vendor> {
     elements(b)
         .filter(|(id, v)| *id == 221 && v.len() >= 4)
-        .map(|(_, v)| Vendor {
-            oui: [v[0], v[1], v[2]],
-            kind: v[3],
-            data: v[4..].to_vec(),
-        })
+        .map(|(_, v)| Vendor { oui: [v[0], v[1], v[2]], kind: v[3], data: v[4..].to_vec() })
         .collect()
 }
 
@@ -463,10 +455,7 @@ mod tests {
     fn a_randomised_address_says_so() {
         assert!(Mac([0x02, 0, 0, 0, 0, 1]).is_local());
         assert_eq!(Mac([0x02, 0, 0, 0, 0, 1]).oui(), None);
-        assert_eq!(
-            Mac([0x00, 0x1a, 0x2b, 0, 0, 1]).oui(),
-            Some([0x00, 0x1a, 0x2b])
-        );
+        assert_eq!(Mac([0x00, 0x1a, 0x2b, 0, 0, 1]).oui(), Some([0x00, 0x1a, 0x2b]));
     }
 
     #[test]

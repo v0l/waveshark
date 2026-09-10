@@ -252,14 +252,16 @@ pub fn fmt_mhz(mhz: f64) -> String {
 mod tests {
     use super::*;
 
-    const AIRPORTS: &str = "\"id\",\"ident\",\"type\",\"name\",\"latitude_deg\",\"longitude_deg\",\"elevation_ft\"\n\
+    const AIRPORTS: &str =
+        "\"id\",\"ident\",\"type\",\"name\",\"latitude_deg\",\"longitude_deg\",\"elevation_ft\"\n\
 1,\"EIDW\",\"large_airport\",\"Dublin Airport\",53.421299,-6.27007,242\n\
 2,\"EGLL\",\"large_airport\",\"London Heathrow Airport\",51.4706,-0.461941,83\n\
 3,\"EIWT\",\"small_airport\",\"Weston Airport\",53.3522,-6.48611,150\n\
 4,\"XX-0001\",\"heliport\",\"Rooftop, somewhere\",1.0,2.0,\n\
 5,\"XX-0002\",\"closed\",\"Old field\",3.0,4.0,10\n";
 
-    const FREQS: &str = "\"id\",\"airport_ref\",\"airport_ident\",\"type\",\"description\",\"frequency_mhz\"\n\
+    const FREQS: &str =
+        "\"id\",\"airport_ref\",\"airport_ident\",\"type\",\"description\",\"frequency_mhz\"\n\
 1,1,\"EIDW\",\"APP\",\"Dublin Approach\",121.1\n\
 2,1,\"EIDW\",\"TWR\",\"Dublin Tower\",118.6\n\
 3,1,\"EIDW\",\"TWR\",\"Dublin Tower\",118.6\n\

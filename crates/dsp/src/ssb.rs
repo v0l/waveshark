@@ -42,9 +42,7 @@ impl std::str::FromStr for Sideband {
         match s.trim().to_ascii_lowercase().as_str() {
             "usb" | "upper" => Ok(Self::Upper),
             "lsb" | "lower" => Ok(Self::Lower),
-            other => Err(common::Error::other(format!(
-                "no sideband called {other:?}"
-            ))),
+            other => Err(common::Error::other(format!("no sideband called {other:?}"))),
         }
     }
 }
