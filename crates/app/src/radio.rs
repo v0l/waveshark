@@ -4891,4 +4891,116 @@ mod zoom_tests {
         let db = 20.0 * leaked.max(1e-12).log10();
         assert!(db < -60.0, "a signal outside the span folded in at {db:.1} dBFS");
     }
+
+    /// Every capture in the corpus, through the whole receiver, at least as
+    /// fast as it was recorded.
+    ///
+    /// The dashboard's speed trace is this number live, and a block that
+    /// takes longer than the samples in it is a block the radio drops. So the
+    /// rule is per block and not a mean: one slow block in a hundred is a lag
+    /// spike, and a mean of 20x hides it. The first blocks of a capture
+    /// allocate, fault pages in and open whatever the detector finds, so they
+    /// are run and not judged, and a short capture is repeated until enough
+    /// blocks have been timed to say anything.
+    ///
+    /// Blocks are the size a HackRF delivers, which is the worst case: a
+    /// bigger block is more work between two reads of the clock.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
+    fn every_capture_runs_faster_than_real_time() {
+        const BLOCK: usize = 131_072;
+        const WARM: usize = 4;
+        const TIMED: usize = 32;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let mut files: Vec<std::path::PathBuf> = ["", "offair", "rtl433"]
+            .iter()
+            .filter_map(|d| std::fs::read_dir(root.join(d)).ok())
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("cu8" | "cs8" | "cs16" | "cf32")
+                )
+            })
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            eprintln!("skipping: no captures in testdata, run testdata/fetch.sh");
+            return;
+        }
+        // Captures known not to keep up, each with the reason, so the test
+        // stays a gate for everything else while the reason is worked on.
+        // One that starts keeping up fails the test until it is taken off
+        // the list, so the list cannot outlive its reasons.
+        const KNOWN_SLOW: &[(&str, &str)] = &[
+            ("droneid_mini4k_2444.5M_15360k.cs8", "burst router on a span-wide source"),
+            ("odid_bt5lr_holybro_2474M_20000k.cs8", "burst router on a span-wide source"),
+            ("odid_holybro_2431M_20000k.cs8", "burst router on a span-wide source"),
+            ("offair/elrs_100hz_2415M_20000k.cs8", "burst router on a span-wide source"),
+            ("offair/ofdm_wifi_2462M_20000k.cs8", "burst router on a span-wide source"),
+            ("offair/ofdm_wifi_frames_2462M_20000k.cs8", "burst router on a span-wide source"),
+            ("pal_camera_5865M_20000k.cs8", "burst router on a span-wide source"),
+        ];
+        let mut slow: Vec<String> = Vec::new();
+        let mut recovered: Vec<String> = Vec::new();
+        for path in &files {
+            let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+            let known = KNOWN_SLOW.iter().find(|(n, _)| *n == name).map(|(_, why)| *why);
+            let buf = match sources::FileSource::open(path).and_then(|s| s.read_all()) {
+                Ok(b) if b.samples.len() >= BLOCK => b,
+                Ok(_) => {
+                    eprintln!("{name}: shorter than one block, not timed");
+                    continue;
+                }
+                Err(e) => panic!("{name}: {e}"),
+            };
+            let rate = buf.rate.as_f64().max(1.0);
+            let block_secs = BLOCK as f64 / rate;
+            let mut rx = replay_receiver(&buf, None).expect(&name);
+            let mut us: Vec<f64> = Vec::new();
+            'passes: for _ in 0..64 {
+                for chunk in buf.samples.chunks(BLOCK) {
+                    if chunk.len() < BLOCK {
+                        break;
+                    }
+                    let t = std::time::Instant::now();
+                    rx.process(chunk).expect(&name);
+                    us.push(t.elapsed().as_secs_f64() * 1e6);
+                    let at = block_start(std::time::Instant::now(), chunk.len(), rate);
+                    let _ = harvest(&mut rx, at);
+                    if us.len() >= WARM + TIMED {
+                        break 'passes;
+                    }
+                }
+            }
+            let timed = &us[WARM.min(us.len().saturating_sub(1))..];
+            let worst = timed.iter().copied().fold(0.0f64, f64::max);
+            let mut sorted = timed.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median = sorted[sorted.len() / 2];
+            let x = |us: f64| block_secs * 1e6 / us.max(1e-9);
+            let over = timed.iter().filter(|&&b| b > block_secs * 1e6).count();
+            eprintln!(
+                "{name}: {} blocks, median {:.1}x, worst {:.2}x{}",
+                timed.len(),
+                x(median),
+                x(worst),
+                if over > 0 { format!(", {over} slower than real time") } else { String::new() },
+            );
+            match (over > 0, known) {
+                (true, None) => slow.push(format!("{name}: worst block {:.2}x real time", x(worst))),
+                (true, Some(why)) => eprintln!("{name}: known slow, {why}"),
+                (false, Some(_)) => recovered.push(name.clone()),
+                (false, None) => {}
+            }
+        }
+        assert!(slow.is_empty(), "captures the receiver cannot keep up with:\n{}", slow.join("\n"));
+        assert!(
+            recovered.is_empty(),
+            "captures that keep up now and should come off KNOWN_SLOW:\n{}",
+            recovered.join("\n")
+        );
+    }
 }

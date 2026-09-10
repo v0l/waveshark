@@ -73,6 +73,7 @@ pub fn wrap(frame: &[u8]) -> Vec<u8> {
 
 pub struct DroneIdNode {
     meter: Option<FrameMeter>,
+    finder: Option<dsp::droneid::BurstFinder>,
     carry: Vec<common::C32>,
     at: usize,
     rate: f64,
@@ -92,6 +93,7 @@ impl DroneIdNode {
     pub fn new() -> Self {
         Self {
             meter: None,
+            finder: None,
             carry: Vec::new(),
             at: 0,
             rate: RATE_HZ,
@@ -117,6 +119,7 @@ impl Simple for DroneIdNode {
         }
         self.rate = rate;
         self.meter = Some(FrameMeter::new(rate, input.spec.center.0, KEEP_S));
+        self.finder = Some(dsp::droneid::BurstFinder::new(rate, THRESHOLD));
         let mut out = input.spec.with_kind(PortKind::Frames);
         out.bandwidth = WIDTH_HZ;
         Ok(out)
@@ -138,7 +141,10 @@ impl Simple for DroneIdNode {
         let carried = self.carry.len();
         let mut window = std::mem::take(&mut self.carry);
         window.extend_from_slice(iq);
-        for found in dsp::droneid::find_bursts(&window, self.rate, THRESHOLD) {
+        let Some(finder) = self.finder.as_mut() else {
+            return Ok(());
+        };
+        for found in finder.find(&window) {
             let Some(start) = found
                 .zc4_at
                 .checked_sub(dsp::droneid::symbol_offset(self.rate, 4))
