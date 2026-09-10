@@ -52,7 +52,22 @@ libc = "0.2"
 zstd = { version = "0.13", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "net"] }
+# Driving the receiver from an agent: MCP over streamable HTTP, served from
+# inside the running interface. Optional, since a receiver nobody is
+# automating should not carry an HTTP stack.
+rmcp = { version = "3.2", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+], optional = true }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "tokio",
+], optional = true }
+schemars = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
 reqwest.workspace = true
 httpc.workspace = true
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
@@ -64,7 +79,11 @@ hound = "3"
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["limesdr", "stt", "cuda", "tea", "ambe"]
+default = ["limesdr", "stt", "cuda", "tea", "ambe", "mcp"]
+# The MCP server behind --mcp-listen, which hands an agent the same receiver
+# the operator is looking at. On by default and shipped in the release
+# binaries: nothing listens until an address is given on the command line.
+mcp = ["dep:rmcp", "dep:axum", "dep:schemars", "dep:base64"]
 limesdr = ["dep:limesdr"]
 # TETRA decryption and key recovery. On in a build from source, since a Keys
 # view that can only watch is half a receiver, and off in the binaries the

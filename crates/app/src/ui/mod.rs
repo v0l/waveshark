@@ -24,6 +24,8 @@
 //! [`head`] and [`settings`], because neither is a view of anything: both set
 //! the receiver itself, so what they borrow is most of the application.
 
+#[cfg(feature = "mcp")]
+mod agent;
 mod burst;
 mod calls_pane;
 mod chain_pane;
@@ -216,6 +218,19 @@ pub struct App {
     station_edit: Option<String>,
     saved: crate::session::Session,
     saved_at: Option<std::time::Instant>,
+    /// What an agent has asked for over MCP, when a server was started.
+    /// `None` in an ordinary run, which is every run without `--mcp-listen`.
+    #[cfg(feature = "mcp")]
+    agent: Option<crossbeam_channel::Receiver<crate::agent::Ask>>,
+    /// Agents waiting for a picture of the window. Held rather than answered
+    /// on the spot because egui hands the image back on a later frame.
+    #[cfg(feature = "mcp")]
+    agent_shots: Vec<tokio::sync::oneshot::Sender<crate::agent::Reply>>,
+    /// Graph edits an agent made, waiting for the rebuild that takes them:
+    /// an edit that will not build is refused, and answering before the
+    /// receiver has tried would be answering the wrong question.
+    #[cfg(feature = "mcp")]
+    agent_edits: Vec<agent::PendingEdit>,
 }
 
 /// Which settings panel is open. Each pane owns its own, because spectrum and
@@ -576,6 +591,12 @@ impl Default for App {
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
+            #[cfg(feature = "mcp")]
+            agent: None,
+            #[cfg(feature = "mcp")]
+            agent_shots: Vec::new(),
+            #[cfg(feature = "mcp")]
+            agent_edits: Vec::new(),
         }
     }
 }
@@ -960,6 +981,14 @@ impl App {
     /// capture being replayed usually wants and what a screenshot needs.
     pub fn start_on_open(&mut self) {
         self.autostart = true;
+    }
+
+    /// Serve MCP on `addr`, so an agent drives this receiver rather than one
+    /// of its own.
+    #[cfg(feature = "mcp")]
+    pub fn serve_mcp(&mut self, addr: std::net::SocketAddr, ctx: &egui::Context) -> anyhow::Result<()> {
+        self.agent = Some(crate::agent::serve(addr, self.rt.handle(), ctx.clone())?);
+        Ok(())
     }
 
     pub fn set_device(&mut self, want: &str) {
@@ -2291,6 +2320,11 @@ impl eframe::App for App {
             self.autostart = false;
             self.connect(ui.ctx());
         }
+        // Before the panes draw, so what an agent changed is on the screen in
+        // the same frame it asked for it and what it reads back is what the
+        // frame is about to show.
+        #[cfg(feature = "mcp")]
+        self.agent_serve(ui.ctx());
         self.screenshot(ui.ctx());
         // Who is talking and what they said, every frame and whichever view
         // is open. Both used to be read only under --soak, so the call list
