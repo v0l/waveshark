@@ -116,6 +116,10 @@ jobs:
         if: matrix.cuda
         shell: bash
         run: echo "CUDA_COMPUTE_CAP=80" >> "$GITHUB_ENV"
+      # nvcc drives cl.exe, which the runner has but does not put on the
+      # PATH until a developer shell is opened.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.cuda && runner.os == 'Windows'
 
       - uses: dtolnay/rust-toolchain@stable
         with:
