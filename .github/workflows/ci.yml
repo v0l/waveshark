@@ -55,14 +55,14 @@ jobs:
 
       - name: Test
         env:
-          CUDA_COMPUTE_CAP: '75'
+          CUDA_COMPUTE_CAP: '80'
         # Release: several tests assert throughput against real time, and a
         # debug build misses those by a wide enough margin to be meaningless.
         run: cargo test --workspace --release
 
       - name: Build with no radio attached
         env:
-          CUDA_COMPUTE_CAP: '75'
+          CUDA_COMPUTE_CAP: '80'
         run: cargo build --workspace --release --all-targets
 
       # What the release workflow ships on Linux is built without CUDA, so
