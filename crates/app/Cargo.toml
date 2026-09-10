@@ -20,6 +20,7 @@ windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
 
 [dependencies]
 eframe = "0.35"
+rayon.workspace = true
 egui = "0.35"
 egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }
 
