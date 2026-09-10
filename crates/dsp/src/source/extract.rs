@@ -329,10 +329,13 @@ impl SourceExtractor {
     /// wide, from wideband sample `from`.
     fn cut(&mut self, id: SourceId, offset_hz: f64, width_hz: f64, from: u64, snr_db: f32) {
         let bw = (width_hz * self.cfg.width_margin).max(self.cfg.bin_hz * 2.0);
-        let want = (bw * self.cfg.oversample).max(self.cfg.min_rate_hz);
+        // Oversampled where something will demodulate it, and at its own
+        // width where nothing can: see [`SourceConfig::read_width_hz`].
+        let over = if width_hz > self.cfg.read_width_hz { 1.0 } else { self.cfg.oversample };
+        let want = (bw * over).max(self.cfg.min_rate_hz);
         // Whether the rate came from the width or from the floor, which
         // decides what the extraction filter should keep.
-        let floored = bw * self.cfg.oversample < self.cfg.min_rate_hz;
+        let floored = bw * over < self.cfg.min_rate_hz;
         let start = from.saturating_sub(self.lead).max(self.ring.first());
         // How far back the stream starts is bounded by the work of reading
         // it, in samples of the stream rather than in time. A candidate can
