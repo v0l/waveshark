@@ -52,6 +52,13 @@ pub struct RouterConfig {
     pub margin_us: u32,
     /// Longest burst held, in microseconds.
     pub max_burst_us: u32,
+    /// Most samples the pulse front ends are handed. A burst over this is
+    /// still classified and reported as its measurement, but not read for
+    /// pulses: within the time above, this many samples means a stream over
+    /// 2 MS/s, so a source megahertz wide, and nothing keyed at a sensor's
+    /// pace occupies that. Reading it measured at 160 ms a burst on a 2.4 GHz
+    /// span, for rows that were only ever the channel's own noise.
+    pub max_pulse_samples: usize,
     /// Shortest burst worth measuring, in microseconds, not counting the
     /// margins. A gate that opened on a blip and shut again produced a
     /// burst of nothing but its two margins, and the classifier then read
@@ -82,6 +89,7 @@ impl Default for RouterConfig {
             reset_us: 10_000,
             margin_us: 2_000,
             max_burst_us: 500_000,
+            max_pulse_samples: 1 << 20,
             min_burst_us: 1_000,
             tau_us: 500.0,
             min_snr_db: 6.0,
@@ -130,6 +138,10 @@ pub struct RouterStats {
     /// Bursts named as something no front end here reads: a carrier, a chirp,
     /// a phase-keyed signal, or noise.
     pub no_front_end: u64,
+    /// Bursts too long in samples for the pulse front ends to read
+    /// (`RouterConfig::max_pulse_samples`), reported as their measurement
+    /// alone.
+    pub too_long: u64,
 }
 
 pub struct BurstRouter {
@@ -282,7 +294,12 @@ impl BurstRouter {
 
         let mut packages = Vec::new();
         let mut symbols = Vec::new();
+        let readable = burst.len() <= self.cfg.max_pulse_samples;
         let routed_to = match class.modulation {
+            _ if !readable => {
+                self.stats.too_long += 1;
+                common::FrontEnd::None
+            }
             Modulation::Ook => {
                 self.stats.to_ook += 1;
                 self.run_ook(&burst, &mut packages);

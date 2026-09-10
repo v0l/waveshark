@@ -117,71 +117,163 @@ pub struct Found {
 
 /// Find bursts by cross correlating against the first ZC symbol.
 ///
+/// One call builds a [`BurstFinder`] and throws it away, which is fine for a
+/// file read once. A node running per block keeps one.
+pub fn find_bursts(iq: &[C32], rate: f64, threshold: f32) -> Vec<Found> {
+    BurstFinder::new(rate, threshold).find(iq)
+}
+
+/// The correlator behind [`find_bursts`], holding its transform plans.
+///
 /// The correlation is normalised by the energy in the window, so the
 /// threshold means the same thing whatever the gain was, which is what makes
 /// one number work across captures.
 ///
-/// Correlating every position is what this used to do and it is unaffordable:
-/// 1024 multiply-accumulates a sample over a wideband capture is hours. A
-/// DroneID burst is nine symbols, about 700 us, roughly twice a second, so a
-/// thousandth of a recording is worth looking at and the rest is skipped on
-/// its power alone.
-pub fn find_bursts(iq: &[C32], rate: f64, threshold: f32) -> Vec<Found> {
-    let fft = fft_size(rate);
-    let (_, short_cp) = cyclic_prefix(rate);
-    let template = zc_time(4, rate);
-    let t_energy: f32 = template.iter().map(|c| c.norm_sqr()).sum::<f32>().sqrt();
-    if iq.len() < fft + short_cp {
-        return Vec::new();
+/// It is computed by fast convolution rather than position by position. The
+/// direct form was gated on the window being 6 dB over the floor, which on a
+/// quiet band skips nearly everything; on 2.4 GHz with Wi-Fi in it the gate
+/// is open most of the time, and 1024 multiply-accumulates a sample at
+/// 15.36 MS/s measured at six times real time. Overlap-save costs the same
+/// whatever the band holds, about a fifteenth of that.
+pub struct BurstFinder {
+    fft: usize,
+    short_cp: usize,
+    threshold: f32,
+    /// Transform length, and how many correlations one transform yields.
+    n: usize,
+    valid: usize,
+    fwd: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    inv: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    /// The template's spectrum, conjugated and scaled, so the product with a
+    /// segment's spectrum is the cross correlation.
+    template: Vec<Complex<f32>>,
+    t_energy: f32,
+    seg: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    corr: Vec<C32>,
+}
+
+impl BurstFinder {
+    pub fn new(rate: f64, threshold: f32) -> Self {
+        let fft = fft_size(rate);
+        let (_, short_cp) = cyclic_prefix(rate);
+        let zc = zc_time(4, rate);
+        let t_energy: f32 = zc.iter().map(|c| c.norm_sqr()).sum::<f32>().sqrt();
+        // Eight times the template, so seven eighths of every transform is
+        // output; past that the transforms are no longer where the time goes.
+        let n = (8 * fft).next_power_of_two();
+        let valid = n - fft + 1;
+        let mut planner = FftPlanner::<f32>::new();
+        let fwd = planner.plan_fft_forward(n);
+        let inv = planner.plan_fft_inverse(n);
+        let mut template = vec![Complex::<f32>::new(0.0, 0.0); n];
+        for (t, z) in template.iter_mut().zip(&zc) {
+            *t = Complex::new(z.re, z.im);
+        }
+        fwd.process(&mut template);
+        let scale = 1.0 / n as f32;
+        for t in &mut template {
+            *t = t.conj() * scale;
+        }
+        let scratch = vec![
+            Complex::<f32>::new(0.0, 0.0);
+            fwd.get_inplace_scratch_len().max(inv.get_inplace_scratch_len())
+        ];
+        Self {
+            fft,
+            short_cp,
+            threshold,
+            n,
+            valid,
+            fwd,
+            inv,
+            template,
+            t_energy,
+            seg: vec![Complex::<f32>::new(0.0, 0.0); n],
+            scratch,
+            corr: Vec::new(),
+        }
     }
 
-    // The floor, from a coarse sample of the file rather than all of it: a
-    // burst this brief cannot move a median taken every thousandth sample.
-    let mut sample: Vec<f32> = iq.iter().step_by(1021).map(|c| c.norm_sqr()).collect();
-    sample.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let floor = sample.get(sample.len() / 2).copied().unwrap_or(0.0);
-    // Six decibels over the floor, which a burst that correlates at all
-    // clears comfortably and noise does not.
-    let gate = floor * 4.0 * fft as f32;
-
-    // A running sum of the window's energy, so each position costs a
-    // multiply-accumulate over the template and nothing more.
-    let mut energy: f32 = iq[..fft].iter().map(|c| c.norm_sqr()).sum();
-    let mut out: Vec<Found> = Vec::new();
-    let mut best: Option<Found> = None;
-    for n in 0..iq.len() - fft {
-        if n > 0 {
-            energy += iq[n + fft - 1].norm_sqr() - iq[n - 1].norm_sqr();
-        }
-        if energy > gate {
-            let mut acc = C32::default();
-            for (k, t) in template.iter().enumerate() {
-                acc += iq[n + k] * t.conj();
+    /// Cross correlation of the template against every start position that
+    /// has a whole symbol after it.
+    fn correlate(&mut self, iq: &[C32]) {
+        let positions = iq.len() + 1 - self.fft;
+        self.corr.clear();
+        self.corr.resize(positions, C32::default());
+        let mut start = 0;
+        while start < positions {
+            let take = self.n.min(iq.len() - start);
+            for (s, x) in self.seg.iter_mut().zip(&iq[start..start + take]) {
+                *s = Complex::new(x.re, x.im);
             }
-            let score = acc.norm() / (energy.sqrt() * t_energy);
-            if score > threshold {
-                let here = Found {
-                    // The correlation peaks on the symbol itself; the burst
-                    // starts a cyclic prefix earlier.
-                    zc4_at: n.saturating_sub(short_cp),
-                    score,
-                };
-                match &mut best {
-                    Some(b) if score > b.score => *b = here,
-                    Some(_) => {}
-                    None => best = Some(here),
+            for s in &mut self.seg[take..] {
+                *s = Complex::new(0.0, 0.0);
+            }
+            self.fwd.process_with_scratch(&mut self.seg, &mut self.scratch);
+            for (s, t) in self.seg.iter_mut().zip(&self.template) {
+                *s *= *t;
+            }
+            self.inv.process_with_scratch(&mut self.seg, &mut self.scratch);
+            let keep = self.valid.min(positions - start);
+            for (c, s) in self.corr[start..start + keep].iter_mut().zip(&self.seg) {
+                *c = C32::new(s.re, s.im);
+            }
+            start += self.valid;
+        }
+    }
+
+    pub fn find(&mut self, iq: &[C32]) -> Vec<Found> {
+        let fft = self.fft;
+        if iq.len() < fft + self.short_cp {
+            return Vec::new();
+        }
+        // The floor, from a coarse sample of the file rather than all of it:
+        // a burst this brief cannot move a median taken every thousandth
+        // sample.
+        let mut sample: Vec<f32> = iq.iter().step_by(1021).map(|c| c.norm_sqr()).collect();
+        sample.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let floor = sample.get(sample.len() / 2).copied().unwrap_or(0.0);
+        // Six decibels over the floor, which a burst that correlates at all
+        // clears comfortably and noise does not.
+        let gate = floor * 4.0 * fft as f32;
+
+        self.correlate(iq);
+        // A running sum of the window's energy, for the normalisation.
+        let mut energy: f32 = iq[..fft].iter().map(|c| c.norm_sqr()).sum();
+        let mut out: Vec<Found> = Vec::new();
+        let mut best: Option<Found> = None;
+        for n in 0..iq.len() - fft {
+            if n > 0 {
+                energy += iq[n + fft - 1].norm_sqr() - iq[n - 1].norm_sqr();
+            }
+            if energy > gate {
+                let score = self.corr[n].norm() / (energy.sqrt() * self.t_energy);
+                if score > self.threshold {
+                    let here = Found {
+                        // The correlation peaks on the symbol itself; the
+                        // burst starts a cyclic prefix earlier.
+                        zc4_at: n.saturating_sub(self.short_cp),
+                        score,
+                    };
+                    match &mut best {
+                        Some(b) if score > b.score => *b = here,
+                        Some(_) => {}
+                        None => best = Some(here),
+                    }
+                    continue;
                 }
-                continue;
+            }
+            // A peak is one burst however many positions cleared the
+            // threshold, so it is reported when the run ends rather than per
+            // position.
+            if let Some(b) = best.take() {
+                out.push(b);
             }
         }
-        // A peak is one burst however many positions cleared the threshold,
-        // so it is reported when the run ends rather than per position.
-        if let Some(b) = best.take() {
-            out.push(b);
-        }
+        out.extend(best);
+        out
     }
-    out.extend(best);
-    out
 }
 
 /// The cyclic prefix of each of the nine symbols, long or short.

@@ -276,6 +276,12 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A 2.4 GHz span with DJI DroneID on it no longer stalls the receiver:
+  the DroneID search correlated sample by sample whenever the band was
+  busy, which on 2.4 GHz is always, and cost six times real time. It is a
+  fast correlation now, at a fifteenth of that. The burst classifier also
+  stops sorting every sample of a long burst to find its edges, and the
+  pulse front ends no longer read a burst megahertz wide for sensor pulses.
 - The radio thread no longer stalls for a tenth of a second on every
   spectrum frame in a CUDA build. The transcript's device list was rebuilt
   each frame, and naming a card means opening it, so the speed trace was a

@@ -476,11 +476,14 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
     let chirps = pk.iter().filter(|p| p.modulation() == Some(common::Modulation::Chirp)).count();
     // Fifteen packets on four channel visits; the first two of each visit
     // are what the link is recovered from and come out with it.
-    // Fifteen of the eighteen rows the capture produces are the handset.
+    // Fifteen of the nineteen rows the capture produces are the handset.
     // Pinned exactly: the two that are lost to a floor or a splice are the
     // ones a change would take next, and "twelve or more" would not say so.
+    // The nineteenth is one channel visit, 44 ms and 1.4 MHz wide, measured
+    // as a chirp: it read as unknown, and left no row, while the classifier
+    // found the burst's edges on every sample rather than a thinned copy.
     assert_eq!(rows.len(), 15, "{} ExpressLRS rows of {} packets, {chirps} chirps", rows.len(), pk.len());
-    assert_eq!(pk.len(), 18, "{} packets in all", pk.len());
+    assert_eq!(pk.len(), 19, "{} packets in all", pk.len());
     for r in &rows {
         assert_eq!(r.identity.as_ref().map(|i| i.id.as_str()), Some("6f37"), "{r:?}");
         let detail = r.detail.as_deref().unwrap_or("");

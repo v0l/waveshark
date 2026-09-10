@@ -356,11 +356,30 @@ impl Classifier {
         // separates on-off keying from a frequency-keyed packet is that the
         // amplitude changes *during* the transmission, and that question can
         // only be asked once the transmission's edges are known.
-        let (a, b) = self.extent(iq);
-        let (mut trimmed, samples) = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
-            (iq[a..b].to_vec(), iq.len())
+        //
+        // The edges are found on a thinned copy of a burst longer than the
+        // measurement keeps: a wide source that stays on hands over half a
+        // second at 15 MS/s, and sorting seven million amplitudes to find
+        // where it switched on measured at a third of a second, for a
+        // decision made on the 16384 samples cut out below. Even a 50000
+        // sample packet spent 2 ms here, a log per sample, for a mean of
+        // 6 ms a burst on a busy 2.4 GHz span. Thinning keeps the loudest
+        // sample of each run, so an edge is still where the carrier is.
+        let stride = iq.len().div_ceil(EDGE_SAMPLES).max(1);
+        let thin: Vec<C32>;
+        let (edge_iq, edge_rate) = if stride > 1 {
+            thin = thin_peaks(iq, stride);
+            (thin.as_slice(), self.rate / stride as f64)
         } else {
-            (iq.to_vec(), iq.len())
+            (iq, self.rate)
+        };
+        let (a, b) = self.extent(edge_iq);
+        let (a, b) = ((a * stride).min(iq.len()), (b * stride).min(iq.len()));
+        let samples = iq.len();
+        let mut trimmed: &[C32] = if b - a >= self.cfg.min_samples && b - a < iq.len() * 9 / 10 {
+            &iq[a..b]
+        } else {
+            iq
         };
         // A burst that is a few long transmissions with silence between
         // them is measured on one of them. The router holds a burst open
@@ -372,15 +391,22 @@ impl Classifier {
         // milliseconds long to count as a transmission of its own, so a
         // sensor's pulses, which are shorter, still measure as the keying
         // they are.
-        if let Some(r) = longest_transmission(&trimmed, self.rate, self.cfg.min_samples) {
-            trimmed = trimmed[r].to_vec();
+        let own = if stride > 1 {
+            let thin = thin_peaks(trimmed, stride);
+            longest_transmission(&thin, edge_rate, self.cfg.min_samples.div_ceil(stride))
+                .map(|r| (r.start * stride).min(trimmed.len())..(r.end * stride).min(trimmed.len()))
+        } else {
+            longest_transmission(trimmed, self.rate, self.cfg.min_samples)
+        };
+        if let Some(r) = own {
+            trimmed = &trimmed[r];
         }
         if trimmed.len() > self.cfg.max_samples.max(self.cfg.min_samples) {
             let n = self.cfg.max_samples.max(self.cfg.min_samples);
             let from = (trimmed.len() - n) / 2;
-            trimmed.drain(..from);
-            trimmed.truncate(n);
+            trimmed = &trimmed[from..from + n];
         }
+        let trimmed = trimmed.to_vec();
 
         // Bring a signal that is a small part of its span down to its own
         // bandwidth first. In the channel bank this never fires, because the
@@ -954,6 +980,24 @@ fn longest_transmission(iq: &[C32], rate: f64, min_samples: usize) -> Option<std
     }
     let best = runs.into_iter().max_by_key(|r| r.len())?;
     (best.len() < iq.len() * 9 / 10).then_some(best)
+}
+
+/// The most samples the edge finding walks; a longer burst is thinned to
+/// this first. Half a second at 250 kS/s, so no burst of the corpus is
+/// thinned: at a quarter of this the GT-WT02 capture read as unknown.
+const EDGE_SAMPLES: usize = 1 << 17;
+
+/// One sample per `stride`: the loudest of each run, so keying survives the
+/// thinning where a plain decimation would sample the gaps.
+fn thin_peaks(iq: &[C32], stride: usize) -> Vec<C32> {
+    iq.chunks(stride)
+        .map(|c| {
+            c.iter()
+                .copied()
+                .max_by(|a, b| a.norm_sqr().partial_cmp(&b.norm_sqr()).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// How long a run of carrier has to be before it is a transmission of its
