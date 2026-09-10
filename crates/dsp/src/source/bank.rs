@@ -173,7 +173,8 @@ impl Bank {
 
     /// Start streaming so that frames from wideband sample `from` on exist,
     /// caught up from the ring.
-    pub(super) fn start(&mut self, ring: &[C32], ring_base: u64, from: u64) {
+    pub(super) fn start(&mut self, ring: &super::extract::History, from: u64) {
+        let ring_base = ring.first();
         let origin = (from / self.adv) * self.adv;
         let origin = origin.max((ring_base / self.adv + 1) * self.adv);
         self.chan.reset();
@@ -182,11 +183,11 @@ impl Bank {
         self.origin = origin;
         self.running = true;
         self.idle = 0;
-        let off = (origin - ring_base) as usize;
-        if off < ring.len() {
+        if origin < ring.end() {
             let t = std::time::Instant::now();
-            let input = &ring[off..];
-            self.feed(input, origin);
+            let (head, tail) = ring.parts(origin, ring.end());
+            self.feed(head, origin);
+            self.feed(tail, origin + head.len() as u64);
             self.start_us += t.elapsed().as_micros() as u64;
         }
     }
