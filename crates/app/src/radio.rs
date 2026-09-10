@@ -4941,7 +4941,8 @@ mod zoom_tests {
         const KNOWN_SLOW: &[(&str, &str)] = &[
             (
                 "droneid_mini4k_2444.5M_15360k.cs8",
-                "the DroneID correlator over a source megahertz wide, 3.5 ms of a 8.5 ms block",
+                "the DroneID correlator over a source megahertz wide, 1.7 ms of a 8.5 ms block, \
+                 under a source opening from its lead-in",
             ),
             (
                 "odid_bt5lr_holybro_2474M_20000k.cs8",
@@ -4959,8 +4960,8 @@ mod zoom_tests {
             ),
             (
                 "offair/ofdm_wifi_2462M_20000k.cs8",
-                "the DroneID correlator on the wide source the Wi-Fi opens, 90 ms in the worst \
-                 block",
+                "extracting the 5 MHz source the Wi-Fi opens at 15 MS/s and correlating DroneID \
+                 over it, 3 ms each of a 6.5 ms block beside 2 ms of detection",
             ),
             (
                 "offair/ofdm_wifi_frames_2462M_20000k.cs8",
