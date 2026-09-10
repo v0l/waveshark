@@ -30,6 +30,8 @@ use common::SourceBlock;
 use pipeline::lock::{Lock, Verdict};
 use pipeline::registry::Settings;
 
+use super::AutoNode;
+
 /// A held lock's name, so a slot can say which lock claimed it across
 /// rebuilds and drops without holding an index into a moving list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,13 +191,22 @@ impl Locks {
         Some(gone)
     }
 
-    /// Every lock held, as (protocol, transmitter, confidence), for a view
-    /// and for the tests.
+    /// Every lock held, as (protocol, transmitter, confidence).
     pub(super) fn held(&self) -> Vec<(&'static str, &str, f32)> {
         self.held
             .iter()
             .map(|h| (h.protocol, h.lock.transmitter.as_str(), h.lock.confidence))
             .collect()
+    }
+}
+
+impl AutoNode {
+    /// The transmitters a front end inside has learned this session, as
+    /// (front end, what it calls the transmitter, how sure it still is).
+    /// The frequency counterpart of [`AutoNode::remembered`]: that is where
+    /// something was heard, this is what will be heard and where.
+    pub fn locked_transmitters(&self) -> Vec<(&'static str, &str, f32)> {
+        self.locks.held()
     }
 }
 

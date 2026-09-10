@@ -471,18 +471,16 @@ impl Node for AutoNode {
         // it: a transmitter a front end has already learned is read by that
         // front end alone, and costs one extraction and nothing else. See
         // [`locks`].
-        let mut opened: Vec<(common::SourceId, Option<locks::Claimed>)> = Vec::new();
-        for b in &self.blocks {
+        let blocks = std::mem::take(&mut self.blocks);
+        for b in &blocks {
             if !self.slots.iter().any(|s| s.id == b.id) {
-                opened.push((b.id, self.locks.claim(b)));
+                let claimed = self.locks.claim(b);
+                let slot = self.open(b, claimed)?;
+                self.slots.push(slot);
+                self.built += 1;
             }
         }
-        for (id, claimed) in opened {
-            let Some(b) = self.blocks.iter().find(|b| b.id == id) else { continue };
-            let slot = self.open(b, claimed)?;
-            self.slots.push(slot);
-            self.built += 1;
-        }
+        self.blocks = blocks;
 
         // Every member of every source is a task of its own, not one task
         // per source: the members share nothing but the block they read, and
