@@ -107,7 +107,10 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: local
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "cccl", "visual_studio_integration"]'
+          # Windows names differ from Linux's and the installer refuses the
+          # whole list over one it does not know: there is no cccl package
+          # here, its headers come with nvcc, and nvrtc_dev has an underscore.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
           log-file-suffix: '${{ matrix.name }}.txt'
       - name: Compute capability for the kernels
         if: matrix.cuda
