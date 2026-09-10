@@ -407,6 +407,14 @@ impl Protocol for Wifi {
     fn watch(&self) -> crate::protocol::Watch {
         crate::protocol::Watch::Sampled { on_s: 0.2, every_s: 1.0, hold_s: 10.0 }
     }
+    /// And nothing at all while the detector has found nothing. A frame is
+    /// over 200 us at 1 Mbit/s and its access point beacons ten times a
+    /// second, so anything worth reading has been on the air long enough for
+    /// the detector to have a source open. The hold covers the gap between
+    /// one station's frames, which is longer than the detector's own hang.
+    fn wakes_on(&self) -> crate::protocol::Wake {
+        crate::protocol::Wake::Detected { hold_s: 1.0 }
+    }
     fn stage_label(&self, hz: f64) -> String {
         match channel_of(hz) {
             Some(ch) => format!("WIFI {ch}"),

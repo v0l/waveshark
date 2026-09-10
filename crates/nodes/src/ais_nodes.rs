@@ -290,6 +290,17 @@ impl Protocol for Ais {
                 .unwrap_or_default(),
         )
     }
+    /// It mixes its two channels out of the span itself, rather than taking
+    /// one from the bank the extractor channelizes the span with.
+    ///
+    /// The two of them and their skirts are 75 kHz, which would sit inside
+    /// one 1 MHz bank channel comfortably. What does not fit is where AIS is
+    /// heard: the bank is not worth its fixed cost below
+    /// [`dsp::source::BANK_MIN_CHANNELS`] channels, so a span under 8 MHz
+    /// never runs one, and the marine band is listened to at a couple of
+    /// megasamples. Where a span were wide enough, a bank channel arrives at
+    /// 2 MS/s against the 600 kHz asked for below, so the front end would
+    /// pay three times over per sample for the privilege.
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_HZ[1] - CHANNEL_HZ[0] + 2.0 * CHANNEL_WIDTH_HZ],

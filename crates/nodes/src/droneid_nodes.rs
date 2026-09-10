@@ -262,6 +262,15 @@ impl Protocol for DroneId {
     fn placement(&self) -> Placement {
         Placement::Channels(channels())
     }
+    /// A burst is 600 carriers of 15 kHz, and the detector measures it
+    /// within 20 dB of its peak, so a source under half its width is not
+    /// one. Without the floor every Wi-Fi beacon on the band, measured a
+    /// few hundred kilohertz to a few megahertz wide, was extracted at
+    /// 15.36 MS/s and correlated, 3 ms of every 6.5 ms block for nothing.
+    fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
+        source_width_hz >= WIDTH_HZ / 2.0
+            && source_width_hz <= WIDTH_HZ * crate::protocol::CHANNEL_WIDTH_TOLERANCE
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[WIDTH_HZ],

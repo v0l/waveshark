@@ -515,6 +515,20 @@ impl SourceDetector {
         (self.cfg.min_frames + 1) * self.hop + self.n
     }
 
+    /// Whether the detector is still measuring the floor, and so cannot yet
+    /// say that nothing is transmitting.
+    ///
+    /// A stream is not looked at for its first [`SETTLE_FRAMES`] frames,
+    /// which at 20 MS/s is over a tenth of a second: a consumer that reads
+    /// only while a source is open is deaf for all of it unless it knows to
+    /// keep reading until the detector can answer. A stream silent from its
+    /// first sample never settles, because there is nothing to measure a
+    /// floor against, and it is also the one case where nothing being open
+    /// is certainly right.
+    pub fn settling(&self) -> bool {
+        !self.silent_so_far && self.frame < self.settle_at + SETTLE_FRAMES
+    }
+
     /// Channels a front end is already reading, as offsets from the centre.
     /// Nothing is opened inside one; see [`Owned`].
     pub fn set_owned(&mut self, channels: Vec<Owned>) {
@@ -1308,6 +1322,7 @@ impl SourceDetector {
         // Extents are kept in hertz on the source so they survive the bins
         // moving, and updated from whatever the track saw this frame.
         let hop = self.hop as u64;
+        let frame = self.frame;
         let min_frames = self.cfg.min_frames;
         let steady_db = self.cfg.steady_db;
         // Candidates born before this frame appeared with the floor cap,
@@ -1421,6 +1436,17 @@ impl SourceDetector {
                     if room && fits && t.hits >= min_frames && (moved || t.born >= fixture_until) {
                         *open_now += 1;
                         t.open = true;
+                        // From when it was confirmed, not from when it was
+                        // first seen. A candidate can sit unopened for as
+                        // long as it is present, too wide or with no room,
+                        // and opening it from its birth handed the front
+                        // ends the whole ring at once: half a second of a
+                        // 20 MHz span in one block, measured at 170 ms on
+                        // a 2.4 GHz capture, for a stream nothing was
+                        // waiting to read the start of. A burst is what
+                        // the confirmation frames cover, and they still do.
+                        let confirmed = frame.saturating_sub(min_frames as u64) * hop;
+                        t.src.start_sample = t.src.start_sample.max(confirmed);
                         let c = t.centroid_sum / t.centroid_n.max(1) as f64;
                         t.src.center_hz = hz_of_bin(c, n, bin_hz);
                         t.opened_hz = t.src.bandwidth_hz();

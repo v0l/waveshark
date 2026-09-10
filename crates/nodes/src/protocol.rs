@@ -121,6 +121,45 @@ impl Stickiness {
     pub const SESSION: Stickiness = Stickiness::Latch { hold_s: None };
 }
 
+/// What has to be transmitting before a span-wide decoder is handed a block
+/// at all.
+///
+/// A source cut out of the span is only read while something is on the air
+/// there, because the detector found it first. A span-wide decoder has no
+/// such thing in front of it: it is handed every sample for as long as the
+/// receiver runs, and on an empty band that is a core spent proving the band
+/// is empty. Measured on the 5.8 GHz camera capture, the Wi-Fi front end
+/// read 7.5 seconds of air in 3.1 seconds of CPU and returned no frames at
+/// all, because there was no Wi-Fi there.
+///
+/// The detector is the thing in front of it. What decides whether that works
+/// is how long the traffic lasts against how long the detector takes to
+/// notice: a Wi-Fi frame is over 200 us and a camera's carrier is on for
+/// seconds, so the detector has a source open before either decoder needs
+/// one, while a Mode S reply is 120 us and would be over before anything
+/// opened.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Wake {
+    /// Every block, whatever the detector has found. What it reads is
+    /// shorter than the detector takes to find it, or is on a channel the
+    /// detector is kept out of and will therefore never open: Mode S, AIS,
+    /// and Bluetooth advertising, which owns its three channels from the
+    /// moment the span reaches them.
+    Always,
+    /// While the detector has any source open in the span, and for `hold_s`
+    /// after the last one closed.
+    ///
+    /// Any source, rather than one as wide as the signal this decoder
+    /// reads, because the detector's extent is every bin within 20 dB of a
+    /// run's peak and that is far narrower than the transmission: measured,
+    /// one 802.11b beacon capture opens sources of 9 kHz, 181 kHz, 571 kHz
+    /// and 1.9 MHz for the same access point, and a camera's 20 MHz carrier
+    /// opens runs of 55 kHz to 1.4 MHz and never one wider. A width
+    /// threshold that let both of those through would let everything
+    /// through.
+    Detected { hold_s: f64 },
+}
+
 /// How much of the stream a span-wide decoder needs while nothing has been
 /// read on it.
 ///
@@ -288,6 +327,32 @@ pub struct Placed {
 /// the old ~40 kHz ceiling for a 12.5 kHz channel while scaling with width.
 pub const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 
+/// The widest source the burst router is placed on, in hertz.
+///
+/// The router is a decoder like every other and is placed where its width
+/// fits, except that its shape is decided by what reads its output rather
+/// than by a channel of its own: the pulse front ends inside it read sensor
+/// channels up to [`dsp::route::MAX_PULSE_CHANNEL_HZ`], and the protocols
+/// that wait for one of its verdicts ([`Shape::families`], so far LoRa and
+/// ExpressLRS) read channels of their declared widths. So it is asked of the
+/// registry, like everything else the auto node wants to know.
+///
+/// Above this nothing consumes the verdict. Measured on the 2.4 GHz DroneID
+/// capture, the detector opens a 20 MHz source for the Wi-Fi in the band and
+/// the router then ran its per-sample gate over the whole of it and
+/// classified every Wi-Fi frame at 3 to 6 ms each: 100 of the 147 million
+/// samples every router saw were that one source, and no front end could
+/// read a burst of it. A source wider than this leaves the detector's own
+/// measurement as its evidence row instead; see [`super::auto`].
+pub fn router_max_width_hz() -> f64 {
+    let widest = all()
+        .iter()
+        .filter(|p| !p.shape().families.is_empty())
+        .flat_map(|p| p.shape().widths.iter().copied())
+        .fold(dsp::route::MAX_PULSE_CHANNEL_HZ, f64::max);
+    widest * CHANNEL_WIDTH_TOLERANCE
+}
+
 pub trait Protocol: Send + Sync {
     /// The stage registry's name for the decoder, and the word a table or a
     /// saved channel names it by.
@@ -360,6 +425,15 @@ pub trait Protocol: Send + Sync {
     /// of the air finds it just as surely.
     fn watch(&self) -> Watch {
         Watch::Everything
+    }
+
+    /// What has to be on the air before this decoder is handed a block.
+    ///
+    /// Only asked of a span-wide decoder: everything else is placed on a
+    /// source and so is gated on the detector already. [`Wake::Always`]
+    /// unless what it reads lasts longer than the detector takes to find it.
+    fn wakes_on(&self) -> Wake {
+        Wake::Always
     }
 
     /// Of the channel widths that each read something on one source, the
@@ -576,6 +650,28 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all().len());
+    }
+
+    /// The burst router is placed by what reads it, and both its consumers
+    /// are in the registry: a source wider than the widest of them holds
+    /// nothing either could read, and used to cost a per-sample gate over a
+    /// whole 20 MHz span.
+    #[test]
+    fn the_burst_router_is_as_wide_as_what_reads_it_and_no_wider() {
+        let max = router_max_width_hz();
+        let widest = all()
+            .iter()
+            .filter(|p| !p.shape().families.is_empty())
+            .flat_map(|p| p.shape().widths.iter().copied())
+            .fold(0.0, f64::max);
+        assert!(widest > 0.0, "nothing waits for a verdict any more");
+        assert!(max >= widest, "a chirp channel of {widest} Hz gets no verdict");
+        assert!(
+            max >= dsp::route::MAX_PULSE_CHANNEL_HZ,
+            "a sensor channel gets no pulse front end"
+        );
+        // And well under a span: this is the whole saving.
+        assert!(max < 5e6, "{max} Hz is most of a 20 MHz span");
     }
 
     #[test]

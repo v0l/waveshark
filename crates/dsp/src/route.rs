@@ -37,6 +37,16 @@ use crate::{AskConfig, AskDetector, FskConfig, FskDetector, OokDetector, PulseCo
 use common::C32;
 use std::collections::VecDeque;
 
+/// The widest channel the pulse front ends inside the router read.
+///
+/// Nothing keyed at a sensor's pace occupies more than this: the widest
+/// thing they are asked for is a few hundred kilohertz of splatter around a
+/// hard-keyed remote. It is the width, rather than a sample count, because
+/// it is what decides where the router belongs at all; see
+/// `nodes::protocol::router_max_width_hz`. [`RouterConfig::max_pulse_samples`]
+/// is this width at [`RouterConfig::max_burst_us`], two samples a hertz.
+pub const MAX_PULSE_CHANNEL_HZ: f64 = 1_000_000.0;
+
 #[derive(Clone, Copy, Debug)]
 pub struct RouterConfig {
     /// Silence that ends a burst, in microseconds.
@@ -54,9 +64,9 @@ pub struct RouterConfig {
     pub max_burst_us: u32,
     /// Most samples the pulse front ends are handed. A burst over this is
     /// still classified and reported as its measurement, but not read for
-    /// pulses: within the time above, this many samples means a stream over
-    /// 2 MS/s, so a source megahertz wide, and nothing keyed at a sensor's
-    /// pace occupies that. Reading it measured at 160 ms a burst on a 2.4 GHz
+    /// pulses: within the time above, this many samples means a stream wider
+    /// than [`MAX_PULSE_CHANNEL_HZ`], and nothing keyed at a sensor's pace
+    /// occupies that. Reading it measured at 160 ms a burst on a 2.4 GHz
     /// span, for rows that were only ever the channel's own noise.
     pub max_pulse_samples: usize,
     /// Shortest burst worth measuring, in microseconds, not counting the
@@ -85,11 +95,12 @@ pub struct RouterConfig {
 
 impl Default for RouterConfig {
     fn default() -> Self {
+        let max_burst_us = 500_000u32;
         Self {
             reset_us: 10_000,
             margin_us: 2_000,
-            max_burst_us: 500_000,
-            max_pulse_samples: 1 << 20,
+            max_burst_us,
+            max_pulse_samples: (max_burst_us as f64 * 1e-6 * 2.0 * MAX_PULSE_CHANNEL_HZ) as usize,
             min_burst_us: 1_000,
             tau_us: 500.0,
             min_snr_db: 6.0,

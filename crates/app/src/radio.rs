@@ -4934,14 +4934,44 @@ mod zoom_tests {
         // stays a gate for everything else while the reason is worked on.
         // One that starts keeping up fails the test until it is taken off
         // the list, so the list cannot outlive its reasons.
+        //
+        // Every reason here was measured with `--bench-iq`, which prints the
+        // auto node's phases; none of them is the span-wide burst router any
+        // more, which is what they all used to say.
         const KNOWN_SLOW: &[(&str, &str)] = &[
-            ("droneid_mini4k_2444.5M_15360k.cs8", "burst router on a span-wide source"),
-            ("odid_bt5lr_holybro_2474M_20000k.cs8", "burst router on a span-wide source"),
-            ("odid_holybro_2431M_20000k.cs8", "burst router on a span-wide source"),
-            ("offair/elrs_100hz_2415M_20000k.cs8", "burst router on a span-wide source"),
-            ("offair/ofdm_wifi_2462M_20000k.cs8", "burst router on a span-wide source"),
-            ("offair/ofdm_wifi_frames_2462M_20000k.cs8", "burst router on a span-wide source"),
-            ("pal_camera_5865M_20000k.cs8", "burst router on a span-wide source"),
+            (
+                "droneid_mini4k_2444.5M_15360k.cs8",
+                "the DroneID correlator over a source megahertz wide, 1.7 ms of a 8.5 ms block, \
+                 under a source opening from its lead-in",
+            ),
+            (
+                "odid_bt5lr_holybro_2474M_20000k.cs8",
+                "classifying the coded-PHY bursts of several megahertz-wide sources at once, \
+                 17 ms in the worst block of 6.5",
+            ),
+            (
+                "odid_holybro_2431M_20000k.cs8",
+                "the same, with the chirp decoders placed on those verdicts behind it",
+            ),
+            (
+                "offair/elrs_100hz_2415M_20000k.cs8",
+                "classifying a handset's channel visit, 44 ms and 1.4 MHz wide, which is one \
+                 burst that costs three blocks",
+            ),
+            (
+                "offair/ofdm_wifi_2462M_20000k.cs8",
+                "extracting the 5 MHz source the Wi-Fi opens at 15 MS/s and correlating DroneID \
+                 over it, 3 ms each of a 6.5 ms block beside 2 ms of detection",
+            ),
+            (
+                "offair/ofdm_wifi_frames_2462M_20000k.cs8",
+                "the same, beside the Wi-Fi front end reading the span it is on",
+            ),
+            (
+                "pal_camera_5865M_20000k.cs8",
+                "the video front end itself: 5.2 ms of every 6.5 ms block demodulating 20 MS/s \
+                 of FM carrier",
+            ),
         ];
         let mut slow: Vec<String> = Vec::new();
         let mut recovered: Vec<String> = Vec::new();

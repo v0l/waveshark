@@ -44,6 +44,26 @@ impl Watch {
         self.detector.as_ref().map_or(0, |d| d.position())
     }
 
+    /// Whether the detector has any source open right now, which is what a
+    /// gated span-wide front end runs on. See [`crate::protocol::Wake`].
+    ///
+    /// True as well while the detector is still measuring its floor, since
+    /// until it has, its silence is not evidence of anything: at 20 MS/s
+    /// that is the first tenth of a second of every stream, which is a tenth
+    /// of a second of Wi-Fi a gated front end would otherwise be deaf for
+    /// after every retune.
+    pub(super) fn detecting(&self) -> bool {
+        self.detector
+            .as_ref()
+            .is_some_and(|d| d.settling() || d.live().next().is_some())
+    }
+
+    /// How far behind the samples the detector's verdict is, which is the
+    /// lead-in a front end waking on it has missed.
+    pub(super) fn latency_samples(&self) -> usize {
+        self.detector.as_ref().map_or(0, |d| d.latency_samples())
+    }
+
     pub(super) fn live(&self) -> Vec<dsp::Source> {
         self.detector
             .as_ref()

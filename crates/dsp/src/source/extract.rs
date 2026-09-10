@@ -380,16 +380,18 @@ impl SourceExtractor {
         let base = self.base;
         let ring = &self.ring;
         let bank = self.bank.as_ref();
+        let pace = (input.len() as u64 * CATCH_UP_PACE).max(1);
         let blocks: Vec<SourceBlock> = self
             .chans
             .par_iter_mut()
             .filter_map(|c| match c.feed {
                 Feed::Direct => {
-                    Self::extract_block(c, &Gather::Ring { ring, base }, c.cursor, end)
+                    Self::extract_block(c, &Gather::Ring { ring, base }, c.cursor, end, pace)
                 }
                 Feed::Bank { m, pair, next } => {
-                    let g = Gather::Bank { bank: bank?, m, pair };
-                    Self::extract_block(c, &g, next, end)
+                    let b = bank?;
+                    let g = Gather::Bank { bank: b, m, pair };
+                    Self::extract_block(c, &g, next, end, (pace / b.adv).max(1))
                 }
             })
             .collect();
@@ -436,10 +438,22 @@ impl SourceExtractor {
     /// wideband samples for the ring, bank frames for the bank. The two paths
     /// were the same state machine written twice, and the second copy is how
     /// a source read from the bank came to be timed a block late.
-    fn extract_block(c: &mut Chan, g: &Gather, from: u64, end: u64) -> Option<SourceBlock> {
+    fn extract_block(
+        c: &mut Chan,
+        g: &Gather,
+        from: u64,
+        end: u64,
+        pace: u64,
+    ) -> Option<SourceBlock> {
         let avail = g.last(end);
-        let stop = c.end.map_or(avail, |e| g.at(e).min(avail));
         let from = from.max(g.first());
+        // A stream behind the ring's end catches up at `pace` rather than
+        // all at once. A source opened from history handed its front ends
+        // the whole lead-in in one block, half a second of a 20 MHz span,
+        // and that block ran at a twentieth of real time; paced, the same
+        // history arrives over a few blocks and the stream is a few blocks
+        // late for them, which a decoder cannot tell from a longer filter.
+        let stop = c.end.map_or(avail, |e| g.at(e).min(avail)).min(from + pace);
         let state = if !c.opened {
             SourceState::Opened
         } else if c.end.is_some_and(|e| stop >= g.at(e)) {
@@ -497,6 +511,11 @@ impl SourceExtractor {
 
 /// Where a channel's samples come from, and how positions in it relate to the
 /// wideband sample count everything else here is indexed by.
+/// How many blocks' worth of history a stream behind the ring's end reads
+/// in one block. Four keeps up with anything short of the whole ring
+/// arriving at once, and clears a third of a second of lead-in in a tenth.
+const CATCH_UP_PACE: u64 = 4;
+
 enum Gather<'a> {
     Ring { ring: &'a [C32], base: u64 },
     Bank { bank: &'a Bank, m: usize, pair: bool },
