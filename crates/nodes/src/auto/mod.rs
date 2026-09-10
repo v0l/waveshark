@@ -38,6 +38,7 @@ use std::time::Instant;
 
 use crate::protocol;
 
+mod evidence;
 mod member;
 mod memory;
 mod place;
@@ -582,7 +583,12 @@ impl Node for AutoNode {
                         // The flush is fed once, on the block that closed
                         // the source, not on every block after it.
                         let closed = b.is_some() && state == SourceState::Closed;
-                        slot.ring.keeps = slot.members.iter().any(|m| m.keeps_samples);
+                        // The samples are kept for the evidence row too: a
+                        // row that cannot say what it was read from is half a
+                        // row, whether a classifier or the detector measured
+                        // it.
+                        slot.ring.keeps = slot.evidence.is_some()
+                            || slot.members.iter().any(|m| m.keeps_samples);
                         slot.ring.push(samples);
                         let ring = &slot.ring;
                         let per: Vec<MemberResult> = slot
@@ -616,6 +622,17 @@ impl Node for AutoNode {
                         let mut packets = Vec::new();
                         let mut heard = Vec::new();
                         let mut spent = Vec::new();
+                        // What the detector measured, where nothing else
+                        // measured anything: the row an unknown wideband
+                        // signal leaves.
+                        if let Some(e) = slot.evidence.as_mut() {
+                            e.push(samples);
+                            let ended = matches!(
+                                state,
+                                SourceState::Closed | SourceState::Superseded
+                            );
+                            packets.extend(e.row(at_us, ended, &slot.ring));
+                        }
                         for r in per {
                             events.extend(r.events);
                             packets.extend(r.packets);
@@ -1225,6 +1242,47 @@ mod tests {
         let names: Vec<&str> = slot.members.iter().map(|m| m.name).collect();
         assert!(names.contains(&"m17"), "{names:?}");
         assert!(names.contains(&"pocsag"), "{names:?}");
+    }
+
+    /// The burst router is placed where its width fits and nowhere else.
+    ///
+    /// On a 2.4 GHz span the detector opens a source megahertz wide for the
+    /// Wi-Fi in the band, and the router used to run its per-sample gate
+    /// over all of it and classify every frame at milliseconds each, for a
+    /// verdict nothing could read: the pulse front ends refuse a burst that
+    /// wide and the only decoder that waits for a verdict reads chirp
+    /// channels. What a source that wide leaves instead is the detector's
+    /// own measurement.
+    #[test]
+    fn the_burst_router_goes_on_a_source_its_consumers_could_read() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz(2_462_000_000))]).unwrap();
+        let source = |id: u64, width_hz: f64| SourceBlock {
+            id: common::SourceId(id),
+            state: SourceState::Opened,
+            center_hz: 2_463_000_000,
+            bandwidth_hz: width_hz,
+            signal_hz: width_hz / 1.5,
+            rate: (width_hz * 2.5).max(n.cfg.min_rate_hz),
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let wide = n.open(&source(1, 6.5e6)).unwrap();
+        assert!(
+            wide.members.iter().all(|m| m.router.is_none()),
+            "a 6.5 MHz source was classified"
+        );
+        assert!(wide.evidence.is_some(), "and left no evidence of itself");
+
+        // An ExpressLRS channel visit measures over a megahertz and must
+        // keep its verdict: that is what places the decoder.
+        let elrs = n.open(&source(2, 1.4e6)).unwrap();
+        assert!(elrs.members.iter().any(|m| m.router.is_some()), "a chirp channel");
+        assert!(elrs.evidence.is_none(), "the classifier is the evidence here");
+
+        let sensor = n.open(&source(3, 40e3)).unwrap();
+        assert!(sensor.members.iter().any(|m| m.router.is_some()), "a sensor channel");
     }
 
     #[test]

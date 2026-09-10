@@ -103,7 +103,7 @@ impl Ring {
     /// however long the channel was quiet before it. Two seconds of a
     /// 2.4 MS/s source is sixteen megabytes a packet in the log, which is how
     /// a day's log reached 122 GB.
-    fn burst(&self, from: u64, to: u64) -> Option<std::sync::Arc<common::IqBurst>> {
+    pub(super) fn burst(&self, from: u64, to: u64) -> Option<std::sync::Arc<common::IqBurst>> {
         let keep = ((IQ_KEEP_S * self.rate) as u64).max(1);
         let to = to.min(self.end());
         let from = from.max(to.saturating_sub(keep)).max(self.base);

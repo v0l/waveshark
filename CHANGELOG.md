@@ -193,6 +193,11 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- A wide signal nobody can decode leaves a row of its own: the centre, the
+  width, how long it was on the air and how strong it was, as the detector
+  measured them. The burst classifier no longer runs on a signal megahertz
+  wide, because nothing it could say about one is readable by any front end,
+  and 2.4 GHz keeps up far better for it.
 - The type line under a box in the chain view names the stage type, so the
   automatic stage reads "auto", a channel bank "bank" and the source decoder
   "source_decode". Three of them repeated the label above instead, which said
