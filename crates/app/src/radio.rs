@@ -4892,8 +4892,8 @@ mod zoom_tests {
         assert!(db < -60.0, "a signal outside the span folded in at {db:.1} dBFS");
     }
 
-    /// Every capture in the corpus, through the whole receiver, at least as
-    /// fast as it was recorded.
+    /// Every capture in the corpus, through the whole receiver, at twice the
+    /// speed it was recorded at, on four threads.
     ///
     /// The dashboard's speed trace is this number live, and a block that
     /// takes longer than the samples in it is a block the radio drops. So the
@@ -4903,14 +4903,27 @@ mod zoom_tests {
     /// are run and not judged, and a short capture is repeated until enough
     /// blocks have been timed to say anything.
     ///
+    /// Twice, because the machine this is measured on is not the machine it
+    /// runs on: a laptop's core is about half as fast, and 1x here is a
+    /// receiver that drops samples there. Four threads for the same reason,
+    /// and because measured on 48 the pool made nothing faster: the work in
+    /// a block is serial, so what a laptop lacks in cores it does not miss.
+    ///
     /// Blocks are the size a HackRF delivers, which is the worst case: a
     /// bigger block is more work between two reads of the clock.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
     fn every_capture_runs_faster_than_real_time() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().expect("a pool");
+        pool.install(every_capture_runs_at_twice_real_time);
+    }
+
+    fn every_capture_runs_at_twice_real_time() {
         const BLOCK: usize = 131_072;
         const WARM: usize = 4;
         const TIMED: usize = 32;
+        /// Blocks slower than this, in multiples of real time, fail.
+        const FLOOR_X: f64 = 2.0;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
         let mut files: Vec<std::path::PathBuf> = ["", "offair", "rtl433"]
             .iter()
@@ -4968,6 +4981,16 @@ mod zoom_tests {
                 "the same, beside the Wi-Fi front end reading the span it is on",
             ),
             (
+                "tetra_downlink_391.5M_2400k.cu8",
+                "one block in three hundred at 1.7x on four threads, with 15 ms of it outside \
+                 any node",
+            ),
+            (
+                "offair/gfsk_ble_2426M_20000k.cs8",
+                "one block at 1.3x on four threads, the BLE front end and the detector at \
+                 1.2 ms each of 6.5 and 12 ms outside any node",
+            ),
+            (
                 "pal_camera_5865M_20000k.cs8",
                 "the video front end itself: 5.2 ms of every 6.5 ms block demodulating 20 MS/s \
                  of FM carrier",
@@ -5011,16 +5034,16 @@ mod zoom_tests {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let median = sorted[sorted.len() / 2];
             let x = |us: f64| block_secs * 1e6 / us.max(1e-9);
-            let over = timed.iter().filter(|&&b| b > block_secs * 1e6).count();
+            let over = timed.iter().filter(|&&b| b * FLOOR_X > block_secs * 1e6).count();
             eprintln!(
                 "{name}: {} blocks, median {:.1}x, worst {:.2}x{}",
                 timed.len(),
                 x(median),
                 x(worst),
-                if over > 0 { format!(", {over} slower than real time") } else { String::new() },
+                if over > 0 { format!(", {over} under {FLOOR_X}x") } else { String::new() },
             );
             match (over > 0, known) {
-                (true, None) => slow.push(format!("{name}: worst block {:.2}x real time", x(worst))),
+                (true, None) => slow.push(format!("{name}: worst block {:.2}x, floor {FLOOR_X}x", x(worst))),
                 (true, Some(why)) => eprintln!("{name}: known slow, {why}"),
                 (false, Some(_)) => recovered.push(name.clone()),
                 (false, None) => {}

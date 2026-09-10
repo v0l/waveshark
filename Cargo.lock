@@ -317,6 +317,7 @@ dependencies = [
  "parking_lot",
  "pipeline",
  "poll-promise",
+ "rayon",
  "reqwest",
  "rfd",
  "rtlsdr",
