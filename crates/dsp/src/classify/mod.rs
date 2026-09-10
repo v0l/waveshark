@@ -57,7 +57,8 @@ pub use hypothesis::{Evidence, Hypothesis};
 
 use crate::window;
 use common::C32;
-use rustfft::FftPlanner;
+use rustfft::{Fft, FftPlanner};
+use std::sync::Arc;
 
 /// Every hypothesis the classifier will consider.
 ///
@@ -265,7 +266,14 @@ impl Default for ClassifyConfig {
 pub struct Classifier {
     cfg: ClassifyConfig,
     rate: f64,
-    planner: FftPlanner<f32>,
+    /// The one transform every spectral feature here takes, planned once.
+    ///
+    /// Planning it per frame looked free and was not: a burst runs the
+    /// transform over a hundred times (the spectrum, the transition line and
+    /// two power laws, each Welch-averaged over the frames of the burst), and
+    /// `Fft::process` allocates and zeroes its own scratch on every call.
+    fft: Arc<dyn Fft<f32>>,
+    fft_scratch: Vec<C32>,
     win: Vec<f32>,
     /// Scratch, reused across bursts: nothing here allocates per burst after
     /// the first of a given size.
@@ -285,14 +293,22 @@ pub struct Classifier {
     trans: Vec<f32>,
     scratch: Vec<f32>,
     fft_buf: Vec<C32>,
+    /// The squared spectrum, beside `spec_pow` which holds the fourth power's.
+    spec_sq: Vec<f32>,
+    /// One frame raised to the fourth power, held while the squared one is
+    /// transformed.
+    quartic: Vec<C32>,
 }
 
 impl Classifier {
     pub fn new(rate: f64, cfg: ClassifyConfig) -> Self {
+        let fft = FftPlanner::new().plan_fft_forward(cfg.fft_size);
+        let scratch_len = fft.get_inplace_scratch_len();
         Self {
             cfg,
             rate,
-            planner: FftPlanner::new(),
+            fft,
+            fft_scratch: vec![C32::default(); scratch_len],
             win: window::blackman_harris(cfg.fft_size),
             spec: Vec::new(),
             spec_real: Vec::new(),
@@ -304,6 +320,8 @@ impl Classifier {
             trans: Vec::new(),
             scratch: Vec::new(),
             fft_buf: Vec::new(),
+            spec_sq: Vec::new(),
+            quartic: Vec::new(),
         }
     }
 
@@ -619,8 +637,9 @@ impl Classifier {
             f.mod_index = separation / baud;
         }
 
-        f.square_line = self.power_line(iq, 2);
-        f.quartic_line = self.power_line(iq, 4);
+        let (square, quartic) = self.power_lines(iq);
+        f.square_line = square;
+        f.quartic_line = quartic;
         let (pair, sep_hz) = self.line_pair();
         f.quartic_pair = pair;
         // The pair is a symbol rate only for one carrier keyed in phase: two
@@ -691,7 +710,7 @@ impl Classifier {
             for (i, v) in self.fft_buf.iter_mut().enumerate() {
                 *v *= self.win[i];
             }
-            self.planner.plan_fft_forward(n).process(&mut self.fft_buf);
+            self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
             for (i, v) in self.fft_buf.iter().enumerate() {
                 self.spec[(i + n / 2) % n] = v.norm_sqr();
             }
@@ -704,7 +723,7 @@ impl Classifier {
         while start + n <= iq.len() {
             self.fft_buf.clear();
             self.fft_buf.extend(iq[start..start + n].iter().zip(&self.win).map(|(c, w)| *c * *w));
-            self.planner.plan_fft_forward(n).process(&mut self.fft_buf);
+            self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
             for (i, v) in self.fft_buf.iter().enumerate() {
                 self.spec[(i + n / 2) % n] += v.norm_sqr();
             }
@@ -805,7 +824,7 @@ impl Classifier {
             let mean = seg.iter().sum::<f32>() / n as f32;
             self.fft_buf.clear();
             self.fft_buf.extend(seg.iter().zip(&self.win).map(|(v, w)| C32::new((v - mean) * w, 0.0)));
-            self.planner.plan_fft_forward(n).process(&mut self.fft_buf);
+            self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
             for i in 0..n / 2 {
                 self.spec_real[i] += self.fft_buf[i].norm_sqr();
             }
@@ -819,8 +838,8 @@ impl Classifier {
         }
     }
 
-    /// Share of the power that the strongest bin holds after raising the
-    /// signal to `power`.
+    /// Share of the power the strongest bin holds after squaring the signal,
+    /// and after taking its fourth power.
     ///
     /// Squaring a BPSK signal collapses its two phases onto one and leaves a
     /// tone; the fourth power does the same for QPSK. Nothing else on the band
@@ -831,31 +850,44 @@ impl Classifier {
     /// Amplitude is normalised away first, because the test is about phase and
     /// an on-off keyed burst would otherwise put most of its power in the
     /// strongest bin for no better reason than being loud in the middle.
-    fn power_line(&mut self, iq: &[C32], power: u32) -> f32 {
+    ///
+    /// Both powers in one pass because the normalising is the expensive part
+    /// and it is the same for both: a square root and a divide a sample,
+    /// measured at more than the two transforms they feed. `spec_pow` is left
+    /// holding the fourth power's spectrum, which [`Self::line_pair`] reads.
+    fn power_lines(&mut self, iq: &[C32]) -> (f32, f32) {
         let n = self.cfg.fft_size;
         if iq.len() < n {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let hop = n / 2;
+        self.spec_sq.clear();
+        self.spec_sq.resize(n, 0.0);
         self.spec_pow.clear();
         self.spec_pow.resize(n, 0.0);
         let mut frames = 0.0f32;
         let mut start = 0;
         while start + n <= iq.len() {
+            self.quartic.clear();
             self.fft_buf.clear();
-            self.fft_buf.extend(iq[start..start + n].iter().zip(&self.win).map(|(c, w)| {
+            for (c, w) in iq[start..start + n].iter().zip(&self.win) {
                 let m = c.norm();
                 if m <= 0.0 {
-                    return C32::new(0.0, 0.0);
+                    self.fft_buf.push(C32::new(0.0, 0.0));
+                    self.quartic.push(C32::new(0.0, 0.0));
+                    continue;
                 }
                 let unit = *c / m;
-                let mut v = unit;
-                for _ in 1..power {
-                    v *= unit;
-                }
-                v * *w
-            }));
-            self.planner.plan_fft_forward(n).process(&mut self.fft_buf);
+                let sq = unit * unit;
+                self.fft_buf.push(sq * *w);
+                self.quartic.push(sq * unit * unit * *w);
+            }
+            self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
+            for (i, v) in self.fft_buf.iter().enumerate() {
+                self.spec_sq[i] += v.norm_sqr();
+            }
+            std::mem::swap(&mut self.fft_buf, &mut self.quartic);
+            self.fft.process_with_scratch(&mut self.fft_buf, &mut self.fft_scratch);
             for (i, v) in self.fft_buf.iter().enumerate() {
                 self.spec_pow[i] += v.norm_sqr();
             }
@@ -863,22 +895,12 @@ impl Classifier {
             start += hop;
         }
         if frames == 0.0 {
-            return 0.0;
+            return (0.0, 0.0);
         }
-
-        let total: f32 = self.spec_pow.iter().sum();
-        if total <= 0.0 {
-            return 0.0;
-        }
-        // The window spreads a tone over three bins, so a line that is really
-        // one tone is undercounted by taking a single bin.
-        let mut best = 0.0f32;
-        for i in 0..self.spec_pow.len() {
-            let a = self.spec_pow[(i + self.spec_pow.len() - 1) % self.spec_pow.len()];
-            let c = self.spec_pow[(i + 1) % self.spec_pow.len()];
-            best = best.max(a + self.spec_pow[i] + c);
-        }
-        best / total
+        let sq = std::mem::take(&mut self.spec_sq);
+        let out = (line_share(&sq), line_share(&self.spec_pow));
+        self.spec_sq = sq;
+        out
     }
 
     /// Share of the last power-law spectrum held by its strongest line and
@@ -1200,6 +1222,23 @@ fn occupied(spec: &[f32], scratch: &mut Vec<f32>, rate: f32) -> (f32, f32) {
     let arith = lin_sum / band.len() as f64;
     let flatness = if arith > 0.0 { (geo / arith) as f32 } else { 1.0 };
     (bw, flatness.clamp(0.0, 1.0))
+}
+
+/// Share of a power-law spectrum held by its strongest line.
+///
+/// The window spreads a tone over three bins, so a line that is really one
+/// tone is undercounted by taking a single bin.
+fn line_share(spec: &[f32]) -> f32 {
+    let total: f32 = spec.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let n = spec.len();
+    let mut best = 0.0f32;
+    for i in 0..n {
+        best = best.max(spec[(i + n - 1) % n] + spec[i] + spec[(i + 1) % n]);
+    }
+    best / total
 }
 
 /// Share of the power held by the strongest three adjacent bins.
