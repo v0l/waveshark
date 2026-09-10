@@ -5085,6 +5085,17 @@ mod zoom_tests {
         // throughput problem rather than a spike.
         const KNOWN_SLOW: &[(&str, &str)] = &[
             (
+                "ism24_busy_2431M_61440k.cs16",
+                "a whole 2.4 GHz band at 61.44 MS/s, which is four things at once: the Wi-Fi \
+                 front end reading the channels it is on, a DroneID correlator at 15.36 MS/s on \
+                 each of the eleven sources wide enough to be a burst (nine of them the lower \
+                 two thirds of Wi-Fi channel 11, cut through by the span's edge), the BLE front \
+                 end on two advertising channels, and the detector itself over 61 MS/s: 2.3, \
+                 2.1, 1.8 and 1.2 ms of a 2.13 ms block. The ExpressLRS handset hopping through \
+                 it is no longer among them, since its link is locked 55 ms in and its visits \
+                 cost one extraction and one decoder each",
+            ),
+            (
                 "droneid_mini4k_2444.5M_15360k.cs8",
                 "the DroneID correlator over a source megahertz wide and the classifier behind \
                  it, 1.6 and 1.9 ms of an 8.5 ms block, under a source opening from its lead-in",
