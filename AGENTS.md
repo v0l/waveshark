@@ -6,7 +6,9 @@ measurements behind the current shape, and the mistakes that produced it. Then
 [`docs/views.md`](docs/views.md) before adding a pane,
 [`docs/references.md`](docs/references.md) before adding a data source or a
 decoder, since it holds the terms each publisher asks for and the rules two
-of them make the code follow, and
+of them make the code follow,
+[`docs/mcp.md`](docs/mcp.md) before adding or changing what an agent can reach
+over `--mcp-listen`, and
 [`docs/web.md`](docs/web.md) only knowing it is a plan and not a status report.
 What follows is the two rules that are easiest to break without noticing, and
 the procedure for adding a capture to the test corpus.
@@ -17,8 +19,10 @@ default, so a plain `cargo test` at the root builds them and `crates/mbe` is
 compiled through the `ambe` feature, though it is still not a default
 workspace member and `cargo test -p mbe` has to be asked for by name. What the
 release workflow publishes is built with `--no-default-features --features
-limesdr,stt`, because a cipher and a patent-encumbered vocoder are things a
-person compiles for themselves rather than things this project ships.
+limesdr,stt,mcp`, because a cipher and a patent-encumbered vocoder are things
+a person compiles for themselves rather than things this project ships. `mcp`
+is the agent server behind `--mcp-listen` and is shipped: nothing listens
+until an address is given.
 
 ## Everything the receiver does is in the graph
 
