@@ -14,6 +14,28 @@
 //! transmitted on. Where a span somehow covers more than one, every covered
 //! channel is read and the port carries the band instead, because a frame
 //! cannot then be placed by the port alone.
+//!
+//! # Why the data channels are not locked
+//!
+//! A connected device hops across the 37 data channels two megahertz apart,
+//! which is the same shape as an ExpressLRS handset's hop set, and a
+//! [`pipeline::Lock`] over that raster was considered for the same reason:
+//! every hop the detector opens is a source with a classifier and a set of
+//! decoders on it. It is the wrong mechanism here twice over. A lock says
+//! that the front end holding it will read the bursts it claims, and this one
+//! will not: `BleConfig::data_channels` is off by default because a mixer and
+//! a decimator per channel is dear, and even switched on it reads the data
+//! channels off the span rather than out of a source handed to it, so a
+//! claimed hop would be routed into silence. The lock layer would then score
+//! the claims, find that none of them decoded, and drop the lock, which is
+//! the right answer arrived at expensively. And a connection's packets are
+//! whitened under an access address a listener never saw, so there is nothing
+//! to decode there in the first place.
+//!
+//! Measured on the 61.44 MS/s capture of a busy 2.4 GHz band, this costs
+//! nothing: none of the sources the detector opens there sits on the data
+//! channel raster, and the 2 MHz hops of a connection are not among what it
+//! finds. A capture that does hold them is what would be needed to say more.
 
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;

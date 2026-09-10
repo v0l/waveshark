@@ -262,7 +262,8 @@ world rather than about this radio.
 `dsp::source` holds the detector and the extractor; `nodes::auto` the node,
 split into what it watches (`watch.rs`: the detector, the extractor, the
 span-wide decoders), what it places on a source (`place.rs`), one decoder
-over one stream (`member.rs`), the channels it keeps (`memory.rs`) and what
+over one stream (`member.rs`), the channels it keeps (`memory.rs`), the
+transmitters a front end has learned to recognise (`locks.rs`) and what
 it does when a decoder asks for something (`requests.rs`); `source_detect`
 and `source_decode` are the same two halves as separate stages, for a chain
 built by hand.
@@ -303,13 +304,53 @@ transmission, so a voice decoder gated on `Fsk4` would never have been
 built; the saving is real only where the classifier is reliable and the
 decoder is dear, which so far is the chirp.
 
+### A transmitter a decoder has learned
+
+Detection is the right answer for something nothing has heard before and the
+wrong one for a transmitter a decoder has already read and can predict. An
+ExpressLRS handset hops across eighty channels a megahertz apart, and a
+detector that knows nothing opens every visit as a new source: fifty-three
+sources in two seconds on the 61.44 MS/s capture of a busy 2.4 GHz band, each
+with a burst classifier, a LoRa decoder and an ExpressLRS decoder built, run
+and torn down for a millisecond of air. Bluetooth data channels, FrSky,
+Crossfire and DECT are the same shape, and on a wide span one hopper can take
+the whole receiver down.
+
+So a front end says what it has learned, as a `pipeline::Lock`
+(`crates/pipeline/src/lock.rs`): the channels the transmitter uses as a
+raster, how wide its bursts are, how sure it is, and what it learned, so a
+decoder placed on a claimed burst starts knowing it. It is published through
+`Request::Lock` like everything else a decoder asks for, and the auto node
+holds it (`crates/nodes/src/auto/locks.rs`). Every source the detector opens
+is offered to every lock before the classifier runs, and the best claim over
+the threshold takes it: that source is read by the claiming protocol alone,
+with no classifier, no decoder waiting on a verdict and no channel decoders
+beside it. The pre-check has a budget, well under the 1.3 ms a core the
+classifier costs per burst, and is arithmetic on what the detector already
+measured.
+
+A wrong lock would swallow a band, so the node keeps each one's score: of the
+sources it claimed, how many the front end read something from. A lock below
+twice the floor loses confidence and gives up the sources it fits worst
+first; one that stays under the floor once it has been tested is dropped by
+name. The floor is a fifth, because a claim that reads nothing is ordinary
+rather than wrong: twelve of the twenty-nine visits of that handset decode
+and the other seventeen are real visits of the same link.
+
+What a lock deliberately does not carry is a schedule. ExpressLRS learns two
+bytes of the binding UID off the air and `hop_sequence` needs four, so the
+node knows where the handset will be and not when; the raster is enough to
+claim it.
+
 ### What a decoder can ask for
 
 A decoder knows things the detector that found it does not: that a control
 channel has just sent a call to another carrier, that the picture it is
 reading is the whole span. It holds one stream and cannot open another, so
 it asks, through `pipeline::Request` on the node's event stream:
-`Claim` a band (the camera, once locked), `OpenChannel` beside it (the TETRA
+`Claim` a band (the camera, once locked), `Lock` a transmitter it has learned
+(the ExpressLRS handset, once a packet of its link has decoded),
+`OpenChannel` beside it (the TETRA
 control channel, for a traffic carrier it was told about, kept for a minute
 after the last decode there and dropped when the control channel is
 forgotten), `Reshape` its own stream, `Release` itself, or `Retune`. The auto

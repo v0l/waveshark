@@ -67,6 +67,11 @@ pub enum Request {
     /// nothing else should be opened inside it: the runs in there are
     /// pieces of the thing already being read.
     Claim { lo_hz: f64, hi_hz: f64 },
+    /// This node has learned a transmitter well enough to recognise its
+    /// bursts from the detector's measurements alone, so a source it claims
+    /// can be handed straight to this protocol without being classified.
+    /// See [`crate::lock`].
+    Lock(crate::lock::Lock),
     /// Done here: whatever placed this node can drop it and let the band
     /// go.
     Release,

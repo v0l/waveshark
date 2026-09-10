@@ -3447,6 +3447,13 @@ fn describe(r: &pipeline::Request) -> String {
             format!("{:.4} to {:.4} MHz for itself", lo_hz / 1e6, hi_hz / 1e6)
         }
         Request::Release => "to be dropped".into(),
+        Request::Lock(l) => format!(
+            "the bursts of {} on {} channels {:.3} MHz apart from {:.4} MHz",
+            l.transmitter,
+            l.raster.count,
+            l.raster.step_hz / 1e6,
+            l.raster.start_hz / 1e6
+        ),
         Request::Retune { center_hz } => format!("a retune to {:.4} MHz", center_hz / 1e6),
     }
 }
