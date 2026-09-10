@@ -861,7 +861,7 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
         None => (String::new(), String::new()),
     };
     let broker = nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
-    Ok(nodes::Publish { broker, spaces: String::new() })
+    Ok(nodes::Publish { broker, spaces: session::DEFAULT_HA_SPACES.into() })
 }
 
 /// `8931` or `127.0.0.1:8931`, for the MCP server's address.
@@ -966,8 +966,9 @@ struct Args {
     #[arg(long, value_name = "BROKER", value_parser = parse_broker)]
     ha_broker: Option<nodes::Publish>,
 
-    /// Publish only these identity spaces, comma separated: `ism,wmbus` is a
-    /// house's own sensors and meters without the street's handsets
+    /// Publish only these identity spaces, comma separated. `ism,wmbus`, a
+    /// house's own sensors and meters, unless given; `all` for everything,
+    /// which on a Bluetooth band is every handset walking past
     #[arg(long, value_name = "SPACES")]
     ha_spaces: Option<String>,
     /// Serve MCP on this address, so an agent can drive this receiver:
@@ -1317,7 +1318,8 @@ fn main() -> eframe::Result<()> {
             args.gps.clone(),
             args.location,
             args.ha_broker.clone().map(|mut p| {
-                p.spaces = args.ha_spaces.clone().unwrap_or_default();
+                p.spaces =
+                    args.ha_spaces.clone().unwrap_or_else(|| session::DEFAULT_HA_SPACES.into());
                 p
             }),
             !args.no_dc,
@@ -1396,7 +1398,8 @@ fn main() -> eframe::Result<()> {
                 app.set_location(lat, lon);
             }
             if let Some(mut p) = args.ha_broker.clone() {
-                p.spaces = args.ha_spaces.clone().unwrap_or_default();
+                p.spaces =
+                    args.ha_spaces.clone().unwrap_or_else(|| session::DEFAULT_HA_SPACES.into());
                 app.publish_to(p);
             }
             #[cfg(feature = "mcp")]
