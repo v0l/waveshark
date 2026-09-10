@@ -131,9 +131,46 @@ fn secs(then: std::time::Instant, now: std::time::Instant) -> f64 {
     now.saturating_duration_since(then).as_secs_f64()
 }
 
+/// What an edit expects to be true of the graph once the receiver has
+/// rebuilt, so a refusal is reported rather than assumed to have worked.
+///
+/// A refused edit is handed back as the previous graph (`Status::patch`),
+/// which the interface adopts, so the check is simply whether the change is
+/// still there a rebuild later.
+pub(super) enum Expect {
+    Stage { id: u64, present: bool },
+    Link(crate::patch::Link),
+    Unlink((u64, usize)),
+    /// Undo, redo and reset: whatever came back is the answer.
+    Whatever,
+}
+
+/// An edit waiting for the rebuild that takes it.
+pub(super) struct PendingEdit {
+    reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
+    /// The revision the receiver had published when the edit was sent.
+    rev: u64,
+    /// When it was sent, so a refusal reported afterwards is this edit's and
+    /// not one left on screen from a minute ago.
+    sent: std::time::Instant,
+    until: std::time::Instant,
+    want: Expect,
+}
+
+/// How long an edit waits for the receiver to rebuild before it answers with
+/// what it can see. A rebuild is a few blocks; this is long enough for a wide
+/// span on a busy host and short enough to be an answer rather than a hang.
+const REBUILD_WAIT: std::time::Duration = std::time::Duration::from_millis(2500);
+
 impl App {
     /// Take everything an agent has queued since the last frame.
     pub(super) fn agent_serve(&mut self, ctx: &egui::Context) {
+        if self.agent.is_none() {
+            return;
+        }
+        // Before this frame's actions, so an edit is judged against the
+        // rebuild that followed it rather than one it caused.
+        self.agent_settle_edits();
         let Some(asks) = self.agent.as_ref() else { return };
         let jobs: Vec<Ask> = asks.try_iter().collect();
         for job in jobs {
@@ -146,9 +183,203 @@ impl App {
                 self.agent_shots.push(reply);
                 continue;
             }
-            let _ = reply.send(self.agent_apply(action, ctx));
+            self.agent_take(action, reply, ctx);
         }
         self.agent_deliver_shot(ctx);
+    }
+
+    /// One request: applied now, or drawn and left for the rebuild.
+    fn agent_take(
+        &mut self,
+        action: Action,
+        reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
+        ctx: &egui::Context,
+    ) {
+        if !self.agent_is_edit(&action) {
+            let _ = reply.send(self.agent_apply(action, ctx));
+            return;
+        }
+        match self.agent_draw(action) {
+            Ok(Some(want)) => self.agent_wait_for_rebuild(reply, want),
+            Ok(None) => {
+                let mut v = self.agent_patch();
+                v["note"] = json!("that changed nothing");
+                let _ = reply.send(Ok(v));
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e));
+            }
+        }
+    }
+
+    /// Hold an edit's reply until the receiver has rebuilt on it.
+    fn agent_wait_for_rebuild(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
+        want: Expect,
+    ) {
+        // Nothing is going to rebuild with no radio running. The edit is kept
+        // and goes on the graph the moment one starts, which is worth saying
+        // rather than waiting two seconds to say nothing.
+        if self.radio.is_none() {
+            let mut v = self.agent_patch();
+            v["note"] = json!("no radio is running: the edit is kept and applies when one starts");
+            let _ = reply.send(Ok(v));
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.agent_edits.push(PendingEdit {
+            reply,
+            rev: self.chain.patch_rev,
+            sent: now,
+            until: now + REBUILD_WAIT,
+            want,
+        });
+    }
+
+    /// Answer the edits whose rebuild has landed, and time out the rest.
+    fn agent_settle_edits(&mut self) {
+        if self.agent_edits.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let rev = self.chain.patch_rev;
+        let mut waiting = Vec::new();
+        for p in std::mem::take(&mut self.agent_edits) {
+            let built = rev != p.rev;
+            if !built && now < p.until {
+                waiting.push(p);
+                continue;
+            }
+            let held = self.agent_holds(&p.want);
+            let answer = if !built {
+                let mut v = self.agent_patch();
+                v["note"] = json!("the receiver has not rebuilt yet; this is the graph as it was");
+                Ok(v)
+            } else if held {
+                Ok(self.agent_patch())
+            } else {
+                // The graph that came back is not the one that was asked
+                // for, which is what a refusal looks like from here. The
+                // receiver says why in `refused`, which the drain has
+                // already put where the banner reads it.
+                let said = self
+                    .err
+                    .clone()
+                    .filter(|_| self.err_at.is_some_and(|at| at >= p.sent));
+                Err(said.unwrap_or_else(|| {
+                    "the receiver refused the edit and put the last graph back".into()
+                }))
+            };
+            let _ = p.reply.send(answer);
+        }
+        self.agent_edits = waiting;
+    }
+
+    /// Whether the graph now running still holds what an edit asked for.
+    fn agent_holds(&self, want: &Expect) -> bool {
+        let p = &self.chain.patch;
+        match want {
+            Expect::Stage { id, present } => p.stage(*id).is_some() == *present,
+            Expect::Link(l) => p.links().contains(l),
+            Expect::Unlink(to) => p.feeding(*to).is_none(),
+            Expect::Whatever => true,
+        }
+    }
+
+    fn agent_is_edit(&self, action: &Action) -> bool {
+        matches!(
+            action,
+            Action::AddStage(_)
+                | Action::RemoveStage(_)
+                | Action::Connect(_)
+                | Action::Disconnect(_)
+                | Action::UndoEdit
+                | Action::RedoEdit
+                | Action::ResetGraph
+        )
+    }
+
+    /// Change the shape of the graph, and say what the change expects to see
+    /// once the receiver has rebuilt on it. `Ok(None)` where the drawing came
+    /// out the same, which is an answer rather than a wait for a rebuild that
+    /// is not coming.
+    ///
+    /// The edit goes through `ChainState::edit`, which is the route the chain
+    /// view uses: it keeps the graph for undo, diffs it against the graph the
+    /// receiver drew, sends the difference and writes it out.
+    fn agent_draw(&mut self, action: Action) -> Result<Option<Expect>, String> {
+        use crate::patch::{Link, Source};
+        let before = self.chain.patch.clone();
+        let want = match action {
+            Action::AddStage(a) => {
+                if !crate::chain::registry().contains(&a.kind) {
+                    return Err(format!(
+                        "no stage kind called {:?}. list_stage_kinds has them all",
+                        a.kind
+                    ));
+                }
+                let mut made = 0;
+                self.chain.edit(&mut self.cmds, |p| made = p.add(&a.kind));
+                Expect::Stage { id: made, present: true }
+            }
+            Action::RemoveStage(a) => {
+                self.agent_stage_exists(a.stage)?;
+                self.chain.edit(&mut self.cmds, |p| p.remove(a.stage));
+                Expect::Stage { id: a.stage, present: false }
+            }
+            Action::Connect(a) => {
+                let from = match a.source {
+                    args::Tap::Span => Source::Span,
+                    args::Tap::Stage { id, port } => {
+                        self.agent_stage_exists(id)?;
+                        Source::Stage(id, port)
+                    }
+                };
+                self.agent_stage_exists(a.to_stage)?;
+                let to = (a.to_stage, a.to_port);
+                self.chain.edit(&mut self.cmds, |p| p.connect(from, to));
+                if self.chain.patch.feeding(to) != Some(from) {
+                    return Err(
+                        "the patch would not take that wire: a stage cannot feed itself, and \
+                         the receiver's own head is a source rather than a stage to read from"
+                            .into(),
+                    );
+                }
+                Expect::Link(Link { from, to })
+            }
+            Action::Disconnect(a) => {
+                self.agent_stage_exists(a.stage)?;
+                let to = (a.stage, a.port);
+                self.chain.edit(&mut self.cmds, |p| p.disconnect(to));
+                Expect::Unlink(to)
+            }
+            Action::UndoEdit => {
+                self.chain.undo(&mut self.cmds);
+                Expect::Whatever
+            }
+            Action::RedoEdit => {
+                self.chain.redo(&mut self.cmds);
+                Expect::Whatever
+            }
+            Action::ResetGraph => {
+                let base = self.chain.base.clone();
+                self.chain.edit(&mut self.cmds, |p| *p = base);
+                Expect::Whatever
+            }
+            _ => return Ok(None),
+        };
+        Ok((self.chain.patch != before).then_some(want))
+    }
+
+    /// A wire and a deletion both name a stage, and naming one that is not
+    /// there does nothing at all, which from an agent's side is the same call
+    /// as one that worked.
+    fn agent_stage_exists(&self, id: u64) -> Result<(), String> {
+        if crate::patch::builtin::is(id) || self.chain.patch.stage(id).is_some() {
+            return Ok(());
+        }
+        Err(format!("no stage {id} in the patch. `patch` lists what is there"))
     }
 
     /// Hand the image to whoever asked for one, once egui has taken it.
@@ -212,6 +443,20 @@ impl App {
             Action::Tracks(a) => Ok(self.agent_tracks(a.limit.unwrap_or(50))),
             Action::Satellites(a) => self.agent_satellites(a.limit.unwrap_or(20)),
             Action::Chain => Ok(self.agent_chain()),
+            Action::Patch => Ok(self.agent_patch()),
+            Action::StageKinds => Ok(agent_stage_kinds()),
+            Action::Manual(a) => {
+                self.chain.set_manual(a.on, &mut self.cmds);
+                Ok(ok())
+            }
+            // Drawn rather than applied; `agent_draw` has them.
+            Action::AddStage(_)
+            | Action::RemoveStage(_)
+            | Action::Connect(_)
+            | Action::Disconnect(_)
+            | Action::UndoEdit
+            | Action::RedoEdit
+            | Action::ResetGraph => Err("an edit is answered by the rebuild that takes it".into()),
             Action::Scanners => Ok(self.agent_scanners()),
             Action::Memory => Ok(self.agent_memory()),
             Action::Protocols => Ok(agent_protocols()),
@@ -909,6 +1154,7 @@ impl App {
             .map(|n| {
                 json!({
                     "id": n.id.0,
+                    "stage": n.tag,
                     "label": n.label,
                     "kind": n.kind,
                     "sink": n.sink,
@@ -953,6 +1199,66 @@ impl App {
         })
     }
 
+    /// The graph as something to edit: stages by the id an edit names them
+    /// by, the wires between them, and what the operator has changed.
+    fn agent_patch(&self) -> Value {
+        let p = &self.chain.patch;
+        let running = self.chain.topo.as_ref();
+        let stages: Vec<Value> = p
+            .stages()
+            .iter()
+            .map(|s| {
+                let node = running.and_then(|t| t.nodes.iter().find(|n| n.tag == Some(s.id)));
+                json!({
+                    "stage": s.id,
+                    "kind": s.kind,
+                    "derived": crate::patch::Patch::is_derived(s.id),
+                    "label": node.map(|n| n.label.clone()),
+                    "node": node.map(|n| n.id.0),
+                    "inputs": node.map(|n| n.inputs.len()),
+                    "outputs": node.map(|n| n.outputs.len()),
+                    "tail": p.is_tail(s.id),
+                    "settings": s
+                        .settings
+                        .iter()
+                        .map(|(k, v)| json!({ "name": k, "value": setting_value(v) }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let links: Vec<Value> = p
+            .links()
+            .iter()
+            .map(|l| {
+                let from = match l.from {
+                    crate::patch::Source::Span => json!({ "from": "span" }),
+                    crate::patch::Source::Stage(id, port) => {
+                        json!({ "from": "stage", "id": id, "port": port })
+                    }
+                };
+                json!({ "source": from, "to_stage": l.to.0, "to_port": l.to.1 })
+            })
+            .collect();
+        let e = &self.chain.edits;
+        json!({
+            "manual": self.chain.edit.manual,
+            "stages": stages,
+            "links": links,
+            "edited": !e.is_empty(),
+            "edits": {
+                "added": e.stages.iter().map(|s| s.id).collect::<Vec<_>>(),
+                "removed": e.removed,
+                "wires": e.links.len(),
+                "unwired": e.unlinked.len(),
+                "settings": e.settings.len(),
+            },
+            "can_undo": !self.chain.undo.is_empty(),
+            "can_redo": !self.chain.redo.is_empty(),
+            "head": crate::patch::builtin::HEAD,
+            "span": crate::patch::builtin::SPAN,
+        })
+    }
+
     fn agent_scanners(&self) -> Value {
         let rows: Vec<Value> = self
             .scanners
@@ -992,6 +1298,39 @@ impl App {
     }
 }
 
+/// A stage's setting, as it was asked for rather than as the node holds it.
+/// No `Param` beside it here, so a choice is its index.
+fn setting_value(v: &pipeline::param::ParamValue) -> Value {
+    use pipeline::param::ParamValue as V;
+    match v {
+        V::Float(v) => json!(v),
+        V::Int(v) => json!(v),
+        V::Bool(v) => json!(v),
+        V::Text(v) => json!(v),
+        V::Choice(i) => json!(i),
+    }
+}
+
+/// Every stage that can be put in the graph, from the registry rather than
+/// from a list kept here, so one added to the build appears without this
+/// being touched.
+fn agent_stage_kinds() -> Value {
+    let reg = crate::chain::registry();
+    let mut kinds: Vec<Value> = reg
+        .list()
+        .map(|d| {
+            json!({
+                "kind": d.name,
+                "summary": d.summary,
+                "category": d.category.label(),
+                "feeds_packet_bus": d.feeds_bus,
+            })
+        })
+        .collect();
+    kinds.sort_by(|a, b| a["kind"].as_str().cmp(&b["kind"].as_str()));
+    json!({ "kinds": kinds })
+}
+
 fn agent_protocols() -> Value {
     let rows: Vec<Value> = nodes::protocol::all()
         .iter()
@@ -1028,8 +1367,13 @@ mod tests {
         egui::Context::default()
     }
 
+    /// The same route a request takes in a frame, so a test exercises the
+    /// routing as well as the work: an edit goes through the patch and an
+    /// action through `agent_apply`.
     fn call(a: &mut App, action: Action) -> Result<Value, String> {
-        a.agent_apply(action, &ctx())
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        a.agent_take(action, tx, &ctx());
+        rx.try_recv().expect("answered in the same frame, since no radio is running")
     }
 
     fn logged(a: &mut App, model: &'static str, ago_s: f64, freq: f64) {
@@ -1278,5 +1622,98 @@ mod tests {
         assert_eq!(v["running"], false);
         assert_eq!(v["channels_open"], 0);
         assert!(v["device"].is_null());
+    }
+
+    /// Drawing a graph: add, wire, and take it apart again, counted at every
+    /// step. With no radio running there is no rebuild to wait for, so each
+    /// call answers with the patch it produced.
+    #[test]
+    fn an_agent_can_draw_a_graph() {
+        let mut a = app();
+        let before = a.chain.patch.stages().len();
+        let mixer = call(&mut a, Action::AddStage(args::StageKind { kind: "mixer".into() }))
+            .unwrap();
+        assert_eq!(mixer["stages"].as_array().unwrap().len(), before + 1);
+        let mix_id = a.chain.patch.stages().last().unwrap().id;
+        call(&mut a, Action::AddStage(args::StageKind { kind: "decimate".into() })).unwrap();
+        let dec_id = a.chain.patch.stages().last().unwrap().id;
+        assert_ne!(mix_id, dec_id);
+
+        // The span into the mixer, the mixer into the decimator.
+        call(&mut a, Action::Connect(args::Connect {
+            source: args::Tap::Span,
+            to_stage: mix_id,
+            to_port: 0,
+        }))
+        .unwrap();
+        let v = call(&mut a, Action::Connect(args::Connect {
+            source: args::Tap::Stage { id: mix_id, port: 0 },
+            to_stage: dec_id,
+            to_port: 0,
+        }))
+        .unwrap();
+        assert_eq!(v["links"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            a.chain.patch.feeding((dec_id, 0)),
+            Some(crate::patch::Source::Stage(mix_id, 0))
+        );
+        // What the operator changed, which is what is sent and saved.
+        assert_eq!(a.chain.edits.stages.len(), 2);
+        assert_eq!(a.chain.edits.links.len(), 2);
+
+        // A stage cannot feed itself, and the patch says so rather than
+        // quietly drawing nothing.
+        assert!(call(&mut a, Action::Connect(args::Connect {
+            source: args::Tap::Stage { id: dec_id, port: 0 },
+            to_stage: dec_id,
+            to_port: 0,
+        }))
+        .is_err());
+        // Neither can a wire name a stage that is not there.
+        assert!(call(&mut a, Action::Connect(args::Connect {
+            source: args::Tap::Span,
+            to_stage: dec_id + 4096,
+            to_port: 0,
+        }))
+        .is_err());
+        assert!(call(&mut a, Action::AddStage(args::StageKind { kind: "wobbulator".into() }))
+            .is_err());
+        assert!(call(&mut a, Action::RemoveStage(args::StageId { stage: dec_id + 4096 })).is_err());
+
+        // Deleting takes the wires with it: guessing that the stage after it
+        // wanted the stage before it is how an edit builds something else.
+        call(&mut a, Action::RemoveStage(args::StageId { stage: mix_id })).unwrap();
+        assert!(a.chain.patch.stage(mix_id).is_none());
+        assert_eq!(a.chain.patch.links().len(), 0);
+
+        // And it goes back.
+        let v = call(&mut a, Action::UndoEdit).unwrap();
+        assert_eq!(v["links"].as_array().unwrap().len(), 2);
+        assert!(a.chain.patch.stage(mix_id).is_some());
+
+        call(&mut a, Action::ResetGraph).unwrap();
+        assert_eq!(a.chain.patch.stages().len(), before);
+        assert!(a.chain.edits.is_empty());
+    }
+
+    /// An edit that changes nothing says so rather than waiting for a
+    /// rebuild that is not coming.
+    #[test]
+    fn an_edit_that_changes_nothing_says_so() {
+        let mut a = app();
+        let v = call(&mut a, Action::UndoEdit).unwrap();
+        assert_eq!(v["note"], "that changed nothing");
+    }
+
+    /// The stage list is the registry, not a copy of it.
+    #[test]
+    fn every_stage_in_the_registry_can_be_placed() {
+        let v = agent_stage_kinds();
+        let kinds = v["kinds"].as_array().unwrap();
+        assert_eq!(kinds.len(), crate::chain::registry().list().count());
+        assert!(kinds.iter().any(|k| k["kind"] == "mixer"));
+        for k in kinds {
+            assert!(!k["summary"].as_str().unwrap().is_empty(), "{k}");
+        }
     }
 }

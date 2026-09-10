@@ -137,6 +137,95 @@ impl Tools {
         self.ask(Action::Chain).await
     }
 
+    #[tool(
+        description = "The graph as something to edit: every stage with the id an edit names it \
+                       by, which are the receiver's own until you add one, every wire, and what \
+                       the operator has changed. `chain` is the same graph as it is running; this \
+                       is what `add_stage`, `connect` and `remove_stage` work on."
+    )]
+    async fn patch(&self) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::Patch).await
+    }
+
+    #[tool(
+        description = "Every kind of stage that can be added to the graph, with what each is for."
+    )]
+    async fn list_stage_kinds(&self) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::StageKinds).await
+    }
+
+    #[tool(
+        description = "Add a stage to the graph, unconnected. Wire it up with `connect`. Answers \
+                       once the receiver has rebuilt, so a stage that will not build is reported \
+                       rather than assumed."
+    )]
+    async fn add_stage(
+        &self,
+        Parameters(a): Parameters<args::StageKind>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::AddStage(a)).await
+    }
+
+    #[tool(
+        description = "Delete a stage and every wire that touched it. A stage the receiver drew \
+                       for itself can be deleted too; it comes back if the plan draws it again."
+    )]
+    async fn remove_stage(
+        &self,
+        Parameters(a): Parameters<args::StageId>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::RemoveStage(a)).await
+    }
+
+    #[tool(
+        description = "Draw a wire: feed one stage's input from the span or from another stage's \
+                       output. An input takes one producer, so this replaces what was there."
+    )]
+    async fn connect(
+        &self,
+        Parameters(a): Parameters<args::Connect>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::Connect(a)).await
+    }
+
+    #[tool(description = "Take the wire off one input, leaving it unfed.")]
+    async fn disconnect(
+        &self,
+        Parameters(a): Parameters<args::Disconnect>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::Disconnect(a)).await
+    }
+
+    #[tool(description = "Take back the last graph edit.")]
+    async fn undo_edit(&self) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::UndoEdit).await
+    }
+
+    #[tool(description = "Put back the edit that was last taken away.")]
+    async fn redo_edit(&self) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::RedoEdit).await
+    }
+
+    #[tool(
+        description = "Throw away every edit and go back to the graph the receiver draws for \
+                       itself from the dial, the scanner table and the strip."
+    )]
+    async fn reset_graph(&self) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::ResetGraph).await
+    }
+
+    #[tool(
+        description = "Unlock the graph in the window so a person can drag and wire it. Edits \
+                       made through these tools apply either way; this only changes what the \
+                       chain view lets a hand do."
+    )]
+    async fn set_manual(
+        &self,
+        Parameters(a): Parameters<args::Switch>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        self.ask(Action::Manual(a)).await
+    }
+
     #[tool(description = "The scanner table: which front end the receiver places on which frequency.")]
     async fn scanners(&self) -> Result<Json<serde_json::Value>, ErrorData> {
         self.ask(Action::Scanners).await
@@ -361,7 +450,13 @@ impl ServerHandler for Tools {
              across the whole span instead, which is how a band is swept.\n\n\
              Levels are dBFS and are only meaningful against the noise floor `spectrum` \
              reports. Frequencies are MHz in, hertz out. This receiver does not transmit \
-             through these tools.",
+             through these tools.\n\n\
+             The graph can be drawn by hand. `patch` lists the stages and wires with the ids an \
+             edit names them by, `list_stage_kinds` is what can be added, and `add_stage`, \
+             `connect`, `disconnect` and `remove_stage` change it. What you change is kept as a \
+             difference from the graph the receiver draws for itself, so it survives a retune. \
+             Ids from `patch` are not the node ids `chain` reports; `chain` carries the patch id \
+             beside each node as `stage`.",
         )
     }
 }

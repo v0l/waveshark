@@ -152,8 +152,9 @@ serves the receiver over the Model Context Protocol at
 `http://127.0.0.1:8931/mcp`. It is the receiver on the screen, not a second
 one: what the agent tunes, opens or switches on appears in the window, and it
 can take a picture of that window to see what it did. It can read the
-spectrum, the packets, the calls, the transcript and the tracker, and it can
-change anything in the signal chain. It cannot transmit.
+spectrum, the packets, the calls, the transcript and the tracker, change
+anything in the signal chain, and draw the chain itself: add stages, wire
+them and take them out again. It cannot transmit.
 [`docs/mcp.md`](docs/mcp.md) has the tools and the reasoning.
 
 ## Command line
