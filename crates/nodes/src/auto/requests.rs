@@ -1,9 +1,38 @@
 //! What the decoders ask for, and what is done about it.
 
+use common::SourceId;
 use pipeline::event::{Event, Request};
 
+use super::place::Slot;
 use super::AutoNode;
 use crate::protocol::{self, Stickiness};
+
+/// Where the front end that asked was reading.
+///
+/// A source by the id the detector gave it, and not by its position in the
+/// slot list: a block that closes a source compacts that list (`slots.retain`)
+/// before the requests the block produced are answered, so an index taken when
+/// the request was made can name a different source by then, or one past the
+/// end. Every source-placed front end asks on behalf of its own source, so the
+/// id is what it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AskAt {
+    /// A front end over the span rather than over one source.
+    Span,
+    Source(SourceId),
+}
+
+impl AskAt {
+    /// The slot it is reading, where that source is still open. Gone is not
+    /// an error: the source closed in this block, and the front end that
+    /// asked went with it.
+    fn slot(self, slots: &[Slot]) -> Option<usize> {
+        match self {
+            AskAt::Span => None,
+            AskAt::Source(id) => slots.iter().position(|s| s.id == id),
+        }
+    }
+}
 
 impl AutoNode {
     /// Whether what the span-wide decoders have claimed covers the whole
@@ -53,17 +82,16 @@ impl AutoNode {
     /// Answer what a decoder asked, and return what only the receiver can
     /// answer.
     ///
-    /// `slot` is the source the decoder is on, or None for one over the
-    /// span, and `front` is the front end that asked, which the node knows
-    /// because it ran it. A claim closes the detector out of the band; a
-    /// channel asked for is remembered the way one that decoded is, tied to
-    /// the asker; a reshape remembers the wider channel and closes the
-    /// source it was cut from, so the remembered one takes over on the next
-    /// block; a release drops the decoder and lets the band go. Anything
-    /// that needs the dial is handed back.
+    /// `at` is what the decoder was reading, and `front` is the front end
+    /// that asked, which the node knows because it ran it. A claim closes the
+    /// detector out of the band; a channel asked for is remembered the way one
+    /// that decoded is, tied to the asker; a reshape remembers the wider
+    /// channel and closes the source it was cut from, so the remembered one
+    /// takes over on the next block; a release drops the decoder and lets the
+    /// band go. Anything that needs the dial is handed back.
     pub(super) fn answer(
         &mut self,
-        slot: Option<usize>,
+        at: AskAt,
         front: &'static str,
         r: Request,
         out: &mut Vec<Event>,
@@ -72,7 +100,8 @@ impl AutoNode {
         let half = self.input_bw / 2.0;
         let c0 = self.center.as_f64();
         let in_span = |hz: f64, w: f64| (hz - c0).abs() + w / 2.0 <= half;
-        let asker = slot.map(|k| self.slots[k].center_hz.as_f64());
+        let k = at.slot(&self.slots);
+        let asker = k.map(|k| self.slots[k].center_hz.as_f64());
         let name = protocol::by_id(front).map(|p| p.id());
         let hold_of = |name: &str| match protocol::by_id(name).map(|p| p.stickiness()) {
             Some(Stickiness::Latch { hold_s }) => hold_s,
@@ -80,8 +109,8 @@ impl AutoNode {
         };
         match r {
             Request::Claim { lo_hz, hi_hz } => {
-                match slot {
-                    None => {
+                match at {
+                    AskAt::Span => {
                         for m in self.wide.iter_mut().filter(|m| m.name == front) {
                             let (mut lo, mut hi) = (lo_hz, hi_hz);
                             if let Some((a, b)) = m.placed_band {
@@ -93,7 +122,14 @@ impl AutoNode {
                         self.apply_locked();
                         self.close_sources_inside(lo_hz, hi_hz);
                     }
-                    Some(_) => {
+                    // A claim from a decoder a source carried. It is
+                    // remembered whether or not that source is still open:
+                    // a control channel that named a carrier and then went
+                    // quiet named something real. With the asker gone the
+                    // channel has no parent, so it lives out its own hold
+                    // rather than being given back with a channel nobody is
+                    // reading.
+                    AskAt::Source(_) => {
                         if let Some(name) = name {
                             let (hz, w) = ((lo_hz + hi_hz) / 2.0, hi_hz - lo_hz);
                             if let Some(e) = self.remember(name, hz, w) {
@@ -136,7 +172,7 @@ impl AutoNode {
                 None
             }
             Request::Reshape { lo_hz, hi_hz } => {
-                let (Some(k), Some(name)) = (slot, name) else {
+                let (Some(k), Some(name)) = (k, name) else {
                     return None;
                 };
                 let (hz, w) = ((lo_hz + hi_hz) / 2.0, hi_hz - lo_hz);
@@ -157,13 +193,18 @@ impl AutoNode {
                 None
             }
             Request::Release => {
-                let Some(k) = slot else {
-                    // A span-wide decoder giving its band back: the detector
-                    // and the other span-wide decoders have it again.
-                    for m in self.wide.iter_mut().filter(|m| m.name == front) {
-                        m.band = None;
+                let Some(k) = k else {
+                    if at == AskAt::Span {
+                        // A span-wide decoder giving its band back: the
+                        // detector and the other span-wide decoders have it
+                        // again.
+                        for m in self.wide.iter_mut().filter(|m| m.name == front) {
+                            m.band = None;
+                        }
+                        self.apply_locked();
                     }
-                    self.apply_locked();
+                    // A release from a source that has closed has nothing
+                    // left to give back: the decoder went with the source.
                     return None;
                 };
                 self.slots[k].members.retain(|m| m.name != front);
