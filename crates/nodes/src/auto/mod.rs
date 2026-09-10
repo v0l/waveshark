@@ -419,6 +419,7 @@ impl Node for AutoNode {
         outputs: &mut [Payload],
         c: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        let __tall = Instant::now();
         let iq = inputs[0].as_iq().unwrap_or(&[]);
         if !self.watch.ready() {
             return Ok(());
@@ -501,7 +502,9 @@ impl Node for AutoNode {
             .wide
             .iter()
             .any(|m| m.keeps_samples || m.protocol.is_some_and(|p| p.wakes_on() != Wake::Always));
+        let __tr = Instant::now();
         self.wide_ring.push(iq);
+        let ring_us = __tr.elapsed().as_micros() as u64;
         // What the detector has open, which is what a gated span-wide front
         // end runs on, and how much of the lead-in it missed getting there.
         let detecting = self.watch.detecting();
@@ -565,6 +568,8 @@ impl Node for AutoNode {
             },
         );
         let fronts_us = t_fronts.elapsed().as_micros() as u64;
+        let tail_us = (__tall.elapsed().as_micros() as u64)
+            .saturating_sub(detect_us + extract_us + fronts_us + ring_us);
         self.phase_sum.clear();
         // What was asked, by the source it was asked on and the front end
         // that asked. Answered once the slots have settled.
@@ -591,6 +596,8 @@ impl Node for AutoNode {
         self.phase("extract bank", bank_feed_us, block_s);
         self.phase("extract catch-up", bank_start_us, block_s);
         self.phase("fronts", fronts_us, block_s);
+        self.phase("wide ring", ring_us, block_s);
+        self.phase("tail", tail_us, block_s);
         let sums: Vec<(&'static str, u64)> = self.phase_sum.iter().map(|(n, u)| (*n, *u)).collect();
         for (name, us) in sums {
             self.phase(&format!("{name} cpu"), us, block_s);

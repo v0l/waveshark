@@ -90,8 +90,10 @@ jobs:
       # The toolkit, where the job builds for a card. Network on Linux
       # installs only the packages named; the Windows installer takes
       # component names instead. The runner has no card, so the compute
-      # capability is given: 7.5 is Turing, and PTX for it is finished by
-      # the driver on anything since.
+      # capability is given: 8.0 is Ampere, and PTX for it is finished by
+      # the driver on anything since. Not 7.5: candle's shim for pre-Ampere
+      # half precision collides with the same functions in CUDA 12.8's own
+      # headers, and the build stops in compatibility.cuh.
       - uses: Jimver/cuda-toolkit@v0.2.36
         if: matrix.cuda && runner.os == 'Linux'
         with:
@@ -110,7 +112,7 @@ jobs:
       - name: Compute capability for the kernels
         if: matrix.cuda
         shell: bash
-        run: echo "CUDA_COMPUTE_CAP=75" >> "$GITHUB_ENV"
+        run: echo "CUDA_COMPUTE_CAP=80" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
