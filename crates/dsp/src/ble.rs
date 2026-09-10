@@ -48,6 +48,7 @@ use crate::gate::{ChannelGate, SpanGate};
 use crate::mixer::Mixer;
 use crate::pulse::LevelGate;
 use common::C32;
+use rayon::prelude::*;
 
 /// Symbol rate. Uncoded BLE, which is the only rate advertising uses on the
 /// primary channels.
@@ -609,15 +610,30 @@ impl BleDetector {
         self.chans.iter().map(|c| c.channel).collect()
     }
 
+    /// Read every lit channel, appending what each one heard.
+    ///
+    /// The channels are independent, so they run in parallel: each holds its
+    /// own mixer, filter and gate, and nothing is shared but the samples they
+    /// all read. Serial, the two channels a 61.44 MS/s span holds were 1.15 ms
+    /// of a 2.13 ms block on one thread while the Wi-Fi front end beside them
+    /// had the other three.
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<BleFrame>) {
         self.span.measure(iq);
-        for c in &mut self.chans {
-            if !c.gate.awake(&self.span) {
-                c.doze(iq.len());
-                continue;
-            }
-            c.process(iq, &self.cfg, out);
-        }
+        let (cfg, span) = (&self.cfg, &self.span);
+        let heard: Vec<Vec<BleFrame>> = self
+            .chans
+            .par_iter_mut()
+            .map(|c| {
+                let mut mine = Vec::new();
+                if !c.gate.awake(span) {
+                    c.doze(iq.len());
+                    return mine;
+                }
+                c.process(iq, cfg, &mut mine);
+                mine
+            })
+            .collect();
+        out.extend(heard.into_iter().flatten());
     }
 
     pub fn reset(&mut self) {
