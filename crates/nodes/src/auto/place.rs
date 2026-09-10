@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use super::evidence::Evidence;
+use super::locks::{Claimed, LockId};
 use super::member::Ring;
 use super::{AutoNode, Member};
 use crate::protocol::{self, Origin, Placed, Protocol};
@@ -37,6 +38,9 @@ pub(super) struct Slot {
     /// A channel remembered from earlier, which runs the one decoder that
     /// earned it and nothing else.
     pub(super) remembered: bool,
+    /// The lock that claimed this source, where one did, so what the front
+    /// end it was handed to made of it is scored against that lock.
+    pub(super) locked: Option<LockId>,
     /// Where the stream sits in the span, as a decoder placed on it that has
     /// to be timed from another stream is told.
     pub(super) origin: Origin,
@@ -186,7 +190,7 @@ impl AutoNode {
     ///
     /// A channel this node remembered runs the one front end that earned it;
     /// anything else gets what [`found`] says a source of that shape gets.
-    pub(super) fn open(&self, b: &SourceBlock) -> Result<Slot> {
+    pub(super) fn open(&self, b: &SourceBlock, claimed: Option<Claimed>) -> Result<Slot> {
         let mut spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
         spec.bandwidth = b.bandwidth_hz.min(b.rate);
         // Where this stream sits in the span, so a decoder that has to be
@@ -225,9 +229,51 @@ impl AutoNode {
                 tried: Vec::new(),
                 verdicts_seen: 0,
                 remembered: true,
+                locked: None,
                 origin,
                 ring: Ring::new(spec),
                 evidence: None,
+            });
+        }
+        // A source a lock claimed is that transmitter's, and the front end
+        // that learned it is the only thing built on it: no classifier, no
+        // decoder waiting on a verdict, no channel decoders whose width it
+        // could be. It is built for the channel the lock names and told what
+        // that front end learned, so it starts knowing the link rather than
+        // recovering it again from the first packets of every visit.
+        //
+        // The detector's own measurement still rides along, as it does on a
+        // source too wide to classify: a burst that reads is a row about
+        // what was said, and one that does not is still a row saying
+        // something transmitted there. It costs no signal processing.
+        if let Some(c) = claimed {
+            let p = protocol::by_id(c.protocol)
+                .ok_or_else(|| common::Error::other(format!("no protocol {:?}", c.protocol)))?;
+            let at = Placed {
+                center_hz: b.center_hz as f64,
+                width_hz: c.width_hz,
+                rate: b.rate,
+                snr_db: b.snr_db,
+                origin: Some(origin),
+            };
+            let m = Member::place(p, spec, at, &c.settings, &self.reg)?;
+            return Ok(Slot {
+                id: b.id,
+                center_hz: Hz(b.center_hz),
+                members: vec![m],
+                heard: false,
+                spec,
+                signal_hz: b.signal_hz,
+                tried: Vec::new(),
+                verdicts_seen: 0,
+                remembered: false,
+                locked: Some(c.id),
+                origin,
+                ring: Ring::new(spec),
+                evidence: Some(
+                    Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
+                        .from_sample(b.start_sample),
+                ),
             });
         }
         let (members, evidence) = found(b, spec, origin, &self.reg)?;
@@ -241,6 +287,7 @@ impl AutoNode {
             tried: Vec::new(),
             verdicts_seen: 0,
             remembered: false,
+            locked: None,
             origin,
             ring: Ring::new(spec),
             evidence,
@@ -435,6 +482,7 @@ mod tests {
             tried: Vec::new(),
             verdicts_seen: 0,
             remembered: false,
+            locked: None,
             origin: Origin { span_sample: 0, span_rate_hz: rate },
             ring: Ring::new(spec),
             evidence: None,

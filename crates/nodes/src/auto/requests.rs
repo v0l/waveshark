@@ -174,6 +174,25 @@ impl AutoNode {
                 }
                 None
             }
+            Request::Lock(lock) => {
+                // Held under the name of the front end that asked, not
+                // under any name the lock gives itself, so a node cannot
+                // hand the band to a protocol it is not.
+                let Some(name) = name else {
+                    out.push(warn(format!(
+                        "{front} published a lock and is not a protocol this node knows"
+                    )));
+                    return None;
+                };
+                let transmitter = lock.transmitter.clone();
+                if self.locks.hold(name, lock).is_some() {
+                    out.push(warn(format!(
+                        "{name} has learned {transmitter}; its bursts are read by {name} alone \
+                         from here"
+                    )));
+                }
+                None
+            }
             Request::Retune { center_hz } => Some(Request::Retune { center_hz }),
         }
     }
