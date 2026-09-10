@@ -71,7 +71,7 @@ impl Protocol for FineOffsetWh1080 {
         let mut r = Report::new(self.name());
         r.crc_valid = Some(true);
         r.raw = b.to_vec();
-        r = r.int("station_id", device_id as i64);
+        r = r.int("station_id", device_id as i64).identified_by("station_id");
 
         match msg_format {
             0x0a => {
@@ -239,6 +239,7 @@ mod tests {
         let f = frame(196, 16.2, 89, 0, 0, 281, 8, false);
         let r = FineOffsetWh1080.decode(&BitBuffer::from_bytes(&f)).unwrap();
         assert_eq!(r.get("station_id"), Some(&Value::Int(196)));
+        assert_eq!(r.device.as_deref(), Some("196"), "the station is the device");
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(16.2)));
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(89)));
         assert_eq!(r.get("wind_direction_deg"), Some(&Value::Int(180)));

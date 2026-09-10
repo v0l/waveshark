@@ -3426,6 +3426,107 @@ pub(crate) mod tests {
         );
     }
 
+    /// An ISM sensor through the whole receiver and out to a broker.
+    ///
+    /// The publisher, the node and the packet bus each have tests of their
+    /// own; what none of them said is that a sensor heard by the live
+    /// receiver reaches a broker, which is the only thing an operator can
+    /// see. A socket that speaks enough MQTT to accept the connection stands
+    /// in for the broker, and what arrives on it is what Home Assistant
+    /// would read.
+    #[test]
+    fn a_sensor_heard_by_the_receiver_reaches_the_house() {
+        use std::io::{Read, Write};
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/fineoffset_wh1080_433.92M_250k.cu8");
+        if !p.exists() {
+            eprintln!("skipping: fineoffset_wh1080_433.92M_250k.cu8 absent, run testdata/fetch.sh");
+            return;
+        }
+        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, seen) = std::sync::mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("a connection");
+            let mut held = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = match sock.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                held.extend_from_slice(&chunk[..n]);
+                while let Some((kind, flags, body, used)) = nodes::mqtt_packet(&held) {
+                    held.drain(..used);
+                    match kind {
+                        1 => {
+                            if sock.write_all(&[0x20, 0x02, 0x00, 0x00]).is_err() {
+                                return;
+                            }
+                        }
+                        3 => {
+                            let tl = u16::from_be_bytes([body[0], body[1]]) as usize;
+                            let topic = String::from_utf8_lossy(&body[2..2 + tl]).to_string();
+                            let at = 2 + tl + if (flags >> 1) & 3 > 0 { 2 } else { 0 };
+                            let payload = String::from_utf8_lossy(&body[at..]).to_string();
+                            if tx.send((topic, payload)).is_err() {
+                                return;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let mut rx = replay_receiver(&buf, None).expect("a receiver");
+        let mut plan = replay_plan(&buf, false);
+        plan.settings.homeassistant = Some(nodes::Publish {
+            broker: nodes::Broker { port, ..nodes::Broker::new("127.0.0.1") },
+            spaces: "ism".into(),
+        });
+        rx.apply_settings(&plan);
+        let up = std::time::Instant::now();
+        while !rx.homeassistant_status().is_some_and(|s| s.connected)
+            && up.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let st = rx.homeassistant_status();
+        assert!(st.as_ref().is_some_and(|s| s.connected), "never connected: {st:?}");
+
+        let rows = replay_blocks(&mut rx, &buf);
+        assert!(rows.iter().any(|r| r.model == Some("Fineoffset-WHx080")), "{rows:?}");
+        let st = rx.homeassistant_status().unwrap();
+        assert_eq!(st.devices, 1, "{st:?}");
+        assert_eq!(st.dropped, 0, "{st:?}");
+
+        let mut got: Vec<(String, String)> = Vec::new();
+        while let Ok(m) = seen.recv_timeout(std::time::Duration::from_secs(2)) {
+            got.push(m);
+            if got.iter().any(|(t, _)| t.ends_with("/state")) {
+                break;
+            }
+        }
+        let topics: Vec<&str> = got.iter().map(|(t, _)| t.as_str()).collect();
+        let state = got
+            .iter()
+            .find(|(t, _)| {
+                t.starts_with("waveshark/ism_fineoffset_whx080/") && t.ends_with("/state")
+            })
+            .unwrap_or_else(|| panic!("no reading reached the broker: {topics:?}"));
+        assert!(state.1.contains("\"temperature_c\""), "{}", state.1);
+        assert!(
+            topics
+                .iter()
+                .any(|t| t.starts_with("homeassistant/sensor/waveshark_ism_fineoffset_whx080_")
+                    && t.ends_with("/temperature_c/config")),
+            "{topics:?}"
+        );
+    }
+
     /// The M17 capture: three seconds of a busy 433 MHz band with an
     /// OpenRTX handheld on the calling channel, recorded 550 kHz off centre.
     fn m17_fixture() -> Option<common::IqBuf> {

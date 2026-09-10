@@ -308,6 +308,13 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A Fine Offset weather station and a Hanshow shelf label are devices in
+  the device database and in Home Assistant. Both name their transmitter in
+  a field not called `id`, so neither counted as identified, and a house
+  whose only sensor was a WH1080 published nothing at all.
+- Pointing the Home Assistant feed at a broker connects at once rather
+  than after the five seconds the connection thread was sleeping between
+  tries.
 - A source the receiver opens from its history no longer arrives all at
   once. A signal that had sat below the opening threshold for a while was
   handed to its decoders from the moment it was first seen, half a second
