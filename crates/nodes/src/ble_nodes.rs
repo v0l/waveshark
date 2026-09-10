@@ -253,12 +253,22 @@ impl Protocol for Ble {
         }
         Some(ble_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
+    /// It cuts its three advertising channels out of the span itself, rather
+    /// than taking them from the bank the extractor channelizes the span
+    /// with.
+    ///
+    /// Measured against what the bank offers: its channels are
+    /// [`dsp::source::BANK_CHANNEL_HZ`] apart at twice that rate, so one is
+    /// 1 MHz wide at 2 MS/s. An advertising channel is 2 MHz wide and this
+    /// decoder refuses under 4 MS/s, since at 1 Mbit/s the bit centres have
+    /// to be found in the samples themselves and four a symbol is where the
+    /// packet count stops moving. So a bank channel is half the width and
+    /// half the rate it needs, and a pair of them summed is one channel's
+    /// worth of flat response, not two. Widening the bank to suit would
+    /// widen it for every source cut from it.
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
-            // At 1 Mbit/s the bit centres have to be found in the samples
-            // themselves, and four a symbol is where the packet count stops
-            // moving.
             min_rate_hz: 4_000_000.0,
             feed_rate_hz: 8_000_000.0,
             span_wide: true,
