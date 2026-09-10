@@ -40,6 +40,7 @@ use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use survey::{Db, Report, Sighting};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// Which decoded field carries the transmitter's identity, per protocol
 /// prefix, and what to call that identity space in the database.
@@ -57,6 +58,26 @@ use survey::{Db, Report, Sighting};
 pub fn identity(d: &Decoded) -> Option<(String, String)> {
     let who = d.identity.as_ref()?;
     Some((who.space.clone(), who.id.clone()))
+}
+
+/// One reception, as every consumer of the bus records it: when, where the
+/// receiver was, and what the packet was heard at.
+///
+/// Shared by the three nodes that submit sightings. They had a copy each,
+/// byte for byte the same, which is three places to fix when the evidence
+/// moves. The measurement is the packet's, because the packet is what was
+/// received; the decode is only asked which channel it named.
+pub fn sighting(p: &Packet, d: &Decoded, fix: Option<gps::Fix>) -> Sighting {
+    Sighting {
+        at_us: p.at_us,
+        lat: fix.map(|f| f.lat),
+        lon: fix.map(|f| f.lon),
+        alt_m: fix.and_then(|f| f.alt_m),
+        accuracy_m: fix.and_then(|f| f.accuracy_m()),
+        rssi_dbfs: p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs()),
+        snr_db: p.snr_db().is_finite().then_some(p.snr_db()),
+        center_hz: d.center.0,
+    }
 }
 
 /// A name a device gave for itself, where its decode carries one.
@@ -148,20 +169,6 @@ impl SurveyNode {
     pub fn failures(&self) -> u64 {
         self.failures
     }
-
-    fn sighting(&self, p: &Packet, d: &Decoded) -> Sighting {
-        let fix = self.station;
-        Sighting {
-            at_us: p.at_us,
-            lat: fix.map(|f| f.lat),
-            lon: fix.map(|f| f.lon),
-            alt_m: fix.and_then(|f| f.alt_m),
-            accuracy_m: fix.and_then(|f| f.accuracy_m()),
-            rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs())),
-            snr_db: d.snr_db.or(p.snr_db().is_finite().then_some(p.snr_db())),
-            center_hz: d.center.0,
-        }
-    }
 }
 
 impl Simple for SurveyNode {
@@ -201,7 +208,7 @@ impl Simple for SurveyNode {
                     ident,
                     name: name_of(d),
                     vendor: vendor_of(&d),
-                    sighting: self.sighting(p, d),
+                    sighting: sighting(p, d, self.station),
                 };
                 self.heard += 1;
                 if let Some(db) = self.db.as_mut() {
@@ -386,4 +393,15 @@ mod tests {
         assert!(!node.is_recording());
         assert_eq!(node.heard(), 0);
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "survey",
+    summary: "The device database: who was heard, from where, at what level",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(SurveyNode::default()))
 }

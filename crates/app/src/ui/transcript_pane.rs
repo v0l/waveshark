@@ -16,7 +16,7 @@
 
 use super::state::TranscriptState;
 use super::*;
-use crate::transcripts::{Engine, ModelState, Speaker, Utterance, LIVE};
+use crate::transcripts::{Engine, ModelState, Utterance, LIVE};
 
 /// The transcript, over what was said and what read it.
 pub(super) struct Transcript<'a> {
@@ -146,7 +146,7 @@ impl Transcript<'_> {
         if !self.st.filter.is_empty() {
             return "Nothing said matches that.";
         }
-        match self.engine.as_ref().map(|e| (&e.state, e.enabled)) {
+        match self.engine.as_ref().map(|e| (&e.health.state, e.enabled)) {
             None => {
                 "There is no transcriber in the graph. Either the radio is not running, or \
                  this build was made without the stt feature, which is what compiles the \
@@ -189,7 +189,7 @@ impl Transcript<'_> {
             });
             return;
         };
-        let rail = match e.state {
+        let rail = match e.health.state {
             ModelState::Ready => theme::TRACE,
             ModelState::Failed(_) => theme::FAULT,
             _ => theme::READOUT,
@@ -208,9 +208,9 @@ impl Transcript<'_> {
                     // runs, and where a directory holds something other
                     // than the pick, the files line below says so.
                     let mut head = theme::Line::new().legend("model").set(e.label.clone());
-                    head = head.legend("state").value(e.state.label()).tint(rail);
-                    if !e.device.is_empty() {
-                        head = head.legend("on").value(&e.device);
+                    head = head.legend("state").value(e.health.state.label()).tint(rail);
+                    if !e.health.device.is_empty() {
+                        head = head.legend("on").value(&e.health.device);
                     }
                     head.size(11.0).show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -279,11 +279,11 @@ impl Transcript<'_> {
                     // somebody checking the files can read it and nobody
                     // else has to.
                     let mut l = theme::Line::new();
-                    l = if e.present {
+                    l = if e.health.present {
                         l.legend("on disc")
-                            .value(super::human_bytes(e.bytes))
-                            .value(&e.weights)
-                            .value(&e.flavour)
+                            .value(super::human_bytes(e.health.bytes))
+                            .value(&e.health.weights)
+                            .value(&e.health.flavour)
                     } else {
                         l.legend("on disc").value("nothing yet").tint(theme::READOUT)
                     };
@@ -293,8 +293,8 @@ impl Transcript<'_> {
                     // smallest model is 74 MB and the largest a few
                     // gigabytes, and a card that says only "downloading"
                     // reads the same as one that has hung.
-                    if matches!(e.state, ModelState::Fetching) {
-                        let f = &e.fetch;
+                    if matches!(e.health.state, ModelState::Fetching) {
+                        let f = &e.health.fetch;
                         let mut l = theme::Line::new().legend("fetching");
                         l = if f.file.is_empty() {
                             l.value("asking the hub")
@@ -327,7 +327,7 @@ impl Transcript<'_> {
                         }
                     }
                     ui.horizontal(|ui| {
-                        let mut l = theme::Line::new().legend("read").value(e.reads.to_string());
+                        let mut l = theme::Line::new().legend("read").value(e.health.reads.to_string());
                         if let Some(x) = e.speed() {
                             // Against real time, because that is the number
                             // that decides whether the receiver keeps up:
@@ -335,7 +335,7 @@ impl Transcript<'_> {
                             // be read and the partials fall behind.
                             l = l
                                 .legend("last")
-                                .value(format!("{:.1} s in {} ms", e.last_audio_s, e.last_ms))
+                                .value(format!("{:.1} s in {} ms", e.health.last_audio_s, e.health.last_ms))
                                 .legend("speed")
                                 .value(format!("{x:.1}x real time"))
                                 .tint(if x < 1.0 { theme::FAULT } else { theme::VALUE });
@@ -351,21 +351,21 @@ impl Transcript<'_> {
                         }
                         l.size(11.0).show(ui);
                     });
-                    if let ModelState::Failed(why) = &e.state {
+                    if let ModelState::Failed(why) = &e.health.state {
                         theme::Line::new().words(why).tint(theme::FAULT).wrapped(ui);
                     }
-                    if !e.note.is_empty() {
-                        theme::Line::new().words(&e.note).tint(theme::READOUT).wrapped(ui);
+                    if !e.health.note.is_empty() {
+                        theme::Line::new().words(&e.health.note).tint(theme::READOUT).wrapped(ui);
                     }
                     // Loading it by hand is the only way to find out whether
                     // transcription works on this machine without waiting
                     // for somebody to key up: the model is fetched and
                     // loaded by the first speech worth reading, and that may
                     // be an hour away.
-                    let cold = matches!(e.state, ModelState::Cold | ModelState::Failed(_));
+                    let cold = matches!(e.health.state, ModelState::Cold | ModelState::Failed(_));
                     if cold {
                         ui.horizontal(|ui| {
-                            let label = if e.present {
+                            let label = if e.health.present {
                                 "Load the model now"
                             } else {
                                 "Download and load the model"
@@ -373,7 +373,7 @@ impl Transcript<'_> {
                             if ui.add_enabled(!asked, egui::Button::new(label)).clicked() {
                                 want.borrow_mut().1 = true;
                             }
-                            if !e.present {
+                            if !e.health.present {
                                 let size = e
                                     .models
                                     .iter()
@@ -430,7 +430,7 @@ impl Transcript<'_> {
         // The button is offered again once the model has left the cold or
         // failed state and come back to it, which is what a changed model
         // directory or a second failure looks like.
-        if !matches!(e.state, ModelState::Cold | ModelState::Failed(_)) {
+        if !matches!(e.health.state, ModelState::Cold | ModelState::Failed(_)) {
             self.st.asked = false;
         }
     }
@@ -501,14 +501,16 @@ fn row(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| crate::sats::utc_hms(d.as_secs() as i64))
         .unwrap_or_default();
-    let sp = Speaker::parse(&u.key).unwrap_or_default();
-    let freq =
-        if sp.freq_hz > 0 { format!("{:.4}", sp.freq_hz as f64 / 1e6) } else { String::new() };
-    let speaker = sp.speaker.clone().unwrap_or_default();
-    let chan = match (&sp.channel, sp.proto.as_str()) {
+    let freq = if u.key.channel_hz > 0 {
+        format!("{:.4}", u.key.channel_hz as f64 / 1e6)
+    } else {
+        String::new()
+    };
+    let speaker = u.key.from.clone().unwrap_or_default();
+    let chan = match (&u.key.to, u.key.system.as_str()) {
         (Some(c), _) => c.clone(),
         (None, "") => String::new(),
-        (None, proto) => proto.to_string(),
+        (None, system) => system.to_string(),
     };
     // Cells are drawn on the first line of the row, which is the row's
     // top rather than its middle when the text has wrapped.
@@ -528,15 +530,12 @@ fn row(
 }
 
 /// A conversation key, as a person reads it.
-pub(super) fn who(key: &str) -> String {
-    let Some(s) = Speaker::parse(key) else {
-        return key.to_string();
-    };
-    let mut out = format!("{}  {:.4} MHz", s.proto, s.freq_hz as f64 / 1e6);
-    if let Some(c) = &s.channel {
+pub(super) fn who(key: &common::ConversationKey) -> String {
+    let mut out = format!("{}  {:.4} MHz", key.system, key.channel_hz as f64 / 1e6);
+    if let Some(c) = &key.to {
         out.push_str(&format!("  {c}"));
     }
-    if let Some(from) = &s.speaker {
+    if let Some(from) = &key.from {
         out.push_str(&format!("  < {from}"));
     }
     out

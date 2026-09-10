@@ -305,13 +305,7 @@ impl pipeline::node::Node for VideoBusNode {
         "video_bus"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     /// One per feed drawn into it, plus the spare a chain drawn by hand
     /// lands on. The transmissions are told apart by what they carry, not by

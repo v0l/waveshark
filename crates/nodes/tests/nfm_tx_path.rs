@@ -101,7 +101,7 @@ fn the_chain_reports_what_it_handed_the_radio() {
 
     let id = g.order().last().map(|(id, _)| id).unwrap();
     let node = g.node(id).unwrap();
-    let tx = node.as_any().and_then(|a| a.downcast_ref::<TxSinkNode>());
+    let tx = node.as_any().downcast_ref::<TxSinkNode>();
     let tx = tx.expect("the sink can be read back off the graph");
     assert_eq!(tx.written(), 5 * BLOCK as u64);
     assert_eq!(tx.underruns(), 0, "a file is never late");
@@ -134,7 +134,9 @@ fn the_transmission_is_the_shape_the_graph_says_it_is() {
     let topo = g.topology();
     let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
     assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
-    assert!(topo.nodes.last().unwrap().sink);
+    // Not a sink: what went to the antenna leaves the last stage as well, so
+    // the receiver's own spectrum can be shown the over it cannot hear.
+    assert!(!topo.nodes.last().unwrap().sink);
 
     let modulated = g.output_spec();
     assert_eq!(modulated.kind, PortKind::Iq);
@@ -158,7 +160,7 @@ fn a_block_the_radio_refuses_does_not_stop_the_graph() {
     // being unplugged mid-transmission looks like.
     let id = g.order().last().map(|(id, _)| id).unwrap();
     if let Some(n) = g.node_mut(id) {
-        if let Some(tx) = n.as_any_mut().and_then(|a| a.downcast_mut::<TxSinkNode>()) {
+        if let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>() {
             tx.finish(std::time::Duration::from_millis(10));
         }
     }
@@ -176,12 +178,10 @@ fn what_went_to_the_radio_can_be_read_back_off_the_sink() {
     transmit(&mut g, 3);
 
     let id = g.order().last().map(|(id, _)| id).unwrap();
-    let node = g.node(id).and_then(|n| n.as_any());
-    let tx = node.and_then(|a| a.downcast_ref::<TxSinkNode>()).unwrap();
-    let monitor = tx.monitor();
+    let monitor = g.buf(id.o()).and_then(|b| b.as_iq()).expect("the monitor port");
     assert_eq!(monitor.len(), BLOCK, "the monitor holds the last block");
 
-    let mut went_out = Vec::new();
+    let mut went_out: Vec<common::C32> = Vec::new();
     SampleFormat::Cs8.convert(&captured.lock(), &mut went_out);
     let tail = &went_out[went_out.len() - BLOCK..];
     for (a, b) in monitor.iter().zip(tail) {

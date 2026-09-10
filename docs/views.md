@@ -19,12 +19,14 @@ the ones not built yet would need.
 | `at` | when the burst arrived, stamped at the start of the block that held it | every view, for ageing and ordering |
 | `freq` | centre of the channel it arrived on | list, map (as a filter) |
 | `channel_hz` | how wide that channel was, and so how far apart two reports must be to be different bursts | deduplication |
-| `model` | protocol name, or "unknown" | routing |
+| `model` | the protocol that claimed the burst, `None` where nothing did | routing |
 | `media_type` | what `bytes` holds | routing |
 | `fields` | the decoder's own fields, structured | map, chart, text |
 | `bytes` | the raw frame | hex dump, image pane |
 | `iq` | the burst's own samples, where the front end kept them | the packet list's burst detail |
 | `audio` | decoded speech, with the call it belongs to | call list, audio bus |
+| `link` | who the transmission was between, as the decoder named them | call list, links |
+| `airtime` | how long it held the channel, whether it was speech, the cipher and the codec | call list |
 | `rssi_dbfs`, `snr_db` | how it was received | list, and a map colouring tracks by signal |
 | `crc` | integrity check result, `None` when the protocol has none | every view: an unverified position is not a position |
 
@@ -115,20 +117,22 @@ because traffic does not collect there.
   every demodulator's audio passes through first, says who is talking now
   and for how long (`AudioBus::track`, published as `Status::heard`), and
   that is where every analogue call and the airtime of every digital one
-  comes from. The packet bus says what only a decoder knows, `call_type`,
-  the cipher, the codec, off a decode marked `voice`. A DMR call, a TETRA
-  call, an M17 call and an FM channel marked as voice are the same row with
-  different fields filled in. An analogue over is never a packet: there is
-  no packeting in it, and it goes nowhere near the packet log.
+  comes from. The packet bus says what only a decoder knows, which kind of
+  party was called, the cipher and the codec, off a decode whose
+  `common::Airtime` says it carried speech. A DMR call, a TETRA call, an M17
+  call and an FM channel marked as voice are the same row with different
+  parts filled in. An analogue over is never a packet: there is no packeting
+  in it, and it goes nowhere near the packet log.
   `crates/app/src/calls.rs`.
 
 - **Transcript**: what was said, as the model on the audio bus tap read it,
   newest at the bottom. Off until it is switched on, like the packet log and
   the survey: a receiver does not start writing down what people said because
   nobody told it not to. The switch is a setting on the stage, so turning it
-  on is an edit and is remembered. A conversation is the transcriber's key,
-  `{proto}:{freq}:{chan}:{speaker}`, so the pane can be opened on one and
-  nothing else, which is what the calls list's "read" button does; that
+  on is an edit and is remembered. A conversation is a
+  `common::ConversationKey`, the system, the channel, the party called and
+  who is talking, so the pane can be opened on one and nothing else, which
+  is what the calls list's "read" button does; that
   button is drawn only on rows the log has lines for, since a way into an
   empty pane says something was heard when nothing was. A line still being
   spoken is dim and marked, because the next partial replaces it, and a
@@ -144,11 +148,11 @@ because traffic does not collect there.
   because the repository setting is only where files would be fetched from
   and a directory filled by an earlier run holds a different model. The
   status comes off the node through `Status::transcriber`. The transcript
-  itself is one for the whole program, `transcripts::log()`: the node writes
-  into it and the view copies it when its sequence number moves. It is not
-  kept in the node, because the node is a stage in a graph that is rebuilt
-  on every retune, and a log that lived there was emptied every time the
-  dial moved.
+  itself belongs to the receiver, which lends it to the node on every
+  rebuild and publishes it as `Status::transcript`: the node writes into it
+  and the view copies it when its sequence number moves. It is not kept in
+  the node, because the node is a stage in a graph that is rebuilt on every
+  retune, and a log that lived there was emptied every time the dial moved.
 
 - **Messages**: every record carrying a `text`, `message` or `sms` field,
   newest first, each drawn as a header line and the words underneath at full
@@ -529,7 +533,8 @@ the right one:
 2. Emit a packet per *image*, with `media_type` of `image/png` and the encoded
    picture in `bytes`, and have the decoder hold the partial image. The list
    then shows one row per picture and the pane renders it. Progress while a
-   pass is in flight is a `Metric` event, not a packet.
+   pass is in flight is state on the node, read back by downcasting, not a
+   packet.
 
 Analogue television is deliberately out of scope: it is not a digital mode and
 has no frame to log.

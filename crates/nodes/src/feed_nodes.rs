@@ -24,6 +24,7 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// One wire format, as a table entry.
 ///
@@ -189,19 +190,8 @@ impl Node for FeedNode {
         "feed"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
-    /// So a retune carries the open socket into the new graph instead of
-    /// dropping the connection and starting again.
-    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         0
@@ -311,8 +301,13 @@ fn read_loop(
         let at_us = now_us();
         for f in frames {
             state.frames.fetch_add(1, Ordering::Relaxed);
-            let mut frame = common::Frame::unmeasured(f.bytes).at(spec.kind.center_hz);
-            frame.rssi_dbfs = f.rssi_dbfs;
+            // The far end's own reading, and no noise floor with it: a feed
+            // carries what its receiver measured and nothing about the
+            // channel it measured it in. A format that reports no level at
+            // all (AVR) leaves both absent, which is a fact about the feed
+            // rather than a level of zero.
+            let frame =
+                common::Frame::measured(f.bytes, f.rssi_dbfs, f32::NAN).at(spec.kind.center_hz);
             let packet = Packet::of_frame(at_us, spec.kind.bandwidth_hz, frame);
             if tx.send(packet).is_err() {
                 return;
@@ -667,4 +662,27 @@ mod tests {
         assert_eq!(got[0].center_hz(), 1_090_000_000);
         assert_eq!(node.frames(), 3);
     }
+}
+
+/// The setting names this stage reads.
+const FORMAT: &str = "format";
+const HOST: &str = "host";
+const PORT: &str = "port";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "feed",
+    summary: "Packets from another receiver, over the network",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    let kind = feed_kind(s.str_or(FORMAT, FEED_KINDS[0].name))
+        .ok_or_else(|| Error::other("no feed format of that name"))?;
+    let spec = FeedSpec::new(
+        s.str_or(HOST, "127.0.0.1"),
+        s.i64_or(PORT, kind.default_port as i64) as u16,
+        kind,
+    );
+    Ok(Box::new(FeedNode::new(spec)))
 }

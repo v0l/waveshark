@@ -206,7 +206,7 @@ fn events(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<pipeline::e
         .chunks(16_384)
         .chain(std::iter::repeat_n(&silence[..], 8))
     {
-        out.extend_from_slice(g.feed_iq(block).expect("run"));
+        out.extend(g.feed_iq(block).expect("run").iter().map(|e| e.event.clone()));
     }
     out
 }
@@ -541,7 +541,7 @@ fn a_channel_that_decoded_is_remembered() {
     assert_eq!(measures, 4, "rows carrying a measurement: {measures}");
     let auto = g
         .order()
-        .find_map(|(id, _)| g.node(id)?.as_any()?.downcast_ref::<nodes::AutoNode>())
+        .find_map(|(id, _)| g.node(id)?.as_any().downcast_ref::<nodes::AutoNode>())
         .expect("the auto node");
     let kept = auto.remembered();
     let lora = kept.iter().find(|(name, _, _)| *name == "lora");

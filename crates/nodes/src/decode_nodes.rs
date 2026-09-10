@@ -9,9 +9,10 @@ use common::Result;
 use decode::protocol::{DecodeError, Protocols};
 use dsp::{AskConfig, AskDetector, FskConfig, FskDetector, OokDetector, PulseConfig};
 use pipeline::event::{Decoded, Event};
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// Envelope to pulse packages.
 pub struct PulseDetectNode {
@@ -98,10 +99,7 @@ impl Simple for PulseDetectNode {
                     s.rejected_low_snr, self.cfg.min_snr_db
                 ));
             }
-            c.emit(Event::Warning {
-                stage: "pulse_detect".into(),
-                message: format!("discarded {}", why.join("; ")),
-            });
+            c.warn(format!("discarded {}", why.join("; ")));
         }
         Ok(())
     }
@@ -112,19 +110,19 @@ impl Simple for PulseDetectNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("reset_us", self.cfg.reset_us as f64, 500.0..=100_000.0)
+            Param::float(RESET_US, self.cfg.reset_us as f64, 500.0..=100_000.0)
                 .unit("us")
                 .label("Gap that ends a packet")
                 .log(),
-            Param::float("min_mark_us", self.cfg.min_mark_us as f64, 10.0..=2000.0)
+            Param::float(MIN_MARK_US, self.cfg.min_mark_us as f64, 10.0..=2000.0)
                 .unit("us")
                 .label("Shortest credible mark"),
-            Param::int("min_pulses", self.cfg.min_pulses as i64, 2..=512)
+            Param::int(MIN_PULSES, self.cfg.min_pulses as i64, 2..=512)
                 .label("Minimum pulses per packet"),
-            Param::float("min_snr_db", self.cfg.min_snr_db as f64, 3.0..=40.0)
+            Param::float(MIN_SNR_DB, self.cfg.min_snr_db as f64, 3.0..=40.0)
                 .unit("dB")
                 .label("Minimum SNR"),
-            Param::float("hysteresis", self.cfg.hysteresis as f64, 0.0..=0.5)
+            Param::float(HYSTERESIS, self.cfg.hysteresis as f64, 0.0..=0.5)
                 .label("Threshold hysteresis"),
         ]
     }
@@ -132,11 +130,11 @@ impl Simple for PulseDetectNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         let f = v.as_f64().unwrap_or_default();
         match name {
-            "reset_us" => self.cfg.reset_us = f.max(1.0) as u32,
-            "min_mark_us" => self.cfg.min_mark_us = f.max(0.0) as u32,
-            "min_pulses" => self.cfg.min_pulses = f.max(1.0) as usize,
-            "min_snr_db" => self.cfg.min_snr_db = f as f32,
-            "hysteresis" => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
+            RESET_US => self.cfg.reset_us = f.max(1.0) as u32,
+            MIN_MARK_US => self.cfg.min_mark_us = f.max(0.0) as u32,
+            MIN_PULSES => self.cfg.min_pulses = f.max(1.0) as usize,
+            MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
+            HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "pulse_detect: unknown parameter {name:?}"
@@ -235,10 +233,7 @@ impl Simple for AskDetectNode {
                     s.rejected_low_snr, self.cfg.min_snr_db
                 ));
             }
-            c.emit(Event::Warning {
-                stage: "ask_detect".into(),
-                message: format!("discarded {}", why.join("; ")),
-            });
+            c.warn(format!("discarded {}", why.join("; ")));
         }
         Ok(())
     }
@@ -249,22 +244,22 @@ impl Simple for AskDetectNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("reset_us", self.cfg.reset_us as f64, 500.0..=100_000.0)
+            Param::float(RESET_US, self.cfg.reset_us as f64, 500.0..=100_000.0)
                 .unit("us")
                 .label("Gap that ends a packet")
                 .log(),
-            Param::float("min_run_us", self.cfg.min_run_us as f64, 10.0..=2000.0)
+            Param::float(MIN_RUN_US, self.cfg.min_run_us as f64, 10.0..=2000.0)
                 .unit("us")
                 .label("Shortest credible symbol"),
-            Param::int("min_pulses", self.cfg.min_pulses as i64, 2..=512)
+            Param::int(MIN_PULSES, self.cfg.min_pulses as i64, 2..=512)
                 .label("Minimum pulses per packet"),
-            Param::float("min_depth_db", self.cfg.min_depth_db as f64, 1.0..=40.0)
+            Param::float(MIN_DEPTH_DB, self.cfg.min_depth_db as f64, 1.0..=40.0)
                 .unit("dB")
                 .label("Minimum modulation depth"),
-            Param::float("min_snr_db", self.cfg.min_snr_db as f64, 3.0..=40.0)
+            Param::float(MIN_SNR_DB, self.cfg.min_snr_db as f64, 3.0..=40.0)
                 .unit("dB")
                 .label("Minimum SNR"),
-            Param::float("hysteresis", self.cfg.hysteresis as f64, 0.0..=0.5)
+            Param::float(HYSTERESIS, self.cfg.hysteresis as f64, 0.0..=0.5)
                 .label("Threshold hysteresis"),
         ]
     }
@@ -272,12 +267,12 @@ impl Simple for AskDetectNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         let f = v.as_f64().unwrap_or_default();
         match name {
-            "reset_us" => self.cfg.reset_us = f.max(1.0) as u32,
-            "min_run_us" => self.cfg.min_run_us = f.max(1.0) as u32,
-            "min_pulses" => self.cfg.min_pulses = f.max(1.0) as usize,
-            "min_depth_db" => self.cfg.min_depth_db = f as f32,
-            "min_snr_db" => self.cfg.min_snr_db = f as f32,
-            "hysteresis" => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
+            RESET_US => self.cfg.reset_us = f.max(1.0) as u32,
+            MIN_RUN_US => self.cfg.min_run_us = f.max(1.0) as u32,
+            MIN_PULSES => self.cfg.min_pulses = f.max(1.0) as usize,
+            MIN_DEPTH_DB => self.cfg.min_depth_db = f as f32,
+            MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
+            HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "ask_detect: unknown parameter {name:?}"
@@ -378,10 +373,7 @@ impl Simple for FskDetectNode {
                     s.rejected_low_snr, self.cfg.min_snr_db
                 ));
             }
-            c.emit(Event::Warning {
-                stage: "fsk_detect".into(),
-                message: format!("discarded {}", why.join("; ")),
-            });
+            c.warn(format!("discarded {}", why.join("; ")));
         }
         Ok(())
     }
@@ -392,27 +384,27 @@ impl Simple for FskDetectNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("reset_us", self.cfg.reset_us as f64, 100.0..=100_000.0)
+            Param::float(RESET_US, self.cfg.reset_us as f64, 100.0..=100_000.0)
                 .unit("us")
                 .label("Silence that ends a burst")
                 .log(),
-            Param::float("min_run_us", self.cfg.min_run_us as f64, 2.0..=2000.0)
+            Param::float(MIN_RUN_US, self.cfg.min_run_us as f64, 2.0..=2000.0)
                 .unit("us")
                 .label("Shortest credible symbol"),
-            Param::int("min_pulses", self.cfg.min_pulses as i64, 2..=512)
+            Param::int(MIN_PULSES, self.cfg.min_pulses as i64, 2..=512)
                 .label("Minimum pulses per packet"),
             Param::float(
-                "min_separation_hz",
+                MIN_SEPARATION_HZ,
                 self.cfg.min_separation_hz as f64,
                 200.0..=200_000.0,
             )
             .unit("Hz")
             .label("Minimum tone separation")
             .log(),
-            Param::float("min_snr_db", self.cfg.min_snr_db as f64, 3.0..=40.0)
+            Param::float(MIN_SNR_DB, self.cfg.min_snr_db as f64, 3.0..=40.0)
                 .unit("dB")
                 .label("Minimum SNR"),
-            Param::float("hysteresis", self.cfg.hysteresis as f64, 0.0..=0.5)
+            Param::float(HYSTERESIS, self.cfg.hysteresis as f64, 0.0..=0.5)
                 .label("Threshold hysteresis"),
         ]
     }
@@ -420,12 +412,12 @@ impl Simple for FskDetectNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         let f = v.as_f64().unwrap_or_default();
         match name {
-            "reset_us" => self.cfg.reset_us = f.max(1.0) as u32,
-            "min_run_us" => self.cfg.min_run_us = f.max(1.0) as u32,
-            "min_pulses" => self.cfg.min_pulses = f.max(1.0) as usize,
-            "min_separation_hz" => self.cfg.min_separation_hz = f.max(0.0) as f32,
-            "min_snr_db" => self.cfg.min_snr_db = f as f32,
-            "hysteresis" => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
+            RESET_US => self.cfg.reset_us = f.max(1.0) as u32,
+            MIN_RUN_US => self.cfg.min_run_us = f.max(1.0) as u32,
+            MIN_PULSES => self.cfg.min_pulses = f.max(1.0) as usize,
+            MIN_SEPARATION_HZ => self.cfg.min_separation_hz = f.max(0.0) as f32,
+            MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
+            HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "fsk_detect: unknown parameter {name:?}"
@@ -439,6 +431,9 @@ impl Simple for FskDetectNode {
 }
 
 /// Turn one report into the event a consumer sees.
+///
+/// The conclusion only. How strongly the burst was heard and what it was read
+/// from stay on the package and the packet the decode is attached to.
 ///
 /// Shared with the packet bus decoder, which runs the same protocols over the
 /// same packages at a different point in the graph. Two copies of this drifted
@@ -454,7 +449,6 @@ pub fn decoded_event(
         .with_detail(report.fields_line())
         .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .with_modulation(modulation)
-        .with_level(pkg.rssi_dbfs, pkg.snr_db)
         .with_crc(report.crc_valid);
     if let Some(id) = &report.device {
         // The model is part of the space, not decoration. A sensor's id is a
@@ -465,6 +459,11 @@ pub fn decoded_event(
     }
     d
 }
+
+/// What a burst no protocol claimed is named, everywhere it is asked about.
+/// An open identifier rather than a set, since every other value is a
+/// protocol id from the registry.
+pub const UNKNOWN: &str = "unknown";
 
 /// The event for a burst no protocol claimed, read under a guessed coding.
 ///
@@ -524,7 +523,7 @@ pub fn unmatched_event(
                     }),
                 ));
             }
-            Decoded::bytes("unknown", center, at, a.frame_bytes().to_vec())
+            Decoded::bytes(UNKNOWN, center, at, a.frame_bytes().to_vec())
                 .with_text(format!("unknown: {}", a.summary()))
                 .with_detail(join(measured, a.summary()))
         }
@@ -532,11 +531,11 @@ pub fn unmatched_event(
         // something was there, which is the difference between a quiet band
         // and a misconfigured chain.
         None if pkg.pulses.is_empty() && measure.is_some() => {
-            Decoded::bytes("unknown", center, at, Vec::new())
+            Decoded::bytes(UNKNOWN, center, at, Vec::new())
                 .with_text(format!("unknown: {}", measured.clone().unwrap_or_default()))
                 .with_detail(measured.unwrap_or_default())
         }
-        None => Decoded::bytes("unknown", center, at, Vec::new())
+        None => Decoded::bytes(UNKNOWN, center, at, Vec::new())
             .with_text("unknown: unreadable burst")
             .with_detail(join(
                 measured,
@@ -547,9 +546,7 @@ pub fn unmatched_event(
                 ),
             )),
     };
-    let mut ev = ev
-        .with_modulation(modulation)
-        .with_level(pkg.rssi_dbfs, pkg.snr_db);
+    let mut ev = ev.with_modulation(modulation);
     let mut fields: Vec<(String, common::Value)> = Vec::new();
     if let Some(m) = measure {
         fields.push((
@@ -579,9 +576,6 @@ pub fn unmatched_event(
         }
         if let Some(mode) = &m.mode {
             fields.push(("mode".into(), common::Value::Text(mode.clone())));
-        }
-        if m.bandwidth_hz > 0.0 {
-            ev = ev.with_bandwidth(m.bandwidth_hz as f64);
         }
     }
     fields.append(&mut framing_fields);
@@ -689,14 +683,12 @@ impl Simple for ProtocolDecodeNode {
                         // Distinguishing "wrong protocol" from "right protocol,
                         // bad reception" is the difference between a silent
                         // tool and one that tells you to move the antenna.
-                        c.emit(Event::Warning {
-                            stage: name.to_string(),
-                            message: format!(
-                                "timings matched but CRC failed ({} pulses, {:.1} dB SNR)",
-                                pkg.pulses.len(),
-                                pkg.snr_db
-                            ),
-                        });
+                        c.warn(format!(
+                            "{name}: timings matched but CRC failed \
+                             ({} pulses, {:.1} dB SNR)",
+                            pkg.pulses.len(),
+                            pkg.snr_db
+                        ));
                     }
                     Err(_) => {}
                 }
@@ -710,18 +702,18 @@ impl Simple for ProtocolDecodeNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::bool("report_all", self.report_all).label("Report every matching protocol"),
-            Param::bool("report_crc_failures", self.report_crc_failures)
+            Param::bool(REPORT_ALL, self.report_all).label("Report every matching protocol"),
+            Param::bool(REPORT_CRC_FAILURES, self.report_crc_failures)
                 .label("Warn on CRC failures"),
-            Param::bool("report_unknown", self.report_unknown).label("Report unrecognised bursts"),
+            Param::bool(REPORT_UNKNOWN, self.report_unknown).label("Report unrecognised bursts"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "report_all" => self.report_all = v.as_bool().unwrap_or(true),
-            "report_crc_failures" => self.report_crc_failures = v.as_bool().unwrap_or(true),
-            "report_unknown" => self.report_unknown = v.as_bool().unwrap_or(true),
+            REPORT_ALL => self.report_all = v.as_bool().unwrap_or(true),
+            REPORT_CRC_FAILURES => self.report_crc_failures = v.as_bool().unwrap_or(true),
+            REPORT_UNKNOWN => self.report_unknown = v.as_bool().unwrap_or(true),
             _ => {
                 return Err(common::Error::other(format!(
                     "protocol_decode: unknown parameter {name:?}"
@@ -762,6 +754,28 @@ pub struct BurstRouteNode {
     cfg: dsp::RouterConfig,
     router: dsp::BurstRouter,
     bursts: Vec<dsp::RoutedBurst>,
+    /// When a transmission that never ends was last reported, in seconds of
+    /// stream. See [`REPORT_S`].
+    last_report_s: Option<f64>,
+    /// Where every burst is written as it is cut, when `SR_DUMP_BURSTS` names
+    /// a directory. Read once, at build: it is a diagnostic switch, not a
+    /// setting, and looking it up per burst is a lookup per burst.
+    dump_dir: Option<std::path::PathBuf>,
+}
+
+/// How often a transmission that never ends is reported, in seconds.
+///
+/// A base station carrier is on all day. The router cuts it into pieces of
+/// half a second to have something to measure, and a packet per piece would
+/// be a list of nothing else. One when it is found, then one every so often
+/// to say it is still there, is what "which channels are busy" needs.
+const REPORT_S: f64 = 5.0;
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 impl BurstRouteNode {
@@ -771,6 +785,8 @@ impl BurstRouteNode {
             cfg,
             router: dsp::BurstRouter::new(1.0, cfg),
             bursts: Vec::new(),
+            last_report_s: None,
+            dump_dir: std::env::var_os("SR_DUMP_BURSTS").map(std::path::PathBuf::from),
         }
     }
 
@@ -818,12 +834,19 @@ pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
     }
 }
 
-impl Simple for BurstRouteNode {
+impl Node for BurstRouteNode {
     fn name(&self) -> &str {
         "burst_route"
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+
+
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other(
                 "burst_route needs IQ: it classifies the burst before deciding whether \
@@ -834,16 +857,54 @@ impl Simple for BurstRouteNode {
         self.router = dsp::BurstRouter::new(i.spec.rate, self.cfg);
         let mut out = i.spec.with_kind(PortKind::Pulses);
         out.rate = 0.0;
-        Ok(out)
+        // What each burst was, as evidence: the packages read from it where
+        // something read them, the measurement either way, and the samples it
+        // was cut from. The pulses port is for the chain that reads them on;
+        // this port is the burst itself, for whatever logs it.
+        let mut packets = out.with_kind(PortKind::Packets);
+        packets.rate = 0.0;
+        Ok(vec![out, packets])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
         self.bursts.clear();
-        self.router.process(i.as_iq().unwrap(), &mut self.bursts);
+        self.router.process(inputs[0].as_iq().unwrap(), &mut self.bursts);
 
         let center = c.inputs[0].spec.center.0;
-        let pkgs = o.pulses_mut();
+        let rate = c.inputs[0].spec.rate.max(1.0);
+        let bandwidth_hz = c.inputs[0].spec.bandwidth as u32;
+        let at_us = now_us();
+        let (pulses, packets) = outputs.split_at_mut(1);
+        let pkgs = pulses[0].pulses_mut();
+        let out = packets[0].packets_mut();
         for b in &self.bursts {
+            // A diagnostic: with `SR_DUMP_BURSTS` naming a directory, every
+            // burst cut here is written there as interleaved f32 IQ, named
+            // with the centre, the rate and the start sample, which is what
+            // the classifier's `score_a_dumped_burst` test reads. How a
+            // verdict on a real signal came out is otherwise invisible, and
+            // that is how the TETRA carriers were found to be read as OFDM.
+            // A file per burst, written where the burst was cut, which on a
+            // busy band is inside whatever fanout is running this node.
+            if let Some(dir) = &self.dump_dir {
+                let path = dir.join(format!(
+                    "burst_{}_{}_{}.c64",
+                    center, rate as u64, b.start_sample
+                ));
+                if !path.exists() {
+                    let mut bytes = Vec::with_capacity(b.iq.len() * 8);
+                    for s in &b.iq {
+                        bytes.extend_from_slice(&s.re.to_le_bytes());
+                        bytes.extend_from_slice(&s.im.to_le_bytes());
+                    }
+                    let _ = std::fs::write(path, bytes);
+                }
+            }
             // What it was measured to be, whether or not anything read it.
             // A burst nothing decodes is still evidence, and this is most of
             // what makes it useful.
@@ -871,15 +932,34 @@ impl Simple for BurstRouteNode {
                     TagValue::Float(b.class.features.baud as f64),
                 ));
             }
-            for p in &b.packages {
-                c.tag(Tag::new(
-                    p.start_sample,
-                    "burst",
-                    TagValue::Float(p.snr_db as f64),
-                ));
-                let mut p = p.clone();
-                p.center_hz = center;
-                pkgs.push(p);
+            // The measurement and the samples, built once for the burst and
+            // only where a packet leaves carrying them.
+            let evidence = || {
+                (
+                    measure_of(b, center as f64),
+                    Some(std::sync::Arc::new(common::IqBurst {
+                        rate,
+                        center_hz: center,
+                        samples: b.iq.clone(),
+                    })),
+                )
+            };
+            if !b.packages.is_empty() {
+                let (m, iq) = evidence();
+                for p in &b.packages {
+                    c.tag(Tag::new(
+                        p.start_sample,
+                        "burst",
+                        TagValue::Float(p.snr_db as f64),
+                    ));
+                    let mut p = p.clone();
+                    p.center_hz = center;
+                    let mut pkt = common::Packet::of_pulses(at_us, bandwidth_hz, p.clone());
+                    pkt.measure = Some(m.clone());
+                    pkt.iq = iq.clone();
+                    out.push(pkt);
+                    pkgs.push(p);
+                }
             }
 
             // A burst nothing here can demodulate is still a burst that
@@ -929,31 +1009,62 @@ impl Simple for BurstRouteNode {
                     center as f64,
                 );
                 let at = b.start_sample as f64 / c.inputs[0].spec.rate.max(1.0);
-                let mut d = Decoded::bytes("unidentified", common::Hz(center), at, Vec::new())
+                let d = Decoded::bytes("unidentified", common::Hz(center), at, Vec::new())
                     .with_modulation(b.class.modulation)
                     .with_fields(fields);
-                if f.bandwidth_hz > 0.0 {
-                    d = d.with_bandwidth(f.bandwidth_hz as f64);
-                }
-                d = match mode {
+                let d = match mode {
                     Some(m) => d.with_detail(m.label()),
                     None => {
                         d.with_detail(format!("no front end reads {}", b.class.modulation.label()))
                     }
                 };
                 c.emit(Event::Decoded(d));
+
+                // And as a packet, so what is left of a burst nothing read is
+                // a row with its measurement and its samples on it rather
+                // than a line of text. A piece of a transmission that is
+                // still going is the same news as the last piece, so those
+                // are reported every [`REPORT_S`].
+                let due = !b.continuous
+                    || self.last_report_s.is_none_or(|l| at - l >= REPORT_S);
+                if b.packages.is_empty() && due {
+                    if b.continuous {
+                        self.last_report_s = Some(at);
+                    }
+                    let (m, iq) = evidence();
+                    // The level is filled in by whatever holds the samples
+                    // this was cut from; the classifier measures the burst
+                    // against the noise it found and reports nothing when it
+                    // never found any.
+                    let mut pkt = common::Packet::of_pulses(
+                        at_us,
+                        bandwidth_hz,
+                        common::Package {
+                            pulses: Vec::new(),
+                            snr_db: if b.class.features.snr_db > 0.0 {
+                                b.class.features.snr_db
+                            } else {
+                                f32::NAN
+                            },
+                            rssi_dbfs: f32::NAN,
+                            start_sample: b.start_sample,
+                            center_hz: center,
+                            modulation: None,
+                        },
+                    );
+                    pkt.measure = Some(m);
+                    pkt.iq = iq;
+                    out.push(pkt);
+                }
             }
         }
 
         let s = self.router.take_stats();
         if s.no_front_end > 0 {
-            c.emit(Event::Warning {
-                stage: "burst_route".into(),
-                message: format!(
-                    "{} burst(s) named as something no front end here reads",
-                    s.no_front_end
-                ),
-            });
+            c.warn(format!(
+                "{} burst(s) named as something no front end here reads",
+                s.no_front_end
+            ));
         }
         Ok(())
     }
@@ -964,24 +1075,24 @@ impl Simple for BurstRouteNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("reset_us", self.cfg.reset_us as f64, 500.0..=100_000.0)
+            Param::float(RESET_US, self.cfg.reset_us as f64, 500.0..=100_000.0)
                 .unit("us")
                 .label("Silence that ends a burst")
                 .log(),
-            Param::float("margin_us", self.cfg.margin_us as f64, 100.0..=20_000.0)
+            Param::float(MARGIN_US, self.cfg.margin_us as f64, 100.0..=20_000.0)
                 .unit("us")
                 .label("Samples kept either side"),
-            Param::float("min_snr_db", self.cfg.min_snr_db as f64, 3.0..=40.0)
+            Param::float(MIN_SNR_DB, self.cfg.min_snr_db as f64, 3.0..=40.0)
                 .unit("dB")
                 .label("Minimum SNR"),
-            Param::float("min_score", self.cfg.classify.min_score as f64, 0.1..=0.9)
+            Param::float(MIN_SCORE, self.cfg.classify.min_score as f64, 0.1..=0.9)
                 .label("Score below which the burst is unnamed"),
-            Param::float("min_margin", self.cfg.classify.min_margin as f64, 0.0..=0.5)
+            Param::float(MIN_MARGIN, self.cfg.classify.min_margin as f64, 0.0..=0.5)
                 .label("Margin over the runner-up required"),
             // Past one on purpose: the top of the range means never, and a
             // busy wideband tier wants that available without a rebuild.
             Param::float(
-                "report_confidence",
+                REPORT_CONFIDENCE,
                 self.report_min_confidence as f64,
                 0.0..=1.01,
             )
@@ -992,14 +1103,14 @@ impl Simple for BurstRouteNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         let f = v.as_f64().unwrap_or_default();
         match name {
-            "reset_us" => self.cfg.reset_us = f.max(1.0) as u32,
-            "margin_us" => self.cfg.margin_us = f.max(1.0) as u32,
-            "min_snr_db" => self.cfg.min_snr_db = f as f32,
-            "min_score" => self.cfg.classify.min_score = f as f32,
-            "min_margin" => self.cfg.classify.min_margin = f as f32,
+            RESET_US => self.cfg.reset_us = f.max(1.0) as u32,
+            MARGIN_US => self.cfg.margin_us = f.max(1.0) as u32,
+            MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
+            MIN_SCORE => self.cfg.classify.min_score = f as f32,
+            MIN_MARGIN => self.cfg.classify.min_margin = f as f32,
             // Reporting only: it does not touch the router, so it must not
             // rebuild it below either.
-            "report_confidence" => {
+            REPORT_CONFIDENCE => {
                 self.report_min_confidence = f.max(0.0) as f32;
                 return Ok(());
             }
@@ -1013,4 +1124,154 @@ impl Simple for BurstRouteNode {
         self.router = dsp::BurstRouter::new(rate.max(1.0), self.cfg);
         Ok(())
     }
+}
+
+/// The setting names these stages read.
+///
+/// The three burst detectors take most of the same ones, so a threshold is
+/// spelled where the builder, the parameter list and the setter all see it.
+const RESET_US: &str = "reset_us";
+const MIN_PULSES: &str = "min_pulses";
+const MIN_SNR_DB: &str = "min_snr_db";
+const HYSTERESIS: &str = "hysteresis";
+const NOISE_THRESHOLD_RATIO: &str = "noise_threshold_ratio";
+const TAU_US: &str = "tau_us";
+const MIN_MARK_US: &str = "min_mark_us";
+const MIN_RUN_US: &str = "min_run_us";
+const MERGE_DROPOUTS: &str = "merge_dropouts";
+const MEASURED_NOISE_FLOOR: &str = "measured_noise_floor";
+const NOISE_FLOOR_MARGIN: &str = "noise_floor_margin";
+const MIN_DEPTH_DB: &str = "min_depth_db";
+const MAX_BURST_US: &str = "max_burst_us";
+const MIN_SEPARATION_HZ: &str = "min_separation_hz";
+const MARGIN_US: &str = "margin_us";
+const SOURCE_SNR_DB: &str = "source_snr_db";
+const MIN_SCORE: &str = "min_score";
+const MIN_MARGIN: &str = "min_margin";
+const REPORT_CONFIDENCE: &str = "report_confidence";
+const MODULATION: &str = "modulation";
+const REPORT_ALL: &str = "report_all";
+const REPORT_CRC_FAILURES: &str = "report_crc_failures";
+const REPORT_UNKNOWN: &str = "report_unknown";
+
+/// How sure the classifier has to be before a burst nothing read is logged.
+const DEFAULT_REPORT_CONFIDENCE: f64 = 0.5;
+
+pub const PULSE_DETECT: StageDesc = StageDesc {
+    name: "pulse_detect",
+    summary: "Envelope to mark/gap timings; the boundary between DSP \
+              and protocol parsing",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build_pulse_detect(s: &Settings) -> Result<Box<dyn Node>> {
+    let d = PulseConfig::default();
+    Ok(Box::new(PulseDetectNode::new(PulseConfig {
+        reset_us: s.f64_or(RESET_US, d.reset_us as f64) as u32,
+        min_mark_us: s.f64_or(MIN_MARK_US, d.min_mark_us as f64) as u32,
+        min_pulses: s.i64_or(MIN_PULSES, d.min_pulses as i64).max(1) as usize,
+        min_snr_db: s.f64_or(MIN_SNR_DB, d.min_snr_db as f64) as f32,
+        hysteresis: s.f64_or(HYSTERESIS, d.hysteresis as f64) as f32,
+        noise_threshold_ratio: s.f64_or(NOISE_THRESHOLD_RATIO, d.noise_threshold_ratio as f64)
+            as f32,
+        tau_us: s.f64_or(TAU_US, d.tau_us as f64) as f32,
+        merge_dropouts: s.bool_or(MERGE_DROPOUTS, d.merge_dropouts),
+        measured_noise_floor: s.bool_or(MEASURED_NOISE_FLOOR, d.measured_noise_floor),
+        noise_floor_margin: s.f64_or(NOISE_FLOOR_MARGIN, d.noise_floor_margin as f64) as f32,
+    })))
+}
+
+pub const ASK_DETECT: StageDesc = StageDesc {
+    name: "ask_detect",
+    summary: "Amplitude keying with a low level that is not silence, \
+              which `pulse_detect` latches through",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build_ask_detect(s: &Settings) -> Result<Box<dyn Node>> {
+    let d = AskConfig::default();
+    Ok(Box::new(AskDetectNode::new(AskConfig {
+        reset_us: s.f64_or(RESET_US, d.reset_us as f64) as u32,
+        min_run_us: s.f64_or(MIN_RUN_US, d.min_run_us as f64) as u32,
+        min_pulses: s.i64_or(MIN_PULSES, d.min_pulses as i64).max(1) as usize,
+        hysteresis: s.f64_or(HYSTERESIS, d.hysteresis as f64) as f32,
+        tau_us: s.f64_or(TAU_US, d.tau_us as f64) as f32,
+        min_snr_db: s.f64_or(MIN_SNR_DB, d.min_snr_db as f64) as f32,
+        noise_threshold_ratio: s.f64_or(NOISE_THRESHOLD_RATIO, d.noise_threshold_ratio as f64)
+            as f32,
+        min_depth_db: s.f64_or(MIN_DEPTH_DB, d.min_depth_db as f64) as f32,
+        max_burst_us: s.f64_or(MAX_BURST_US, d.max_burst_us as f64) as u32,
+    })))
+}
+
+pub const FSK_DETECT: StageDesc = StageDesc {
+    name: "fsk_detect",
+    summary: "Two-level FSK to mark/gap timings, straight from IQ; the \
+              constant-envelope signals an OOK detector cannot see",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build_fsk_detect(s: &Settings) -> Result<Box<dyn Node>> {
+    let d = FskConfig::default();
+    Ok(Box::new(FskDetectNode::new(FskConfig {
+        reset_us: s.f64_or(RESET_US, d.reset_us as f64) as u32,
+        min_run_us: s.f64_or(MIN_RUN_US, d.min_run_us as f64) as u32,
+        min_pulses: s.i64_or(MIN_PULSES, d.min_pulses as i64).max(1) as usize,
+        hysteresis: s.f64_or(HYSTERESIS, d.hysteresis as f64) as f32,
+        tau_us: s.f64_or(TAU_US, d.tau_us as f64) as f32,
+        min_snr_db: s.f64_or(MIN_SNR_DB, d.min_snr_db as f64) as f32,
+        noise_threshold_ratio: s.f64_or(NOISE_THRESHOLD_RATIO, d.noise_threshold_ratio as f64)
+            as f32,
+        min_separation_hz: s.f64_or(MIN_SEPARATION_HZ, d.min_separation_hz as f64) as f32,
+        max_burst_us: s.f64_or(MAX_BURST_US, d.max_burst_us as f64) as u32,
+    })))
+}
+
+pub const BURST_ROUTE: StageDesc = StageDesc {
+    name: "burst_route",
+    summary: "Measure each burst, then run the one front end that reads it: \
+              on-off, shallow ASK, two-level FSK or four-level",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build_burst_route(s: &Settings) -> Result<Box<dyn Node>> {
+    let d = dsp::RouterConfig::default();
+    let cfg = dsp::RouterConfig {
+        reset_us: s.f64_or(RESET_US, d.reset_us as f64) as u32,
+        margin_us: s.f64_or(MARGIN_US, d.margin_us as f64) as u32,
+        min_snr_db: s.f64_or(MIN_SNR_DB, d.min_snr_db as f64) as f32,
+        source_snr_db: s.f64_or(SOURCE_SNR_DB, 0.0) as f32,
+        classify: dsp::ClassifyConfig {
+            min_score: s.f64_or(MIN_SCORE, d.classify.min_score as f64) as f32,
+            min_margin: s.f64_or(MIN_MARGIN, d.classify.min_margin as f64) as f32,
+            ..d.classify
+        },
+        ..d
+    };
+    let mut n = BurstRouteNode::new(cfg);
+    n.set_report_confidence(s.f64_or(REPORT_CONFIDENCE, DEFAULT_REPORT_CONFIDENCE) as f32);
+    Ok(Box::new(n))
+}
+
+pub const PROTOCOL_DECODE: StageDesc = StageDesc {
+    name: "protocol_decode",
+    summary: "Try every known protocol against each burst",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build_protocol_decode(s: &Settings) -> Result<Box<dyn Node>> {
+    let default = common::Modulation::Ook;
+    let m = common::Modulation::parse(s.str_or(MODULATION, default.label())).unwrap_or(default);
+    let mut n = ProtocolDecodeNode::all().with_modulation(m);
+    for k in [REPORT_ALL, REPORT_CRC_FAILURES, REPORT_UNKNOWN] {
+        if let Some(v) = s.get(k) {
+            Node::set_param(&mut n, k, v.clone())?;
+        }
+    }
+    Ok(Box::new(n))
 }

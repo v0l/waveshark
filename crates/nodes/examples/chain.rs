@@ -50,11 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() < 3 {
         println!("usage: chain <capture file> '<node> | <node>:k=v,k=v | ...'\n");
         println!("available nodes:");
-        let mut cat = "";
+        let mut cat = None;
         for d in reg.list() {
-            if d.category != cat {
-                cat = d.category;
-                println!("\n  [{cat}]");
+            if cat != Some(d.category) {
+                cat = Some(d.category);
+                println!("\n  [{}]", d.category);
             }
             println!("    {:<18} {}", d.name, d.summary);
         }
@@ -107,9 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let events = g.feed_iq(&buf.samples)?.to_vec();
     println!("\n--- {} event(s) ---", events.len());
     for e in &events {
-        match e {
+        let stage = g.label(e.node).unwrap_or("?");
+        match &e.event {
             Event::Decoded(d) => println!("DECODE  {}", d.text.as_deref().unwrap_or(d.protocol)),
-            Event::Warning { stage, message } => println!("warn    [{stage}] {message}"),
+            Event::Warning { message } => println!("warn    [{stage}] {message}"),
             Event::Detection { center, snr_db, .. } => {
                 println!("detect  {center} {snr_db:.1} dB")
             }

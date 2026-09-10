@@ -13,8 +13,7 @@
 //! this is off until an operator turns it on, and what it sends is a list of
 //! places this receiver has been.
 
-use common::{Packet, Result};
-use pipeline::event::Decoded;
+use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use std::collections::HashMap;
@@ -22,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// A spool file is closed once it holds this many observations.
 const ITEMS_PER_FILE: usize = 500;
@@ -314,19 +314,6 @@ impl BeaconDbNode {
         self.opened = Instant::now();
     }
 
-    fn sighting(&self, p: &Packet, d: &Decoded) -> survey::Sighting {
-        let fix = self.station;
-        survey::Sighting {
-            at_us: p.at_us,
-            lat: fix.map(|f| f.lat),
-            lon: fix.map(|f| f.lon),
-            alt_m: fix.and_then(|f| f.alt_m),
-            accuracy_m: fix.and_then(|f| f.accuracy_m()),
-            rssi_dbfs: d.rssi_dbfs.or(p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs())),
-            snr_db: d.snr_db.or(p.snr_db().is_finite().then_some(p.snr_db())),
-            center_hz: d.center.0,
-        }
-    }
 }
 
 impl Drop for BeaconDbNode {
@@ -361,7 +348,7 @@ impl Simple for BeaconDbNode {
                 if survey::beacondb::kind(&protocol).is_none() {
                     break;
                 }
-                let s = self.sighting(p, d);
+                let s = crate::survey_nodes::sighting(p, d, self.station);
                 let key = (protocol.clone(), ident.clone());
                 let fresh = match self.last.get(&key) {
                     None => true,
@@ -403,7 +390,7 @@ fn now_s() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::Hz;
+    use common::{Hz, Packet};
 
     fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
         Packet::of_frame(
@@ -519,4 +506,18 @@ mod tests {
         assert_eq!(spooled(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "beacondb",
+    summary: "Feed what was heard to beacondb.net: observations, spooled and submitted",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(BeaconDbNode::new(crate::spool_dir(
+        s,
+        default_spool_dir,
+    ))))
 }

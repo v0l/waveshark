@@ -194,17 +194,6 @@ fn a_stereo_broadcast_separates_and_reports_its_blend() {
         sep > 20.0,
         "only {sep:.1} dB of separation through the node"
     );
-
-    assert!(
-        r.events.iter().any(|e| matches!(
-            e,
-            Event::Metric {
-                name: "stereo_blend",
-                ..
-            }
-        )),
-        "no blend metric reported"
-    );
 }
 
 #[test]

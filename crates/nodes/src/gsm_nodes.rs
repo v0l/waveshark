@@ -15,16 +15,16 @@
 //! a front end that quietly follows the tuning is one that says it heard a
 //! cell where there is none.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Mark, Origin, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
 use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
-use pipeline::registry::{Settings, SettingsExt};
 use pipeline::param::{Param, ParamValue};
-use std::collections::HashMap;
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+use std::collections::HashMap;
 
 /// What one carrier occupies, and the width a burst was heard through.
 pub const CHANNEL_WIDTH_HZ: f64 = gsm::CHANNEL_SPACING_HZ;
@@ -46,13 +46,6 @@ pub const GRANTED_CARRIER_HOLD_S: f64 = 60.0;
 /// once a grant.
 const ASK_AGAIN_FRAMES: u32 = 13_000;
 
-/// Where a stream sits in the span it was cut from, so a position in it
-/// can be named to a decoder on another stream of the same span.
-#[derive(Clone, Copy, Debug)]
-struct Origin {
-    span_sample: f64,
-    span_rate: f64,
-}
 
 pub struct GsmNode {
     cfg: GsmConfig,
@@ -111,11 +104,8 @@ impl GsmNode {
     /// sits in the span, and, for a carrier a cell sent a phone to, the
     /// timeslot and the beacon's frame timing.
     pub fn configure(&mut self, s: &Settings) {
-        if s.get("span_origin_sample").is_some() {
-            self.origin = Some(Origin {
-                span_sample: s.f64_or("span_origin_sample", 0.0),
-                span_rate: s.f64_or("span_rate_hz", 0.0),
-            });
+        if let Some(o) = Origin::read(s) {
+            self.origin = Some(o);
         }
         if let Some(t) = s.get("timeslot").and_then(|v| v.as_i64()) {
             self.follow.push(t as u8);
@@ -153,7 +143,7 @@ impl GsmNode {
         }
         self.asked.insert(key, sync.frame_number);
         let input = self.det.input_of_channel(sync.at);
-        let span = origin.span_sample + input * origin.span_rate / rate;
+        let span = origin.span_sample_at(input, rate);
         let mut settings = Settings::new();
         settings.insert("timeslot".into(), ParamValue::Int(g.timeslot.into()));
         settings.insert("anchor_span_sample".into(), ParamValue::Float(span));
@@ -206,7 +196,7 @@ impl Simple for GsmNode {
         }
         // The beacon's timing, named in span samples, found in this stream.
         if let (Some((span, frame, tsc, off)), Some(origin)) = (self.handed, self.origin) {
-            let input = (span - origin.span_sample) * rate / origin.span_rate;
+            let input = origin.stream_pos_at(span, rate);
             self.det.anchor(gsm::Anchor {
                 at: self.det.channel_of_input(input),
                 frame_number: frame,
@@ -225,7 +215,7 @@ impl Simple for GsmNode {
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         for r in self.wants.drain(..) {
-            c.request("gsm", r);
+            c.request(r);
         }
         let rate = c.inputs.first().map_or(0.0, |p| p.spec.rate);
         let Some(iq) = i.as_iq() else { return Ok(()) };
@@ -299,14 +289,14 @@ impl Simple for GsmNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float("channel_hz", self.channel_hz, 100e6..=2_000e6)
+        vec![Param::float(CHANNEL_HZ, self.channel_hz, 100e6..=2_000e6)
             .unit("Hz")
             .label("Which carrier to watch")]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "channel_hz" => self.channel_hz = v.as_f64().unwrap_or(DEFAULT_HZ),
+            CHANNEL_HZ => self.channel_hz = v.as_f64().unwrap_or(DEFAULT_HZ),
             _ => return Err(common::Error::other(format!("gsm: unknown parameter {name:?}"))),
         }
         Ok(())
@@ -581,8 +571,24 @@ impl Protocol for Gsm {
     fn label(&self) -> &'static str {
         "gsm"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["gsm-sch"]
+    }
     fn placement(&self) -> Placement {
         Placement::Bands(gsm::DOWNLINK_BANDS.to_vec())
+    }
+    /// The widest of the downlink bands, P-GSM and E-GSM 900 together.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 35_000_000 }
+    }
+    /// A block arrives from a downlink band, which only a base station
+    /// transmits from, and what it carries had to pass the standard's parity
+    /// to reach the bus at all.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !gsm::is_downlink_band(p.center_hz() as f64) {
+            return None;
+        }
+        Some(gsm_rows(bytes, common::Hz(p.center_hz())))
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -618,7 +624,14 @@ impl Protocol for Gsm {
         vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label }]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("gsm").f("channel_hz", at.center_hz)]
+        let mut n = NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz);
+        // A carrier read here may have to send a phone to another one, and
+        // the timing it hands over is a position in the span rather than in
+        // this stream.
+        if let Some(o) = at.origin {
+            o.write(&mut n.settings);
+        }
+        vec![n]
     }
 }
 
@@ -869,7 +882,7 @@ mod tests {
                 frames.extend(f);
             }
             asked.extend(events.into_iter().filter_map(|e| match e {
-                pipeline::event::Event::Request { request, .. } => Some(request),
+                pipeline::event::Event::Request(request) => Some(request),
                 _ => None,
             }));
         }
@@ -928,8 +941,7 @@ mod tests {
         let other = carrier(14.0, &bursts, rate);
 
         let mut origin = Settings::new();
-        origin.insert("span_origin_sample".into(), ParamValue::Float(0.0));
-        origin.insert("span_rate_hz".into(), ParamValue::Float(rate));
+        Origin { span_sample: 0, span_rate_hz: rate }.write(&mut origin);
 
         let mut a = GsmNode::new(beacon_hz, Default::default());
         a.configure(&origin);
@@ -965,4 +977,21 @@ mod tests {
         let (frames, _) = run(&mut c, rate, other_hz, &other);
         assert!(frames.is_empty(), "{frames:?}");
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "gsm",
+    summary: "One GSM carrier: the frequency correction tone, then the \
+              synchronisation burst's cell identity and frame number",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = GsmNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), GsmConfig::default());
+    n.configure(s);
+    Ok(Box::new(n))
 }

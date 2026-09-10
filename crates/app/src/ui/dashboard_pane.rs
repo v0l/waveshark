@@ -373,7 +373,9 @@ impl Dashboard<'_> {
             // here that is gone a second later and so the one worth a list
             // rather than a count.
             let mut open = s.sources.lock().clone();
-            open.sort_by(|a, b| b.source.snr_db.total_cmp(&a.source.snr_db));
+            // A locked channel measured nothing, and sorts below what did.
+            let heard_at = |s: &crate::radio::SeenSource| s.source.snr_db.unwrap_or(f32::MIN);
+            open.sort_by(|a, b| heard_at(b).total_cmp(&heard_at(a)));
             card(
                 &mut c[col(1)],
                 Some(Rail::Heard.colour()),
@@ -391,7 +393,10 @@ impl Dashboard<'_> {
                             .column(ui, 96.0)
                             .legend(src.source.locked_to.unwrap_or("open"))
                             .column(ui, 176.0)
-                            .heard(format!("{:.0} dB", src.source.snr_db))
+                            .heard(match src.source.snr_db {
+                                Some(db) => format!("{db:.0} dB"),
+                                None => String::new(),
+                            })
                             .size(12.0)
                             .show(ui);
                     }
@@ -436,6 +441,14 @@ impl Dashboard<'_> {
                     match err {
                         Some(e) => Self::lamp_row(ui, false, &e),
                         None => Self::lamp_row(ui, true, "No fault reported"),
+                    }
+                    // What the last rebuild could not put in the graph, which
+                    // stands for as long as the graph does: a front end the
+                    // span cannot hold is not a fault that happened once.
+                    let refused = s.refused.lock().clone();
+                    match refused {
+                        Some(e) => Self::lamp_row(ui, false, &e),
+                        None => Self::lamp_row(ui, true, "Every stage the plan asked for is built"),
                     }
                     Self::lamp_row(
                         ui,

@@ -200,9 +200,7 @@ impl Log<'_> {
                 } else {
                     Vec::new()
                 };
-                let tracking = r.status.modes_on.load(Ordering::Relaxed)
-                    || r.status.ais_on.load(Ordering::Relaxed)
-                    || r.status.aprs_on.load(Ordering::Relaxed);
+                let tracking = r.status.tracking.load(Ordering::Relaxed);
                 ui.label(legend(&if !self.decode_on {
                     "decoding off".to_string()
                 } else if running.is_empty() {
@@ -356,7 +354,7 @@ impl Log<'_> {
                 (rec.modulation.to_string(), theme::LEGEND),
                 (fmt_db(rec.rssi_dbfs), level_color(rec.rssi_dbfs)),
                 (fmt_db(rec.snr_db), theme::LEGEND),
-                (rec.model.clone(), col),
+                (rec.protocol().to_string(), col),
                 (format!("{:>4}", rec.bytes.len()), theme::LEGEND),
             ];
             let mut x = rect.left();
@@ -391,7 +389,7 @@ impl Log<'_> {
                     if hot { theme::READOUT } else { theme::LEGEND },
                 );
                 if presp.clicked() {
-                    pin = Some((rec.freq, rec.model.clone()));
+                    pin = Some((rec.freq, rec.protocol().to_string()));
                 }
                 if presp.hovered() {
                     presp.on_hover_text("decode this frequency on the channel strip");

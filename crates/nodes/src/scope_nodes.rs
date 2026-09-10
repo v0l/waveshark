@@ -17,6 +17,7 @@ use dsp::{FirDecim, Spectrum};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// Lowest reading kept, in dBFS.
 pub const FLOOR_DB: f32 = -140.0;
@@ -292,8 +293,8 @@ impl Simple for ScopeNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::int("fft_size", self.size as i64, 64..=16_384).label("FFT size"),
-            Param::float("refresh_hz", self.refresh_hz as f64, 1.0..=120.0)
+            Param::int(FFT_SIZE, self.size as i64, 64..=16_384).label("FFT size"),
+            Param::float(REFRESH_HZ, self.refresh_hz as f64, 1.0..=120.0)
                 .label("Refresh")
                 .unit("Hz"),
             Param::float("span_hz", self.span_hz, 0.0..=50_000_000.0)
@@ -304,7 +305,7 @@ impl Simple for ScopeNode {
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
-            "fft_size" => {
+            FFT_SIZE => {
                 let n = (value.as_i64().unwrap_or(1024).max(64) as usize)
                     .next_power_of_two()
                     .min(16_384);
@@ -317,7 +318,7 @@ impl Simple for ScopeNode {
                 }
                 Ok(())
             }
-            "refresh_hz" => {
+            REFRESH_HZ => {
                 self.refresh_hz = value.as_f64().unwrap_or(30.0).clamp(1.0, 120.0) as f32;
                 Ok(())
             }
@@ -465,4 +466,31 @@ mod span_tests {
             "tone read at {hz:.0} Hz"
         );
     }
+}
+
+/// The setting names this stage reads.
+const FFT_SIZE: &str = "fft_size";
+const REFRESH_HZ: &str = "refresh_hz";
+
+/// How many bins the transform runs at, and how often it is drawn, when
+/// nothing has said otherwise.
+const DEFAULT_FFT_SIZE: i64 = 1_024;
+const DEFAULT_REFRESH_HZ: f64 = 30.0;
+
+pub const DESC: StageDesc = StageDesc {
+    name: "scope",
+    summary: "Look at a wire: a spectrum, a spectrogram and a level meter of \
+              whatever passes through, which it passes on untouched",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = ScopeNode::new(s.i64_or(FFT_SIZE, DEFAULT_FFT_SIZE).max(64) as usize);
+    Simple::set_param(
+        &mut n,
+        REFRESH_HZ,
+        ParamValue::Float(s.f64_or(REFRESH_HZ, DEFAULT_REFRESH_HZ)),
+    )?;
+    Ok(Box::new(n))
 }

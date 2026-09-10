@@ -1135,7 +1135,17 @@ impl App {
         // so the map, the range rings and anything else that resolves against
         // the station are where the receiver actually is rather than where it
         // was parked this morning.
-        if let Some(e) = radio.status.error.lock().take() {
+        // A fault first, then whatever the last rebuild could not put in the
+        // graph. Two slots because they are different in kind, and one banner
+        // because there is one place to read a sentence: what went wrong wins
+        // over a standing verdict on the chain.
+        let fault = radio
+            .status
+            .error
+            .lock()
+            .take()
+            .or_else(|| radio.status.refused.lock().take());
+        if let Some(e) = fault {
             self.err = Some(e);
             self.err_at = Some(std::time::Instant::now());
         }
@@ -1207,7 +1217,11 @@ impl App {
             // interface's behalf: it comes back here as the running graph
             // and has to be written out like one drawn by hand, or the
             // model picked is the model until the program is restarted.
-            let edits = crate::patch::Edits::diff(&self.chain.patch, &self.chain.base);
+            let edits = crate::patch::Edits::diff(
+                &self.chain.patch,
+                &self.chain.base,
+                crate::chain::operator_owns,
+            );
             if edits != self.chain.edits {
                 self.chain.edits = edits;
                 self.chain.save_patch();
@@ -1215,16 +1229,16 @@ impl App {
         }
         // A level set in the chain view lands on the node, and the strip
         // has to follow or the next thing it sends puts the level back.
-        let (rev, audio, chans) = radio.status.levels();
-        if rev != self.audio.levels_rev {
-            self.audio.levels_rev = rev;
-            if rev > 0 {
-                self.audio.volume = audio.master;
-                self.audio.muted = audio.muted;
-                self.audio.call_volume = audio.calls;
-                self.audio.call_muted = audio.calls_muted;
-                self.audio.call_agc = audio.agc;
-                for spec in chans {
+        let levels = radio.status.levels();
+        if levels.rev != self.audio.levels_rev {
+            self.audio.levels_rev = levels.rev;
+            if levels.rev > 0 {
+                self.audio.volume = levels.audio.master;
+                self.audio.muted = levels.audio.muted;
+                self.audio.call_volume = levels.audio.calls;
+                self.audio.call_muted = levels.audio.calls_muted;
+                self.audio.call_agc = levels.audio.agc;
+                for spec in levels.channels {
                     if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == spec.id) {
                         c.volume = spec.volume;
                         c.muted = spec.muted;
@@ -1317,16 +1331,6 @@ impl App {
             self.log.next_packet += 1;
             self.log.decodes.push(Logged { id, rec });
         }
-        // Listening does not depend on which pane is on screen. The
-        // subscriptions used to be made where the call list is drawn, so a
-        // receiver sitting on the spectrum heard nothing however much it
-        // decoded, and the fault looked like a broken vocoder.
-        let heard: Vec<crate::calls::Call> =
-            self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
-        let mut cmds = std::mem::take(&mut self.cmds);
-        self.calls.subscribe_new(&heard, &mut cmds);
-        self.cmds = cmds;
-
         // A busy band produces packets faster than anyone reads them, and an
         // unbounded log is a slow memory leak with a scrollbar.
         // The samples of a burst are kept for the newest rows only. A row
@@ -1544,6 +1548,14 @@ impl App {
     /// and the bus is the one thing that knows who is on the air now. What a
     /// decoder knows besides, the cipher, the codec, arrives on the packet
     /// side through `log_decodes` and lands on the same row.
+    ///
+    /// The one place anything is subscribed to, for the same reason: a group
+    /// worth listening to is one the bus has heard speech on. Subscribing
+    /// where the list is drawn meant a receiver sitting on the spectrum
+    /// heard nothing however much it decoded, and subscribing from a decode
+    /// meant subscribing to calls the receiver cannot play.
+    ///
+    /// Every frame, whichever pane is on screen.
     fn read_heard(&mut self) {
         let Some(r) = &self.radio else {
             return;
@@ -1565,12 +1577,14 @@ impl App {
     /// Take a fresh copy of the transcript when it has changed, and give the
     /// call list the newest line for each call.
     ///
-    /// The transcript is one for the whole program and the node writes into
-    /// it from the radio thread; the view draws from a copy so it never
-    /// holds the lock while drawing. Every frame rather than when a packet
+    /// The transcript belongs to the receiver and the node writes into it
+    /// from the radio thread; the view draws from a copy so it never holds
+    /// the lock while drawing. Every frame rather than when a packet
     /// arrives, because speech is not a packet.
     fn read_said(&mut self) {
-        let shared = crate::transcripts::log();
+        let Some(shared) = self.radio.as_ref().map(|r| r.status.transcript()) else {
+            return;
+        };
         let seq = shared.lock().seq();
         if seq == self.transcript.seq {
             return;
@@ -1591,7 +1605,9 @@ impl App {
                 .show(ui);
         match act {
             Some(transcript_pane::Action::Clear) => {
-                crate::transcripts::log().lock().clear();
+                if let Some(r) = self.radio.as_ref() {
+                    r.status.transcript().lock().clear();
+                }
                 self.transcript.log.clear();
                 self.transcript.only = None;
             }
@@ -2489,7 +2505,7 @@ impl App {
     }
 
     /// Open the transcript, on one conversation or on everything heard.
-    pub fn show_transcript(&mut self, only: Option<String>) {
+    pub fn show_transcript(&mut self, only: Option<common::ConversationKey>) {
         self.transcript.only = only;
         self.set_view(View::Transcript);
     }
@@ -2686,7 +2702,7 @@ mod tests {
         DecodeRecord {
             at: std::time::Instant::now(),
             freq,
-            model: "Fineoffset-WHx080".into(),
+            model: Some("Fineoffset-WHx080"),
             channel_hz: 31_250.0,
             modulation: common::Modulation::Ook,
             detail: "temperature_c=16.2 humidity_pct=89".into(),
@@ -2702,6 +2718,7 @@ mod tests {
             link: None,
             iq: None,
             audio: None,
+            airtime: None,
         }
     }
 
@@ -2754,7 +2771,7 @@ mod tests {
         // bursts that arrived while it was off.
         let mut a = app();
         let mut unknown = record(a.center, None);
-        unknown.model = "unknown".into();
+        unknown.model = None;
         a.log_decodes(vec![unknown, record(a.center, Some(true))]);
         a.log.show_unknown = false;
         assert_eq!(a.log.decodes.len(), 2, "hiding must not drop anything");
@@ -3132,7 +3149,9 @@ mod tests {
     #[test]
     fn a_call_opens_the_transcript_on_its_own_conversation() {
         let mut a = app();
-        let key = "DMR:435000000:9:1234567".to_string();
+        let key = common::ConversationKey::new("DMR", 435_000_000.0)
+            .to(Some("9".into()))
+            .from(Some("1234567".into()));
         a.read_views();
         assert!(!a.view_live(View::Transcript), "nothing has been said yet");
         assert!(!a.transcript.log.has(&key), "and so no row would offer a way in");
@@ -3153,7 +3172,7 @@ mod tests {
 
         a.show_transcript(Some(key.clone()));
         assert_eq!(a.view, View::Transcript);
-        assert_eq!(a.transcript.only.as_deref(), Some(key.as_str()));
+        assert_eq!(a.transcript.only.as_ref(), Some(&key));
         assert_eq!(a.transcript.log.of(&key).len(), 2);
         a.read_views();
         assert!(!a.view_live(View::Transcript), "the view has been looked at");

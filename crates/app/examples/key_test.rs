@@ -76,7 +76,7 @@ fn main() -> common::Result<()> {
             let id = g.order().last().map(|(i, _)| i).unwrap();
             let sink = g
                 .node(id)
-                .and_then(|n| n.as_any())
+                .map(|n| n.as_any())
                 .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())
                 .unwrap();
             println!(
@@ -98,7 +98,7 @@ fn main() -> common::Result<()> {
     println!("--- unkeying ---");
     let id = g.order().last().map(|(i, _)| i).unwrap();
     if let Some(n) = g.node_mut(id) {
-        if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+        if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
             s.finish(std::time::Duration::from_secs(1));
         }
     }

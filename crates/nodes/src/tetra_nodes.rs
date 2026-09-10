@@ -16,7 +16,7 @@
 //! registration or a data session, and only a row that carries `voice`
 //! reaches the call list.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::tetra::{
@@ -37,6 +37,7 @@ use pipeline::event::{Decoded, Request};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use tetra_crypto::Crypto;
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// The raster TETRA carriers sit on.
 pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
@@ -182,6 +183,9 @@ const TB_FLAG_ENCRYPTED: u8 = 0x02;
 /// holds a slot of history, so a few slots is plenty.
 const RING_SLOTS: usize = 8;
 
+/// The same ring in seconds, which is what the meter that keeps it takes.
+const KEEP_S: f64 = RING_SLOTS as f64 * SLOT_SYMBOLS as f64 / BAUD;
+
 /// How a timeslot's speech frames move, watched to tell clear speech from
 /// ciphertext. The ACELP codec interpolates its LSPs across frames, so a
 /// clear call's three LSP indices drift a little each frame; ciphertext
@@ -261,11 +265,9 @@ pub struct TetraNode {
     rx: TetraRx,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
-    /// Channel samples at the demodulator's rate, kept behind it so a
-    /// burst's packet can carry the samples it was sliced from;
-    /// `ring_base` is the absolute index of `ring[0]`.
-    ring: Vec<common::C32>,
-    ring_base: u64,
+    /// The channel behind the demodulator: what each burst was heard at and
+    /// the samples it was sliced from.
+    meter: crate::FrameMeter,
     demod_rate: f64,
     bursts: Vec<Burst>,
     blocks: Vec<Block>,
@@ -325,7 +327,7 @@ pub struct TetraNode {
 
 impl Default for TetraNode {
     fn default() -> Self {
-        Self::new(390_000_000.0)
+        Self::new(DEFAULT_HZ)
     }
 }
 
@@ -344,8 +346,7 @@ impl TetraNode {
             rx: TetraRx::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            ring: Vec::new(),
-            ring_base: 0,
+            meter: crate::FrameMeter::new(DEMOD_HZ, channel_hz as u64, KEEP_S),
             demod_rate: DEMOD_HZ,
             bursts: Vec::new(),
             blocks: Vec::new(),
@@ -607,29 +608,41 @@ impl TetraNode {
         self.lsp_by_tn.get(&tn).is_some_and(LspWatch::enciphered)
     }
 
+    /// How many samples one slot occupies, which is what a burst was sliced
+    /// from. The root-raised-cosine filter ahead of the slicer delays it by a
+    /// few samples, which is inside the burst's own guard.
+    fn slot_samples(&self) -> usize {
+        (SLOT_SYMBOLS as f64 * self.demod_rate / BAUD) as usize
+    }
+
+    /// One slot as a frame: its bytes, the level its own samples measured and
+    /// the samples themselves.
+    ///
+    /// The slot's own power rather than the channel's peak, because a carrier
+    /// this front end reads is on the air continuously and a row has to say
+    /// what *this* burst arrived at. Where the slot is not one of the bursts
+    /// just read, which is what a reaped traffic event is, the channel's own
+    /// level stands in and there are no samples to point at.
+    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::Frame {
+        let len = self.slot_samples();
+        match start_sample {
+            Some(at) => {
+                let snr_db = self.meter.snr_db_at(at, len);
+                self.meter.frame_measured(bytes, at, len, snr_db)
+            }
+            None => {
+                common::Frame::measured(bytes, self.meter.rssi_dbfs(), self.meter.snr_db())
+                    .at(self.channel_hz as u64)
+            }
+        }
+    }
+
     /// Decode the speech a traffic slot carries into PCM, one [`common::Voice`]
     /// per call heard this block. A traffic burst is a continuous burst
     /// (`Normal1`, training sequence 1) on a timeslot the access assign field
     /// has marked as traffic; its 432 channel bits are the same two half
     /// blocks the SCH/F occupies. Enciphered slots are decrypted first when a
     /// key for the cell's colour is known.
-    /// The channel samples a burst was sliced from. The root-raised-cosine
-    /// filter ahead of the slicer delays it by a few samples, which is
-    /// inside the burst's own guard.
-    fn burst_iq(&self, b: &Burst) -> Option<std::sync::Arc<common::IqBurst>> {
-        let len = (SLOT_SYMBOLS as f64 * self.demod_rate / BAUD) as usize;
-        let start = b.start_sample;
-        if start < self.ring_base || start + len as u64 > self.ring_base + self.ring.len() as u64 {
-            return None;
-        }
-        let s = (start - self.ring_base) as usize;
-        Some(std::sync::Arc::new(common::IqBurst {
-            rate: self.demod_rate,
-            center_hz: self.channel_hz as u64,
-            samples: self.ring[s..s + len].to_vec(),
-        }))
-    }
-
     fn decode_voice(
         &mut self,
         bursts: &[Burst],
@@ -746,13 +759,7 @@ impl Node for TetraNode {
         "tetra"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         1
@@ -779,8 +786,7 @@ impl Node for TetraNode {
         let factor = (rate / DEMOD_HZ).round().max(1.0) as usize;
         let demod_rate = rate / factor as f64;
         self.demod_rate = demod_rate;
-        self.ring.clear();
-        self.ring_base = 0;
+        self.meter = crate::FrameMeter::new(demod_rate, self.channel_hz as u64, KEEP_S);
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, OCCUPIED_HZ / 2.0, 60.0);
         self.demod = TetraDemod::new(demod_rate, TetraConfig::default());
@@ -803,7 +809,7 @@ impl Node for TetraNode {
         c: &mut NodeCtx<'_>,
     ) -> Result<()> {
         for r in self.wants.drain(..) {
-            c.request("tetra", r);
+            c.request(r);
         }
         let Some(iq) = inputs[0].as_iq() else {
             return Ok(());
@@ -812,13 +818,7 @@ impl Node for TetraNode {
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
         self.decim.process(&self.mixed, &mut self.narrow);
-        self.ring.extend_from_slice(&self.narrow);
-        let keep = (RING_SLOTS as f64 * SLOT_SYMBOLS as f64 * self.demod_rate / BAUD) as usize;
-        if self.ring.len() > keep * 2 {
-            let drop = self.ring.len() - keep;
-            self.ring.drain(..drop);
-            self.ring_base += drop as u64;
-        }
+        self.meter.feed(&self.narrow);
 
         self.bursts.clear();
         let narrow = std::mem::take(&mut self.narrow);
@@ -832,6 +832,10 @@ impl Node for TetraNode {
             self.rx.push(b, &mut blocks);
         }
         self.bursts = bursts;
+        // Where each of this block's slots sat in the stream, so an event
+        // built from one can be measured on the samples it was read from.
+        let slot_starts: Vec<(u64, u64)> =
+            self.bursts.iter().map(|b| (b.slot, b.start_sample)).collect();
 
         let at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -952,11 +956,11 @@ impl Node for TetraNode {
                 *seen = Some(key);
             }
             self.accepted += 1;
-            out.push(common::Packet::of_frame(
-                at_us,
-                CHANNEL_WIDTH_HZ as u32,
-                common::Frame::unmeasured(bytes).at(self.channel_hz as u64),
-            ));
+            // Measured where the slot it came out of sat, so a row says what
+            // that burst arrived at rather than what the carrier is doing.
+            let start = slot_starts.iter().find(|(s, _)| *s == slot).map(|(_, at)| *at);
+            let frame = self.frame_at(bytes, start);
+            out.push(common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame));
         }
         // Speech the traffic slots carried this block, one Voice per call
         // for the bus and one packet per burst for the log.
@@ -966,14 +970,14 @@ impl Node for TetraNode {
         for vb in per_burst {
             let b = &bursts[vb.burst_index];
             self.accepted += 1;
-            let frame = common::Frame::unmeasured(encode_traffic_burst(
+            let bytes = encode_traffic_burst(
                 &vb,
                 b,
                 self.last_aie != 0 || self.slot_enciphered(vb.tn),
-            ))
-            .at(self.channel_hz as u64);
+            );
+            let start = b.start_sample;
+            let frame = self.frame_at(bytes, Some(start));
             let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
-            p.iq = self.burst_iq(b);
             p.audio = (!vb.pcm.is_empty())
                 .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ }));
             out.push(p);
@@ -990,8 +994,7 @@ impl Node for TetraNode {
         self.mixer.reset();
         self.decim.reset();
         self.demod.reset();
-        self.ring.clear();
-        self.ring_base = 0;
+        self.meter.reset();
         self.rx = TetraRx::new();
         self.last_sync = None;
         self.last_sysinfo = None;
@@ -1102,7 +1105,6 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         text: None,
         crc_ok: Some(crc_ok),
         modulation: Some(common::Modulation::Dqpsk),
-        bandwidth_hz: Some(CHANNEL_WIDTH_HZ),
         detail: Some(format!(
             "traffic burst TS{tn} marker {marker}{}",
             if flags & TB_FLAG_ENCRYPTED != 0 {
@@ -1112,16 +1114,24 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             }
         )),
         fields,
-        rssi_dbfs: None,
-        snr_db: None,
-        iq: None,
-        audio: None,
         position: None,
         report: common::ReportDetail::Bare,
         identity: None,
         // A traffic burst is 60 ms of one timeslot, and it says whether the
-        // network had granted the channel for speech.
-        airtime: Some(common::Airtime { seconds: 0.06, voice: true, live: true }),
+        // network had granted the channel for speech. It says nothing about
+        // the cipher: the grant named that, and a burst reporting "clear"
+        // would flip the call back while it was still enciphered.
+        airtime: Some(common::Airtime {
+            seconds: 0.06,
+            voice: true,
+            live: true,
+            secrecy: if flags & TB_FLAG_ENCRYPTED != 0 {
+                common::Secrecy::Encrypted(None)
+            } else {
+                common::Secrecy::Unsaid
+            },
+            codec: Some(TETRA_CODEC),
+        }),
         // A traffic burst says which usage marker it is on and, once the
         // network has granted the channel, who was granted it. The party
         // called is the marker's own until then, which is what the call list
@@ -1145,6 +1155,10 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     }
     let event = Event::parse(bytes)?;
     let mut fields: Vec<(String, Value)> = Vec::new();
+    // What the call list reads, filled in by the one PDU that knows: a call
+    // control PDU says whether this is a circuit mode call, what protects it
+    // and, at the end, how long it ran.
+    let mut airtime: Option<common::Airtime> = None;
     let protocol = match &event {
         Event::Sync(s) => {
             fields.push(("mcc".into(), Value::Int(s.mcc.into())));
@@ -1183,6 +1197,16 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             if c.is_call() {
                 fields.push(("voice".into(), Value::Bool(true)));
                 fields.push(("codec".into(), Value::Text(TETRA_CODEC.into())));
+                airtime = Some(common::Airtime {
+                    seconds: if c.pdu == TRAFFIC_END { f64::from(c.seconds) } else { 0.0 },
+                    voice: true,
+                    live: c.pdu == TRAFFIC,
+                    secrecy: match c.encryption() {
+                        name if name == "none" => common::Secrecy::Clear,
+                        name => common::Secrecy::Encrypted(Some(name)),
+                    },
+                    codec: Some(TETRA_CODEC),
+                });
             }
             match c.address {
                 Address::Ssi(s) | Address::Ussi(s) => {
@@ -1290,6 +1314,7 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if protocol == "TETRA-SDS" {
         d = d.with_media(pipeline::event::media::TEXT);
     }
+    d.airtime = airtime;
     Some(d)
 }
 
@@ -1309,6 +1334,19 @@ impl Protocol for Tetra {
     }
     fn placement(&self) -> Placement {
         Placement::Bands(dsp::tetra::DOWNLINK_BANDS.to_vec())
+    }
+    /// One downlink band, which is inside the UHF paging allocation.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 10_000_000 }
+    }
+    /// A broadcast identifies itself twice over: it arrives from a downlink
+    /// band, and its bytes are a tagged PDU that had to pass the standard's
+    /// own CRC to exist at all.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::tetra::is_downlink_band(p.center_hz() as f64) {
+            return None;
+        }
+        Some(tetra_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -1331,7 +1369,7 @@ impl Protocol for Tetra {
         &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("tetra").f("channel_hz", at.center_hz)]
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
     fn dedupe_key(&self, p: &common::Packet) -> Option<Vec<u8>> {
         let common::PacketBody::Frame(f) = &p.body else {
@@ -1530,10 +1568,12 @@ mod tests {
                         let b = &f.bytes;
                         let d = tetra_decoded(b, Hz(hz as u64)).unwrap();
                         if d.protocol == "TETRA-Voice" {
-                            // Every burst carries the samples it was sliced
-                            // from, a slot's worth at the demodulator's rate.
-                            let q = p.iq.as_ref().expect("a traffic burst without its samples");
+                            // Every burst carries what it was heard at and
+                            // the samples it was sliced from, a slot's worth
+                            // at the demodulator's rate.
+                            let q = p.samples().expect("a traffic burst without its samples");
                             assert_eq!(q.samples.len(), (255.0 * q.rate / 18_000.0) as usize);
+                            assert!(p.rssi_dbfs().is_finite() && p.snr_db().is_finite());
                             assert!(traffic_burst_bits(b).is_some());
                         }
                         rows.push(d);
@@ -1569,9 +1609,18 @@ mod tests {
         assert_eq!(get(traffic[0], "to").as_deref(), Some("marker 23"));
         assert_eq!(get(traffic[0], "timeslot").as_deref(), Some("2"));
         assert_eq!(get(traffic[0], "live").as_deref(), Some("true"));
+        // The same said as the call list reads it, in types rather than in
+        // fields: speech in the one vocoder TETRA has, still running.
+        let air = traffic[0].airtime.as_ref().expect("a call with no airtime");
+        assert!(air.voice && air.live);
+        assert_eq!(air.codec, Some(TETRA_CODEC));
+        assert_eq!(air.secrecy, common::Secrecy::Clear, "this call was in the clear");
         // Twenty-nine frames of four slots between the first and the last
         // frame the marker was seen on.
         let secs: f64 = get(traffic[1], "seconds").unwrap().parse().unwrap();
+        let ended = traffic[1].airtime.as_ref().expect("an end with no airtime");
+        assert!(!ended.live, "the call ended");
+        assert_eq!(ended.seconds, secs, "the airtime and the field are one measurement");
         let want = 29.0 * 4.0 * 255.0 / 18_000.0;
         assert!(
             (secs - want).abs() < 0.2,
@@ -1908,4 +1957,22 @@ mod tests {
             "ESI de-anonymised to SSI"
         );
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+/// The bottom of the lower downlink band, which is where a stage with no
+/// carrier of its own sits until something tunes it.
+pub const DEFAULT_HZ: f64 = dsp::tetra::DOWNLINK_BANDS[0].0;
+
+pub const DESC: StageDesc = StageDesc {
+    name: "tetra",
+    summary: "One TETRA downlink carrier: pi/4-DQPSK, sync and broadcast PDUs",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(TetraNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

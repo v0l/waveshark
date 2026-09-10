@@ -211,7 +211,7 @@ impl Recorder {
         let name = format!(
             "g{:04}_{}_{}_{:.4}M_{:.0}k.cu8",
             self.seq,
-            sanitise(&r.model),
+            sanitise(r.protocol()),
             r.modulation.label().to_ascii_lowercase(),
             r.freq / 1e6,
             out_rate / 1e3,
@@ -266,7 +266,7 @@ impl Recorder {
             r.freq,
             rate,
             samples,
-            esc(&r.model),
+            esc(r.protocol()),
             esc(r.modulation.label()),
             r.rssi_dbfs,
             r.snr_db,
@@ -376,7 +376,7 @@ mod tests {
         let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap();
         let (live, _rec) = crate::radio::scan_with_recorder(&buf, rec);
         assert!(
-            live.iter().any(|r| r.model.contains("Fineoffset")),
+            live.iter().any(|r| r.protocol().contains("Fineoffset")),
             "the fixture did not decode live, so replay proves nothing"
         );
 
@@ -390,7 +390,7 @@ mod tests {
         let mut found = false;
         for f in &files {
             for r in crate::radio::replay(f).unwrap() {
-                if r.model.contains("Fineoffset") {
+                if r.protocol().contains("Fineoffset") {
                     found = true;
                     assert_eq!(
                         r.fields
@@ -437,7 +437,7 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("cu8"))
             .any(|f| {
-                crate::radio::replay(f).unwrap().iter().any(|r| r.model.contains("Fineoffset"))
+                crate::radio::replay(f).unwrap().iter().any(|r| r.protocol().contains("Fineoffset"))
             });
         assert!(!decoded, "0.1 s now catches the burst; PRE_ROLL can be reduced again");
         let _ = std::fs::remove_dir_all(&dir);

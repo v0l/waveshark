@@ -25,7 +25,7 @@
 //! sync word the first sixteen bytes of the payload are read as its packet
 //! header, which is as far as anyone without the channel key gets.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::{Result, C32};
 use decode::lora::{self, Received};
@@ -33,10 +33,11 @@ use decode::lorawan;
 use decode::meshtastic;
 use dsp::lora::{Demod, OVERSAMPLE};
 use dsp::FirDecim;
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// The bandwidths LoRa is used at in practice. The standard defines nine,
 /// down to 7.8 kHz, but a receiver that offers all of them has to guess
@@ -526,16 +527,14 @@ impl Simple for LoraNode {
                     if frame.crc_ok != Some(true)
                         && (frame.header.has_crc || !KNOWN_SYNC.contains(&packet.sync_word)) =>
                 {
-                    c.emit(Event::Warning {
-                        stage: "lora".into(),
-                        message: format!(
-                            "SF{} over {:.0} kHz: {} bytes without a CRC that checks, sync {:#04x}, refused",
-                            packet.sf,
-                            bw / 1e3,
-                            frame.payload.len(),
-                            packet.sync_word
-                        ),
-                    });
+                    c.warn(format!(
+                        "SF{} over {:.0} kHz: {} bytes without a CRC that checks, \
+                         sync {:#04x}, refused",
+                        packet.sf,
+                        bw / 1e3,
+                        frame.payload.len(),
+                        packet.sync_word
+                    ));
                 }
                 Ok(frame) => {
                     self.decoded += 1;
@@ -553,15 +552,12 @@ impl Simple for LoraNode {
                     o.packets_mut().push(common::Packet::of_frame(now_us(), bw as u32, f));
                 }
                 Err(e) => {
-                    c.emit(Event::Warning {
-                        stage: "lora".into(),
-                        message: format!(
-                            "SF{} over {:.0} kHz: {} symbols and {e:?}",
-                            packet.sf,
-                            bw / 1e3,
-                            packet.symbols.len()
-                        ),
-                    });
+                    c.warn(format!(
+                        "SF{} over {:.0} kHz: {} symbols and {e:?}",
+                        packet.sf,
+                        bw / 1e3,
+                        packet.symbols.len()
+                    ));
                 }
             }
         }
@@ -574,16 +570,16 @@ impl Simple for LoraNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("bandwidth_hz", self.bandwidth_hz, 0.0..=500_000.0)
+            Param::float(BANDWIDTH_HZ, self.bandwidth_hz, 0.0..=500_000.0)
                 .label("Channel bandwidth, 0 to measure it"),
-            Param::float("sf", self.sf as f64, 0.0..=12.0).label("Spreading factor, 0 to find it"),
+            Param::float(SF, self.sf as f64, 0.0..=12.0).label("Spreading factor, 0 to find it"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "bandwidth_hz" => self.bandwidth_hz = v.as_f64().unwrap_or(0.0).max(0.0),
-            "sf" => {
+            BANDWIDTH_HZ => self.bandwidth_hz = v.as_f64().unwrap_or(0.0).max(0.0),
+            SF => {
                 let sf = v.as_f64().unwrap_or(0.0) as u8;
                 self.sf = if sf == 0 || dsp::lora::SPREADING_FACTORS.contains(&sf) {
                     sf
@@ -985,7 +981,6 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             r.payload.clone(),
         )
         .with_modulation(common::Modulation::Css)
-        .with_bandwidth(r.bandwidth_hz)
         .with_crc(r.crc_ok)
         .with_detail(detail)
         .with_fields(fields);
@@ -1042,6 +1037,15 @@ impl Protocol for Lora {
     fn placement(&self) -> Placement {
         Placement::Anywhere
     }
+    /// The same chirp is legal at 433, 868 and 915 MHz and none of those
+    /// bands is only LoRa, so the claim is the front end's tag plus a
+    /// spreading factor, a bandwidth and a coding rate that LoRa defines.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Tagged
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        lora_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &ALL_BANDWIDTHS_HZ,
@@ -1075,7 +1079,7 @@ impl Protocol for Lora {
         heard.retain(|w| *w >= widest);
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("lora").f("bandwidth_hz", at.width_hz)]
+        vec![NodeSpec::new(DESC.name).f(BANDWIDTH_HZ, at.width_hz)]
     }
 }
 
@@ -1145,4 +1149,26 @@ mod tests {
             "not a LoRa channel"
         );
     }
+}
+
+/// The setting names this stage reads.
+const BANDWIDTH_HZ: &str = "bandwidth_hz";
+const SF: &str = "sf";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "lora",
+    summary: "LoRa chirp spread spectrum: dechirp, then the frame \
+              behind it, at any spreading factor over 125 to 500 kHz",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = LoraNode::new(s.f64_or(BANDWIDTH_HZ, 0.0));
+    // Nought is "find it", and so is anything the demodulator cannot run at.
+    let sf = s.f64_or(SF, 0.0) as u8;
+    if dsp::lora::SPREADING_FACTORS.contains(&sf) {
+        Simple::set_param(&mut n, SF, ParamValue::Float(sf as f64))?;
+    }
+    Ok(Box::new(n))
 }

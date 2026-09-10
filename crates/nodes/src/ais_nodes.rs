@@ -10,7 +10,7 @@
 //! what reaches the bus is bytes that proved themselves, and the parsing that
 //! happens downstream is reading rather than acceptance.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::ais::{self, Message};
@@ -18,6 +18,7 @@ use dsp::ais::{AisConfig, AisDetector, AisFrame, BAND_CENTER_HZ, CHANNEL_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// The width one AIS channel occupies, which is what a frame was heard
 /// through whichever of the two carried it.
@@ -262,6 +263,10 @@ impl Protocol for Ais {
     fn id(&self) -> &'static str {
         "ais"
     }
+    /// A position report is most of what the vessels send.
+    fn reports_position(&self) -> bool {
+        true
+    }
     fn label(&self) -> &'static str {
         "ais"
     }
@@ -270,6 +275,20 @@ impl Protocol for Ais {
             CHANNEL_HZ[0] - CHANNEL_WIDTH_HZ,
             CHANNEL_HZ[1] + CHANNEL_WIDTH_HZ,
         )])
+    }
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 200_000 }
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::ais::is_ais_band(p.center_hz() as f64) {
+            return None;
+        }
+        let center = common::Hz(p.center_hz());
+        Some(
+            ais::parse(bytes)
+                .map(|f| vec![ais_decoded(&f, bytes, center)])
+                .unwrap_or_default(),
+        )
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -437,4 +456,15 @@ mod tests {
         assert_eq!(d.protocol, "AIS-Position");
         assert_eq!(d.crc_ok, Some(true));
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "ais",
+    summary: "Both marine AIS channels: GMSK demodulation and HDLC framing",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AisNode::default()))
 }

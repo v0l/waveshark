@@ -86,14 +86,14 @@ fn run(wide: &[C32]) -> (Vec<Event>, Vec<common::Package>) {
     let mut events = Vec::new();
     let mut packages = Vec::new();
     for block in wide.chunks(16_384) {
-        events.extend_from_slice(g.feed_iq(block).expect("run"));
+        events.extend(g.feed_iq(block).expect("run").iter().map(|e| e.event.clone()));
         packages.extend_from_slice(g.output().as_pulses().unwrap_or(&[]));
     }
     // The last source's tail may still be draining: a stretch of silence
     // lets it close.
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     for _ in 0..4 {
-        events.extend_from_slice(g.feed_iq(&silence).expect("run"));
+        events.extend(g.feed_iq(&silence).expect("run").iter().map(|e| e.event.clone()));
         packages.extend_from_slice(g.output().as_pulses().unwrap_or(&[]));
     }
     (events, packages)

@@ -168,7 +168,7 @@ fn sigid_observation(rec: &DecodeRecord) -> datasets::sigid::Observation {
     // A decoder that named it without a check is worth passing on as the
     // guess it is.
     let notes = if rec.is_known() {
-        Some(format!("Read as {} (no integrity check): {}", rec.model, rec.detail))
+        Some(format!("Read as {} (no integrity check): {}", rec.protocol(), rec.detail))
     } else {
         Some(rec.detail.clone())
     };

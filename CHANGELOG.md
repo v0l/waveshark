@@ -183,6 +183,20 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The type line under a box in the chain view names the stage type, so the
+  automatic stage reads "auto", a channel bank "bank" and the source decoder
+  "source_decode". Three of them repeated the label above instead, which said
+  nothing about which stage it was and nothing that could be looked up.
+- The chain view draws every front end the receiver has found work for, not
+  one of them: the decoders watching the whole span and each decoder on each
+  source it has open. It used to show a single chain inside the automatic
+  stage, so most of what the receiver was doing was not on the screen.
+- A warning in the status line names the stage that raised it as the chain
+  view labels it, "868.1000 LORA" rather than "lora", so a message says which
+  of several front ends of the same kind is complaining.
+- The transmission drawn on the waterfall while a half duplex radio is keyed
+  is a stage in the chain now, "Transmit monitor", so it can be seen, tapped
+  and switched off like everything else the receiver does.
 - Nothing is written down until it is asked for. The packet log, the device
   survey and the transcriber are all off on a new install and on an upgrade,
   and each is remembered from then on, so it is a decision made once rather
@@ -252,6 +266,34 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+
+- A channel a front end has locked onto reads no level on the spectrum and
+  on the dashboard, rather than "NaN dB". A lock is a decision the receiver
+  made and not a measurement, so there is no level to print.
+- The waterfall keeps its frame to frame averaging when the dial moves. The
+  spectrum is built again on every retune, and the averaging came back at its
+  default each time, so a display set up for a weak signal lost its settling
+  the moment it was tuned to one.
+- A station name is read off an FM broadcast with no sound card in the
+  machine. RDS is decoded in the graph, but the name was only published
+  while there was a speaker to play the audio on, so a receiver with no
+  audio device showed an unnamed station it was decoding perfectly well.
+- An edit the receiver cannot build says so. The message was written over by
+  the next line of the same rebuild, so an edit went back to the last one
+  that worked with nothing on screen to say why.
+- The map, the device survey and the packet feeds see the same rows the
+  packet list does. The copies of a burst its neighbouring channels also
+  heard were dropped after the graph, so everything reading the bus counted
+  one transmission several times.
+- M17, DMR and TETRA rows say how strongly they were heard and carry the
+  samples they were read from, like every other packet. Those three front
+  ends measured nothing and relied on whatever placed them to fill a level
+  in, so a channel opened from the strip logged every transmission with a
+  blank level column and nothing to look at when the bytes were wrong.
+- The packet list says how many things are being tracked whenever anything
+  is tracking, including from a feed or from a front end the receiver found
+  for itself. It counted only the three front ends it knew by name, so a
+  band being tracked through a feed showed frames and no tracks.
 
 - With the device on Auto, a card that has no room for the model, or that
   opens and then cannot run it, hands the model to the CPU and the card

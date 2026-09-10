@@ -15,6 +15,7 @@
 use crate::NodeSpec;
 use common::Packet;
 use dsp::Modulation;
+use pipeline::event::Decoded;
 use pipeline::port::PortKind;
 
 /// Where in the spectrum a protocol's transmitters can be.
@@ -171,12 +172,97 @@ pub fn span_feed(rate: f64, offset_hz: f64, shape: &Shape) -> (usize, f64) {
     (factor, rate / factor as f64)
 }
 
+/// How a frame on the packet bus is recognised as this protocol's, and so
+/// how specific the claim is.
+///
+/// Two protocols can both be able to read the same bytes, so the order they
+/// are offered a frame in decides which of them gets it. This is that order,
+/// written down as a property of each protocol rather than as the position
+/// of an `if` in the consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FrameClaim {
+    /// By a tag the protocol's own front end wrote into the bytes and its
+    /// decoder checks again. The most specific claim there is, and the only
+    /// one open to a protocol that runs wherever somebody puts it: M17 is on
+    /// the 2 m channels APRS uses and on the 70 cm ones beside the pager
+    /// bands, so its frequency says nothing about it.
+    Tagged,
+    /// By where the frame was received, in a window `width_hz` wide. Where
+    /// two windows overlap the narrower is the better claim: 144 to 146 MHz
+    /// sits inside the VHF paging allocation, and the 420 to 430 MHz TETRA
+    /// downlinks inside the UHF one.
+    Band { width_hz: u64 },
+    /// Nothing this protocol produces reaches the bus as a frame.
+    Never,
+}
+
 /// A marker on the spectrum for a placed channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mark {
     pub hz: f64,
     pub width_hz: f64,
     pub label: String,
+}
+
+/// Where a stream sits in the span it was cut from, so a position in it can
+/// be named to a decoder reading another stream of the same span.
+///
+/// A GSM carrier a beacon sent a phone to has no synchronisation burst of its
+/// own, and the only clock it can be timed from is the beacon's: the beacon
+/// says which span sample it last synchronised on, and the decoder on the
+/// other carrier finds that sample in its own stream. Neither can do it
+/// without knowing where its stream starts in the span, which only whatever
+/// cut the stream out can say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Origin {
+    /// Span sample the stream's first sample was cut from.
+    pub span_sample: u64,
+    pub span_rate_hz: f64,
+}
+
+impl Origin {
+    /// The span sample `pos` samples into a stream running at `rate`.
+    pub fn span_sample_at(&self, pos: f64, rate: f64) -> f64 {
+        self.span_sample as f64 + pos * self.span_rate_hz / rate.max(1.0)
+    }
+
+    /// The other way about: how far into a stream running at `rate` the span
+    /// sample `span` falls.
+    pub fn stream_pos_at(&self, span: f64, rate: f64) -> f64 {
+        (span - self.span_sample as f64) * rate / self.span_rate_hz.max(1.0)
+    }
+
+    /// The origin of a stream that starts `pos` samples into this one: what a
+    /// decoder placed later, on the history the stream kept, is reading from.
+    pub fn advanced(&self, pos: u64, rate: f64) -> Self {
+        Self {
+            span_sample: self.span_sample_at(pos as f64, rate).max(0.0) as u64,
+            span_rate_hz: self.span_rate_hz,
+        }
+    }
+
+    /// Put it where the stage that needs it will find it. The registry builds
+    /// stages from named settings, so this is where the two names are spelled
+    /// and [`Origin::read`] is the only place they are read.
+    pub fn write(&self, s: &mut pipeline::registry::Settings) {
+        s.insert(
+            "span_origin_sample".into(),
+            pipeline::param::ParamValue::Float(self.span_sample as f64),
+        );
+        s.insert(
+            "span_rate_hz".into(),
+            pipeline::param::ParamValue::Float(self.span_rate_hz),
+        );
+    }
+
+    pub fn read(s: &pipeline::registry::Settings) -> Option<Self> {
+        use pipeline::registry::SettingsExt;
+        let sample = s.get("span_origin_sample")?.as_f64()?;
+        Some(Self {
+            span_sample: sample.max(0.0) as u64,
+            span_rate_hz: s.f64_or("span_rate_hz", 0.0),
+        })
+    }
 }
 
 /// A channel a decoder is being built for.
@@ -188,6 +274,10 @@ pub struct Placed {
     pub rate: f64,
     /// How strong the detector found it, or NaN where nothing measured.
     pub snr_db: f32,
+    /// Where the stream it will read sits in the span, where whatever cut it
+    /// out knows: a decoder timed from another carrier's needs it, and one
+    /// placed on the span itself has no span position to be told.
+    pub origin: Option<Origin>,
 }
 
 /// How much wider than its declared channel a source may measure and still
@@ -205,6 +295,13 @@ pub trait Protocol: Send + Sync {
 
     /// What it is called where a person reads it.
     fn label(&self) -> &'static str;
+
+    /// Other words a scanner table or a saved channel may name it by, beside
+    /// its id and its label. Here rather than in a table beside the parser,
+    /// so a protocol arrives with every word it answers to.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     fn placement(&self) -> Placement;
 
@@ -294,6 +391,33 @@ pub trait Protocol: Send + Sync {
     /// found source draw the same chain.
     fn chain(&self, at: Placed) -> Vec<NodeSpec>;
 
+    /// Whether what this protocol reads says where the transmitter was, so
+    /// the tracker is worth attaching to the bus: a squitter carrying an
+    /// aircraft's own position, a vessel's, a station's beacon.
+    fn reports_position(&self) -> bool {
+        false
+    }
+
+    /// How a frame off the packet bus is recognised as this protocol's.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Never
+    }
+
+    /// The rows a frame off the packet bus becomes.
+    ///
+    /// `None` where the frame is not this protocol's, so the next protocol
+    /// is offered it. `Some` of nothing where it was this protocol's and did
+    /// not read: a frame from a TETRA downlink is a TETRA frame whatever its
+    /// bytes turn out to be, and handing it on would only invite a weaker
+    /// parser to guess at it.
+    ///
+    /// Several rows where one transmission carries several messages: a pager
+    /// empties its queue in one go, and a GSM paging request names up to four
+    /// handsets.
+    fn read_frame(&self, _p: &Packet, _bytes: &[u8]) -> Option<Vec<Decoded>> {
+        None
+    }
+
     /// The identity of a packet that is the same news each time it repeats,
     /// so a cell's broadcast is logged once per channel rather than once a
     /// frame. None for a packet that is always news.
@@ -324,9 +448,34 @@ pub fn all() -> &'static [&'static dyn Protocol] {
     ALL
 }
 
+/// Every protocol, in the order a frame on the bus is offered to them:
+/// the most specific claim first.
+pub fn frame_readers() -> &'static [&'static dyn Protocol] {
+    static ORDER: std::sync::OnceLock<Vec<&'static dyn Protocol>> = std::sync::OnceLock::new();
+    ORDER.get_or_init(|| {
+        let mut ps: Vec<&'static dyn Protocol> = all().to_vec();
+        ps.sort_by_key(|p| p.frame_claim());
+        ps
+    })
+}
+
 /// The protocol registered under a name.
 pub fn by_id(id: &str) -> Option<&'static dyn Protocol> {
     all().iter().copied().find(|p| p.id() == id)
+}
+
+/// The protocol a word names: its registry id, the label a person reads, or
+/// one of the words it also answers to.
+///
+/// The one parse, so a scanner block and a saved channel mode cannot
+/// disagree about what `adsb` means.
+pub fn by_word(word: &str) -> Option<&'static dyn Protocol> {
+    let w = word.trim();
+    all().iter().copied().find(|p| {
+        p.id().eq_ignore_ascii_case(w)
+            || p.label().eq_ignore_ascii_case(w)
+            || p.aliases().iter().any(|a| a.eq_ignore_ascii_case(w))
+    })
 }
 
 /// The protocols that read one channel of a declared width, which is what
@@ -353,6 +502,7 @@ mod tests {
                 width_hz: shape.widths[0],
                 rate,
                 snr_db: 20.0,
+                origin: None,
             };
             let chain = p.chain(at);
             assert!(!chain.is_empty(), "{} builds no chain", p.id());
@@ -366,6 +516,58 @@ mod tests {
                 (0..outs).filter_map(|k| g.spec_of(tail.out(k)).map(|s| s.kind)).collect();
             assert_eq!(kinds, p.outputs(), "{}", p.id());
         }
+    }
+
+    /// Nothing is left out of the frame walk, and everything whose spectrum
+    /// the pager bands swallow is offered a frame before the pager: 144 to
+    /// 146 MHz sits inside the VHF paging allocation, the 420 to 430 MHz
+    /// TETRA downlinks inside the UHF one, and a protocol recognised by a tag
+    /// can be anywhere at all.
+    #[test]
+    fn every_protocol_is_offered_a_frame_and_the_pager_is_offered_it_late() {
+        let order = frame_readers();
+        assert_eq!(order.len(), all().len());
+        let at = |id: &str| order.iter().position(|p| p.id() == id).expect(id);
+        let pocsag = at("pocsag");
+        for id in ["m17", "dmr", "lora", "elrs", "aprs", "tetra"] {
+            assert!(at(id) < pocsag, "{id} is offered a frame after the pager");
+        }
+    }
+
+    /// What a protocol says it puts out and what its stage says about the
+    /// packet bus are one fact written twice, and a front end that produced
+    /// packets nothing wired to the bus would decode into silence.
+    #[test]
+    fn a_stage_feeds_the_bus_exactly_when_its_protocol_produces_frames() {
+        let reg = crate::registry();
+        for p in all() {
+            let desc = reg.desc(p.id()).unwrap_or_else(|| panic!("{} has no stage", p.id()));
+            let produces =
+                matches!(p.outputs().first(), Some(PortKind::Frames | PortKind::Packets));
+            assert_eq!(desc.feeds_bus, produces, "{}", p.id());
+        }
+    }
+
+    /// One parse for a word naming a protocol, whichever of its names was
+    /// written: the scanner table and a saved channel mode both come through
+    /// here, and they used to disagree about what `adsb` meant.
+    #[test]
+    fn a_protocol_answers_to_its_id_its_label_and_its_aliases() {
+        let id = |word| by_word(word).map(|p| p.id());
+        assert_eq!(id("mode_s"), Some("mode_s"), "its registry id");
+        assert_eq!(id("mode s"), Some("mode_s"), "its label");
+        assert_eq!(id("ADSB"), Some("mode_s"), "an alias, in any case");
+        assert_eq!(id("pager"), Some("pocsag"), "the pager is labelled one");
+        assert_eq!(id("bluetooth"), Some("ble"));
+        assert_eq!(id("gsm-sch"), Some("gsm"));
+        assert_eq!(id("nothing anybody reads"), None);
+        // Every alias names the protocol that claims it, and no two claim
+        // the same word.
+        let mut words: Vec<&str> = all().iter().flat_map(|p| p.aliases().iter().copied()).collect();
+        let count = words.len();
+        words.sort();
+        words.dedup();
+        assert_eq!(words.len(), count, "two protocols answer to one word");
     }
 
     #[test]

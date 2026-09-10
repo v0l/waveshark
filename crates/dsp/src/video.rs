@@ -127,6 +127,34 @@ impl Standard {
             .into_iter()
             .find(|s| (period_s / s.line_s() - 1.0).abs() < 0.003)
     }
+
+    /// What a setting or a menu calls it, and what [`FromStr`] reads back.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pal => "pal",
+            Self::Ntsc => "ntsc",
+        }
+    }
+}
+
+impl std::str::FromStr for Standard {
+    type Err = common::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "pal" => Ok(Self::Pal),
+            "ntsc" => Ok(Self::Ntsc),
+            other => Err(common::Error::other(format!(
+                "no video standard called {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for Standard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 /// Whether a demodulated baseband is analogue video, and which standard.

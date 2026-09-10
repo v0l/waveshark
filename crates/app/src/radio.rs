@@ -288,37 +288,6 @@ fn restart(
     Ok((dev, stream, soft))
 }
 
-/// Open the microphone, once, for whatever wants speech.
-///
-/// One capture for the receiver rather than one per consumer: the meter on
-/// the strip, the transmitter and anything else that grows a use for speech
-/// each take a tap, and every tap hears every sample. Opening it per keyed
-/// channel meant the meter only moved once it was too late to set a level
-/// against, and two consumers would have taken samples from each other.
-///
-/// A device that will not open is reported once and left alone: a receiver
-/// that works is more useful than one that refuses to start because there is
-/// no microphone in the machine.
-fn open_mic(device: &str, mic: &mut Option<audio::AudioCapture>, status: &Status) {
-    if mic.is_some() {
-        return;
-    }
-    let opened = match device.is_empty() {
-        true => audio::AudioCapture::open(48_000),
-        false => audio::AudioCapture::open_named(device, 48_000),
-    };
-    match opened {
-        Ok(c) => {
-            tracing::info!("microphone: {}", c.device_name());
-            *mic = Some(c);
-        }
-        Err(e) => {
-            *status.error.lock() = Some(format!("no microphone: {e}"));
-            status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
-        }
-    }
-}
-
 /// Open the radio for transmit, and say what the graph should key.
 ///
 /// No graph is built here. The transmitter is stages in the receiver's own
@@ -414,44 +383,6 @@ fn key_up(
         crate::chain::TxPlan { spec: *tx, mode, on_air },
         crate::chain::TxSinks { stream: Some(dev.start_tx()?), mic: src },
     ))
-}
-
-/// Put what is going out into what the receiver sees.
-///
-/// A half duplex radio hears nothing while it transmits, so the driver hands
-/// its receive stream a noise floor and the spectrum is flat for the length
-/// of the over. That is honest and useless: an operator wants to see their
-/// own signal, and it is the only way to check without a second radio that
-/// the transmission is where it was meant to be, is the width it should be,
-/// and is being modulated at all.
-///
-/// So the transmitter's own samples are mixed into the receive block, shifted
-/// by the difference between where it is transmitting and where the receiver
-/// is tuned, exactly as a real signal on that frequency would arrive. The
-/// level is what the modulator produced, which is not calibrated against
-/// anything: this is a monitor, not a measurement, and a transmission on the
-/// waterfall is drawn in the same place a receiver across the room would see
-/// it and not at the strength it would see it.
-///
-/// Only while the radio is deaf. A full duplex radio hears its own
-/// transmission for real, and mirroring on top of that would draw it twice.
-fn mirror_tx(
-    sent: &[C32],
-    into: &mut [C32],
-    shift_hz: f64,
-    rate: f64,
-    mixer: &mut dsp::Mixer,
-    scratch: &mut Vec<C32>,
-) {
-    if sent.is_empty() {
-        return;
-    }
-    mixer.set_shift(shift_hz, rate);
-    scratch.clear();
-    mixer.process(sent, scratch);
-    for (dst, src) in into.iter_mut().zip(scratch.iter()) {
-        *dst += *src;
-    }
 }
 
 /// Put the correction on the device, and say how much of it the receiver has
@@ -890,8 +821,9 @@ pub struct DecodeRecord {
     /// Width of that channel, which differs between the two banks and is what
     /// says how far apart two reports have to be to be different bursts.
     pub channel_hz: f64,
-    /// Protocol name, or "unknown" for a burst nothing claimed.
-    pub model: String,
+    /// The protocol that claimed the burst, by the name its decoder
+    /// publishes, or `None` for a burst nothing claimed.
+    pub model: Option<&'static str>,
     /// How it was keyed.
     pub modulation: common::Modulation,
     /// Fields for a decode, inferred coding and timings for an unknown.
@@ -923,6 +855,10 @@ pub struct DecodeRecord {
     /// What was said, for a voice protocol. This is the payload of such a
     /// transmission: the bytes of a vocoded stream say nothing to anybody.
     pub audio: Option<std::sync::Arc<common::Speech>>,
+    /// How long it held the channel, whether it carried speech, and what
+    /// protects it. What the call list is built from, as the decoder said it
+    /// rather than as a reader guessed from field names.
+    pub airtime: Option<common::Airtime>,
 }
 
 impl DecodeRecord {
@@ -943,20 +879,34 @@ impl DecodeRecord {
             self.modulation,
             self.rssi_dbfs,
             self.snr_db,
-            self.model,
+            self.protocol(),
             self.bytes.len(),
             self.detail
         )
     }
 
+    /// What the row is named as, for a person reading it: the protocol that
+    /// claimed the burst, or that nothing did.
+    pub fn protocol(&self) -> &'static str {
+        self.model.unwrap_or(nodes::UNKNOWN)
+    }
+
+    /// The system a call, a message or a link on this row belongs to:
+    /// `M17-Voice` and `M17-Packet` are both M17, so every mode of one
+    /// system shares a row wherever rows are folded together.
+    pub fn system(&self) -> &'static str {
+        let name = self.protocol();
+        name.split('-').next().unwrap_or(name)
+    }
+
     /// A bare record, for tests that need one to hand to something else.
     #[cfg(test)]
-    pub fn for_test(freq: f64, model: &str) -> Self {
+    pub fn for_test(freq: f64, model: &'static str) -> Self {
         Self {
             at: std::time::Instant::now(),
             freq,
             channel_hz: 31_250.0,
-            model: model.to_string(),
+            model: (model != nodes::UNKNOWN).then_some(model),
             modulation: common::Modulation::Ook,
             detail: String::new(),
             fields: Vec::new(),
@@ -968,91 +918,15 @@ impl DecodeRecord {
             link: None,
             iq: None,
             audio: None,
+            airtime: None,
         }
     }
 
     /// Whether any protocol claimed this burst.
     pub fn is_known(&self) -> bool {
-        self.model != "unknown"
+        self.model.is_some()
     }
 }
-
-/// Decodes everything audible in the current span, without being tuned or told
-/// what to look for.
-///
-/// Two channelizers, not one, because the two front ends want opposite things
-/// from a channel. Measured on the Fine Offset capture by adding noise until
-/// decoding stops, a 1.5 kbit/s OOK sensor survives down to 12.3 dB
-/// peak-to-noise in a 31 kHz channel and only 22.9 dB in a 125 kHz one: the
-/// detector integrates noise across the whole channel while the signal
-/// occupies a sliver of it, so a wide channel costs 10.6 dB for nothing. An
-/// FSK transmitter needs the opposite, because its two tones are tens of kHz
-/// apart and a narrow channel simply cuts one of them off: the same synthetic
-/// packet reads as 46 bits at 110 us a symbol in a 125 kHz channel and as
-/// eight bits of nonsense in a 31 kHz one.
-///
-/// Neither front end needs the signal centred, which is what makes any of this
-/// work: the OOK path is an envelope detector and does not care where in the
-/// channel the carrier sits, and the FSK path measures both tones from the
-/// burst itself, so a SAW transmitter tens of kHz off nominal reads the same
-/// as one on frequency. Width therefore costs sensitivity and nothing else.
-/// Bursts already reported, for long enough to recognise the same one
-/// arriving again from another channel.
-///
-/// Deduping within a block is not enough. Reads from the radio are short,
-/// about seven milliseconds at 2.3 MS/s, and a burst that starts near the end
-/// of one is finished by the detectors in the next, so the copies from
-/// neighbouring channels straddle the boundary. Measured on live 868 MHz
-/// traffic, one transmission appeared as four rows 31 kHz apart.
-#[derive(Default)]
-struct Dedupe {
-    recent: Vec<Reported>,
-}
-
-impl Dedupe {
-    /// Whether a burst is new, remembering it if so.
-    fn accept(&mut self, r: &DecodeRecord, now: std::time::Instant) -> bool {
-        self.recent.retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
-        if self.recent.iter().any(|k| same_burst(k, r)) {
-            return false;
-        }
-        self.recent.push(Reported {
-            at: r.at,
-            freq: r.freq,
-            channel_hz: r.channel_hz,
-            modulation: r.modulation,
-            known: r.is_known(),
-        });
-        true
-    }
-
-    fn clear(&mut self) {
-        self.recent.clear();
-    }
-}
-
-/// A burst that has already been logged.
-#[derive(Clone, Copy, Debug)]
-struct Reported {
-    at: std::time::Instant,
-    freq: f64,
-    channel_hz: f64,
-    modulation: common::Modulation,
-    /// Whether a protocol claimed it.
-    known: bool,
-}
-
-/// How long a burst stays in that memory.
-///
-/// A block is roughly a tenth of a second, and a burst that starts near the
-/// end of one is finished by the detectors in the next, so its copies from
-/// neighbouring channels straddle the boundary and a per-block comparison
-/// misses half of them. Measured on live 868 MHz traffic, one transmission
-/// appeared as four rows 31 kHz apart across two blocks.
-///
-/// Long enough to cover that, short enough that a device repeating its packet
-/// two or three times a second still gets a row per repeat.
-const DEDUPE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Scan a buffer while recording, as the radio thread does. Test support.
 /// A receiver set up to sweep a capture, the way the live one sweeps the air.
@@ -1086,6 +960,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         // A file has already been through whatever the receiver did to it.
         dc_block: false,
         refresh_hz: 30.0,
+        smoothing: crate::chain::DEFAULT_SMOOTHING,
         fft: 1024,
         channels: Vec::new(),
         audio: crate::chain::AudioPlan::default(),
@@ -1094,9 +969,11 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         tx: None,
         edits: Default::default(),
         record,
+        capture: false,
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
         log: false,
+        settings: Default::default(),
     }
 }
 
@@ -1115,11 +992,6 @@ fn capture_format_for(native: common::SampleFormat) -> common::SampleFormat {
     }
 }
 
-/// Sweep a capture as the radio thread does, block by block.
-///
-/// Blocks are the size the radio delivers, because deduplication depends on
-/// how a burst falls across block boundaries and a whole-file call would not
-/// exercise it.
 /// When a block's signal arrived, given the moment its processing finished.
 ///
 /// A decode is stamped with the start of the block that carried it rather than
@@ -1130,30 +1002,32 @@ fn block_start(finished: std::time::Instant, samples: usize, rate: f64) -> std::
     finished - std::time::Duration::from_secs_f64(samples as f64 / rate.max(1.0))
 }
 
-/// What the bus is subscribed to, kept where a rebuild cannot lose it.
+/// What one block decoded to, and what the recorder should keep of it.
 ///
-/// Every level on the bus is a setting the plan carries and the patch draws,
-/// so those come back with the graph. A subscription is a rule rather than
-/// a number, and the patch has no way to write one, so the set is kept here
-/// and handed to whatever bus a rebuild produces.
-#[derive(Default)]
-struct BusSettings {
-    subs: Vec<crate::audiobus::Subscription>,
-}
-
-impl BusSettings {
-    fn apply(&self, rx: &mut crate::chain::Receiver) {
-        if let Some(n) = rx.audio_mut() {
-            n.bus_mut().set_subscriptions(self.subs.clone());
+/// One place, used by the live loop and by a replay, because a replay that
+/// harvested differently would be evidence about a different receiver. The
+/// copies of a burst other channels read are already gone: the dedupe is a
+/// node in the graph, so every consumer of the bus sees the rows this
+/// returns.
+pub(crate) fn harvest(rx: &mut crate::chain::Receiver, at: std::time::Instant) -> Vec<DecodeRecord> {
+    let found = rx.decodes(at);
+    if let Some(r) = rx.recorder_mut() {
+        for d in &found {
+            r.capture(d);
         }
     }
+    found
 }
 
+/// Sweep a capture as the radio thread does, block by block.
+///
+/// Blocks are the size the radio delivers, because deduplication depends on
+/// how a burst falls across block boundaries and a whole-file call would not
+/// exercise it.
 pub(crate) fn replay_blocks(
     rx: &mut crate::chain::Receiver,
     buf: &common::IqBuf,
 ) -> Vec<DecodeRecord> {
-    let mut dedupe = Dedupe::default();
     let mut out = Vec::new();
     let rate = buf.rate.as_f64().max(1.0);
     for block in buf.samples.chunks(16_384) {
@@ -1161,15 +1035,7 @@ pub(crate) fn replay_blocks(
             break;
         }
         let at = block_start(std::time::Instant::now(), block.len(), rate);
-        let mut found = rx.decodes(at);
-        dedupe_neighbours(&mut found);
-        let seen = out.len();
-        out.extend(found.into_iter().filter(|r| !r.model.is_empty() && dedupe.accept(r, at)));
-        if let Some(r) = rx.recorder_mut() {
-            for d in &out[seen..] {
-                r.capture(d);
-            }
-        }
+        out.extend(harvest(rx, at));
     }
     out
 }
@@ -1200,80 +1066,6 @@ pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<DecodeRec
     Ok(replay_blocks(&mut rx, &buf))
 }
 
-/// Drop the copies of a burst that other channels also reported.
-///
-/// Channels overlap by design: a two times oversampled channelizer hands
-/// adjacent channels each other's transition band, so a transmitter sitting
-/// anywhere near an edge is genuinely present in two of them, and its
-/// sidebands reach further still. Each of those channels runs its own
-/// detector, reads a mangled copy of the same burst, and reports it. Measured
-/// on a synthetic FSK packet, the channel holding the signal read it correctly
-/// as 46 bits at 110 us a symbol while its neighbour reported 139 bits at
-/// 36 us: not a second device, just the same one seen through a filter skirt.
-/// Running two banks over the same air makes this certain rather than likely.
-///
-/// The strongest report of a burst wins, and a real decode beats an unknown
-/// however loud, because a protocol that matched its own CRC is better
-/// evidence than a stronger guess. Marked by clearing the model rather than
-/// removed here, so the caller can compact once.
-/// Whether a new report is the same burst as one already logged.
-///
-/// Same channel through the same front end is a second transmission, which on
-/// a device that repeats its packet is exactly what should be logged. Same
-/// channel through the other front end is one burst read twice. Anything else
-/// near enough in frequency is one signal seen through a filter skirt: two and
-/// a half channels either side, taken from the wider of the two reports
-/// because that is the one whose skirts reach furthest.
-fn same_burst(kept: &Reported, new: &DecodeRecord) -> bool {
-    // A real decode is never a copy of a guess. The front end names what it
-    // measured about every burst, including the ones it read nothing from,
-    // and a measurement of noise a few kilohertz off a sensor a moment
-    // before it keyed up must not stand in for the sensor's packet.
-    if new.is_known() && !kept.known {
-        return false;
-    }
-    let d = (kept.freq - new.freq).abs();
-    if d < 1.0 && (kept.channel_hz - new.channel_hz).abs() < 1.0 {
-        return kept.modulation != new.modulation;
-    }
-    d <= 2.5 * kept.channel_hz.max(new.channel_hz)
-}
-
-fn dedupe_neighbours(block: &mut [DecodeRecord]) {
-    let mut order: Vec<usize> = (0..block.len()).collect();
-    order.sort_by(|&a, &b| {
-        let key = |r: &DecodeRecord| (r.is_known(), r.rssi_dbfs);
-        let (ka, kb) = (key(&block[a]), key(&block[b]));
-        kb.0.cmp(&ka.0).then(kb.1.total_cmp(&ka.1))
-    });
-
-    let mut kept: Vec<(f64, f64, common::Modulation, bool)> = Vec::new();
-    for i in order {
-        let dup = kept.iter().any(|(kf, kw, km, known)| {
-            same_burst(
-                &Reported {
-                    at: block[i].at,
-                    freq: *kf,
-                    channel_hz: *kw,
-                    modulation: *km,
-                    known: *known,
-                },
-                &block[i],
-            )
-        });
-        if dup {
-            block[i].model.clear();
-        } else {
-            kept.push((
-                block[i].freq,
-                block[i].channel_hz,
-                block[i].modulation,
-                block[i].is_known(),
-            ));
-        }
-    }
-}
-
 /// A source the detector has, or recently had, open.
 #[derive(Clone, Copy, Debug)]
 pub struct SeenSource {
@@ -1290,6 +1082,27 @@ pub const SOURCE_LINGER: std::time::Duration = std::time::Duration::from_secs(6)
 /// is as far back as a reading anybody can act on goes.
 pub const SPEED_HISTORY: usize = 96;
 
+/// The levels as the nodes hold them, with the revision that moves whenever
+/// something other than the strip changed one.
+///
+/// A revision rather than a comparison: the strip sends its own levels down
+/// and reads these back, and only a change it did not make should move its
+/// faders.
+#[derive(Clone, Debug, Default)]
+pub struct Levels {
+    pub rev: u64,
+    pub audio: crate::chain::AudioPlan,
+    pub channels: Vec<ChannelSpec>,
+}
+
+/// Every input of the audio bus, and where the bus sits in the running
+/// graph so a level can be set by the same route the chain view uses.
+#[derive(Clone, Debug, Default)]
+pub struct Strips {
+    pub bus_node: Option<usize>,
+    pub inputs: Vec<crate::chain::StripState>,
+}
+
 pub struct Status {
     pub dropped: AtomicU64,
     pub running: AtomicBool,
@@ -1300,6 +1113,15 @@ pub struct Status {
     /// above it the trace sits is the headroom left for another channel.
     speed: parking_lot::Mutex<std::collections::VecDeque<f32>>,
     pub error: parking_lot::Mutex<Option<String>>,
+    /// What the last rebuild could not put in the graph: a front end the span
+    /// cannot hold, a channel too near its edge.
+    ///
+    /// Its own slot rather than a second use of `error`, because the two are
+    /// different in kind. A fault happened once; this is a standing verdict on
+    /// the graph that is running, republished by every rebuild, and it used to
+    /// be written over `error` a few lines after a refused edit had been
+    /// reported there, so the operator never saw why their edit went back.
+    pub refused: parking_lot::Mutex<Option<String>>,
     /// Stereo separation currently applied, as f32 bits.
     blend: AtomicU32,
 
@@ -1322,7 +1144,7 @@ pub struct Status {
     video: parking_lot::Mutex<Option<common::VideoFrame>>,
     /// Every input of the video bus: which one, what it is called, and how
     /// complete its last picture was. What a pane offers to switch between.
-    video_inputs: parking_lot::Mutex<Vec<(String, String, f32)>>,
+    video_inputs: parking_lot::Mutex<Vec<crate::chain::VideoInput>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
     /// What each scope stage in the chain is seeing, by node id.
@@ -1353,6 +1175,11 @@ pub struct Status {
     /// on and whether it is reading anything. `None` where the graph has no
     /// transcriber, which is every build made without the `stt` feature.
     pub transcriber: parking_lot::Mutex<Option<crate::transcripts::Engine>>,
+    /// What has been said, as the receiver's own transcript rather than a
+    /// copy of it: the node writes into this from the radio thread and the
+    /// view takes a snapshot when its sequence number moves. Empty until a
+    /// receiver is built, which is what an interface with no radio shows.
+    pub transcript: parking_lot::Mutex<crate::transcripts::SharedLog>,
     /// What the raw span capture has written, and where. Off unless somebody
     /// switched it on, which is the usual state.
     pub capture_on: AtomicBool,
@@ -1366,15 +1193,9 @@ pub struct Status {
     pub log_full: std::sync::atomic::AtomicBool,
     /// What each packet feed is doing, for the packet log settings.
     pub feeds: parking_lot::Mutex<Vec<crate::chain::FeedStatus>>,
-    /// Whether the wideband Mode S path is the one running.
-    pub modes_on: AtomicBool,
-    /// Whether the AIS path is the one running.
-    pub ais_on: AtomicBool,
-    /// Whether the APRS path is the one running.
-    pub aprs_on: AtomicBool,
-    /// Whether the pager path is the one running.
-    pub pocsag_on: AtomicBool,
-    pub m17_on: AtomicBool,
+    /// Whether anything the tracker can resolve a position from is running,
+    /// locally or from a feed.
+    pub tracking: AtomicBool,
     /// Software zoom currently applied, 1 for none.
     pub zoom: AtomicU64,
     /// Whether the operator owns the shape of the graph.
@@ -1396,7 +1217,7 @@ pub struct Status {
     pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
     /// through the chain view changed one, so the strip can follow.
-    levels: parking_lot::Mutex<(u64, crate::chain::AudioPlan, Vec<ChannelSpec>)>,
+    levels: parking_lot::Mutex<Levels>,
     /// The patch the receiver is actually running, which is not always the
     /// one last sent: an edit that will not build is refused and the previous
     /// one goes back.
@@ -1416,20 +1237,15 @@ pub struct Status {
     pub wigle: parking_lot::Mutex<Option<nodes::WigleStatus>>,
     /// The same for the beaconDB feed.
     pub beacondb: parking_lot::Mutex<Option<nodes::BeaconDbStatus>>,
-    /// Whether anything is subscribed on the call bus, whether a recorded
-    /// transmission is playing, and what the bus last passed through.
-    pub call_audio: AtomicBool,
     /// Every input of the bus, and where the bus is in the graph, so a strip
     /// the operator drew can be given a level by the same route the chain
     /// view uses.
-    strips: parking_lot::Mutex<(Option<usize>, Vec<crate::chain::StripState>)>,
-    pub replaying: AtomicBool,
-    pub call_heard: parking_lot::Mutex<Option<String>>,
-    /// What each voice source put into the mix last block, keyed as
-    /// `system:channel`. The meter on a call's own row, which separates
-    /// "nothing was decoded" from "it was decoded and you still cannot hear
-    /// it": two different faults that sound identical.
-    call_levels: parking_lot::Mutex<Vec<(String, f32)>>,
+    strips: parking_lot::Mutex<Strips>,
+    /// What each voice source put into the mix last block, by the
+    /// conversation it belongs to. The meter on a call's own row, which
+    /// separates "nothing was decoded" from "it was decoded and you still
+    /// cannot hear it": two different faults that sound identical.
+    call_levels: parking_lot::Mutex<Vec<(common::ConversationKey, f32)>>,
     /// Who the bus is hearing, and who it has just stopped hearing, since the
     /// interface last took them. Appended by the radio thread every block
     /// and drained by the interface every frame: the ending of a call is
@@ -1561,15 +1377,12 @@ impl Default for Status {
             speed: parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(
                 SPEED_HISTORY,
             )),
-            call_audio: AtomicBool::new(false),
             survey_devices: AtomicU64::new(0),
             survey_sightings: AtomicU64::new(0),
             survey_heard: AtomicU64::new(0),
             wigle: parking_lot::Mutex::new(None),
             beacondb: parking_lot::Mutex::new(None),
-            strips: parking_lot::Mutex::new((None, Vec::new())),
-            replaying: AtomicBool::new(false),
-            call_heard: parking_lot::Mutex::new(None),
+            strips: parking_lot::Mutex::new(Strips::default()),
             call_levels: parking_lot::Mutex::new(Vec::new()),
             heard: parking_lot::Mutex::new(Vec::new()),
             tetra_keys: parking_lot::Mutex::new(Vec::new()),
@@ -1577,6 +1390,7 @@ impl Default for Status {
             call_level: AtomicU32::new(0),
             call_gain_db: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
+            refused: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
 
             radio: parking_lot::Mutex::new(RadioControls::default()),
@@ -1596,6 +1410,7 @@ impl Default for Status {
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
             transcriber: parking_lot::Mutex::new(None),
+            transcript: parking_lot::Mutex::new(Default::default()),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
             capture_folder: AtomicU64::new(0),
@@ -1604,11 +1419,7 @@ impl Default for Status {
             log_bytes: AtomicU64::new(0),
             log_full: std::sync::atomic::AtomicBool::new(false),
             feeds: parking_lot::Mutex::new(Vec::new()),
-            modes_on: AtomicBool::new(false),
-            ais_on: AtomicBool::new(false),
-            aprs_on: AtomicBool::new(false),
-            pocsag_on: AtomicBool::new(false),
-            m17_on: AtomicBool::new(false),
+            tracking: AtomicBool::new(false),
             zoom: AtomicU64::new(1),
             manual: AtomicBool::new(false),
             can_transmit: AtomicBool::new(false),
@@ -1618,7 +1429,7 @@ impl Default for Status {
             mic_clipped: AtomicBool::new(false),
             tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
-            levels: parking_lot::Mutex::new((0, crate::chain::AudioPlan::default(), Vec::new())),
+            levels: parking_lot::Mutex::new(Levels::default()),
             patch_rev: AtomicU64::new(0),
         }
     }
@@ -1638,15 +1449,20 @@ impl Status {
         (self.patch_rev.load(Ordering::Relaxed), self.patch.lock().clone())
     }
 
+    /// The receiver's transcript, for a view that wants to read or clear it.
+    pub fn transcript(&self) -> crate::transcripts::SharedLog {
+        self.transcript.lock().clone()
+    }
+
     /// The levels as the graph holds them, and a revision that moves only
     /// when something other than the strip changed one.
-    pub fn levels(&self) -> (u64, crate::chain::AudioPlan, Vec<ChannelSpec>) {
+    pub fn levels(&self) -> Levels {
         self.levels.lock().clone()
     }
 
-    fn set_levels(&self, audio: crate::chain::AudioPlan, chans: Vec<ChannelSpec>) {
+    fn set_levels(&self, audio: crate::chain::AudioPlan, channels: Vec<ChannelSpec>) {
         let mut held = self.levels.lock();
-        *held = (held.0 + 1, audio, chans);
+        *held = Levels { rev: held.rev + 1, audio, channels };
     }
 
     pub fn blend(&self) -> f32 {
@@ -1665,23 +1481,23 @@ impl Status {
     }
 
     /// What each voice source last put into the mix, for the meters.
-    pub fn call_levels(&self) -> Vec<(String, f32)> {
+    pub fn call_levels(&self) -> Vec<(common::ConversationKey, f32)> {
         self.call_levels.lock().clone()
     }
 
     /// Every input of the bus as the strip draws it, and the bus's node id.
-    pub fn strips(&self) -> (Option<usize>, Vec<crate::chain::StripState>) {
+    pub fn strips(&self) -> Strips {
         self.strips.lock().clone()
     }
 
-    fn set_strips(&self, node: Option<usize>, mut strips: Vec<crate::chain::StripState>) {
+    fn set_strips(&self, bus_node: Option<usize>, mut inputs: Vec<crate::chain::StripState>) {
         let mut held = self.strips.lock();
-        for s in &mut strips {
-            if let Some(prev) = held.1.iter().find(|p| p.port == s.port) {
+        for s in &mut inputs {
+            if let Some(prev) = held.inputs.iter().find(|p| p.port == s.port) {
                 s.level = s.level.max(prev.level * METER_FALL);
             }
         }
-        *held = (node, strips);
+        *held = Strips { bus_node, inputs };
     }
 
     /// The mix's own level, and the call bus's share of it.
@@ -1800,11 +1616,11 @@ impl Status {
     }
 
     /// What the video bus is receiving, whether or not it is being watched.
-    pub fn video_inputs(&self) -> Vec<(String, String, f32)> {
+    pub fn video_inputs(&self) -> Vec<crate::chain::VideoInput> {
         self.video_inputs.lock().clone()
     }
 
-    fn set_video_inputs(&self, inputs: Vec<(String, String, f32)>) {
+    fn set_video_inputs(&self, inputs: Vec<crate::chain::VideoInput>) {
         let mut cur = self.video_inputs.lock();
         if *cur != inputs {
             *cur = inputs;
@@ -1951,17 +1767,20 @@ impl Audio {
             zoom: 1,
             dc_block: false,
             refresh_hz: 30.0,
+            smoothing: crate::chain::DEFAULT_SMOOTHING,
             fft: 1024,
             channels: vec![spec],
             audio: crate::chain::AudioPlan::default(),
             fronts: Vec::new(),
             edits: Default::default(),
             record: false,
+            capture: false,
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
             tx: None,
+            settings: Default::default(),
         };
         let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
         Self { rx, pcm: Vec::new() }
@@ -2007,6 +1826,1183 @@ impl Audio {
     }
 }
 
+/// Whether the radio thread carries on after a step, or is finished.
+enum Flow {
+    Go,
+    Stop,
+}
+
+/// What a read of the radio produced.
+enum Block {
+    Samples(common::IqBuf),
+    /// The radio stopped delivering and was reopened; there is nothing to
+    /// process this time round.
+    Restarted,
+    /// The radio did not come back.
+    Lost,
+}
+
+/// The correction asked for, and however much of it this thread has to apply
+/// itself because the device would not.
+struct Ppm {
+    asked: f64,
+    soft: f64,
+}
+
+/// The transmit side of the radio, between and during overs.
+struct Tx {
+    /// The radio's own transmit gain.
+    gain_db: f32,
+    /// Blocks since the key went down, for the note said once a second.
+    blocks_since_key: u64,
+    /// The channel whose key is down but whose transmitter is still being
+    /// built, so the strip is not told it is on air before it is.
+    keying_for: Option<u64>,
+}
+
+/// The speaker and the microphone, and the devices they were asked for.
+struct AudioIo {
+    out: String,
+    input: String,
+    /// Held only so the output stream stays open: dropping it closes the
+    /// device the sink writes to.
+    _player: Option<AudioPlayer>,
+    sink: Option<audio::AudioSink>,
+    /// Open for as long as the receiver runs, so the strip's meter is live
+    /// and anything that wants speech can take a tap.
+    mic: Option<audio::AudioCapture>,
+}
+
+/// The radio thread: a device, the graph it feeds, and everything a command
+/// changes about either.
+///
+/// One block is one turn of [`RadioThread::run`]: the commands that arrived,
+/// a retune if one is due, a rebuild if anything asked for one, a read, the
+/// graph, what is published from it, and the audio it produced.
+struct RadioThread<'a, R: Fn()> {
+    /// What the device was opened from, so it can be opened again.
+    entry: crate::devices::Entry,
+    dev: Box<dyn common::Device>,
+    /// The stream the radio is delivering on. Absent only between letting one
+    /// go and opening the next, which is a state the thread does not run in:
+    /// a reopen that fails ends it.
+    stream: Option<Box<dyn common::RxStream>>,
+    /// Tracked so a restart can put it back: reopening a device resets it, and
+    /// a span change that silently returned the gain to its default would look
+    /// like the antenna had fallen out.
+    gain: GainMode,
+    /// What the receiver should be doing. Everything that acts on a sample is
+    /// in the graph this describes, so a command changes the plan and the
+    /// graph is rebuilt from it, rather than each command reaching into a
+    /// different object.
+    plan: Plan,
+    rx: crate::chain::Receiver,
+    /// What to run follows from where the dial is, and that mapping is
+    /// configuration rather than structure.
+    scanners: crate::scanners::Scanners,
+    audio: AudioIo,
+    ppm: Ppm,
+    tx: Tx,
+    status: &'a Status,
+    cmd: Receiver<Cmd>,
+    frames: Sender<Frame>,
+    decodes: Sender<Vec<DecodeRecord>>,
+    repaint: R,
+    /// Where the dial has been asked to go, held until a retune is affordable.
+    want_center: Option<Hz>,
+    last_tune: std::time::Instant,
+    tune_gap: std::time::Duration,
+    last_chain: std::time::Instant,
+    /// The last edits that built, to fall back on when an edit does not.
+    last_edits: Option<crate::patch::Edits>,
+    needs_rebuild: bool,
+    /// The operator's own decoding switch: off, and no front end is built at
+    /// all, which is the expensive thing the receiver does.
+    scan_on: bool,
+    records: Vec<DecodeRecord>,
+    /// Everything decoded since the receiver started, which is what the
+    /// counter on screen reads.
+    hits: u64,
+}
+
+impl<'a, R: Fn()> RadioThread<'a, R> {
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        entry: crate::devices::Entry,
+        center: Hz,
+        rate: Sps,
+        fft: usize,
+        cmd: Receiver<Cmd>,
+        frames: Sender<Frame>,
+        decodes: Sender<Vec<DecodeRecord>>,
+        status: &'a Status,
+        repaint: R,
+    ) -> anyhow::Result<Self> {
+        let mut dev = crate::devices::open(&entry)?;
+        // Clamp to what this radio can actually do: the app's last span may
+        // have come from a different device entirely.
+        let info_rates = dev.info().rate_range.clone();
+        let rate = Sps(rate.0.clamp(info_rates.start().0, info_rates.end().0));
+        dev.set_rate(rate)?;
+        dev.set_center(center)?;
+        dev.set_gain("tuner", GainMode::Auto)?;
+
+        // The device the session asked for arrives as a command once the
+        // interface is up, so this is the default until then.
+        let (player, sink) = match AudioPlayer::open(48_000) {
+            Ok((p, s)) => (Some(p), Some(s)),
+            Err(e) => {
+                *status.error.lock() = Some(format!("no audio output: {e}"));
+                (None, None)
+            }
+        };
+
+        let stream = dev.start_rx()?;
+        status.running.store(true, Ordering::Relaxed);
+        status.set_radio(RadioControls::read(dev.as_ref(), 0.0));
+
+        let mut plan = Plan {
+            center: dev.center(),
+            rate: dev.rate().as_f64(),
+            zoom: 1,
+            dc_block: true,
+            refresh_hz: 30.0,
+            smoothing: crate::chain::DEFAULT_SMOOTHING,
+            fft,
+            channels: Vec::new(),
+            audio: crate::chain::AudioPlan::default(),
+            // Resolved from the scanner table below, once the tuning is known.
+            fronts: Vec::new(),
+            edits: Default::default(),
+            record: false,
+            capture: false,
+            capture_dir: crate::chain::default_capture_dir(),
+            capture_format: capture_format_for(dev.info().native_format),
+            // Switched on as soon as the interface says where to write; the
+            // default is on, and the command arrives with the first frame.
+            log: false,
+            // Feeds arrive from the session or the settings modal, as a
+            // command.
+            feeds: Vec::new(),
+            tx: None,
+            settings: Default::default(),
+        };
+        let scanners = crate::scanners::Scanners::load();
+        plan.fronts = fronts_here(&scanners, &plan, true);
+        let rx = crate::chain::Receiver::build(&plan, Default::default())?;
+        publish_chain(status, &rx);
+        *status.transcript.lock() = rx.transcript().clone();
+        status.can_transmit.store(dev.info().can_transmit(), Ordering::Relaxed);
+
+        let gap = tune_gap();
+        let mut this = Self {
+            entry,
+            dev,
+            stream: Some(stream),
+            gain: GainMode::Auto,
+            plan,
+            rx,
+            scanners,
+            audio: AudioIo {
+                out: String::new(),
+                input: String::new(),
+                _player: player,
+                sink,
+                mic: None,
+            },
+            ppm: Ppm { asked: 0.0, soft: 0.0 },
+            tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None },
+            status,
+            cmd,
+            frames,
+            decodes,
+            repaint,
+            want_center: None,
+            last_tune: std::time::Instant::now() - gap,
+            tune_gap: gap,
+            last_chain: std::time::Instant::now(),
+            last_edits: None,
+            needs_rebuild: false,
+            scan_on: true,
+            records: Vec::new(),
+            hits: 0,
+        };
+        this.open_mic();
+        Ok(this)
+    }
+
+    fn run(mut self) -> anyhow::Result<()> {
+        loop {
+            if let Flow::Stop = self.apply_commands() {
+                return Ok(());
+            }
+            self.retune()?;
+            if let Flow::Stop = self.rebuild() {
+                return Ok(());
+            }
+            let buf = match self.read_block() {
+                Block::Samples(b) => b,
+                Block::Restarted => continue,
+                Block::Lost => return Ok(()),
+            };
+            // Timed from here rather than around the loop: the read is where
+            // the thread waits for the radio, so counting it would measure
+            // real time against itself and always say exactly 1x.
+            let work = std::time::Instant::now();
+            let block_secs = buf.samples.len() as f64 / self.plan.rate.max(1.0);
+
+            self.meter_mic();
+            // Whether the monitor stage draws what is going out on the span.
+            // Only while the radio is deaf: a full duplex one hears its own
+            // transmission for real, and mirroring on top of that would draw
+            // it twice.
+            let silent = self.stream.as_ref().is_some_and(|s| s.silent());
+            self.rx.set_tx_monitor(self.rx.keyed() && silent);
+
+            if let Flow::Stop = self.process(&buf.samples) {
+                return Ok(());
+            }
+            if let Flow::Stop = self.publish_spectrum() {
+                return Ok(());
+            }
+            self.publish_status();
+
+            // Stamped at the start of the block rather than at the moment the
+            // decode fell out of it, by the same arithmetic a replay uses.
+            let at = block_start(std::time::Instant::now(), buf.samples.len(), self.plan.rate);
+            if let Flow::Stop = self.harvest_decodes(at) {
+                return Ok(());
+            }
+
+            let _a = tracing::info_span!("audio").entered();
+            self.play();
+            self.publish_stations();
+            self.status.push_speed((block_secs / work.elapsed().as_secs_f64().max(1e-9)) as f32);
+        }
+    }
+
+    /// Every command that has arrived since the last block.
+    fn apply_commands(&mut self) -> Flow {
+        let batch: Vec<Cmd> = self.cmd.try_iter().collect();
+        for c in batch {
+            if let Flow::Stop = self.apply(c) {
+                return Flow::Stop;
+            }
+        }
+        Flow::Go
+    }
+
+    fn apply(&mut self, c: Cmd) -> Flow {
+        match c {
+            Cmd::Stop => {
+                if let Some(s) = self.stream.as_mut() {
+                    s.stop();
+                }
+                return Flow::Stop;
+            }
+            // Held rather than applied. A drag issues one of these per
+            // displayed frame and only the last is worth anything, so
+            // applying each in turn spends the whole budget retuning to
+            // frequencies already superseded.
+            Cmd::Center(f) => self.want_center = Some(f),
+            Cmd::Audio { out, input } => self.set_audio_devices(out, input),
+            Cmd::TxGain(db) => {
+                self.tx.gain_db = db.max(0.0);
+                self.status.tx_gain_db.store(self.tx.gain_db.to_bits(), Ordering::Relaxed);
+            }
+            // Unkeying while not keyed is what the interface sends when it
+            // loses the button, and it is not an error.
+            Cmd::Key(None) => self.unkey(),
+            // Already keyed. The interface repeats this while the key is
+            // held, because it cannot know the over has started until the
+            // status comes back, and keying twice would open a second
+            // transmitter on a radio that has one.
+            Cmd::Key(Some(_)) if self.rx.keyed() => {}
+            Cmd::Key(Some(id)) => self.key(id),
+            Cmd::Rate(r) => return self.set_rate(r),
+            Cmd::NodeParam(id, name, value) => self.set_node_param(id, &name, value),
+            Cmd::Channels(specs) => self.set_channels(specs),
+            Cmd::Volume { volume, muted } => {
+                self.plan.audio.master = volume;
+                self.plan.audio.muted = muted;
+                if let Some(b) = self.rx.audio_mut() {
+                    b.bus_mut().set_master(volume, muted);
+                }
+            }
+            Cmd::Fft(n) => {
+                self.plan.fft = n;
+                self.needs_rebuild = true;
+            }
+            Cmd::Refresh(hz) => {
+                self.plan.refresh_hz = hz.clamp(1.0, 120.0);
+                self.rx.set_refresh(self.plan.refresh_hz);
+            }
+            Cmd::Smoothing(v) => {
+                self.plan.smoothing = v.clamp(0.01, 1.0);
+                self.rx.set_smoothing(self.plan.smoothing);
+            }
+            Cmd::DcBlock(on) => {
+                self.plan.dc_block = on;
+                self.rx.set_dc_block(on);
+            }
+            Cmd::GainStage(stage, mode) => {
+                if let Err(e) = self.dev.set_gain(&stage, mode) {
+                    *self.status.error.lock() = Some(format!("{stage} gain: {e}"));
+                }
+                // Reopening for a rate change resets the device, so the tuner
+                // setting has to survive outside it.
+                if stage == "tuner" {
+                    self.gain = mode;
+                }
+                // The driver snaps to what the hardware supports, so the
+                // control has to be told what it actually got rather than what
+                // it asked for.
+                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.rx.remeasure_dc();
+            }
+            Cmd::Toggle(name, on) => {
+                if let Err(e) = self.dev.set_toggle(&name, on) {
+                    *self.status.error.lock() = Some(format!("{name}: {e}"));
+                }
+                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                // Any of these changes the offset, and a stale estimate shows
+                // up as a spur that was not there a moment ago.
+                self.rx.remeasure_dc();
+            }
+            Cmd::Choice(name, value) => return self.set_choice(&name, &value),
+            Cmd::Ppm(v) => {
+                self.ppm.asked = v;
+                self.ppm.soft = apply_ppm(self.dev.as_mut(), v);
+                // Nothing moves until the tuner is asked for a frequency
+                // again, so ask now: a correction that only took effect on the
+                // next drag of the dial is a correction nobody can see
+                // themselves setting.
+                self.want_center = Some(self.plan.center);
+                self.last_tune = std::time::Instant::now() - self.tune_gap;
+                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.needs_rebuild = true;
+            }
+            Cmd::Record(dir) => self.set_recording(dir),
+            // No rebuild: the graph already holds the stage, switched off, so
+            // a capture starts on the block after the button and keeps every
+            // source the auto node has open.
+            Cmd::CaptureIq(on) => {
+                self.plan.capture = on;
+                self.rx.set_capture(on);
+            }
+            Cmd::Location(lat, lon) => self.rx.set_location(lat, lon),
+            Cmd::Survey(path) => {
+                self.plan.settings.survey_path = path;
+                self.rx.apply_settings(&self.plan);
+            }
+            Cmd::Wigle(account) => {
+                self.plan.settings.wigle = account;
+                self.rx.apply_settings(&self.plan);
+            }
+            Cmd::BeaconDb(on) => {
+                self.plan.settings.beacondb = on;
+                self.rx.apply_settings(&self.plan);
+            }
+            Cmd::Gps(transport) => crate::station::set_source(transport),
+            Cmd::PacketLogCap(cap) => self.rx.set_log_cap(cap),
+            Cmd::CaptureCap(bytes) => self.rx.set_capture_cap(bytes),
+            Cmd::Feeds(feeds) => {
+                if feeds != self.plan.feeds {
+                    self.plan.feeds = feeds;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::Scanners(table) => {
+                // A different table can mean a different front end on the
+                // frequency the dial is already on, so this rebuilds rather
+                // than waiting for the next retune.
+                if table != self.scanners {
+                    self.scanners = table;
+                    self.needs_rebuild = true;
+                }
+            }
+            // A lock on editing in the view, and nothing to the receiver: what
+            // the operator changed applies either way, and what they did not
+            // follows the dial either way.
+            Cmd::Manual(on) => self.status.manual.store(on, Ordering::Relaxed),
+            Cmd::Edits(e) => {
+                if e != self.plan.edits {
+                    self.plan.edits = e;
+                    self.needs_rebuild = true;
+                }
+            }
+            #[cfg(feature = "tea")]
+            Cmd::TetraKey { colour, key } => self.rx.set_tetra_key(colour, key),
+            #[cfg(feature = "tea")]
+            Cmd::TetraIdSecret { colour, c } => self.rx.set_tetra_id_secret(colour, c),
+            Cmd::PacketLog(dir) => {
+                self.plan.log = dir.is_some();
+                self.rx.set_packet_log(dir);
+                self.needs_rebuild = true;
+            }
+            Cmd::Zoom(n) => {
+                let n = n.clamp(1, 64);
+                if n != self.plan.zoom {
+                    self.plan.zoom = n;
+                    self.needs_rebuild = true;
+                    self.status.zoom.store(n as u64, Ordering::Relaxed);
+                }
+            }
+            Cmd::Decode(on) => {
+                self.scan_on = on;
+                self.needs_rebuild = true;
+            }
+            // The bus is a node, so it is rebuilt with the graph. What it was
+            // told is in the plan, and the plan is what a rebuild hands the
+            // bus that comes back: a retune must not silently unsubscribe.
+            Cmd::CallSubs(subs) => {
+                self.plan.settings.calls = subs;
+                self.rx.apply_settings(&self.plan);
+            }
+            // In the plan for the same reason the call subscriptions are: a
+            // rebuild must not silently change what is being watched.
+            Cmd::WatchVideo(rules) => {
+                self.plan.settings.watching = rules;
+                self.rx.apply_settings(&self.plan);
+            }
+            Cmd::StopPlay => {
+                if let Some(b) = self.rx.audio_mut() {
+                    b.bus_mut().stop_replay();
+                }
+            }
+            Cmd::CallVolume { volume, muted } => {
+                self.plan.audio.calls = volume;
+                self.plan.audio.calls_muted = muted;
+                if let Some(b) = self.rx.audio_mut() {
+                    b.bus_mut().set_calls(volume, muted);
+                }
+            }
+            Cmd::CallAgc(on) => {
+                self.plan.audio.agc = on;
+                if let Some(b) = self.rx.audio_mut() {
+                    b.bus_mut().set_agc(on);
+                }
+            }
+            Cmd::Play(speech) => {
+                if let Some(b) = self.rx.audio_mut() {
+                    b.bus_mut().play(&speech);
+                }
+            }
+        }
+        Flow::Go
+    }
+
+    /// Open the microphone, once, for whatever wants speech.
+    ///
+    /// One capture for the receiver rather than one per consumer: the meter on
+    /// the strip, the transmitter and anything else that grows a use for
+    /// speech each take a tap, and every tap hears every sample. Opening it
+    /// per keyed channel meant the meter only moved once it was too late to
+    /// set a level against, and two consumers would have taken samples from
+    /// each other.
+    ///
+    /// A device that will not open is reported once and left alone: a receiver
+    /// that works is more useful than one that refuses to start because there
+    /// is no microphone in the machine.
+    fn open_mic(&mut self) {
+        if self.audio.mic.is_none() {
+            let opened = match self.audio.input.is_empty() {
+                true => audio::AudioCapture::open(48_000),
+                false => audio::AudioCapture::open_named(&self.audio.input, 48_000),
+            };
+            match opened {
+                Ok(c) => {
+                    tracing::info!("microphone: {}", c.device_name());
+                    self.audio.mic = Some(c);
+                }
+                Err(e) => {
+                    *self.status.error.lock() = Some(format!("no microphone: {e}"));
+                    self.status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
+                }
+            }
+        }
+        self.rx.set_microphone(self.audio.mic.as_ref().map(|m| m.tap()));
+    }
+
+    /// Move to the speaker and microphone the session asked for.
+    fn set_audio_devices(&mut self, out: String, input: String) {
+        if input != self.audio.input {
+            self.audio.input = input;
+            self.audio.mic = None;
+            self.open_mic();
+            self.needs_rebuild = true;
+        }
+        if out == self.audio.out {
+            return;
+        }
+        self.audio.out = out;
+        // Dropping the old player first: a host that only allows one stream
+        // per device refuses the second one while the first is still open.
+        let level = self.audio.sink.as_ref().map(|s: &audio::AudioSink| (s.volume(), s.muted()));
+        self.audio._player = None;
+        self.audio.sink = None;
+        let opened = match self.audio.out.is_empty() {
+            true => AudioPlayer::open(48_000),
+            false => AudioPlayer::open_named(&self.audio.out, 48_000),
+        };
+        match opened {
+            Ok((p, mut s)) => {
+                if let Some((v, m)) = level {
+                    s.set_output(v, m);
+                }
+                self.audio._player = Some(p);
+                self.audio.sink = Some(s);
+            }
+            Err(e) => *self.status.error.lock() = Some(format!("cannot open that speaker: {e}")),
+        }
+    }
+
+    /// Take the radio back off the transmit stage.
+    fn unkey(&mut self) {
+        if !self.rx.keyed() {
+            return;
+        }
+        tracing::info!("unkeyed");
+        // The stages stay; what goes is the radio. Dropping it drains the
+        // queue before the carrier stops and, on a half duplex radio, hands
+        // the receiver its radio back.
+        self.status.tx_underruns.store(self.rx.unkey(), Ordering::Relaxed);
+        self.status.keyed.store(0, Ordering::Relaxed);
+        // Back where the receiver was. A half duplex radio has one
+        // synthesiser, so keying moved it to the transmit frequency; leaving
+        // it there means the waterfall comes back tuned to wherever the
+        // channel transmits, which looks like reception never resumed at all.
+        let want = tuned(self.plan.center, self.ppm.soft);
+        if self.dev.center() != want {
+            if let Err(e) = self.dev.set_center(want) {
+                *self.status.error.lock() =
+                    Some(format!("could not retune after transmitting: {e}"));
+            }
+        }
+        self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+    }
+
+    /// Put a channel on air.
+    ///
+    /// The receive stream is left running. On a half duplex radio the driver
+    /// feeds it a noise floor for the length of the over, so the spectrum, the
+    /// channels and the decoders keep their state and the waterfall shows the
+    /// gap rather than stopping; on a full duplex one it goes on hearing the
+    /// band.
+    fn key(&mut self, id: u64) {
+        let spec = self.plan.channels.iter().find(|c| c.id == id).cloned();
+        let Some((ch, tx)) = spec.and_then(|c| c.tx.map(|t| (c, t))) else {
+            *self.status.error.lock() = Some("that channel has no transmit side".into());
+            return;
+        };
+        let up =
+            key_up(self.dev.as_mut(), &ch, &tx, self.plan.center, self.tx.gain_db, &self.audio.mic);
+        let (tx_plan, mut sinks) = match up {
+            Ok(got) => got,
+            Err(e) => {
+                tracing::warn!("cannot transmit: {e}");
+                *self.status.error.lock() = Some(format!("cannot transmit: {e}"));
+                return;
+            }
+        };
+        // The stages are already in the graph, so keying hands the transmit
+        // stage a radio rather than building anything: a rebuild here would
+        // restart the spectrum's averaging twice an over.
+        let same = self.plan.tx == Some(tx_plan);
+        self.plan.tx = Some(tx_plan);
+        let mut on_air = false;
+        if same {
+            if let Some(s) = sinks.stream.take() {
+                on_air = self.rx.key(s);
+            }
+        }
+        if !on_air {
+            // Either the chain in the graph is for another channel, or there
+            // is no transmit stage yet: build it, with the radio going in as
+            // it is built.
+            self.rx.set_transmitter(Some(sinks));
+            self.needs_rebuild = true;
+            // Said only once the radio is actually transmitting, so ON AIR
+            // means on air.
+            self.tx.keying_for = Some(ch.id);
+        } else {
+            tracing::info!("keyed channel {}", ch.id);
+            self.status.keyed.store(ch.id, Ordering::Relaxed);
+        }
+    }
+
+    /// Stop the stream and let go of it.
+    ///
+    /// Dropped rather than only stopped: the driver counts a stopped stream as
+    /// still holding the radio until its handle is gone.
+    fn release_stream(&mut self) {
+        if let Some(mut s) = self.stream.take() {
+            s.stop();
+        }
+    }
+
+    /// Change the span the radio delivers.
+    fn set_rate(&mut self, r: Sps) -> Flow {
+        // A HackRF's streaming reader owns the device and its control channel
+        // does not carry the sample rate, so the radio has to be stopped,
+        // reopened and started again. Asking anyway used to fail, and the
+        // failure propagated out of this loop and killed the thread: changing
+        // bandwidth stopped the receiver dead.
+        if self.dev.rate_needs_restart() {
+            self.release_stream();
+            match restart(&self.entry, r, self.plan.center, self.gain, self.ppm.asked) {
+                Ok((d, s, soft)) => {
+                    self.dev = d;
+                    self.stream = Some(s);
+                    self.ppm.soft = soft;
+                }
+                Err(e) => {
+                    *self.status.error.lock() = Some(format!("cannot change span: {e}"));
+                    return Flow::Stop;
+                }
+            }
+        } else if let Err(e) = self.dev.set_rate(r) {
+            *self.status.error.lock() = Some(format!("cannot change span: {e}"));
+            return Flow::Go;
+        }
+        self.plan.rate = self.dev.rate().as_f64();
+        self.needs_rebuild = true;
+        Flow::Go
+    }
+
+    /// Set one of the device's own choices, restarting the stream where the
+    /// choice describes the stream rather than a setting on it: a LimeSDR's
+    /// receive channel is a different stream entirely.
+    fn set_choice(&mut self, name: &str, value: &str) -> Flow {
+        if self.dev.choice_needs_restart(name) {
+            self.release_stream();
+            if let Err(e) = self.dev.set_choice(name, value) {
+                *self.status.error.lock() = Some(format!("{name}: {e}"));
+            }
+            match self.dev.start_rx() {
+                Ok(s) => self.stream = Some(s),
+                Err(e) => {
+                    *self.status.error.lock() = Some(format!("cannot restart after {name}: {e}"));
+                    return Flow::Stop;
+                }
+            }
+        } else if let Err(e) = self.dev.set_choice(name, value) {
+            *self.status.error.lock() = Some(format!("{name}: {e}"));
+        }
+        self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+        self.rx.remeasure_dc();
+        Flow::Go
+    }
+
+    /// Set a parameter on one node of the running graph.
+    fn set_node_param(&mut self, id: usize, name: &str, value: pipeline::param::ParamValue) {
+        match self.rx.set_node_param(id, name, value) {
+            // A parameter that changes the stream's shape needs the graph
+            // negotiated again around it; the rest take effect on the next
+            // block.
+            Ok(true) => self.needs_rebuild = true,
+            Ok(false) => publish_chain(self.status, &self.rx),
+            Err(e) => *self.status.error.lock() = Some(format!("{name}: {e}")),
+        }
+        // The receiver wrote it into its description. What that changed is
+        // either the operator's edit, which the next rebuild has to start
+        // from, or a level the strip owns, which the strip has to be told of.
+        self.plan.edits = self.rx.edits();
+        pull_levels(&self.rx, &mut self.plan, self.status);
+        self.status.set_patch(&self.rx);
+    }
+
+    /// The complete set of channels the strip is asking for.
+    fn set_channels(&mut self, specs: Vec<ChannelSpec>) {
+        self.plan.channels = specs;
+        // The transmit chain follows the strip like every other derived stage:
+        // change a channel's mode or its shift and the chain view shows what
+        // would go out, keyed or not.
+        let want = derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed));
+        if want != self.plan.tx && !self.rx.keyed() {
+            self.plan.tx = want;
+            self.needs_rebuild = true;
+        }
+        // A squelch or gain change is a number on a node that is already
+        // there. Rebuilding for it threw away the spectrum's averaging and
+        // every channel's state, once per frame for as long as the slider was
+        // held.
+        if self.rx.params_only(&self.plan) {
+            self.rx.apply_params(&self.plan);
+            publish_chain(self.status, &self.rx);
+        } else {
+            self.needs_rebuild = true;
+        }
+    }
+
+    /// Start or stop recording the span.
+    fn set_recording(&mut self, dir: Option<(std::path::PathBuf, Option<u64>)>) {
+        let rec = match dir {
+            Some((d, mb)) => {
+                match crate::record::Recorder::new(&d, self.plan.eff_rate(), self.plan.center) {
+                    Ok(r) => Some(match mb {
+                        Some(mb) => r.with_budget(mb << 20),
+                        None => r,
+                    }),
+                    Err(e) => {
+                        *self.status.error.lock() =
+                            Some(format!("cannot record to {}: {e}", d.display()));
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        self.plan.record = rec.is_some();
+        self.rx.set_recorder(rec);
+        self.needs_rebuild = true;
+    }
+
+    /// Move the dial, no more often than a retune can be afforded.
+    ///
+    /// Retuning costs about 25 ms on the RTL-SDR, more than a frame at 60 Hz,
+    /// and it blocks the thread that reads samples. Spacing them out keeps the
+    /// spectrum live while a drag is in progress; the last requested frequency
+    /// is always reached because the pending one is held until it can be
+    /// applied.
+    fn retune(&mut self) -> anyhow::Result<()> {
+        let Some(f) = self.want_center else { return Ok(()) };
+        if self.last_tune.elapsed() < self.tune_gap {
+            return Ok(());
+        }
+        let _t = tracing::info_span!("set_center").entered();
+        self.dev.set_center(tuned(f, self.ppm.soft))?;
+        // The plan is labelled with where the receiver is, not with what the
+        // tuner was asked for: the dial, the spectrum and every channel offset
+        // are read against it.
+        self.plan.center = untuned(self.dev.center(), self.ppm.soft);
+        self.needs_rebuild = true;
+        self.want_center = None;
+        self.last_tune = std::time::Instant::now();
+        Ok(())
+    }
+
+    /// Draw the graph again from the plan, if anything asked for it.
+    fn rebuild(&mut self) -> Flow {
+        if !self.needs_rebuild {
+            return Flow::Go;
+        }
+        let _t = tracing::info_span!("rebuild").entered();
+        // The banks understand nothing on either wideband band, so running
+        // them there only spends CPU inventing unknown bursts.
+        self.plan.fronts = fronts_here(&self.scanners, &self.plan, self.scan_on);
+        // The transmit chain follows the dial too: a channel's transmit
+        // frequency is its offset from wherever the receiver is now.
+        if !self.rx.keyed() {
+            self.plan.tx = derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed));
+        }
+        let before: Vec<u64> = self.rx.channels().iter().map(|c| c.spec.id).collect();
+        let keying_now = self.tx.keying_for.take();
+        if let Err(e) = self.rx.rebuild(&self.plan) {
+            // A patch is drawn wire by wire, so most of the time it is half a
+            // graph, and a type mismatch between two stages is an ordinary
+            // step rather than a fault. Going back to the last edits that
+            // built keeps the receiver running while it is said; without this
+            // an edit could stop the radio dead.
+            let Some(good) = self.last_edits.clone() else {
+                *self.status.error.lock() = Some(format!("cannot build the chain: {e}"));
+                return Flow::Stop;
+            };
+            *self.status.error.lock() = Some(format!("the patch was refused: {e}"));
+            self.plan.edits = good;
+            if let Err(e) = self.rx.rebuild(&self.plan) {
+                *self.status.error.lock() = Some(format!("cannot build the chain: {e}"));
+                return Flow::Stop;
+            }
+        } else {
+            // Only a shape that built is worth going back to.
+            self.last_edits = Some(self.plan.edits.clone());
+        }
+        // A key that was waiting on this rebuild: the radio went in with the
+        // graph, so this is the moment it is actually on air, or the moment to
+        // say it is not.
+        if let Some(id) = keying_now {
+            if self.rx.keyed() {
+                tracing::info!("keyed channel {id}");
+                self.status.keyed.store(id, Ordering::Relaxed);
+            } else {
+                *self.status.error.lock() =
+                    Some("the transmit chain did not build; nothing is on air".into());
+                self.status.keyed.store(0, Ordering::Relaxed);
+            }
+        }
+        // Its own slot, not the fault line: a front end the span cannot hold
+        // is a standing verdict on the graph that was just built, and writing
+        // it over `error` threw away whatever went wrong a few lines above,
+        // every rebuild.
+        *self.status.refused.lock() = self.rx.refused.clone();
+        // A channel that was rebuilt has lost its RDS state, and its old
+        // station name must not sit over whatever it is tuned to now.
+        let kept: Vec<u64> = self
+            .rx
+            .channels()
+            .iter()
+            .filter(|c| before.contains(&c.spec.id) && c.kept)
+            .map(|c| c.spec.id)
+            .collect();
+        self.status.keep_stations(&kept);
+        // Every channel covers a different frequency now, so nothing already
+        // reported can be the same burst as anything arriving.
+        self.rx.reset_dedupe();
+        let (rate, center) = (self.plan.eff_rate(), self.plan.center);
+        if let Some(r) = self.rx.recorder_mut() {
+            r.retune(rate, center);
+        }
+        self.status.logged.store(self.rx.logged(), Ordering::Relaxed);
+        // What is running, described the way the view draws it, and what the
+        // receiver drew underneath the edits, which is what an edited copy is
+        // read against.
+        self.status.set_patch(&self.rx);
+        publish_chain(self.status, &self.rx);
+        self.needs_rebuild = false;
+        Flow::Go
+    }
+
+    /// One block of samples from the radio, reopening it if it has stopped.
+    ///
+    /// Reopening is worth trying, because the usual cause is the board
+    /// resetting itself and coming back a second later, and the alternative is
+    /// a window that has to be restarted to speak to a radio that is present.
+    fn read_block(&mut self) -> Block {
+        let _read = tracing::info_span!("rf_read").entered();
+        let Some(stream) = self.stream.as_mut() else { return Block::Lost };
+        let e = match stream.read() {
+            Ok(b) => {
+                let dropped = stream.dropped();
+                self.status.dropped.store(dropped, Ordering::Relaxed);
+                return Block::Samples(b);
+            }
+            // The radio has gone: unplugged, reset by hand, or wedged past
+            // what its driver could recover.
+            Err(e) => e,
+        };
+        tracing::warn!("receive stopped: {e}");
+        *self.status.error.lock() = Some(format!("radio stopped: {e}; reopening"));
+        let mut back = None;
+        for attempt in 1..=3 {
+            std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
+            match restart(
+                &self.entry,
+                Sps(self.plan.rate as u64),
+                self.plan.center,
+                self.gain,
+                self.ppm.asked,
+            ) {
+                Ok(got) => {
+                    back = Some(got);
+                    break;
+                }
+                Err(e) => tracing::warn!("reopen {attempt} failed: {e}"),
+            }
+        }
+        match back {
+            Some((d, s, soft)) => {
+                self.dev = d;
+                self.stream = Some(s);
+                self.ppm.soft = soft;
+                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                *self.status.error.lock() = Some("radio came back".into());
+                self.needs_rebuild = true;
+                Block::Restarted
+            }
+            None => {
+                *self.status.error.lock() =
+                    Some("the radio is gone; pick it again once it is back".into());
+                Block::Lost
+            }
+        }
+    }
+
+    /// What the microphone is hearing, whether or not anything is keyed.
+    ///
+    /// While an over is running the microphone stage has already taken those
+    /// samples out of the ring, so the reading comes from the graph instead of
+    /// from the capture.
+    fn meter_mic(&mut self) {
+        let Some(c) = self.audio.mic.as_ref() else { return };
+        let keyed_now = self.rx.tx_state();
+        let peak = match keyed_now {
+            Some(tx) if self.rx.keyed() => tx.mic_peak,
+            _ => c.peak(),
+        };
+        // Said once a second while keyed, because a transmission that stops is
+        // the hardest thing here to see after the fact: the carrier is gone
+        // and nothing on screen says why.
+        if let (Some(tx), 0) = (keyed_now, self.tx.blocks_since_key % 50) {
+            if self.rx.keyed() {
+                tracing::info!(
+                    "on air: {} samples, {} unfilled, mic {peak:.2}",
+                    tx.written,
+                    tx.underruns
+                );
+                self.status.tx_underruns.store(tx.underruns, Ordering::Relaxed);
+            }
+        }
+        self.tx.blocks_since_key = self.tx.blocks_since_key.wrapping_add(1);
+        self.status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
+        self.status.mic_clipped.store(self.rx.keyed() && self.rx.mic_clipped(), Ordering::Relaxed);
+    }
+
+    /// Put the block through the graph, which is everything the receiver does
+    /// with it.
+    fn process(&mut self, samples: &[C32]) -> Flow {
+        let _g = tracing::info_span!("graph").entered();
+        if let Err(e) = self.rx.process(samples) {
+            *self.status.error.lock() = Some(format!("chain: {e}"));
+            return Flow::Stop;
+        }
+        if let Some(w) = self.rx.take_warnings().pop() {
+            *self.status.error.lock() = Some(w);
+        }
+        Flow::Go
+    }
+
+    /// The spectrum frame, and everything else read at the display's rate.
+    fn publish_spectrum(&mut self) -> Flow {
+        if !self.rx.spectrum_ready() {
+            return Flow::Go;
+        }
+        // The fix is read at the display's rate rather than per block: a GPS
+        // reports once a second and a block is seven milliseconds, so asking
+        // per block is two hundred locks for one new number.
+        // A fix moves the station; losing the sky leaves it where it was.
+        self.rx.set_fix(crate::station::fix());
+        {
+            // Read at the display's rate: the status counts spool files on
+            // disc, which is a directory listing and not a number worth taking
+            // per block.
+            let now = self.rx.wigle_status();
+            let mut held = self.status.wigle.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        {
+            let now = self.rx.beacondb_status();
+            let mut held = self.status.beacondb.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        if let Some((devices, sightings, heard)) = self.rx.survey_counts() {
+            self.status.survey_devices.store(devices, Ordering::Relaxed);
+            self.status.survey_sightings.store(sightings, Ordering::Relaxed);
+            self.status.survey_heard.store(heard, Ordering::Relaxed);
+        }
+        // Published with the spectrum rather than every block: the table is
+        // redrawn at the display's rate, and cloning it 140 times a second for
+        // a pane nobody may be looking at is wasted work.
+        if self.rx.tracking() {
+            let rows = self.rx.tracks(std::time::Instant::now());
+            self.status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
+            *self.status.track_list.lock() = rows;
+        }
+        #[cfg(feature = "stt")]
+        {
+            *self.status.transcriber.lock() = self.rx.transcriber();
+        }
+        if !self.plan.feeds.is_empty() {
+            *self.status.feeds.lock() = self.rx.feed_status();
+        }
+        // The chain carries what each wire is measured to be passing, so it is
+        // republished while it runs rather than only when its shape changes: a
+        // graph drawn once at build time reports the throughput it had before
+        // any samples went through it, which is none.
+        if self.last_chain.elapsed() >= CHAIN_PUBLISH {
+            publish_chain(self.status, &self.rx);
+            self.last_chain = std::time::Instant::now();
+        }
+        // Scopes are a display and refresh with the spectrum, not with the
+        // chain: a scope republished once a second is a scope showing a
+        // second-old picture.
+        let scopes = self.rx.scopes();
+        if !scopes.is_empty() || !self.status.scopes.lock().is_empty() {
+            *self.status.scopes.lock() = scopes;
+        }
+        // The rate the spectrum sees rather than the one the radio delivers:
+        // in manual mode a stage can sit between the two, and an axis drawn
+        // from the wrong one puts every signal in the wrong place.
+        let seen = self.rx.spectrum_rate();
+        let extra = self.rx.patch_spectra();
+        let f = Frame {
+            db: self.rx.power_db().to_vec(),
+            adc: self.rx.adc(),
+            center: self.plan.center.as_f64(),
+            rate: if seen > 0.0 { seen } else { self.plan.eff_rate() },
+            extra,
+        };
+        // Drop rather than block: the radio must never stall waiting for the
+        // UI, and a stale spectrum is worthless anyway.
+        match self.frames.try_send(f) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => return Flow::Stop,
+        }
+        (self.repaint)();
+        Flow::Go
+    }
+
+    /// What the receiver is holding, published every block.
+    fn publish_status(&mut self) {
+        self.status.tracking.store(self.rx.tracking(), Ordering::Relaxed);
+        {
+            self.rx.refresh_capture_folder();
+            let cap = self.rx.capture();
+            self.status.capture_on.store(self.rx.capturing(), Ordering::Relaxed);
+            self.status.capture_bytes.store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
+            self.status
+                .capture_folder
+                .store(cap.map(|c| c.folder_bytes()).unwrap_or(0), Ordering::Relaxed);
+            self.status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
+            *self.status.capture_file.lock() =
+                cap.and_then(|c| c.path()).map(|p| p.display().to_string());
+        }
+        self.rx.refresh_log_folder();
+        self.status.logged.store(self.rx.logged(), Ordering::Relaxed);
+        self.status.set_video(self.rx.watched_video());
+        self.status.set_video_inputs(self.rx.video_inputs());
+        self.status.log_bytes.store(self.rx.log_bytes(), Ordering::Relaxed);
+        self.status.log_full.store(self.rx.log_full(), Ordering::Relaxed);
+        let chans = self.rx.bank_channels();
+        self.status
+            .scan_channels
+            .store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
+        self.status
+            .scan_channels_wide
+            .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
+        self.status.sources_on.store(self.rx.has_sources(), Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let mut seen = self.status.sources.lock();
+        for e in seen.iter_mut() {
+            e.live = false;
+        }
+        for s in self.rx.live_sources() {
+            // Matched within kind: a locked channel and a detection can sit on
+            // the same frequency, and they are two different statements about
+            // it.
+            let same = seen.iter_mut().find(|e| {
+                e.source.locked_to == s.locked_to
+                    && (e.source.center_hz - s.center_hz).abs()
+                        < e.source.bandwidth_hz.max(s.bandwidth_hz) / 2.0
+            });
+            match same {
+                Some(e) => {
+                    e.source = s;
+                    e.last_seen = now;
+                    e.live = true;
+                }
+                None => seen.push(SeenSource { source: s, last_seen: now, live: true }),
+            }
+        }
+        seen.retain(|e| e.live || now.duration_since(e.last_seen) < SOURCE_LINGER);
+    }
+
+    /// What the block decoded to, on its way to the packet list.
+    fn harvest_decodes(&mut self, at: std::time::Instant) -> Flow {
+        self.records.clear();
+        self.records.extend(harvest(&mut self.rx, at));
+        if self.rx.recorder_mut().is_some_and(|r| r.is_full()) {
+            let mb = self.rx.recorder_mut().map(|r| r.written() >> 20).unwrap_or(0);
+            *self.status.error.lock() = Some(format!("recording stopped: wrote {mb} MB"));
+            self.plan.record = false;
+            self.rx.set_recorder(None);
+            self.needs_rebuild = true;
+        }
+        if self.records.is_empty() {
+            return Flow::Go;
+        }
+        self.hits += self.records.len() as u64;
+        self.status.decoded.store(self.hits, Ordering::Relaxed);
+        // Never block the radio thread on a UI that is behind; a dropped batch
+        // is reported by the counter going up without the log growing to
+        // match.
+        match self.decodes.try_send(std::mem::take(&mut self.records)) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => return Flow::Stop,
+        }
+        (self.repaint)();
+        Flow::Go
+    }
+
+    /// Hand the block the bus mixed to the speaker, and read the meters back.
+    ///
+    /// Everything that is heard was mixed on the bus, in the graph: every
+    /// channel at its fader, every subscribed call, a replay.
+    fn play(&mut self) {
+        self.status.set_channel_states(self.rx.channel_states());
+        self.status.set_strips(self.rx.audio_node_id(), self.rx.strips());
+        *self.status.tetra_keys.lock() = self.rx.tetra_key_status();
+        if let Some(b) = self.rx.audio_mut().map(|n| n.bus_mut()) {
+            let calls = b.take_calls();
+            if !calls.is_empty() {
+                let mut heard = self.status.heard.lock();
+                // A running call replaces its last report; an ended one is
+                // kept, since it is the only report that says so.
+                for c in calls {
+                    match heard.iter_mut().find(|h| !h.over && h.key() == c.key()) {
+                        Some(h) => *h = c,
+                        None => heard.push(c),
+                    }
+                }
+            }
+        }
+        if let Some(b) = self.rx.audio().map(|n| n.bus()) {
+            Status::set_level(&self.status.call_level, b.voice_peak());
+            *self.status.call_levels.lock() = b.levels();
+            self.status.call_gain_db.store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
+        }
+        let Some(s) = self.audio.sink.as_mut() else { return };
+        // Silent while transmitting, whatever the strip says. The receiver is
+        // being shown the transmission so the operator can see it, and playing
+        // it as well is a radio talking over itself: with desktop audio as the
+        // microphone it is worse than that, because what comes out of the
+        // speaker goes back in and is transmitted again.
+        //
+        // Applied here rather than once at key-up because this line runs every
+        // block and would put the operator's setting straight back.
+        let muted = self.plan.audio.muted || self.rx.keyed();
+        // The master governs the device, not the mix: anything a stage
+        // downstream of the bus adds is under it too, and a mute takes the
+        // fifth of a second already queued at the sound card with it.
+        s.set_output(self.plan.audio.master, muted);
+        let (out, rate) = self.rx.audio_out();
+        if muted {
+            Status::set_level(&self.status.out_level, 0.0);
+            if !out.is_empty() {
+                // Still written, so the drift loop stays converged and
+                // unmuting does not open with a burst of resampling.
+                s.write_adaptive_stereo(out, rate);
+            }
+        } else if !out.is_empty() {
+            Status::set_level(&self.status.out_level, peak_of(out) * self.plan.audio.master);
+            s.write_adaptive_stereo(out, rate);
+            self.status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
+        } else {
+            Status::set_level(&self.status.out_level, 0.0);
+        }
+    }
+
+    /// What the RDS decoder has read, whatever there is to play it on.
+    ///
+    /// It is a demodulator in the graph and not something the speaker does, so
+    /// a receiver with no audio device still names the station: the headless
+    /// probe reads exactly this.
+    fn publish_stations(&self) {
+        let wfm = |c: &&crate::chain::Chan| c.spec.mode == ChanMode::Audio(Demod::Wfm);
+        for w in self.rx.channels().iter().filter(wfm) {
+            let (g, e, sy) = w.rds_stats;
+            self.status.set_station(w.spec.id, &w.station, g, e, sy);
+        }
+        if let Some(w) = self.rx.channels().iter().find(wfm) {
+            self.status.set_blend(w.blend);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     entry: crate::devices::Entry,
@@ -2019,1003 +3015,7 @@ fn run(
     status: &Status,
     repaint: impl Fn(),
 ) -> anyhow::Result<()> {
-    let mut dev = crate::devices::open(&entry)?;
-    // Clamp to what this radio can actually do: the app's last span may have
-    // come from a different device entirely.
-    let info_rates = dev.info().rate_range.clone();
-    let rate = Sps(rate.0.clamp(info_rates.start().0, info_rates.end().0));
-    dev.set_rate(rate)?;
-    dev.set_center(center)?;
-    dev.set_gain("tuner", GainMode::Auto)?;
-    // Tracked so a restart can put it back: reopening a device resets it, and
-    // a span change that silently returned the gain to its default would look
-    // like the antenna had fallen out.
-    let mut gain = GainMode::Auto;
-
-    // The device the session asked for arrives as a command once the
-    // interface is up, so this is the default until then.
-    let mut audio_out = String::new();
-    let mut audio_in = String::new();
-    let (mut _player, mut sink) = match AudioPlayer::open(48_000) {
-        Ok((p, s)) => (Some(p), Some(s)),
-        Err(e) => {
-            *status.error.lock() = Some(format!("no audio output: {e}"));
-            (None, None)
-        }
-    };
-
-    let mut stream = dev.start_rx()?;
-    status.running.store(true, Ordering::Relaxed);
-    status.set_radio(RadioControls::read(dev.as_ref(), 0.0));
-
-    // What the receiver should be doing. Everything that acts on a sample is
-    // in the graph this describes, so a command changes the plan and the
-    // graph is rebuilt from it, rather than each command reaching into a
-    // different object.
-    let mut plan = Plan {
-        center: dev.center(),
-        rate: dev.rate().as_f64(),
-        zoom: 1,
-        dc_block: true,
-        refresh_hz: 30.0,
-        fft,
-        channels: Vec::new(),
-        audio: crate::chain::AudioPlan::default(),
-        // Resolved from the scanner table below, once the tuning is known.
-        fronts: Vec::new(),
-        edits: Default::default(),
-        record: false,
-        capture_dir: crate::chain::default_capture_dir(),
-        capture_format: capture_format_for(dev.info().native_format),
-        // Switched on as soon as the interface says where to write; the
-        // default is on, and the command arrives with the first frame.
-        log: false,
-        // Feeds arrive from the session or the settings modal, as a command.
-        feeds: Vec::new(),
-        tx: None,
-    };
-    // What to run follows from where the dial is, and that mapping is
-    // configuration rather than structure.
-    let mut scanners = crate::scanners::Scanners::load();
-    plan.fronts = fronts_here(&scanners, &plan, true);
-    let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
-    publish_chain(status, &rx);
-
-    let mut records: Vec<DecodeRecord> = Vec::new();
-    // Whether the raw span is being written, held here because the stage is
-    // rebuilt with the graph and comes back switched off.
-    let mut capture_on = false;
-    let mut dedupe = Dedupe::default();
-    let mut hits = 0u64;
-    let mut scan_on = true;
-    // The last edits that built, to fall back on when an edit does not.
-    let mut last_edits: Option<crate::patch::Edits> = None;
-    let mut rebuild = false;
-    // The correction asked for, and however much of it this thread has to
-    // apply because the device would not.
-    let mut ppm = 0.0f64;
-    let mut soft_ppm = 0.0f64;
-    let mut want_center: Option<Hz> = None;
-    let mut last_chain = std::time::Instant::now();
-    // What the bus is subscribed to, kept outside the graph because the bus
-    // is a node and a rebuild can hand back a new one.
-    let mut calls = BusSettings::default();
-    // The same for the video bus: what is being watched outlives the node.
-    let mut watching: Vec<crate::videobus::Rule> = vec![crate::videobus::Rule::Everything];
-    // Who the WiGLE feed uploads as, which outlives a rebuild for the same
-    // reason the survey path does.
-    let mut wigle_account: Option<survey::Account> = None;
-    // The same for beaconDB, which is a switch rather than an account.
-    let mut beacondb_on = false;
-    // Where the survey is written, which outlives a rebuild: the node is
-    // replaced with the graph and the setting is not. The GPS is not here at
-    // all; it runs for as long as the program does, in `crate::station`, and
-    // this thread reads the same fix the interface does.
-    let mut survey_path: Option<std::path::PathBuf> = None;
-    let gap = tune_gap();
-    let mut last_tune = std::time::Instant::now() - gap;
-    // The radio's own transmit gain, and the commands an over held back
-    // while the graph it belongs to was not running.
-    let mut tx_gain_db = 0.0f32;
-    let mut held: Vec<Cmd> = Vec::new();
-    let mut blocks_since_key: u64 = 0;
-    // The channel whose key is down but whose transmitter is still being
-    // built, so the strip is not told it is on air before it is.
-    let mut keying_for: Option<u64> = None;
-    // Where the transmitter is, and the mixer that puts it back on the
-    // spectrum where it belongs.
-    let mut keyed_hz = 0.0f64;
-    let mut monitor_mix = dsp::Mixer::new(0.0, 1.0);
-    let mut monitor_buf: Vec<C32> = Vec::new();
-    let mut monitor_scratch: Vec<C32> = Vec::new();
-
-    // The microphone, open for as long as the receiver runs, so the strip's
-    // meter is live and anything that wants speech can take a tap.
-    let mut mic: Option<audio::AudioCapture> = None;
-    open_mic(&audio_in, &mut mic, status);
-    rx.set_microphone(mic.as_ref().map(|m| m.tap()));
-    status.can_transmit.store(dev.info().can_transmit(), Ordering::Relaxed);
-
-    loop {
-        let batch: Vec<Cmd> = held.drain(..).chain(cmd.try_iter()).collect();
-        for c in batch {
-            match c {
-                Cmd::Stop => {
-                    stream.stop();
-                    return Ok(());
-                }
-                // Held rather than applied. A drag issues one of these per
-                // displayed frame and only the last is worth anything, so
-                // applying each in turn spends the whole budget retuning to
-                // frequencies already superseded.
-                Cmd::Center(f) => want_center = Some(f),
-                Cmd::Audio { out, input } => {
-                    let changed = input != audio_in;
-                    audio_in = input;
-                    if changed {
-                        mic = None;
-                        open_mic(&audio_in, &mut mic, status);
-                        rx.set_microphone(mic.as_ref().map(|m| m.tap()));
-                        rebuild = true;
-                    }
-                    if out != audio_out {
-                        audio_out = out;
-                        // Dropping the old player first: a host that only
-                        // allows one stream per device refuses the second one
-                        // while the first is still open.
-                        let level =
-                            sink.as_ref().map(|s: &audio::AudioSink| (s.volume(), s.muted()));
-                        _player = None;
-                        sink = None;
-                        let opened = match audio_out.is_empty() {
-                            true => AudioPlayer::open(48_000),
-                            false => AudioPlayer::open_named(&audio_out, 48_000),
-                        };
-                        match opened {
-                            Ok((p, mut s)) => {
-                                if let Some((v, m)) = level {
-                                    s.set_output(v, m);
-                                }
-                                _player = Some(p);
-                                sink = Some(s);
-                            }
-                            Err(e) => {
-                                *status.error.lock() =
-                                    Some(format!("cannot open that speaker: {e}"))
-                            }
-                        }
-                    }
-                }
-                Cmd::TxGain(db) => {
-                    tx_gain_db = db.max(0.0);
-                    status.tx_gain_db.store(tx_gain_db.to_bits(), Ordering::Relaxed);
-                }
-                // Unkeying while not keyed is what the interface sends when it
-                // loses the button, and it is not an error.
-                Cmd::Key(None) => {
-                    if rx.keyed() {
-                        tracing::info!("unkeyed");
-                        // The stages stay; what goes is the radio. Dropping
-                        // it drains the queue before the carrier stops and,
-                        // on a half duplex radio, hands the receiver its
-                        // radio back.
-                        status.tx_underruns.store(rx.unkey(), Ordering::Relaxed);
-                        status.keyed.store(0, Ordering::Relaxed);
-                        // Back where the receiver was. A half duplex radio
-                        // has one synthesiser, so keying moved it to the
-                        // transmit frequency; leaving it there means the
-                        // waterfall comes back tuned to wherever the channel
-                        // transmits, which looks like reception never
-                        // resumed at all.
-                        let want = tuned(plan.center, soft_ppm);
-                        if dev.center() != want {
-                            if let Err(e) = dev.set_center(want) {
-                                *status.error.lock() =
-                                    Some(format!("could not retune after transmitting: {e}"));
-                            }
-                        }
-                        status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                    }
-                }
-                // Already keyed. The interface repeats this while the key is
-                // held, because it cannot know the over has started until the
-                // status comes back, and keying twice would open a second
-                // transmitter on a radio that has one.
-                Cmd::Key(Some(_)) if rx.keyed() => {}
-                Cmd::Key(Some(id)) => {
-                    let spec = plan.channels.iter().find(|c| c.id == id).cloned();
-                    match spec.and_then(|c| c.tx.map(|t| (c, t))) {
-                        None => {
-                            *status.error.lock() = Some("that channel has no transmit side".into())
-                        }
-                        Some((ch, tx)) => {
-                            // The receive stream is left running. On a half
-                            // duplex radio the driver feeds it a noise floor
-                            // for the length of the over, so the spectrum,
-                            // the channels and the decoders keep their state
-                            // and the waterfall shows the gap rather than
-                            // stopping; on a full duplex one it goes on
-                            // hearing the band.
-                            match key_up(dev.as_mut(), &ch, &tx, plan.center, tx_gain_db, &mic) {
-                                Ok((tx_plan, mut sinks)) => {
-                                    keyed_hz = tx_plan.on_air.as_f64();
-                                    // The stages are already in the graph, so
-                                    // keying hands the transmit stage a radio
-                                    // rather than building anything: a
-                                    // rebuild here would restart the
-                                    // spectrum's averaging twice an over.
-                                    let same = plan.tx == Some(tx_plan);
-                                    plan.tx = Some(tx_plan);
-                                    let mut on_air = false;
-                                    if same {
-                                        if let Some(s) = sinks.stream.take() {
-                                            on_air = rx.key(s);
-                                        }
-                                    }
-                                    if !on_air {
-                                        // Either the chain in the graph is
-                                        // for another channel, or there is no
-                                        // transmit stage yet: build it, with
-                                        // the radio going in as it is built.
-                                        rx.set_transmitter(Some(sinks));
-                                        rebuild = true;
-                                        // Said only once the radio is
-                                        // actually transmitting, so ON AIR
-                                        // means on air.
-                                        keying_for = Some(ch.id);
-                                    } else {
-                                        tracing::info!("keyed channel {}", ch.id);
-                                        status.keyed.store(ch.id, Ordering::Relaxed);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("cannot transmit: {e}");
-                                    *status.error.lock() = Some(format!("cannot transmit: {e}"))
-                                }
-                            }
-                        }
-                    }
-                }
-                Cmd::Rate(r) => {
-                    // A HackRF's streaming reader owns the device and its
-                    // control channel does not carry the sample rate, so the
-                    // radio has to be stopped, reopened and started again.
-                    // Asking anyway used to fail, and the failure propagated
-                    // out of this loop and killed the thread: changing
-                    // bandwidth stopped the receiver dead.
-                    if dev.rate_needs_restart() {
-                        stream.stop();
-                        drop(stream);
-                        match restart(&entry, r, plan.center, gain, ppm) {
-                            Ok((d, s, soft)) => {
-                                dev = d;
-                                stream = s;
-                                soft_ppm = soft;
-                            }
-                            Err(e) => {
-                                *status.error.lock() = Some(format!("cannot change span: {e}"));
-                                return Ok(());
-                            }
-                        }
-                    } else if let Err(e) = dev.set_rate(r) {
-                        *status.error.lock() = Some(format!("cannot change span: {e}"));
-                        continue;
-                    }
-                    plan.rate = dev.rate().as_f64();
-                    rebuild = true;
-                }
-                Cmd::NodeParam(id, name, value) => {
-                    match rx.set_node_param(id, &name, value) {
-                        // A parameter that changes the stream's shape needs
-                        // the graph negotiated again around it; the rest take
-                        // effect on the next block.
-                        Ok(true) => rebuild = true,
-                        Ok(false) => publish_chain(status, &rx),
-                        Err(e) => *status.error.lock() = Some(format!("{name}: {e}")),
-                    }
-                    // The receiver wrote it into its description. What that
-                    // changed is either the operator's edit, which the next
-                    // rebuild has to start from, or a level the strip owns,
-                    // which the strip has to be told of.
-                    plan.edits = rx.edits();
-                    pull_levels(&rx, &mut plan, status);
-                    status.set_patch(&rx);
-                }
-                Cmd::Channels(specs) => {
-                    plan.channels = specs;
-                    // The transmit chain follows the strip like every other
-                    // derived stage: change a channel's mode or its shift and
-                    // the chain view shows what would go out, keyed or not.
-                    let want = derive_tx(&plan, status.can_transmit.load(Ordering::Relaxed));
-                    if want != plan.tx && !rx.keyed() {
-                        plan.tx = want;
-                        rebuild = true;
-                    }
-                    // A squelch or gain change is a number on a node that is
-                    // already there. Rebuilding for it threw away the
-                    // spectrum's averaging and every channel's state, once per
-                    // frame for as long as the slider was held.
-                    if rx.params_only(&plan) {
-                        rx.apply_params(&plan);
-                        publish_chain(status, &rx);
-                    } else {
-                        rebuild = true;
-                    }
-                }
-                Cmd::Volume { volume, muted } => {
-                    plan.audio.master = volume;
-                    plan.audio.muted = muted;
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_master(volume, muted);
-                    }
-                }
-                Cmd::Fft(n) => {
-                    plan.fft = n;
-                    rebuild = true;
-                }
-                Cmd::Refresh(hz) => {
-                    plan.refresh_hz = hz.clamp(1.0, 120.0);
-                    rx.set_refresh(plan.refresh_hz);
-                }
-                Cmd::Smoothing(v) => rx.set_smoothing(v.clamp(0.01, 1.0)),
-                Cmd::DcBlock(on) => {
-                    plan.dc_block = on;
-                    rx.set_dc_block(on);
-                }
-                Cmd::GainStage(stage, mode) => {
-                    if let Err(e) = dev.set_gain(&stage, mode) {
-                        *status.error.lock() = Some(format!("{stage} gain: {e}"));
-                    }
-                    // Reopening for a rate change resets the device, so the
-                    // tuner setting has to survive outside it.
-                    if stage == "tuner" {
-                        gain = mode;
-                    }
-                    // The driver snaps to what the hardware supports, so the
-                    // control has to be told what it actually got rather than
-                    // what it asked for.
-                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                    rx.remeasure_dc();
-                }
-                Cmd::Toggle(name, on) => {
-                    if let Err(e) = dev.set_toggle(&name, on) {
-                        *status.error.lock() = Some(format!("{name}: {e}"));
-                    }
-                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                    // Any of these changes the offset, and a stale estimate
-                    // shows up as a spur that was not there a moment ago.
-                    rx.remeasure_dc();
-                }
-                Cmd::Choice(name, value) => {
-                    // Some of these describe the stream rather than a setting
-                    // on it: a LimeSDR's receive channel is a different stream
-                    // entirely, so it has to be torn down and set up again.
-                    if dev.choice_needs_restart(&name) {
-                        // Dropped rather than only stopped: the driver counts
-                        // a stopped stream as still holding the radio until
-                        // its handle is gone.
-                        stream.stop();
-                        drop(stream);
-                        if let Err(e) = dev.set_choice(&name, &value) {
-                            *status.error.lock() = Some(format!("{name}: {e}"));
-                        }
-                        match dev.start_rx() {
-                            Ok(s) => stream = s,
-                            Err(e) => {
-                                *status.error.lock() =
-                                    Some(format!("cannot restart after {name}: {e}"));
-                                return Ok(());
-                            }
-                        }
-                    } else if let Err(e) = dev.set_choice(&name, &value) {
-                        *status.error.lock() = Some(format!("{name}: {e}"));
-                    }
-                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                    rx.remeasure_dc();
-                }
-                Cmd::Ppm(v) => {
-                    ppm = v;
-                    soft_ppm = apply_ppm(dev.as_mut(), v);
-                    // Nothing moves until the tuner is asked for a frequency
-                    // again, so ask now: a correction that only took effect
-                    // on the next drag of the dial is a correction nobody
-                    // can see themselves setting.
-                    want_center = Some(plan.center);
-                    last_tune = std::time::Instant::now() - gap;
-                    status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                    rebuild = true;
-                }
-                Cmd::Record(dir) => {
-                    let rec = match dir {
-                        Some((d, mb)) => {
-                            match crate::record::Recorder::new(&d, plan.eff_rate(), plan.center) {
-                                Ok(r) => Some(match mb {
-                                    Some(mb) => r.with_budget(mb << 20),
-                                    None => r,
-                                }),
-                                Err(e) => {
-                                    *status.error.lock() =
-                                        Some(format!("cannot record to {}: {e}", d.display()));
-                                    None
-                                }
-                            }
-                        }
-                        None => None,
-                    };
-                    plan.record = rec.is_some();
-                    rx.set_recorder(rec);
-                    rebuild = true;
-                }
-                // No rebuild: the graph already holds the stage, switched
-                // off, so a capture starts on the block after the button and
-                // keeps every source the auto node has open.
-                Cmd::CaptureIq(on) => {
-                    capture_on = on;
-                    rx.set_capture(on);
-                }
-                Cmd::Location(lat, lon) => rx.set_location(lat, lon),
-                Cmd::Survey(path) => {
-                    survey_path = path.clone();
-                    rx.set_survey(path);
-                }
-                Cmd::Wigle(account) => {
-                    wigle_account = account.clone();
-                    rx.set_wigle(account);
-                }
-                Cmd::BeaconDb(on) => {
-                    beacondb_on = on;
-                    rx.set_beacondb(on);
-                }
-                Cmd::Gps(transport) => crate::station::set_source(transport),
-                Cmd::PacketLogCap(cap) => rx.set_log_cap(cap),
-                Cmd::CaptureCap(bytes) => rx.set_capture_cap(bytes),
-                Cmd::Feeds(feeds) => {
-                    if feeds != plan.feeds {
-                        plan.feeds = feeds;
-                        rebuild = true;
-                    }
-                }
-                Cmd::Scanners(table) => {
-                    // A different table can mean a different front end on the
-                    // frequency the dial is already on, so this rebuilds
-                    // rather than waiting for the next retune.
-                    if table != scanners {
-                        scanners = table;
-                        rebuild = true;
-                    }
-                }
-                // A lock on editing in the view, and nothing to the
-                // receiver: what the operator changed applies either way,
-                // and what they did not follows the dial either way.
-                Cmd::Manual(on) => status.manual.store(on, Ordering::Relaxed),
-                Cmd::Edits(e) => {
-                    if e != plan.edits {
-                        plan.edits = e;
-                        rebuild = true;
-                    }
-                }
-                #[cfg(feature = "tea")]
-                Cmd::TetraKey { colour, key } => rx.set_tetra_key(colour, key),
-                #[cfg(feature = "tea")]
-                Cmd::TetraIdSecret { colour, c } => rx.set_tetra_id_secret(colour, c),
-                Cmd::PacketLog(dir) => {
-                    plan.log = dir.is_some();
-                    rx.set_packet_log(dir);
-                    rebuild = true;
-                }
-                Cmd::Zoom(n) => {
-                    let n = n.clamp(1, 64);
-                    if n != plan.zoom {
-                        plan.zoom = n;
-                        rebuild = true;
-                        status.zoom.store(n as u64, Ordering::Relaxed);
-                    }
-                }
-                Cmd::Decode(on) => {
-                    scan_on = on;
-                    rebuild = true;
-                }
-                // The bus is a node, so it is rebuilt with the graph. What
-                // it was told is kept here as well, and given to whatever
-                // bus comes back: a retune must not silently unsubscribe.
-                Cmd::CallSubs(subs) => {
-                    calls.subs = subs.clone();
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_subscriptions(subs);
-                    }
-                }
-                // Kept here as well as on the node, for the same reason the
-                // call subscriptions are: a rebuild must not silently change
-                // what is being watched.
-                Cmd::WatchVideo(rules) => {
-                    watching = rules.clone();
-                    if let Some(b) = rx.video_mut() {
-                        b.bus_mut().set_rules(rules);
-                    }
-                }
-                Cmd::StopPlay => {
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().stop_replay();
-                    }
-                }
-                Cmd::CallVolume { volume, muted } => {
-                    plan.audio.calls = volume;
-                    plan.audio.calls_muted = muted;
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_calls(volume, muted);
-                    }
-                }
-                Cmd::CallAgc(on) => {
-                    plan.audio.agc = on;
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().set_agc(on);
-                    }
-                }
-                Cmd::Play(speech) => {
-                    if let Some(b) = rx.audio_mut() {
-                        b.bus_mut().play(&speech);
-                    }
-                }
-            }
-        }
-
-        // Retuning costs about 25 ms on the RTL-SDR, more than a frame at
-        // 60 Hz, and it blocks the thread that reads samples. Spacing them out
-        // keeps the spectrum live while a drag is in progress; the last
-        // requested frequency is always reached because the pending one is
-        // held until it can be applied.
-        if let Some(f) = want_center {
-            if last_tune.elapsed() >= gap {
-                let _t = tracing::info_span!("set_center").entered();
-                dev.set_center(tuned(f, soft_ppm))?;
-                // The plan is labelled with where the receiver is, not with
-                // what the tuner was asked for: the dial, the spectrum and
-                // every channel offset are read against it.
-                plan.center = untuned(dev.center(), soft_ppm);
-                rebuild = true;
-                want_center = None;
-                last_tune = std::time::Instant::now();
-            }
-        }
-
-        if rebuild {
-            let _t = tracing::info_span!("rebuild").entered();
-            // The banks understand nothing on either wideband band, so
-            // running them there only spends CPU inventing unknown bursts.
-            plan.fronts = fronts_here(&scanners, &plan, scan_on);
-            // The transmit chain follows the dial too: a channel's transmit
-            // frequency is its offset from wherever the receiver is now.
-            if !rx.keyed() {
-                plan.tx = derive_tx(&plan, status.can_transmit.load(Ordering::Relaxed));
-            }
-            let before: Vec<u64> = rx.channels().iter().map(|c| c.spec.id).collect();
-            let keying_now = keying_for.take();
-            if let Err(e) = rx.rebuild(&plan) {
-                // A patch is drawn wire by wire, so most of the time it is
-                // half a graph, and a type mismatch between two stages is an
-                // ordinary step rather than a fault. Going back to the last
-                // edits that built keeps the receiver running while it is
-                // said; without this an edit could stop the radio dead.
-                let Some(good) = last_edits.clone() else {
-                    *status.error.lock() = Some(format!("cannot build the chain: {e}"));
-                    return Ok(());
-                };
-                *status.error.lock() = Some(format!("the patch was refused: {e}"));
-                plan.edits = good;
-                if let Err(e) = rx.rebuild(&plan) {
-                    *status.error.lock() = Some(format!("cannot build the chain: {e}"));
-                    return Ok(());
-                }
-            } else {
-                // Only a shape that built is worth going back to.
-                last_edits = Some(plan.edits.clone());
-            }
-            // A key that was waiting on this rebuild: the radio went in with
-            // the graph, so this is the moment it is actually on air, or the
-            // moment to say it is not.
-            if let Some(id) = keying_now {
-                if rx.keyed() {
-                    tracing::info!("keyed channel {id}");
-                    status.keyed.store(id, Ordering::Relaxed);
-                } else {
-                    *status.error.lock() =
-                        Some("the transmit chain did not build; nothing is on air".into());
-                    status.keyed.store(0, Ordering::Relaxed);
-                }
-            }
-            *status.error.lock() = rx.refused.clone();
-            // A channel that was rebuilt has lost its RDS state, and its old
-            // station name must not sit over whatever it is tuned to now.
-            let kept: Vec<u64> = rx
-                .channels()
-                .iter()
-                .filter(|c| before.contains(&c.spec.id) && c.kept)
-                .map(|c| c.spec.id)
-                .collect();
-            status.keep_stations(&kept);
-            // Every channel covers a different frequency now, so nothing
-            // already reported can be the same burst as anything arriving.
-            dedupe.clear();
-            if let Some(r) = rx.recorder_mut() {
-                r.retune(plan.eff_rate(), plan.center);
-            }
-            status.logged.store(rx.logged(), Ordering::Relaxed);
-            // A rebuild replaced the survey node with an empty one.
-            rx.set_survey(survey_path.clone());
-            rx.set_wigle(wigle_account.clone());
-            rx.set_beacondb(beacondb_on);
-            // The stage comes back switched off, as the derived graph draws
-            // it. A capture running across a retune has to be switched on
-            // again, and it starts a new file: the old one's name says which
-            // frequency and rate every sample in it was taken at.
-            rx.set_capture(capture_on);
-            // A bus built afresh is subscribed to nothing, exactly as the
-            // capture comes back switched off.
-            calls.apply(&mut rx);
-            if let Some(b) = rx.video_mut() {
-                b.bus_mut().set_rules(watching.clone());
-            }
-            // What is running, described the way the view draws it, and
-            // what the receiver drew underneath the edits, which is what an
-            // edited copy is read against.
-            status.set_patch(&rx);
-            publish_chain(status, &rx);
-            rebuild = false;
-        }
-
-        let read_span = tracing::info_span!("rf_read").entered();
-        let mut buf = match stream.read() {
-            Ok(b) => b,
-            // The radio has gone: unplugged, reset by hand, or wedged past
-            // what its driver could recover. Reopening it is worth trying,
-            // because the usual cause is the board resetting itself and
-            // coming back a second later, and the alternative is a window
-            // that has to be restarted to speak to a radio that is present.
-            Err(e) => {
-                tracing::warn!("receive stopped: {e}");
-                *status.error.lock() = Some(format!("radio stopped: {e}; reopening"));
-                let mut back = None;
-                for attempt in 1..=3 {
-                    std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
-                    match restart(&entry, Sps(plan.rate as u64), plan.center, gain, ppm) {
-                        Ok(got) => {
-                            back = Some(got);
-                            break;
-                        }
-                        Err(e) => tracing::warn!("reopen {attempt} failed: {e}"),
-                    }
-                }
-                match back {
-                    Some((d, s, soft)) => {
-                        dev = d;
-                        stream = s;
-                        soft_ppm = soft;
-                        status.set_radio(RadioControls::read(dev.as_ref(), ppm));
-                        *status.error.lock() = Some("radio came back".into());
-                        rebuild = true;
-                        continue;
-                    }
-                    None => {
-                        *status.error.lock() =
-                            Some("the radio is gone; pick it again once it is back".into());
-                        return Ok(());
-                    }
-                }
-            }
-        };
-        drop(read_span);
-        status.dropped.store(stream.dropped(), Ordering::Relaxed);
-        // Timed from here rather than around the loop: the read is where the
-        // thread waits for the radio, so counting it would measure real time
-        // against itself and always say exactly 1x.
-        let work = std::time::Instant::now();
-        let block_secs = buf.samples.len() as f64 / plan.rate.max(1.0);
-
-        // What the microphone is hearing, whether or not anything is keyed.
-        // While an over is running the microphone stage has already taken
-        // those samples out of the ring, so the reading comes from the graph
-        // instead of from the capture.
-        if let Some(c) = mic.as_ref() {
-            let keyed_now = rx.tx_state();
-            let peak = match keyed_now {
-                Some((_, _, peak)) if rx.keyed() => peak,
-                _ => c.peak(),
-            };
-            // Said once a second while keyed, because a transmission that
-            // stops is the hardest thing here to see after the fact: the
-            // carrier is gone and nothing on screen says why.
-            if let (Some((sent, idle, _)), 0) = (keyed_now, blocks_since_key % 50) {
-                if rx.keyed() {
-                    tracing::info!("on air: {sent} samples, {idle} unfilled, mic {peak:.2}");
-                    status.tx_underruns.store(idle, Ordering::Relaxed);
-                }
-            }
-            blocks_since_key = blocks_since_key.wrapping_add(1);
-            status.mic_level.store(peak.to_bits(), Ordering::Relaxed);
-            status.mic_clipped.store(rx.keyed() && rx.mic_clipped(), Ordering::Relaxed);
-        }
-
-        // What is going out, drawn where a receiver would have heard it.
-        // Taken from the block the transmit stages sent last time round,
-        // because they run inside the same graph as everything else and this
-        // block has not reached them yet.
-        if rx.keyed() && stream.silent() {
-            let shift = keyed_hz - plan.center.as_f64();
-            monitor_buf.clear();
-            monitor_buf.extend_from_slice(rx.tx_monitor());
-            let sent = std::mem::take(&mut monitor_buf);
-            mirror_tx(
-                &sent,
-                &mut buf.samples,
-                shift,
-                plan.rate,
-                &mut monitor_mix,
-                &mut monitor_scratch,
-            );
-            monitor_buf = sent;
-        }
-
-        {
-            let _g = tracing::info_span!("graph").entered();
-            if let Err(e) = rx.process(&buf.samples) {
-                *status.error.lock() = Some(format!("chain: {e}"));
-                return Ok(());
-            }
-            if let Some(w) = rx.take_warnings().pop() {
-                *status.error.lock() = Some(w);
-            }
-        }
-
-        if rx.spectrum_ready() {
-            // The fix is read at the display's rate rather than per block: a
-            // GPS reports once a second and a block is seven milliseconds, so
-            // asking per block is two hundred locks for one new number.
-            // A fix moves the station; losing the sky leaves it where it was.
-            rx.set_fix(crate::station::fix());
-            {
-                // Read at the display's rate: the status counts spool files
-                // on disc, which is a directory listing and not a number
-                // worth taking per block.
-                let now = rx.wigle_status();
-                let mut held = status.wigle.lock();
-                if *held != now {
-                    *held = now;
-                }
-            }
-            {
-                let now = rx.beacondb_status();
-                let mut held = status.beacondb.lock();
-                if *held != now {
-                    *held = now;
-                }
-            }
-            if let Some((devices, sightings, heard)) = rx.survey_counts() {
-                status.survey_devices.store(devices, Ordering::Relaxed);
-                status.survey_sightings.store(sightings, Ordering::Relaxed);
-                status.survey_heard.store(heard, Ordering::Relaxed);
-            }
-            // Published with the spectrum rather than every block: the table
-            // is redrawn at the display's rate, and cloning it 140 times a
-            // second for a pane nobody may be looking at is wasted work.
-            if rx.tracking() {
-                let rows = rx.tracks(std::time::Instant::now());
-                status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
-                *status.track_list.lock() = rows;
-            }
-            #[cfg(feature = "stt")]
-            {
-                *status.transcriber.lock() = rx.transcriber();
-            }
-            if !plan.feeds.is_empty() {
-                *status.feeds.lock() = rx.feed_status();
-            }
-            // The chain carries what each wire is measured to be passing, so
-            // it is republished while it runs rather than only when its shape
-            // changes: a graph drawn once at build time reports the throughput
-            // it had before any samples went through it, which is none.
-            if last_chain.elapsed() >= CHAIN_PUBLISH {
-                publish_chain(status, &rx);
-                last_chain = std::time::Instant::now();
-            }
-            // Scopes are a display and refresh with the spectrum, not with
-            // the chain: a scope republished once a second is a scope
-            // showing a second-old picture.
-            let scopes = rx.scopes();
-            if !scopes.is_empty() || !status.scopes.lock().is_empty() {
-                *status.scopes.lock() = scopes;
-            }
-            // The rate the spectrum sees rather than the one the radio
-            // delivers: in manual mode a stage can sit between the two, and
-            // an axis drawn from the wrong one puts every signal in the
-            // wrong place.
-            let seen = rx.spectrum_rate();
-            let extra = rx
-                .patch_spectra()
-                .into_iter()
-                .map(|(tag, db, center, rate)| Spectrum { tag, db, center, rate })
-                .collect();
-            let f = Frame {
-                db: rx.power_db().to_vec(),
-                adc: rx.adc(),
-                center: plan.center.as_f64(),
-                rate: if seen > 0.0 { seen } else { plan.eff_rate() },
-                extra,
-            };
-            // Drop rather than block: the radio must never stall waiting for
-            // the UI, and a stale spectrum is worthless anyway.
-            match frames.try_send(f) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Disconnected(_)) => return Ok(()),
-            }
-            repaint();
-        }
-
-        status.modes_on.store(rx.modes_on(), Ordering::Relaxed);
-        status.ais_on.store(rx.ais_on(), Ordering::Relaxed);
-        status.aprs_on.store(rx.aprs_on(), Ordering::Relaxed);
-        status.pocsag_on.store(rx.pocsag_on(), Ordering::Relaxed);
-        status.m17_on.store(rx.m17_on(), Ordering::Relaxed);
-        {
-            rx.refresh_capture_folder();
-            let cap = rx.capture();
-            status.capture_on.store(rx.capturing(), Ordering::Relaxed);
-            status.capture_bytes.store(cap.map(|c| c.bytes()).unwrap_or(0), Ordering::Relaxed);
-            status
-                .capture_folder
-                .store(cap.map(|c| c.folder_bytes()).unwrap_or(0), Ordering::Relaxed);
-            status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
-            *status.capture_file.lock() =
-                cap.and_then(|c| c.path()).map(|p| p.display().to_string());
-        }
-        rx.refresh_log_folder();
-        status.logged.store(rx.logged(), Ordering::Relaxed);
-        status.set_video(rx.watched_video());
-        status.set_video_inputs(rx.video_inputs());
-        status.log_bytes.store(rx.log_bytes(), Ordering::Relaxed);
-        status.log_full.store(rx.log_full(), Ordering::Relaxed);
-        let chans = rx.bank_channels();
-        status.scan_channels.store(chans.first().copied().unwrap_or(0) as u64, Ordering::Relaxed);
-        status
-            .scan_channels_wide
-            .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
-        status.sources_on.store(rx.has_sources(), Ordering::Relaxed);
-        {
-            let now = std::time::Instant::now();
-            let mut seen = status.sources.lock();
-            for e in seen.iter_mut() {
-                e.live = false;
-            }
-            for s in rx.live_sources() {
-                // Matched within kind: a locked channel and a detection can
-                // sit on the same frequency, and they are two different
-                // statements about it.
-                let same = seen.iter_mut().find(|e| {
-                    e.source.locked_to == s.locked_to
-                        && (e.source.center_hz - s.center_hz).abs()
-                            < e.source.bandwidth_hz.max(s.bandwidth_hz) / 2.0
-                });
-                match same {
-                    Some(e) => {
-                        e.source = s;
-                        e.last_seen = now;
-                        e.live = true;
-                    }
-                    None => seen.push(SeenSource { source: s, last_seen: now, live: true }),
-                }
-            }
-            seen.retain(|e| e.live || now.duration_since(e.last_seen) < SOURCE_LINGER);
-        }
-
-        // Stamped at the start of the block rather than at the moment the
-        // decode fell out of it. The packet happened somewhere inside the
-        // block, and a pulse detector only closes a package once it has seen
-        // the silence afterwards, so "now" is always late by up to a block.
-        let block =
-            std::time::Duration::from_secs_f64(buf.samples.len() as f64 / plan.rate.max(1.0));
-        let at = std::time::Instant::now() - block;
-
-        records.clear();
-        records.extend(rx.decodes(at));
-        dedupe_neighbours(&mut records);
-        records.retain(|r| !r.model.is_empty() && dedupe.accept(r, at));
-        if let Some(r) = rx.recorder_mut() {
-            for d in &records {
-                r.capture(d);
-            }
-            if r.is_full() {
-                let mb = r.written() >> 20;
-                *status.error.lock() = Some(format!("recording stopped: wrote {mb} MB"));
-                plan.record = false;
-                rx.set_recorder(None);
-                rebuild = true;
-            }
-        }
-        if !records.is_empty() {
-            hits += records.len() as u64;
-            status.decoded.store(hits, Ordering::Relaxed);
-            // Never block the radio thread on a UI that is behind; a dropped
-            // batch is reported by the counter going up without the log
-            // growing to match.
-            match decodes.try_send(std::mem::take(&mut records)) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Disconnected(_)) => return Ok(()),
-            }
-            records = Vec::new();
-            repaint();
-        }
-
-        let _a = tracing::info_span!("audio").entered();
-        // Everything that is heard was mixed on the bus, in the graph: every
-        // channel at its fader, every subscribed call, a replay. What is
-        // left to do here is hand the block to the device and read the
-        // meters back.
-        status.set_channel_states(rx.channel_states());
-        status.set_strips(rx.audio_node_id(), rx.strips());
-        *status.tetra_keys.lock() = rx.tetra_key_status();
-        if let Some(b) = rx.audio_mut().map(|n| n.bus_mut()) {
-            let calls = b.take_calls();
-            if !calls.is_empty() {
-                let mut heard = status.heard.lock();
-                // A running call replaces its last report; an ended one is
-                // kept, since it is the only report that says so.
-                for c in calls {
-                    match heard.iter_mut().find(|h| !h.over && h.key() == c.key()) {
-                        Some(h) => *h = c,
-                        None => heard.push(c),
-                    }
-                }
-            }
-        }
-        if let Some(b) = rx.audio().map(|n| n.bus()) {
-            Status::set_level(&status.call_level, b.voice_peak());
-            *status.call_levels.lock() = b.levels();
-            status.call_gain_db.store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
-            status.call_audio.store(b.listening(), Ordering::Relaxed);
-            status.replaying.store(b.replaying(), Ordering::Relaxed);
-            *status.call_heard.lock() = b.last_heard().map(str::to_string);
-        }
-        if let Some(s) = sink.as_mut() {
-            // Silent while transmitting, whatever the strip says. The
-            // receiver is being shown the transmission so the operator can
-            // see it, and playing it as well is a radio talking over itself:
-            // with desktop audio as the microphone it is worse than that,
-            // because what comes out of the speaker goes back in and is
-            // transmitted again.
-            //
-            // Applied here rather than once at key-up because this line runs
-            // every block and would put the operator's setting straight back.
-            let muted = plan.audio.muted || rx.keyed();
-            // The master governs the device, not the mix: anything a stage
-            // downstream of the bus adds is under it too, and a mute takes
-            // the fifth of a second already queued at the sound card with it.
-            s.set_output(plan.audio.master, muted);
-            let (out, rate) = rx.audio_out();
-            if muted {
-                Status::set_level(&status.out_level, 0.0);
-                if !out.is_empty() {
-                    // Still written, so the drift loop stays converged and
-                    // unmuting does not open with a burst of resampling.
-                    s.write_adaptive_stereo(out, rate);
-                }
-            } else if !out.is_empty() {
-                Status::set_level(&status.out_level, peak_of(out) * plan.audio.master);
-                s.write_adaptive_stereo(out, rate);
-                status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
-            } else {
-                Status::set_level(&status.out_level, 0.0);
-            }
-            let wfm = |c: &&crate::chain::Chan| c.spec.mode == ChanMode::Audio(Demod::Wfm);
-            for w in rx.channels().iter().filter(wfm) {
-                let (g, e, sy) = w.rds_stats;
-                status.set_station(w.spec.id, &w.station, g, e, sy);
-            }
-            if let Some(w) = rx.channels().iter().find(wfm) {
-                status.set_blend(w.blend);
-            }
-        }
-
-        status.push_speed((block_secs / work.elapsed().as_secs_f64().max(1e-9)) as f32);
-    }
+    RadioThread::open(entry, center, rate, fft, cmd, frames, decodes, status, repaint)?.run()
 }
 
 /// Take the levels the nodes hold into the plan, and tell the strip when
@@ -3031,12 +3031,18 @@ fn pull_levels(rx: &crate::chain::Receiver, plan: &mut Plan, status: &Status) {
     let mut changed = audio != plan.audio;
     plan.audio = audio;
     for c in chans {
-        if let Some(have) = plan.channels.iter_mut().find(|h| h.id == c.id) {
-            if *have != c {
-                *have = c;
-                changed = true;
-            }
+        let Some(have) = plan.channels.iter_mut().find(|h| h.id == c.id) else { continue };
+        if (&have.label, have.volume, have.muted, have.squelch_db, have.agc)
+            == (&c.label, c.volume, c.muted, c.squelch_db, c.agc)
+        {
+            continue;
         }
+        have.label = c.label;
+        have.volume = c.volume;
+        have.muted = c.muted;
+        have.squelch_db = c.squelch_db;
+        have.agc = c.agc;
+        changed = true;
     }
     if changed {
         status.set_levels(plan.audio, plan.channels.clone());
@@ -3076,6 +3082,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         zoom: 1,
         dc_block: false,
         refresh_hz: 30.0,
+        smoothing: crate::chain::DEFAULT_SMOOTHING,
         fft: 1024,
         channels: Vec::new(),
         audio: crate::chain::AudioPlan::default(),
@@ -3087,18 +3094,20 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         }],
         edits: Default::default(),
         record: false,
+        capture: false,
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
         log: false,
         feeds: Vec::new(),
         tx: None,
+        settings: Default::default(),
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::chain::{FSK_CHANNEL_HZ, OOK_CHANNEL_HZ};
+    use crate::chain::OOK_CHANNEL_HZ;
 
     /// The correction has to move the request the opposite way to the error,
     /// and it has to come back to the frequency the operator asked for, or
@@ -3324,7 +3333,8 @@ pub(crate) mod tests {
             for (want, lo, hi) in [
                 (12_500.0, 6_000.0, 30_000.0),
                 (OOK_CHANNEL_HZ, 15_000.0, 70_000.0),
-                (FSK_CHANNEL_HZ, 60_000.0, 260_000.0),
+                // The wide tier of the scanner table, in `scanners::DEFAULT_WIDTHS`.
+                (125_000.0, 60_000.0, 260_000.0),
                 (500_000.0, 240_000.0, 1_100_000.0),
             ] {
                 let n = nodes::BankNode::channels_for(rate, want);
@@ -3475,7 +3485,7 @@ pub(crate) mod tests {
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "BLE-Adv").collect();
+        let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("BLE-Adv")).collect();
         assert!(ble.len() >= 6, "read {} advertisements, expected the 8 in the capture", ble.len());
         for r in &ble {
             assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
@@ -3528,7 +3538,7 @@ pub(crate) mod tests {
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
+        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("802.11")).collect();
         assert!(wifi.len() >= 88, "read {} frames, expected 94", wifi.len());
         for r in &wifi {
             assert_eq!(r.crc, Some(true), "a frame without its FCS got through: {r:?}");
@@ -3583,7 +3593,7 @@ pub(crate) mod tests {
             crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "802.11").collect();
+        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("802.11")).collect();
         let beacons: Vec<&&DecodeRecord> =
             wifi.iter().filter(|r| r.detail.contains("type=beacon")).collect();
         assert!(!beacons.is_empty(), "no beacon read from {} frames", wifi.len());
@@ -3629,7 +3639,7 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
 
-        let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SCH").collect();
+        let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("GSM-SCH")).collect();
         assert_eq!(cells.len(), 2, "expected both bursts, got {out:?}");
         let r = cells[0];
         assert_eq!(r.crc, Some(true), "the parity is what makes a burst a burst");
@@ -3640,7 +3650,7 @@ pub(crate) mod tests {
 
         // And the block the broadcast channel carried in the four frames
         // after it, which is the row that says whose cell this is.
-        let si: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "GSM-SI").collect();
+        let si: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("GSM-SI")).collect();
         assert_eq!(si.len(), 1, "expected one system information block, got {out:?}");
         assert_eq!(si[0].detail, "SI3 262-01 LAC 100 CI 4660");
         every_row_carries_its_measurements(&si);
@@ -3702,11 +3712,11 @@ pub(crate) mod tests {
     fn every_row_carries_its_measurements(rows: &[&DecodeRecord]) {
         assert!(!rows.is_empty(), "nothing to check");
         for r in rows {
-            assert!(r.rssi_dbfs.is_finite(), "{} has no level: {:?}", r.model, r.rssi_dbfs);
-            assert!(r.snr_db.is_finite(), "{} has no SNR: {:?}", r.model, r.snr_db);
-            let iq = r.iq.as_ref().unwrap_or_else(|| panic!("{} kept no samples", r.model));
-            assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.model);
-            assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.model);
+            assert!(r.rssi_dbfs.is_finite(), "{} has no level: {:?}", r.protocol(), r.rssi_dbfs);
+            assert!(r.snr_db.is_finite(), "{} has no SNR: {:?}", r.protocol(), r.snr_db);
+            let iq = r.iq.as_ref().unwrap_or_else(|| panic!("{} kept no samples", r.protocol()));
+            assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.protocol());
+            assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.protocol());
         }
     }
 
@@ -3733,7 +3743,8 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("waveshark-survey-{}", std::process::id()));
         let path = dir.join("survey.sqlite");
         let _ = std::fs::remove_file(&path);
-        rx.set_survey(Some(path.clone()));
+        plan.settings.survey_path = Some(path.clone());
+        rx.apply_settings(&plan);
         rx.set_fix(Some(gps::Fix {
             lat: 53.6369,
             lon: -6.6528,
@@ -3807,11 +3818,11 @@ pub(crate) mod tests {
             let out = replay_blocks(&mut rx, &buf);
             let rows: Vec<String> = out
                 .iter()
-                .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.model, r.detail))
+                .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.protocol(), r.detail))
                 .collect();
             let r = out
                 .iter()
-                .find(|r| r.model == "Meshtastic")
+                .find(|r| r.model == Some("Meshtastic"))
                 .unwrap_or_else(|| panic!("capture {which}: nothing read it: {rows:?}"));
             // The transmitter's CRC, not a plausibility argument.
             assert_eq!(r.crc, Some(true), "capture {which}: {r:?}");
@@ -3847,11 +3858,11 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
         let rows: Vec<String> = out
             .iter()
-            .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.model, r.detail))
+            .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.protocol(), r.detail))
             .collect();
         let r = out
             .iter()
-            .find(|r| r.model == "MeshCore")
+            .find(|r| r.model == Some("MeshCore"))
             .unwrap_or_else(|| panic!("nothing read it: {rows:?}"));
         assert_eq!(r.crc, Some(true), "{r:?}");
         assert!(r.detail.contains("SF8 BW63k 4/8"), "read as {}", r.detail);
@@ -3871,7 +3882,7 @@ pub(crate) mod tests {
             return;
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
-        let mut seen: Vec<(f64, f32)> = Vec::new();
+        let mut seen: Vec<(f64, Option<f32>)> = Vec::new();
         for block in buf.samples.chunks(16_384) {
             if rx.process(block).is_err() {
                 break;
@@ -3885,6 +3896,34 @@ pub(crate) mod tests {
         let near = |hz: f64| seen.iter().any(|(c, _)| (c - hz).abs() < 12_500.0);
         assert!(near(391_181_000.0), "391.181 MHz was never opened: {seen:?}");
         assert!(near(391_704_500.0), "391.7045 MHz was never opened: {seen:?}");
+    }
+
+    /// The key manager reaches a front end the receiver built for itself.
+    ///
+    /// Nothing here places a TETRA stage: the scanner table watches the band,
+    /// the auto node builds a front end on each carrier it finds, and the key
+    /// status is read by asking every node in the receiver whether it takes
+    /// keys. Read off a stage held by name, an encrypted network the receiver
+    /// found for itself could never be given one.
+    #[test]
+    fn the_key_manager_reaches_a_front_end_the_receiver_found_for_itself() {
+        let Some(buf) = tetra_fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        replay_blocks(&mut rx, &buf);
+        let keys = rx.tetra_key_status();
+        // One row per cell heard, both on the same network, as the cells
+        // themselves broadcast it: the control carrier at 391.175 MHz says
+        // its traffic is enciphered (air interface encryption 3) and the
+        // other carrier is in the clear.
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.iter().all(|k| (k.mcc, k.mnc) == (272, 6838)), "{keys:?}");
+        let mut colours: Vec<u8> = keys.iter().map(|k| k.colour).collect();
+        colours.sort();
+        assert_eq!(colours, [3, 5], "{keys:?}");
+        assert!(keys.iter().any(|k| k.aie == 3), "the encrypting cell was not seen: {keys:?}");
     }
 
     /// Finding the carriers is half of it. The scanner block promises that
@@ -3911,12 +3950,18 @@ pub(crate) mod tests {
         out.extend(replay_blocks(&mut rx, &second));
         let rows: Vec<String> = out
             .iter()
-            .map(|r| format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.model, r.modulation, r.detail))
+            .map(|r| {
+                format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.protocol(), r.modulation, r.detail)
+            })
             .collect();
         for hz in [391_181_000.0, 391_704_500.0] {
             let mine: Vec<&DecodeRecord> =
                 out.iter().filter(|r| (r.freq - hz).abs() < 12_500.0).collect();
             assert!(!mine.is_empty(), "{:.4} MHz was never logged: {rows:?}", hz / 1e6);
+            // Every row says what it was heard at: the front end measures the
+            // slot each block came out of rather than handing over a frame
+            // with nothing on it.
+            every_row_carries_its_measurements(&mine);
             // Logged as the channel the plan lists, not as this tuner's
             // measurement of it: the band is on a 25 kHz raster and the
             // carrier was found a few kilohertz off it.
@@ -3929,8 +3974,8 @@ pub(crate) mod tests {
             );
             // The cell's identity once, and once only, though its decoders
             // were built twice.
-            let sync = mine.iter().filter(|r| r.model == "TETRA-Sync").count();
-            let sysinfo = mine.iter().filter(|r| r.model == "TETRA-Sysinfo").count();
+            let sync = mine.iter().filter(|r| r.model == Some("TETRA-Sync")).count();
+            let sysinfo = mine.iter().filter(|r| r.model == Some("TETRA-Sysinfo")).count();
             assert_eq!((sync, sysinfo), (1, 1), "{:.4} MHz: {rows:?}", hz / 1e6);
             assert!(
                 mine.iter().any(|r| r.detail.contains("mcc=272")),
@@ -3943,7 +3988,7 @@ pub(crate) mod tests {
             // carrier is an idle traffic carrier and broadcasts nothing but
             // its identity.
             let network: Vec<&&DecodeRecord> =
-                mine.iter().filter(|r| r.model == "TETRA-Network").collect();
+                mine.iter().filter(|r| r.model == Some("TETRA-Network")).collect();
             if hz == 391_181_000.0 {
                 assert!(!network.is_empty(), "{:.4} MHz: no network broadcast: {rows:?}", hz / 1e6);
             }
@@ -3967,7 +4012,7 @@ pub(crate) mod tests {
             // a front end is reading it: at most the one piece cut before
             // the front end found its first sync burst.
             let measured: Vec<&&DecodeRecord> =
-                mine.iter().filter(|r| r.model == "unknown").collect();
+                mine.iter().filter(|r| r.model.is_none()).collect();
             assert!(
                 measured.len() <= 1,
                 "{:.4} MHz measured {} times while being read: {rows:?}",
@@ -4003,7 +4048,8 @@ pub(crate) mod tests {
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let calls: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == "TETRA-Call").collect();
+        let calls: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.model == Some("TETRA-Call")).collect();
         assert!(!calls.is_empty(), "no call rows from {} rows", out.len());
         let field = |r: &DecodeRecord, k: &str| {
             r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
@@ -4060,7 +4106,8 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        let m17: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         // The callsign is in the link setup frame that opens the
         // transmission and repeated across the link information channel, so
@@ -4079,8 +4126,12 @@ pub(crate) mod tests {
         // Most of the over, not a frame or two of it. A receiver that opens a
         // source, reads three frames and loses it is the failure this capture
         // was recorded for.
-        let voice = m17.iter().filter(|r| r.model == "M17-Voice").count();
+        let voice = m17.iter().filter(|r| r.model == Some("M17-Voice")).count();
         assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
+        // And each of those rows says how it was heard. The front end that
+        // read them measures the channel itself; it used to hand over frames
+        // with no level at all and rely on whatever placed it to fill one in.
+        every_row_carries_its_measurements(&m17);
     }
 
     #[test]
@@ -4111,7 +4162,8 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        let m17: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
             m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
@@ -4122,6 +4174,10 @@ pub(crate) mod tests {
         // for: a decode channel is told where to listen.
         let hz = m17[0].freq;
         assert!((hz - 433_475_000.0).abs() < 1.0, "read at {hz} Hz");
+        // Placed by the strip, so nothing above it measures anything: the
+        // auto node's fill is not in this path at all, and a row still has
+        // its level, its ratio to the floor and the samples behind it.
+        every_row_carries_its_measurements(&m17);
     }
 
     #[test]
@@ -4151,7 +4207,8 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> = out.iter().filter(|r| r.model.starts_with("M17")).collect();
+        let m17: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
             m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
@@ -4223,7 +4280,7 @@ pub(crate) mod tests {
         // rather than assuming it arrived first.
         let r = out
             .iter()
-            .find(|r| r.model == "Fineoffset-WHx080")
+            .find(|r| r.model == Some("Fineoffset-WHx080"))
             .unwrap_or_else(|| panic!("only unknowns: {out:?}"));
         assert_eq!(r.crc, Some(true), "{r:?}");
         assert!(r.detail.contains("temperature_c=16.2"), "{}", r.detail);
@@ -4248,151 +4305,6 @@ pub(crate) mod tests {
         // what makes a waterfall mark land on the signal.
         let off = (r.freq - buf.center.as_f64()).abs();
         assert!(off < buf.rate.as_f64() / 2.0, "{} Hz is outside the span", r.freq);
-    }
-
-    fn rec(freq: f64, model: &str, rssi: f32) -> DecodeRecord {
-        DecodeRecord {
-            at: std::time::Instant::now(),
-            freq,
-            model: model.into(),
-            channel_hz: 125_000.0,
-            modulation: common::Modulation::Fsk2,
-            detail: String::new(),
-            fields: Vec::new(),
-            media_type: pipeline::event::media::BYTES,
-            rssi_dbfs: rssi,
-            snr_db: 20.0,
-            bytes: vec![1, 2, 3],
-            crc: None,
-            link: None,
-            iq: None,
-            audio: None,
-        }
-    }
-
-    #[test]
-    fn the_same_burst_seen_by_two_channels_is_reported_once() {
-        // Channels overlap, so a strong transmitter is genuinely present in
-        // its neighbours, where the detectors read a mangled copy of it. The
-        // loudest reading wins and the skirts are dropped.
-        let w = 125_000.0;
-        let mut block = vec![
-            rec(868_100_000.0, "unknown", -54.0),
-            rec(868_100_000.0 + w, "unknown", -38.0),
-            rec(868_100_000.0 - w, "unknown", -61.0),
-        ];
-        assert_eq!(block[0].modulation, common::Modulation::Fsk2);
-        dedupe_neighbours(&mut block);
-        let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
-        assert_eq!(kept.len(), 1, "kept {kept:#?}");
-        assert_eq!(kept[0].rssi_dbfs, -38.0, "the strongest reading should win");
-    }
-
-    #[test]
-    fn a_real_decode_beats_a_louder_guess() {
-        let mut block = vec![
-            rec(868_100_000.0, "unknown", -20.0),
-            rec(868_100_000.0 + 125_000.0, "Fineoffset-WHx080", -44.0),
-        ];
-        dedupe_neighbours(&mut block);
-        let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].model, "Fineoffset-WHx080", "a CRC beats a stronger guess");
-    }
-
-    #[test]
-    fn two_devices_far_apart_are_both_kept() {
-        let mut block =
-            vec![rec(868_100_000.0, "unknown", -40.0), rec(869_000_000.0, "unknown", -50.0)];
-        dedupe_neighbours(&mut block);
-        assert_eq!(block.iter().filter(|r| !r.model.is_empty()).count(), 2);
-    }
-
-    #[test]
-    fn a_device_that_repeats_its_packet_is_logged_every_time() {
-        // Two bursts on one channel through one front end are two
-        // transmissions, not one seen twice, and a sensor that sends its
-        // reading three times should show three rows.
-        let mut block =
-            vec![rec(868_100_000.0, "unknown", -40.0), rec(868_100_000.0, "unknown", -41.0)];
-        dedupe_neighbours(&mut block);
-        assert_eq!(block.iter().filter(|r| !r.model.is_empty()).count(), 2);
-    }
-
-    #[test]
-    fn one_burst_read_by_both_front_ends_is_logged_once() {
-        // The OOK and FSK branches see the same channel, so a burst can be
-        // decoded by one and guessed at by the other. That is one packet.
-        let mut ook = rec(868_100_000.0, "Fineoffset-WHx080", -44.0);
-        ook.modulation = common::Modulation::Ook;
-        let mut block = vec![rec(868_100_000.0, "unknown", -30.0), ook];
-        dedupe_neighbours(&mut block);
-        let kept: Vec<&DecodeRecord> = block.iter().filter(|r| !r.model.is_empty()).collect();
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].model, "Fineoffset-WHx080");
-    }
-
-    fn ook_at(freq: f64, at: std::time::Instant) -> DecodeRecord {
-        let mut r = rec(freq, "unknown", -30.0);
-        r.channel_hz = OOK_CHANNEL_HZ;
-        r.modulation = common::Modulation::Ook;
-        r.at = at;
-        r
-    }
-
-    #[test]
-    fn a_burst_split_across_two_blocks_is_still_reported_once() {
-        // Observed on live 868 MHz traffic: one transmission arrived as four
-        // rows 31 kHz apart, because reads from the radio are milliseconds
-        // long and each was deduped alone.
-        let mut sc = Dedupe::default();
-        let t0 = std::time::Instant::now();
-        let block = std::time::Duration::from_millis(7);
-        let mut kept = 0;
-        for (n, freq) in [868_362_300.0, 868_393_400.0, 868_331_100.0].iter().enumerate() {
-            let at = t0 + block * n as u32;
-            if sc.accept(&ook_at(*freq, at), at) {
-                kept += 1;
-            }
-        }
-        assert_eq!(kept, 1, "one burst logged as {kept} rows");
-    }
-
-    #[test]
-    fn a_device_repeating_on_its_own_channel_is_logged_every_time() {
-        // Same channel through the same front end is a second transmission,
-        // not a second reading of the first, and a sensor that sends its
-        // packet three times should show three rows.
-        let mut sc = Dedupe::default();
-        let t0 = std::time::Instant::now();
-        for n in 0..3u32 {
-            let at = t0 + std::time::Duration::from_millis(60) * n;
-            assert!(sc.accept(&ook_at(868_362_300.0, at), at), "repeat {n} was swallowed");
-        }
-    }
-
-    #[test]
-    fn a_neighbour_is_only_a_duplicate_while_the_burst_is_recent() {
-        let mut sc = Dedupe::default();
-        let t0 = std::time::Instant::now();
-        assert!(sc.accept(&ook_at(868_362_300.0, t0), t0));
-
-        let soon = t0 + std::time::Duration::from_millis(50);
-        assert!(!sc.accept(&ook_at(868_393_400.0, soon), soon), "a skirt slipped through");
-
-        // Long enough later and it is a different burst that happens to be
-        // next door, which is the whole reason the memory expires.
-        let later = t0 + DEDUPE_WINDOW + std::time::Duration::from_millis(10);
-        assert!(sc.accept(&ook_at(868_393_400.0, later), later), "the memory never expired");
-    }
-
-    #[test]
-    fn the_dedupe_memory_is_shorter_than_a_repeating_device() {
-        // Long enough to cover a block boundary, short enough that a sensor
-        // repeating its packet two or three times a second still gets a row
-        // per repeat.
-        assert!(DEDUPE_WINDOW >= std::time::Duration::from_millis(250));
-        assert!(DEDUPE_WINDOW <= std::time::Duration::from_millis(400));
     }
 
     #[test]
@@ -4637,11 +4549,11 @@ pub(crate) mod tests {
             voice: true,
             tx: None,
         }];
-        // The transcript is one for the whole program, so what this test
-        // reads is what arrived after it started.
-        let log = crate::transcripts::log();
         let since = std::time::Instant::now();
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        // The receiver's own transcript, so what this test reads is what
+        // this receiver heard.
+        let log = rx.transcript().clone();
         let _ = replay_blocks(&mut rx, &buf);
         // The model runs on its own thread, so the answer arrives after the
         // samples have run out, the way it does in the receiver.
@@ -4653,7 +4565,7 @@ pub(crate) mod tests {
                 .lock()
                 .recent(usize::MAX)
                 .into_iter()
-                .filter(|u| u.at >= since && u.key.contains(&format!("{}", CHANNEL_HZ as u64)))
+                .filter(|u| u.at >= since && u.key.channel_hz == CHANNEL_HZ as u64)
                 .cloned()
                 .collect();
             if said.iter().any(|u| u.settled) {
@@ -4672,8 +4584,7 @@ pub(crate) mod tests {
         // On the channel it was heard on, since the key is what the call
         // list and the transcript view meet on.
         let key = said[0].key.clone();
-        let who = crate::transcripts::Speaker::parse(&key).expect("a key");
-        assert_eq!(who.freq_hz, CHANNEL_HZ as u64, "read on {key}");
+        assert_eq!(key.channel_hz, CHANNEL_HZ as u64, "read on {key}");
     }
 
     /// A channel marked as voice is heard through its own fader and listed
@@ -4750,14 +4661,14 @@ pub(crate) mod tests {
         assert_eq!(over[0].to, "PMR1");
         assert_eq!(over[0].system, crate::audiobus::ANALOGUE);
         assert!((3.5..4.5).contains(&over[0].seconds), "the over ran {:.2} s", over[0].seconds);
-        assert_eq!(over[0].key(), "Audio:446049100:PMR1:");
+        assert_eq!(over[0].key().to_string(), "Audio:446049100:PMR1:");
         let now = std::time::Instant::now();
         let rows = calls.active(now);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].to, "PMR1");
         assert_eq!(rows[0].overs, 1);
         assert!((3.5..4.5).contains(&rows[0].seconds), "the row says {:.2} s", rows[0].seconds);
-        assert_eq!(rows[0].transcript_key(), over[0].key());
+        assert_eq!(rows[0].key(), over[0].key());
     }
 
     fn pmr446_fixture() -> Option<common::IqBuf> {

@@ -15,7 +15,7 @@
 //! channel is read and the port carries the band instead, because a frame
 //! cannot then be placed by the port alone.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::ble as pdu;
@@ -23,6 +23,7 @@ use dsp::ble::{BleConfig, BleDetector, BleFrame, ADV_CHANNELS};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// The width one advertising channel occupies: 1 MHz of modulation with the
 /// guard that puts the neighbours 2 MHz away.
@@ -235,8 +236,22 @@ impl Protocol for Ble {
     fn label(&self) -> &'static str {
         "ble"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["bluetooth"]
+    }
     fn placement(&self) -> Placement {
         Placement::Channels(ADV_CHANNELS.iter().map(|(_, hz)| *hz).collect())
+    }
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 1_000_000 }
+    }
+    /// An advertising channel is a frequency nothing else here transmits a
+    /// frame from.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !is_advertising_channel(p.center_hz() as f64) {
+            return None;
+        }
+        Some(ble_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -349,4 +364,15 @@ mod tests {
         assert!(detail.contains("ua_type=multirotor"), "{detail}");
         assert!(detail.contains("66:55:44:33:22:11"), "{detail}");
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "ble",
+    summary: "One BLE advertising channel: GFSK at 1 Mbit/s, dewhitening and CRC-24",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(BleNode::default()))
 }

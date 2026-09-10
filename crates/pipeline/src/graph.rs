@@ -95,7 +95,6 @@ struct Entry {
     /// levels.
     scratch_out: Vec<Payload>,
     scratch_specs: Vec<PortSpec>,
-    scratch_in_tags: Vec<Tag>,
     scratch_new_tags: Vec<Tag>,
     scratch_events: Vec<Event>,
     base_index: u64,
@@ -113,26 +112,46 @@ impl Entry {
     /// Run the node over the buffers staged by the pre-pass. Errors are
     /// parked on the entry so the post-pass can put every buffer back
     /// before one failing node aborts the call.
-    fn run(&mut self, bufs: &[Payload], block_seconds: f64) {
+    ///
+    /// The arena is read here rather than copied into the entry, so a node's
+    /// inputs and the tags on each of them cost no allocation: the shapes
+    /// with one and two ports, which is nearly every node, are gathered on
+    /// the stack.
+    fn run(&mut self, bufs: &[Payload], tags: &[Vec<Tag>], block_seconds: f64) {
         self.scratch_events.clear();
         self.scratch_new_tags.clear();
-        let ins: Vec<&Payload> = self.in_slots.iter().map(|&s| &bufs[s]).collect();
-        let mut ctx = NodeCtx::new(
-            self.base_index,
-            &self.scratch_specs,
-            &self.scratch_in_tags,
-            &mut self.scratch_events,
-            &mut self.scratch_new_tags,
-        )
-        .with_block_seconds(block_seconds);
         let t = std::time::Instant::now();
-        if let Err(err) = self.node.process(&ins, &mut self.scratch_out, &mut ctx) {
-            self.error = Some(err);
+        let mut slots = self.in_slots.iter().copied();
+        match (self.in_slots.len(), slots.next(), slots.next()) {
+            (0, _, _) => self.call(&[], &[], block_seconds),
+            (1, Some(a), _) => self.call(&[&bufs[a]], &[&tags[a]], block_seconds),
+            (2, Some(a), Some(b)) => {
+                self.call(&[&bufs[a], &bufs[b]], &[&tags[a], &tags[b]], block_seconds)
+            }
+            _ => {
+                let ins: Vec<&Payload> = self.in_slots.iter().map(|&s| &bufs[s]).collect();
+                let its: Vec<&[Tag]> = self.in_slots.iter().map(|&s| tags[s].as_slice()).collect();
+                self.call(&ins, &its, block_seconds)
+            }
         }
         let us = t.elapsed().as_micros() as u64;
         self.cost_us += 0.2 * (us as f32 - self.cost_us);
         self.total_us += us;
         self.ring.push(us.min(u32::MAX as u64) as u32, block_seconds);
+    }
+
+    fn call(&mut self, ins: &[&Payload], in_tags: &[&[Tag]], block_seconds: f64) {
+        let mut ctx = NodeCtx::new(
+            self.base_index,
+            &self.scratch_specs,
+            in_tags,
+            &mut self.scratch_events,
+            &mut self.scratch_new_tags,
+        )
+        .with_block_seconds(block_seconds);
+        if let Err(err) = self.node.process(ins, &mut self.scratch_out, &mut ctx) {
+            self.error = Some(err);
+        }
     }
 }
 
@@ -247,7 +266,23 @@ impl GraphBuilder {
 /// A node lifted out of a graph, ready to be built into another one.
 pub struct NodePart {
     pub label: String,
+    /// What the graph this came out of knew the node by, which is how a
+    /// caller picks its own nodes out again: `NodeId` is a position and the
+    /// rebuild is what changed it.
+    pub tag: Option<u64>,
     pub node: Box<dyn Node>,
+}
+
+/// One event and the node that raised it.
+///
+/// The graph knows which entry it ran, so a node does not have to name
+/// itself in what it emits: a warning or a request carried a string the
+/// node wrote about itself, and a misspelt one was routed nowhere and
+/// dropped in silence.
+#[derive(Clone, Debug)]
+pub struct Emitted {
+    pub node: NodeId,
+    pub event: Event,
 }
 
 /// A node as it exists in a built graph.
@@ -263,9 +298,10 @@ pub struct TopoNode {
     pub latency: u64,
     pub inputs: Vec<(usize, StreamSpec)>,
     pub outputs: Vec<(usize, StreamSpec)>,
-    /// The graph this node runs inside itself, and how many times per block.
-    /// A bank reports the chain one channel runs and the number of channels.
-    pub inner: Option<Box<Topology>>,
+    /// The graphs this node runs inside itself, and how many times per block.
+    /// A bank reports the chain one channel runs and the number of channels;
+    /// a node holding a graph per front end reports every one of them.
+    pub inner: Vec<Topology>,
     pub inner_count: usize,
     /// Whether the node ends the stream rather than passing one on.
     pub sink: bool,
@@ -334,7 +370,7 @@ pub struct Graph {
     rate_seen: Vec<u64>,
     rate_at: std::time::Instant,
     output_slot: Slot,
-    events: Vec<Event>,
+    events: Vec<Emitted>,
 }
 
 impl std::fmt::Debug for Graph {
@@ -348,12 +384,22 @@ impl std::fmt::Debug for Graph {
     }
 }
 
-impl Graph {
-    pub fn builder(input: StreamSpec) -> GraphBuilder {
-        GraphBuilder::new(input)
-    }
+/// Which slot every port of every node reads and writes, worked out before
+/// anything is ordered or run.
+struct Wiring {
+    /// First output slot of each node; port `p` is that plus `p`.
+    out_slot_base: Vec<Slot>,
+    /// Slot feeding each input port of each node.
+    in_slots: Vec<Vec<Slot>>,
+    /// Slots nothing writes, standing in for an optional input left unfed.
+    silent: Vec<Slot>,
+    /// Which node writes a slot, for anything that has to walk backwards.
+    producer_of: HashMap<Slot, usize>,
+    n_slots: usize,
+}
 
-    fn assemble(b: GraphBuilder) -> Result<Graph> {
+impl Wiring {
+    fn resolve(b: &GraphBuilder) -> Result<Wiring> {
         let n = b.nodes.len();
 
         // Slot 0 is the external input; node k's output port p follows.
@@ -399,78 +445,104 @@ impl Graph {
             in_slots.push(slots);
         }
 
-        // Topological sort by Kahn's algorithm. A cycle is a build-time error
-        // rather than a runtime hang.
         let mut producer_of: HashMap<Slot, usize> = HashMap::new();
         for (k, base) in out_slot_base.iter().enumerate() {
             for p in 0..b.nodes[k].num_outputs().max(1) {
                 producer_of.insert(base + p, k);
             }
         }
-        let mut indeg = vec![0usize; n];
-        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (k, slots) in in_slots.iter().enumerate() {
-            for s in slots {
-                if let Some(&p) = producer_of.get(s) {
-                    succ[p].push(k);
-                    indeg[k] += 1;
-                }
-            }
-        }
-        let mut queue: Vec<usize> = (0..n).filter(|&k| indeg[k] == 0).collect();
-        queue.sort_unstable();
-        let mut order = Vec::with_capacity(n);
-        let mut qi = 0;
-        while qi < queue.len() {
-            let k = queue[qi];
-            qi += 1;
-            order.push(k);
-            for &s in &succ[k] {
-                indeg[s] -= 1;
-                if indeg[s] == 0 {
-                    queue.push(s);
-                }
-            }
-        }
-        if order.len() != n {
-            let stuck: Vec<&str> = (0..n)
-                .filter(|k| indeg[*k] > 0)
-                .map(|k| b.labels[k].as_str())
-                .collect();
-            return Err(Error::other(format!(
-                "graph has a cycle involving: {}. Feedback loops belong inside a node.",
-                stuck.join(", ")
-            )));
-        }
 
-        // Cut the order into levels: a node's level is one past the deepest
-        // of its producers, so everything a level reads was written by an
-        // earlier one.
-        let mut level_of = vec![0usize; n];
-        for &k in &order {
-            level_of[k] = in_slots[k]
-                .iter()
-                .filter_map(|s| producer_of.get(s))
-                .map(|&p| level_of[p] + 1)
-                .max()
-                .unwrap_or(0);
+        Ok(Wiring { out_slot_base, in_slots, silent, producer_of, n_slots })
+    }
+}
+
+/// Execution order by Kahn's algorithm. A cycle is a build-time error rather
+/// than a runtime hang.
+fn toposort(b: &GraphBuilder, w: &Wiring) -> Result<Vec<usize>> {
+    let n = b.nodes.len();
+    let mut indeg = vec![0usize; n];
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (k, slots) in w.in_slots.iter().enumerate() {
+        for s in slots {
+            if let Some(&p) = w.producer_of.get(s) {
+                succ[p].push(k);
+                indeg[k] += 1;
+            }
         }
-        let mut levels = vec![Vec::new(); order.iter().map(|&k| level_of[k] + 1).max().unwrap_or(0)];
-        for &k in &order {
-            levels[level_of[k]].push(k);
+    }
+    let mut queue: Vec<usize> = (0..n).filter(|&k| indeg[k] == 0).collect();
+    queue.sort_unstable();
+    let mut order = Vec::with_capacity(n);
+    let mut qi = 0;
+    while qi < queue.len() {
+        let k = queue[qi];
+        qi += 1;
+        order.push(k);
+        for &s in &succ[k] {
+            indeg[s] -= 1;
+            if indeg[s] == 0 {
+                queue.push(s);
+            }
         }
+    }
+    if order.len() != n {
+        let stuck: Vec<&str> =
+            (0..n).filter(|k| indeg[*k] > 0).map(|k| b.labels[k].as_str()).collect();
+        return Err(Error::other(format!(
+            "graph has a cycle involving: {}. Feedback loops belong inside a node.",
+            stuck.join(", ")
+        )));
+    }
+    Ok(order)
+}
+
+/// Cut the order into levels: a node's level is one past the deepest of its
+/// producers, so everything a level reads was written by an earlier one.
+///
+/// Each level is in ascending node order, which is what lets the run hand a
+/// level's entries to the pool by walking the entry list once.
+fn levels(order: &[usize], w: &Wiring) -> Vec<Vec<usize>> {
+    let mut level_of = vec![0usize; order.len()];
+    for &k in order {
+        level_of[k] = w.in_slots[k]
+            .iter()
+            .filter_map(|s| w.producer_of.get(s))
+            .map(|&p| level_of[p] + 1)
+            .max()
+            .unwrap_or(0);
+    }
+    let mut levels = vec![Vec::new(); order.iter().map(|&k| level_of[k] + 1).max().unwrap_or(0)];
+    for &k in order {
+        levels[level_of[k]].push(k);
+    }
+    for l in &mut levels {
+        l.sort_unstable();
+    }
+    levels
+}
+
+impl Graph {
+    pub fn builder(input: StreamSpec) -> GraphBuilder {
+        GraphBuilder::new(input)
+    }
+
+    fn assemble(b: GraphBuilder) -> Result<Graph> {
+        let n = b.nodes.len();
+        let wiring = Wiring::resolve(&b)?;
+        let order = toposort(&b, &wiring)?;
+        let levels = levels(&order, &wiring);
 
         let mut g = Graph {
             entries: Vec::with_capacity(n),
             order,
             levels,
             bufs: Vec::new(),
-            specs: vec![b.input; n_slots],
-            latency: vec![0; n_slots],
-            tags: vec![Vec::new(); n_slots],
-            produced: vec![0; n_slots],
-            rate: vec![0.0; n_slots],
-            rate_seen: vec![0; n_slots],
+            specs: vec![b.input; wiring.n_slots],
+            latency: vec![0; wiring.n_slots],
+            tags: vec![Vec::new(); wiring.n_slots],
+            produced: vec![0; wiring.n_slots],
+            rate: vec![0.0; wiring.n_slots],
+            rate_seen: vec![0; wiring.n_slots],
             rate_at: std::time::Instant::now(),
             output_slot: INPUT_SLOT,
             events: Vec::new(),
@@ -483,11 +555,10 @@ impl Graph {
                 node,
                 label: b.labels[k].clone(),
                 tag: b.tags[k],
-                in_slots: in_slots[k].clone(),
-                out_slots: (0..outs).map(|p| out_slot_base[k] + p).collect(),
+                in_slots: wiring.in_slots[k].clone(),
+                out_slots: (0..outs).map(|p| wiring.out_slot_base[k] + p).collect(),
                 scratch_out: Vec::new(),
                 scratch_specs: Vec::new(),
-                scratch_in_tags: Vec::new(),
                 scratch_new_tags: Vec::new(),
                 scratch_events: Vec::new(),
                 base_index: 0,
@@ -499,7 +570,7 @@ impl Graph {
         }
 
         g.output_slot = match b.output {
-            Some(o) => out_slot_base[o.node.0] + o.port,
+            Some(o) => wiring.out_slot_base[o.node.0] + o.port,
             // Default to the last node in execution order, which is what a
             // linear chain wants and an explicit `output()` overrides.
             None => g
@@ -510,7 +581,7 @@ impl Graph {
         };
 
         g.specs[INPUT_SLOT] = b.input;
-        for s in silent {
+        for s in wiring.silent {
             g.specs[s] = StreamSpec::silence();
         }
         g.negotiate()?;
@@ -528,12 +599,14 @@ impl Graph {
                 .map(|&s| PortSpec { spec: self.specs[s], latency: self.latency[s] })
                 .collect();
 
-            // A node fed by both directions at once is always a mistake, and
-            // one that only shows up as nonsense on air. GNU Radio cannot
-            // catch this because its ports carry no direction.
+            // A node fed by both directions at once is a mistake unless it
+            // says otherwise, and one that only shows up as nonsense on air.
+            // GNU Radio cannot catch this because its ports carry no
+            // direction. The transmit monitor is the one node that means it.
+            let joins = self.entries[k].node.joins_flows();
             let mut flows = ins.iter().filter(|p| !p.spec.is_silence()).map(|p| p.spec.flow);
             if let Some(first) = flows.next() {
-                if flows.any(|f| f != first) {
+                if !joins && flows.any(|f| f != first) {
                     return Err(Error::other(format!(
                         "node {k} ({}) is fed by both a receive and a transmit stream",
                         self.entries[k].label
@@ -665,7 +738,7 @@ impl Graph {
                     .map(|&s| (s, self.specs[s]))
                     .collect(),
                 outputs: e.out_slots.iter().map(|&s| (s, self.specs[s])).collect(),
-                inner: e.node.subgraph().map(Box::new),
+                inner: e.node.subgraphs(),
                 inner_count: e.node.subgraph_count(),
                 sink: e.node.is_sink(),
                 params: e.node.params(),
@@ -688,7 +761,7 @@ impl Graph {
     pub fn into_parts(self) -> Vec<NodePart> {
         self.entries
             .into_iter()
-            .map(|e| NodePart { label: e.label, node: e.node })
+            .map(|e| NodePart { label: e.label, tag: e.tag, node: e.node })
             .collect()
     }
 
@@ -770,7 +843,7 @@ impl Graph {
     /// construction and run together on the pool. A level of one node, which
     /// is every level of a linear chain, runs inline on the calling thread
     /// so a plain chain pays nothing for the machinery.
-    pub fn run(&mut self) -> Result<&[Event]> {
+    pub fn run(&mut self) -> Result<&[Emitted]> {
         self.events.clear();
         let n_in = self.bufs[INPUT_SLOT].len() as u64;
         // What this block is worth in time, from the rate the graph was
@@ -789,14 +862,8 @@ impl Graph {
             for &k in level {
                 let e = &mut entries[k];
                 e.scratch_specs.clear();
-                e.scratch_in_tags.clear();
                 for &s in &e.in_slots {
                     e.scratch_specs.push(PortSpec { spec: specs[s], latency: latency[s] });
-                }
-                // Tags arriving on the primary input port for this call's
-                // window.
-                if let Some(&s0) = e.in_slots.first() {
-                    e.scratch_in_tags.extend_from_slice(&tags[s0]);
                 }
                 e.base_index = e.in_slots.first().map(|&s| produced[s]).unwrap_or(0);
                 e.scratch_out.clear();
@@ -817,12 +884,21 @@ impl Graph {
             let heavy = level.iter().filter(|&&k| entries[k].cost_us > FORK_US).count();
             if level.len() > 1 && heavy > 1 {
                 let bufs = &*bufs;
-                let ks = level.as_slice();
-                entries
-                    .par_iter_mut()
-                    .enumerate()
-                    .filter(|(k, _)| ks.contains(k))
-                    .for_each(|(_, e)| e.run(bufs, block_seconds));
+                let all_tags = &*tags;
+                // The level's entries, picked out of the list in one walk.
+                // Filtering the whole list per level instead cost a pass
+                // over every node in the graph for every level of it.
+                let mut rest = entries.as_mut_slice();
+                let mut base = 0usize;
+                let mut picked: Vec<&mut Entry> = Vec::with_capacity(level.len());
+                for &k in level {
+                    let (_, tail) = rest.split_at_mut(k - base);
+                    let (e, tail) = tail.split_first_mut().expect("a level names its own nodes");
+                    picked.push(e);
+                    base = k + 1;
+                    rest = tail;
+                }
+                picked.into_par_iter().for_each(|e| e.run(bufs, all_tags, block_seconds));
             } else {
                 for &k in level {
                     let e = &mut entries[k];
@@ -830,7 +906,8 @@ impl Graph {
                     // moved out in the pre-pass, so the arena holds nothing
                     // this node writes.
                     let bufs = &*bufs;
-                    e.run(bufs, block_seconds);
+                    let all_tags = &*tags;
+                    e.run(bufs, all_tags, block_seconds);
                 }
             }
 
@@ -849,7 +926,6 @@ impl Graph {
                     failed = Some(Error::other(format!("node {k} ({}): {err}", e.label)));
                     break 'levels;
                 }
-                let in_rate = e.scratch_specs.first().map(|p| p.spec.rate).unwrap_or(1.0);
                 for (p, &s) in e.out_slots.iter().enumerate() {
                     debug_assert_eq!(
                         bufs[s].kind(),
@@ -857,18 +933,36 @@ impl Graph {
                         "node {} wrote the wrong payload kind on port {p}",
                         e.label
                     );
-                    // Rate-scale inbound tags onto this output, then append
-                    // the node's own.
-                    let out_rate = specs[s].rate;
-                    tags[s].clear();
-                    for t in e.scratch_in_tags.iter() {
-                        tags[s].push(t.rescale(in_rate, out_rate));
+                    // Rate-scale what arrived on every input onto this
+                    // output, then append the node's own. Taken out of the
+                    // arena and put back so the input slots can be read
+                    // while the output slot is written; a node never reads
+                    // its own output, since the graph is acyclic. Most
+                    // blocks carry no tag at all, and then emptying the slot
+                    // is the whole of the work.
+                    let carries = !e.scratch_new_tags.is_empty()
+                        || e.in_slots.iter().any(|&is| !tags[is].is_empty());
+                    if !carries {
+                        tags[s].clear();
+                    } else {
+                        let out_rate = specs[s].rate;
+                        let mut out = std::mem::take(&mut tags[s]);
+                        out.clear();
+                        for (q, &is) in e.in_slots.iter().enumerate() {
+                            let in_rate = e.scratch_specs[q].spec.rate;
+                            out.extend(tags[is].iter().map(|t| t.rescale(in_rate, out_rate)));
+                        }
+                        out.extend(e.scratch_new_tags.iter().cloned());
+                        out.sort_by_key(|t| t.index);
+                        // One tag reaching a merge down two paths is still
+                        // one tag.
+                        out.dedup();
+                        tags[s] = out;
                     }
-                    tags[s].extend(e.scratch_new_tags.iter().cloned());
-                    tags[s].sort_by_key(|t| t.index);
                     produced[s] += bufs[s].len() as u64;
                 }
-                events.append(&mut e.scratch_events);
+                let raised = e.scratch_events.drain(..);
+                events.extend(raised.map(|event| Emitted { node: NodeId(k), event }));
             }
         }
         self.levels = levels;
@@ -905,7 +999,7 @@ impl Graph {
     }
 
     /// Fill the input buffer from IQ and run.
-    pub fn feed_iq(&mut self, samples: &[common::C32]) -> Result<&[Event]> {
+    pub fn feed_iq(&mut self, samples: &[common::C32]) -> Result<&[Emitted]> {
         let b = self.bufs[INPUT_SLOT].iq_mut();
         b.clear();
         b.extend_from_slice(samples);
@@ -1079,6 +1173,51 @@ mod tests {
         }
     }
 
+    /// Emits a tag of its own key on its first output sample of every call.
+    struct KeyTagger(&'static str);
+    impl Simple for KeyTagger {
+        fn name(&self) -> &str {
+            "keytagger"
+        }
+        fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec)
+        }
+        fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+            c.tag(Tag::marker(c.sample_index, self.0));
+            o.iq_mut().extend_from_slice(i.as_iq().unwrap());
+            Ok(())
+        }
+    }
+
+    /// Two inputs, recording which port each tag arrived on.
+    struct PortSpy {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<(usize, &'static str)>>>,
+    }
+    impl Node for PortSpy {
+        fn name(&self) -> &str {
+            "portspy"
+        }
+        fn num_inputs(&self) -> usize {
+            2
+        }
+        fn negotiate(&mut self, ins: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+            Ok(vec![ins[0].spec])
+        }
+        fn process(
+            &mut self,
+            ins: &[&Payload],
+            outs: &mut [Payload],
+            c: &mut NodeCtx<'_>,
+        ) -> Result<()> {
+            let mut seen = self.seen.lock().unwrap();
+            for port in 0..2 {
+                seen.extend(c.in_tags(port).iter().map(|t| (port, t.key)));
+            }
+            outs[0].iq_mut().extend_from_slice(ins[0].as_iq().unwrap());
+            Ok(())
+        }
+    }
+
     /// Records the tags it saw, to prove propagation and rate scaling.
     struct TagSpy {
         seen: std::sync::Arc<std::sync::Mutex<Vec<Tag>>>,
@@ -1091,7 +1230,7 @@ mod tests {
             Ok(i.spec)
         }
         fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-            self.seen.lock().unwrap().extend(c.in_tags.iter().cloned());
+            self.seen.lock().unwrap().extend(c.in_tags(0).iter().cloned());
             o.iq_mut().extend_from_slice(i.as_iq().unwrap());
             Ok(())
         }
@@ -1218,6 +1357,35 @@ mod tests {
         assert_eq!(s[1].value, TagValue::Int(7));
     }
 
+    /// A node with two inputs is told which port each tag arrived on, and
+    /// forwards both onto its output. Reading one list meant a merge could
+    /// only ever see the first port's tags, so every strip on the audio bus
+    /// but one lost its own.
+    #[test]
+    fn a_merge_reads_the_tags_on_every_input_and_forwards_them_all() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let after = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut b = Graph::builder(spec());
+        let left = b.add(Box::new(KeyTagger("left")));
+        let right = b.add(Box::new(KeyTagger("right")));
+        let spy = b.add(Box::new(PortSpy { seen: seen.clone() }));
+        let down = b.add(Box::new(TagSpy { seen: after.clone() }));
+        b.source(left.i());
+        b.source(right.i());
+        b.connect(left.o(), spy.input(0));
+        b.connect(right.o(), spy.input(1));
+        b.link(spy, down);
+        b.output(down.o());
+        let mut g = b.build().unwrap();
+        g.feed_iq(&ramp(8)).unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(*seen, vec![(0, "left"), (1, "right")]);
+        let after = after.lock().unwrap();
+        let keys: Vec<&str> = after.iter().map(|t| t.key).collect();
+        assert_eq!(keys, vec!["left", "right"], "a tag was dropped at the merge");
+    }
+
     #[test]
     fn output_latency_accumulates_through_rate_changes() {
         let g = chain(
@@ -1275,7 +1443,7 @@ mod tests {
         g.feed_iq(&ramp(4)).unwrap();
         let n = g
             .node(c)
-            .and_then(|n| n.as_any())
+            .map(|n| n.as_any())
             .and_then(|a| a.downcast_ref::<Counting>())
             .map(|c| c.0);
         assert_eq!(n, Some(12), "the node kept counting rather than starting over");

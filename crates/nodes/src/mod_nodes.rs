@@ -23,6 +23,38 @@ use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec, TAG_TX_END, TAG_TX_START};
 use pipeline::Tag;
 
+/// The setting names these stages read, spelled once for the builder, the
+/// parameter list and the setter that share each of them.
+const OFFSET_HZ: &str = "offset_hz";
+const AMPLITUDE: &str = "amplitude";
+const RAMP_US: &str = "ramp_us";
+const SHIFT_HZ: &str = "shift_hz";
+const SPS: &str = "sps";
+const DEPTH: &str = "depth";
+const DEVIATION_HZ: &str = "deviation_hz";
+
+/// How hard a modulator drives the output, as a fraction of full scale.
+///
+/// The DAC clips at one, and a clipped carrier is spread across the band
+/// rather than confined to it, so a quarter leaves headroom for the sum of a
+/// chain with more than one thing on it and for a shaped edge's overshoot.
+pub const DEFAULT_AMPLITUDE: f32 = 0.25;
+
+/// Edge ramp of a keyed carrier, in microseconds.
+const DEFAULT_RAMP_US: f32 = 500.0;
+
+/// Samples per symbol an amplitude modulator keys at.
+const DEFAULT_SPS: usize = 10;
+
+/// Modulation depth of an AM carrier.
+const DEFAULT_DEPTH: f32 = 0.8;
+
+/// Tone separation of a two-level FSK modulator, in hertz: what most ISM
+/// sensors use, and wide enough that a discriminator reads it without a
+/// narrow filter.
+const DEFAULT_FSK_SHIFT_HZ: f64 = 50_000.0;
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+
 /// Where a modulator's own carrier sits, and how loud, since every one of
 /// them has these two.
 fn tx_spec(input: &PortSpec, rate: f64, bandwidth: f64) -> StreamSpec {
@@ -95,10 +127,8 @@ impl Default for OokModNode {
     fn default() -> Self {
         Self {
             offset_hz: 0.0,
-            // A quarter of full scale. The DAC clips at one, and a clipped
-            // carrier is spread across the band rather than confined to it.
-            amplitude: 0.25,
-            ramp_us: 500.0,
+            amplitude: DEFAULT_AMPLITUDE,
+            ramp_us: DEFAULT_RAMP_US,
             rate: 0.0,
             carrier: Carrier::default(),
             produced: 0,
@@ -220,13 +250,13 @@ impl Simple for OokModNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("offset_hz", self.offset_hz, -1e6..=1e6)
+            Param::float(OFFSET_HZ, self.offset_hz, -1e6..=1e6)
                 .label("Carrier offset")
                 .unit("Hz"),
-            Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
+            Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
-            Param::float("ramp_us", self.ramp_us as f64, 0.0..=5000.0)
+            Param::float(RAMP_US, self.ramp_us as f64, 0.0..=5000.0)
                 .label("Edge ramp")
                 .unit("us"),
         ]
@@ -235,9 +265,9 @@ impl Simple for OokModNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         let v = value.as_f64().unwrap_or(0.0);
         match name {
-            "offset_hz" => self.offset_hz = v,
-            "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
-            "ramp_us" => self.ramp_us = v.max(0.0) as f32,
+            OFFSET_HZ => self.offset_hz = v,
+            AMPLITUDE => self.amplitude = v.clamp(0.0, 1.0) as f32,
+            RAMP_US => self.ramp_us = v.max(0.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "ook_mod: unknown parameter {name:?}"
@@ -271,10 +301,8 @@ impl Default for FskModNode {
     fn default() -> Self {
         Self {
             offset_hz: 0.0,
-            // The separation most ISM sensors use, and wide enough that a
-            // discriminator reads it without a narrow filter.
-            shift_hz: 50_000.0,
-            amplitude: 0.25,
+            shift_hz: DEFAULT_FSK_SHIFT_HZ,
+            amplitude: DEFAULT_AMPLITUDE,
             rate: 0.0,
             carrier: Carrier::default(),
             produced: 0,
@@ -368,13 +396,13 @@ impl Simple for FskModNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("offset_hz", self.offset_hz, -1e6..=1e6)
+            Param::float(OFFSET_HZ, self.offset_hz, -1e6..=1e6)
                 .label("Carrier offset")
                 .unit("Hz"),
-            Param::float("shift_hz", self.shift_hz, 100.0..=500_000.0)
+            Param::float(SHIFT_HZ, self.shift_hz, 100.0..=500_000.0)
                 .label("Tone separation")
                 .unit("Hz"),
-            Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
+            Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
         ]
@@ -383,9 +411,9 @@ impl Simple for FskModNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         let v = value.as_f64().unwrap_or(0.0);
         match name {
-            "offset_hz" => self.offset_hz = v,
-            "shift_hz" => self.shift_hz = v.abs(),
-            "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
+            OFFSET_HZ => self.offset_hz = v,
+            SHIFT_HZ => self.shift_hz = v.abs(),
+            AMPLITUDE => self.amplitude = v.clamp(0.0, 1.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "fsk_mod: unknown parameter {name:?}"
@@ -423,8 +451,8 @@ impl Default for AskModNode {
     fn default() -> Self {
         Self {
             offset_hz: 0.0,
-            amplitude: 0.25,
-            sps: 10,
+            amplitude: DEFAULT_AMPLITUDE,
+            sps: DEFAULT_SPS,
             transition: 0.25,
             rate: 0.0,
             carrier: Carrier::default(),
@@ -498,13 +526,13 @@ impl Simple for AskModNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("offset_hz", self.offset_hz, -1e6..=1e6)
+            Param::float(OFFSET_HZ, self.offset_hz, -1e6..=1e6)
                 .label("Carrier offset")
                 .unit("Hz"),
-            Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
+            Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
-            Param::int("sps", self.sps as i64, 1..=1024).label("Samples per symbol"),
+            Param::int(SPS, self.sps as i64, 1..=1024).label("Samples per symbol"),
             Param::float("transition", self.transition as f64, 0.0..=1.0)
                 .label("Transition")
                 .unit("symbol"),
@@ -513,9 +541,12 @@ impl Simple for AskModNode {
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
-            "offset_hz" => self.offset_hz = value.as_f64().unwrap_or(0.0),
-            "amplitude" => self.amplitude = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32,
-            "sps" => self.sps = value.as_i64().unwrap_or(10).max(1) as usize,
+            OFFSET_HZ => self.offset_hz = value.as_f64().unwrap_or(0.0),
+            AMPLITUDE => {
+                self.amplitude =
+                    value.as_f64().unwrap_or(DEFAULT_AMPLITUDE as f64).clamp(0.0, 1.0) as f32
+            }
+            SPS => self.sps = value.as_i64().unwrap_or(DEFAULT_SPS as i64).max(1) as usize,
             "transition" => self.transition = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
@@ -550,8 +581,8 @@ impl Default for AmModNode {
     fn default() -> Self {
         Self {
             offset_hz: 0.0,
-            depth: 0.8,
-            amplitude: 0.25,
+            depth: DEFAULT_DEPTH,
+            amplitude: DEFAULT_AMPLITUDE,
             rate: 0.0,
             carrier: Carrier::default(),
         }
@@ -617,11 +648,11 @@ impl Simple for AmModNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("offset_hz", self.offset_hz, -1e6..=1e6)
+            Param::float(OFFSET_HZ, self.offset_hz, -1e6..=1e6)
                 .label("Carrier offset")
                 .unit("Hz"),
-            Param::float("depth", self.depth as f64, 0.0..=1.0).label("Modulation depth"),
-            Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
+            Param::float(DEPTH, self.depth as f64, 0.0..=1.0).label("Modulation depth"),
+            Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
         ]
@@ -630,9 +661,9 @@ impl Simple for AmModNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         let v = value.as_f64().unwrap_or(0.0);
         match name {
-            "offset_hz" => self.offset_hz = v,
-            "depth" => self.depth = v.clamp(0.0, 1.0) as f32,
-            "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
+            OFFSET_HZ => self.offset_hz = v,
+            DEPTH => self.depth = v.clamp(0.0, 1.0) as f32,
+            AMPLITUDE => self.amplitude = v.clamp(0.0, 1.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "am_mod: unknown parameter {name:?}"
@@ -676,7 +707,7 @@ impl Default for FmModNode {
         Self {
             offset_hz: 0.0,
             deviation_hz: FM_DEVIATION_HZ,
-            amplitude: 0.25,
+            amplitude: DEFAULT_AMPLITUDE,
             rate: 0.0,
             carrier: Carrier::default(),
         }
@@ -694,11 +725,11 @@ impl FmModNode {
     }
 
     pub fn narrowband(offset_hz: f64) -> Self {
-        Self::new(offset_hz, NBFM_DEVIATION_HZ, 0.25)
+        Self::new(offset_hz, NBFM_DEVIATION_HZ, DEFAULT_AMPLITUDE)
     }
 
     pub fn wideband(offset_hz: f64) -> Self {
-        Self::new(offset_hz, WBFM_DEVIATION_HZ, 0.25)
+        Self::new(offset_hz, WBFM_DEVIATION_HZ, DEFAULT_AMPLITUDE)
     }
 }
 
@@ -766,13 +797,13 @@ impl Simple for FmModNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("offset_hz", self.offset_hz, -1e6..=1e6)
+            Param::float(OFFSET_HZ, self.offset_hz, -1e6..=1e6)
                 .label("Carrier offset")
                 .unit("Hz"),
-            Param::float("deviation_hz", self.deviation_hz, 100.0..=200_000.0)
+            Param::float(DEVIATION_HZ, self.deviation_hz, 100.0..=200_000.0)
                 .label("Deviation")
                 .unit("Hz"),
-            Param::float("amplitude", self.amplitude as f64, 0.0..=1.0)
+            Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0)
                 .label("Amplitude")
                 .unit("FS"),
         ]
@@ -781,9 +812,9 @@ impl Simple for FmModNode {
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         let v = value.as_f64().unwrap_or(0.0);
         match name {
-            "offset_hz" => self.offset_hz = v,
-            "deviation_hz" => self.deviation_hz = v.abs(),
-            "amplitude" => self.amplitude = v.clamp(0.0, 1.0) as f32,
+            OFFSET_HZ => self.offset_hz = v,
+            DEVIATION_HZ => self.deviation_hz = v.abs(),
+            AMPLITUDE => self.amplitude = v.clamp(0.0, 1.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "fm_mod: unknown parameter {name:?}"
@@ -1152,4 +1183,79 @@ mod tests {
             .to_string();
         assert!(err.contains("deviation"), "unhelpful: {err}");
     }
+}
+
+pub const OOK_MOD: StageDesc = StageDesc {
+    name: "ook_mod",
+    summary: "Key a carrier on and off from pulse timings, with shaped edges",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_ook_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(OokModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        s.f64_or(RAMP_US, DEFAULT_RAMP_US as f64) as f32,
+    )))
+}
+
+pub const FSK_MOD: StageDesc = StageDesc {
+    name: "fsk_mod",
+    summary: "Key two tones from pulse timings, continuous phase",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_fsk_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(FskModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(SHIFT_HZ, DEFAULT_FSK_SHIFT_HZ),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+    )))
+}
+
+pub const ASK_MOD: StageDesc = StageDesc {
+    name: "ask_mod",
+    summary: "Amplitude modulate a carrier with one level per symbol",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_ask_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AskModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        s.i64_or(SPS, DEFAULT_SPS as i64).max(1) as usize,
+    )))
+}
+
+pub const AM_MOD: StageDesc = StageDesc {
+    name: "am_mod",
+    summary: "Amplitude modulate a carrier with audio, carrier left in",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_am_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AmModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(DEPTH, DEFAULT_DEPTH as f64) as f32,
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+    )))
+}
+
+pub const FM_MOD: StageDesc = StageDesc {
+    name: "fm_mod",
+    summary: "Frequency modulate a carrier with audio, narrowband to broadcast",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_fm_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(FmModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(DEVIATION_HZ, FM_DEVIATION_HZ),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+    )))
 }

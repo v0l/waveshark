@@ -25,6 +25,7 @@ use pipeline::graph::Topology;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use pipeline::{Graph, Out};
 use rayon::prelude::*;
 
@@ -123,6 +124,13 @@ impl Default for SourceDetectNode {
 impl Simple for SourceDetectNode {
     fn name(&self) -> &str {
         "source_detect"
+    }
+
+    /// The band watched, which has to be set before the node goes into the
+    /// graph: what is inside it is settled while the graph negotiates, and
+    /// the span has usually moved since the node was last built.
+    fn configure(&mut self, settings: &Settings) {
+        self.set_band(crate::band_of(settings));
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
@@ -295,14 +303,16 @@ impl SourceDecodeNode {
 
 impl Simple for SourceDecodeNode {
     fn name(&self) -> &str {
-        &self.label
+        SOURCE_DECODE.name
     }
 
-    fn subgraph(&self) -> Option<Topology> {
+    fn subgraphs(&self) -> Vec<Topology> {
         self.graphs
             .first()
             .map(|(_, g, _)| g.topology())
             .or_else(|| self.template.as_ref().map(|g| g.topology()))
+            .into_iter()
+            .collect()
     }
 
     fn subgraph_count(&self) -> usize {
@@ -353,10 +363,9 @@ impl Simple for SourceDecodeNode {
                 buf.clear();
                 buf.iq_mut().extend_from_slice(&b.samples);
                 let evs = match g.run() {
-                    Ok(ev) => ev.to_vec(),
+                    Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
                     Err(e) => vec![Event::Warning {
-                        stage: format!("source {}", id.0),
-                        message: e.to_string(),
+                        message: format!("source {}: {e}", id.0),
                     }],
                 };
                 let pkgs: Vec<Package> = taps
@@ -491,7 +500,7 @@ mod tests {
         s.spec.rate = 0.0;
         let out = Node::negotiate(&mut n, &[s]).unwrap();
         assert_eq!(out[0].kind, PortKind::Pulses);
-        let inner = Node::subgraph(&n).expect("template graph");
+        let inner = Node::subgraphs(&n).pop().expect("template graph");
         assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
         assert!(
             !Node::params(&n).is_empty(),
@@ -504,4 +513,61 @@ mod tests {
         let mut n = SourceDecodeNode::new("sources", crate::ism_decode_graph);
         assert!(Node::negotiate(&mut n, &[spec(2_400_000.0)]).is_err());
     }
+}
+
+/// The setting names a source detector reads, shared with the auto node,
+/// which watches the same way.
+pub(crate) const OPEN_DB: &str = "open_db";
+pub(crate) const CLOSE_DB: &str = "close_db";
+pub(crate) const HANG_MS: &str = "hang_ms";
+pub(crate) const BIN_HZ: &str = "bin_hz";
+const MIN_RATE_HZ: &str = "min_rate_hz";
+
+/// How a description says what the detector should watch for.
+///
+/// One reading of these settings rather than one per node that watches: the
+/// auto node and the bare detector took the same five and drifted, so a
+/// threshold added to one was silently ignored by the other.
+pub(crate) fn watch_config(s: &Settings, mut cfg: SourceConfig) -> SourceConfig {
+    cfg.open_db = s.f64_or(OPEN_DB, cfg.open_db as f64) as f32;
+    cfg.close_db = s.f64_or(CLOSE_DB, cfg.close_db as f64) as f32;
+    cfg.hang_us = (s.f64_or(HANG_MS, cfg.hang_us as f64 / 1e3) * 1e3) as u32;
+    cfg.bin_hz = s.f64_or(BIN_HZ, cfg.bin_hz);
+    // A closing threshold at or above the opening one opens and closes a
+    // source on every frame of a fading signal.
+    if cfg.close_db >= cfg.open_db {
+        cfg.close_db = cfg.open_db - 1.0;
+    }
+    cfg
+}
+
+pub const SOURCE_DETECT: StageDesc = StageDesc {
+    name: "source_detect",
+    summary: "Find every transmitter in a span, measure its centre and \
+              width, and hand each over as its own stream",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build_source_detect(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut cfg = watch_config(s, SourceConfig::default());
+    cfg.min_rate_hz = s.f64_or(MIN_RATE_HZ, cfg.min_rate_hz);
+    let mut n = SourceDetectNode::new(cfg);
+    Simple::configure(&mut n, s);
+    Ok(Box::new(n))
+}
+
+pub const SOURCE_DECODE: StageDesc = StageDesc {
+    name: "source_decode",
+    summary: "Run the burst front end over every source found, for as \
+              long as each one lasts",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build_source_decode(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(SourceDecodeNode::new(
+        "sources",
+        crate::ism_decode_graph,
+    )))
 }

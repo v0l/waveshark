@@ -9,7 +9,7 @@
 //!
 //! A chain does not usually wire the two by hand. [`MorseTxNode`] is one node
 //! taking bytes and producing IQ, holding both inside and showing them
-//! through [`pipeline::node::Node::subgraph`], which is the transmit mirror
+//! through [`pipeline::node::Node::subgraphs`], which is the transmit mirror
 //! of the front ends that take IQ and produce packets. The modulator is
 //! shared: it keys whatever timings arrive, so every protocol with a timing
 //! table adds an encoder and reuses this carrier.
@@ -21,6 +21,7 @@ use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
 use pipeline::Graph;
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// Bytes of text in, Morse timings out.
 pub struct MorseKeyNode {
@@ -85,14 +86,14 @@ impl Simple for MorseKeyNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float("wpm", self.wpm as f64, 1.0..=60.0)
+        vec![Param::float(WPM, self.wpm as f64, 1.0..=60.0)
             .label("Speed")
             .unit("wpm")]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
-            "wpm" => {
+            WPM => {
                 self.wpm = value.as_f64().unwrap_or(20.0).clamp(1.0, 60.0) as f32;
                 Ok(())
             }
@@ -148,8 +149,8 @@ impl Node for MorseTxNode {
         "morse_tx"
     }
 
-    fn subgraph(&self) -> Option<Topology> {
-        Some(self.inner.topology())
+    fn subgraphs(&self) -> Vec<Topology> {
+        vec![self.inner.topology()]
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -308,18 +309,18 @@ impl Simple for ToneNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("hz", self.hz, 20.0..=20_000.0)
+            Param::float(HZ, self.hz, 20.0..=20_000.0)
                 .label("Tone")
                 .unit("Hz"),
-            Param::float("level", self.level as f64, 0.0..=1.0).label("Level"),
+            Param::float(LEVEL, self.level as f64, 0.0..=1.0).label("Level"),
         ]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         let v = value.as_f64().unwrap_or(0.0);
         match name {
-            "hz" => self.hz = v.max(0.0),
-            "level" => self.level = v.clamp(0.0, 1.0) as f32,
+            HZ => self.hz = v.max(0.0),
+            LEVEL => self.level = v.clamp(0.0, 1.0) as f32,
             _ => {
                 return Err(common::Error::other(format!(
                     "tone: unknown parameter {name:?}"
@@ -330,7 +331,8 @@ impl Simple for ToneNode {
     }
 }
 
-/// The end of a transmit chain: IQ in, samples out of the antenna.
+/// The end of a transmit chain: IQ in, samples out of the antenna, and what
+/// went out on its own port for [`TxMonitorNode`] to draw.
 ///
 /// The mirror of the radio at the head of the receive graph, and the node
 /// that makes a transmission visible as something the graph does rather than
@@ -351,13 +353,6 @@ pub struct TxSinkNode {
     written: u64,
     /// Blocks the device could not take, because the radio went away.
     failed: u64,
-    /// The last block handed over, kept so the receiver can be shown what is
-    /// going out. A half duplex radio hears nothing while it transmits, so
-    /// without this the spectrum is a flat floor for the length of every
-    /// over and an operator has no way to see their own signal: whether it
-    /// is where they meant it, how wide it is, or whether the modulation is
-    /// doing anything at all.
-    monitor: Vec<C32>,
 }
 
 impl TxSinkNode {
@@ -369,7 +364,6 @@ impl TxSinkNode {
             center: common::Hz(0),
             written: 0,
             failed: 0,
-            monitor: Vec::new(),
         }
     }
 
@@ -393,14 +387,7 @@ impl TxSinkNode {
             center: common::Hz(0),
             written: 0,
             failed: 0,
-            monitor: Vec::new(),
         }
-    }
-
-    /// The last block that went to the radio, for a monitor on the receive
-    /// side. Empty until something has been transmitted.
-    pub fn monitor(&self) -> &[C32] {
-        &self.monitor
     }
 
     /// Complex samples handed to the radio since the node was built.
@@ -428,7 +415,6 @@ impl TxSinkNode {
             s.stop();
         }
         self.stream = None;
-        self.monitor.clear();
     }
 }
 
@@ -437,8 +423,12 @@ impl Simple for TxSinkNode {
         "radio_tx"
     }
 
+    /// Not a sink: what went to the antenna leaves here as well, for
+    /// [`TxMonitorNode`] to put back on the receiver's own spectrum. A half
+    /// duplex radio hears nothing while it transmits, and the only thing
+    /// holding the samples that did go out is this stage.
     fn is_sink(&self) -> bool {
-        true
+        false
     }
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
@@ -461,7 +451,7 @@ impl Simple for TxSinkNode {
     fn process(
         &mut self,
         input: &Payload,
-        _output: &mut Payload,
+        output: &mut Payload,
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
         let Some(iq) = input.as_iq() else {
@@ -473,12 +463,12 @@ impl Simple for TxSinkNode {
         // Not keyed: the chain runs and produces, and nothing leaves the
         // antenna. That is what makes the stages worth having in the graph
         // when the key is up, since the modulator's output can be tapped and
-        // the levels set before anything is radiated.
+        // the levels set before anything is radiated. Nothing leaves this
+        // port either, so the monitor draws nothing.
         let Some(s) = &mut self.stream else {
             return Ok(());
         };
-        self.monitor.clear();
-        self.monitor.extend_from_slice(iq);
+        output.iq_mut().extend_from_slice(iq);
         let buf = common::IqBuf::new(iq.to_vec(), self.center, self.rate, self.written);
         match s.write(&buf) {
             Ok(()) => self.written += iq.len() as u64,
@@ -492,6 +482,151 @@ impl Simple for TxSinkNode {
                     tracing::warn!("the radio stopped taking samples mid-transmission: {e}");
                 }
                 self.failed += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Put what is going out into what the receiver sees.
+///
+/// A half duplex radio hears nothing while it transmits, so the driver hands
+/// its receive stream a noise floor and the spectrum is flat for the length
+/// of the over. That is honest and useless: an operator wants to see their
+/// own signal, and it is the only way to check without a second radio that
+/// the transmission is where it was meant to be, is the width it should be,
+/// and is being modulated at all.
+///
+/// So the transmitter's own samples arrive on the second input, shifted by
+/// the difference between where it is transmitting and where the receiver is
+/// tuned, and are summed into the span exactly as a real signal on that
+/// frequency would arrive. The level is what the modulator produced, which is
+/// not calibrated against anything: this is a monitor, not a measurement, and
+/// a transmission on the waterfall is drawn in the same place a receiver
+/// across the room would see it and not at the strength it would see it.
+///
+/// Only while the radio is deaf, which is what `enabled` says. A full duplex
+/// radio hears its own transmission for real, and mirroring on top of that
+/// would draw it twice.
+pub struct TxMonitorNode {
+    /// Where the transmitter is against the receiver's own centre.
+    shift_hz: f64,
+    enabled: bool,
+    mixer: dsp::Mixer,
+    rate: f64,
+    scratch: Vec<C32>,
+}
+
+impl Default for TxMonitorNode {
+    fn default() -> Self {
+        Self {
+            shift_hz: 0.0,
+            enabled: false,
+            mixer: dsp::Mixer::new(0.0, 1.0),
+            rate: 0.0,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl TxMonitorNode {
+    /// Whether what is being transmitted is drawn on the receiver's span.
+    /// Set from the radio thread, which is the only thing that knows whether
+    /// the receive stream has gone deaf for the over.
+    pub fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl Node for TxMonitorNode {
+    fn name(&self) -> &str {
+        "tx_monitor"
+    }
+
+
+
+    fn num_inputs(&self) -> usize {
+        2
+    }
+
+    /// The transmitter's input is allowed to be empty, and usually is: a
+    /// receiver with no transmit chain still has a head, and this stage sits
+    /// in front of it. Refusing the wire would drop the stage, and with it
+    /// everything downstream of the head.
+    fn optional_inputs(&self) -> bool {
+        true
+    }
+
+    /// The whole point of this stage: what went out of the antenna, back onto
+    /// what came in.
+    fn joins_flows(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let span = inputs
+            .first()
+            .ok_or_else(|| common::Error::other("tx_monitor needs the span on its first input"))?;
+        if span.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("tx_monitor needs IQ on its first input"));
+        }
+        self.rate = span.spec.rate;
+        self.mixer.set_shift(self.shift_hz, self.rate.max(1.0));
+        Ok(vec![span.spec])
+    }
+
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(span) = inputs.first().and_then(|p| p.as_iq()) else {
+            return Ok(());
+        };
+        let out = outputs[0].iq_mut();
+        out.extend_from_slice(span);
+        let sent = inputs.get(1).and_then(|p| p.as_iq()).unwrap_or(&[]);
+        if !self.enabled || sent.is_empty() {
+            return Ok(());
+        }
+        self.scratch.clear();
+        self.mixer.process(sent, &mut self.scratch);
+        for (dst, src) in out.iter_mut().zip(self.scratch.iter()) {
+            *dst += *src;
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.mixer.reset();
+        self.scratch.clear();
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float(SHIFT_HZ, self.shift_hz, -30e6..=30e6)
+                .label("Transmitting from centre")
+                .unit("Hz"),
+            Param::bool(ENABLED, self.enabled).label("Draw the transmission"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            SHIFT_HZ => {
+                self.shift_hz = value.as_f64().unwrap_or(0.0);
+                self.mixer.set_shift(self.shift_hz, self.rate.max(1.0));
+            }
+            ENABLED => self.enabled = value.as_bool().unwrap_or(false),
+            _ => {
+                return Err(common::Error::other(format!(
+                    "tx_monitor: unknown parameter {name:?}"
+                )))
             }
         }
         Ok(())
@@ -1193,4 +1328,84 @@ impl Simple for TxClockNode {
         output.real_mut().resize(n, 0.0);
         Ok(())
     }
+}
+
+/// The setting names these stages read, and the speed a keyer runs at when
+/// nothing has said otherwise.
+const WPM: &str = "wpm";
+const HZ: &str = "hz";
+const LEVEL: &str = "level";
+const OFFSET_HZ: &str = "offset_hz";
+const SHIFT_HZ: &str = "shift_hz";
+const ENABLED: &str = "enabled";
+
+/// A comfortable hand speed, and what a keyer starts at.
+pub const DEFAULT_WPM: f32 = 20.0;
+
+pub const TX_CLOCK: StageDesc = StageDesc {
+    name: "tx_clock",
+    summary: "Take the receiver's clock and give a transmit chain a \
+              block of time to fill",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx_clock(_s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(TxClockNode::default()))
+}
+
+pub const TX_MONITOR: StageDesc = StageDesc {
+    name: "tx_monitor",
+    summary: "Draw what is being transmitted on the receiver's own span, \
+              for the length of an over a half duplex radio cannot hear",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx_monitor(s: &Settings) -> Result<Box<dyn Node>> {
+    let mut n = TxMonitorNode::default();
+    Node::set_param(&mut n, SHIFT_HZ, ParamValue::Float(s.f64_or(SHIFT_HZ, 0.0)))?;
+    n.set_enabled(s.bool_or(ENABLED, false));
+    Ok(Box::new(n))
+}
+
+pub const TONE: StageDesc = StageDesc {
+    name: "tone",
+    summary: "A test tone, added to whatever is on the stream",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tone(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(ToneNode::new(
+        s.f64_or(HZ, 1_000.0),
+        s.f64_or(LEVEL, 0.8) as f32,
+    )))
+}
+
+pub const MORSE_TX: StageDesc = StageDesc {
+    name: "morse_tx",
+    summary: "Key text as Morse on a carrier, ready for a transmitter",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_morse_tx(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(MorseTxNode::new(
+        s.f64_or(WPM, DEFAULT_WPM as f64) as f32,
+        s.f64_or(OFFSET_HZ, 0.0),
+    )))
+}
+
+pub const MORSE_KEY: StageDesc = StageDesc {
+    name: "morse_key",
+    summary: "Text to Morse mark and gap timings",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_morse_key(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(MorseKeyNode::new(
+        s.f64_or(WPM, DEFAULT_WPM as f64) as f32,
+    )))
 }

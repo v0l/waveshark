@@ -226,7 +226,7 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
 fn packet_row(ui: &mut egui::Ui, r: &DecodeRecord, first: Option<std::time::Instant>) {
     let t = first.map(|f| r.at.saturating_duration_since(f).as_secs_f64()).unwrap_or(0.0);
     ui.horizontal_wrapped(|ui| {
-        theme::Line::new().legend(&format!("{t:>8.3}")).value(r.model.clone()).size(11.0).show(ui);
+        theme::Line::new().legend(&format!("{t:>8.3}")).value(r.protocol()).size(11.0).show(ui);
         if r.rssi_dbfs.is_finite() {
             theme::Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs)).size(11.0).show(ui);
         }

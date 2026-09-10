@@ -1,12 +1,141 @@
 //! Watching the band: the detector and extractor, what they are kept out
 //! of, and the span-wide decoders placed where the span reaches them.
 
-use common::Result;
-use dsp::{SourceConfig, SourceDetector, SourceExtractor};
+use common::{Result, SourceBlock, SourceId, C32};
+use dsp::{Owned, SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::port::StreamSpec;
 
 use super::{AutoNode, Member};
 use crate::protocol::{self, Placed, Stickiness};
+
+/// The pair that finds what is on the span and cuts it out, and everything
+/// that decides where they may look.
+///
+/// One owner, because the two are one instrument: the extractor's ring has to
+/// be long enough for the detector's latency, every channel the detector is
+/// kept out of is a channel something else is cutting out, and neither exists
+/// until the graph has said what the span is.
+#[derive(Default)]
+pub(super) struct Watch {
+    detector: Option<SourceDetector>,
+    extractor: Option<SourceExtractor>,
+    /// The band detection is limited to inside the input, in absolute hertz,
+    /// or None for all of it.
+    band: Option<(f64, f64)>,
+    /// The tuner's own centre, and the band around it once the resolution is
+    /// known. See [`AutoNode::set_spur`].
+    spur: Option<f64>,
+    spur_band: Option<(f64, f64)>,
+    /// The channel plan on this band, as an origin and a step in hertz, when
+    /// there is one. See [`snap_to_raster`].
+    raster: Option<(f64, f64)>,
+}
+
+impl Watch {
+    /// Whether there is anything to watch with yet: both are built when the
+    /// graph negotiates, and until then the node has not been told the span.
+    pub(super) fn ready(&self) -> bool {
+        self.detector.is_some() && self.extractor.is_some()
+    }
+
+    /// Wideband samples consumed so far, which is the clock everything here
+    /// is timed on.
+    pub(super) fn position(&self) -> u64 {
+        self.detector.as_ref().map_or(0, |d| d.position())
+    }
+
+    pub(super) fn live(&self) -> Vec<dsp::Source> {
+        self.detector
+            .as_ref()
+            .map(|d| d.live().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Put a detector built with new thresholds in place of the running one,
+    /// keeping the extractor and its ring. False before the graph has said
+    /// what the span is: there is nothing to replace, and nothing to build
+    /// one from either.
+    pub(super) fn rebuild_detector(&mut self, build: impl FnOnce() -> SourceDetector) -> bool {
+        match self.detector.as_mut() {
+            Some(old) => {
+                *old = build();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn set_owned(&mut self, channels: Vec<Owned>) {
+        if let Some(d) = self.detector.as_mut() {
+            d.set_owned(channels);
+        }
+    }
+
+    /// What opened and closed in this block, snapped to the channel plan
+    /// where there is one.
+    ///
+    /// `idle` when something else has claimed the whole span: there is
+    /// nothing to find in a span that is one transmission, and the block goes
+    /// by unread rather than being buffered.
+    pub(super) fn admit(&mut self, iq: &[C32], center_hz: f64, idle: bool, out: &mut Vec<SourceEvent>) {
+        let Some(d) = self.detector.as_mut() else { return };
+        if idle {
+            d.idle(iq.len());
+            return;
+        }
+        out.extend_from_slice(d.process(iq));
+        // A source plainly on a channel of the plan is that channel: what is
+        // cut out, and what is reported, is the channel rather than this
+        // frame's measurement of it.
+        let Some(raster) = self.raster else { return };
+        for ev in out.iter_mut() {
+            if let SourceEvent::Opened(s) = ev {
+                snap_to_raster(s, raster, center_hz);
+            }
+        }
+    }
+
+    /// Cut every open source out of the block, as a run of samples each.
+    pub(super) fn cut(
+        &mut self,
+        iq: &[C32],
+        events: &[SourceEvent],
+        blocks: &mut Vec<SourceBlock>,
+    ) {
+        if let Some(e) = self.extractor.as_mut() {
+            e.process(iq, events, blocks);
+        }
+    }
+
+    /// Cut a channel out that no source opened, from where the stream is now.
+    pub(super) fn open_channel(&mut self, id: SourceId, center_hz: f64, width_hz: f64) {
+        let from = self.position();
+        if let Some(e) = self.extractor.as_mut() {
+            e.open_channel(id, center_hz, width_hz, from);
+        }
+    }
+
+    pub(super) fn close_channel(&mut self, id: SourceId) {
+        if let Some(e) = self.extractor.as_mut() {
+            e.close(id);
+        }
+    }
+
+    /// Microseconds the shared bank spent this block, streaming and catching
+    /// up, for the cost view.
+    pub(super) fn bank_cost(&mut self) -> (u64, u64) {
+        self.extractor.as_mut().map_or((0, 0), |e| e.take_bank_cost())
+    }
+
+    pub(super) fn reset(&mut self) {
+        if let Some(d) = self.detector.as_mut() {
+            d.reset();
+        }
+        if let Some(e) = self.extractor.as_mut() {
+            e.reset();
+        }
+    }
+}
 
 impl AutoNode {
     /// The detector's settings for this span.
@@ -35,7 +164,7 @@ impl AutoNode {
 
     /// Limit detection to a band inside the input, or `None` for all of it.
     pub fn set_band(&mut self, band: Option<(f64, f64)>) {
-        self.band = band;
+        self.watch.band = band;
         self.apply_band();
     }
 
@@ -51,41 +180,38 @@ impl AutoNode {
     /// open elsewhere, and a device that really sits on the centre still
     /// opens when it transmits by itself.
     pub fn set_spur(&mut self, hz: Option<f64>) {
-        self.spur = hz;
+        self.watch.spur = hz;
         self.apply_band();
     }
 
     pub fn band(&self) -> Option<(f64, f64)> {
-        self.band
+        self.watch.band
     }
 
     /// The channel plan on this band: a frequency the plan lands on and the
     /// spacing, in hertz. A source found close to a channel is locked to it;
     /// see [`snap_to_raster`].
     pub fn set_raster(&mut self, raster: Option<(f64, f64)>) {
-        self.raster = raster.filter(|(_, step)| *step > 0.0);
+        self.watch.raster = raster.filter(|(_, step)| *step > 0.0);
     }
 
     pub fn raster(&self) -> Option<(f64, f64)> {
-        self.raster
+        self.watch.raster
     }
 
     pub(super) fn apply_band(&mut self) {
-        if let (Some(d), Some((lo, hi))) = (self.detector.as_mut(), self.band) {
-            let c = self.center.as_f64();
+        let c = self.center.as_f64();
+        let w = &mut self.watch;
+        if let (Some(d), Some((lo, hi))) = (w.detector.as_mut(), w.band) {
             d.set_band(lo - c, hi - c);
         }
         // Three bins either side, tested against the source's centre.
-        self.spur_band = match (self.detector.as_ref(), self.spur) {
+        w.spur_band = match (w.detector.as_ref(), w.spur) {
             (Some(d), Some(hz)) => Some((hz - 3.0 * d.bin_hz(), hz + 3.0 * d.bin_hz())),
             _ => None,
         };
-        // And the floor cap left off there: the residual DC is a permanent
-        // hump the cap would otherwise unhide, and reported it is an unknown
-        // at the centre of every span for as long as the receiver runs.
-        if let (Some(d), Some((lo, hi))) = (self.detector.as_mut(), self.spur_band) {
-            let c = self.center.as_f64();
-            d.exempt_from_cap(lo - c, hi - c);
+        if let (Some(d), Some((lo, hi))) = (w.detector.as_mut(), w.spur_band) {
+            d.set_spur(lo - c, hi - c);
         }
     }
 
@@ -95,15 +221,15 @@ impl AutoNode {
         }
         let d = SourceDetector::new(self.rate, self.input_bw, self.detector_cfg());
         let keep = d.latency_samples();
-        self.extractor = Some(SourceExtractor::new(
+        self.watch.extractor = Some(SourceExtractor::new(
             self.rate,
             self.center.as_f64(),
             keep,
             self.cfg,
         ));
-        self.detector = Some(d);
+        self.watch.detector = Some(d);
         self.slots.clear();
-        self.pending_sticky = self.sticky.iter().map(|s| s.id).collect();
+        self.memory.cut_again();
 
         // The span-wide decoders, where the span reaches what they are for.
         // Each one is asked where it belongs and what it owns; nothing here
@@ -113,6 +239,7 @@ impl AutoNode {
         let c = self.center.as_f64();
         let half = self.input_bw / 2.0;
         self.wide.clear();
+        self.wide_ring = super::Ring::new(spec);
         let covers = |lo: f64, hi: f64| c - half <= lo && hi <= c + half;
         for p in protocol::all() {
             let shape = p.shape();
@@ -153,6 +280,9 @@ impl AutoNode {
                     width_hz: hi - lo,
                     rate,
                     snr_db: f32::NAN,
+                    // A front end over the span is not cut out of anything,
+                    // so there is no position in a span to tell it.
+                    origin: None,
                 };
                 // Four fifths of the new Nyquist and sixty decibels: a
                 // transition band wide enough that the filter stays short,

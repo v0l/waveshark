@@ -26,6 +26,7 @@ use common::Result;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// The occupied bandwidth: 600 carriers 15 kHz apart, plus guards.
 pub const WIDTH_HZ: f64 = 10_000_000.0;
@@ -350,4 +351,15 @@ mod tests {
         assert!(n.negotiate(&spec(dsp::droneid::RATE)).is_ok());
         assert!(n.negotiate(&spec(20_000_000.0)).is_ok());
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "droneid",
+    summary: "DJI DroneID: the 15.36 MS/s OFDM burst an aircraft broadcasts about itself",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(DroneIdNode::new()))
 }

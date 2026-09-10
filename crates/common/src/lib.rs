@@ -21,11 +21,12 @@ pub use device::{
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
 pub use decode::{
-    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
+    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail, Secrecy,
 };
 pub use modulation::Modulation;
 pub use pulse::{
-    Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse, Speech, VideoFrame, Voice,
+    ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse,
+    Speech, VideoFrame, Voice, CHANNEL_MATCH_HZ,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use value::Value;

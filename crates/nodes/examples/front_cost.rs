@@ -53,6 +53,7 @@ fn main() {
             width_hz: shape.widths[0],
             rate: fed,
             snr_db: f32::NAN,
+            origin: None,
         };
         chain.extend(p.chain(at));
         let mut g = match nodes::build_chain(

@@ -19,7 +19,7 @@
 //! pipelines. This node is the wiring, exactly as `PulseDetectNode` is the
 //! wiring around `dsp::OokDetector`.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
@@ -29,6 +29,7 @@ use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 pub struct ModeSNode {
     cfg: ModeSConfig,
@@ -424,11 +425,34 @@ impl Protocol for ModeS {
     fn id(&self) -> &'static str {
         "mode_s"
     }
+    /// An extended squitter carries the aircraft's own position.
+    fn reports_position(&self) -> bool {
+        true
+    }
     fn label(&self) -> &'static str {
         "mode s"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["modes", "mode-s", "adsb"]
+    }
     fn placement(&self) -> Placement {
         Placement::Channels(vec![1_090_000_000.0])
+    }
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 2_000_000 }
+    }
+    /// A Mode S frame and an AIS frame are both bytes, and nothing tells them
+    /// apart except where they were received.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::modes::is_modes_band(p.center_hz() as f64) {
+            return None;
+        }
+        let center = common::Hz(p.center_hz());
+        Some(
+            adsb::parse(bytes)
+                .map(|f| vec![adsb_decoded(&f, bytes, center)])
+                .unwrap_or_default(),
+        )
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -520,4 +544,15 @@ mod tests {
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
             .collect()
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "mode_s",
+    summary: "1090 MHz ADS-B: preamble search and pulse-position bits",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(ModeSNode::default()))
 }

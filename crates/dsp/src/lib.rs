@@ -65,7 +65,7 @@ pub use m17::{M17Config, M17Demod, M17Stats};
 pub use mixer::Mixer;
 pub use modes::{ModeSConfig, ModeSDetector, ModeSFrame};
 pub use pocsag::{PocsagConfig, PocsagDemod};
-pub use source::{Source, SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
+pub use source::{Owned, Source, SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 pub use spectrum::Spectrum;
 pub use stereo::StereoDecoder;
 pub use tetra::{TetraConfig, TetraDemod, TetraRx, TetraStats};

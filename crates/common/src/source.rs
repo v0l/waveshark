@@ -63,7 +63,9 @@ pub struct SourceBlock {
     /// Index in the *wideband* stream of the instant `samples` begins, for
     /// placing the block in time against the stream it came from.
     pub start_sample: u64,
-    /// Peak SNR the detector measured for the source so far, in dB.
+    /// Peak SNR the detector measured for the source so far, in dB, and NaN
+    /// for a channel the caller asked to be cut out itself: nothing measured
+    /// it, so whatever reads it has to measure its own.
     pub snr_db: f32,
     pub samples: Vec<C32>,
 }

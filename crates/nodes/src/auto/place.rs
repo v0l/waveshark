@@ -2,17 +2,18 @@
 
 use common::{Hz, Result, SourceBlock, SourceId, C32};
 use pipeline::port::StreamSpec;
-use pipeline::registry::Settings;
-use pipeline::ParamValue;
 
+use super::member::Ring;
 use super::{AutoNode, Member};
-use crate::protocol::{self, Placed, Protocol};
+use crate::protocol::{self, Origin, Placed, Protocol};
 use crate::NodeSpec;
 
 /// One open source and the decoders reading it.
 pub(super) struct Slot {
     pub(super) id: SourceId,
-    pub(super) center_hz: u64,
+    /// Where the stream was cut from, which is what a packet off it is
+    /// labelled with and what a remembered channel is matched against.
+    pub(super) center_hz: Hz,
     pub(super) members: Vec<Member>,
     /// A front end has read something from this source. From then on the
     /// burst front end's measurement of it is not news: a row saying what
@@ -32,9 +33,11 @@ pub(super) struct Slot {
     /// A channel remembered from earlier, which runs the one decoder that
     /// earned it and nothing else.
     pub(super) remembered: bool,
-    /// Where the stream sits in the span, as every decoder placed on it is
-    /// told.
-    pub(super) origin: Settings,
+    /// Where the stream sits in the span, as a decoder placed on it that has
+    /// to be timed from another stream is told.
+    pub(super) origin: Origin,
+    /// The stream itself, kept once for every front end reading it.
+    pub(super) ring: Ring,
 }
 
 impl AutoNode {
@@ -56,10 +59,11 @@ impl AutoNode {
         // timed from another carrier's decoder can say where in the span
         // its timing was measured, and the other can find that in its own
         // samples.
-        let mut origin = Settings::new();
-        origin.insert("span_origin_sample".into(), ParamValue::Float(b.start_sample as f64));
-        origin.insert("span_rate_hz".into(), ParamValue::Float(self.rate));
-        if let Some(st) = self.sticky.iter().find(|s| s.id == b.id) {
+        let origin = Origin {
+            span_sample: b.start_sample,
+            span_rate_hz: self.rate,
+        };
+        if let Some(st) = self.memory.find(b.id) {
             let p = protocol::by_id(st.name)
                 .ok_or_else(|| common::Error::other(format!("no protocol {:?}", st.name)))?;
             let at = Placed {
@@ -67,25 +71,20 @@ impl AutoNode {
                 width_hz: st.width_hz,
                 rate: b.rate,
                 snr_db: b.snr_db,
+                origin: Some(origin),
             };
-            let mut extra = origin.clone();
-            extra.extend(st.settings.iter().map(|(k, v)| (k.clone(), v.clone())));
-            let m = Member::place(p, spec, at, &extra, &self.reg)?;
+            let m = Member::place(p, spec, at, &st.settings, &self.reg)?;
             // The classifier rides along on a remembered channel, so a
             // second transmitter that shares the frequency is named rather
             // than fed to a demodulator that cannot read it: two LoRa
             // networks at different spreading factors and bandwidths do
             // exactly this. It is affordable because the router measures
             // each burst shape once and skips the repeats.
-            let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
             let mut members = vec![m];
-            if let Ok(mut c) = Member::classifier(spec, route, &self.reg) {
-                c.source_snr_db = b.snr_db;
-                members.push(c);
-            }
+            members.extend(self.classifier(b, spec).ok());
             return Ok(Slot {
                 id: b.id,
-                center_hz: b.center_hz,
+                center_hz: Hz(b.center_hz),
                 members,
                 heard: true,
                 spec,
@@ -94,15 +93,10 @@ impl AutoNode {
                 verdicts_seen: 0,
                 remembered: true,
                 origin,
+                ring: Ring::new(spec),
             });
         }
-        // The front end is told how strong the detector found the source,
-        // so a stream that begins inside a transmission is not read as
-        // noise from its first sample to its last.
-        let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
-        let mut classifier = Member::classifier(spec, route, &self.reg)?;
-        classifier.source_snr_db = b.snr_db;
-        let mut members = vec![classifier];
+        let mut members = vec![self.classifier(b, spec)?];
         let hz = b.center_hz as f64;
         for p in protocol::all() {
             let shape = p.shape();
@@ -118,15 +112,16 @@ impl AutoNode {
                     width_hz: w,
                     rate: b.rate,
                     snr_db: b.snr_db,
+                    origin: Some(origin),
                 };
-                if let Ok(m) = Member::place(*p, spec, at, &origin, &self.reg) {
+                if let Ok(m) = Member::place(*p, spec, at, &Default::default(), &self.reg) {
                     members.push(m);
                 }
             }
         }
         Ok(Slot {
             id: b.id,
-            center_hz: b.center_hz,
+            center_hz: Hz(b.center_hz),
             members,
             heard: false,
             spec,
@@ -135,7 +130,18 @@ impl AutoNode {
             verdicts_seen: 0,
             remembered: false,
             origin,
+            ring: Ring::new(spec),
         })
+    }
+
+    /// The burst front end for a source, told how strong the detector found
+    /// it: a stream that begins inside a transmission is otherwise read as
+    /// noise from its first sample to its last.
+    fn classifier(&self, b: &SourceBlock, spec: StreamSpec) -> Result<Member> {
+        let route = NodeSpec::new("burst_route").f("source_snr_db", b.snr_db as f64);
+        let mut m = Member::classifier(spec, route, &self.reg)?;
+        m.source_snr_db = b.snr_db;
+        Ok(m)
     }
 
     /// Place the decoders that wait for the classifier's verdict, once it
@@ -161,9 +167,8 @@ impl AutoNode {
         };
         let verdicts = router.verdicts.clone();
         slot.verdicts_seen = verdicts.len();
-        let hz = slot.center_hz as f64;
+        let hz = slot.center_hz.as_f64();
         let snr = slot.members.first().map_or(f32::NAN, |m| m.source_snr_db);
-        let mut history: Option<Vec<C32>> = None;
         for p in protocol::all() {
             let shape = p.shape();
             if shape.span_wide || slot.tried.contains(&(p.id(), 0)) {
@@ -188,13 +193,6 @@ impl AutoNode {
                 slot.tried.push((p.id(), 0));
                 continue;
             }
-            let history = history.get_or_insert_with(|| {
-                slot.members
-                    .iter()
-                    .find(|m| m.router.is_some())
-                    .map(|m| m.ring.clone())
-                    .unwrap_or_default()
-            });
             for w in p.widths_for(hz, width) {
                 if slot.tried.contains(&(p.id(), w as u64)) {
                     continue;
@@ -205,13 +203,17 @@ impl AutoNode {
                     width_hz: w,
                     rate: slot.spec.rate,
                     snr_db: snr,
+                    // Not where the source began: this decoder starts on the
+                    // history the stream kept, which is where its own first
+                    // sample is.
+                    origin: Some(slot.origin.advanced(slot.ring.base(), slot.spec.rate)),
                 };
-                let Ok(mut m) = Member::place(*p, slot.spec, at, &slot.origin, reg) else {
+                let Ok(mut m) = Member::place(*p, slot.spec, at, &Default::default(), reg) else {
                     continue;
                 };
                 // The samples the source has produced so far, then the
                 // flush if it has already closed.
-                m.catch_up(history);
+                m.catch_up_from(&slot.ring);
                 if closed {
                     let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * slot.spec.rate) as usize];
                     m.catch_up(&quiet);

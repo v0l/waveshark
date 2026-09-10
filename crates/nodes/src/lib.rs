@@ -31,6 +31,7 @@ pub mod bank_node;
 pub mod filter_nodes;
 pub mod frame_meter;
 pub mod gsm_nodes;
+pub mod keyed;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
@@ -47,10 +48,11 @@ pub use capture_nodes::IqCaptureNode;
 pub use video_nodes::VideoNode;
 pub use wfm::WfmDemodNode;
 pub use decode_nodes::{
-    AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode,
+    AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode, UNKNOWN,
 };
 pub use ais_nodes::AisNode;
 pub use frame_meter::FrameMeter;
+pub use keyed::{keyed, keyed_mut, Keyed};
 pub use ble_nodes::BleNode;
 pub use wifi_nodes::WifiNode;
 pub use survey_nodes::SurveyNode;
@@ -63,13 +65,16 @@ pub use tetra_nodes::TetraNode;
 pub use pocsag_nodes::PocsagNode;
 pub use modes_nodes::ModeSNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
-pub use packet_nodes::PacketDecodeNode;
+pub use packet_nodes::{DedupeNode, PacketDecodeNode};
 pub use auto::{AutoNode, AUTO_OPEN_DB};
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use lora_nodes::LoraNode;
 pub use elrs_nodes::ElrsNode;
 pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxSinkNode, MIC_GAIN_MAX};
+pub use tx_nodes::{
+    MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode,
+    MIC_GAIN_MAX,
+};
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
     NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
@@ -80,904 +85,116 @@ pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
 pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use dsp_nodes::{
-    AgcNode, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
-    RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
+    AgcNode, AgcPreset, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode,
+    MixerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
 };
 
 use common::Result;
-use dsp::{AskConfig, FskConfig, PulseConfig};
 use pipeline::node::Node;
 use pipeline::registry::{Registry, Settings, SettingsExt, StageDesc};
 use pipeline::{Graph, StreamSpec};
 
+/// The band a stage is limited to inside its input, as its description
+/// carries it, or `None` for all of it.
+///
+/// Read here rather than by whatever builds the graph, so the two halves of
+/// the setting are spelled once and the node that obeys them is the node
+/// that reads them.
+pub fn band_of(settings: &Settings) -> Option<(f64, f64)> {
+    let (lo, hi) = (settings.f64_or("band_lo_hz", 0.0), settings.f64_or("band_hi_hz", 0.0));
+    (hi > lo).then_some((lo, hi))
+}
+
+/// Where a sink spools what it has to send, as its description carries it,
+/// or the folder that sink keeps its own spool in.
+///
+/// Read here for the same reason as [`band_of`]: two sinks upload to two
+/// services and both answer the setting the same way.
+pub fn spool_dir(settings: &Settings, fallback: fn() -> std::path::PathBuf) -> std::path::PathBuf {
+    match settings.str_or("spool", "") {
+        "" => fallback(),
+        p => std::path::PathBuf::from(p),
+    }
+}
+
 /// Every node type compiled into this build.
-pub fn registry() -> Registry {
-    let mut r = Registry::new();
-
-    r.register(
-        StageDesc {
-            name: "tx_clock",
-            summary: "Take the receiver's clock and give a transmit chain a \
-                      block of time to fill",
-            category: "transmit",
-        },
-        |_s: &Settings| Ok(Box::new(TxClockNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "tone",
-            summary: "A test tone, added to whatever is on the stream",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(ToneNode::new(
-                s.f64_or("hz", 1_000.0),
-                s.f64_or("level", 0.8) as f32,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "morse_tx",
-            summary: "Key text as Morse on a carrier, ready for a transmitter",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(MorseTxNode::new(
-                s.f64_or("wpm", 20.0) as f32,
-                s.f64_or("offset_hz", 0.0),
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "morse_key",
-            summary: "Text to Morse mark and gap timings",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(MorseKeyNode::new(s.f64_or("wpm", 20.0) as f32)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "ook_mod",
-            summary: "Key a carrier on and off from pulse timings, with shaped edges",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(OokModNode::new(
-                s.f64_or("offset_hz", 0.0),
-                s.f64_or("amplitude", 0.25) as f32,
-                s.f64_or("ramp_us", 500.0) as f32,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "fsk_mod",
-            summary: "Key two tones from pulse timings, continuous phase",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(FskModNode::new(
-                s.f64_or("offset_hz", 0.0),
-                s.f64_or("shift_hz", 50_000.0),
-                s.f64_or("amplitude", 0.25) as f32,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "ask_mod",
-            summary: "Amplitude modulate a carrier with one level per symbol",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(AskModNode::new(
-                s.f64_or("offset_hz", 0.0),
-                s.f64_or("amplitude", 0.25) as f32,
-                s.i64_or("sps", 10).max(1) as usize,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "am_mod",
-            summary: "Amplitude modulate a carrier with audio, carrier left in",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(AmModNode::new(
-                s.f64_or("offset_hz", 0.0),
-                s.f64_or("depth", 0.8) as f32,
-                s.f64_or("amplitude", 0.25) as f32,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "fm_mod",
-            summary: "Frequency modulate a carrier with audio, narrowband to broadcast",
-            category: "transmit",
-        },
-        |s: &Settings| {
-            Ok(Box::new(FmModNode::new(
-                s.f64_or("offset_hz", 0.0),
-                s.f64_or("deviation_hz", FM_DEVIATION_HZ),
-                s.f64_or("amplitude", 0.25) as f32,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "mixer",
-            summary: "Shift the signal in frequency, to bring an off-centre \
-                      carrier to baseband and away from the DC spur",
-            category: "filter",
-        },
-        |s: &Settings| Ok(Box::new(MixerNode::new(s.f64_or("shift_hz", 0.0))) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "decimate",
-            summary: "Lowpass and reduce the sample rate of an IQ stream",
-            category: "filter",
-        },
-        |s: &Settings| {
-            Ok(Box::new(DecimateNode::new(s.i64_or("factor", 1).max(1) as usize)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "real_decimate",
-            summary: "Reduce the sample rate of a real stream, for audio",
-            category: "filter",
-        },
-        |s: &Settings| {
-            Ok(
-                Box::new(RealDecimateNode::new(s.i64_or("factor", 1).max(1) as usize))
-                    as Box<dyn Node>,
-            )
-        },
-    );
-
+///
+/// A description and a builder each, both belonging to the module that owns
+/// the node, so a default is spelled once where the node reads it rather than
+/// restated here and left to drift.
+const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
+    (tx_nodes::TX_CLOCK, tx_nodes::build_tx_clock),
+    (tx_nodes::TX_MONITOR, tx_nodes::build_tx_monitor),
+    (tx_nodes::TONE, tx_nodes::build_tone),
+    (tx_nodes::MORSE_TX, tx_nodes::build_morse_tx),
+    (tx_nodes::MORSE_KEY, tx_nodes::build_morse_key),
+    (mod_nodes::OOK_MOD, mod_nodes::build_ook_mod),
+    (mod_nodes::FSK_MOD, mod_nodes::build_fsk_mod),
+    (mod_nodes::ASK_MOD, mod_nodes::build_ask_mod),
+    (mod_nodes::AM_MOD, mod_nodes::build_am_mod),
+    (mod_nodes::FM_MOD, mod_nodes::build_fm_mod),
+    (dsp_nodes::MIXER, dsp_nodes::build_mixer),
+    (dsp_nodes::DECIMATE, dsp_nodes::build_decimate),
+    (dsp_nodes::REAL_DECIMATE, dsp_nodes::build_real_decimate),
+    (dsp_nodes::ENVELOPE, dsp_nodes::build_envelope),
+    (dsp_nodes::FM_DEMOD, dsp_nodes::build_fm_demod),
+    (dsp_nodes::DEEMPHASIS, dsp_nodes::build_deemphasis),
+    (dsp_nodes::SSB_DEMOD, dsp_nodes::build_ssb_demod),
+    (dsp_nodes::HIGH_BLEND, dsp_nodes::build_high_blend),
+    (dsp_nodes::AGC, dsp_nodes::build_agc),
+    (dsp_nodes::SQUELCH, dsp_nodes::build_squelch),
+    (wfm::DESC, wfm::build),
+    (filter_nodes::FIR_FILTER, filter_nodes::build_fir),
+    (filter_nodes::IIR_FILTER, filter_nodes::build_iir),
     // The front ends the scanner table puts on a span. Registered like any
     // other stage so that the graph the receiver derives for itself is a
     // description rather than a special case, and so an operator can put one
     // anywhere rather than only where the table would have.
-    r.register(
-        StageDesc {
-            name: "mode_s",
-            summary: "1090 MHz ADS-B: preamble search and pulse-position bits",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(ModeSNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "ais",
-            summary: "Both marine AIS channels: GMSK demodulation and HDLC framing",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(AisNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "gsm",
-            summary: "One GSM carrier: the frequency correction tone, then the \
-                      synchronisation burst's cell identity and frame number",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let hz = s.f64_or("channel_hz", gsm_nodes::DEFAULT_HZ);
-            let mut n = gsm_nodes::GsmNode::new(hz, Default::default());
-            n.configure(s);
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "survey",
-            summary: "The device database: who was heard, from where, at what level",
-            category: "sink",
-        },
-        |_s: &Settings| Ok(Box::new(SurveyNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "wigle",
-            summary: "Feed what was heard to wigle.net: CSV rows, spooled and uploaded",
-            category: "sink",
-        },
-        |s: &Settings| {
-            let dir = match s.str_or("spool", "") {
-                "" => wigle_nodes::default_spool_dir(),
-                p => std::path::PathBuf::from(p),
-            };
-            Ok(Box::new(WigleNode::new(dir)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "beacondb",
-            summary: "Feed what was heard to beacondb.net: observations, spooled and submitted",
-            category: "sink",
-        },
-        |s: &Settings| {
-            let dir = match s.str_or("spool", "") {
-                "" => beacondb_nodes::default_spool_dir(),
-                p => std::path::PathBuf::from(p),
-            };
-            Ok(Box::new(BeaconDbNode::new(dir)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "video",
-            summary: "Analogue video: FM to composite, sync separation, PAL or NTSC fields, colour",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let forced = match s.str_or("standard", "auto") {
-                "pal" => Some(dsp::video::Standard::Pal),
-                "ntsc" => Some(dsp::video::Standard::Ntsc),
-                _ => None,
-            };
-            Ok(Box::new(VideoNode::new(forced, s.bool_or("colour", true))) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "ble",
-            summary: "One BLE advertising channel: GFSK at 1 Mbit/s, dewhitening and CRC-24",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(BleNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "wifi",
-            summary: "One 20 MHz 802.11a/g channel: OFDM, the legacy rates, and the MAC frame",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(WifiNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "droneid",
-            summary: "DJI DroneID: the 15.36 MS/s OFDM burst an aircraft broadcasts about itself",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(droneid_nodes::DroneIdNode::new()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "aprs",
-            summary: "One APRS channel: narrowband FM, Bell 202 AFSK, AX.25",
-            category: "decode",
-        },
-        |s: &Settings| {
-            Ok(Box::new(AprsNode::new(s.f64_or("channel_hz", 144_800_000.0))) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "m17",
-            summary: "One M17 channel: narrowband FM, 4-FSK at 4800 baud, link setup and packets",
-            category: "decode",
-        },
-        |s: &Settings| {
-            Ok(
-                Box::new(M17Node::new(s.f64_or("channel_hz", m17_nodes::DEFAULT_HZ)))
-                    as Box<dyn Node>,
-            )
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "tetra",
-            summary: "One TETRA downlink carrier: pi/4-DQPSK, sync and broadcast PDUs",
-            category: "decode",
-        },
-        |s: &Settings| {
-            Ok(Box::new(TetraNode::new(s.f64_or("channel_hz", 390_000_000.0))) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "dmr",
-            summary: "One DMR channel: narrowband FM, 4-FSK at 4800 baud, two-slot TDMA voice",
-            category: "decode",
-        },
-        |s: &Settings| {
-            Ok(
-                Box::new(DmrNode::new(s.f64_or("channel_hz", dmr_nodes::DEFAULT_HZ)))
-                    as Box<dyn Node>,
-            )
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "pocsag",
-            summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
-            category: "decode",
-        },
-        |s: &Settings| {
-            Ok(Box::new(PocsagNode::new(s.f64_or("channel_hz", 153_350_000.0))) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "bank",
-            summary: "Channelize a band and run a burst front end in every \
-                      channel of it at once",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let width = s.f64_or("channel_hz", 31_250.0).max(1.0);
-            // Every tier runs the same graph: what a channel holds is
-            // measured and then routed, rather than assumed from the width
-            // the tier was built at.
-            let label = if width >= 1e6 {
-                format!("{:.1} MHz bank", width / 1e6)
-            } else {
-                format!("{:.0} kHz bank", width / 1e3)
-            };
-            let mut n = BankNode::new(label, width, ism_decode_graph);
-            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
-            if hi > lo {
-                n.set_band(Some((lo, hi)));
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "lora",
-            summary: "LoRa chirp spread spectrum: dechirp, then the frame \
-                      behind it, at any spreading factor over 125 to 500 kHz",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut n = LoraNode::new(s.f64_or("bandwidth_hz", 0.0));
-            let sf = s.f64_or("sf", 0.0) as u8;
-            if dsp::lora::SPREADING_FACTORS.contains(&sf) {
-                let _ = n.set_param("sf", pipeline::param::ParamValue::Float(sf as f64));
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "elrs",
-            summary: "ExpressLRS 2.4 GHz: an SX1280's chirps read as the packets of a \
-                      control link, the link learned from its sync packet or given \
-                      as a binding phrase",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut n = ElrsNode::new(elrs_nodes::parse_uid(s.str_or("uid", "")));
-            let phrase = s.str_or("phrase", "");
-            if !phrase.is_empty() {
-                let _ = n.set_param("phrase", pipeline::param::ParamValue::Text(phrase.into()));
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "wmbus",
-            summary: "Wireless M-Bus meter frames, modes T and C at 100 kchip/s",
-            category: "decode",
-        },
-        |_: &Settings| Ok(Box::new(WmbusNode::new()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "auto",
-            summary: "Find and decode everything in the span on its own: sources \
-                      wherever something transmits, and the span-wide decoders \
-                      where the span reaches them",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut cfg = dsp::SourceConfig {
-                open_db: AUTO_OPEN_DB,
-                ..Default::default()
-            };
-            cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
-            cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
-            cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
-            cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
-            cfg.bank_channel_hz = s.f64_or("bank_channel_hz", cfg.bank_channel_hz);
-            cfg.bank_min_channels =
-                s.f64_or("bank_min_channels", cfg.bank_min_channels as f64) as usize;
-            if cfg.close_db >= cfg.open_db {
-                cfg.close_db = cfg.open_db - 1.0;
-            }
-            let mut n = AutoNode::new(s.str_or("label", "Auto"), cfg);
-            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
-            if hi > lo {
-                n.set_band(Some((lo, hi)));
-            }
-            let spur = s.f64_or("spur_hz", 0.0);
-            if spur > 0.0 {
-                n.set_spur(Some(spur));
-            }
-            let step = s.f64_or("raster_hz", 0.0);
-            if step > 0.0 {
-                n.set_raster(Some((s.f64_or("raster_origin_hz", 0.0), step)));
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "source_detect",
-            summary: "Find every transmitter in a span, measure its centre and \
-                      width, and hand each over as its own stream",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let mut cfg = dsp::SourceConfig::default();
-            cfg.open_db = s.f64_or("open_db", cfg.open_db as f64) as f32;
-            cfg.close_db = s.f64_or("close_db", cfg.close_db as f64) as f32;
-            cfg.hang_us = (s.f64_or("hang_ms", cfg.hang_us as f64 / 1e3) * 1e3) as u32;
-            cfg.bin_hz = s.f64_or("bin_hz", cfg.bin_hz);
-            cfg.min_rate_hz = s.f64_or("min_rate_hz", cfg.min_rate_hz);
-            if cfg.close_db >= cfg.open_db {
-                cfg.close_db = cfg.open_db - 1.0;
-            }
-            let mut n = SourceDetectNode::new(cfg);
-            let (lo, hi) = (s.f64_or("band_lo_hz", 0.0), s.f64_or("band_hi_hz", 0.0));
-            if hi > lo {
-                n.set_band(Some((lo, hi)));
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "source_decode",
-            summary: "Run the burst front end over every source found, for as \
-                      long as each one lasts",
-            category: "decode",
-        },
-        |_: &Settings| {
-            Ok(Box::new(SourceDecodeNode::new("sources", ism_decode_graph)) as Box<dyn Node>)
-        },
-    );
-
+    (modes_nodes::DESC, modes_nodes::build),
+    (ais_nodes::DESC, ais_nodes::build),
+    (gsm_nodes::DESC, gsm_nodes::build),
+    (video_nodes::DESC, video_nodes::build),
+    (ble_nodes::DESC, ble_nodes::build),
+    (wifi_nodes::DESC, wifi_nodes::build),
+    (droneid_nodes::DESC, droneid_nodes::build),
+    (aprs_nodes::DESC, aprs_nodes::build),
+    (m17_nodes::DESC, m17_nodes::build),
+    (tetra_nodes::DESC, tetra_nodes::build),
+    (dmr_nodes::DESC, dmr_nodes::build),
+    (pocsag_nodes::DESC, pocsag_nodes::build),
+    (lora_nodes::DESC, lora_nodes::build),
+    (elrs_nodes::DESC, elrs_nodes::build),
+    (wmbus_nodes::DESC, wmbus_nodes::build),
+    (bank_node::DESC, bank_node::build),
+    (auto::DESC, auto::build),
+    (source_nodes::SOURCE_DETECT, source_nodes::build_source_detect),
+    (source_nodes::SOURCE_DECODE, source_nodes::build_source_decode),
+    (decode_nodes::PULSE_DETECT, decode_nodes::build_pulse_detect),
+    (decode_nodes::ASK_DETECT, decode_nodes::build_ask_detect),
+    (decode_nodes::FSK_DETECT, decode_nodes::build_fsk_detect),
+    (decode_nodes::BURST_ROUTE, decode_nodes::build_burst_route),
+    (decode_nodes::PROTOCOL_DECODE, decode_nodes::build_protocol_decode),
     // Where everything that produces packets meets, and what hangs off the
     // far side of it.
-    r.register(
-        StageDesc {
-            name: "packet_bus",
-            summary: "Gather bursts, frames and packets from every front end \
-                      into one stream, and write them to the log",
-            category: "sink",
-        },
-        |s: &Settings| {
-            Ok(
-                Box::new(PacketBusNode::new(s.i64_or("inputs", 1).max(1) as usize))
-                    as Box<dyn Node>,
-            )
-        },
-    );
+    (sink_nodes::PACKET_BUS, sink_nodes::build_packet_bus),
+    (sink_nodes::DC_BLOCK, sink_nodes::build_dc_block),
+    (sink_nodes::SPECTRUM, sink_nodes::build_spectrum),
+    (packet_nodes::PROTOCOLS, packet_nodes::build_protocols),
+    (packet_nodes::DEDUPE, packet_nodes::build_dedupe),
+    (feed_nodes::DESC, feed_nodes::build),
+    (scope_nodes::DESC, scope_nodes::build),
+    (capture_nodes::DESC, capture_nodes::build),
+    (survey_nodes::DESC, survey_nodes::build),
+    (wigle_nodes::DESC, wigle_nodes::build),
+    (beacondb_nodes::DESC, beacondb_nodes::build),
+];
 
-    r.register(
-        StageDesc {
-            name: "protocols",
-            summary: "Run every known protocol over everything on the bus, once",
-            category: "decode",
-        },
-        |_s: &Settings| Ok(Box::new(PacketDecodeNode::default()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "feed",
-            summary: "Packets from another receiver, over the network",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let kind = feed_kind(s.str_or("format", FEED_KINDS[0].name))
-                .ok_or_else(|| common::Error::other("no feed format of that name"))?;
-            let spec = FeedSpec::new(
-                s.str_or("host", "127.0.0.1"),
-                s.i64_or("port", kind.default_port as i64) as u16,
-                kind,
-            );
-            Ok(Box::new(FeedNode::new(spec)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "dc_block",
-            summary: "Remove the centre spur a direct-conversion receiver \
-                      produces, by measuring it rather than notching it out",
-            category: "filter",
-        },
-        |_s: &Settings| Ok(Box::new(DcBlockNode::new()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "scope",
-            summary: "Look at a wire: a spectrum, a spectrogram and a level meter of \
-                      whatever passes through, which it passes on untouched",
-            category: "sink",
-        },
-        |s: &Settings| {
-            let mut n = ScopeNode::new(s.i64_or("fft_size", 1024).max(64) as usize);
-            let _ = n.set_param(
-                "refresh_hz",
-                pipeline::ParamValue::Float(s.f64_or("refresh_hz", 30.0)),
-            );
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "spectrum",
-            summary: "An FFT display of whatever is wired into it, drawn \
-                      alongside the receiver's own",
-            category: "sink",
-        },
-        |s: &Settings| {
-            let size = s.i64_or("size", 1024).clamp(64, 32_768) as usize;
-            // A power of two, because that is what the transform takes.
-            let size = 1usize << (usize::BITS - 1 - size.leading_zeros()) as usize;
-            Ok(Box::new(SpectrumNode::new(size)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "iq_capture",
-            summary: "Write the span to a file as it arrives, so a signal \
-                      nothing decodes can be worked on off the air",
-            category: "sink",
-        },
-        |s: &Settings| {
-            let format = common::SampleFormat::from_extension(s.str_or("format", "cu8"))
-                .unwrap_or(common::SampleFormat::Cu8);
-            let mb = s.f64_or("budget_mb", 0.0);
-            let budget = if mb > 0.0 {
-                (mb * (1u64 << 20) as f64) as u64
-            } else {
-                capture_nodes::DEFAULT_BUDGET
-            };
-            Ok(Box::new(
-                IqCaptureNode::new(s.str_or("dir", "."))
-                    .with_name(s.str_or("name", "capture"))
-                    .with_format(format)
-                    .with_budget(budget)
-                    .with_enabled(s.bool_or("enabled", true)),
-            ) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "fir_filter",
-            summary: "Windowed-sinc pass or block filter: linear phase, and \
-                      as sharp as the taps you pay for",
-            category: "filter",
-        },
-        |s: &Settings| {
-            let r = dsp::filter::Response::from_name(s.str_or("response", "lowpass"))
-                .unwrap_or(dsp::filter::Response::Lowpass);
-            Ok(Box::new(FirFilterNode::new(
-                r,
-                s.f64_or("freq_hz", 5_000.0),
-                s.f64_or("width_hz", 2_000.0),
-                s.i64_or("taps", 127).clamp(3, 4095) as usize,
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "iir_filter",
-            summary: "Biquad pass or block filter: a handful of coefficients \
-                      where an FIR would need hundreds, at the cost of phase",
-            category: "filter",
-        },
-        |s: &Settings| {
-            let r = dsp::filter::Response::from_name(s.str_or("response", "lowpass"))
-                .unwrap_or(dsp::filter::Response::Lowpass);
-            let freq = s.f64_or("freq_hz", 5_000.0);
-            // A band is described by its width everywhere except in the
-            // arithmetic, which wants a resonance.
-            let q = match s.get("width_hz") {
-                Some(w) => dsp::filter::Biquad::band_q(freq, w.as_f64().unwrap_or(1.0)),
-                None => s.f64_or("q", 0.707),
-            };
-            Ok(Box::new(IirFilterNode::new(r, freq, q)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "envelope",
-            summary: "Complex magnitude; the input an OOK pulse detector needs",
-            category: "demod",
-        },
-        |_s: &Settings| Ok(Box::new(EnvelopeNode) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "fm_demod",
-            summary: "Quadrature frequency discriminator, for FM and FSK",
-            category: "demod",
-        },
-        |s: &Settings| {
-            Ok(Box::new(FmDemodNode::new(s.f64_or("deviation_hz", 75_000.0))) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "deemphasis",
-            summary: "Undo broadcast FM pre-emphasis (50 us in Europe, 75 in the Americas)",
-            category: "filter",
-        },
-        |s: &Settings| Ok(Box::new(DeemphasisNode::new(s.f64_or("tau_us", 50.0))) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "pulse_detect",
-            summary: "Envelope to mark/gap timings; the boundary between DSP \
-                      and protocol parsing",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let d = PulseConfig::default();
-            let cfg = PulseConfig {
-                reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
-                min_mark_us: s.f64_or("min_mark_us", d.min_mark_us as f64) as u32,
-                min_pulses: s.i64_or("min_pulses", d.min_pulses as i64).max(1) as usize,
-                min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
-                hysteresis: s.f64_or("hysteresis", d.hysteresis as f64) as f32,
-                noise_threshold_ratio: s
-                    .f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64)
-                    as f32,
-                tau_us: s.f64_or("tau_us", d.tau_us as f64) as f32,
-                merge_dropouts: s.bool_or("merge_dropouts", d.merge_dropouts),
-                measured_noise_floor: s.bool_or("measured_noise_floor", d.measured_noise_floor),
-                noise_floor_margin: s.f64_or("noise_floor_margin", d.noise_floor_margin as f64)
-                    as f32,
-            };
-            Ok(Box::new(PulseDetectNode::new(cfg)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "ask_detect",
-            summary: "Amplitude keying with a low level that is not silence, \
-                      which `pulse_detect` latches through",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let d = AskConfig::default();
-            let cfg = AskConfig {
-                reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
-                min_run_us: s.f64_or("min_run_us", d.min_run_us as f64) as u32,
-                min_pulses: s.i64_or("min_pulses", d.min_pulses as i64).max(1) as usize,
-                hysteresis: s.f64_or("hysteresis", d.hysteresis as f64) as f32,
-                tau_us: s.f64_or("tau_us", d.tau_us as f64) as f32,
-                min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
-                noise_threshold_ratio: s
-                    .f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64)
-                    as f32,
-                min_depth_db: s.f64_or("min_depth_db", d.min_depth_db as f64) as f32,
-                max_burst_us: s.f64_or("max_burst_us", d.max_burst_us as f64) as u32,
-            };
-            Ok(Box::new(AskDetectNode::new(cfg)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "fsk_detect",
-            summary: "Two-level FSK to mark/gap timings, straight from IQ; the \
-                      constant-envelope signals an OOK detector cannot see",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let d = FskConfig::default();
-            let cfg = FskConfig {
-                reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
-                min_run_us: s.f64_or("min_run_us", d.min_run_us as f64) as u32,
-                min_pulses: s.i64_or("min_pulses", d.min_pulses as i64).max(1) as usize,
-                hysteresis: s.f64_or("hysteresis", d.hysteresis as f64) as f32,
-                tau_us: s.f64_or("tau_us", d.tau_us as f64) as f32,
-                min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
-                noise_threshold_ratio: s
-                    .f64_or("noise_threshold_ratio", d.noise_threshold_ratio as f64)
-                    as f32,
-                min_separation_hz: s.f64_or("min_separation_hz", d.min_separation_hz as f64) as f32,
-                max_burst_us: s.f64_or("max_burst_us", d.max_burst_us as f64) as u32,
-            };
-            Ok(Box::new(FskDetectNode::new(cfg)) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "burst_route",
-            summary: "Measure each burst, then run the one front end that reads it: \
-                      on-off, shallow ASK, two-level FSK or four-level",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let d = dsp::RouterConfig::default();
-            let cfg = dsp::RouterConfig {
-                reset_us: s.f64_or("reset_us", d.reset_us as f64) as u32,
-                margin_us: s.f64_or("margin_us", d.margin_us as f64) as u32,
-                min_snr_db: s.f64_or("min_snr_db", d.min_snr_db as f64) as f32,
-                source_snr_db: s.f64_or("source_snr_db", 0.0) as f32,
-                classify: dsp::ClassifyConfig {
-                    min_score: s.f64_or("min_score", d.classify.min_score as f64) as f32,
-                    min_margin: s.f64_or("min_margin", d.classify.min_margin as f64) as f32,
-                    ..d.classify
-                },
-                ..d
-            };
-            let mut n = BurstRouteNode::new(cfg);
-            n.set_report_confidence(s.f64_or("report_confidence", 0.5) as f32);
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "ssb_demod",
-            summary: "Demodulate one sideband, or a narrow slice of it for CW",
-            category: "demod",
-        },
-        |s: &Settings| {
-            let sideband = match s.str_or("sideband", "usb") {
-                "lsb" | "LSB" => dsp::ssb::Sideband::Lower,
-                _ => dsp::ssb::Sideband::Upper,
-            };
-            // A CW filter is the same stage with its passband put around the
-            // pitch the operator hears rather than around speech.
-            if s.get("pitch_hz").is_some() {
-                return Ok(Box::new(SsbDemodNode::cw(
-                    sideband,
-                    s.f64_or("pitch_hz", 700.0),
-                    s.f64_or("width_hz", 500.0),
-                )) as Box<dyn Node>);
-            }
-            Ok(Box::new(SsbDemodNode::new(
-                sideband,
-                s.f64_or("low_hz", 300.0),
-                s.f64_or("high_hz", 2_700.0),
-            )) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "wfm_demod",
-            summary: "Broadcast FM with stereo and RDS, from a wide IF",
-            category: "demod",
-        },
-        |_s: &Settings| Ok(Box::new(WfmDemodNode::new()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "high_blend",
-            summary: "Roll the top off audio in proportion to the noise on it, \
-                      so a weak channel hisses less",
-            category: "audio",
-        },
-        |_s: &Settings| Ok(Box::new(HighBlendNode::new()) as Box<dyn Node>),
-    );
-
-    r.register(
-        StageDesc {
-            name: "agc",
-            summary: "Hold audio at a usable level without riding the volume control",
-            category: "audio",
-        },
-        |s: &Settings| {
-            // The presets a mode asks for, so a derived chain does not have
-            // to restate three time constants to say "the one for speech".
-            let mut n = match s.str_or("preset", "") {
-                "voice" => AgcNode::voice(),
-                "cw" => AgcNode::cw(),
-                _ => AgcNode::new(
-                    s.f64_or("attack_ms", 5.0),
-                    s.f64_or("release_ms", 500.0),
-                    s.f64_or("hang_ms", 300.0),
-                ),
-            };
-            if let Some(v) = s.get("max_gain_db") {
-                pipeline::node::Node::set_param(&mut n, "max_gain_db", v.clone())?;
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "squelch",
-            summary: "Mute a channel with nothing on it, by noise for FM or by level",
-            category: "audio",
-        },
-        |s: &Settings| {
-            let kind = match s.str_or("kind", "noise") {
-                "level" => SquelchKind::Level,
-                _ => SquelchKind::Noise,
-            };
-            Ok(
-                Box::new(SquelchNode::new(kind, s.f64_or("threshold_db", 9.0) as f32))
-                    as Box<dyn Node>,
-            )
-        },
-    );
-
-    r.register(
-        StageDesc {
-            name: "protocol_decode",
-            summary: "Try every known protocol against each burst",
-            category: "decode",
-        },
-        |s: &Settings| {
-            let m = common::Modulation::parse(s.str_or("modulation", "OOK"))
-                .unwrap_or(common::Modulation::Ook);
-            let mut n = ProtocolDecodeNode::all().with_modulation(m);
-            for k in ["report_all", "report_crc_failures", "report_unknown"] {
-                if let Some(v) = s.get(k) {
-                    pipeline::node::Node::set_param(&mut n, k, v.clone())?;
-                }
-            }
-            Ok(Box::new(n) as Box<dyn Node>)
-        },
-    );
-
+/// Every node type compiled into this build, ready to make one by name.
+pub fn registry() -> Registry {
+    let mut r = Registry::new();
+    for (desc, build) in STAGES {
+        r.register(desc.clone(), *build);
+    }
     r
 }
 
@@ -1135,4 +352,26 @@ pub fn fsk_chain(
             .f("min_separation_hz", deviation_hz),
         NodeSpec::new("protocol_decode"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node's `name` is its registry id, which is what every consumer of a
+    /// topology matches on. A node that returns a display label instead is a
+    /// box the chain view, the packet bus and the transmit pane cannot find.
+    #[test]
+    fn every_stage_answers_to_its_registered_name() {
+        for (desc, build) in STAGES {
+            let node = build(&Settings::new())
+                .unwrap_or_else(|e| panic!("{} could not be built: {e}", desc.name));
+            assert_eq!(
+                node.name(),
+                desc.name,
+                "{} is registered under a name it does not answer to",
+                desc.name
+            );
+        }
+    }
 }

@@ -140,8 +140,7 @@ impl Link {
     /// reaches as far back as the log does rather than as far as a buffer.
     pub fn holds(&self, rec: &DecodeRecord) -> bool {
         let Some(link) = &rec.link else { return false };
-        let system = rec.model.split('-').next().unwrap_or(&rec.model);
-        system == self.system && link.from == self.from && link.to == self.to
+        rec.system() == self.system && link.from == self.from && link.to == self.to
     }
 
     /// Whether the party called is many listeners rather than one radio.
@@ -180,7 +179,7 @@ impl Links {
         if !named(&from) || !named(&to) {
             return false;
         }
-        let system = rec.model.split('-').next().unwrap_or(&rec.model).to_string();
+        let system = rec.system().to_string();
         let found =
             self.seen.iter_mut().find(|l| l.system == system && l.from == from && l.to == to);
         match found {
@@ -309,7 +308,7 @@ pub fn from_log(path: &std::path::Path) -> std::io::Result<Links> {
         let ago = Duration::from_micros(last_us.saturating_sub(p.at_us));
         let at = now.checked_sub(ago).unwrap_or(now);
         for d in &p.decodes {
-            let rec = crate::chain::record_of(at, d);
+            let rec = crate::chain::record_of(at, p, d);
             links.update(&rec, at);
         }
     }
@@ -338,7 +337,7 @@ mod tests {
 
     /// A decode as a front end makes one: the parties are the decoder's own
     /// statement, which is the whole point of the typed link.
-    fn rec(model: &str, hz: f64, link: Option<EventLink>) -> DecodeRecord {
+    fn rec(model: &'static str, hz: f64, link: Option<EventLink>) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(hz, model);
         r.rssi_dbfs = -40.0;
         r.snr_db = 20.0;
@@ -348,7 +347,7 @@ mod tests {
         r
     }
 
-    fn said(model: &str, hz: f64, link: EventLink, text: &str) -> DecodeRecord {
+    fn said(model: &'static str, hz: f64, link: EventLink, text: &str) -> DecodeRecord {
         let mut r = rec(model, hz, Some(link));
         r.fields = vec![("text".into(), common::Value::Text(text.into()))];
         r

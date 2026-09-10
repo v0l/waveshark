@@ -11,7 +11,7 @@
 //! AX.25 is HDLC. What reaches the bus is an AX.25 frame that has already
 //! proved itself.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::{aprs, ax25};
@@ -20,6 +20,7 @@ use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// Where APRS is across Europe. North America uses 144.390 and Japan 144.640;
 /// the scanner configuration decides which, and this is only the default the
@@ -255,11 +256,32 @@ impl Protocol for Aprs {
     fn id(&self) -> &'static str {
         "aprs"
     }
+    /// A station beacons where it is, which is what the network is for.
+    fn reports_position(&self) -> bool {
+        true
+    }
     fn label(&self) -> &'static str {
         "aprs"
     }
     fn placement(&self) -> Placement {
         Placement::Anywhere
+    }
+    /// The 2 m packet segment, which is inside the VHF paging allocation:
+    /// two protocols really do share that spectrum, and the narrower window
+    /// is the better claim.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 2_000_000 }
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::afsk::is_packet_band(p.center_hz() as f64) {
+            return None;
+        }
+        let center = common::Hz(p.center_hz());
+        Some(
+            ax25::parse(bytes)
+                .map(|f| vec![aprs_decoded(&f, bytes, center)])
+                .unwrap_or_default(),
+        )
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -279,7 +301,7 @@ impl Protocol for Aprs {
         format!("{:.3} APRS", hz / 1e6)
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("aprs").f("channel_hz", at.center_hz)]
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
 }
 
@@ -392,4 +414,18 @@ mod tests {
         assert_eq!(d.protocol, "AX25");
         assert_eq!(d.crc_ok, Some(true));
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "aprs",
+    summary: "One APRS channel: narrowband FM, Bell 202 AFSK, AX.25",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AprsNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

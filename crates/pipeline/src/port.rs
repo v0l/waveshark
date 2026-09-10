@@ -215,10 +215,7 @@ impl Payload {
     pub fn video_mut(&mut self) -> &mut Vec<common::VideoFrame> {
         match self {
             Payload::Video(v) => v,
-            other => {
-                *other = Payload::Video(Vec::new());
-                other.video_mut()
-            }
+            _ => panic!("payload is {:?}, not Video", self.kind()),
         }
     }
 
@@ -285,7 +282,9 @@ impl Payload {
 /// for "this specific sample is where the retune landed" or "a burst starts
 /// here". Tags ride the graph automatically, rate-scaled at every node, so a
 /// decoder five nodes downstream still knows exactly which sample a detection
-/// referred to.
+/// referred to. A node is told which input port each one arrived on
+/// ([`crate::node::NodeCtx::in_tags`]) and passes on what arrived on all of
+/// them, so a merge is not a place tags go missing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tag {
     /// Absolute index at the rate of the port carrying it.

@@ -150,7 +150,7 @@ impl DecodeRecord {
         }
         let body = text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
         Some(Message {
-            system: self.model.split('-').next().unwrap_or(&self.model).to_string(),
+            system: self.system().to_string(),
             channel_hz: self.freq,
             // `sender` first: where a protocol carries a name somebody typed
             // as well as the address the radio sent from, the name is what a
@@ -189,7 +189,7 @@ mod tests {
     use super::*;
 
     /// A decode that says it carries text, which is what this view reads.
-    fn rec(model: &str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+    fn rec(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(freq, model);
         r.channel_hz = 12_500.0;
         r.media_type = pipeline::event::media::TEXT;
@@ -199,7 +199,7 @@ mod tests {
 
     /// And one that does not: a decode whose fields happen to include a
     /// `message` or a `text` but which is not somebody writing.
-    fn not_text(model: &str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+    fn not_text(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
         let mut r = rec(model, freq, fields);
         r.media_type = pipeline::event::media::BYTES;
         r

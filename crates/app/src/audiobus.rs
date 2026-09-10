@@ -77,16 +77,14 @@ pub enum Rule {
 
 impl Rule {
     /// Whether this rule covers a transmission.
-    pub fn matches(&self, v: &Voice) -> bool {
+    pub fn matches(&self, v: &Heard) -> bool {
         match self {
             Rule::Everything => true,
             // Case-insensitive because a callsign is written both ways and
             // nobody means a different aircraft by it.
             Rule::Group(g) => v.to.eq_ignore_ascii_case(g),
             Rule::Caller(c) => v.from.is_some_and(|f| f.eq_ignore_ascii_case(c)),
-            // Half a kilohertz, which is a rounding rather than a channel:
-            // the narrowest grid anything here uses is 12.5 kHz.
-            Rule::Channel(hz) => (v.channel_hz - hz).abs() < 500.0,
+            Rule::Channel(hz) => (v.channel_hz - hz).abs() < common::CHANNEL_MATCH_HZ,
             Rule::System(s) => v.system.eq_ignore_ascii_case(s),
         }
     }
@@ -125,9 +123,10 @@ impl Subscription {
     }
 }
 
-/// A block of speech from one source, as it was decoded.
+/// A block of speech from one source, as it was decoded: what arrived,
+/// borrowed from the [`common::Voice`] it came in on.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Voice<'a> {
+pub struct Heard<'a> {
     /// The system it came from, which is what a `System` rule names.
     pub system: &'a str,
     pub channel_hz: f64,
@@ -165,12 +164,15 @@ pub struct Strip {
     /// The rate it arrives at, which is not the rate it is mixed at.
     in_rate: f64,
     feed: Feed,
-    /// Whether what arrives here is speech: a channel marked as voice on the
-    /// strip. Its audio is played through the fader like any other, and on
-    /// the tap it is named as a conversation so the call list and the
-    /// transcriber can follow it. Analogue speech has no address of its own,
-    /// so the strip's label stands in for the party being called.
-    pub voice: bool,
+    /// Whether the operator says what arrives here is people talking. Its
+    /// audio is played through the fader like any other, and on the tap it is
+    /// named as a conversation so the call list and the transcriber can
+    /// follow it. Analogue speech has no address of its own, so the strip's
+    /// label stands in for the party being called.
+    ///
+    /// Not [`Strip::is_voice`], which is what the graph wired in: this is a
+    /// switch on an analogue channel, that is a port carrying decoded speech.
+    pub speech: bool,
 }
 
 impl Strip {
@@ -183,7 +185,7 @@ impl Strip {
             center_hz: 0.0,
             in_rate: OUT_HZ,
             feed: Feed::Silent,
-            voice: false,
+            speech: false,
         }
     }
 
@@ -223,7 +225,7 @@ pub struct AudioBus {
     /// Peak per voice source since the last block, for a meter on the row it
     /// belongs to. Decayed rather than reset, so a meter tracks speech
     /// instead of flickering with every syllable.
-    peaks: HashMap<String, f32>,
+    peaks: HashMap<common::ConversationKey, f32>,
     /// One resampler per voice source, because each carries filter state
     /// and two sources at the same rate are still two different streams.
     rs: HashMap<String, audio::Resampler>,
@@ -255,7 +257,7 @@ pub struct AudioBus {
     heard_peak: f32,
     /// Who is talking now, by conversation, from every voice that passed the
     /// tap. See [`AudioBus::track`].
-    live: HashMap<String, LiveCall>,
+    live: HashMap<common::ConversationKey, LiveCall>,
 }
 
 /// One conversation the bus is hearing, or has just stopped hearing.
@@ -284,15 +286,13 @@ pub struct LiveCall {
 }
 
 impl LiveCall {
-    /// The key the transcriber uses for the same conversation, so a row here
-    /// and a line there are the same thing.
-    pub fn key(&self) -> String {
-        live_key(&self.system, self.channel_hz, &self.to, self.from.as_deref())
+    /// The conversation this is, as the transcriber and the call list key it,
+    /// so a row here and a line there are the same thing.
+    pub fn key(&self) -> common::ConversationKey {
+        common::ConversationKey::new(&self.system, self.channel_hz)
+            .to(Some(self.to.clone()))
+            .from(self.from.clone())
     }
-}
-
-fn live_key(system: &str, channel_hz: f64, to: &str, from: Option<&str>) -> String {
-    format!("{system}:{}:{to}:{}", channel_hz.max(0.0) as u64, from.unwrap_or(""))
 }
 
 /// Below this peak a block of speech is silence. A squelched analogue
@@ -408,20 +408,11 @@ impl AudioBus {
         !self.muted && !self.calls_muted && self.subs.iter().any(|s| !s.muted)
     }
 
-    /// What each voice source put into the mix last block, keyed as
-    /// `system:channel:to`, for a meter on its row.
-    pub fn levels(&self) -> Vec<(String, f32)> {
+    /// What each voice source put into the mix last block, for a meter on
+    /// its row. Keyed by the conversation with nobody named as talking: see
+    /// [`common::ConversationKey::meter`].
+    pub fn levels(&self) -> Vec<(common::ConversationKey, f32)> {
         self.peaks.iter().map(|(k, v)| (k.clone(), *v)).collect()
-    }
-
-    /// The key a voice source's meter is filed under.
-    ///
-    /// The group is part of it because a trunked system carries several of
-    /// them on one carrier: keyed by frequency alone, every talkgroup on a
-    /// TETRA channel shared one meter and the whole column moved together
-    /// whenever any one of them was speaking.
-    pub fn key_of(system: &str, channel_hz: f64, to: &str) -> String {
-        format!("{system}:{channel_hz:.0}:{to}")
     }
 
     /// What the subscriptions say about one transmission: the gain to mix it
@@ -429,7 +420,7 @@ impl AudioBus {
     ///
     /// The loudest matching subscription wins rather than their sum, so
     /// covering one group twice does not make it twice as loud.
-    pub fn gain_for(&self, v: &Voice) -> Option<f32> {
+    pub fn gain_for(&self, v: &Heard) -> Option<f32> {
         if self.muted || self.calls_muted {
             return None;
         }
@@ -441,7 +432,7 @@ impl AudioBus {
     }
 
     /// Publish a block of speech. Returns whether any of it was mixed.
-    pub fn push(&mut self, v: Voice<'_>) -> bool {
+    pub fn push(&mut self, v: Heard<'_>) -> bool {
         let Some(gain) = self.gain_for(&v) else {
             return false;
         };
@@ -535,7 +526,7 @@ impl AudioBus {
         Some(common::Voice {
             system: ANALOGUE,
             channel_hz: strip.center_hz,
-            to: strip.voice.then(|| strip.label.clone()),
+            to: strip.speech.then(|| strip.label.clone()),
             from: None,
             rate: strip.in_rate,
             pcm: mono,
@@ -556,14 +547,19 @@ impl AudioBus {
         let Some(to) = v.to.as_deref() else {
             return;
         };
-        let key = live_key(v.system, v.channel_hz, to, v.from.as_deref());
+        let key = common::ConversationKey::of(v);
         let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         // The meter for the call list, here rather than in `push`: `push`
         // sees only what the subscriptions mix, so a call nobody had
         // subscribed to was listed with a bar that never moved. What this
         // shows is the level the call arrived at, which is a fact about the
         // transmission rather than about whose fader is up.
-        let m = self.peaks.entry(Self::key_of(v.system, v.channel_hz, to)).or_insert(0.0);
+        //
+        // Keyed with nobody talking, because a trunked carrier holds several
+        // groups: keyed by frequency alone the whole column moved whenever
+        // any one of them spoke, and keyed by caller a meter would move to a
+        // new row every time somebody else took the group.
+        let m = self.peaks.entry(key.meter()).or_insert(0.0);
         *m = m.max(peak);
         self.heard_peak = self.heard_peak.max(peak);
         let talking = peak > SPEECH_FLOOR;
@@ -828,6 +824,46 @@ pub fn levels_db(speech: &Speech) -> (f32, f32) {
     (db(peak), db(rms))
 }
 
+/// One strip's own setting on the bus, and the name it is written under.
+///
+/// The set is closed, so it is a type: the patch, the chain view and the
+/// strip all spell these names, and a prefix comparison against "vol" also
+/// matches a "volume" nobody meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripParam {
+    Vol,
+    Mute,
+    Label,
+    Speech,
+}
+
+impl StripParam {
+    pub const ALL: [StripParam; 4] =
+        [StripParam::Vol, StripParam::Mute, StripParam::Label, StripParam::Speech];
+
+    fn word(self) -> &'static str {
+        match self {
+            StripParam::Vol => "vol",
+            StripParam::Mute => "mute",
+            StripParam::Label => "label",
+            StripParam::Speech => "speech",
+        }
+    }
+
+    /// The parameter name this setting has on strip `k`.
+    pub fn name(self, k: usize) -> String {
+        format!("{}{k}", self.word())
+    }
+
+    /// What a parameter name sets, and which strip, or `None` for a name
+    /// that is not one of these.
+    pub fn parse(name: &str) -> Option<(Self, usize)> {
+        Self::ALL.into_iter().find_map(|p| {
+            name.strip_prefix(p.word()).and_then(|k| k.parse().ok()).map(|k| (p, k))
+        })
+    }
+}
+
 /// The bus as a node, which is the only way it is ever built.
 ///
 /// One input per strip and one output carrying the mix, so the whole audio
@@ -854,21 +890,6 @@ impl AudioBusNode {
         &mut self.bus
     }
 
-    /// The name of one strip's parameter, as the patch and the chain view
-    /// write it.
-    pub fn param_of(k: usize, what: &str) -> String {
-        format!("{what}{k}")
-    }
-
-    /// Split a per-strip parameter name into what it sets and which strip.
-    fn per_strip(name: &str) -> Option<(&str, usize)> {
-        for what in ["vol", "mute", "label", "voice"] {
-            if let Some(k) = name.strip_prefix(what).and_then(|k| k.parse().ok()) {
-                return Some((what, k));
-            }
-        }
-        None
-    }
 }
 
 impl pipeline::node::Node for AudioBusNode {
@@ -876,19 +897,8 @@ impl pipeline::node::Node for AudioBusNode {
         "audio_bus"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
-    /// So a rebuild carries the bus across rather than dropping what it was
-    /// subscribed to, its levels and whatever it was playing.
-    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         self.bus.strips.len().max(1)
@@ -979,7 +989,6 @@ impl pipeline::node::Node for AudioBusNode {
         // everything the receiver hears, whether or not the receiver can say
         // who is talking.
         let mut tapped: Vec<common::Voice> = Vec::new();
-        let mut calls: Vec<common::Voice> = Vec::new();
         for (k, p) in inputs.iter().enumerate() {
             match p {
                 Payload::Voice(voices) => {
@@ -998,8 +1007,11 @@ impl pipeline::node::Node for AudioBusNode {
                             self.bus.push_audio(v.system, v.channel_hz, &v.pcm, v.rate);
                             continue;
                         };
-                        calls.push(v.clone());
-                        self.bus.push(Voice {
+                        // Every call a front end decoded is a conversation
+                        // the bus is hearing, subscribed or not, muted or
+                        // not.
+                        self.bus.track(v, ctx.block_seconds);
+                        self.bus.push(Heard {
                             system: v.system,
                             channel_hz: v.channel_hz,
                             to,
@@ -1019,11 +1031,6 @@ impl pipeline::node::Node for AudioBusNode {
                 }
                 _ => {}
             }
-        }
-        // Every call a front end decoded is a conversation the bus is
-        // hearing, subscribed or not, muted or not.
-        for v in &calls {
-            self.bus.track(v, ctx.block_seconds);
         }
         // What this block is worth in audio, from the run's own clock, with
         // the fraction of a frame carried to the next block.
@@ -1068,10 +1075,12 @@ impl pipeline::node::Node for AudioBusNode {
             }
             let name = if s.label.is_empty() { format!("input {k}") } else { s.label.clone() };
             p.push(
-                Param::float(&Self::param_of(k, "vol"), s.volume as f64, 0.0..=1.0)
+                Param::float(&StripParam::Vol.name(k), s.volume as f64, 0.0..=1.0)
                     .label(&format!("{name} level")),
             );
-            p.push(Param::bool(&Self::param_of(k, "mute"), s.muted).label(&format!("{name} mute")));
+            p.push(
+                Param::bool(&StripParam::Mute.name(k), s.muted).label(&format!("{name} mute")),
+            );
         }
         p
     }
@@ -1092,7 +1101,7 @@ impl pipeline::node::Node for AudioBusNode {
                 self.bus.set_inputs(n.max(1) as usize);
             }
             _ => {
-                let Some((what, k)) = Self::per_strip(name) else {
+                let Some((what, k)) = StripParam::parse(name) else {
                     return Err(Error::other(format!("audio_bus: unknown parameter {name:?}")));
                 };
                 // A level for a strip the bus has not been told about yet
@@ -1103,13 +1112,12 @@ impl pipeline::node::Node for AudioBusNode {
                 }
                 let s = &mut self.bus.strips[k];
                 match what {
-                    "vol" => s.volume = num(&v)?.clamp(0.0, 1.0),
-                    "mute" => s.muted = flag(&v)?,
-                    "label" => {
+                    StripParam::Vol => s.volume = num(&v)?.clamp(0.0, 1.0),
+                    StripParam::Mute => s.muted = flag(&v)?,
+                    StripParam::Label => {
                         s.label = v.as_str().unwrap_or_default().to_string();
                     }
-                    "voice" => s.voice = flag(&v)?,
-                    _ => unreachable!(),
+                    StripParam::Speech => s.speech = flag(&v)?,
                 }
             }
         }
@@ -1121,8 +1129,8 @@ impl pipeline::node::Node for AudioBusNode {
 mod tests {
     use super::*;
 
-    fn voice<'a>(to: &'a str, from: &'a str, pcm: &'a [f32]) -> Voice<'a> {
-        Voice { system: "M17", channel_hz: 433_475_000.0, to, from: Some(from), pcm, rate: 8_000.0 }
+    fn voice<'a>(to: &'a str, from: &'a str, pcm: &'a [f32]) -> Heard<'a> {
+        Heard { system: "M17", channel_hz: 433_475_000.0, to, from: Some(from), pcm, rate: 8_000.0 }
     }
 
     fn bus(rules: &[Rule]) -> AudioBus {
@@ -1185,8 +1193,10 @@ mod tests {
         );
         assert!(b.push(voice("TG100", "M0ABC", &pcm)));
         let levels = b.levels();
-        let loud = AudioBus::key_of("M17", 433_475_000.0, "TG100");
-        let quiet = AudioBus::key_of("M17", 433_475_000.0, "TG200");
+        let meter = |to: &str| {
+            common::ConversationKey::new("M17", 433_475_000.0).to(Some(to.into())).meter()
+        };
+        let (loud, quiet) = (meter("TG100"), meter("TG200"));
         assert!(levels.iter().any(|(k, v)| *k == loud && *v > 0.1), "{levels:?}");
         assert!(!levels.iter().any(|(k, _)| *k == quiet), "a silent group read a level");
     }
@@ -1524,7 +1534,9 @@ mod tests {
         // Nothing is subscribed, so nothing is mixed.
         assert!(b.gain_for(&voice("M17-M17 C", "M0ABC", &pcm)).is_none());
         b.track(&call, 0.01);
-        let key = AudioBus::key_of("M17", 433_475_000.0, "M17-M17 C");
+        let key = common::ConversationKey::new("M17", 433_475_000.0)
+            .to(Some("M17-M17 C".into()))
+            .meter();
         let level = |b: &AudioBus| {
             b.levels().into_iter().find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or(0.0)
         };
@@ -1549,7 +1561,7 @@ mod tests {
     fn a_strip_channel_is_not_listed_as_a_call() {
         use pipeline::node::Node;
         let mut n = strips(1, 48_000.0, 1);
-        n.bus_mut().strip_mut(0).unwrap().voice = true;
+        n.bus_mut().strip_mut(0).unwrap().speech = true;
         n.bus_mut().strip_mut(0).unwrap().label = "PMR5".into();
         n.bus_mut().strip_mut(0).unwrap().center_hz = 446_049_100.0;
 

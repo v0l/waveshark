@@ -10,9 +10,33 @@ use dsp::agc::Agc;
 use dsp::squelch::{NoiseMeter, Squelch};
 use dsp::ssb::{Sideband, SsbDemod};
 use dsp::{Deemphasis, FirDecim, FmDemod, HighBlend, Mixer};
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+
+/// The setting names these stages read, spelled once for the builder, the
+/// parameter list and the setter that share each of them.
+const SHIFT_HZ: &str = "shift_hz";
+const FACTOR: &str = "factor";
+const PASSBAND: &str = "passband";
+const ATTEN_DB: &str = "atten_db";
+const DEVIATION_HZ: &str = "deviation_hz";
+const TAU_US: &str = "tau_us";
+const SIDEBAND: &str = "sideband";
+const LOW_HZ: &str = "low_hz";
+const HIGH_HZ: &str = "high_hz";
+const PITCH_HZ: &str = "pitch_hz";
+const WIDTH_HZ: &str = "width_hz";
+const PRESET: &str = "preset";
+const ATTACK_MS: &str = "attack_ms";
+const RELEASE_MS: &str = "release_ms";
+const HANG_MS: &str = "hang_ms";
+const MAX_GAIN_DB: &str = "max_gain_db";
+const ENABLED: &str = "enabled";
+const KIND: &str = "kind";
+const THRESHOLD_DB: &str = "threshold_db";
+const HYSTERESIS_DB: &str = "hysteresis_db";
 
 /// Shift a signal in frequency.
 ///
@@ -72,14 +96,14 @@ impl Simple for MixerNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float("shift_hz", self.shift_hz, -30e6..=30e6)
+        vec![Param::float(SHIFT_HZ, self.shift_hz, -30e6..=30e6)
             .unit("Hz")
             .label("Frequency shift")]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "shift_hz" => {
+            SHIFT_HZ => {
                 self.shift_hz = v
                     .as_f64()
                     .ok_or_else(|| common::Error::other("expected a number"))?;
@@ -91,6 +115,13 @@ impl Simple for MixerNode {
         }
     }
 }
+
+/// Passband edge as a fraction of the output Nyquist, when nothing has said
+/// where it belongs in hertz.
+const PASSBAND_FRACTION: f64 = 0.9;
+
+/// Stopband attenuation of the decimating filter, in dB.
+const STOPBAND_DB: f64 = 80.0;
 
 /// Lowpass and decimate.
 pub struct DecimateNode {
@@ -113,9 +144,9 @@ impl DecimateNode {
     pub fn new(factor: usize) -> Self {
         Self {
             factor: factor.max(1),
-            passband: 0.9,
-            atten_db: 80.0,
-            dec: FirDecim::design(factor.max(1), 0.9, 80.0),
+            passband: PASSBAND_FRACTION,
+            atten_db: STOPBAND_DB,
+            dec: FirDecim::design(factor.max(1), PASSBAND_FRACTION, STOPBAND_DB),
         }
     }
 }
@@ -123,6 +154,16 @@ impl DecimateNode {
 impl Simple for DecimateNode {
     fn name(&self) -> &str {
         "decimate"
+    }
+
+    /// A passband is designed rather than set, so it is not something one
+    /// number can carry: the design needs the rate it is being cut from.
+    fn configure(&mut self, settings: &Settings) {
+        let pb = settings.f64_or("passband_hz", 0.0);
+        let rate = settings.f64_or("input_rate_hz", 0.0);
+        if pb > 0.0 && rate > 0.0 {
+            self.set_passband_hz(rate, pb);
+        }
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
@@ -159,11 +200,11 @@ impl Simple for DecimateNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::int("factor", self.factor as i64, 1..=1024)
+            Param::int(FACTOR, self.factor as i64, 1..=1024)
                 .label("Decimation")
                 .affects_rate(),
-            Param::float("passband", self.passband, 0.5..=0.99).label("Passband fraction"),
-            Param::float("atten_db", self.atten_db, 30.0..=120.0)
+            Param::float(PASSBAND, self.passband, 0.5..=0.99).label("Passband fraction"),
+            Param::float(ATTEN_DB, self.atten_db, 30.0..=120.0)
                 .unit("dB")
                 .label("Stopband attenuation"),
         ]
@@ -171,16 +212,16 @@ impl Simple for DecimateNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "factor" => {
+            FACTOR => {
                 self.factor = v.as_i64().unwrap_or(1).max(1) as usize;
                 Ok(())
             }
-            "passband" => {
-                self.passband = v.as_f64().unwrap_or(0.9).clamp(0.1, 0.99);
+            PASSBAND => {
+                self.passband = v.as_f64().unwrap_or(PASSBAND_FRACTION).clamp(0.1, 0.99);
                 Ok(())
             }
-            "atten_db" => {
-                self.atten_db = v.as_f64().unwrap_or(80.0).clamp(20.0, 150.0);
+            ATTEN_DB => {
+                self.atten_db = v.as_f64().unwrap_or(STOPBAND_DB).clamp(20.0, 150.0);
                 Ok(())
             }
             _ => Err(common::Error::other(format!(
@@ -212,6 +253,10 @@ impl Simple for EnvelopeNode {
     }
 }
 
+/// Peak deviation of broadcast FM, which is what a discriminator with
+/// nothing else to go on is scaled for.
+pub const WIDE_DEVIATION_HZ: f64 = 75_000.0;
+
 /// Frequency demodulator.
 pub struct FmDemodNode {
     deviation_hz: f64,
@@ -228,7 +273,7 @@ impl FmDemodNode {
 
     /// Broadcast WFM: 75 kHz peak deviation.
     pub fn wide() -> Self {
-        Self::new(75_000.0)
+        Self::new(WIDE_DEVIATION_HZ)
     }
 
     /// Narrowband voice and most FSK telemetry.
@@ -261,7 +306,7 @@ impl Simple for FmDemodNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("deviation_hz", self.deviation_hz, 500.0..=200_000.0)
+            Param::float(DEVIATION_HZ, self.deviation_hz, 500.0..=200_000.0)
                 .unit("Hz")
                 .label("Peak deviation")
                 .log(),
@@ -270,8 +315,8 @@ impl Simple for FmDemodNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "deviation_hz" => {
-                self.deviation_hz = v.as_f64().unwrap_or(75_000.0).max(1.0);
+            DEVIATION_HZ => {
+                self.deviation_hz = v.as_f64().unwrap_or(WIDE_DEVIATION_HZ).max(1.0);
                 Ok(())
             }
             _ => Err(common::Error::other(format!(
@@ -280,6 +325,10 @@ impl Simple for FmDemodNode {
         }
     }
 }
+
+/// The pre-emphasis time constant used in Europe, in microseconds. The
+/// Americas use 75.
+pub const EUROPE_TAU_US: f64 = 50.0;
 
 /// FM de-emphasis, undoing the transmitter's treble boost.
 pub struct DeemphasisNode {
@@ -334,15 +383,15 @@ impl Simple for DeemphasisNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float("tau_us", self.tau_us, 25.0..=100.0)
+        vec![Param::float(TAU_US, self.tau_us, 25.0..=100.0)
             .unit("us")
             .label("Time constant (50 EU, 75 Americas)")]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "tau_us" => {
-                self.tau_us = v.as_f64().unwrap_or(50.0).clamp(1.0, 1000.0);
+            TAU_US => {
+                self.tau_us = v.as_f64().unwrap_or(EUROPE_TAU_US).clamp(1.0, 1000.0);
                 Ok(())
             }
             _ => Err(common::Error::other(format!(
@@ -365,8 +414,8 @@ impl RealDecimateNode {
     pub fn new(factor: usize) -> Self {
         Self {
             factor: factor.max(1),
-            passband: 0.9,
-            dec: vec![FirDecim::design(factor.max(1), 0.9, 80.0)],
+            passband: PASSBAND_FRACTION,
+            dec: vec![FirDecim::design(factor.max(1), PASSBAND_FRACTION, STOPBAND_DB)],
             scratch: Vec::new(),
             out: Vec::new(),
         }
@@ -391,7 +440,7 @@ impl Simple for RealDecimateNode {
         }
         let ch = i.spec.channels.max(1);
         self.dec = (0..ch)
-            .map(|_| FirDecim::design(self.factor, self.passband, 80.0))
+            .map(|_| FirDecim::design(self.factor, self.passband, STOPBAND_DB))
             .collect();
         Ok(i.spec.with_rate(i.spec.frame_rate() / self.factor as f64))
     }
@@ -425,14 +474,14 @@ impl Simple for RealDecimateNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::int("factor", self.factor as i64, 1..=1024)
+        vec![Param::int(FACTOR, self.factor as i64, 1..=1024)
             .label("Decimation")
             .affects_rate()]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "factor" => {
+            FACTOR => {
                 self.factor = v.as_i64().unwrap_or(1).max(1) as usize;
                 Ok(())
             }
@@ -496,7 +545,7 @@ impl Simple for HighBlendNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         // Last tag in the window rather than the first: it is the most recent
         // estimate, and a block covers many of them at audio rate.
-        for t in c.in_tags {
+        for t in c.in_tags(0) {
             if t.key == "noise" {
                 if let TagValue::Float(v) = t.value {
                     self.noise = v as f32;
@@ -535,6 +584,10 @@ impl Simple for HighBlendNode {
     }
 }
 
+/// The speech passband a sideband receiver filters to, in hertz.
+pub const VOICE_LOW_HZ: f64 = 300.0;
+pub const VOICE_HIGH_HZ: f64 = 2_700.0;
+
 /// Single sideband and CW demodulator.
 pub struct SsbDemodNode {
     sideband: Sideband,
@@ -554,7 +607,7 @@ impl SsbDemodNode {
     }
 
     pub fn voice(sideband: Sideband) -> Self {
-        Self::new(sideband, 300.0, 2_700.0)
+        Self::new(sideband, VOICE_LOW_HZ, VOICE_HIGH_HZ)
     }
 
     /// A CW filter of `width_hz` centred on the pitch the operator hears.
@@ -588,10 +641,10 @@ impl Simple for SsbDemodNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("low_hz", self.low_hz, 50.0..=3_000.0)
+            Param::float(LOW_HZ, self.low_hz, 50.0..=3_000.0)
                 .unit("Hz")
                 .label("Filter low edge"),
-            Param::float("high_hz", self.high_hz, 100.0..=6_000.0)
+            Param::float(HIGH_HZ, self.high_hz, 100.0..=6_000.0)
                 .unit("Hz")
                 .label("Filter high edge"),
         ]
@@ -599,8 +652,8 @@ impl Simple for SsbDemodNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "low_hz" => self.low_hz = v.as_f64().unwrap_or(300.0),
-            "high_hz" => self.high_hz = v.as_f64().unwrap_or(2_700.0),
+            LOW_HZ => self.low_hz = v.as_f64().unwrap_or(VOICE_LOW_HZ),
+            HIGH_HZ => self.high_hz = v.as_f64().unwrap_or(VOICE_HIGH_HZ),
             _ => {
                 return Err(common::Error::other(format!(
                     "ssb_demod: unknown parameter {name:?}"
@@ -618,6 +671,9 @@ impl SsbDemodNode {
     }
 }
 
+/// How much gain the control will apply before it stops, in dB.
+const DEFAULT_MAX_GAIN_DB: f64 = 60.0;
+
 /// Automatic gain control on an audio stream.
 pub struct AgcNode {
     attack_ms: f64,
@@ -634,18 +690,65 @@ impl AgcNode {
             attack_ms,
             release_ms,
             hang_ms,
-            max_gain_db: 60.0,
+            max_gain_db: DEFAULT_MAX_GAIN_DB as f32,
             enabled: true,
             agc: Agc::new(48_000.0, attack_ms, release_ms, hang_ms),
         }
     }
 
-    pub fn voice() -> Self {
-        Self::new(5.0, 500.0, 300.0)
+    /// The times a mode asks for by name.
+    pub fn preset(p: AgcPreset) -> Self {
+        let (attack, release, hang) = p.times();
+        Self::new(attack, release, hang)
+    }
+}
+
+/// The gain behaviour a mode asks for by name, so a derived chain does not
+/// have to restate three time constants to say "the one for speech".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgcPreset {
+    /// Speech: fast enough to catch a syllable, slow enough not to pump.
+    Voice,
+    /// Morse: faster still, and a long hang so the gain does not ride up
+    /// between characters.
+    Cw,
+}
+
+impl AgcPreset {
+    /// Attack, release and hang, in milliseconds.
+    pub fn times(self) -> (f64, f64, f64) {
+        match self {
+            Self::Voice => (5.0, 500.0, 300.0),
+            Self::Cw => (2.0, 1_000.0, 500.0),
+        }
     }
 
-    pub fn cw() -> Self {
-        Self::new(2.0, 1_000.0, 500.0)
+    /// What a setting or a menu calls it, and what [`FromStr`] reads back.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Voice => "voice",
+            Self::Cw => "cw",
+        }
+    }
+}
+
+impl std::str::FromStr for AgcPreset {
+    type Err = common::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "voice" => Ok(Self::Voice),
+            "cw" => Ok(Self::Cw),
+            other => Err(common::Error::other(format!(
+                "no gain preset called {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for AgcPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 
@@ -711,34 +814,35 @@ impl Simple for AgcNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("attack_ms", self.attack_ms, 0.5..=50.0)
+            Param::float(ATTACK_MS, self.attack_ms, 0.5..=50.0)
                 .unit("ms")
                 .label("Attack"),
-            Param::float("release_ms", self.release_ms, 50.0..=5_000.0)
+            Param::float(RELEASE_MS, self.release_ms, 50.0..=5_000.0)
                 .unit("ms")
                 .label("Release")
                 .log(),
-            Param::float("hang_ms", self.hang_ms, 0.0..=2_000.0)
+            Param::float(HANG_MS, self.hang_ms, 0.0..=2_000.0)
                 .unit("ms")
                 .label("Hang"),
-            Param::float("max_gain_db", self.max_gain_db as f64, 0.0..=90.0)
+            Param::float(MAX_GAIN_DB, self.max_gain_db as f64, 0.0..=90.0)
                 .unit("dB")
                 .label("Maximum gain"),
-            Param::bool("enabled", self.enabled).label("Enabled"),
+            Param::bool(ENABLED, self.enabled).label("Enabled"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        let (attack, release, hang) = AgcPreset::Voice.times();
         match name {
-            "attack_ms" => self.attack_ms = v.as_f64().unwrap_or(5.0),
-            "release_ms" => self.release_ms = v.as_f64().unwrap_or(500.0),
-            "hang_ms" => self.hang_ms = v.as_f64().unwrap_or(300.0),
-            "max_gain_db" => {
-                self.max_gain_db = v.as_f64().unwrap_or(60.0) as f32;
+            ATTACK_MS => self.attack_ms = v.as_f64().unwrap_or(attack),
+            RELEASE_MS => self.release_ms = v.as_f64().unwrap_or(release),
+            HANG_MS => self.hang_ms = v.as_f64().unwrap_or(hang),
+            MAX_GAIN_DB => {
+                self.max_gain_db = v.as_f64().unwrap_or(DEFAULT_MAX_GAIN_DB) as f32;
                 self.agc.set_max_gain_db(self.max_gain_db);
                 return Ok(());
             }
-            "enabled" => {
+            ENABLED => {
                 self.set_enabled(v.as_bool().unwrap_or(true));
                 return Ok(());
             }
@@ -764,6 +868,44 @@ pub enum SquelchKind {
     Level,
 }
 
+impl SquelchKind {
+    /// What a setting or a menu calls it, and what [`FromStr`] reads back.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Noise => "noise",
+            Self::Level => "level",
+        }
+    }
+}
+
+impl std::str::FromStr for SquelchKind {
+    type Err = common::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "noise" => Ok(Self::Noise),
+            "level" => Ok(Self::Level),
+            other => Err(common::Error::other(format!(
+                "no squelch measurement called {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SquelchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Where a squelch opens by default, in dB on whatever it measures: the
+/// level at which narrowband FM speech becomes intelligible.
+pub const DEFAULT_SQUELCH_DB: f32 = 9.0;
+
+/// How far the level has to fall below the threshold before the mute closes
+/// again, in dB.
+const DEFAULT_HYSTERESIS_DB: f64 = 3.0;
+
 /// Mute a channel with nothing on it.
 pub struct SquelchNode {
     kind: SquelchKind,
@@ -787,8 +929,13 @@ impl SquelchNode {
         Self {
             kind,
             threshold_db,
-            hysteresis_db: 3.0,
-            squelch: Squelch::new(48_000.0, threshold_db, threshold_db - 3.0, RAMP_MS),
+            hysteresis_db: DEFAULT_HYSTERESIS_DB as f32,
+            squelch: Squelch::new(
+                48_000.0,
+                threshold_db,
+                threshold_db - DEFAULT_HYSTERESIS_DB as f32,
+                RAMP_MS,
+            ),
             meter: NoiseMeter::new(48_000.0, 4_000.0),
             open: false,
             measured: -120.0,
@@ -797,7 +944,7 @@ impl SquelchNode {
 
     /// Narrowband FM, at the level where a signal becomes intelligible.
     pub fn fm() -> Self {
-        Self::new(SquelchKind::Noise, 9.0)
+        Self::new(SquelchKind::Noise, DEFAULT_SQUELCH_DB)
     }
 
     pub fn is_open(&self) -> bool {
@@ -876,10 +1023,10 @@ impl Simple for SquelchNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float("threshold_db", self.threshold_db as f64, -100.0..=40.0)
+            Param::float(THRESHOLD_DB, self.threshold_db as f64, -100.0..=40.0)
                 .unit("dB")
                 .label("Threshold"),
-            Param::float("hysteresis_db", self.hysteresis_db as f64, 0.0..=20.0)
+            Param::float(HYSTERESIS_DB, self.hysteresis_db as f64, 0.0..=20.0)
                 .unit("dB")
                 .label("Hysteresis"),
         ]
@@ -887,8 +1034,12 @@ impl Simple for SquelchNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "threshold_db" => self.threshold_db = v.as_f64().unwrap_or(9.0) as f32,
-            "hysteresis_db" => self.hysteresis_db = v.as_f64().unwrap_or(3.0) as f32,
+            THRESHOLD_DB => {
+                self.threshold_db = v.as_f64().unwrap_or(DEFAULT_SQUELCH_DB as f64) as f32
+            }
+            HYSTERESIS_DB => {
+                self.hysteresis_db = v.as_f64().unwrap_or(DEFAULT_HYSTERESIS_DB) as f32
+            }
             _ => {
                 return Err(common::Error::other(format!(
                     "squelch: unknown parameter {name:?}"
@@ -899,4 +1050,162 @@ impl Simple for SquelchNode {
             .set_thresholds(self.threshold_db, self.threshold_db - self.hysteresis_db);
         Ok(())
     }
+}
+
+/// What the registry knows about these stages, and how it builds one.
+///
+/// The description sits beside the node it describes so that a default is
+/// spelled once: the registry used to restate the discriminator's deviation
+/// and the de-emphasis time constant, and either could be changed here
+/// without the other following.
+pub const MIXER: StageDesc = StageDesc {
+    name: "mixer",
+    summary: "Shift the signal in frequency, to bring an off-centre \
+              carrier to baseband and away from the DC spur",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_mixer(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(MixerNode::new(s.f64_or(SHIFT_HZ, 0.0))))
+}
+
+pub const DECIMATE: StageDesc = StageDesc {
+    name: "decimate",
+    summary: "Lowpass and reduce the sample rate of an IQ stream",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_decimate(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(DecimateNode::new(s.i64_or(FACTOR, 1).max(1) as usize)))
+}
+
+pub const REAL_DECIMATE: StageDesc = StageDesc {
+    name: "real_decimate",
+    summary: "Reduce the sample rate of a real stream, for audio",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_real_decimate(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(RealDecimateNode::new(
+        s.i64_or(FACTOR, 1).max(1) as usize
+    )))
+}
+
+pub const ENVELOPE: StageDesc = StageDesc {
+    name: "envelope",
+    summary: "Complex magnitude; the input an OOK pulse detector needs",
+    category: Category::Demod,
+    feeds_bus: false,
+};
+
+pub fn build_envelope(_s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(EnvelopeNode))
+}
+
+pub const FM_DEMOD: StageDesc = StageDesc {
+    name: "fm_demod",
+    summary: "Quadrature frequency discriminator, for FM and FSK",
+    category: Category::Demod,
+    feeds_bus: false,
+};
+
+pub fn build_fm_demod(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(FmDemodNode::new(
+        s.f64_or(DEVIATION_HZ, WIDE_DEVIATION_HZ),
+    )))
+}
+
+pub const DEEMPHASIS: StageDesc = StageDesc {
+    name: "deemphasis",
+    summary: "Undo broadcast FM pre-emphasis (50 us in Europe, 75 in the Americas)",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_deemphasis(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(DeemphasisNode::new(s.f64_or(TAU_US, EUROPE_TAU_US))))
+}
+
+pub const SSB_DEMOD: StageDesc = StageDesc {
+    name: "ssb_demod",
+    summary: "Demodulate one sideband, or a narrow slice of it for CW",
+    category: Category::Demod,
+    feeds_bus: false,
+};
+
+pub fn build_ssb_demod(s: &Settings) -> Result<Box<dyn Node>> {
+    let sideband = s
+        .str_or(SIDEBAND, Sideband::Upper.label())
+        .parse()
+        .unwrap_or(Sideband::Upper);
+    // A CW filter is the same stage with its passband put around the pitch
+    // the operator hears rather than around speech.
+    if s.get(PITCH_HZ).is_some() {
+        return Ok(Box::new(SsbDemodNode::cw(
+            sideband,
+            s.f64_or(PITCH_HZ, 700.0),
+            s.f64_or(WIDTH_HZ, 500.0),
+        )));
+    }
+    Ok(Box::new(SsbDemodNode::new(
+        sideband,
+        s.f64_or(LOW_HZ, VOICE_LOW_HZ),
+        s.f64_or(HIGH_HZ, VOICE_HIGH_HZ),
+    )))
+}
+
+pub const HIGH_BLEND: StageDesc = StageDesc {
+    name: "high_blend",
+    summary: "Roll the top off audio in proportion to the noise on it, \
+              so a weak channel hisses less",
+    category: Category::Audio,
+    feeds_bus: false,
+};
+
+pub fn build_high_blend(_s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(HighBlendNode::new()))
+}
+
+pub const AGC: StageDesc = StageDesc {
+    name: "agc",
+    summary: "Hold audio at a usable level without riding the volume control",
+    category: Category::Audio,
+    feeds_bus: false,
+};
+
+pub fn build_agc(s: &Settings) -> Result<Box<dyn Node>> {
+    let (attack, release, hang) = AgcPreset::Voice.times();
+    let mut n = match s.str_or(PRESET, "").parse::<AgcPreset>() {
+        Ok(p) => AgcNode::preset(p),
+        Err(_) => AgcNode::new(
+            s.f64_or(ATTACK_MS, attack),
+            s.f64_or(RELEASE_MS, release),
+            s.f64_or(HANG_MS, hang),
+        ),
+    };
+    if let Some(v) = s.get(MAX_GAIN_DB) {
+        Node::set_param(&mut n, MAX_GAIN_DB, v.clone())?;
+    }
+    Ok(Box::new(n))
+}
+
+pub const SQUELCH: StageDesc = StageDesc {
+    name: "squelch",
+    summary: "Mute a channel with nothing on it, by noise for FM or by level",
+    category: Category::Audio,
+    feeds_bus: false,
+};
+
+pub fn build_squelch(s: &Settings) -> Result<Box<dyn Node>> {
+    let kind = s
+        .str_or(KIND, SquelchKind::Noise.label())
+        .parse()
+        .unwrap_or(SquelchKind::Noise);
+    Ok(Box::new(SquelchNode::new(
+        kind,
+        s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32,
+    )))
 }

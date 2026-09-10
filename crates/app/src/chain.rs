@@ -25,27 +25,29 @@
 
 use std::collections::HashMap;
 
+use crate::audiobus::StripParam;
 use crate::scanners::Front;
 use common::{Hz, Result, C32};
 use dsp::rds::Station;
-use nodes::{AgcNode, BankNode, DecimateNode, SpectrumNode, SquelchNode, WfmDemodNode};
+use nodes::{AgcNode, BankNode, SpectrumNode, SquelchNode, WfmDemodNode};
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
 use crate::radio::{ChanMode, ChannelSpec, DecodeRecord, Demod};
 use crate::record::Recorder;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Channel width for the OOK bank. Below this the measurements show no further
 /// gain, because the sensor's own bandwidth and its carrier offset start to
 /// matter more than the noise saved.
 pub const OOK_CHANNEL_HZ: f64 = 31_250.0;
-/// Channel width for the FSK bank. rtl_433 runs at 250 kHz for the same
-/// signals; half that still holds a 50 kHz tone separation comfortably.
-pub const FSK_CHANNEL_HZ: f64 = 125_000.0;
 
 /// Audio sample rate every channel branch aims for.
 const AUDIO_HZ: f64 = 48_000.0;
+
+/// How much of the last spectrum frame the next one keeps, until the
+/// interface says otherwise.
+pub const DEFAULT_SMOOTHING: f32 = 0.35;
 
 /// Grid the extracted band's centre is snapped to.
 ///
@@ -113,21 +115,6 @@ impl SubBand {
 /// The narrow CW filter, in Hz.
 const CW_FILTER_HZ: f64 = 500.0;
 
-/// What a node in the graph is for, so a rebuild can find it again.
-///
-/// Keyed by purpose rather than by position: the whole point is that a node
-/// keeps its state when the graph around it changes, and its position is
-/// exactly what changed. Every node in the receiver is a patch stage now, so
-/// there is one kind of purpose left.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum Role {
-    /// A stage the operator drew, keyed by its patch id and what it is. The
-    /// kind is in the key because editing a patch can replace a stage with a
-    /// different one, and reusing an envelope detector as a mixer would hand
-    /// the graph a node of the wrong type entirely.
-    Patch(u64, String),
-}
-
 /// What a channel branch was built for. A branch is only reused while all of
 /// this is unchanged, since every one of these decides a filter's
 /// coefficients or a mixer's shift.
@@ -163,13 +150,6 @@ pub struct Chan {
     pub port: Option<usize>,
     agc: Option<NodeId>,
     squelch: Option<NodeId>,
-    /// The mixer that brings this channel to baseband. Kept so a change of
-    /// frequency is a number on it rather than a graph built again: a
-    /// rebuild throws away every filter's history, the AGC's gain and the
-    /// audio resampler's phase, which is a click. A pass being followed
-    /// down retunes every few seconds, and clicking at every step is not
-    /// listening to it.
-    mix: Option<NodeId>,
     wfm: Option<NodeId>,
     pub audio_rate: f64,
     pub channels: usize,
@@ -193,7 +173,9 @@ pub struct Bank {
 pub struct LiveSource {
     pub center_hz: f64,
     pub bandwidth_hz: f64,
-    pub snr_db: f32,
+    /// How strongly the detector heard it, or `None` for a locked channel,
+    /// which is a decision the auto node made rather than a measurement.
+    pub snr_db: Option<f32>,
     /// The front end that owns this channel for the rest of the session,
     /// or `None` for a source the detector has open right now.
     ///
@@ -205,43 +187,20 @@ pub struct LiveSource {
 
 pub struct Receiver {
     graph: Graph,
-    /// What each node is, indexed by `NodeId`, so a rebuild can hand the same
-    /// nodes to the new graph.
-    roles: Vec<Role>,
-    /// The DC blocker, when the graph has one: it is a stage like any other
-    /// and can be taken out.
-    dc: Option<NodeId>,
     /// What the parts of the receiver that are not drawn yet read.
     head: Out,
-    spectrum: Option<NodeId>,
     /// The graph as a description: what is running, in the operator's terms.
+    ///
+    /// Also how every node the receiver has to talk to is found: a stage's
+    /// id is carried into the graph as a node's tag, so [`Receiver::stage`]
+    /// reads the spectrum, the bus or the recorder out of the running graph
+    /// by the id the patch derived it under. A field per node held that
+    /// answer across rebuilds instead, twenty of them, each cleared and
+    /// reassigned by hand.
     patch: crate::patch::Patch,
     /// The graph as the receiver drew it before the operator's edits, which
     /// is what an edited copy of `patch` is read against to find them.
     base: crate::patch::Patch,
-    record: Option<NodeId>,
-    /// The transmitter and what feeds it, by node id.
-    ///
-    /// Held rather than looked up by name, because a graph node carries the
-    /// label the chain view draws ("Transmitter") and not the kind the patch
-    /// asked for: a lookup by kind found nothing, and keying said the chain
-    /// was not built while it was sitting there in the view.
-    tx_radio: Option<NodeId>,
-    tx_mic: Option<NodeId>,
-    /// The raw span capture, which is always in the graph and almost always
-    /// switched off; see [`Receiver::set_capture`].
-    capture: Option<NodeId>,
-    /// The audio bus, where every channel and every voice front end meets.
-    audio: Option<NodeId>,
-    /// The video bus, where every picture meets. `None` until something in
-    /// the graph produces one, since a receiver with no camera in earshot
-    /// should not carry a bus for it.
-    video: Option<NodeId>,
-    modes: Option<NodeId>,
-    ais: Option<NodeId>,
-    aprs: Option<NodeId>,
-    pocsag: Option<NodeId>,
-    m17: Option<NodeId>,
     banks: Vec<Bank>,
     /// The source detectors, one per band watched.
     sources: Vec<NodeId>,
@@ -269,24 +228,6 @@ pub struct Receiver {
     /// was last added up.
     log_folder: u64,
     log_measured: Option<std::time::Instant>,
-    bus: Option<NodeId>,
-    decode: Option<NodeId>,
-    tracks: Option<NodeId>,
-    transcripts: Option<NodeId>,
-    survey: Option<NodeId>,
-    wigle: Option<NodeId>,
-    beacondb: Option<NodeId>,
-    /// Who the receiver uploads to wigle.net as, when it does. Kept beside
-    /// the survey path and for the same reason: a rebuild replaces the node,
-    /// and the setting is what survives it.
-    wigle_account: Option<survey::Account>,
-    /// Whether the beaconDB feed is on. Kept beside the node for the same
-    /// reason the account is: the node is rebuilt and this is not.
-    beacondb_on: bool,
-    /// Where the survey is written, if it is. Held as a path rather than an
-    /// open database for the same reason the packet log holds a directory: a
-    /// rebuild replaces the node, and what survives it is the setting.
-    survey_path: Option<PathBuf>,
     /// Where the receiver is: one position, whether it was typed in or came
     /// from a GPS, carrying the quality fields when a fix supplied it.
     ///
@@ -317,6 +258,11 @@ pub struct Receiver {
     patch_spectra: Vec<(u64, NodeId)>,
     /// Channels that could not be built, for the status line.
     pub refused: Option<String>,
+    /// What was said, which outlives every graph that heard it. Held here
+    /// and lent to the transcriber on each rebuild: the node is a stage on
+    /// the audio bus, and the bus is rebuilt whenever a channel comes or
+    /// goes.
+    transcript: crate::transcripts::SharedLog,
 }
 
 /// What the receiver should be doing, as opposed to what it is.
@@ -330,6 +276,8 @@ pub struct Plan {
     pub dc_block: bool,
     /// Frames a second the spectrum is worth producing.
     pub refresh_hz: f32,
+    /// How much of the last spectrum frame the next one keeps.
+    pub smoothing: f32,
     pub fft: usize,
     pub channels: Vec<ChannelSpec>,
     /// The levels on the bus that are nobody's channel.
@@ -348,6 +296,10 @@ pub struct Plan {
     /// receiver.
     pub edits: crate::patch::Edits,
     pub record: bool,
+    /// Whether the raw span is being written to disk. The stage is always in
+    /// the graph and almost always switched off, so this is the switch and
+    /// not the presence of a stage.
+    pub capture: bool,
     /// Where a raw span capture is written when one is switched on. The
     /// stage is always in the graph, so this is always needed.
     pub capture_dir: PathBuf,
@@ -367,6 +319,45 @@ pub struct Plan {
     /// like every other stage rather than living in a second graph the
     /// interface never sees.
     pub tx: Option<TxPlan>,
+    /// Which calls are heard, which pictures are watched, where the survey
+    /// is written and who it is uploaded as.
+    ///
+    /// In the plan like everything else the receiver is doing, but apart
+    /// from the stage settings above because none of these fits in a
+    /// `ParamValue`: a subscription is a rule, an account holds a secret,
+    /// and a survey is an open file. [`Receiver::apply_settings`] is the one
+    /// thing that hands them to the nodes.
+    pub settings: PlanSettings,
+}
+
+/// What the receiver is doing that no stage setting can carry.
+#[derive(Clone, PartialEq)]
+pub struct PlanSettings {
+    /// Which calls the audio bus mixes.
+    pub calls: Vec<crate::audiobus::Subscription>,
+    /// Which pictures the video bus publishes.
+    pub watching: Vec<crate::videobus::Rule>,
+    /// Where the survey is written, if it is.
+    pub survey_path: Option<PathBuf>,
+    /// Who the receiver uploads to wigle.net as, when it does.
+    pub wigle: Option<survey::Account>,
+    /// Whether the beaconDB feed is collecting.
+    pub beacondb: bool,
+}
+
+impl Default for PlanSettings {
+    fn default() -> Self {
+        Self {
+            calls: Vec::new(),
+            // Whatever is being received, which is what the video bus itself
+            // starts at: a camera the receiver finds should appear without
+            // anybody having to ask for it by name first.
+            watching: vec![crate::videobus::Rule::Everything],
+            survey_path: None,
+            wigle: None,
+            beacondb: false,
+        }
+    }
 }
 
 /// The transmit chain the receiver should be drawing.
@@ -401,6 +392,23 @@ impl Default for AudioPlan {
     }
 }
 
+/// One channel's settings as the nodes hold them: what the strip owns and an
+/// operator can move from the chain view as well as from the strip.
+///
+/// The line between this and the rest of a [`ChannelSpec`] is the one
+/// [`operator_owns`] draws. What is here is read back
+/// into the plan on every block; what is not is the plan's alone, and a node
+/// that was handed a stale copy of it must not write it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelLevels {
+    pub id: u64,
+    pub label: String,
+    pub volume: f32,
+    pub muted: bool,
+    pub squelch_db: Option<f32>,
+    pub agc: bool,
+}
+
 /// One input of the bus, as the strip draws it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StripState {
@@ -416,6 +424,26 @@ pub struct StripState {
     /// The listening channel feeding it, when one does. A strip with none
     /// is a chain the operator drew.
     pub channel: Option<u64>,
+}
+
+/// One input of the video bus, as a pane offers it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoInput {
+    /// What the bus keeps it under, which is what a pane asks to watch.
+    pub key: String,
+    pub label: String,
+    /// How much of its last picture arrived, from nothing to one.
+    pub completeness: f32,
+}
+
+/// What the transmitter has done since the graph was built: samples handed
+/// to the radio, transfers the radio had to fill with silence itself, and
+/// what the microphone is hearing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TxState {
+    pub written: u64,
+    pub underruns: u64,
+    pub mic_peak: f32,
 }
 
 /// One feed, as the interface sees it.
@@ -464,23 +492,9 @@ impl Receiver {
             // empty and then filled, which is the same constraint that makes
             // rebuilding the interesting case.
             graph: Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
-            roles: Vec::new(),
-            dc: None,
             head: pipeline::graph::GRAPH_INPUT,
-            spectrum: None,
             patch: crate::patch::Patch::default(),
             base: crate::patch::Patch::default(),
-            record: None,
-            tx_radio: None,
-            tx_mic: None,
-            capture: None,
-            audio: None,
-            video: None,
-            modes: None,
-            ais: None,
-            aprs: None,
-            pocsag: None,
-            m17: None,
             banks: Vec::new(),
             sources: Vec::new(),
             chans: Vec::new(),
@@ -491,16 +505,6 @@ impl Receiver {
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             log_folder: 0,
             log_measured: None,
-            bus: None,
-            decode: None,
-            tracks: None,
-            transcripts: None,
-            survey: None,
-            wigle: None,
-            beacondb: None,
-            wigle_account: None,
-            beacondb_on: false,
-            survey_path: None,
             station: None,
             logged: 0,
             center: plan.center,
@@ -510,8 +514,11 @@ impl Receiver {
             requests: Vec::new(),
             patch_spectra: Vec::new(),
             refused: None,
+            transcript: Default::default(),
         };
-        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new), sinks.tx)?;
+        // Nothing is in the pool to be reused, so whether the span moved is
+        // not a question anything asks of this build.
+        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new), sinks.tx, false)?;
         Ok(rx)
     }
 
@@ -557,17 +564,34 @@ impl Receiver {
         self.tx_sink().is_some_and(|s| s.keyed())
     }
 
-    fn tx_sink_mut(&mut self) -> Option<&mut nodes::TxSinkNode> {
-        let id = self.tx_radio?;
-        self.graph.node_mut(id)?.as_any_mut()?.downcast_mut::<nodes::TxSinkNode>()
+    /// A stage of the running graph, read as what it is.
+    ///
+    /// The stage's patch id is the node's identity across rebuilds, so this
+    /// asks the graph rather than a field the last rebuild filled in. A
+    /// stage that is not in the graph, or is not the kind asked for, is
+    /// absent: the transmit source is a microphone or a tone, and asking for
+    /// the microphone answers only when it is one.
+    fn stage<T: 'static>(&self, tag: u64) -> Option<&T> {
+        self.graph.by_tag(tag).and_then(|id| downcast::<T>(&self.graph, id))
     }
 
-    /// What the transmitter has done, for the interface: samples handed over,
-    /// transfers the radio had to fill itself, and what the microphone is
-    /// hearing.
-    pub fn tx_state(&self) -> Option<(u64, u64, f32)> {
+    fn stage_mut<T: 'static>(&mut self, tag: u64) -> Option<&mut T> {
+        let id = self.graph.by_tag(tag)?;
+        self.graph.node_mut(id)?.as_any_mut().downcast_mut::<T>()
+    }
+
+    fn tx_sink_mut(&mut self) -> Option<&mut nodes::TxSinkNode> {
+        self.stage_mut::<nodes::TxSinkNode>(derived::TX_RADIO)
+    }
+
+    /// What the transmitter has done, for the interface.
+    pub fn tx_state(&self) -> Option<TxState> {
         let sink = self.tx_sink()?;
-        Some((sink.written(), sink.underruns(), self.tx_mic().map(|m| m.peak()).unwrap_or(0.0)))
+        Some(TxState {
+            written: sink.written(),
+            underruns: sink.underruns(),
+            mic_peak: self.tx_mic().map(|m| m.peak()).unwrap_or(0.0),
+        })
     }
 
     /// Whether the microphone's signal is arriving already clipped.
@@ -576,23 +600,22 @@ impl Receiver {
     }
 
     fn tx_mic(&self) -> Option<&nodes::MicNode> {
-        self.tx_mic
-            .and_then(|id| self.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::MicNode>())
+        self.stage::<nodes::MicNode>(derived::TX_SOURCE)
     }
 
-    /// The last block the transmitter sent, for showing it on the receiver's
-    /// own spectrum while the radio is deaf.
-    pub fn tx_monitor(&self) -> &[C32] {
-        self.tx_sink().map(|s| s.monitor()).unwrap_or(&[])
+    /// Draw what is going out on the receiver's own span, or stop.
+    ///
+    /// Only while the radio is deaf, which is the radio thread's to know: a
+    /// full duplex radio hears its own transmission for real and mirroring on
+    /// top of that would draw it twice.
+    pub fn set_tx_monitor(&mut self, on: bool) {
+        if let Some(n) = self.stage_mut::<nodes::TxMonitorNode>(derived::TX_MONITOR) {
+            n.set_enabled(on);
+        }
     }
 
     fn tx_sink(&self) -> Option<&nodes::TxSinkNode> {
-        self.tx_radio
-            .and_then(|id| self.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<nodes::TxSinkNode>())
+        self.stage::<nodes::TxSinkNode>(derived::TX_RADIO)
     }
 
     /// Change what the receiver is doing, keeping every node that still means
@@ -616,25 +639,21 @@ impl Receiver {
             &mut self.graph,
             Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
         );
-        let roles = std::mem::take(&mut self.roles);
-        let mut pool: HashMap<Role, NodePart> = roles.into_iter().zip(graph.into_parts()).collect();
+        // Keyed by the tag every node went in under, which is the id of the
+        // stage it was built for: a `NodeId` is a position in the graph that
+        // is being taken apart, and the position is what a rebuild changes.
+        let mut pool: HashMap<u64, NodePart> =
+            graph.into_parts().into_iter().filter_map(|p| p.tag.map(|t| (t, p))).collect();
 
         // A channel whose mixer shift or filter design would differ is not
         // the same channel, and it does not have to be caught here any more:
         // everything a filter was designed against is in the id the stage is
         // derived under, so a channel that changed asks for stages that were
-        // never in the pool.
+        // never in the pool. Whether a node that is still asked for can be
+        // reused is the node's own question, put to it as the graph is
+        // rebuilt: a bank keeps its several hundred chains across a retune,
+        // and a spectrum cannot.
         let retuned = plan.center != old_center || plan.rate != old_rate;
-        pool.retain(|role, _| match role {
-            // A bank rebuilds itself internally on a retune and keeps its
-            // chains, which is cheaper than building several hundred graphs.
-            Role::Patch(_, kind) if kind == "bank" => true,
-            // The spectrum's FFT size can change and the node cannot resize,
-            // and one holding an average of another band is worse than one
-            // starting empty.
-            Role::Patch(_, kind) if kind == "spectrum" => !retuned && self.fft_size() == plan.fft,
-            _ => true,
-        });
 
         // The recorder is a file being written; it survives every rebuild
         // short of being switched off, and a newly started one is waiting
@@ -642,19 +661,9 @@ impl Receiver {
         let ring = self.pending_record.take().or_else(|| {
             // The ring is a stage like any other, so it comes back out of the
             // pool by the same name it went in under.
-            let role = Role::Patch(derived::RING, RING.to_string());
-            pool.remove(&role).and_then(|p| RecordRing::from_part(p.node))
+            pool.remove(&derived::RING).and_then(|p| RecordRing::from_part(p.node))
         });
 
-        self.record = None;
-        self.capture = None;
-        self.audio = None;
-        self.video = None;
-        self.modes = None;
-        self.ais = None;
-        self.aprs = None;
-        self.pocsag = None;
-        self.m17 = None;
         self.banks.clear();
         self.sources.clear();
         self.center = plan.center;
@@ -669,7 +678,7 @@ impl Receiver {
                 None => tx = Some(TxSinks { stream: None, mic: Some(mic.clone()) }),
             }
         }
-        self.assemble(plan, pool, ring, tx)?;
+        self.assemble(plan, pool, ring, tx, retuned)?;
         // The stages are keyed by mode and rate, so a channel moved to
         // another frequency comes back holding the nodes it had. The dial
         // moving under every channel is not that: their offsets change and
@@ -713,24 +722,25 @@ impl Receiver {
     }
 
     fn fft_size(&self) -> usize {
-        self.spectrum
-            .and_then(|id| self.graph.node(id))
-            .and_then(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<SpectrumNode>())
+        main_spectrum(&self.patch)
+            .and_then(|id| self.stage::<SpectrumNode>(id))
             .map(|s| s.size())
             .unwrap_or(0)
     }
 
+    /// Build the graph the plan describes, reusing what `pool` holds.
+    /// `retuned` says the span moved under those nodes, which is one of the
+    /// two things each of them is asked before it is reused.
     fn assemble(
         &mut self,
         plan: &Plan,
-        mut pool: HashMap<Role, NodePart>,
+        mut pool: HashMap<u64, NodePart>,
         ring: Option<RecordRing>,
         sinks_tx: Option<TxSinks>,
+        retuned: bool,
     ) -> Result<()> {
         let input = StreamSpec::iq(plan.rate, plan.center);
         let mut b = Graph::builder(input);
-        let mut roles: Vec<Role> = Vec::new();
 
         // Everything at the head of the chain is a stage in a patch now: the
         // DC block, the zoom decimator, the spectrum and the recorder's ring.
@@ -748,14 +758,18 @@ impl Receiver {
         sync_audio(&mut patch, plan);
         sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
+        // `self.patch` is still the one the pooled nodes were built from,
+        // which is what says whether a stage that kept its id still asks for
+        // the same kind of node.
         let (patch_packets, patch_ids, reused) = match add_patch(
             &mut b,
-            &mut roles,
             &mut pool,
+            &self.patch,
             pipeline::graph::GRAPH_INPUT,
             &patch,
             &mut ring,
             &mut tx_sinks,
+            retuned,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -774,22 +788,8 @@ impl Receiver {
                 crate::patch::Source::Stage(f, port) => patch_ids.get(&f).map(|n| n.out(port)),
             })
             .unwrap_or(pipeline::graph::GRAPH_INPUT);
-        let stage_of = |kind: &str| -> Option<NodeId> {
-            patch
-                .stages()
-                .iter()
-                .find(|s| s.kind == kind)
-                .and_then(|s| patch_ids.get(&s.id))
-                .copied()
-        };
-        let dc = stage_of("dc_block");
-        let spectrum = stage_of("spectrum");
-        let record = stage_of(RING);
-        let tx_radio = stage_of(TX_RADIO);
-        let tx_mic = stage_of("mic");
-        let capture = stage_of("iq_capture");
-        let audio = stage_of("audio_bus");
-        let video = stage_of("video_bus");
+        let spectrum = main_spectrum(&patch).and_then(|id| patch_ids.get(&id)).copied();
+        let audio = patch_ids.get(&derived::AUDIO).copied();
 
         // The front ends are stages in the patch now, so what runs is what
         // the graph says rather than a second reading of the scanner table.
@@ -835,11 +835,6 @@ impl Receiver {
                 ));
             }
         }
-        let modes = of_kind("mode_s").first().copied();
-        let ais = of_kind("ais").first().copied();
-        let aprs = of_kind("aprs").first().copied();
-        let pocsag = of_kind("pocsag").first().copied();
-        let m17 = of_kind("m17").first().copied();
         let banks: Vec<NodeId> = of_kind("bank");
         let mut sources: Vec<NodeId> = of_kind("source_detect");
         sources.extend(of_kind("auto"));
@@ -900,7 +895,6 @@ impl Receiver {
                 },
                 port,
                 agc: of("chan_agc"),
-                mix: of("chan_mix"),
                 squelch: of("chan_squelch"),
                 wfm: stereo.then(|| of("chan_demod")).flatten(),
                 audio_rate: AUDIO_HZ,
@@ -914,17 +908,6 @@ impl Receiver {
                 rds_stats: (0, 0, false),
             });
         }
-
-        // The bus, the protocols and the tracker are stages too now, so this
-        // is a matter of finding them: the parts of the receiver that talk to
-        // them need a node id, not a construction.
-        let bus = of_kind("packet_bus").first().copied();
-        let decode = of_kind("protocols").first().copied();
-        let tracks = of_kind("tracks").first().copied();
-        let transcripts = of_kind("transcribe_live").first().copied();
-        let survey = of_kind("survey").first().copied();
-        let wigle = of_kind("wigle").first().copied();
-        let beacondb = of_kind("beacondb").first().copied();
 
         // The bus is the output: everything that is heard leaves through it.
         // Everything else that leaves the graph is read by the port it is
@@ -955,7 +938,7 @@ impl Receiver {
             .and_then(|id| {
                 graph
                     .node(id)
-                    .and_then(|n| n.as_any())
+                    .map(|n| n.as_any())
                     .and_then(|a| a.downcast_ref::<SpectrumNode>())
                     .map(|s| s.rate())
             })
@@ -970,11 +953,11 @@ impl Receiver {
         // open file; one that had to be built again needs it reopened. The
         // file is opened in append mode, so reopening costs nothing but a
         // syscall and never loses what is already in it.
-        if let Some(id) = bus {
+        if let Some(id) = patch_ids.get(&derived::BUS) {
             let want = self.log_dir.is_some();
             if let Some(n) = graph
-                .node_mut(id)
-                .and_then(|n| n.as_any_mut())
+                .node_mut(*id)
+                .map(|n| n.as_any_mut())
                 .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
             {
                 if want != n.has_sink() {
@@ -987,85 +970,36 @@ impl Receiver {
         // once the graph they belong to exists. A reused node arrives holding
         // whatever it was last told, which is not necessarily what the plan
         // now says.
-        if let Some(n) = dc
-            .and_then(|id| graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
+        if let Some(n) = patch_ids
+            .get(&derived::DC)
+            .and_then(|id| graph.node_mut(*id))
+            .map(|n| n.as_any_mut())
             .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
         {
             n.set_enabled(plan.dc_block);
         }
-        if let Some(n) = spectrum
-            .and_then(|id| graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<SpectrumNode>())
-        {
-            n.set_refresh(plan.refresh_hz);
-        }
-        for c in chans.iter() {
-            // Applied every time rather than only on a fresh node: a channel
-            // whose nodes were reused still has to be told what the channel
-            // list now says about its squelch and its gain control.
-            if let (Some(id), Some(db)) = (c.squelch, c.spec.squelch_db) {
-                if let Some(sq) = graph
-                    .node_mut(id)
-                    .and_then(|n| n.as_any_mut())
-                    .and_then(|a| a.downcast_mut::<SquelchNode>())
-                {
-                    sq.set_threshold_db(db);
-                }
-            }
-            if let Some(a) = c
-                .agc
-                .and_then(|id| graph.node_mut(id))
-                .and_then(|n| n.as_any_mut())
-                .and_then(|a| a.downcast_mut::<AgcNode>())
-            {
-                a.set_enabled(c.spec.agc);
-            }
-        }
         self.graph = graph;
-        self.dc = dc;
         self.head = head;
         self.patch = patch;
         self.base = base;
-        self.roles = roles;
-        self.spectrum = spectrum;
-        self.record = record;
-        self.tx_radio = tx_radio;
-        self.tx_mic = tx_mic;
-        self.capture = capture;
-        self.audio = audio;
-        self.video = video;
-        self.bus = bus;
-        self.decode = decode;
-        self.ais = ais;
-        self.aprs = aprs;
-        self.pocsag = pocsag;
-        self.m17 = m17;
-        self.tracks = tracks;
-        self.transcripts = transcripts;
-        self.survey = survey;
-        self.wigle = wigle;
-        self.beacondb = beacondb;
-        self.open_wigle();
-        self.open_beacondb();
-        // A survey built fresh has to be reopened, and both it and a fresh
-        // tracker have to be told where the receiver is: the tracker resolves
-        // a position from a single frame with it, and without it a rebuild in
+        // The nodes a rebuild replaced come back empty: no subscriptions, no
+        // account, no survey file. What the plan says they are doing goes
+        // back onto them here.
+        self.apply_settings(plan);
+        // A fresh tracker has to be told where the receiver is: it resolves a
+        // position from a single frame with it, and without it a rebuild in
         // the middle of a drive silently stops recording where anything was
         // heard.
-        self.open_survey();
         if let Some(at) = self.station {
             self.set_station(at);
         }
-        self.modes = modes;
         self.banks = banks
             .into_iter()
             .map(|id| {
                 let channels = self
                     .graph
                     .node(id)
-                    .and_then(|n| n.as_any())
+                    .map(|n| n.as_any())
                     .and_then(|a| a.downcast_ref::<BankNode>())
                     // What is decoding, not what the channelizer produces:
                     // the channels outside the wanted band have no decoder on
@@ -1086,18 +1020,35 @@ impl Receiver {
         let buf = self.graph.input_buf();
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
+        // Kept and read back after the run rather than during it, because
+        // saying which node spoke means asking the graph, and the run holds
+        // it. Both kinds are rare; the packets and the speech are not, and
+        // they are read from the ports.
+        let mut said: Vec<(NodeId, pipeline::event::Event)> = Vec::new();
         for e in self.graph.run()? {
-            match e {
-                pipeline::event::Event::Warning { stage, message } => {
+            match &e.event {
+                pipeline::event::Event::Warning { .. } | pipeline::event::Event::Request(_) => {
+                    said.push((e.node, e.event.clone()));
+                }
+                _ => {}
+            }
+        }
+        for (node, event) in said {
+            // The stage as the chain view labels it, which is what an
+            // operator has on screen: a node no longer names itself in what
+            // it emits, and a label of the graph's own cannot be misspelt.
+            let stage = self.graph.label(node).unwrap_or("a stage").to_string();
+            match event {
+                pipeline::event::Event::Warning { message } => {
                     self.warnings.push(format!("{stage}: {message}"));
                 }
                 // Nothing here moves the dial or opens a channel on a
                 // decoder's say-so yet; what was asked is kept where the
                 // interface can read it, and said out loud so it is not
                 // silently dropped.
-                pipeline::event::Event::Request { stage, request } => {
-                    self.warnings.push(format!("{stage} asks: {}", describe(request)));
-                    self.requests.push((stage.clone(), request.clone()));
+                pipeline::event::Event::Request(request) => {
+                    self.warnings.push(format!("{stage} asks: {}", describe(&request)));
+                    self.requests.push((stage, request));
                 }
                 _ => {}
             }
@@ -1162,78 +1113,39 @@ impl Receiver {
 
     /// Apply those settings in place. Only valid where [`Self::params_only`]
     /// holds; anything else needs the graph rebuilt around it.
+    ///
+    /// The strip's stages are drawn again from the plan, exactly as a rebuild
+    /// would draw them, and whatever that changed is handed to the nodes
+    /// through the one call that keeps the description in step with them. One
+    /// path rather than a second copy of what a channel's squelch, gain
+    /// control and fader mean, which is how they came to be applied three
+    /// different ways and to disagree.
+    ///
+    /// A stage the drawing would add or remove is left to the rebuild: the
+    /// shape of a graph is fixed once it is built.
     pub fn apply_params(&mut self, plan: &Plan) {
         for (want, have) in plan.channels.iter().zip(self.chans.iter_mut()) {
             have.spec = want.clone();
         }
-        /// One channel's settable numbers, lifted out of `self.chans` so the
-        /// graph can be borrowed mutably while they are applied.
-        struct Update {
-            squelch: Option<NodeId>,
-            db: Option<f32>,
-            agc: Option<NodeId>,
-            on: bool,
-            mix: Option<NodeId>,
-            shift_hz: f64,
-        }
-        let updates: Vec<Update> = self
-            .chans
-            .iter()
-            .map(|c| Update {
-                squelch: c.squelch,
-                db: c.spec.squelch_db,
-                agc: c.agc,
-                on: c.spec.agc,
-                mix: c.mix,
-                shift_hz: chan_shift(&c.spec),
-            })
-            .collect();
-        // The levels live on the bus, one strip per channel.
-        let levels: Vec<(usize, f32, bool, String)> = self
-            .chans
-            .iter()
-            .filter_map(|c| c.port.map(|k| (k, c.spec.volume, c.spec.muted, c.spec.label.clone())))
-            .collect();
-        if let Some(b) = self.audio_mut().map(|n| n.bus_mut()) {
-            for (k, volume, muted, label) in levels {
-                if let Some(s) = b.strip_mut(k) {
-                    s.volume = volume;
-                    s.muted = muted;
-                    s.label = label;
+        let mut drawn = self.patch.clone();
+        sync_audio(&mut drawn, plan);
+        let mut changed: Vec<(u64, String, pipeline::ParamValue)> = Vec::new();
+        for st in drawn.stages() {
+            // The stages the strip owns: one chain per channel, and the bus
+            // every chain ends at. Nothing else in the patch follows the
+            // channel list.
+            if !st.settings.contains_key("channel") && st.id != derived::AUDIO {
+                continue;
+            }
+            let Some(was) = self.patch.stage(st.id) else { continue };
+            for (name, v) in &st.settings {
+                if was.settings.get(name) != Some(v) {
+                    changed.push((st.id, name.clone(), v.clone()));
                 }
             }
         }
-        // And in the description, so a rebuild draws what is running.
-        if let Some(st) = self.patch.stage_mut(derived::AUDIO) {
-            for c in &self.chans {
-                let Some(k) = c.port else { continue };
-                strip_settings(&mut st.settings, k, c.spec.volume, c.spec.muted, &c.spec.label);
-            }
-        }
-        for Update { squelch, db, agc, on, mix, shift_hz } in updates {
-            // The mixer keeps its phase across a change of step, so moving a
-            // channel is a shift of frequency and not a discontinuity.
-            if let Some(id) = mix {
-                let _ =
-                    self.set_node_param(id.0, "shift_hz", pipeline::ParamValue::Float(shift_hz));
-            }
-            if let (Some(id), Some(db)) = (squelch, db) {
-                if let Some(sq) = self
-                    .graph
-                    .node_mut(id)
-                    .and_then(|n| n.as_any_mut())
-                    .and_then(|a| a.downcast_mut::<SquelchNode>())
-                {
-                    sq.set_threshold_db(db);
-                }
-            }
-            if let Some(a) = agc
-                .and_then(|id| self.graph.node_mut(id))
-                .and_then(|n| n.as_any_mut())
-                .and_then(|a| a.downcast_mut::<AgcNode>())
-            {
-                a.set_enabled(on);
-            }
+        for (id, name, v) in changed {
+            self.set_derived_param(id, &name, v);
         }
     }
 
@@ -1248,8 +1160,8 @@ impl Receiver {
 
     /// Whether the spectrum completed a frame this block.
     pub fn spectrum_ready(&self) -> bool {
-        self.spectrum
-            .and_then(|id| downcast::<SpectrumNode>(&self.graph, id))
+        main_spectrum(&self.patch)
+            .and_then(|id| self.stage::<SpectrumNode>(id))
             .map(|s| s.is_fresh())
             .unwrap_or(false)
     }
@@ -1262,50 +1174,24 @@ impl Receiver {
         self.spectrum_mut().map(|s| s.adc()).unwrap_or_default()
     }
 
-    pub fn modes_on(&self) -> bool {
-        self.modes.is_some() || self.auto_wide("mode_s")
-    }
-
-    pub fn ais_on(&self) -> bool {
-        self.ais.is_some() || self.auto_wide("ais")
-    }
-
-    pub fn aprs_on(&self) -> bool {
-        self.aprs.is_some()
-    }
-
-    pub fn pocsag_on(&self) -> bool {
-        self.pocsag.is_some()
-    }
-
     /// The audio bus, for the subscriptions, the levels, the meters and what
     /// it is playing. `None` only when the patch could not be built at all.
     pub fn audio(&self) -> Option<&crate::audiobus::AudioBusNode> {
-        downcast::<crate::audiobus::AudioBusNode>(&self.graph, self.audio?)
+        self.stage::<crate::audiobus::AudioBusNode>(derived::AUDIO)
     }
 
     pub fn audio_mut(&mut self) -> Option<&mut crate::audiobus::AudioBusNode> {
-        let id = self.audio?;
-        self.graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<crate::audiobus::AudioBusNode>())
+        self.stage_mut::<crate::audiobus::AudioBusNode>(derived::AUDIO)
     }
 
-    /// The bus's position in the running graph, for setting its parameters
-    /// by the same route the chain view uses.
     /// The video bus, for what is being watched and what else is being
     /// received. `None` when nothing in the graph produces pictures.
     pub fn video(&self) -> Option<&crate::videobus::VideoBusNode> {
-        downcast::<crate::videobus::VideoBusNode>(&self.graph, self.video?)
+        self.stage::<crate::videobus::VideoBusNode>(derived::VIDEO)
     }
 
     pub fn video_mut(&mut self) -> Option<&mut crate::videobus::VideoBusNode> {
-        let id = self.video?;
-        self.graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<crate::videobus::VideoBusNode>())
+        self.stage_mut::<crate::videobus::VideoBusNode>(derived::VIDEO)
     }
 
     /// The picture the bus is publishing, if any.
@@ -1313,9 +1199,8 @@ impl Receiver {
         self.video().and_then(|n| n.bus().watched().cloned())
     }
 
-    /// Every transmission the video bus has seen: what it is kept under,
-    /// what to call it, and how complete its last picture was.
-    pub fn video_inputs(&self) -> Vec<(String, String, f32)> {
+    /// Every transmission the video bus has seen.
+    pub fn video_inputs(&self) -> Vec<VideoInput> {
         let Some(bus) = self.video().map(|n| n.bus()) else {
             return Vec::new();
         };
@@ -1323,26 +1208,31 @@ impl Receiver {
             .iter()
             .filter(|c| c.live())
             .filter_map(|c| {
-                c.last.as_ref().map(|f| (c.key.clone(), c.label.clone(), f.completeness()))
+                c.last.as_ref().map(|f| VideoInput {
+                    key: c.key.clone(),
+                    label: c.label.clone(),
+                    completeness: f.completeness(),
+                })
             })
             .collect()
     }
 
+    /// The bus's position in the running graph, for setting its parameters
+    /// by the same route the chain view uses.
     pub fn audio_node_id(&self) -> Option<usize> {
-        self.audio.map(|id| id.0)
+        self.node_of_stage(derived::AUDIO).map(|id| id.0)
     }
 
     /// This block's mix as it leaves for the speaker: stereo, interleaved,
     /// and the frame rate it is at.
     pub fn audio_out(&self) -> (&[f32], f64) {
-        let pcm = self
-            .audio
-            .and_then(|id| self.graph.buf(id.o()))
+        let out = self.node_of_stage(derived::AUDIO).map(|id| id.o());
+        let pcm = out
+            .and_then(|o| self.graph.buf(o))
             .and_then(|p| p.as_real())
             .unwrap_or(&[]);
-        let rate = self
-            .audio
-            .and_then(|id| self.graph.spec_of(id.o()))
+        let rate = out
+            .and_then(|o| self.graph.spec_of(o))
             .map(|s| s.frame_rate())
             .unwrap_or(crate::audiobus::OUT_HZ);
         (pcm, rate)
@@ -1411,16 +1301,10 @@ impl Receiver {
             .collect()
     }
 
-    /// Whether an M17 front end is running anywhere: a stage on a channel,
-    /// or one the auto node built for a source it found.
-    pub fn m17_on(&self) -> bool {
-        self.voices().iter().any(|v| v.system == "M17")
-    }
-
     /// Whether anything is tracking aircraft, from the local demodulator or
     /// from a feed.
     pub fn tracking(&self) -> bool {
-        self.tracks.is_some()
+        self.stage::<crate::tracks::TracksNode>(derived::TRACKS).is_some()
     }
 
     /// Channels in each bank, in the order the banks were added.
@@ -1453,7 +1337,7 @@ impl Receiver {
                 out.push(LiveSource {
                     center_hz: c + s.center_hz,
                     bandwidth_hz: s.bandwidth_hz(),
-                    snr_db: s.peak_snr_db,
+                    snr_db: Some(s.peak_snr_db),
                     locked_to: None,
                 });
             }
@@ -1462,7 +1346,7 @@ impl Receiver {
                     out.push(LiveSource {
                         center_hz,
                         bandwidth_hz: width_hz,
-                        snr_db: f32::NAN,
+                        snr_db: None,
                         locked_to: Some(name),
                     });
                 }
@@ -1471,92 +1355,60 @@ impl Receiver {
         out
     }
 
-    /// The key status of every TETRA front end in the graph, placed by hand
-    /// or by a scanner: what the key manager shows, and how a recovered key
-    /// reaches persistence. Deduplicated by cell, since two front ends on
-    /// the same carrier report the same cell.
+    /// The key status of every keyed front end in the graph, placed by hand,
+    /// by a scanner, or by an auto node for a source it found: what the key
+    /// manager shows, and how a recovered key reaches persistence.
+    /// Deduplicated by cell, since two front ends on the same carrier report
+    /// the same cell.
     pub fn tetra_key_status(&self) -> Vec<nodes::tetra_nodes::KeyStatus> {
         let mut out: Vec<nodes::tetra_nodes::KeyStatus> = Vec::new();
-        let mut push = |s: nodes::tetra_nodes::KeyStatus| {
-            if !out.iter().any(|e| (e.mcc, e.mnc, e.colour) == (s.mcc, s.mnc, s.colour)) {
-                out.push(s);
-            }
-        };
-        for (id, name) in self.graph.order() {
-            if name == "tetra" {
-                if let Some(t) = downcast::<nodes::TetraNode>(&self.graph, id) {
-                    if let Some(s) = t.key_status() {
-                        push(s);
-                    }
+        for (id, _) in self.graph.order() {
+            let Some(n) = self.graph.node(id) else { continue };
+            pipeline::node::walk(n, &mut |n| {
+                let Some(s) = nodes::keyed(n).and_then(|k| k.key_status()) else {
+                    return;
+                };
+                if !out.iter().any(|e| (e.mcc, e.mnc, e.colour) == (s.mcc, s.mnc, s.colour)) {
+                    out.push(s);
                 }
-            }
-        }
-        for &id in &self.sources {
-            if let Some(a) = downcast::<nodes::AutoNode>(&self.graph, id) {
-                for s in a.inner_tetra_status() {
-                    push(s);
-                }
-            }
+            });
         }
         out
     }
 
-    /// Install a key for a cell colour on every TETRA front end, so traffic
+    /// Install a key for a cell colour on every keyed front end, so traffic
     /// on that cell decodes. From the key manager, for a manual key.
     #[cfg(feature = "tea")]
     pub fn set_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
-        let ids: Vec<_> =
-            self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
-        for id in ids {
-            if let Some(n) = self.graph.node_mut(id) {
-                if let Some(t) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TetraNode>()) {
-                    t.add_key(colour, key);
-                }
-            }
-        }
-        for &id in &self.sources.clone() {
-            if let Some(n) = self.graph.node_mut(id) {
-                if let Some(a) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
-                    a.set_inner_tetra_key(colour, key);
-                }
-            }
-        }
+        self.each_keyed(&mut |k| k.add_key(colour, key));
     }
 
-    /// Install a TA61 identity secret for a cell colour on every TETRA front
+    /// Install a TA61 identity secret for a cell colour on every keyed front
     /// end, so its encrypted identities show as real subscribers.
     #[cfg(feature = "tea")]
     pub fn set_tetra_id_secret(&mut self, colour: u8, c: [u8; 8]) {
-        let ids: Vec<_> =
-            self.graph.order().filter(|(_, n)| *n == "tetra").map(|(id, _)| id).collect();
-        for id in ids {
-            if let Some(n) = self.graph.node_mut(id) {
-                if let Some(t) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TetraNode>()) {
-                    t.add_id_secret(colour, c);
-                }
-            }
-        }
-        for &id in &self.sources.clone() {
-            if let Some(n) = self.graph.node_mut(id) {
-                if let Some(a) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
-                    a.set_inner_tetra_id_secret(colour, c);
-                }
-            }
-        }
+        self.each_keyed(&mut |k| k.add_id_secret(colour, c));
     }
 
-    /// The span-wide decoders the auto nodes are running, by stage name.
-    fn auto_wide(&self, name: &str) -> bool {
-        self.sources
-            .iter()
-            .filter_map(|&id| downcast::<nodes::AutoNode>(&self.graph, id))
-            .any(|n| n.wide().contains(&name))
+    /// Every keyed front end in the graph, wherever it sits: on the span, on
+    /// a channel of a bank, or inside an auto node.
+    #[cfg(feature = "tea")]
+    fn each_keyed(&mut self, f: &mut dyn FnMut(&mut dyn nodes::Keyed)) {
+        let ids: Vec<_> = self.graph.order().map(|(id, _)| id).collect();
+        for id in ids {
+            let Some(n) = self.graph.node_mut(id) else { continue };
+            pipeline::node::walk_mut(n, &mut |n| {
+                if let Some(k) = nodes::keyed_mut(n) {
+                    f(k);
+                }
+            });
+        }
     }
 
     /// The raw span capture, for switching on and for reading how far it has
     /// got.
     pub fn capture(&self) -> Option<&nodes::IqCaptureNode> {
-        downcast::<nodes::IqCaptureNode>(&self.graph, self.capture?)
+        self.stage::<nodes::IqCaptureNode>(derived::CAPTURE)
     }
 
     /// Start or stop writing the span to disk.
@@ -1565,15 +1417,7 @@ impl Receiver {
     /// transmission happening right now, and rebuilding the graph to add a
     /// stage would drop every source the auto node has open.
     pub fn set_capture(&mut self, on: bool) {
-        let Some(id) = self.capture else { return };
-        if let Some(n) = self
-            .graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::IqCaptureNode>())
-        {
-            n.set_enabled(on);
-        }
+        self.set_derived_param(derived::CAPTURE, "enabled", pipeline::ParamValue::Bool(on));
     }
 
     pub fn capturing(&self) -> bool {
@@ -1583,13 +1427,7 @@ impl Receiver {
     /// Add the capture folder up again, for the status that reports it
     /// against the limit. Throttled inside the node.
     pub fn refresh_capture_folder(&mut self) {
-        let Some(id) = self.capture else { return };
-        if let Some(n) = self
-            .graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::IqCaptureNode>())
-        {
+        if let Some(n) = self.stage_mut::<nodes::IqCaptureNode>(derived::CAPTURE) {
             n.refresh_folder();
         }
     }
@@ -1598,17 +1436,13 @@ impl Receiver {
     /// stopped be started again, which is what pressing the button after
     /// reading why it stopped is asking for.
     pub fn set_capture_cap(&mut self, bytes: u64) {
-        let Some(id) = self.capture else { return };
+        let Some(id) = self.node_of_stage(derived::CAPTURE) else { return };
         let mb = bytes as f64 / (1u64 << 20) as f64;
         let _ = self.set_node_param(id.0, "budget_mb", pipeline::ParamValue::Float(mb));
     }
 
     pub fn recorder_mut(&mut self) -> Option<&mut Recorder> {
-        let id = self.record?;
-        self.graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::RingNode<RecordRing>>())
+        self.stage_mut::<nodes::RingNode<RecordRing>>(derived::RING)
             .and_then(|r| r.ring_mut().rec.as_mut())
     }
 
@@ -1638,7 +1472,7 @@ impl Receiver {
             let Some(scope) = self
                 .graph
                 .node_mut(id)
-                .and_then(|n| n.as_any_mut())
+                .map(|n| n.as_any_mut())
                 .and_then(|a| a.downcast_mut::<nodes::ScopeNode>())
             else {
                 continue;
@@ -1695,6 +1529,29 @@ impl Receiver {
         Ok(affects_rate)
     }
 
+    /// The node a stage of the patch became, for a setting applied without a
+    /// rebuild.
+    fn node_of_stage(&self, stage: u64) -> Option<NodeId> {
+        self.graph.by_tag(stage)
+    }
+
+    /// Put a value the plan owns onto a derived stage: the node, the running
+    /// description, and the graph the receiver drew alike.
+    ///
+    /// The drawn graph moves too because it is what the operator's edits are
+    /// read against. Left behind, a switch the plan carries would read as
+    /// something the operator changed, and be saved as an edit that outlived
+    /// the switch that set it.
+    fn set_derived_param(&mut self, stage: u64, name: &str, value: pipeline::ParamValue) {
+        let Some(id) = self.node_of_stage(stage) else { return };
+        if self.set_node_param(id.0, name, value.clone()).is_err() {
+            return;
+        }
+        if let Some(st) = self.base.stage_mut(stage) {
+            st.settings.insert(name.to_string(), value);
+        }
+    }
+
     /// Delay to a channel's audio, in milliseconds.
     /// The graph as a description: what is running, in the terms the view
     /// draws and the operator edits.
@@ -1712,16 +1569,17 @@ impl Receiver {
     /// the receiver drew: a parameter set on a derived stage by hand is in
     /// here, and has to be, or the next rebuild would put the stage back.
     pub fn edits(&self) -> crate::patch::Edits {
-        crate::patch::Edits::diff(&self.patch, &self.base)
+        crate::patch::Edits::diff(&self.patch, &self.base, operator_owns)
     }
 
     /// The levels as the nodes hold them, for the plan to follow.
     ///
     /// A fader or a squelch set through the chain view lands on the node,
     /// and the strip has to learn of it or the next thing the strip sends
-    /// puts it back. Returns the bus levels and each running channel's
-    /// settings as the graph has them.
-    pub fn levels(&self) -> (AudioPlan, Vec<ChannelSpec>) {
+    /// puts it back. Returns the bus levels and, per running channel, only
+    /// what the strip owns: the rest of a channel is the plan's and a node
+    /// has nothing to say about it.
+    pub fn levels(&self) -> (AudioPlan, Vec<ChannelLevels>) {
         let bus = self.audio().map(|n| n.bus());
         let mut audio = AudioPlan::default();
         if let Some(b) = bus {
@@ -1733,22 +1591,29 @@ impl Receiver {
             .chans
             .iter()
             .map(|c| {
-                let mut spec = c.spec.clone();
+                let mut own = ChannelLevels {
+                    id: c.spec.id,
+                    label: c.spec.label.clone(),
+                    volume: c.spec.volume,
+                    muted: c.spec.muted,
+                    squelch_db: c.spec.squelch_db,
+                    agc: c.spec.agc,
+                };
                 if let Some(s) = c.port.and_then(|k| bus.and_then(|b| b.strips().get(k))) {
-                    spec.volume = s.volume;
-                    spec.muted = s.muted;
+                    own.volume = s.volume;
+                    own.muted = s.muted;
                     if !s.label.is_empty() {
-                        spec.label = s.label.clone();
+                        own.label = s.label.clone();
                     }
                 }
                 if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id))
                 {
-                    spec.squelch_db = Some(sq.threshold_db());
+                    own.squelch_db = Some(sq.threshold_db());
                 }
                 if let Some(a) = c.agc.and_then(|id| downcast::<AgcNode>(&self.graph, id)) {
-                    spec.agc = a.is_enabled();
+                    own.agc = a.is_enabled();
                 }
-                spec
+                own
             })
             .collect();
         (audio, chans)
@@ -1761,20 +1626,24 @@ impl Receiver {
 
     /// What every spectrum stage the operator added is seeing: its patch id,
     /// its powers in dBFS, and the band they cover.
-    pub fn patch_spectra(&mut self) -> Vec<(u64, Vec<f32>, f64, f64)> {
+    pub fn patch_spectra(&mut self) -> Vec<crate::radio::Spectrum> {
         let ids = self.patch_spectra.clone();
         let mut out = Vec::with_capacity(ids.len());
         for (tag, id) in ids {
             let Some(n) = self
                 .graph
                 .node_mut(id)
-                .and_then(|n| n.as_any_mut())
+                .map(|n| n.as_any_mut())
                 .and_then(|a| a.downcast_mut::<SpectrumNode>())
             else {
                 continue;
             };
-            let (rate, center) = (n.rate(), n.center().as_f64());
-            out.push((tag, n.power_db().to_vec(), center, rate));
+            out.push(crate::radio::Spectrum {
+                tag,
+                db: n.power_db().to_vec(),
+                center: n.center().as_f64(),
+                rate: n.rate(),
+            });
         }
         out
     }
@@ -1787,22 +1656,24 @@ impl Receiver {
     }
 
     pub fn set_refresh(&mut self, hz: f32) {
-        if let Some(s) = self.spectrum_mut() {
-            s.set_refresh(hz);
-        }
+        self.set_derived_param(
+            derived::SPECTRUM,
+            "refresh",
+            pipeline::ParamValue::Float(hz as f64),
+        );
     }
 
     pub fn set_smoothing(&mut self, v: f32) {
-        if let Some(s) = self.spectrum_mut() {
-            s.set_smoothing(v);
-        }
+        self.set_derived_param(
+            derived::SPECTRUM,
+            "smoothing",
+            pipeline::ParamValue::Float(v as f64),
+        );
     }
 
     fn spectrum_mut(&mut self) -> Option<&mut SpectrumNode> {
-        self.spectrum
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<SpectrumNode>())
+        let id = main_spectrum(&self.patch)?;
+        self.stage_mut::<SpectrumNode>(id)
     }
 
     pub fn set_dc_block(&mut self, on: bool) {
@@ -1819,10 +1690,7 @@ impl Receiver {
     }
 
     fn dc_mut(&mut self) -> Option<&mut nodes::DcBlockNode> {
-        self.dc
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::DcBlockNode>())
+        self.stage_mut::<nodes::DcBlockNode>(derived::DC)
     }
 
     /// Start or stop recording. Takes effect on the next rebuild, since a
@@ -1836,17 +1704,32 @@ impl Receiver {
     /// One place, because there is one decoder: whatever the front end, a
     /// packet went onto the bus and came off it as a row.
     pub fn decodes(&self, at: std::time::Instant) -> Vec<DecodeRecord> {
-        // Read off the bus rather than out of the node: the packets leaving
-        // the protocols carry what they decoded to, so the list sees exactly
-        // what the map and the device database see.
-        let Some(out) = self.decode.and_then(|id| self.graph.buf(id.o())) else {
+        // Read off the bus rather than out of the node, and from the far side
+        // of the dedupe: the packets there carry what they decoded to and one
+        // row per burst, so the list sees exactly what the map and the device
+        // database see. The protocols are the fallback for a graph whose
+        // dedupe the operator took out.
+        let node =
+            self.node_of_stage(derived::DEDUPE).or_else(|| self.node_of_stage(derived::PROTOCOLS));
+        let Some(out) = node.and_then(|id| self.graph.buf(id.o())) else {
             return Vec::new();
         };
         out.as_packets()
             .unwrap_or(&[])
             .iter()
-            .flat_map(|p| p.decodes.iter().map(|d| record(at, d)))
+            .flat_map(|p| p.decodes.iter().map(move |d| record(at, p, d)))
             .collect()
+    }
+
+    /// Forget every burst already reported.
+    ///
+    /// For a rebuild: every channel covers a different frequency afterwards,
+    /// so nothing already reported can be the same burst as anything arriving.
+    pub fn reset_dedupe(&mut self) {
+        let Some(id) = self.node_of_stage(derived::DEDUPE) else { return };
+        if let Some(n) = self.graph.node_mut(id) {
+            n.reset();
+        }
     }
 
     /// Point the log at a directory, or stop writing one.
@@ -1858,11 +1741,11 @@ impl Receiver {
     pub fn feed_status(&self) -> Vec<FeedStatus> {
         // Found by what they are rather than by a role of their own: a feed
         // is a stage in the graph like everything else now.
-        self.roles
+        self.patch
+            .stages()
             .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r, Role::Patch(_, kind) if kind == "feed"))
-            .filter_map(|(k, _)| downcast::<nodes::FeedNode>(&self.graph, NodeId(k)))
+            .filter(|s| s.kind == "feed")
+            .filter_map(|s| self.stage::<nodes::FeedNode>(s.id))
             .map(|n| FeedStatus {
                 spec: n.spec().clone(),
                 connected: n.connected(),
@@ -1888,8 +1771,7 @@ impl Receiver {
     /// it, because the log is off or because no front end on this span
     /// produces packets, still reports what is on the disk rather than zero.
     pub fn log_bytes(&self) -> u64 {
-        self.bus
-            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
+        self.stage::<nodes::PacketBusNode>(derived::BUS)
             .filter(|b| b.has_sink())
             .map(|b| b.sink_bytes())
             .unwrap_or(self.log_folder)
@@ -1899,10 +1781,8 @@ impl Receiver {
     /// and skipped entirely while a sink is counting its own writes.
     pub fn refresh_log_folder(&mut self) {
         const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-        let writing = self
-            .bus
-            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
-            .is_some_and(|b| b.has_sink());
+        let writing =
+            self.stage::<nodes::PacketBusNode>(derived::BUS).is_some_and(|b| b.has_sink());
         if writing || self.log_measured.is_some_and(|t| t.elapsed() < EVERY) {
             return;
         }
@@ -1912,9 +1792,7 @@ impl Receiver {
     }
 
     pub fn log_full(&self) -> bool {
-        self.bus
-            .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
-            .is_some_and(|b| b.sink_full())
+        self.stage::<nodes::PacketBusNode>(derived::BUS).is_some_and(|b| b.sink_full())
     }
 
     pub fn set_packet_log(&mut self, dir: Option<PathBuf>) {
@@ -1934,16 +1812,12 @@ impl Receiver {
     }
 
     fn bus_mut(&mut self) -> Option<&mut nodes::PacketBusNode> {
-        self.bus
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+        self.stage_mut::<nodes::PacketBusNode>(derived::BUS)
     }
 
     /// Tracks heard recently, in the order they were first heard.
     pub fn tracks(&self, now: std::time::Instant) -> Vec<crate::tracks::Track> {
-        self.tracks
-            .and_then(|id| downcast::<crate::tracks::TracksNode>(&self.graph, id))
+        self.stage::<crate::tracks::TracksNode>(derived::TRACKS)
             .map(|n| n.rows(now))
             .unwrap_or_default()
     }
@@ -1955,34 +1829,85 @@ impl Receiver {
     /// on screen.
     #[cfg(feature = "stt")]
     pub fn transcriber(&self) -> Option<crate::transcripts::Engine> {
-        let id = self.transcripts?;
+        let id = self.node_of_stage(derived::TRANSCRIBE)?;
         let n = downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id)?;
         let mut e = n.engine();
         e.node = id.0;
         Some(e)
     }
 
-    /// Tell the tracker roughly where the receiver is.
-    /// Start or stop recording a survey. The node stays in the graph either
-    /// way; what changes is whether it has a file.
-    pub fn set_survey(&mut self, path: Option<PathBuf>) {
-        self.survey_path = path;
-        self.open_survey();
+    /// Hand the nodes what the plan says that no stage setting could carry.
+    ///
+    /// A subscription is a rule, an account holds a secret, and a survey is
+    /// an open file, so none of these survives the round trip through a
+    /// stage's settings that every other plan value takes. This is the one
+    /// place they are applied: on every rebuild, because the nodes come back
+    /// empty, and whenever one of them changes, because a rebuild is not
+    /// what a change to any of them is worth.
+    pub fn apply_settings(&mut self, plan: &Plan) {
+        let want = &plan.settings;
+        // Reopened only when it is a different file. A rebuild is frequent
+        // and opening the database again on each one costs a connection for
+        // nothing.
+        let open = self.survey_node().and_then(|n| n.db().map(|d| d.path().to_path_buf()));
+        if open.as_deref() != want.survey_path.as_deref() {
+            let db = match &want.survey_path {
+                Some(p) => match survey::Db::open(p) {
+                    Ok(db) => Some(db),
+                    Err(e) => {
+                        self.warnings.push(format!("survey: {e}"));
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(n) = self.survey_node_mut() {
+                n.set_db(db);
+            }
+        }
+        // An account short of what wigle.net needs to accept an upload is no
+        // account: the feed would collect all day and be refused at the end
+        // of it.
+        let account = want.wigle.clone().filter(survey::Account::is_complete);
+        if let Some(n) = self.wigle_node_mut() {
+            n.set_account(account);
+        }
+        let beacondb = want.beacondb;
+        if let Some(n) = self.beacondb_node_mut() {
+            n.set_on(beacondb);
+        }
+        let calls = want.calls.clone();
+        if let Some(n) = self.audio_mut() {
+            n.bus_mut().set_subscriptions(calls);
+        }
+        let watching = want.watching.clone();
+        if let Some(n) = self.video_mut() {
+            n.bus_mut().set_rules(watching);
+        }
+        // Every transcriber in the graph, not only the one the receiver
+        // draws: a stage the operator placed by hand writes what it read
+        // into the same transcript, or its lines would go somewhere nobody
+        // is reading.
+        #[cfg(feature = "stt")]
+        {
+            let log = self.transcript.clone();
+            let ids: Vec<_> = self.graph.order().map(|(id, _)| id).collect();
+            for id in ids {
+                if let Some(t) = self
+                    .graph
+                    .node_mut(id)
+                    .map(|n| n.as_any_mut())
+                    .and_then(|a| a.downcast_mut::<crate::transcripts::LiveTranscribeNode>())
+                {
+                    t.set_log(log.clone());
+                }
+            }
+        }
     }
 
-    pub fn survey_path(&self) -> Option<&Path> {
-        self.survey_path.as_deref()
-    }
-
-    /// Start or stop feeding wigle.net. The node stays in the graph either
-    /// way; what changes is whether it has an account to upload as.
-    pub fn set_wigle(&mut self, account: Option<survey::Account>) {
-        self.wigle_account = account.filter(survey::Account::is_complete);
-        self.open_wigle();
-    }
-
-    pub fn wigle_account(&self) -> Option<&survey::Account> {
-        self.wigle_account.as_ref()
+    /// What has been said on everything the receiver heard.
+    pub fn transcript(&self) -> &crate::transcripts::SharedLog {
+        &self.transcript
     }
 
     /// What the feed has sent, what is waiting, and why the last attempt
@@ -1991,71 +1916,24 @@ impl Receiver {
         Some(self.wigle_node()?.status())
     }
 
-    fn open_wigle(&mut self) {
-        let account = self.wigle_account.clone();
-        if let Some(n) = self.wigle_node_mut() {
-            n.set_account(account);
-        }
-    }
-
-    /// Start or stop feeding beacondb.net. The node stays in the graph
-    /// either way; what changes is whether it is collecting.
-    pub fn set_beacondb(&mut self, on: bool) {
-        self.beacondb_on = on;
-        self.open_beacondb();
-    }
-
-    pub fn beacondb_on(&self) -> bool {
-        self.beacondb_on
-    }
-
     pub fn beacondb_status(&self) -> Option<nodes::BeaconDbStatus> {
         Some(self.beacondb_node()?.status())
     }
 
-    fn open_beacondb(&mut self) {
-        let on = self.beacondb_on;
-        if let Some(n) = self.beacondb_node_mut() {
-            n.set_on(on);
-        }
-    }
-
     fn beacondb_node(&self) -> Option<&nodes::BeaconDbNode> {
-        self.beacondb.and_then(|id| downcast::<nodes::BeaconDbNode>(&self.graph, id))
+        self.stage::<nodes::BeaconDbNode>(derived::BEACONDB)
     }
 
     fn beacondb_node_mut(&mut self) -> Option<&mut nodes::BeaconDbNode> {
-        self.beacondb
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::BeaconDbNode>())
+        self.stage_mut::<nodes::BeaconDbNode>(derived::BEACONDB)
     }
 
     fn wigle_node(&self) -> Option<&nodes::WigleNode> {
-        self.wigle.and_then(|id| downcast::<nodes::WigleNode>(&self.graph, id))
+        self.stage::<nodes::WigleNode>(derived::WIGLE)
     }
 
     fn wigle_node_mut(&mut self) -> Option<&mut nodes::WigleNode> {
-        self.wigle
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::WigleNode>())
-    }
-
-    fn open_survey(&mut self) {
-        let db = match &self.survey_path {
-            Some(p) => match survey::Db::open(p) {
-                Ok(db) => Some(db),
-                Err(e) => {
-                    self.warnings.push(format!("survey: {e}"));
-                    None
-                }
-            },
-            None => None,
-        };
-        if let Some(n) = self.survey_node_mut() {
-            n.set_db(db);
-        }
+        self.stage_mut::<nodes::WigleNode>(derived::WIGLE)
     }
 
     /// A fix from the GPS, which moves the station.
@@ -2106,14 +1984,11 @@ impl Receiver {
     }
 
     fn survey_node(&self) -> Option<&nodes::SurveyNode> {
-        self.survey.and_then(|id| downcast::<nodes::SurveyNode>(&self.graph, id))
+        self.stage::<nodes::SurveyNode>(derived::SURVEY)
     }
 
     fn survey_node_mut(&mut self) -> Option<&mut nodes::SurveyNode> {
-        self.survey
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::SurveyNode>())
+        self.stage_mut::<nodes::SurveyNode>(derived::SURVEY)
     }
 
     /// A position typed in or taken from the country, which is a station with
@@ -2125,12 +2000,7 @@ impl Receiver {
     /// Move the station, and everything that resolves a position against it.
     pub fn set_station(&mut self, at: gps::Fix) {
         self.station = Some(at);
-        if let Some(n) = self
-            .tracks
-            .and_then(|id| self.graph.node_mut(id))
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<crate::tracks::TracksNode>())
-        {
+        if let Some(n) = self.stage_mut::<crate::tracks::TracksNode>(derived::TRACKS) {
             n.set_reference(at.lat, at.lon);
         }
         if let Some(n) = self.survey_node_mut() {
@@ -2147,21 +2017,13 @@ impl Receiver {
     /// Packets written to the log since the receiver started.
     pub fn logged(&self) -> u64 {
         self.logged
-            + self
-                .bus
-                .and_then(|id| downcast::<nodes::PacketBusNode>(&self.graph, id))
-                .map(|n| n.written())
-                .unwrap_or(0)
+            + self.stage::<nodes::PacketBusNode>(derived::BUS).map(|n| n.written()).unwrap_or(0)
     }
 
     /// Take the recorder back out, after a replay that wrote one.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_recorder(&mut self) -> Option<Recorder> {
-        let id = self.record.take()?;
-        self.graph
-            .node_mut(id)
-            .and_then(|n| n.as_any_mut())
-            .and_then(|a| a.downcast_mut::<nodes::RingNode<RecordRing>>())
+        self.stage_mut::<nodes::RingNode<RecordRing>>(derived::RING)
             .and_then(|r| r.ring_mut().rec.take())
     }
 
@@ -2183,9 +2045,6 @@ pub fn bank_label(width_hz: f64) -> String {
     }
 }
 
-/// Bandwidth a Mode S transmission occupies, for the log's channel column.
-const MODES_BAND_HZ: f64 = 2_000_000.0;
-
 /// The protocols a strip channel can be set to, with the channel each
 /// expects: every registered one, span-wide or not. A decoder that reads a
 /// span is put on a channel as wide as what it reads.
@@ -2202,11 +2061,7 @@ pub fn front_width(kind: &str) -> Option<f64> {
 /// The protocol a word names: its registry id, or its label as a strip
 /// button or a saved channel writes it.
 pub fn front_kind(word: &str) -> Option<&'static str> {
-    let w = word.to_ascii_lowercase();
-    nodes::protocol::all()
-        .iter()
-        .find(|p| p.id() == w || p.label().eq_ignore_ascii_case(&w))
-        .map(|p| p.id())
+    nodes::protocol::by_word(word).map(|p| p.id())
 }
 
 /// What a front end is called on a strip button.
@@ -2247,17 +2102,15 @@ fn front_band(front: &Front, at: &crate::scanners::FrontAt) -> Option<((f64, f64
     }
 }
 
-/// Patch stages whose output the packet bus accepts, besides every
-/// protocol's decoder.
-const BUS_TAILS: [&str; 6] =
-    ["pulse_detect", "ask_detect", "fsk_detect", "bank", "source_decode", "auto"];
-
-/// Whether a stage of this kind puts frames or packets on its first output.
-fn bus_tail(kind: &str) -> bool {
-    BUS_TAILS.contains(&kind)
-        || nodes::protocol::by_id(kind).is_some_and(|p| {
-            matches!(p.outputs().first(), Some(PortKind::Frames | PortKind::Packets))
-        })
+/// Whether a stage of this kind puts what it reads on the packet bus.
+///
+/// Every front end that produces bursts, frames or packets, whether it was
+/// placed on a channel, on a band or by an operator, and a feed from another
+/// receiver. Asked of the stage registry, which is where each stage says so
+/// for itself: a decoder nobody wired to the bus decodes into silence, and a
+/// list here would have to be remembered.
+fn feeds_bus(kind: &str) -> bool {
+    stages().desc(kind).is_some_and(|d| d.feeds_bus)
 }
 
 /// The port a stage of this kind puts speech on, if it has one.
@@ -2282,9 +2135,22 @@ fn video_port(kind: &str) -> Option<usize> {
     }
 }
 
-/// Stages that report something a position can be resolved from, so the
-/// tracker is worth attaching to the bus.
-const TRACK_SOURCES: [&str; 4] = ["mode_s", "ais", "aprs", "auto"];
+/// Whether a stage of this kind can put something on the bus that the
+/// tracker resolves a position from.
+///
+/// Asked of each protocol rather than kept as a list here, so a protocol
+/// that starts reporting positions is tracked without this being touched.
+fn reports_position(kind: &str) -> bool {
+    match kind {
+        // Whatever front end it placed on the source it found, which can be
+        // any of them.
+        "auto" => true,
+        // Another receiver's packets, which is usually the reason to run a
+        // tracker on a band that is neither 1090 nor 162.
+        "feed" => true,
+        _ => nodes::protocol::by_id(kind).is_some_and(|p| p.reports_position()),
+    }
+}
 
 /// The recorder's ring, which is a stage in the graph but owns an open file
 /// and so cannot be built from a description alone.
@@ -2342,12 +2208,18 @@ pub mod derived {
     pub const TX_SOURCE: u64 = Patch::DERIVED_BASE + 11;
     pub const TX_MOD: u64 = Patch::DERIVED_BASE + 12;
     pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
+    /// What is going out, drawn on the span the receiver is deaf to while it
+    /// goes out. In front of the head, so everything downstream sees it.
+    pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
     /// The video bus, where every picture the receiver has meets.
     pub const VIDEO: u64 = Patch::DERIVED_BASE + 16;
     /// The wardriving feed: what was heard, on its way to wigle.net.
     pub const WIGLE: u64 = Patch::DERIVED_BASE + 17;
     /// The same, on its way to beacondb.net.
     pub const BEACONDB: u64 = Patch::DERIVED_BASE + 18;
+    /// One row per burst, after the protocols and before everything that
+    /// reads them.
+    pub const DEDUPE: u64 = Patch::DERIVED_BASE + 20;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2378,6 +2250,25 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // are. A branch that saw the spur or the full rate would disagree with
     // the others about what arrived.
     let mut head = Source::Span;
+    // What is being transmitted, drawn on the span. In front of everything
+    // else at the head, so the spectrum, the waterfall and the raw capture
+    // all see the over: a half duplex radio hears nothing while it keys up,
+    // and a flat floor for the length of a transmission is the one moment an
+    // operator most wants a display.
+    if let Some(tx) = &plan.tx {
+        let mut s = Settings::new();
+        s.insert(
+            "shift_hz".into(),
+            pipeline::ParamValue::Float(tx.on_air.as_f64() - plan.center.as_f64()),
+        );
+        // Switched on by the radio thread, which is the only thing that knows
+        // whether the receive stream has gone deaf, and switched off here on
+        // every rebuild the way the raw capture is.
+        s.insert("enabled".into(), pipeline::ParamValue::Bool(false));
+        p.add_derived(derived::TX_MONITOR, "tx_monitor", s);
+        p.connect(Source::Span, (derived::TX_MONITOR, 0));
+        head = Source::Stage(derived::TX_MONITOR, 0);
+    }
     if plan.dc_block {
         p.add_derived(derived::DC, "dc_block", Settings::new());
         p.connect(head, (derived::DC, 0));
@@ -2401,6 +2292,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 
     let mut spectrum = Settings::new();
     spectrum.insert("size".into(), pipeline::ParamValue::Int(plan.fft as i64));
+    // Both of these are the plan's, so the stage carries them: the spectrum
+    // node is dropped from the pool on every retune, and a setting only the
+    // node held came back at its default every time the dial moved.
+    spectrum.insert("refresh".into(), pipeline::ParamValue::Float(plan.refresh_hz as f64));
+    spectrum.insert("smoothing".into(), pipeline::ParamValue::Float(plan.smoothing as f64));
     p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
     p.connect(head, (derived::SPECTRUM, 0));
 
@@ -2478,18 +2374,24 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 
         p.add_derived(derived::TX_RADIO, TX_RADIO, Settings::new());
         p.connect(Source::Stage(derived::TX_MOD, 0), (derived::TX_RADIO, 0));
+        // What went to the antenna, back to the monitor at the head of the
+        // receive chain. This is the only place holding those samples.
+        p.connect(Source::Stage(derived::TX_RADIO, 0), (derived::TX_MONITOR, 1));
     }
 
-    // The raw capture is always in the graph and switched off, because the
-    // transmission worth having is the one already on the screen. Adding the
-    // stage when somebody asks for it would rebuild the graph first, and a
-    // rebuild loses the source the auto node has open, which is exactly the
-    // signal they were trying to capture. Switched on it costs a parameter;
-    // switched off it costs a memcpy of nothing.
+    // The raw capture is always in the graph and usually switched off,
+    // because the transmission worth having is the one already on the screen.
+    // Adding the stage when somebody asks for it would rebuild the graph
+    // first, and a rebuild loses the source the auto node has open, which is
+    // exactly the signal they were trying to capture. Switched on it costs a
+    // parameter; switched off it costs a memcpy of nothing.
     {
         let mut s = Settings::new();
         s.insert("dir".into(), pipeline::ParamValue::Text(plan.capture_dir.display().to_string()));
-        s.insert("enabled".into(), pipeline::ParamValue::Bool(false));
+        // A capture running across a retune keeps running, and starts a new
+        // file: the old one's name says which frequency and rate every
+        // sample in it was taken at.
+        s.insert("enabled".into(), pipeline::ParamValue::Bool(plan.capture));
         s.insert(
             "format".into(),
             pipeline::ParamValue::Text(plan.capture_format.extension().into()),
@@ -2545,6 +2447,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     width_hz: shape.widths[0],
                     rate: plan.eff_rate(),
                     snr_db: f32::NAN,
+                    origin: None,
                 };
                 // A span-wide decoder is one stage wherever it is placed;
                 // one on a channel is keyed by the channel, so two blocks
@@ -2660,7 +2563,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // the only stage whose shape follows the rest of the graph rather than
     // its own settings.
     let sources: Vec<u64> =
-        p.stages().iter().filter(|s| puts_packets_on_bus(&s.kind)).map(|s| s.id).collect();
+        p.stages().iter().filter(|s| feeds_bus(&s.kind)).map(|s| s.id).collect();
     if !sources.is_empty() {
         let mut s = Settings::new();
         s.insert("inputs".into(), pipeline::ParamValue::Int(sources.len() as i64));
@@ -2677,19 +2580,25 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         let decode = p.add_derived(derived::PROTOCOLS, "protocols", Settings::new());
         p.connect(Source::Stage(bus, 0), (decode, 0));
 
+        // And the copies of a burst that neighbouring channels also read are
+        // dropped once, here, rather than by each consumer for itself. The
+        // packet list used to do it after the graph, so the map, the device
+        // database and the feeds saw rows it had rejected.
+        let rows = p.add_derived(derived::DEDUPE, "dedupe", Settings::new());
+        p.connect(Source::Stage(decode, 0), (rows, 0));
+
         // The tracker is a consumer of the bus like any other, which is what
         // stops every view being wired to the demodulator it happens to care
         // about. Attached whenever anything could produce a frame it can
         // resolve a position from: a feed is usually the reason to run one at
         // all on a band that is neither 1090 nor 162.
-        let makes_tracks =
-            p.stages().iter().any(|s| TRACK_SOURCES.contains(&s.kind.as_str()) || s.kind == "feed");
+        let makes_tracks = p.stages().iter().any(|s| reports_position(&s.kind));
         if makes_tracks {
             let t = p.add_derived(derived::TRACKS, "tracks", Settings::new());
             // Downstream of the protocols and not beside them: the packets
             // that arrive here carry what they decoded to, so the map reads
             // one decode rather than parsing the frame a second time.
-            p.connect(Source::Stage(decode, 0), (t, 0));
+            p.connect(Source::Stage(rows, 0), (t, 0));
         }
 
         // The device database is another consumer of the bus, and it is in
@@ -2697,31 +2606,22 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // file is a setting on a node that is already there, so turning it on
         // mid-drive does not rebuild the receiver under the packets.
         let survey = p.add_derived(derived::SURVEY, "survey", Settings::new());
-        p.connect(Source::Stage(decode, 0), (survey, 0));
+        p.connect(Source::Stage(rows, 0), (survey, 0));
 
         // The feed to wigle.net is a second consumer of the same decodes,
         // and it is drawn whether or not an account has been set: turning
         // wardriving on is a setting on a node that is already there, the
         // way the survey's file is.
         let wigle = p.add_derived(derived::WIGLE, "wigle", Settings::new());
-        p.connect(Source::Stage(decode, 0), (wigle, 0));
+        p.connect(Source::Stage(rows, 0), (wigle, 0));
 
         // beaconDB is a third consumer of the same decodes, drawn whether or
         // not it is on for the same reason.
         let beacondb = p.add_derived(derived::BEACONDB, "beacondb", Settings::new());
-        p.connect(Source::Stage(decode, 0), (beacondb, 0));
+        p.connect(Source::Stage(rows, 0), (beacondb, 0));
     }
 
     p
-}
-
-/// Whether a stage of this kind puts packets on the bus.
-///
-/// The table, plus every front end that declares a channel of its own: those
-/// are what a strip channel can be set to, and a decoder nobody wired to the
-/// bus decodes into silence.
-fn puts_packets_on_bus(kind: &str) -> bool {
-    bus_tail(kind) || kind == "feed"
 }
 
 /// The stages of one strip channel, in the order they are built. A decode
@@ -2779,6 +2679,27 @@ fn sync_video(p: &mut crate::patch::Patch) {
     // has an input to land on.
     s.insert("inputs".into(), V::Int(feeds.len() as i64 + 1));
     p.add_derived(bus, "video_bus", s);
+}
+
+/// Whether a setting the operator changed on a derived stage is an edit of
+/// theirs, or one the plan owns and writes again on the next rebuild.
+///
+/// A listening channel's stages and the audio bus's per-strip levels are the
+/// strip's: what the operator sets on them by hand goes back into the strip
+/// rather than sitting in the edits as an override the strip would fight.
+/// The level of a bus input the strip did not set, which is a chain the
+/// operator drew, is the exception, since the strip has no other place to
+/// keep it.
+pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::Stage) -> bool {
+    if st.settings.contains_key("channel") {
+        return false;
+    }
+    if st.kind == "audio_bus" {
+        let level =
+            matches!(StripParam::parse(name), Some((StripParam::Vol | StripParam::Mute, _)));
+        return level && !base.settings.contains_key(name);
+    }
+    true
 }
 
 /// The stages the strip owns, drawn into a patch: one chain per listening
@@ -2909,48 +2830,44 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     let mut wired: Vec<(usize, Source)> =
         p.links().iter().filter(|l| l.to.0 == bus).map(|l| (l.to.1, l.from)).collect();
     wired.sort_by_key(|(k, _)| *k);
-    let per_port: Vec<Settings> = wired
+    let per_port: Vec<Vec<(StripParam, V)>> = wired
         .iter()
         .map(|(k, _)| {
-            let mut own = Settings::new();
-            for what in ["vol", "mute", "label", "voice"] {
-                if let Some(v) = s.get(&format!("{what}{k}")) {
-                    own.insert(what.into(), v.clone());
-                }
-            }
-            own
+            StripParam::ALL
+                .into_iter()
+                .filter_map(|what| s.get(&what.name(*k)).map(|v| (what, v.clone())))
+                .collect()
         })
         .collect();
-    s.retain(|name, _| {
-        !["vol", "mute", "label", "voice"]
-            .iter()
-            .any(|w| name.strip_prefix(w).is_some_and(|k| k.parse::<usize>().is_ok()))
-    });
+    s.retain(|name, _| StripParam::parse(name).is_none());
     for (k, _) in &wired {
         p.disconnect((bus, *k));
     }
     for (k, ((_, from), own)) in wired.iter().zip(per_port).enumerate() {
         p.connect(*from, (bus, k));
         for (what, v) in own {
-            s.insert(format!("{what}{k}"), v);
+            s.insert(what.name(k), v);
         }
         match owned.iter().find(|(o, ..)| o == from) {
             // A channel's level is the strip's to say.
             Some((_, Some(spec), label)) => {
                 strip_settings(&mut s, k, spec.volume, spec.muted, label);
-                s.insert(format!("voice{k}"), V::Bool(spec.voice && !spec.mode.is_decode()));
+                s.insert(
+                    StripParam::Speech.name(k),
+                    V::Bool(spec.voice && !spec.mode.is_decode()),
+                );
             }
             // A voice port's level is the subscriptions' business; the strip
             // itself passes it whole.
             Some((_, None, label)) => {
-                s.insert(format!("label{k}"), V::Text(label.clone()));
-                s.entry(format!("vol{k}")).or_insert(V::Float(1.0));
+                s.insert(StripParam::Label.name(k), V::Text(label.clone()));
+                s.entry(StripParam::Vol.name(k)).or_insert(V::Float(1.0));
             }
             // A chain the operator drew, named after what feeds it.
             None => {
                 if let Source::Stage(f, _) = from {
                     if let Some(st) = p.stage(*f) {
-                        s.entry(format!("label{k}"))
+                        s.entry(StripParam::Label.name(k))
                             .or_insert(V::Text(stage_label(&st.kind, &st.settings)));
                     }
                 }
@@ -2987,9 +2904,9 @@ fn strip_settings(
     label: &str,
 ) {
     use pipeline::ParamValue as V;
-    s.insert(format!("vol{k}"), V::Float(volume as f64));
-    s.insert(format!("mute{k}"), V::Bool(muted));
-    s.insert(format!("label{k}"), V::Text(label.to_string()));
+    s.insert(StripParam::Vol.name(k), V::Float(volume as f64));
+    s.insert(StripParam::Mute.name(k), V::Bool(muted));
+    s.insert(StripParam::Label.name(k), V::Text(label.to_string()));
 }
 
 /// One listening channel, as stages.
@@ -3142,6 +3059,7 @@ fn decode_channel_stages(
         width_hz: width,
         rate: rate / dec as f64,
         snr_db: f32::NAN,
+        origin: None,
     };
     let chain = match proto {
         Some(p) => p.chain(placed),
@@ -3222,8 +3140,7 @@ fn audio_channel_stages(
         d.insert("label".into(), V::Text("AM envelope".into()));
         "envelope"
     } else if mode.is_ssb() {
-        let lsb = mode.sideband() == dsp::ssb::Sideband::Lower;
-        d.insert("sideband".into(), V::Text(if lsb { "lsb" } else { "usb" }.into()));
+        d.insert("sideband".into(), V::Text(mode.sideband().to_string()));
         if mode == Demod::Cw {
             d.insert("pitch_hz".into(), V::Float(mode.cw_pitch()));
             // On CW the width control is the filter itself, which is the
@@ -3268,7 +3185,12 @@ fn audio_channel_stages(
 
     if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
         let mut s = Settings::new();
-        s.insert("kind".into(), V::Text(if mode == Demod::Nfm { "noise" } else { "level" }.into()));
+        let measure = if mode == Demod::Nfm {
+            nodes::SquelchKind::Noise
+        } else {
+            nodes::SquelchKind::Level
+        };
+        s.insert("kind".into(), V::Text(measure.to_string()));
         s.insert("threshold_db".into(), V::Float(db as f64));
         let sq = at(p, "chan_squelch", "squelch", s);
         p.connect(tail, (sq, 0));
@@ -3301,13 +3223,14 @@ fn audio_channel_stages(
     // signal or silence. The other order lets the AGC lift the noise on a
     // dead channel up to the threshold and hold the squelch open.
     let preset = match mode {
-        Demod::Cw => Some("cw"),
-        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some("voice"),
+        Demod::Cw => Some(nodes::AgcPreset::Cw),
+        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(nodes::AgcPreset::Voice),
         Demod::Wfm => None,
     };
     if let Some(preset) = preset {
         let mut a = Settings::new();
-        a.insert("preset".into(), V::Text(preset.into()));
+        a.insert("preset".into(), V::Text(preset.to_string()));
+        a.insert("enabled".into(), V::Bool(spec.agc));
         let agc = at(p, "chan_agc", "agc", a);
         p.connect(tail, (agc, 0));
         tail = Source::Stage(agc, 0);
@@ -3431,6 +3354,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "mixer" => "Mixer".into(),
         TX_RADIO => "Transmitter".into(),
         "tx_clock" => "Transmit clock".into(),
+        "tx_monitor" => "Transmit monitor".into(),
         "mic" => "Microphone".into(),
         "tone" => "Test tone".into(),
         "fm_mod" => "FM modulator".into(),
@@ -3455,6 +3379,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "protocol_decode" => "Protocols".into(),
         "high_blend" => "High blend".into(),
         "protocols" => "Protocols".into(),
+        "dedupe" => "Dedupe".into(),
         "tracks" => "Tracks".into(),
         "transcribe_live" => "Transcribe".into(),
         "survey" => "Devices".into(),
@@ -3501,19 +3426,27 @@ fn describe(r: &pipeline::Request) -> String {
 /// where every stage ended up, and which of them kept the node they had.
 type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>);
 
+/// The same registry, built once, for the questions a patch answers about a
+/// stage before any node of it exists.
+fn stages() -> &'static pipeline::registry::Registry {
+    static REG: std::sync::OnceLock<pipeline::registry::Registry> = std::sync::OnceLock::new();
+    REG.get_or_init(registry)
+}
+
 /// Every stage type this receiver can build.
 ///
 /// The node registry plus the ones that only make sense inside the
 /// application: the tracker folds positions together for the map, which is a
 /// view rather than a signal path, so it lives here.
 pub fn registry() -> pipeline::registry::Registry {
-    use pipeline::registry::StageDesc;
+    use pipeline::registry::{Category, StageDesc};
     let mut r = nodes::registry();
     r.register(
         StageDesc {
             name: "tracks",
             summary: "Fold reported positions into tracks: aircraft, vessels and marks",
-            category: "sink",
+            category: Category::Sink,
+            feeds_bus: false,
         },
         |_s| Ok(Box::new(crate::tracks::TracksNode::new()) as Box<dyn pipeline::node::Node>),
     );
@@ -3523,7 +3456,8 @@ pub fn registry() -> pipeline::registry::Registry {
             name: "transcribe_live",
             summary: "Read what is being said on everything the receiver hears, \
                       as it is said, with a local Whisper model",
-            category: "sink",
+            category: Category::Sink,
+            feeds_bus: false,
         },
         |s: &pipeline::registry::Settings| {
             use pipeline::SettingsExt;
@@ -3555,7 +3489,8 @@ pub fn registry() -> pipeline::registry::Registry {
             summary: "Every picture the receiver has in one place: pictures do \
                       not sum, so this one selects what is watched and keeps \
                       the last field of everything else",
-            category: "video",
+            category: Category::Video,
+            feeds_bus: false,
         },
         |s: &pipeline::registry::Settings| {
             let mut n = crate::videobus::VideoBusNode::new();
@@ -3571,7 +3506,8 @@ pub fn registry() -> pipeline::registry::Registry {
             summary: "Every channel and every voice front end in one place: \
                       what reaches the speaker is what is wired in here, at \
                       the level its strip says",
-            category: "audio",
+            category: Category::Audio,
+            feeds_bus: false,
         },
         |s: &pipeline::registry::Settings| {
             let mut n = crate::audiobus::AudioBusNode::new(crate::audiobus::OUT_HZ);
@@ -3598,12 +3534,13 @@ pub fn registry() -> pipeline::registry::Registry {
 /// backwards from its last wire.
 fn add_patch(
     b: &mut GraphBuilder,
-    roles: &mut Vec<Role>,
-    pool: &mut HashMap<Role, NodePart>,
+    pool: &mut HashMap<u64, NodePart>,
+    was: &crate::patch::Patch,
     span: Out,
     patch: &crate::patch::Patch,
     ring: &mut Option<RecordRing>,
     tx: &mut Option<TxSinks>,
+    retuned: bool,
 ) -> Result<Built> {
     use crate::patch::Source;
     use pipeline::registry::SettingsExt;
@@ -3614,10 +3551,21 @@ fn add_patch(
     // interface has to know not to keep showing them.
     let mut reused: Vec<u64> = Vec::new();
     for st in patch.stages() {
-        let role = Role::Patch(st.id, st.kind.clone());
         // Reused where it can be, so editing one wire does not reset the
-        // detector's noise floor on every other stage in the graph.
-        let mut node = match pool.remove(&role) {
+        // detector's noise floor on every other stage in the graph. Two
+        // things stop it. A stage that kept its id and changed kind is not
+        // the same stage, and `was` is what says which kind the pooled node
+        // was built as: reusing an envelope detector as a mixer would hand
+        // the graph a node of the wrong type entirely. And a node that
+        // cannot be reused for what the stage now asks for is dropped here
+        // rather than kept and half corrected: a spectrum cannot resize, and
+        // one holding an average of another band is worse than one starting
+        // empty.
+        let pooled = pool
+            .remove(&st.id)
+            .filter(|_| was.stage(st.id).is_some_and(|s| s.kind == st.kind))
+            .filter(|p| p.node.survives_rebuild(retuned, &st.settings));
+        let mut node = match pooled {
             Some(p) => {
                 reused.push(st.id);
                 p.node
@@ -3654,23 +3602,7 @@ fn add_patch(
                     None => continue,
                 }
             }
-            None => {
-                let mut node = reg.build(&st.kind, &st.settings)?;
-                // A decimator's passband is designed rather than set, so it
-                // is not something a number alone can carry: the design needs
-                // the rate it is being cut from.
-                if let (Some(pb), Some(rate)) = (
-                    st.settings.get("passband_hz").and_then(|v| v.as_f64()),
-                    st.settings.get("input_rate_hz").and_then(|v| v.as_f64()),
-                ) {
-                    if let Some(d) =
-                        node.as_any_mut().and_then(|a| a.downcast_mut::<DecimateNode>())
-                    {
-                        d.set_passband_hz(rate, pb);
-                    }
-                }
-                node
-            }
+            None => reg.build(&st.kind, &st.settings)?,
         };
         // A stage the receiver derived is described by its settings, so one
         // that came back out of the pool is brought up to date rather than
@@ -3683,49 +3615,12 @@ fn add_patch(
                 let _ = node.set_param(name, value.clone());
             }
         }
-        // The bus is the one stage whose shape follows the graph rather than
-        // its own settings: how many inputs it has is how many things feed
-        // it, and that changes with every retune. It is carried across
-        // rebuilds because it holds the open log file, so it has to be told.
-        if st.kind == "packet_bus" {
-            if let Some(n) =
-                node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
-            {
-                n.set_inputs(st.settings.i64_or("inputs", 1).max(1) as usize);
-            }
-        }
-        // A bank's band decides which of its channels get a decoder, and that
-        // is settled while the graph negotiates: it has to be set before the
-        // node goes in, on a reused node as much as a fresh one, because the
-        // span has usually moved under it since it was last built.
-        if st.kind == "bank" {
-            let (lo, hi) =
-                (st.settings.f64_or("band_lo_hz", 0.0), st.settings.f64_or("band_hi_hz", 0.0));
-            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<BankNode>()) {
-                n.set_band((hi > lo).then_some((lo, hi)));
-            }
-        }
-        // The same for the source detector and the auto node, and for the
-        // same reason.
-        if st.kind == "source_detect" || st.kind == "auto" {
-            let (lo, hi) =
-                (st.settings.f64_or("band_lo_hz", 0.0), st.settings.f64_or("band_hi_hz", 0.0));
-            let band = (hi > lo).then_some((lo, hi));
-            if let Some(n) =
-                node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::SourceDetectNode>())
-            {
-                n.set_band(band);
-            }
-            if let Some(n) = node.as_any_mut().and_then(|a| a.downcast_mut::<nodes::AutoNode>()) {
-                n.set_band(band);
-                let spur = st.settings.f64_or("spur_hz", 0.0);
-                n.set_spur((spur > 0.0).then_some(spur));
-                let step = st.settings.f64_or("raster_hz", 0.0);
-                n.set_raster(
-                    (step > 0.0).then(|| (st.settings.f64_or("raster_origin_hz", 0.0), step)),
-                );
-            }
-        }
+        // What a stage's description says that a parameter cannot carry one
+        // value at a time: the band a bank or a detector is limited to, how
+        // many things feed the bus, the passband a decimator designs. Every
+        // node is handed the description and takes what it understands, on a
+        // node that came through the rebuild as much as on a fresh one.
+        node.configure(&st.settings);
         made.push((st.id, st.kind.clone(), node));
     }
 
@@ -3764,9 +3659,9 @@ fn add_patch(
             .unwrap_or_else(|| kind.clone());
         let nid = b.add_labeled(label, node);
         // Tagged with the patch's own id, which is how the view knows which
-        // box on screen is the stage that asked for it.
+        // box on screen is the stage that asked for it, and how the next
+        // rebuild finds the node again.
         b.set_tag(nid, id);
-        roles.push(Role::Patch(id, kind.clone()));
         ids.insert(id, nid);
         for p in 0..ins {
             match patch.feeding((id, p)) {
@@ -3785,7 +3680,7 @@ fn add_patch(
         // protocols run once over all of it. Anything else at the end of a
         // chain is one the operator has not finished, and wiring it to the
         // bus would hand the bus a stream of the wrong type.
-        if bus_tail(kind.as_str()) && patch.is_tail(id) {
+        if feeds_bus(kind.as_str()) && patch.is_tail(id) {
             packets.push(nid);
         }
     }
@@ -3905,57 +3800,49 @@ pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) 
 
 /// A decode as the packet list holds it. Public because a directory rebuilt
 /// from the log has to make the same rows the live receiver makes.
-pub fn record_of(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
-    record(at, d)
+pub fn record_of(
+    at: std::time::Instant,
+    p: &common::Packet,
+    d: &pipeline::event::Decoded,
+) -> DecodeRecord {
+    record(at, p, d)
 }
 
-fn record(at: std::time::Instant, d: &pipeline::event::Decoded) -> DecodeRecord {
-    // Mode S occupies the whole band it is transmitted in; there is no
-    // channel to speak of, and nothing else is near enough to be confused
-    // with it. Anything from a bank was heard through one of its channels,
-    // and which bank is what its keying says.
-    // The width the packet was actually heard through, when the chain that
-    // produced it knows. The match below is the fallback for the chains that
-    // do not carry one, and it is a guess: it reads the width off the keying,
-    // which stops being a proxy for the bank tier as soon as anything measures
-    // the keying properly.
-    let channel_hz = match d.bandwidth_hz {
-        Some(hz) if hz > 0.0 => hz,
-        _ => channel_hz_from_keying(d),
-    };
+/// One row from a packet and one of the conclusions on it.
+///
+/// The packet is what carries the evidence: how strongly it was heard, the
+/// samples it was read from, the speech it brought and the width it came
+/// through. The decode says only what it was. They used to be copied onto the
+/// conclusion as well, filled in by four different fallbacks, and the two
+/// copies disagreed as soon as one of them was missed.
+fn record(
+    at: std::time::Instant,
+    p: &common::Packet,
+    d: &pipeline::event::Decoded,
+) -> DecodeRecord {
     DecodeRecord {
         at,
         freq: d.center.as_f64(),
-        channel_hz,
-        model: d.protocol.to_string(),
+        // The width the packet was heard through, as the front end that
+        // produced it declared. This used to be read off the keying where a
+        // decode carried no width of its own, which meant a table here of
+        // which protocol is heard through what: a guess that had to be kept
+        // in step with every front end, and one the packet has always been
+        // able to answer for itself.
+        channel_hz: f64::from(p.bandwidth_hz),
+        model: (d.protocol != nodes::UNKNOWN).then_some(d.protocol),
         modulation: d.modulation.unwrap_or(common::Modulation::Unknown),
         detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
         fields: d.fields.clone(),
         media_type: d.media_type,
-        rssi_dbfs: d.rssi_dbfs.unwrap_or(f32::NAN),
-        snr_db: d.snr_db.unwrap_or(f32::NAN),
+        rssi_dbfs: p.rssi_dbfs(),
+        snr_db: p.snr_db(),
         bytes: d.payload.clone(),
         crc: d.crc_ok,
         link: d.link.clone(),
-        iq: d.iq.clone(),
-        audio: d.audio.clone(),
-    }
-}
-
-fn channel_hz_from_keying(d: &pipeline::event::Decoded) -> f64 {
-    use common::Modulation as M;
-    match d.modulation {
-        Some(M::Ppm) => MODES_BAND_HZ,
-        // AIS is heard through one 25 kHz marine channel, whichever of the
-        // two carried the frame.
-        Some(M::Gmsk) => nodes::ais_nodes::CHANNEL_WIDTH_HZ,
-        // A pager is keyed FSK like an 868 MHz sensor and heard through a
-        // channel a tenth the width, so the keying alone does not say which
-        // front end produced it.
-        Some(M::Fsk2) if d.protocol.starts_with("POCSAG") => nodes::pocsag_nodes::CHANNEL_WIDTH_HZ,
-        Some(M::Fsk4) => nodes::m17_nodes::CHANNEL_WIDTH_HZ,
-        Some(M::Fsk2 | M::Gfsk | M::Afsk) => FSK_CHANNEL_HZ,
-        _ => OOK_CHANNEL_HZ,
+        iq: p.samples().cloned(),
+        audio: p.audio.clone(),
+        airtime: d.airtime.clone(),
     }
 }
 
@@ -3984,8 +3871,17 @@ pub fn default_capture_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-captures"))
 }
 
+/// The spectrum stage the waterfall is drawn from: the receiver's own,
+/// or the first the operator drew if they took it out.
+///
+/// A graph with a spectrum in it draws it where a person is looking,
+/// whoever put it there; the rest are strips of their own underneath.
+fn main_spectrum(patch: &crate::patch::Patch) -> Option<u64> {
+    patch.stages().iter().find(|s| s.kind == "spectrum").map(|s| s.id)
+}
+
 fn downcast<T: 'static>(g: &Graph, id: NodeId) -> Option<&T> {
-    g.node(id).and_then(|n| n.as_any()).and_then(|a| a.downcast_ref::<T>())
+    g.node(id).and_then(|n| n.as_any().downcast_ref::<T>())
 }
 
 /// The recorder, as a node.
@@ -4008,8 +3904,7 @@ impl RecordRing {
     /// Recover the recorder from a node lifted out of a graph, so a rebuild
     /// keeps writing the same file.
     fn from_part(node: Box<dyn pipeline::node::Node>) -> Option<Self> {
-        let any = node.into_any()?;
-        any.downcast::<nodes::RingNode<Self>>().ok().map(|n| n.into_ring())
+        node.into_any().downcast::<nodes::RingNode<Self>>().ok().map(|n| n.into_ring())
     }
 }
 
@@ -4025,6 +3920,16 @@ impl nodes::Ring for RecordRing {
 mod tests {
     use super::*;
 
+    /// Whether one stage's output is wired into another's input.
+    fn feeds(from: &pipeline::graph::TopoNode, to: &pipeline::graph::TopoNode) -> bool {
+        from.outputs.iter().any(|(slot, _)| to.inputs.iter().any(|(want, _)| want == slot))
+    }
+
+    /// Whether a front end of this kind is in the running graph.
+    fn running(rx: &Receiver, kind: &str) -> bool {
+        rx.topology().nodes.iter().any(|n| n.kind == kind)
+    }
+
     /// A front end with no band of its own, which is what every front end
     /// except a bank has: only a bank is built over a range.
     pub(super) fn anywhere(front: Front) -> crate::scanners::FrontAt {
@@ -4039,6 +3944,7 @@ mod tests {
             zoom: 1,
             dc_block: true,
             refresh_hz: 30.0,
+            smoothing: DEFAULT_SMOOTHING,
             fft: 1024,
             channels: Vec::new(),
             audio: AudioPlan::default(),
@@ -4047,11 +3953,13 @@ mod tests {
                 band: (0.0, f64::INFINITY),
             }],
             record: false,
+            capture: false,
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
             feeds: Vec::new(),
             tx: None,
+            settings: Default::default(),
         }
     }
 
@@ -4061,7 +3969,7 @@ mod tests {
     fn manual(patch: crate::patch::Patch) -> Plan {
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.fronts.clear();
-        p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p));
+        p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p), operator_owns);
         p
     }
 
@@ -4104,7 +4012,7 @@ mod tests {
         let strips = rx.audio().expect("the bus").bus().strips();
         let fed: Vec<_> = strips.iter().filter(|s| s.is_fed()).collect();
         assert_eq!(fed.len(), 1);
-        assert!(fed[0].voice, "the strip is named as a conversation");
+        assert!(fed[0].speech, "the strip is named as a conversation");
         assert_eq!(fed[0].label, "CH1");
     }
 
@@ -4115,8 +4023,13 @@ mod tests {
     #[cfg(feature = "stt")]
     #[test]
     fn the_transcript_survives_a_rebuild() {
-        let log = crate::transcripts::log();
-        let key = format!("Audio:{}:CH-rebuild:", 145_000_000u64);
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_000_000.0)
+            .to(Some("CH-rebuild".into()));
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let log = rx.transcript().clone();
         log.lock().push(crate::transcripts::Utterance {
             key: key.clone(),
             at: std::time::Instant::now(),
@@ -4126,19 +4039,17 @@ mod tests {
             confidence: -0.2,
             credible: true,
         });
-        let mut plan = plan(2_400_000.0, Hz::mhz(145));
-        plan.fronts.clear();
-        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
-        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
         let first = rx.transcriber().expect("a transcriber");
         plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
         rx.rebuild(&plan).expect("a rebuild");
         let second = rx.transcriber().expect("a transcriber");
         // The node's own state did not survive: this is the rebuild that
         // used to take the transcript with it.
-        assert_eq!(second.reads, 0);
-        assert_eq!(first.reads, 0);
+        assert_eq!(second.health.reads, 0);
+        assert_eq!(first.health.reads, 0);
         assert_eq!(log.lock().latest(&key).map(|u| u.text.as_str()), Some("still here"));
+        // And the node the rebuild put there writes into the same one.
+        assert!(std::sync::Arc::ptr_eq(&log, rx.transcript()));
     }
 
     /// Without the mark it is audio and nothing else, which is what an
@@ -4150,7 +4061,7 @@ mod tests {
         plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
         let rx = Receiver::build(&plan, Default::default()).expect("a plain channel");
         let strips = rx.audio().expect("the bus").bus().strips();
-        assert!(strips.iter().filter(|s| s.is_fed()).all(|s| !s.voice));
+        assert!(strips.iter().filter(|s| s.is_fed()).all(|s| !s.speech));
     }
 
     #[test]
@@ -4254,10 +4165,10 @@ mod tests {
         // One strip, not two: the first spectrum is the main plot, and only
         // the other one is a band of its own worth a strip underneath.
         assert_eq!(seen.len(), 1, "the stage should report a spectrum of its own");
-        assert_eq!(seen[0].0, view);
+        assert_eq!(seen[0].tag, view);
         // Its own band, not the span's: a strip drawn from the dial's rate
         // would put every signal in it at eight times the offset.
-        assert_eq!(seen[0].3, plan.eff_rate() / 8.0);
+        assert_eq!(seen[0].rate, plan.eff_rate() / 8.0);
     }
 
     #[test]
@@ -4332,11 +4243,55 @@ mod tests {
     }
 
     #[test]
+    fn the_spectrum_keeps_what_the_plan_says_across_a_retune() {
+        // The transform cannot be resized or moved, so the spectrum node is
+        // the one stage a retune always replaces. Anything only the node held
+        // was therefore lost on every move of the dial: the averaging went
+        // back to its default each time, which reads as the waterfall
+        // changing character on its own.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.smoothing = 0.6;
+        p.refresh_hz = 12.0;
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(rx.spectrum_mut().map(|s| (s.smoothing(), s.refresh())), Some((0.6, 12.0)));
+
+        p.center = Hz::mhz(434);
+        rx.rebuild(&p).unwrap();
+        assert_eq!(rx.spectrum_mut().map(|s| (s.smoothing(), s.refresh())), Some((0.6, 12.0)));
+    }
+
+    #[test]
+    fn a_channel_keeps_its_level_across_a_retune() {
+        // A fader is a plan value, so it survives being moved by the strip
+        // without a rebuild and a rebuild without the strip. It is not an
+        // edit either: the operator moved a level the receiver draws, not the
+        // graph the receiver drew.
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        let mut ch = chan(1, 100_000.0, Demod::Nfm);
+        ch.volume = 0.25;
+        p.channels = vec![ch];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let level =
+            |rx: &Receiver| rx.strips().iter().find(|s| s.channel == Some(1)).map(|s| s.volume);
+        assert_eq!(level(&rx), Some(0.25));
+
+        p.channels[0].volume = 0.75;
+        assert!(rx.params_only(&p), "a level is a number on a node that is already there");
+        rx.apply_params(&p);
+        assert_eq!(level(&rx), Some(0.75));
+        assert_eq!(rx.edits(), crate::patch::Edits::default(), "the strip owns the fader");
+
+        p.center = Hz::mhz(434);
+        rx.rebuild(&p).unwrap();
+        assert_eq!(level(&rx), Some(0.75));
+    }
+
+    #[test]
     fn a_bank_shows_the_chain_its_channels_run() {
         let rx = Receiver::build(&plan(2_400_000.0, Hz::mhz(433)), Sinks::default()).unwrap();
         let topo = rx.topology();
         let bank = topo.nodes.iter().find(|n| n.label == "31 kHz bank").expect("the 31 kHz bank");
-        let inner = bank.inner.as_ref().expect("what a channel runs");
+        let inner = bank.inner.first().expect("what a channel runs");
         // One stage per channel now, where there were two: it measures the
         // burst and then runs whichever front end reads it.
         assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
@@ -4544,7 +4499,9 @@ mod tests {
         // The mixer is where the frequency lives, and it has to have heard
         // about it: the offset used to be applied only when the graph was
         // built again.
-        let mix = rx.channels()[0].mix.expect("a channel has a mixer");
+        let mix = rx
+            .node_of_stage(chan_stage_id("chan_mix", &moved.channels[0], moved.eff_rate()))
+            .expect("a channel has a mixer");
         let shift = rx
             .graph
             .node(mix)
@@ -4704,7 +4661,7 @@ mod tests {
             .expect("the bus says how many inputs it has") as usize
             - 1;
         patch.connect(Source::Stage(env, 0), (derived::AUDIO, spare));
-        p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p));
+        p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p), operator_owns);
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         let strips = rx.strips();
         assert_eq!(strips.len(), 1, "{strips:?}");
@@ -4752,7 +4709,7 @@ mod tests {
             .insert("factor".into(), pipeline::ParamValue::Int(4));
         patch.connect(Source::Span, (dec, 0));
         patch.connect(Source::Stage(dec, 0), (derived::SPECTRUM, 0));
-        p.edits = crate::patch::Edits::diff(&patch, rx.base());
+        p.edits = crate::patch::Edits::diff(&patch, rx.base(), operator_owns);
         assert_eq!(p.edits.stages.len(), 1);
         assert_eq!(p.edits.links.len(), 2, "{:?}", p.edits.links);
         rx.rebuild(&p).unwrap();
@@ -4768,7 +4725,7 @@ mod tests {
         rx.rebuild(&p).unwrap();
         assert_eq!(rx.spectrum_rate(), p.eff_rate() / 4.0, "the edit was lost on retune");
         assert!(rx.bank_channels().is_empty(), "the old band's banks came along");
-        assert!(rx.modes_on(), "the new band's front end was not built");
+        assert!(running(&rx, "mode_s"), "the new band's front end was not built");
         // And what the receiver reports as the edits is what was made.
         assert_eq!(rx.edits(), p.edits);
     }
@@ -4884,17 +4841,14 @@ mod tests {
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
         let decode = topo.nodes.iter().find(|n| n.label == "Protocols").expect("the protocols");
+        let rows = topo.nodes.iter().find(|n| n.label == "Dedupe").expect("the dedupe");
         let tracker = topo.nodes.iter().find(|n| n.label == "Tracks").expect("a tracker");
-        let bus_to_decode = bus
-            .outputs
-            .iter()
-            .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(bus_to_decode, "the protocols are not fed by the bus");
-        let from_decode = decode
-            .outputs
-            .iter()
-            .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(from_decode, "the flight list is not fed by the decoded bus");
+        assert!(feeds(bus, decode), "the protocols are not fed by the bus");
+        assert!(feeds(decode, rows), "the dedupe is not fed by the protocols");
+        // And every consumer reads the far side of the dedupe, so the map
+        // sees the rows the packet list shows rather than the copies of a
+        // burst that its neighbouring channels also read.
+        assert!(feeds(rows, tracker), "the flight list is not fed by the decoded bus");
         assert_eq!(tracker.inputs[0].1.kind, pipeline::PortKind::Packets);
     }
 
@@ -4909,29 +4863,20 @@ mod tests {
         let mut p = plan(2_400_000.0, Hz(162_000_000));
         p.fronts = vec![anywhere(Front::named("ais").unwrap())];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
-        assert!(rx.ais_on(), "the AIS decoder is not running");
+        assert!(running(&rx, "ais"), "the AIS decoder is not running");
         let topo = rx.topology();
         let ais = topo.nodes.iter().find(|n| n.label == "162 AIS").expect("an AIS node");
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
         let tracker = topo.nodes.iter().find(|n| n.label == "Tracks").expect("a tracker");
-        let to_bus = ais
-            .outputs
-            .iter()
-            .any(|(slot, _)| bus.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(to_bus, "AIS does not reach the bus");
-        // And the tracker reads the far side of the protocols, which is the
-        // bus with what each packet decoded to on it.
+        assert!(feeds(ais, bus), "AIS does not reach the bus");
+        // And the tracker reads the far side of the protocols and the dedupe,
+        // which is the bus with what each packet decoded to on it and one row
+        // per burst.
         let decode = topo.nodes.iter().find(|n| n.label == "Protocols").expect("the protocols");
-        let bus_to_decode = bus
-            .outputs
-            .iter()
-            .any(|(slot, _)| decode.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(bus_to_decode, "the protocols are not fed by the bus");
-        let from_decode = decode
-            .outputs
-            .iter()
-            .any(|(slot, _)| tracker.inputs.iter().any(|(in_slot, _)| in_slot == slot));
-        assert!(from_decode, "the tracker is not fed by the decoded bus");
+        let rows = topo.nodes.iter().find(|n| n.label == "Dedupe").expect("the dedupe");
+        assert!(feeds(bus, decode), "the protocols are not fed by the bus");
+        assert!(feeds(decode, rows), "the dedupe is not fed by the protocols");
+        assert!(feeds(rows, tracker), "the tracker is not fed by the decoded bus");
     }
 
     /// A span wide enough for two protocols runs both of them, and both
@@ -4952,8 +4897,8 @@ mod tests {
         // so it is dropped rather than built into a node that would refuse
         // its own input and take the graph down.
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
-        assert!(rx.aprs_on());
-        assert!(!rx.pocsag_on(), "a channel outside the span must not be built");
+        assert!(running(&rx, "aprs"));
+        assert!(!running(&rx, "pocsag"), "a channel outside the span must not be built");
         assert!(rx.refused.is_some(), "and the interface has to be told why");
 
         // Both inside the span now.
@@ -4963,7 +4908,10 @@ mod tests {
             anywhere(Front::protocol("pocsag", 145_000_000.0)),
         ];
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
-        assert!(rx.aprs_on() && rx.pocsag_on(), "both front ends should run");
+        assert!(
+            running(&rx, "aprs") && running(&rx, "pocsag"),
+            "both front ends should run"
+        );
         let topo = rx.topology();
         let bus = topo.nodes.iter().find(|n| n.label == "Packet log").expect("a bus");
         for label in ["144.800 APRS", "145.0000 pager"] {
@@ -5486,7 +5434,7 @@ mod tx_tests {
         }
         let id = g.order().last().map(|(id, _)| id).unwrap();
         if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
                 s.finish(std::time::Duration::from_millis(50));
             }
         }
@@ -5573,7 +5521,7 @@ mod tx_tests {
         }
         let id = g.order().last().map(|(id, _)| id).unwrap();
         if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
                 s.finish(std::time::Duration::from_millis(50));
             }
         }
@@ -5643,7 +5591,7 @@ mod tx_tests {
         }
         let id = g.order().last().map(|(i, _)| i).unwrap();
         if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().and_then(|a| a.downcast_mut::<nodes::TxSinkNode>()) {
+            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
                 s.finish(std::time::Duration::from_millis(50));
             }
         }
@@ -5756,7 +5704,7 @@ mod tx_in_graph_tests {
         // nothing handed in at all.
         let plan = plan_with_tx(TxSource::Tone);
         let rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        assert!(rx.tx_radio.is_some(), "no transmitter stage in the graph");
+        assert!(rx.tx_sink().is_some(), "no transmitter stage in the graph");
         assert!(!rx.keyed());
         let topo = rx.topology();
         let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
@@ -5778,12 +5726,58 @@ mod tx_in_graph_tests {
         for _ in 0..3 {
             rx.process(&block).unwrap();
         }
+        // What went to the radio is on the transmitter's own port, which is
+        // what the monitor at the head of the receive chain reads.
+        let sent = rx.node_of_stage(derived::TX_RADIO).and_then(|id| rx.graph.buf(id.o())).and_then(|b| b.as_iq());
+        assert_eq!(sent.map(<[C32]>::len), Some(40_000), "the monitor port is empty while keyed");
         rx.unkey();
         assert!(!rx.keyed());
         assert_eq!(captured.lock().len(), 3 * 40_000 * 2, "not every block reached the radio");
-        // And the monitor holds nothing after unkey, so the mirror stops
-        // drawing a transmission that has ended.
-        assert!(rx.tx_monitor().is_empty());
+        // And nothing leaves that port once the key is up, so the monitor
+        // stops drawing a transmission that has ended.
+        rx.process(&block).unwrap();
+        let sent = rx.node_of_stage(derived::TX_RADIO).and_then(|id| rx.graph.buf(id.o())).and_then(|b| b.as_iq());
+        assert_eq!(sent.map(<[C32]>::len), Some(0));
+    }
+
+    #[test]
+    fn what_is_transmitted_is_drawn_on_the_receiver_span() {
+        // The point of the monitor: a half duplex radio hears nothing while
+        // it transmits, so the operator is shown their own signal where a
+        // receiver across the room would hear it. The plan transmits 49 kHz
+        // above the centre, so that is where it has to land.
+        let plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let (mut dev, _c) =
+            sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
+        assert!(rx.key(dev.start_tx().unwrap()));
+        let quiet = vec![C32::new(0.0, 0.0); 40_000];
+
+        // Off, which is what a full duplex radio wants: the span is what the
+        // radio delivered and nothing else.
+        rx.process(&quiet).unwrap();
+        let seen = |rx: &Receiver| -> Vec<C32> {
+            let id = rx.node_of_stage(derived::TX_MONITOR).expect("a monitor stage");
+            rx.graph.buf(id.o()).and_then(|b| b.as_iq()).unwrap_or(&[]).to_vec()
+        };
+        assert!(seen(&rx).iter().all(|s| s.norm() < 1e-6), "silence was drawn on");
+
+        rx.set_tx_monitor(true);
+        rx.process(&quiet).unwrap();
+        let span = seen(&rx);
+        assert_eq!(span.len(), quiet.len(), "the monitor did not pass the span on");
+        // Mean frequency, from the phase advance between samples. A tone
+        // through the NFM modulator sits within its deviation of the
+        // carrier, so this is where the transmission is.
+        let turn: C32 = span.windows(2).map(|w| w[1] * w[0].conj()).sum();
+        let hz = turn.arg() as f64 * plan.rate / std::f64::consts::TAU;
+        assert!((hz - 49_000.0).abs() < 500.0, "the transmission was drawn at {hz:.0} Hz");
+        // At the level the modulator produced, which is a quarter of full
+        // scale: this is a monitor and not a measurement, so what is drawn is
+        // where the transmission is and not how strong a receiver would hear
+        // it.
+        let peak = span.iter().fold(0.0f32, |a, s| a.max(s.norm()));
+        assert!((peak - 0.25).abs() < 0.01, "the transmission was drawn at {peak:.3}");
     }
 
     #[test]
@@ -5793,13 +5787,13 @@ mod tx_in_graph_tests {
         // microphone in at the rebuild is what completes it.
         let plan = plan_with_tx(TxSource::Mic);
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        assert!(rx.tx_mic.is_none(), "a mic stage was built with no microphone");
+        assert!(rx.tx_mic().is_none(), "a mic stage was built with no microphone");
 
         let src: std::sync::Arc<dyn audio::AudioSource> =
             std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
         rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src) }));
         rx.rebuild(&plan).unwrap();
-        assert!(rx.tx_mic.is_some(), "the microphone stage did not appear");
-        assert!(rx.tx_radio.is_some(), "the transmitter stage is missing with a microphone");
+        assert!(rx.tx_mic().is_some(), "the microphone stage did not appear");
+        assert!(rx.tx_sink().is_some(), "the transmitter stage is missing with a microphone");
     }
 }

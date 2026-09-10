@@ -52,10 +52,11 @@ What this rules out in practice:
   off the whole graph rather than off a named stage.
 - No behaviour keyed on a protocol name where a capability will do. Ask nodes
   what they can do; do not keep a list here of which ones can.
-- A composite node owns an inner graph and must say so through
-  `Node::subgraph`, or the work it does disappears from the view. The auto node
-  is a node holding a graph per open source; a bank is a node holding hundreds
-  of channels.
+- A composite node owns inner graphs and must say so through
+  `Node::subgraphs`, or the work it does disappears from the view. The auto
+  node is a node holding a graph per front end on every open source, and
+  reports all of them; a bank is a node holding hundreds of channels running
+  the one chain, and reports that with a count.
 
 Reading state back by downcasting is fine and is how the spectrum, the
 recorder and the capture are read. What is not fine is the work itself
@@ -257,7 +258,8 @@ every rebuild, so a value set on one by hand survives only as an edit:
 thread reads the edits back off it. A setting the strip owns (a channel's
 squelch or gain control, a bus level) is not an edit but a plan value, pulled
 back into the plan and published as `Status::levels` so the strip follows;
-`Edits::own_settings` is where that line is drawn. And a node's identity
+`chain::operator_owns`, which `Edits::diff` is given, is where that line is
+drawn. And a node's identity
 across rebuilds is its derived id, so a channel's stages are keyed by mode and
 rate and not by offset; the mixer's shift is a setting, and keying on it meant
 every channel was rebuilt, and forgot its station, whenever the dial moved

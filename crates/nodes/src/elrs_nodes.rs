@@ -37,14 +37,15 @@
 //! read. `docs/protocols.md` says how to measure another.
 
 use crate::lora_nodes::{ChirpReader, Found};
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::{Result, C32};
 use decode::elrs;
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// The one bandwidth every ExpressLRS LoRa rate on 2.4 GHz uses.
 pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
@@ -206,14 +207,11 @@ impl Simple for ElrsNode {
         while let Some(Found { packet, samples, rssi_dbfs, snr_db }) = self.reader.next() {
             let Some(bytes) = Self::payload(&packet.symbols, packet.sf) else {
                 self.refused += 1;
-                c.emit(Event::Warning {
-                    stage: "elrs".into(),
-                    message: format!(
-                        "SF{}: {} symbols that are not a packet at a rate this reads",
-                        packet.sf,
-                        packet.symbols.len()
-                    ),
-                });
+                c.warn(format!(
+                    "SF{}: {} symbols that are not a packet at a rate this reads",
+                    packet.sf,
+                    packet.symbols.len()
+                ));
                 continue;
             };
             let known = self.uid.is_some();
@@ -269,7 +267,7 @@ impl Simple for ElrsNode {
             .map(|u| u.iter().map(|b| format!("{b:02x}")).collect::<String>())
             .unwrap_or_default();
         vec![
-            Param::text("uid", uid).label("Binding UID, twelve hex digits, or blank to learn it"),
+            Param::text(UID, uid).label("Binding UID, twelve hex digits, or blank to learn it"),
             Param::float("ota_version", f64::from(self.ota_version), 3.0..=4.0)
                 .label("Firmware generation"),
         ]
@@ -277,12 +275,12 @@ impl Simple for ElrsNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "uid" => {
+            UID => {
                 let t = v.as_str().unwrap_or("").trim().to_string();
                 self.uid = parse_uid(&t);
                 self.uid_whole = self.uid.is_some();
             }
-            "phrase" => {
+            PHRASE => {
                 let t = v.as_str().unwrap_or("").trim().to_string();
                 self.uid = (!t.is_empty()).then(|| elrs::uid_from_phrase(&t));
                 self.uid_whole = self.uid.is_some();
@@ -375,7 +373,6 @@ pub fn elrs_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     };
     let mut out = Decoded::bytes("ExpressLRS", center, 0.0, packet.to_vec())
         .with_modulation(common::Modulation::Css)
-        .with_bandwidth(f64::from(khz) * 1e3)
         .with_crc(Some(true))
         .with_detail(format!("SF{sf} {kind}: {detail} link {link_id}"))
         .with_fields(fields);
@@ -413,6 +410,14 @@ impl Protocol for Elrs {
     }
     fn placement(&self) -> Placement {
         Placement::Bands(vec![(2_400_000_000.0, 2_483_500_000.0)])
+    }
+    /// A chirp like LoRa's, tagged by the front end with the link it checked
+    /// the packet against; the check is made again in `read_frame`.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Tagged
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        elrs_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn default_hz(&self) -> f64 {
         // The middle of the hop set.
@@ -568,4 +573,26 @@ mod tests {
         let s = StreamSpec::iq(2_000_000.0, Hz(868_000_000));
         assert!(n.negotiate(&PortSpec { spec: s, latency: 0 }).is_err());
     }
+}
+
+/// The setting names this stage reads.
+const UID: &str = "uid";
+const PHRASE: &str = "phrase";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "elrs",
+    summary: "ExpressLRS 2.4 GHz: an SX1280's chirps read as the packets of a \
+              control link, the link learned from its sync packet or given \
+              as a binding phrase",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = ElrsNode::new(parse_uid(s.str_or(UID, "")));
+    let phrase = s.str_or(PHRASE, "");
+    if !phrase.is_empty() {
+        Simple::set_param(&mut n, PHRASE, ParamValue::Text(phrase.into()))?;
+    }
+    Ok(Box::new(n))
 }

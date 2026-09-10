@@ -10,13 +10,14 @@
 //!
 //! # A conversation is a key
 //!
-//! Speech has no address, so one is made from what the receiver knows:
-//! `{proto}:{freq}:{chan}:{speaker}`, with the parts it does not know left
-//! empty. An FM channel on 145.5 MHz is `Audio:145500000::`; a DMR call to
-//! talkgroup 9 from radio 1234567 is `DMR:435000000:9:1234567`. That is
-//! deliberately a string and not a struct: a view looks a conversation up by
-//! it, two blocks of the same call agree on it without coordinating, and a
-//! system nobody has written yet fills in the parts it has.
+//! Speech has no address, so one is made from what the receiver knows: the
+//! system, the channel, the party called and who is talking, with the parts
+//! it does not know left out. That is [`common::ConversationKey`], the one
+//! the audio bus keys who is talking now on and the one the call list rows
+//! on, so a row here and a row there are the same conversation without
+//! either end formatting a string the other has to match. An FM channel on
+//! 145.5 MHz reads `Audio:145500000::`; a DMR call to talkgroup 9 from radio
+//! 1234567 reads `DMR:435000000:9:1234567`.
 //!
 //! # Streaming
 //!
@@ -95,7 +96,7 @@ const MAX_PER_KEY: usize = 64;
 /// One thing somebody said, or as much of it as has been heard.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Utterance {
-    pub key: String,
+    pub key: common::ConversationKey,
     /// When it started, on the receiver's clock.
     pub at: Instant,
     pub seconds: f64,
@@ -113,51 +114,10 @@ pub struct Utterance {
     pub credible: bool,
 }
 
-/// Who is talking, in the parts the receiver knows.
-///
-/// Kept as its own type so a caller builds a key rather than formatting one,
-/// which is how the two ends stay in step.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Speaker {
-    pub proto: String,
-    pub freq_hz: u64,
-    /// The talkgroup, reflector or destination, where the system has one.
-    pub channel: Option<String>,
-    /// Who is talking, where the system says.
-    pub speaker: Option<String>,
-}
-
-impl Speaker {
-    pub fn key(&self) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            self.proto,
-            self.freq_hz,
-            self.channel.as_deref().unwrap_or(""),
-            self.speaker.as_deref().unwrap_or(""),
-        )
-    }
-
-    /// The other direction, for a view holding a key and wanting the parts.
-    pub fn parse(key: &str) -> Option<Self> {
-        let mut it = key.splitn(4, ':');
-        let proto = it.next()?.to_string();
-        let freq_hz = it.next()?.parse().ok()?;
-        let some = |s: &str| (!s.is_empty()).then(|| s.to_string());
-        Some(Self {
-            proto,
-            freq_hz,
-            channel: some(it.next().unwrap_or_default()),
-            speaker: some(it.next().unwrap_or_default()),
-        })
-    }
-}
-
 /// Everything that has been said, by conversation.
 ///
-/// One for the whole program, behind [`log`]. The node writes to it and the
-/// interface reads it, and neither owns it: the node is a stage in a graph
-/// that is rebuilt on every retune, and a log that lived inside it was
+/// Owned by the receiver and lent to the node, which is a stage in a graph
+/// that is rebuilt on every retune: a log that lived inside the node was
 /// emptied every time the dial moved, which on screen was three reads and
 /// no lines. A transcript outlives any one graph the way the call list
 /// does.
@@ -167,23 +127,17 @@ impl Speaker {
 /// belong on disk is a decision that has not been made.
 #[derive(Debug, Default)]
 pub struct TranscriptLog {
-    by_key: HashMap<String, Vec<Utterance>>,
+    by_key: HashMap<common::ConversationKey, Vec<Utterance>>,
     /// Keys in the order they were last spoken on, oldest first.
-    order: Vec<String>,
+    order: Vec<common::ConversationKey>,
     /// Bumped on every push, so a reader can tell whether anything changed
     /// without comparing the contents.
     seq: u64,
 }
 
-/// The one transcript.
+/// A transcript the node writes to, the receiver holds and the interface
+/// reads.
 pub type SharedLog = std::sync::Arc<parking_lot::Mutex<TranscriptLog>>;
-
-/// The program's transcript, which every transcriber writes to and the
-/// transcript view reads.
-pub fn log() -> &'static SharedLog {
-    static LOG: std::sync::OnceLock<SharedLog> = std::sync::OnceLock::new();
-    LOG.get_or_init(Default::default)
-}
 
 impl TranscriptLog {
     /// Add or replace. One utterance is one start time on one key, so a
@@ -209,6 +163,21 @@ impl TranscriptLog {
         self.seq += 1;
     }
 
+    /// Say that the last reading of an utterance is the last word on it.
+    ///
+    /// What the worker does when there is nobody left to ask for the rest:
+    /// the node that wanted it has been rebuilt away, so the partial it
+    /// left behind is never going to be replaced and a view that draws
+    /// partials differently should stop waiting for one.
+    pub fn settle(&mut self, key: &common::ConversationKey, at: Instant) {
+        if let Some(u) = self.by_key.get_mut(key).and_then(|v| v.last_mut()) {
+            if u.at == at && !u.settled {
+                u.settled = true;
+                self.seq += 1;
+            }
+        }
+    }
+
     /// How many pushes there have been, for a reader deciding whether to
     /// look again.
     pub fn seq(&self) -> u64 {
@@ -222,18 +191,18 @@ impl TranscriptLog {
     }
 
     /// Everything said on one conversation, oldest first.
-    pub fn of(&self, key: &str) -> &[Utterance] {
+    pub fn of(&self, key: &common::ConversationKey) -> &[Utterance] {
         self.by_key.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// The last thing said on one conversation, whether or not it has
     /// finished.
-    pub fn latest(&self, key: &str) -> Option<&Utterance> {
+    pub fn latest(&self, key: &common::ConversationKey) -> Option<&Utterance> {
         self.by_key.get(key).and_then(|v| v.last())
     }
 
     /// Conversations heard, most recent last.
-    pub fn keys(&self) -> &[String] {
+    pub fn keys(&self) -> &[common::ConversationKey] {
         &self.order
     }
 
@@ -249,7 +218,7 @@ impl TranscriptLog {
 
     /// Whether anything was read on one conversation, which is what decides
     /// whether a call is worth offering a way into this log.
-    pub fn has(&self, key: &str) -> bool {
+    pub fn has(&self, key: &common::ConversationKey) -> bool {
         self.by_key.get(key).is_some_and(|v| !v.is_empty())
     }
 
@@ -357,6 +326,39 @@ pub struct Engine {
     /// on, as ids and labels.
     pub device_choice: String,
     pub devices: Vec<(String, String)>,
+    /// What the thread holding the model reports, copied whole rather than
+    /// field by field: the two structures were the same list written twice
+    /// and a field added to one of them reached the pane only when somebody
+    /// remembered to add it to the other.
+    pub health: Health,
+    /// Speech being collected right now, and on how many conversations.
+    pub holding_s: f64,
+    pub speakers: usize,
+    /// Whether the model has a window in front of it at this moment.
+    pub busy: bool,
+}
+
+/// What the thread holding the model reports about it, written there and
+/// read here.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Health {
+    pub state: ModelState,
+    /// What it is running on, once it has loaded: CPU, CUDA or Metal.
+    pub device: String,
+    /// Why that is not where it was asked to be, when it is not: the card
+    /// had no room, or opened and could not run.
+    pub note: String,
+    /// Windows read since it loaded, and what the last one cost against how
+    /// much audio it was. A receiver whose model is slower than real time is
+    /// a receiver that will fall behind, and this is where that shows.
+    pub reads: u64,
+    pub last_ms: u64,
+    pub last_audio_s: f64,
+    /// How far the download has got, while one is running: the file, the
+    /// bytes of it, and how many files are done. Without it the card says
+    /// "downloading" for as long as a multi-gigabyte model takes, which
+    /// looks exactly like a fetch that has hung.
+    pub fetch: Fetch,
     /// Whether a usable model is in that directory already, and what it
     /// takes up.
     pub present: bool,
@@ -368,36 +370,14 @@ pub struct Engine {
     /// and this is the half that is running.
     pub weights: String,
     pub flavour: String,
-    pub state: ModelState,
-    /// How far the download has got, while one is running: the file, the
-    /// bytes of it, and how many files are done. Without it the card says
-    /// "downloading" for as long as a multi-gigabyte model takes, which
-    /// looks exactly like a fetch that has hung.
-    pub fetch: Fetch,
-    /// What it is running on, once it has loaded: CPU, CUDA or Metal.
-    pub device: String,
-    /// Why that is not what Auto reached for first, when it is not: the
-    /// card had no room, or opened and could not run.
-    pub note: String,
-    /// Windows read since it loaded, and what the last one cost against how
-    /// much audio it was. A receiver whose model is slower than real time is
-    /// a receiver that will fall behind, and this is where that shows.
-    pub reads: u64,
-    pub last_ms: u64,
-    pub last_audio_s: f64,
-    /// Speech being collected right now, and on how many conversations.
-    pub holding_s: f64,
-    pub speakers: usize,
-    /// Whether the model has a window in front of it at this moment.
-    pub busy: bool,
 }
 
 impl Engine {
     /// How much faster than real time the last read was. Below 1 the model
     /// cannot keep up with somebody talking continuously.
     pub fn speed(&self) -> Option<f64> {
-        (self.last_ms > 0 && self.last_audio_s > 0.0)
-            .then(|| self.last_audio_s / (self.last_ms as f64 / 1000.0))
+        (self.health.last_ms > 0 && self.health.last_audio_s > 0.0)
+            .then(|| self.health.last_audio_s / (self.health.last_ms as f64 / 1000.0))
     }
 }
 
@@ -455,7 +435,7 @@ pub struct LiveTranscribeNode {
     /// Where the lines go: the program's one transcript, unless a test
     /// handed this node one of its own.
     log: SharedLog,
-    talking: HashMap<String, Talking>,
+    talking: HashMap<common::ConversationKey, Talking>,
     enabled: bool,
     /// Shortest run of speech worth reading. A squelch tail transcribes as
     /// "Thank you." with high confidence.
@@ -482,24 +462,6 @@ pub struct LiveTranscribeNode {
     /// What the model is doing, written by the thread that has it.
     #[cfg(feature = "stt")]
     health: std::sync::Arc<parking_lot::Mutex<Health>>,
-}
-
-/// The worker thread's half of [`Engine`].
-#[cfg(feature = "stt")]
-#[derive(Debug, Default)]
-struct Health {
-    state: ModelState,
-    device: String,
-    /// Why it is not where it was asked to be, when it is not.
-    note: String,
-    reads: u64,
-    last_ms: u64,
-    last_audio_s: f64,
-    fetch: Fetch,
-    present: bool,
-    bytes: u64,
-    weights: String,
-    flavour: String,
 }
 
 #[cfg(feature = "stt")]
@@ -531,7 +493,7 @@ impl Default for LiveTranscribeNode {
 impl LiveTranscribeNode {
     pub fn new() -> Self {
         Self {
-            log: log().clone(),
+            log: SharedLog::default(),
             talking: HashMap::new(),
             enabled: true,
             min_speech_s: 0.6,
@@ -639,18 +601,7 @@ impl LiveTranscribeNode {
             e.models = self.models();
             e.device_choice = self.device.id();
             e.devices = stt::devices().into_iter().map(|d| (d.choice.id(), d.label)).collect();
-            let h = self.health.lock();
-            e.state = h.state.clone();
-            e.device = h.device.clone();
-            e.note = h.note.clone();
-            e.reads = h.reads;
-            e.last_ms = h.last_ms;
-            e.last_audio_s = h.last_audio_s;
-            e.fetch = h.fetch.clone();
-            e.present = h.present;
-            e.bytes = h.bytes;
-            e.weights = h.weights.clone();
-            e.flavour = h.flavour.clone();
+            e.health = self.health.lock().clone();
         }
         e
     }
@@ -669,11 +620,16 @@ impl LiveTranscribeNode {
         self
     }
 
-    /// Write to a transcript of the caller's own rather than the program's,
-    /// so a test reads what it produced and nothing else.
+    /// Write into the caller's transcript rather than the one this node was
+    /// built with. The receiver hands its own in on every rebuild, so what
+    /// was said outlives the graph that heard it.
     pub fn into_log(mut self, log: SharedLog) -> Self {
-        self.log = log;
+        self.set_log(log);
         self
+    }
+
+    pub fn set_log(&mut self, log: SharedLog) {
+        self.log = log;
     }
 
     pub fn log(&self) -> &SharedLog {
@@ -685,7 +641,13 @@ impl LiveTranscribeNode {
     ///
     /// Split out from `process` because the decision of what is speech and
     /// when it ended is worth testing without a model behind it.
-    fn collect(&mut self, key: String, v: &common::Voice, block_s: f64, at: Instant) -> bool {
+    fn collect(
+        &mut self,
+        key: common::ConversationKey,
+        v: &common::Voice,
+        block_s: f64,
+        at: Instant,
+    ) -> bool {
         let loud = v.pcm.iter().any(|s| s.abs() > FLOOR);
         let entry = self.talking.entry(key).or_insert_with(|| Talking {
             pcm: Vec::new(),
@@ -728,7 +690,7 @@ impl LiveTranscribeNode {
     /// nothing in twice is left alone. Squelch noise is loud enough to
     /// collect and there is no threshold that tells it from speech; the model
     /// already decides, and this is that decision being used.
-    fn read_back(&mut self, key: &str, anything: bool) {
+    fn read_back(&mut self, key: &common::ConversationKey, anything: bool) {
         let Some(t) = self.talking.get_mut(key) else {
             return;
         };
@@ -744,20 +706,9 @@ impl LiveTranscribeNode {
     }
 
     /// Seconds of audio held for a key, for tests and for a status line.
-    pub fn held_seconds(&self, key: &str) -> f64 {
+    pub fn held_seconds(&self, key: &common::ConversationKey) -> f64 {
         self.talking.get(key).map(|t| t.pcm.len() as f64 / t.rate).unwrap_or(0.0)
     }
-}
-
-/// The key one block of speech belongs to.
-pub fn key_of(v: &common::Voice) -> String {
-    Speaker {
-        proto: v.system.to_string(),
-        freq_hz: v.channel_hz.max(0.0) as u64,
-        channel: v.to.clone(),
-        speaker: v.from.clone(),
-    }
-    .key()
 }
 
 #[cfg(feature = "stt")]
@@ -766,7 +717,7 @@ mod work {
     use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 
     pub(super) struct Job {
-        pub key: String,
+        pub key: common::ConversationKey,
         pub at: Instant,
         pub pcm: Vec<f32>,
         pub rate: f64,
@@ -778,7 +729,7 @@ mod work {
     /// it into the transcript directly, so a read that finishes after the
     /// node that asked for it has gone is still written down.
     pub(super) struct Done {
-        pub key: String,
+        pub key: common::ConversationKey,
         pub at: Instant,
         pub settled: bool,
         /// Whether the model heard speech, or what went wrong.
@@ -853,10 +804,7 @@ mod work {
                     Err(e) => {
                         if !self.reported {
                             self.reported = true;
-                            c.emit(pipeline::event::Event::Warning {
-                                stage: "transcribe_live".into(),
-                                message: format!("{e}"),
-                            });
+                            c.warn(format!("{e}"));
                         }
                     }
                 }
@@ -867,7 +815,7 @@ mod work {
         /// speech has stopped, another partial if it is still going and
         /// enough has arrived since the last one, and nothing while the model
         /// still has the previous window.
-        pub(super) fn pump(&mut self, key: &str) {
+        pub(super) fn pump(&mut self, key: &common::ConversationKey) {
             let Some(t) = self.talking.get(key) else {
                 return;
             };
@@ -896,7 +844,7 @@ mod work {
         }
 
         /// Settle the speech held so far and carry the rest into a new line.
-        pub(super) fn cut(&mut self, key: &str) {
+        pub(super) fn cut(&mut self, key: &common::ConversationKey) {
             let Some(t) = self.talking.get_mut(key) else {
                 return;
             };
@@ -907,7 +855,7 @@ mod work {
             let head: Vec<f32> = t.pcm[..at].to_vec();
             let tail: Vec<f32> = t.pcm[at..].to_vec();
             let job =
-                Job { key: key.to_string(), at: t.started, pcm: head, rate: t.rate, settled: true };
+                Job { key: key.clone(), at: t.started, pcm: head, rate: t.rate, settled: true };
             if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
                 if let Some(t) = self.talking.get_mut(key) {
                     // The tail is a new utterance, with its own start time,
@@ -922,7 +870,7 @@ mod work {
         }
 
         /// Send what is held for a key to the model.
-        pub(super) fn ask(&mut self, key: &str, settled: bool) {
+        pub(super) fn ask(&mut self, key: &common::ConversationKey, settled: bool) {
             let Some(t) = self.talking.get(key) else {
                 return;
             };
@@ -930,7 +878,7 @@ mod work {
                 return;
             }
             let job = Job {
-                key: key.to_string(),
+                key: key.clone(),
                 at: t.started,
                 pcm: t.pcm.clone(),
                 rate: t.rate,
@@ -1012,7 +960,8 @@ mod work {
         while let Ok(job) = jobs.recv() {
             let seconds = job.pcm.len() as f64 / job.rate.max(1.0);
             if let Some(dir) = &dump {
-                let name = format!("{dumped:04}_{}_{seconds:.1}s.wav", job.key.replace(':', "_"));
+                let key = job.key.to_string().replace(':', "_");
+                let name = format!("{dumped:04}_{key}_{seconds:.1}s.wav");
                 let speech = common::Speech { pcm: job.pcm.clone(), rate: job.rate };
                 let _ = crate::audiobus::write_wav(&dir.join(name), &speech);
                 dumped += 1;
@@ -1061,13 +1010,7 @@ mod work {
                 // read is then the last word on that utterance, since
                 // nothing will ask for the rest of it.
                 if !job.settled {
-                    let mut log = log.lock();
-                    if let Some(u) = log.by_key.get_mut(&job.key).and_then(|v| v.last_mut()) {
-                        if u.at == job.at {
-                            u.settled = true;
-                            log.seq += 1;
-                        }
-                    }
+                    log.lock().settle(&job.key, job.at);
                 }
                 break;
             }
@@ -1103,9 +1046,9 @@ impl Simple for LiveTranscribeNode {
         }
         let at = Instant::now();
         let block_s = _c.block_seconds;
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen: Vec<common::ConversationKey> = Vec::new();
         for v in i.as_voice().unwrap_or(&[]) {
-            let key = key_of(v);
+            let key = common::ConversationKey::of(v);
             if self.collect(key.clone(), v, block_s, at) {
                 if let Some(t) = self.talking.get_mut(&key) {
                     t.finished = true;
@@ -1238,27 +1181,23 @@ mod tests {
         }
     }
 
+    /// The key one block of speech belongs to, and what a person reads of
+    /// it: the parts stay parts, so a view holding one says who was talking
+    /// without parsing anything back out.
     #[test]
     fn a_key_says_what_the_receiver_knows_and_no_more() {
         let fm = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.1, 8);
-        assert_eq!(key_of(&fm), "Audio:145500000::");
+        let key = common::ConversationKey::of(&fm);
+        assert_eq!(key.system, crate::audiobus::ANALOGUE);
+        assert_eq!(key.channel_hz, 145_500_000);
+        assert_eq!(key.to, None);
+        assert_eq!(key.from, None);
+        assert_eq!(key.to_string(), "Audio:145500000::");
         let dmr = voice("DMR", 435_000_000.0, Some("9"), Some("1234567"), 0.1, 8);
-        assert_eq!(key_of(&dmr), "DMR:435000000:9:1234567");
-    }
-
-    /// The parts come back out, so a view holding a key can say who was
-    /// talking without keeping a second copy of it.
-    #[test]
-    fn a_key_reads_back_as_its_parts() {
-        let s = Speaker::parse("DMR:435000000:9:1234567").expect("a key");
-        assert_eq!(s.proto, "DMR");
-        assert_eq!(s.freq_hz, 435_000_000);
-        assert_eq!(s.channel.as_deref(), Some("9"));
-        assert_eq!(s.speaker.as_deref(), Some("1234567"));
-        let bare = Speaker::parse("Audio:145500000::").expect("a key");
-        assert_eq!(bare.channel, None);
-        assert_eq!(bare.speaker, None);
-        assert_eq!(bare.key(), "Audio:145500000::");
+        let key = common::ConversationKey::of(&dmr);
+        assert_eq!(key.to.as_deref(), Some("9"));
+        assert_eq!(key.from.as_deref(), Some("1234567"));
+        assert_eq!(key.to_string(), "DMR:435000000:9:1234567");
     }
 
     /// Somebody talking, pausing for breath, and stopping. The pause is not
@@ -1267,7 +1206,7 @@ mod tests {
     #[test]
     fn a_pause_for_breath_does_not_end_an_utterance() {
         let mut n = LiveTranscribeNode::new();
-        let key = "Audio:145500000::".to_string();
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
         let at = Instant::now();
         let block = 0.1;
         let loud = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.2, 800);
@@ -1294,9 +1233,11 @@ mod tests {
         let mut n = LiveTranscribeNode::new();
         let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
         for _ in 0..100 {
-            assert!(!n.collect("Audio:145500000::".into(), &quiet, 0.1, Instant::now()));
+            let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+            assert!(!n.collect(key, &quiet, 0.1, Instant::now()));
         }
-        assert_eq!(n.held_seconds("Audio:145500000::"), 0.0);
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        assert_eq!(n.held_seconds(&key), 0.0);
     }
 
     /// A partial is replaced by the next reading of the same utterance; a
@@ -1306,7 +1247,7 @@ mod tests {
         let mut log = TranscriptLog::default();
         let at = Instant::now();
         let u = |text: &str, settled: bool| Utterance {
-            key: "Audio:145500000::".into(),
+            key: common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0),
             at,
             seconds: 1.0,
             text: text.into(),
@@ -1314,13 +1255,14 @@ mod tests {
             confidence: -0.2,
             credible: true,
         };
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
         log.push(u("all stations", false));
         log.push(u("all stations this is", false));
-        assert_eq!(log.of("Audio:145500000::").len(), 1);
-        assert_eq!(log.latest("Audio:145500000::").unwrap().text, "all stations this is");
+        assert_eq!(log.of(&key).len(), 1);
+        assert_eq!(log.latest(&key).unwrap().text, "all stations this is");
         log.push(u("All stations, this is EI2ABC.", true));
-        assert_eq!(log.of("Audio:145500000::").len(), 1, "the settled text is the same utterance");
-        assert!(log.latest("Audio:145500000::").unwrap().settled);
+        assert_eq!(log.of(&key).len(), 1, "the settled text is the same utterance");
+        assert!(log.latest(&key).unwrap().settled);
     }
 
     /// The whole path with a model behind it: speech in as voice blocks,
@@ -1357,7 +1299,7 @@ mod tests {
         // Silence on the end, so the utterance is finished rather than still
         // being spoken when the samples run out.
         blocks.extend((0..20).map(|_| vec![0.0; block]));
-        let key = "Audio:145500000::";
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
         for b in blocks {
             let payload = Payload::Voice(vec![common::Voice {
                 system: crate::audiobus::ANALOGUE,
@@ -1375,7 +1317,7 @@ mod tests {
         // The model is on its own thread, so the answer arrives on a later
         // block the way it does in the receiver.
         for _ in 0..600 {
-            if n.log().lock().latest(key).is_some_and(|u| u.settled) {
+            if n.log().lock().latest(&key).is_some_and(|u| u.settled) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1384,7 +1326,7 @@ mod tests {
             c.block_seconds = 0.1;
             n.process(&Payload::Voice(Vec::new()), &mut out, &mut c).unwrap();
         }
-        let u = n.log().lock().latest(key).cloned().expect("nothing was transcribed");
+        let u = n.log().lock().latest(&key).cloned().expect("nothing was transcribed");
         println!("{:?} {:?}", u.settled, u.text);
         assert!(u.text.to_lowercase().contains("country"), "read as {:?}", u.text);
     }
@@ -1416,7 +1358,7 @@ mod tests {
         // The model up first, so the read below is the model reading and
         // not the model loading.
         n.set_param("load", ParamValue::Bool(true)).unwrap();
-        while n.engine().state != ModelState::Ready {
+        while n.engine().health.state != ModelState::Ready {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut events = Vec::new();
@@ -1449,14 +1391,14 @@ mod tests {
         // would have asked for it again as settled is beside the point, since
         // it is not there to ask.
         drop(n);
-        let key = "Audio:145500000::";
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
         for _ in 0..600 {
-            if log.lock().latest(key).is_some() {
+            if log.lock().latest(&key).is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let u = log.lock().latest(key).cloned().expect("the reading died with the node");
+        let u = log.lock().latest(&key).cloned().expect("the reading died with the node");
         // The first partial, since that is what was in flight: the node was
         // gone before it could ask for the rest, so this is the last word.
         assert!(u.text.to_lowercase().contains("fellow"), "read as {:?}", u.text);
@@ -1474,7 +1416,7 @@ mod tests {
         let window = |text: &str| {
             vec![
                 Utterance {
-                    key: "Audio:145500000::".into(),
+                    key: common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0),
                     at,
                     seconds: 2.0,
                     text: text.into(),
@@ -1483,7 +1425,9 @@ mod tests {
                     credible: true,
                 },
                 Utterance {
-                    key: "DMR:435000000:9:1234567".into(),
+                    key: common::ConversationKey::new("DMR", 435_000_000.0)
+                        .to(Some("9".into()))
+                        .from(Some("1234567".into())),
                     at: at + Duration::from_secs(3),
                     seconds: 1.0,
                     text: "go ahead".into(),
@@ -1506,10 +1450,14 @@ mod tests {
             log.push(Utterance { settled: true, text: format!("{} over", u.text), ..u });
         }
         assert_eq!(log.len(), 2);
-        assert_eq!(log.of("DMR:435000000:9:1234567").len(), 1);
-        assert_eq!(log.latest("DMR:435000000:9:1234567").unwrap().text, "go ahead over");
-        assert!(log.has("Audio:145500000::"));
-        assert!(!log.has("Audio:433000000::"), "a conversation nobody spoke on");
+        let dmr = common::ConversationKey::new("DMR", 435_000_000.0)
+            .to(Some("9".into()))
+            .from(Some("1234567".into()));
+        assert_eq!(log.of(&dmr).len(), 1);
+        assert_eq!(log.latest(&dmr).unwrap().text, "go ahead over");
+        let fm = |hz: f64| common::ConversationKey::new(crate::audiobus::ANALOGUE, hz);
+        assert!(log.has(&fm(145_500_000.0)));
+        assert!(!log.has(&fm(433_000_000.0)), "a conversation nobody spoke on");
     }
 
     /// The model can be brought up without waiting for somebody to talk, and
@@ -1525,23 +1473,23 @@ mod tests {
         }
         let mut n = LiveTranscribeNode::new().in_dir(&dir);
         let cold = n.engine();
-        assert_eq!(cold.state, ModelState::Cold);
-        assert!(cold.present, "the files are in {}", dir.display());
-        assert!(cold.bytes > 0);
-        assert!(!cold.weights.is_empty(), "what is on disc is not named");
-        assert_eq!(cold.reads, 0);
+        assert_eq!(cold.health.state, ModelState::Cold);
+        assert!(cold.health.present, "the files are in {}", dir.display());
+        assert!(cold.health.bytes > 0);
+        assert!(!cold.health.weights.is_empty(), "what is on disc is not named");
+        assert_eq!(cold.health.reads, 0);
 
         n.set_param("load", ParamValue::Bool(true)).unwrap();
         let waited = std::time::Instant::now();
-        while n.engine().state != ModelState::Ready && waited.elapsed().as_secs() < 120 {
+        while n.engine().health.state != ModelState::Ready && waited.elapsed().as_secs() < 120 {
             std::thread::sleep(Duration::from_millis(100));
         }
         let up = n.engine();
-        assert_eq!(up.state, ModelState::Ready, "the model never loaded");
+        assert_eq!(up.health.state, ModelState::Ready, "the model never loaded");
         assert!(
-            ["CPU", "GPU", "Metal"].iter().any(|d| up.device.starts_with(d)),
+            ["CPU", "GPU", "Metal"].iter().any(|d| up.health.device.starts_with(d)),
             "running on {:?}",
-            up.device
+            up.health.device
         );
     }
 
@@ -1576,7 +1524,7 @@ mod tests {
     #[test]
     fn a_channel_the_model_finds_nothing_in_is_left_alone() {
         let mut n = LiveTranscribeNode::new();
-        let key = "Audio:145500000::".to_string();
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
         let noise = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.02, 800);
         let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
         for _ in 0..50 {
@@ -1606,7 +1554,7 @@ mod tests {
         let mut log = TranscriptLog::default();
         for i in 0..(MAX_KEYS + 8) {
             log.push(Utterance {
-                key: format!("Audio:{i}::"),
+                key: common::ConversationKey::new(crate::audiobus::ANALOGUE, i as f64),
                 at: Instant::now(),
                 seconds: 1.0,
                 text: format!("{i}"),
@@ -1615,11 +1563,9 @@ mod tests {
                 credible: true,
             });
         }
+        let key = |i: usize| common::ConversationKey::new(crate::audiobus::ANALOGUE, i as f64);
         assert_eq!(log.keys().len(), MAX_KEYS);
-        assert!(log.of("Audio:0::").is_empty(), "the oldest conversation was kept");
-        assert_eq!(
-            log.latest(&format!("Audio:{}::", MAX_KEYS + 7)).unwrap().text,
-            format!("{}", MAX_KEYS + 7)
-        );
+        assert!(log.of(&key(0)).is_empty(), "the oldest conversation was kept");
+        assert_eq!(log.latest(&key(MAX_KEYS + 7)).unwrap().text, format!("{}", MAX_KEYS + 7));
     }
 }
