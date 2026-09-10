@@ -241,13 +241,19 @@ impl BurstFinder {
         self.correlate(iq);
         // A running sum of the window's energy, for the normalisation.
         let mut energy: f32 = iq[..fft].iter().map(|c| c.norm_sqr()).sum();
+        // The same test as the score against the threshold, squared, so a
+        // position that is not a peak costs no square root and no divide.
+        // Every sample of the source is tested and on a busy band almost all
+        // of them clear the energy gate, so the two roots a sample were most
+        // of what the search cost.
+        let bar = (self.threshold * self.t_energy).powi(2);
         let mut out: Vec<Found> = Vec::new();
         let mut best: Option<Found> = None;
         for n in 0..iq.len() - fft {
             if n > 0 {
                 energy += iq[n + fft - 1].norm_sqr() - iq[n - 1].norm_sqr();
             }
-            if energy > gate {
+            if energy > gate && self.corr[n].norm_sqr() > bar * energy {
                 let score = self.corr[n].norm() / (energy.sqrt() * self.t_energy);
                 if score > self.threshold {
                     let here = Found {
