@@ -482,3 +482,51 @@ punctuates it differently still has to contain those digits and that word.
 channel_hz = 446_049_100
 words = ["123", "test"]
 utterances = 1
+
+[[capture]]
+name = "ism24_busy_2431M_61440k.cs16"
+sha256 = "6f255fb491a4b7235cc69917661a55c73e92d20aa1015f95e26eb508a03d9e52"
+url = "https://nostr.download/6f255fb491a4b7235cc69917661a55c73e92d20aa1015f95e26eb508a03d9e52.xz"
+compression = "xz"
+center_hz = 2_431_000_000
+rate_sps = 61_440_000
+format = "cs16"
+description = """
+Two seconds of a busy 2.4 GHz band, the whole of it: a LimeSDR at 61.44 MS/s
+centred on 2431 MHz, so the span runs from 2400.3 to 2461.7 MHz. Cut whole
+out of a longer recording made at a desk in a flat, not clipped to bursts,
+because what it is evidence of is everything transmitting at once rather than
+any one transmission.
+
+What is in it, as the receiver reads it: an ExpressLRS handset (link 6f37,
+100 Hz Full, SF7 over 812.5 kHz) hopping through thirty of its eighty
+channels and leaving 107 decoded RC packets; Wi-Fi frames on channels 1, 6
+and 11; Bluetooth advertising on channels 37 and 38. Nothing here was decoded
+by another implementation, so the packet counts are this receiver's own and
+are pinned to catch a change rather than to confirm a reading. What checks
+itself is the ExpressLRS CRC, seeded from the two UID bytes recovered from
+the packets themselves: 107 packets agreeing on one link id is not a
+coincidence a broken decoder produces.
+
+It earns its place by being too much at once. The detector opens fifty-three
+sources in two seconds, most under a millisecond long, and twenty-nine of
+them are one handset: before the lock layer each of those got a burst
+classifier, a LoRa decoder and an ExpressLRS decoder built, run and torn
+down, and the receiver ran at 0.38 times real time on four threads, worst
+block 0.02x. With the link locked 55 ms in, that is 0.47x and 0.03x. It is
+still on the KNOWN_SLOW list in `every_capture_runs_faster_than_real_time`,
+and the reason there says which four things a block goes on. A capture that
+holds one signal at a time cannot show any of this: every capture in the
+corpus that keeps up is one transmitter with a quiet band around it.
+
+The band is a real one at a real place and time. The Wi-Fi frames carry the
+hardware addresses and network names of whatever was on the air in that
+flat, and the Bluetooth advertisements the addresses of whatever was in the
+room; treat them as published.
+"""
+
+[capture.expect]
+elrs_link = "6f37"
+elrs_rows = 107
+elrs_hop_visits = 30
+sources_opened = 53

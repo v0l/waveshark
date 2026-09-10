@@ -209,6 +209,13 @@ the code is in the commit log; what a decoder can and cannot do is in
   failed.
 
 ### Changed
+- A hopping link is read as one transmitter rather than as a new signal on
+  every channel it visits. Once an ExpressLRS handset's link has been read
+  once, the receiver knows the eighty channels it uses and hands each visit
+  straight to the ExpressLRS decoder, without measuring the burst or building
+  anything else on it. A busy 2.4 GHz band keeps up better for it, and the
+  handset is named on every hop it is heard on. If the guess starts being
+  wrong the receiver notices, says so, and goes back to looking.
 - The device database's record switch is on the devices view, beside the
   export and feed buttons, as well as in Setup next to the GPS.
 
