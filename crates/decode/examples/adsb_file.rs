@@ -27,10 +27,7 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3.0),
-        min_level: std::env::var("MODES_LEVEL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.004),
+        min_level: std::env::var("MODES_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.004),
     };
     let mut d = ModeSDetector::new(rate, cfg);
     let mut frames = Vec::new();

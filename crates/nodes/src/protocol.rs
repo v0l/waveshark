@@ -288,10 +288,7 @@ impl Origin {
             "span_origin_sample".into(),
             pipeline::param::ParamValue::Float(self.span_sample as f64),
         );
-        s.insert(
-            "span_rate_hz".into(),
-            pipeline::param::ParamValue::Float(self.span_rate_hz),
-        );
+        s.insert("span_rate_hz".into(), pipeline::param::ParamValue::Float(self.span_rate_hz));
     }
 
     pub fn read(s: &pipeline::registry::Settings) -> Option<Self> {
@@ -395,11 +392,7 @@ pub trait Protocol: Send + Sync {
 
     /// The markers the spectrum draws for a decoder placed at `hz`.
     fn marks(&self, hz: f64) -> Vec<Mark> {
-        vec![Mark {
-            hz,
-            width_hz: self.shape().widths[0],
-            label: self.label().to_uppercase(),
-        }]
+        vec![Mark { hz, width_hz: self.shape().widths[0], label: self.label().to_uppercase() }]
     }
 
     fn stickiness(&self) -> Stickiness {
@@ -447,10 +440,7 @@ pub trait Protocol: Send + Sync {
     /// widths unless the protocol says otherwise; the frequency is for a
     /// protocol keyed differently in different bands.
     fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
-        self.shape()
-            .widths
-            .iter()
-            .any(|w| source_width_hz <= w * CHANNEL_WIDTH_TOLERANCE)
+        self.shape().widths.iter().any(|w| source_width_hz <= w * CHANNEL_WIDTH_TOLERANCE)
     }
 
     /// The channel widths to try on a source at `hz` measured

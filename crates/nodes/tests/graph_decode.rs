@@ -15,9 +15,7 @@ use sources::FileSource;
 const FIXTURE: &str = "fineoffset_wh1080_433.92M_250k.cu8";
 
 fn fixture() -> Option<common::IqBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata")
-        .join(FIXTURE);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(FIXTURE);
     if !p.exists() {
         return None;
     }
@@ -45,9 +43,7 @@ fn chain_specs() -> Vec<NodeSpec> {
     vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -58,9 +54,7 @@ fn specs_with_unknown() -> Vec<NodeSpec> {
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
         NodeSpec::new("real_decimate").i("factor", 20),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -108,10 +102,7 @@ fn the_graph_negotiates_rates_and_kinds_correctly() {
     let g = build_chain(spec, &chain_specs(), &registry()).unwrap();
 
     let names: Vec<&str> = g.order().map(|(_, n)| n).collect();
-    assert_eq!(
-        names,
-        vec!["decimate", "envelope", "pulse_detect", "protocol_decode"]
-    );
+    assert_eq!(names, vec!["decimate", "envelope", "pulse_detect", "protocol_decode"]);
     assert_eq!(g.output_spec().kind, pipeline::PortKind::Bytes);
 }
 
@@ -120,28 +111,18 @@ fn a_misordered_chain_fails_at_build_with_an_actionable_message() {
     // Pulse detection before the envelope: the classic mistake.
     let specs = vec![NodeSpec::new("pulse_detect"), NodeSpec::new("envelope")];
     let spec = StreamSpec::iq(250_000.0, Hz::mhz(433));
-    let err = build_chain(spec, &specs, &registry())
-        .unwrap_err()
-        .to_string();
+    let err = build_chain(spec, &specs, &registry()).unwrap_err().to_string();
     assert!(err.contains("pulse_detect"), "{err}");
-    assert!(
-        err.contains("envelope"),
-        "error should say how to fix it: {err}"
-    );
+    assert!(err.contains("envelope"), "error should say how to fix it: {err}");
 }
 
 #[test]
 fn an_unknown_node_type_lists_what_is_available() {
     let specs = vec![NodeSpec::new("magic_decoder")];
     let spec = StreamSpec::iq(250_000.0, Hz::mhz(433));
-    let err = build_chain(spec, &specs, &registry())
-        .unwrap_err()
-        .to_string();
+    let err = build_chain(spec, &specs, &registry()).unwrap_err().to_string();
     assert!(err.contains("magic_decoder"), "{err}");
-    assert!(
-        err.contains("pulse_detect"),
-        "should list known types: {err}"
-    );
+    assert!(err.contains("pulse_detect"), "should list known types: {err}");
 }
 
 #[test]
@@ -156,9 +137,7 @@ fn retuning_a_parameter_at_runtime_changes_behaviour() {
     let bad = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 600.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 600.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &bad, &registry()).unwrap();
@@ -178,11 +157,7 @@ fn retuning_a_parameter_at_runtime_changes_behaviour() {
     g.reset();
 
     let events = events_of(&mut g, &buf.samples);
-    assert_eq!(
-        decodes_from(&events).len(),
-        1,
-        "restoring the reset gap should decode again"
-    );
+    assert_eq!(decodes_from(&events).len(), 1, "restoring the reset gap should decode again");
 }
 
 #[test]
@@ -199,9 +174,7 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
         // Decimating the envelope by 20 scales every pulse width by 20 and
         // makes the frame unmatchable.
         NodeSpec::new("real_decimate").i("factor", 20),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
@@ -214,10 +187,7 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
             _ => None,
         })
         .collect();
-    assert!(
-        !packets.is_empty(),
-        "an unknown burst must be reported: {events:?}"
-    );
+    assert!(!packets.is_empty(), "an unknown burst must be reported: {events:?}");
     for d in &packets {
         assert_eq!(d.protocol, "unknown", "nothing should have matched: {d:?}");
         assert_eq!(
@@ -235,10 +205,8 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
     // How strongly it was received is on the burst the decode was made from
     // and not copied onto the conclusion, so this is where a consumer reads
     // it: the detector's own output, node 3 of the chain above.
-    let bursts = g
-        .buf(pipeline::NodeId(3).o())
-        .and_then(|p| p.as_pulses())
-        .expect("the detector's bursts");
+    let bursts =
+        g.buf(pipeline::NodeId(3).o()).and_then(|p| p.as_pulses()).expect("the detector's bursts");
     assert_eq!(
         bursts.len(),
         packets.len(),
@@ -261,19 +229,15 @@ fn turning_off_unknown_reporting_silences_them_without_touching_decodes() {
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
 
-    let unknown = events
-        .iter()
-        .filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown"))
-        .count();
+    let unknown =
+        events.iter().filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown")).count();
     assert_eq!(unknown, 0, "unknown reporting was turned off");
 
     // And with it on, the same chain does report them.
     let mut g = build_chain(spec, &specs_with_unknown(), &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown")),
+        events.iter().any(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown")),
         "the same chain must report unknowns when asked to"
     );
 }
@@ -282,18 +246,8 @@ fn turning_off_unknown_reporting_silences_them_without_touching_decodes() {
 fn the_registry_describes_every_node_for_a_ui() {
     let r = registry();
     let names: Vec<&str> = r.list().map(|d| d.name).collect();
-    for want in [
-        "mixer",
-        "decimate",
-        "envelope",
-        "fm_demod",
-        "pulse_detect",
-        "protocol_decode",
-    ] {
-        assert!(
-            names.contains(&want),
-            "registry is missing {want}: {names:?}"
-        );
+    for want in ["mixer", "decimate", "envelope", "fm_demod", "pulse_detect", "protocol_decode"] {
+        assert!(names.contains(&want), "registry is missing {want}: {names:?}");
     }
     // Categories let a UI group the palette without hard-coding node names.
     assert!(r.by_category(pipeline::Category::Decode).count() >= 2);
@@ -335,9 +289,7 @@ fn a_mistuned_detector_says_what_it_discarded_and_which_knob_to_turn() {
     let specs = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 600.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 600.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
@@ -355,10 +307,7 @@ fn a_mistuned_detector_says_what_it_discarded_and_which_knob_to_turn() {
         })
         .expect("a mistuned detector must not fail silently");
     assert!(msg.contains("discarded"), "{msg}");
-    assert!(
-        msg.contains("min_pulses") || msg.contains("reset_us"),
-        "must name a knob: {msg}"
-    );
+    assert!(msg.contains("min_pulses") || msg.contains("reset_us"), "must name a knob: {msg}");
 }
 
 #[test]
@@ -372,9 +321,7 @@ fn the_ask_detector_decodes_the_real_capture_too() {
     let specs = vec![
         NodeSpec::new("decimate").i("factor", 8),
         NodeSpec::new("envelope"),
-        NodeSpec::new("ask_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("ask_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ];
     let mut g = build_chain(spec, &specs, &registry()).expect("build chain");
@@ -419,10 +366,7 @@ fn an_unreadable_burst_is_still_reported() {
 
     let mut events = Vec::new();
     let mut tags = Vec::new();
-    let mut out = [
-        Payload::empty_of(PortKind::Pulses),
-        Payload::empty_of(PortKind::Packets),
-    ];
+    let mut out = [Payload::empty_of(PortKind::Pulses), Payload::empty_of(PortKind::Packets)];
     let inputs = [port];
     let mut ctx = NodeCtx::new(0, &inputs, &[], &mut events, &mut tags);
     let mut input = Payload::empty_of(PortKind::Iq);
@@ -444,19 +388,10 @@ fn an_unreadable_burst_is_still_reported() {
             _ => None,
         })
         .collect();
-    assert!(
-        !reported.is_empty(),
-        "a burst with no front end produced no log entry: {events:?}"
-    );
+    assert!(!reported.is_empty(), "a burst with no front end produced no log entry: {events:?}");
     let d = reported[0];
-    assert!(
-        d.modulation.is_some(),
-        "reported without naming the modulation"
-    );
-    assert!(
-        d.detail.is_some(),
-        "reported without saying why nothing read it"
-    );
+    assert!(d.modulation.is_some(), "reported without naming the modulation");
+    assert!(d.detail.is_some(), "reported without saying why nothing read it");
 
     // And the other direction: an entry is a claim somebody reads, so a
     // classifier that is unsure must stay quiet. Raising the bar above what
@@ -469,10 +404,7 @@ fn an_unreadable_burst_is_still_reported() {
     Node::negotiate(&mut node, std::slice::from_ref(&port)).expect("negotiate");
     let mut events = Vec::new();
     let mut tags = Vec::new();
-    let mut out = [
-        Payload::empty_of(PortKind::Pulses),
-        Payload::empty_of(PortKind::Packets),
-    ];
+    let mut out = [Payload::empty_of(PortKind::Pulses), Payload::empty_of(PortKind::Packets)];
     let inputs = [port];
     let mut ctx = NodeCtx::new(0, &inputs, &[], &mut events, &mut tags);
     Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("process");
@@ -480,8 +412,5 @@ fn an_unreadable_burst_is_still_reported() {
         .iter()
         .filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unidentified"))
         .collect();
-    assert!(
-        still.is_empty(),
-        "reported despite the confidence bar: {still:?}"
-    );
+    assert!(still.is_empty(), "reported despite the confidence bar: {still:?}");
 }

@@ -7,24 +7,18 @@ use pipeline::StreamSpec;
 
 fn run(label: &str, iq: &[C32], rate: f64, center: f64, channel: f64) {
     let spec = StreamSpec::iq(rate, common::Hz(center as u64));
-    let mut g = build_chain(
-        spec,
-        &[NodeSpec::new("dmr").f("channel_hz", channel)],
-        &registry(),
-    )
-    .unwrap();
+    let mut g =
+        build_chain(spec, &[NodeSpec::new("dmr").f("channel_hz", channel)], &registry()).unwrap();
     let (mut frames, mut voice) = (0usize, 0usize);
-    let bs: usize = std::env::var("BLOCK")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(16_384);
+    let bs: usize = std::env::var("BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(16_384);
     for b in iq.chunks(bs) {
         g.feed_iq(b).unwrap();
         if let Some(p) = g.output().as_packets() {
             for p in p {
                 frames += 1;
                 voice += p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0);
-                if let common::PacketBody::Frame(fr) = &p.body { let b = &fr.bytes;
+                if let common::PacketBody::Frame(fr) = &p.body {
+                    let b = &fr.bytes;
                     if let Some(d) = nodes::dmr_nodes::dmr_decoded(b, common::Hz(p.center_hz())) {
                         eprintln!("  {label}: {:?}", d.detail);
                     }
@@ -47,12 +41,9 @@ fn main() {
         .collect();
     run("full", &iq, rate, center, channel);
     // The auto node's cut: mixed to the channel, decimated to the source rate.
-    for (out_rate, cutoff) in [
-        (25_000.0, 10_000.0),
-        (36_571.0, 6_000.0),
-        (36_571.0, 7_500.0),
-        (36_571.0, 9_000.0),
-    ] {
+    for (out_rate, cutoff) in
+        [(25_000.0, 10_000.0), (36_571.0, 6_000.0), (36_571.0, 7_500.0), (36_571.0, 9_000.0)]
+    {
         let factor = (rate / out_rate).round() as usize;
         let got = rate / factor as f64;
         let mut mixer = dsp::Mixer::new(center - channel, rate);
@@ -61,12 +52,6 @@ fn main() {
         mixer.process(&iq, &mut mixed);
         let mut cut = Vec::new();
         decim.process(&mixed, &mut cut);
-        run(
-            &format!("cut {got:.0} +-{cutoff:.0}"),
-            &cut,
-            got,
-            channel,
-            channel,
-        );
+        run(&format!("cut {got:.0} +-{cutoff:.0}"), &cut, got, channel, channel);
     }
 }

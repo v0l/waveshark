@@ -130,14 +130,10 @@ impl Packet {
     pub fn plausible(&self) -> bool {
         match self.kind {
             Kind::Unknown(_) => false,
-            Kind::Sticks => self
-                .channels
-                .iter()
-                .all(|&c| (700..=2300).contains(&c) || c == HOLD),
-            Kind::Bind(_) => self
-                .hops
-                .as_ref()
-                .is_some_and(|h| h.iter().all(|&c| (1..=164).contains(&c))),
+            Kind::Sticks => self.channels.iter().all(|&c| (700..=2300).contains(&c) || c == HOLD),
+            Kind::Bind(_) => {
+                self.hops.as_ref().is_some_and(|h| h.iter().all(|&c| (1..=164).contains(&c)))
+            }
             _ => true,
         }
     }
@@ -393,5 +389,4 @@ mod tests {
         t[0] = 0xaa;
         assert!(parse(&t).expect("a packet").control().is_none());
     }
-
 }

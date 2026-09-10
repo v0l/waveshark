@@ -83,13 +83,9 @@ fn gateway(
 
 /// The data lines, with the comment banners and blanks dropped.
 fn rows<'a>(kind: &'static HostFile, text: &'a [u8]) -> Result<Vec<&'a str>, Error> {
-    let text = std::str::from_utf8(text)
-        .map_err(|e| Error::Parse(kind.file.into(), e.to_string()))?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect())
+    let text =
+        std::str::from_utf8(text).map_err(|e| Error::Parse(kind.file.into(), e.to_string()))?;
+    Ok(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
 }
 
 fn done(kind: &'static HostFile, out: Vec<Gateway>) -> Result<Vec<Gateway>, Error> {

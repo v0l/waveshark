@@ -29,11 +29,7 @@ fn main() -> common::Result<()> {
     println!("{} ({})", info.label, info.tuner);
     println!(
         "transmit stages: {}",
-        tx.gain_stages
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+        tx.gain_stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
     );
     assert!(info.covers_tx(Hz(freq)), "{freq} Hz is outside the transmit range");
 

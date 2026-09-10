@@ -39,8 +39,8 @@ use common::{Packet, Result};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
-use survey::{Db, Report, Sighting};
 use pipeline::registry::{Category, Settings, StageDesc};
+use survey::{Db, Report, Sighting};
 
 /// Which decoded field carries the transmitter's identity, per protocol
 /// prefix, and what to call that identity space in the database.
@@ -130,12 +130,7 @@ impl SurveyNode {
     /// none. A node with no database still sits in the graph: turning the
     /// survey on is opening a file, not rebuilding the receiver.
     pub fn new(db: Option<Db>) -> Self {
-        Self {
-            db,
-            station: None,
-            heard: 0,
-            failures: 0,
-        }
+        Self { db, station: None, heard: 0, failures: 0 }
     }
 
     pub fn set_db(&mut self, db: Option<Db>) {

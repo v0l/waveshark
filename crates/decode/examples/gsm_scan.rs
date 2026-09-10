@@ -10,7 +10,6 @@
 
 use dsp::gsm::{GsmConfig, Hit, SchDetector};
 
-
 fn main() {
     let path = std::env::args().nth(1).expect("a capture");
     let top: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -89,9 +88,7 @@ fn main() {
                     let msg = decode::gsm::parse(&b.bytes)
                         .or_else(|| decode::gsm::parse_dedicated(&b.bytes));
                     if let Some(g) = msg.and_then(|m| m.grant) {
-                        if g.kind.starts_with("SDCCH")
-                            && g.arfcn == Some(*arfcn)
-                            && g.timeslot != 0
+                        if g.kind.starts_with("SDCCH") && g.arfcn == Some(*arfcn) && g.timeslot != 0
                         {
                             det.follow(g.timeslot);
                         }
@@ -127,11 +124,8 @@ fn main() {
         for b in &blocks {
             if let Some(m) = decode::gsm::parse(&b.bytes) {
                 paged += m.pages.len();
-                permanent += m
-                    .pages
-                    .iter()
-                    .filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_)))
-                    .count();
+                permanent +=
+                    m.pages.iter().filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_))).count();
             }
         }
         if paged > 0 {
@@ -148,8 +142,12 @@ fn main() {
         if std::env::var("GSM_GRANTS").is_ok() {
             let mut seen: Vec<String> = Vec::new();
             for g in &grants {
-                let k = format!("{} TS {} ARFCN {:?} hop {:?}", g.kind, g.timeslot, g.arfcn, g.hopping);
-                if !seen.contains(&k) { eprintln!("    {k}"); seen.push(k); }
+                let k =
+                    format!("{} TS {} ARFCN {:?} hop {:?}", g.kind, g.timeslot, g.arfcn, g.hopping);
+                if !seen.contains(&k) {
+                    eprintln!("    {k}");
+                    seen.push(k);
+                }
             }
         }
         if !grants.is_empty() {

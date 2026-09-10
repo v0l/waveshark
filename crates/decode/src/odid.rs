@@ -137,19 +137,11 @@ fn status_name(v: u8) -> &'static str {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     /// Who the aircraft is.
-    BasicId {
-        id_type: IdType,
-        ua_type: u8,
-        id: String,
-    },
+    BasicId { id_type: IdType, ua_type: u8, id: String },
     /// Where it is and what it is doing. The one message that repeats at 1 Hz.
     Location(Location),
     /// A signature over earlier messages, in pages. Carried, not checked.
-    Authentication {
-        auth_type: u8,
-        page: u8,
-        data: Vec<u8>,
-    },
+    Authentication { auth_type: u8, page: u8, data: Vec<u8> },
     /// Free text the operator set, such as a flight description.
     SelfId { description_type: u8, text: String },
     /// The operator's own position, and the area a swarm occupies.
@@ -222,11 +214,7 @@ fn text(bytes: &[u8]) -> String {
     // Padded with NULs by the specification and with spaces by some
     // transmitters. Anything unprintable is a field that was not set.
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end])
-        .trim()
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    String::from_utf8_lossy(&bytes[..end]).trim().chars().filter(|c| !c.is_control()).collect()
 }
 
 fn coord(raw: i32, limit: f64) -> Option<f64> {
@@ -304,10 +292,7 @@ pub fn parse_message(m: &[u8]) -> Option<Parsed> {
             page: b[0] & 0x0f,
             data: b[1..].to_vec(),
         },
-        3 => Message::SelfId {
-            description_type: b[0],
-            text: text(&b[1..24]),
-        },
+        3 => Message::SelfId { description_type: b[0], text: text(&b[1..24]) },
         4 => {
             let lat = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
             let lon = i32::from_le_bytes([b[5], b[6], b[7], b[8]]);
@@ -325,14 +310,8 @@ pub fn parse_message(m: &[u8]) -> Option<Parsed> {
                 timestamp: (ts != 0).then_some(ts),
             })
         }
-        5 => Message::OperatorId {
-            id_type: b[0],
-            id: text(&b[1..21]),
-        },
-        other => Message::Unknown {
-            kind: other,
-            body: b.to_vec(),
-        },
+        5 => Message::OperatorId { id_type: b[0], id: text(&b[1..21]) },
+        other => Message::Unknown { kind: other, body: b.to_vec() },
     };
     Some(Parsed { version, message })
 }
@@ -350,9 +329,7 @@ pub fn parse_pack(body: &[u8]) -> Option<Vec<Parsed>> {
     if size != MESSAGE_LEN || count == 0 || count > 9 || body.len() < 3 + size * count {
         return None;
     }
-    (0..count)
-        .map(|i| parse_message(&body[3 + i * size..3 + (i + 1) * size]))
-        .collect()
+    (0..count).map(|i| parse_message(&body[3 + i * size..3 + (i + 1) * size])).collect()
 }
 
 /// Read whatever an advertisement's service data holds: a single message or a
@@ -429,11 +406,7 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
         // is never blank.
         f.push(("message".into(), Value::Text(p.message.name().into())));
         match &p.message {
-            Message::BasicId {
-                id_type,
-                ua_type,
-                id,
-            } => {
+            Message::BasicId { id_type, ua_type, id } => {
                 f.push(("id_type".into(), Value::Text(id_type.name().into())));
                 f.push(("uas_id".into(), Value::Text(id.clone())));
                 f.push(("ua_type".into(), Value::Text(ua_type_name(*ua_type).into())));
@@ -479,10 +452,7 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
                 }
                 if s.area_count > 1 {
                     f.push(("area_count".into(), Value::Int(i64::from(s.area_count))));
-                    f.push((
-                        "area_radius_m".into(),
-                        Value::Int(i64::from(s.area_radius_m)),
-                    ));
+                    f.push(("area_radius_m".into(), Value::Int(i64::from(s.area_radius_m))));
                 }
                 if let Some((cat, class)) = s.classification {
                     f.push(("eu_category".into(), Value::Int(i64::from(cat))));
@@ -493,9 +463,7 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
                 f.push(("operator_id".into(), Value::Text(id.clone())));
             }
             Message::OperatorId { .. } => {}
-            Message::Authentication {
-                auth_type, page, ..
-            } => {
+            Message::Authentication { auth_type, page, .. } => {
                 f.push(("auth_type".into(), Value::Int(i64::from(*auth_type))));
                 f.push(("auth_page".into(), Value::Int(i64::from(*page))));
             }
@@ -551,11 +519,7 @@ mod tests {
         let p = parse_message(&basic_id("1596F3AAAAAAAAAAAAAA")).expect("a message");
         assert_eq!(p.version, 2);
         match p.message {
-            Message::BasicId {
-                id_type,
-                ua_type,
-                id,
-            } => {
+            Message::BasicId { id_type, ua_type, id } => {
                 assert_eq!(id_type, IdType::SerialNumber);
                 assert_eq!(ua_type_name(ua_type), "multirotor");
                 assert_eq!(id, "1596F3AAAAAAAAAAAAAA");
@@ -567,9 +531,7 @@ mod tests {
     #[test]
     fn a_location_message_reports_where_and_how_fast() {
         let p = parse_message(&location()).expect("a message");
-        let Message::Location(l) = p.message else {
-            panic!("not a location")
-        };
+        let Message::Location(l) = p.message else { panic!("not a location") };
         assert_eq!(l.status, 2);
         assert!((l.latitude.unwrap() - 53.35).abs() < 1e-6);
         assert!((l.longitude.unwrap() + 6.26).abs() < 1e-6);
@@ -588,9 +550,7 @@ mod tests {
         let mut b = vec![0x10];
         b.resize(24, 0);
         let p = parse_message(&message(1, &b)).expect("a message");
-        let Message::Location(l) = p.message else {
-            panic!("not a location")
-        };
+        let Message::Location(l) = p.message else { panic!("not a location") };
         assert_eq!(l.latitude, None);
         assert_eq!(l.longitude, None);
         assert_eq!(l.geodetic_alt_m, None);
@@ -613,9 +573,7 @@ mod tests {
         b.extend_from_slice(&2020u16.to_le_bytes()); // operator altitude 10 m
         b.extend_from_slice(&100u32.to_le_bytes());
         let p = parse_message(&message(4, &b)).expect("a message");
-        let Message::System(s) = p.message else {
-            panic!("not a system message")
-        };
+        let Message::System(s) = p.message else { panic!("not a system message") };
         assert!((s.operator_latitude.unwrap() - 53.34).abs() < 1e-6);
         assert!((s.operator_alt_m.unwrap() - 10.0).abs() < 1e-9);
         assert_eq!(s.classification, Some((2, 1)));
@@ -623,9 +581,7 @@ mod tests {
         let mut other = b.clone();
         other[0] = 0x00;
         let p = parse_message(&message(4, &other)).expect("a message");
-        let Message::System(s) = p.message else {
-            panic!("not a system message")
-        };
+        let Message::System(s) = p.message else { panic!("not a system message") };
         assert_eq!(s.classification, None, "no scheme declared, so no class");
     }
 
@@ -742,9 +698,7 @@ mod tests {
         let msgs = from_nan_action(0x04, 0x09, &nan_action()).expect("a pack");
         assert_eq!(msgs.len(), 2);
         let f = fields(&msgs);
-        assert!(f
-            .iter()
-            .any(|(k, v)| k == "uas_id" && v.to_string() == "OPDRONE1"));
+        assert!(f.iter().any(|(k, v)| k == "uas_id" && v.to_string() == "OPDRONE1"));
         assert!(f.iter().any(|(k, _)| k == "latitude"));
     }
 

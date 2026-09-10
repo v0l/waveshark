@@ -8,8 +8,18 @@ use std::fmt;
 
 macro_rules! hz_newtype {
     ($name:ident, $unit:literal) => {
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-        #[derive(serde::Serialize, serde::Deserialize)]
+        #[derive(
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Default,
+            serde::Serialize,
+            serde::Deserialize,
+        )]
         pub struct $name(pub u64);
 
         impl $name {

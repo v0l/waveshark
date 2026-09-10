@@ -67,10 +67,7 @@ fn reflect_nibbles(b: u8) -> u8 {
 /// should. The checksum byte is stored with its two nibbles swapped, and on
 /// half these layouts it starts at an odd nibble and straddles two bytes.
 fn checksum(msg: &[u8], nibble: usize) -> (u8, u8) {
-    let whole: u16 = msg[..nibble / 2]
-        .iter()
-        .map(|b| (b >> 4) as u16 + (b & 0x0f) as u16)
-        .sum();
+    let whole: u16 = msg[..nibble / 2].iter().map(|b| (b >> 4) as u16 + (b & 0x0f) as u16).sum();
     if nibble % 2 == 1 {
         let sum = ((whole + (msg[nibble / 2] >> 4) as u16) & 0xff) as u8;
         (sum, (msg[nibble / 2] & 0x0f) | (msg[nibble / 2 + 1] & 0xf0))
@@ -84,10 +81,7 @@ fn checksum(msg: &[u8], nibble: usize) -> (u8, u8) {
 /// Every digit is BCD, so a nibble above nine is a frame that passed an eight
 /// bit checksum by luck rather than a reading.
 fn temperature_c(msg: &[u8]) -> Result<f64, DecodeError> {
-    if [msg[4] & 0x0f, msg[4] >> 4, msg[5] >> 4]
-        .iter()
-        .any(|n| *n > 9)
-    {
+    if [msg[4] & 0x0f, msg[4] >> 4, msg[5] >> 4].iter().any(|n| *n > 9) {
         return Err(DecodeError::Implausible("temperature is not BCD"));
     }
     let mut t =
@@ -116,16 +110,9 @@ fn humidity_pct(msg: &[u8]) -> Result<u8, DecodeError> {
 
 /// Wind in m/s and degrees, from the WGR800's BCD digits.
 fn wind(msg: &[u8]) -> Result<(f64, f64, f64), DecodeError> {
-    if [
-        msg[5] & 0x0f,
-        msg[6] >> 4,
-        msg[6] & 0x0f,
-        msg[7] >> 4,
-        msg[7] & 0x0f,
-        msg[8] >> 4,
-    ]
-    .iter()
-    .any(|n| *n > 9)
+    if [msg[5] & 0x0f, msg[6] >> 4, msg[6] & 0x0f, msg[7] >> 4, msg[7] & 0x0f, msg[8] >> 4]
+        .iter()
+        .any(|n| *n > 9)
     {
         return Err(DecodeError::Implausible("wind is not BCD"));
     }
@@ -153,9 +140,7 @@ fn common_fields(model: &'static str, msg: &[u8]) -> Report {
 /// Every offset rather than the first, because a burst holds several repeats
 /// and the earliest is as likely as any to be the one the detector clipped.
 fn sync_offsets(bits: &BitBuffer, sync: u32) -> Vec<usize> {
-    (0..bits.len().saturating_sub(16))
-        .filter(|i| bits.extract(*i, 16) == Some(sync))
-        .collect()
+    (0..bits.len().saturating_sub(16)).filter(|i| bits.extract(*i, 16) == Some(sync)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -193,13 +178,7 @@ enum Kind {
 /// Known sensor ids. The THGR810 rolled its id several times across rebrands
 /// (Newentor, Unni, Liorque), all differing only in the second nibble.
 fn v3_model_of(id: u16) -> Option<V3Model> {
-    let m = |model, checksum_nibble, kind| {
-        Some(V3Model {
-            model,
-            checksum_nibble,
-            kind,
-        })
-    };
+    let m = |model, checksum_nibble, kind| Some(V3Model { model, checksum_nibble, kind });
     match id {
         0xf824 | 0xf024 | 0xf224 | 0xfa24 | 0xf8b4 => {
             m("Oregon-THGR810", CHECKSUM_NIBBLE, Kind::TempHumidity)
@@ -237,25 +216,15 @@ fn v3_frame(bits: &BitBuffer, start: usize, invert: bool) -> Result<Report, Deco
     let take = (bits.len() - start).min(V3_MAX_BYTES * 8);
     let frame = bits.slice(start, take);
     let frame = if invert { frame.inverted() } else { frame };
-    let msg: Vec<u8> = frame
-        .as_padded_bytes()
-        .iter()
-        .map(|b| reflect_nibbles(*b))
-        .collect();
+    let msg: Vec<u8> = frame.as_padded_bytes().iter().map(|b| reflect_nibbles(*b)).collect();
     if msg.len() < 7 {
-        return Err(DecodeError::WrongLength {
-            got: take,
-            want: 7 * 8,
-        });
+        return Err(DecodeError::WrongLength { got: take, want: 7 * 8 });
     }
 
     let m =
         v3_model_of(((msg[0] as u16) << 8) | msg[1] as u16).ok_or(DecodeError::NotThisProtocol)?;
     if msg.len() < m.checksum_nibble / 2 + 2 {
-        return Err(DecodeError::WrongLength {
-            got: take,
-            want: m.checksum_nibble * 4 + 8,
-        });
+        return Err(DecodeError::WrongLength { got: take, want: m.checksum_nibble * 4 + 8 });
     }
     let (sum, stored) = checksum(&msg, m.checksum_nibble);
     if sum != stored {
@@ -320,12 +289,7 @@ struct V2Model {
 /// nibble, so those match on the low twelve bits.
 fn v2_model_of(id: u16, bits: usize) -> Option<V2Model> {
     let m = |model, bits, checksum_nibble, humidity| {
-        Some(V2Model {
-            model,
-            bits,
-            checksum_nibble,
-            humidity,
-        })
+        Some(V2Model { model, bits, checksum_nibble, humidity })
     };
     match (id, id & 0x0fff, bits) {
         (0x1d20, _, _) => m("Oregon-THGR122N", 76, 15, true),
@@ -374,24 +338,14 @@ impl Protocol for OregonV2 {
 /// Unpack, reflect and parse one candidate frame starting at `start`.
 fn v2_frame(bits: &BitBuffer, start: usize) -> Result<Report, DecodeError> {
     let payload = unpack_doubled(bits, start);
-    let msg: Vec<u8> = payload
-        .as_padded_bytes()
-        .iter()
-        .map(|b| reflect_nibbles(*b))
-        .collect();
+    let msg: Vec<u8> = payload.as_padded_bytes().iter().map(|b| reflect_nibbles(*b)).collect();
     if msg.len() < 7 {
-        return Err(DecodeError::WrongLength {
-            got: payload.len(),
-            want: 64,
-        });
+        return Err(DecodeError::WrongLength { got: payload.len(), want: 64 });
     }
     let id = ((msg[0] as u16) << 8) | msg[1] as u16;
     let m = v2_model_of(id, payload.len()).ok_or(DecodeError::NotThisProtocol)?;
     if payload.len() < m.bits || msg.len() < m.checksum_nibble / 2 + 2 {
-        return Err(DecodeError::WrongLength {
-            got: payload.len(),
-            want: m.bits,
-        });
+        return Err(DecodeError::WrongLength { got: payload.len(), want: m.bits });
     }
     let (sum, stored) = checksum(&msg, m.checksum_nibble);
     if sum != stored {
@@ -547,9 +501,7 @@ mod tests {
 
     #[test]
     fn decodes_a_thgr810_frame() {
-        let r = OregonV3
-            .decode(&frame(0xf824, 1, 0x3a, 21.7, 48, false))
-            .unwrap();
+        let r = OregonV3.decode(&frame(0xf824, 1, 0x3a, 21.7, 48, false)).unwrap();
         assert_eq!(r.model, "Oregon-THGR810");
         assert_eq!(r.get("channel"), Some(&Value::Int(1)));
         assert_eq!(r.get("id"), Some(&Value::Int(0x3a)));
@@ -571,18 +523,14 @@ mod tests {
 
     #[test]
     fn a_frost_reading_carries_its_sign_bit() {
-        let r = OregonV3
-            .decode(&frame(0xf824, 2, 0x3a, -6.3, 91, true))
-            .unwrap();
+        let r = OregonV3.decode(&frame(0xf824, 2, 0x3a, -6.3, 91, true)).unwrap();
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(-6.3)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
     }
 
     #[test]
     fn a_temperature_only_sensor_reports_no_humidity() {
-        let r = OregonV3
-            .decode(&frame(0xc844, 1, 0x11, 19.0, 0, false))
-            .unwrap();
+        let r = OregonV3.decode(&frame(0xc844, 1, 0x11, 19.0, 0, false)).unwrap();
         assert_eq!(r.model, "Oregon-THN802");
         assert!(r.get("humidity_pct").is_none());
     }
@@ -602,11 +550,7 @@ mod tests {
         let f = frame(0xf824, 1, 0x3a, 21.7, 48, false);
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 60 {
-                !f.get(i).unwrap()
-            } else {
-                f.get(i).unwrap()
-            });
+            broken.push(if i == 60 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
         }
         assert_eq!(OregonV3.decode(&broken), Err(DecodeError::CrcFailed));
     }
@@ -647,11 +591,7 @@ mod tests {
         let f = frame_v2(0x1d20, 1, 0x3a, 21.7, 48, false, (76, 15));
         let mut broken = BitBuffer::new();
         for i in 0..f.len() {
-            broken.push(if i == 90 || i == 91 {
-                !f.get(i).unwrap()
-            } else {
-                f.get(i).unwrap()
-            });
+            broken.push(if i == 90 || i == 91 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
         }
         assert!(matches!(
             OregonV2.decode(&broken),

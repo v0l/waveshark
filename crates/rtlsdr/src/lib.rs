@@ -20,10 +20,10 @@
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use rtlsdr_sys as ffi;
 use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use rtlsdr_sys as ffi;
 
 /// USB transfer size. Must be a multiple of 512; 16 KiB is librtlsdr's default
 /// and keeps the per-transfer overhead negligible at 2.4 MS/s.
@@ -207,16 +207,17 @@ impl RtlSdr {
             // above 2.4 MS/s most USB 2.0 host controllers cannot sustain the
             // bulk rate and you get silent sample loss. These are the rates
             // worth offering.
-            rates: [240_000, 960_000, 1_024_000, 1_200_000, 2_048_000, 2_400_000, 2_560_000, 3_200_000]
-                .into_iter()
-                .map(Sps)
-                .collect(),
+            rates: [
+                240_000, 960_000, 1_024_000, 1_200_000, 2_048_000, 2_400_000, 2_560_000, 3_200_000,
+            ]
+            .into_iter()
+            .map(Sps)
+            .collect(),
             rate_range: Sps(225_001)..=Sps(3_200_000),
             gain_stages: vec![common::GainStage {
                 name: "tuner".to_string(),
                 label: "Tuner RF".to_string(),
-                range: gains.first().copied().unwrap_or(0.0)
-                    ..=gains.last().copied().unwrap_or(0.0),
+                range: gains.first().copied().unwrap_or(0.0)..=gains.last().copied().unwrap_or(0.0),
                 // The tuner accepts these exact values and nothing between
                 // them, so the control should offer exactly these.
                 values: gains.clone(),

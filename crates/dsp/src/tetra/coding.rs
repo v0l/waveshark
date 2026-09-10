@@ -26,8 +26,20 @@ pub fn scramble(init: u32, bits: &mut [u8]) {
     let mut lfsr = init;
     for b in bits {
         let s = |n: u32| lfsr >> (32 - n);
-        let bit = (s(32) ^ s(26) ^ s(23) ^ s(22) ^ s(16) ^ s(12) ^ s(11) ^ s(10)
-            ^ s(8) ^ s(7) ^ s(5) ^ s(4) ^ s(2) ^ s(1))
+        let bit = (s(32)
+            ^ s(26)
+            ^ s(23)
+            ^ s(22)
+            ^ s(16)
+            ^ s(12)
+            ^ s(11)
+            ^ s(10)
+            ^ s(8)
+            ^ s(7)
+            ^ s(5)
+            ^ s(4)
+            ^ s(2)
+            ^ s(1))
             & 1;
         lfsr = (lfsr >> 1) | (bit << 31);
         *b ^= bit as u8;

@@ -67,12 +67,7 @@ impl Levels {
             counts[self.index(v) as usize] += 1;
         }
         let n = samples.len().max(1) as f32;
-        [
-            counts[0] as f32 / n,
-            counts[1] as f32 / n,
-            counts[2] as f32 / n,
-            counts[3] as f32 / n,
-        ]
+        [counts[0] as f32 / n, counts[1] as f32 / n, counts[2] as f32 / n, counts[3] as f32 / n]
     }
 }
 
@@ -131,7 +126,8 @@ pub(crate) fn levels(scratch: &mut Vec<f32>, samples: &[f32]) -> Option<Levels> 
         if new_step <= 0.0 || !new_step.is_finite() {
             break;
         }
-        let settled = (new_center - center).abs() < 1e-6 * step && (new_step - step).abs() < 1e-6 * step;
+        let settled =
+            (new_center - center).abs() < 1e-6 * step && (new_step - step).abs() < 1e-6 * step;
         center = new_center;
         step = new_step;
         if settled {
@@ -172,9 +168,8 @@ mod tests {
         // Four fifths outer levels, as a sync word tends to be. The initial
         // mean absolute deviation is far too large here, and only the least
         // squares pass brings the step back.
-        let pattern: Vec<usize> = (0..80)
-            .map(|i| if i % 5 == 0 { 1 + (i / 5) % 2 } else { (i % 2) * 3 })
-            .collect();
+        let pattern: Vec<usize> =
+            (0..80).map(|i| if i % 5 == 0 { 1 + (i / 5) % 2 } else { (i % 2) * 3 }).collect();
         let got = fit(&spread(-200.0, 500.0, &pattern, 20.0));
         assert!((got.center + 200.0).abs() < 70.0, "centre came out at {}", got.center);
         assert!((got.step - 500.0).abs() < 70.0, "step came out at {}", got.step);
@@ -201,7 +196,11 @@ mod tests {
         // can be described as the outer pair, or as one outer and one inner.
         // What matters downstream is that two of the four go unused, which no
         // real four-level frame does.
-        assert_eq!(occ.iter().filter(|&&s| s < 0.01).count(), 2, "all four levels were used: {occ:?}");
+        assert_eq!(
+            occ.iter().filter(|&&s| s < 0.01).count(),
+            2,
+            "all four levels were used: {occ:?}"
+        );
     }
 
     #[test]

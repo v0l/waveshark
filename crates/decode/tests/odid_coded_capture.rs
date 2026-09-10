@@ -31,10 +31,7 @@ fn read() -> Option<Vec<BleFrame>> {
         .chunks_exact(2)
         .map(|c| C32::new(c[0] as i8 as f32 / 128.0, c[1] as i8 as f32 / 128.0))
         .collect();
-    let cfg = BleConfig {
-        data_channels: true,
-        ..BleConfig::default()
-    };
+    let cfg = BleConfig { data_channels: true, ..BleConfig::default() };
     let mut det = BleDetector::new(RATE, CENTER, cfg);
     let mut out = Vec::new();
     for chunk in iq.chunks(1 << 20) {
@@ -64,22 +61,20 @@ fn a_message_pack_arrives_whole_on_the_long_range_phy() {
             (!msgs.is_empty()).then_some(msgs)
         })
         .collect();
-    assert!(
-        packs.len() >= 8,
-        "read {} message packs, expected 11",
-        packs.len()
-    );
+    assert!(packs.len() >= 8, "read {} message packs, expected 11", packs.len());
 
     // The payload is on the data channels, which is what the pointer on the
     // primary channel was for. A pack read off 37, 38 or 39 would mean the
     // module was not doing extended advertising at all.
     let on_data = frames
         .iter()
-        .filter(|f| decode::ble::parse(&f.pdu).is_some_and(|a| {
-            a.data.iter().any(|s| {
-                s.kind == 0x16 && decode::odid::from_service_data(&s.value).is_some()
+        .filter(|f| {
+            decode::ble::parse(&f.pdu).is_some_and(|a| {
+                a.data
+                    .iter()
+                    .any(|s| s.kind == 0x16 && decode::odid::from_service_data(&s.value).is_some())
             })
-        }))
+        })
         .all(|f| f.channel <= 36);
     assert!(on_data, "a message pack arrived on an advertising channel");
 

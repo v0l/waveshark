@@ -418,7 +418,10 @@ fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
     }
     let wall = wall.elapsed().as_secs_f64();
     if blocks.len() < 8 {
-        anyhow::bail!("only {} blocks: use a longer capture or a smaller --bench-block", blocks.len());
+        anyhow::bail!(
+            "only {} blocks: use a longer capture or a smaller --bench-block",
+            blocks.len()
+        );
     }
 
     // The first blocks allocate, fault in pages and open the sources the
@@ -454,7 +457,10 @@ fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
     // A trace of the whole run, with the slowest block in each column, since
     // it is the lows that are being looked for and a mean hides them.
     const COLS: usize = 96;
-    let bars = [' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+    let bars = [
+        ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
+    ];
     let per_col = timed.len().div_ceil(COLS).max(1);
     let worst_x = sorted[sorted.len() - 1];
     let trace: String = timed
@@ -465,19 +471,12 @@ fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
             bars[(f * (bars.len() - 1) as f64).round() as usize]
         })
         .collect();
-    println!(
-        "\ntime in a block, tall is slow, full height is {:.1} ms\n{trace}",
-        worst_x / 1e3
-    );
+    println!("\ntime in a block, tall is slow, full height is {:.1} ms\n{trace}", worst_x / 1e3);
 
     // How regularly the slow blocks arrive. A spike that comes every N blocks
     // is something running on a period, and the period says which thing.
-    let slow: Vec<usize> = timed
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.us > 2.0 * median)
-        .map(|(i, _)| i)
-        .collect();
+    let slow: Vec<usize> =
+        timed.iter().enumerate().filter(|(_, b)| b.us > 2.0 * median).map(|(i, _)| i).collect();
     if slow.len() > 2 {
         let mut gaps: Vec<usize> = slow.windows(2).map(|w| w[1] - w[0]).collect();
         gaps.sort_unstable();
@@ -861,8 +860,7 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
         },
         None => (String::new(), String::new()),
     };
-    let broker =
-        nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
+    let broker = nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
     Ok(nodes::Publish { broker, spaces: String::new() })
 }
 
@@ -1363,10 +1361,7 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let opts = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
+    let opts = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "waveshark",
         opts,

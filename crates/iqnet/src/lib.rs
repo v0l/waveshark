@@ -61,7 +61,9 @@ pub fn parse_addr(s: &str) -> Option<String> {
         return Some(format!("[{s}]:{DEFAULT_PORT}"));
     }
     match s.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Some(s.to_string()),
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {
+            Some(s.to_string())
+        }
         _ => Some(format!("{s}:{DEFAULT_PORT}")),
     }
 }
@@ -236,8 +238,7 @@ impl Device for IqNet {
             .spawn(move || {
                 match runtime() {
                     Ok(rt) => {
-                        if let Err(e) =
-                            rt.block_on(pump(addr, center, rate, tx, counted, stop_rx))
+                        if let Err(e) = rt.block_on(pump(addr, center, rate, tx, counted, stop_rx))
                         {
                             tracing::warn!("iqstream: {e}");
                         }

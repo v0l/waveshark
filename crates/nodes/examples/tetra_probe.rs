@@ -7,10 +7,7 @@ use dsp::{FirDecim, Mixer};
 
 fn main() {
     let path = std::env::args().nth(1).expect("path to capture");
-    let buf = sources::FileSource::open(std::path::Path::new(&path))
-        .unwrap()
-        .read_all()
-        .unwrap();
+    let buf = sources::FileSource::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
     let rate = buf.rate.as_f64();
     let center = buf.center.as_f64();
     for hz in [391_181_000.0f64, 391_704_500.0] {

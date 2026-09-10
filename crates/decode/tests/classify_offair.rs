@@ -39,10 +39,7 @@ fn accepts(m: Modulation, family: &str) -> bool {
             | (Modulation::Fsk2, "fsk")
             | (Modulation::Fsk4, "mfsk")
             | (Modulation::Msk, "msk_gmsk")
-            | (
-                Modulation::Psk2 | Modulation::Psk4 | Modulation::Dsss,
-                "psk"
-            )
+            | (Modulation::Psk2 | Modulation::Psk4 | Modulation::Dsss, "psk")
             | (Modulation::Chirp, "chirp")
             | (Modulation::Ofdm | Modulation::NoiseLike, "ofdm")
             | (Modulation::NoiseLike | Modulation::Carrier, "noise")
@@ -177,10 +174,7 @@ fn the_classifier_reads_what_was_recorded() {
         }
         let share = ok as f32 / n as f32;
         let known = KNOWN_MISSES.iter().find(|(f, _)| *f == cap.name);
-        lines.push(format!(
-            "  {:<44} {:>3}/{:<3} {:.2}",
-            cap.name, ok, n, share
-        ));
+        lines.push(format!("  {:<44} {:>3}/{:<3} {:.2}", cap.name, ok, n, share));
         match known {
             Some(_) if share >= 0.5 => unexpected_passes.push(&cap.name),
             None if share < 0.5 => {
@@ -194,16 +188,9 @@ fn the_classifier_reads_what_was_recorded() {
         eprintln!("captures absent, run testdata/fetch.sh, skipping");
         return;
     }
-    eprintln!(
-        "off-air captures, correct of classified:\n{}",
-        lines.join("\n")
-    );
+    eprintln!("off-air captures, correct of classified:\n{}", lines.join("\n"));
 
-    assert!(
-        failures.is_empty(),
-        "captures newly misread:\n  {}",
-        failures.join("\n  ")
-    );
+    assert!(failures.is_empty(), "captures newly misread:\n  {}", failures.join("\n  "));
     assert!(
         unexpected_passes.is_empty(),
         "these are on KNOWN_MISSES and now pass; delete the entry:\n  {}",
@@ -271,14 +258,7 @@ fn parse(text: &str) -> Vec<Capture> {
     let (mut name, mut family, mut format, mut rate) =
         (String::new(), String::new(), String::new(), 0.0f64);
     let (mut burst_us, mut occupancy_min, mut bridge_us) = (None, 0.0f32, 2000.0f64);
-    let value = |l: &str| {
-        l.split('=')
-            .nth(1)
-            .unwrap_or("")
-            .trim()
-            .trim_matches('"')
-            .to_string()
-    };
+    let value = |l: &str| l.split('=').nth(1).unwrap_or("").trim().trim_matches('"').to_string();
     let flush = |name: &mut String,
                  family: &mut String,
                  format: &mut String,
@@ -358,15 +338,6 @@ fn parse(text: &str) -> Vec<Capture> {
             }
         }
     }
-    flush(
-        &mut name,
-        &mut family,
-        &mut format,
-        rate,
-        burst_us,
-        occupancy_min,
-        bridge_us,
-        &mut out,
-    );
+    flush(&mut name, &mut family, &mut format, rate, burst_us, occupancy_min, bridge_us, &mut out);
     out
 }

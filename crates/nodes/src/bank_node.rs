@@ -154,11 +154,7 @@ impl BankNode {
         let Some(g) = (0..self.bank.channels()).find_map(|c| self.bank.graph(c)) else {
             return Vec::new();
         };
-        g.topology()
-            .nodes
-            .into_iter()
-            .flat_map(|n| n.params)
-            .collect()
+        g.topology().nodes.into_iter().flat_map(|n| n.params).collect()
     }
 
     /// Set a parameter on every channel's copy of the decoder.
@@ -188,10 +184,9 @@ impl BankNode {
         match err {
             Some(e) => Err(e),
             None if found => Ok(()),
-            None => Err(common::Error::other(format!(
-                "{}: unknown parameter {name:?}",
-                self.label
-            ))),
+            None => {
+                Err(common::Error::other(format!("{}: unknown parameter {name:?}", self.label)))
+            }
         }
     }
 
@@ -370,10 +365,7 @@ mod tests {
     }
 
     fn spec(rate: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(433_920_000)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
     }
 
     #[test]

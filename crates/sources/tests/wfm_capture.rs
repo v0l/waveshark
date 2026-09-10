@@ -32,9 +32,7 @@ fn goertzel(x: &[f32], rate: f64, target: f64) -> f64 {
 
 /// Returns the discriminator output and its rate.
 fn receive() -> Option<(Vec<f32>, f64)> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata")
-        .join(FIXTURE);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(FIXTURE);
     if !p.exists() {
         return None;
     }
@@ -73,10 +71,8 @@ macro_rules! need_fixture {
 
 fn pilot_snr_db(disc: &[f32], rate: f64) -> f64 {
     let pilot = goertzel(disc, rate, 19_000.0);
-    let refs: Vec<f64> = [15_500.0, 17_000.0, 21_000.0, 23_000.0]
-        .iter()
-        .map(|f| goertzel(disc, rate, *f))
-        .collect();
+    let refs: Vec<f64> =
+        [15_500.0, 17_000.0, 21_000.0, 23_000.0].iter().map(|f| goertzel(disc, rate, *f)).collect();
     let noise = refs.iter().sum::<f64>() / refs.len() as f64;
     20.0 * (pilot / noise.max(1e-30)).log10()
 }
@@ -105,11 +101,7 @@ fn the_pilot_sits_within_a_hertz_of_19000() {
         }
         f += 0.25;
     }
-    assert!(
-        (best.0 - 19_000.0).abs() <= 1.0,
-        "pilot found at {:.2} Hz, expected 19000",
-        best.0
-    );
+    assert!((best.0 - 19_000.0).abs() <= 1.0, "pilot found at {:.2} Hz, expected 19000", best.0);
 }
 
 #[test]
@@ -119,14 +111,10 @@ fn demodulated_audio_has_real_programme_content() {
     let (disc, rate) = need_fixture!(receive());
     let body = &disc[1000..];
 
-    let speech: f64 = [300.0, 700.0, 1500.0, 3000.0]
-        .iter()
-        .map(|f| goertzel(body, rate, *f))
-        .sum();
+    let speech: f64 = [300.0, 700.0, 1500.0, 3000.0].iter().map(|f| goertzel(body, rate, *f)).sum();
     // Above the 53 kHz stereo baseband there is no programme content at all.
-    let above: f64 = [70_000.0, 90_000.0].iter().map(|f| goertzel(body, rate, *f)).sum::<f64>()
-        / 2.0
-        * 4.0;
+    let above: f64 =
+        [70_000.0, 90_000.0].iter().map(|f| goertzel(body, rate, *f)).sum::<f64>() / 2.0 * 4.0;
     assert!(
         speech > above * 4.0,
         "no audio band content: speech {speech:.2e} vs out-of-band {above:.2e}"

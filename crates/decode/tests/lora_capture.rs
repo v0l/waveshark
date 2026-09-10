@@ -87,13 +87,8 @@ fn the_meshtastic_captures_decode_to_valid_frames() {
         seen += 1;
         let iq = channel(&raw);
 
-        let mut demod = dsp::lora::Demod::new(dsp::lora::Config {
-            sf: SF,
-            ..Default::default()
-        });
-        let packet = demod
-            .detect(&iq, 0)
-            .unwrap_or_else(|| panic!("{}: no packet", want.file));
+        let mut demod = dsp::lora::Demod::new(dsp::lora::Config { sf: SF, ..Default::default() });
+        let packet = demod.detect(&iq, 0).unwrap_or_else(|| panic!("{}: no packet", want.file));
 
         assert_eq!(packet.sync_word, want.sync_word, "{}: sync word", want.file);
         assert!(
@@ -107,16 +102,8 @@ fn the_meshtastic_captures_decode_to_valid_frames() {
         let frame = lora::decode(&packet.symbols, SF, ldro)
             .unwrap_or_else(|e| panic!("{}: {e:?}", want.file));
 
-        assert_eq!(
-            frame.header.length, want.length,
-            "{}: payload length",
-            want.file
-        );
-        assert_eq!(
-            frame.header.coding_rate, want.coding_rate,
-            "{}: coding rate",
-            want.file
-        );
+        assert_eq!(frame.header.length, want.length, "{}: payload length", want.file);
+        assert_eq!(frame.header.coding_rate, want.coding_rate, "{}: coding rate", want.file);
         assert!(frame.header.has_crc, "{}: CRC flag", want.file);
         assert_eq!(
             frame.crc_ok,
@@ -131,23 +118,12 @@ fn the_meshtastic_captures_decode_to_valid_frames() {
         // should be, which a length read out of noise would not be.
         assert_eq!(
             packet.symbols.len(),
-            lora::symbol_count(
-                frame.header.length,
-                SF,
-                frame.header.coding_rate,
-                true,
-                ldro
-            ),
+            lora::symbol_count(frame.header.length, SF, frame.header.coding_rate, true, ldro),
             "{}: symbols on the air against the header's shape",
             want.file
         );
 
-        assert_eq!(
-            &frame.payload[..4],
-            &[0xff; 4],
-            "{}: broadcast destination",
-            want.file
-        );
+        assert_eq!(&frame.payload[..4], &[0xff; 4], "{}: broadcast destination", want.file);
         let source = u32::from_le_bytes(frame.payload[4..8].try_into().unwrap());
         assert_eq!(source, want.source, "{}: source node", want.file);
 

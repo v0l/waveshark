@@ -22,7 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("output devices: {:?}", AudioPlayer::devices());
     let (player, mut sink) = AudioPlayer::open(AUDIO_RATE as u32)?;
-    println!("playing on {} at {} Hz, {} ch", player.device_name(), player.rate(), player.channels());
+    println!(
+        "playing on {} at {} Hz, {} ch",
+        player.device_name(),
+        player.rate(),
+        player.channels()
+    );
     // write_adaptive resamples, so a mismatched device rate is fine.
 
     let d = rtlsdr::enumerate();
@@ -50,7 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "\n{:.4} MHz {}  RF {} -> IF {IF_RATE} -> audio {AUDIO_RATE}\nCtrl-C to stop",
-        mhz, if narrow { "NFM" } else { "WFM" }, RF_RATE
+        mhz,
+        if narrow { "NFM" } else { "WFM" },
+        RF_RATE
     );
 
     let (mut sh, mut iq, mut disc, mut cx, mut au) =
@@ -91,8 +98,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 s.dropped.load(std::sync::atomic::Ordering::Relaxed),
                 s.underruns.load(std::sync::atomic::Ordering::Relaxed),
             );
-            println!("       backlog {} samples  drift {:+.1} ppm  noise {:.4}  treble cut {:.0} Hz",
-                sink.backlog(), sink.drift_ppm(), noise.level(), blend.cutoff());
+            println!(
+                "       backlog {} samples  drift {:+.1} ppm  noise {:.4}  treble cut {:.0} Hz",
+                sink.backlog(),
+                sink.drift_ppm(),
+                noise.level(),
+                blend.cutoff()
+            );
         }
     }
 }

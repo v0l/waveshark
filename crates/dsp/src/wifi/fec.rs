@@ -22,9 +22,7 @@ impl Scrambler {
     /// `state` is seven bits, and must not be zero: the all-zero register is
     /// a fixed point that outputs zeros for ever.
     pub fn new(state: u8) -> Self {
-        Self {
-            state: state & 0x7f,
-        }
+        Self { state: state & 0x7f }
     }
 
     pub fn next_bit(&mut self) -> u8 {
@@ -289,10 +287,8 @@ mod tests {
     /// it is the only check on this that is not circular.
     #[test]
     fn the_ht_signal_check_matches_the_published_example() {
-        let bits: Vec<u8> = "1111000100100110000000001110000000"
-            .bytes()
-            .map(|b| b - b'0')
-            .collect();
+        let bits: Vec<u8> =
+            "1111000100100110000000001110000000".bytes().map(|b| b - b'0').collect();
         assert_eq!(bits.len(), 34);
         assert_eq!(ht_sig_crc(&bits), [1, 0, 1, 0, 1, 0, 0, 0]);
     }
@@ -303,10 +299,7 @@ mod tests {
             let mut bits: Vec<u8> = (0..200).map(|i| (i * 5 % 7 < 3) as u8).collect();
             bits.extend([0; 6]);
             let coded = encode(&bits, pattern);
-            let soft: Vec<f32> = coded
-                .iter()
-                .map(|&b| if b == 1 { 1.0 } else { -1.0 })
-                .collect();
+            let soft: Vec<f32> = coded.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
             let (got, err) = viterbi(&soft, pattern, bits.len());
             assert_eq!(got, bits);
             assert_eq!(err, 0.0);
@@ -319,10 +312,7 @@ mod tests {
         let mut bits: Vec<u8> = (0..120).map(|i| (i % 3 == 0) as u8).collect();
         bits.extend([0; 6]);
         let coded = encode(&bits, P_1_2);
-        let mut soft: Vec<f32> = coded
-            .iter()
-            .map(|&b| if b == 1 { 1.0 } else { -1.0 })
-            .collect();
+        let mut soft: Vec<f32> = coded.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
         soft[17] = -soft[17];
         soft[60] = -soft[60];
         let (got, err) = viterbi(&soft, P_1_2, bits.len());

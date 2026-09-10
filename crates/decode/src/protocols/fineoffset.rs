@@ -27,9 +27,8 @@ use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
 /// Wind direction index to degrees, 22.5 degree steps starting at north.
-const WIND_DIR: [u16; 16] = [
-    0, 23, 45, 68, 90, 113, 135, 158, 180, 203, 225, 248, 270, 293, 315, 338,
-];
+const WIND_DIR: [u16; 16] =
+    [0, 23, 45, 68, 90, 113, 135, 158, 180, 203, 225, 248, 270, 293, 315, 338];
 
 const FRAME_BYTES: usize = 11;
 const FRAME_BITS: usize = FRAME_BYTES * 8;
@@ -49,10 +48,7 @@ impl Protocol for FineOffsetWh1080 {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         if bits.len() < FRAME_BITS {
-            return Err(DecodeError::WrongLength {
-                got: bits.len(),
-                want: FRAME_BITS,
-            });
+            return Err(DecodeError::WrongLength { got: bits.len(), want: FRAME_BITS });
         }
 
         // Sync on the 0xff preamble rather than assuming the frame starts at
@@ -60,10 +56,7 @@ impl Protocol for FineOffsetWh1080 {
         // which in practice is a bit or two early or late.
         let start = bits.find(&[0xff], 8).ok_or(DecodeError::NotThisProtocol)?;
         if start + FRAME_BITS > bits.len() {
-            return Err(DecodeError::WrongLength {
-                got: bits.len() - start,
-                want: FRAME_BITS,
-            });
+            return Err(DecodeError::WrongLength { got: bits.len() - start, want: FRAME_BITS });
         }
         let frame = bits.slice(start, FRAME_BITS);
         let b = frame.as_bytes();
@@ -101,10 +94,7 @@ impl Protocol for FineOffsetWh1080 {
                     .int("humidity_pct", humidity as i64)
                     .float("wind_avg_ms", round2(b[5] as f64 * 0.34))
                     .float("wind_gust_ms", round2(b[6] as f64 * 0.34))
-                    .int(
-                        "wind_direction_deg",
-                        WIND_DIR[(b[9] & 0x0f) as usize] as i64,
-                    )
+                    .int("wind_direction_deg", WIND_DIR[(b[9] & 0x0f) as usize] as i64)
                     .float("rain_total_mm", round2(rain_raw as f64 * 0.3))
                     .bool("battery_ok", (b[9] >> 4) != 1);
                 Ok(r)
@@ -178,15 +168,10 @@ impl Protocol for FineOffsetWh51 {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        let at = bits
-            .find(&WH51_PREAMBLE, 24)
-            .ok_or(DecodeError::NotThisProtocol)?;
+        let at = bits.find(&WH51_PREAMBLE, 24).ok_or(DecodeError::NotThisProtocol)?;
         let start = at + 24;
         if start + WH51_BYTES * 8 > bits.len() {
-            return Err(DecodeError::WrongLength {
-                got: bits.len() - start,
-                want: WH51_BYTES * 8,
-            });
+            return Err(DecodeError::WrongLength { got: bits.len() - start, want: WH51_BYTES * 8 });
         }
         let frame = bits.slice(start, WH51_BYTES * 8);
         let b = frame.as_bytes();
@@ -205,17 +190,15 @@ impl Protocol for FineOffsetWh51 {
         let mut r = Report::new(self.name());
         r.crc_valid = Some(true);
         r.raw = b.to_vec();
-        Ok(
-            r.text("id", format!("{:02x}{:02x}{:02x}", b[1], b[2], b[3]))
-                .int("moisture_pct", moisture as i64)
-                .int("ad_raw", (((b[7] as i64) & 0x01) << 8) | b[8] as i64)
-                .int("battery_mv", (b[4] & 0x1f) as i64 * 100)
-                .int("boost", (b[4] >> 5) as i64)
-                // A single alkaline cell: 1.6 V is fresh, 1.2 V is about to take
-                // the readings with it. Reported as millivolts rather than a
-                // fraction so the threshold stays the reader's to choose.
-                .bool("battery_ok", b[4] & 0x1f >= 13),
-        )
+        Ok(r.text("id", format!("{:02x}{:02x}{:02x}", b[1], b[2], b[3]))
+            .int("moisture_pct", moisture as i64)
+            .int("ad_raw", (((b[7] as i64) & 0x01) << 8) | b[8] as i64)
+            .int("battery_mv", (b[4] & 0x1f) as i64 * 100)
+            .int("boost", (b[4] >> 5) as i64)
+            // A single alkaline cell: 1.6 V is fresh, 1.2 V is about to take
+            // the readings with it. Reported as millivolts rather than a
+            // fraction so the threshold stays the reader's to choose.
+            .bool("battery_ok", b[4] & 0x1f >= 13))
     }
 }
 
@@ -326,9 +309,6 @@ mod tests {
     #[test]
     fn a_short_buffer_is_rejected() {
         let b = BitBuffer::from_bytes(&[0xff, 0xa0, 0x00]);
-        assert!(matches!(
-            FineOffsetWh1080.decode(&b),
-            Err(DecodeError::WrongLength { .. })
-        ));
+        assert!(matches!(FineOffsetWh1080.decode(&b), Err(DecodeError::WrongLength { .. })));
     }
 }

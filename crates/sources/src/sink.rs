@@ -63,11 +63,7 @@ impl FileSink {
         })?;
         let rate = meta.rate.unwrap_or(rate);
         let center = meta.center.unwrap_or(Hz(0));
-        let label = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("sink")
-            .to_string();
+        let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("sink").to_string();
         // Fail here rather than at the first block, when a modulator is
         // already running and the error has nowhere useful to go.
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -136,15 +132,7 @@ impl FileSink {
                 channels: 1,
             }),
         };
-        Self {
-            target,
-            info,
-            center,
-            rate,
-            format,
-            gain: 0.0,
-            written: Arc::new(AtomicU64::new(0)),
-        }
+        Self { target, info, center, rate, format, gain: 0.0, written: Arc::new(AtomicU64::new(0)) }
     }
 
     /// Complex samples written so far.
@@ -198,10 +186,9 @@ impl Device for FileSink {
 
     fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
         let out: Box<dyn Write + Send> = match &self.target {
-            Target::Path(p) => Box::new(BufWriter::with_capacity(
-                1 << 20,
-                File::options().append(true).open(p)?,
-            )),
+            Target::Path(p) => {
+                Box::new(BufWriter::with_capacity(1 << 20, File::options().append(true).open(p)?))
+            }
             Target::Memory(b) => Box::new(MemWriter(b.clone())),
         };
         Ok(Box::new(FileTx {
@@ -278,9 +265,7 @@ mod tests {
     use common::C32;
 
     fn ramp(n: usize, rate: Sps) -> IqBuf {
-        let s = (0..n)
-            .map(|i| C32::new(i as f32 / n as f32, -(i as f32) / n as f32))
-            .collect();
+        let s = (0..n).map(|i| C32::new(i as f32 / n as f32, -(i as f32) / n as f32)).collect();
         IqBuf::new(s, Hz(433_920_000), rate, 0)
     }
 

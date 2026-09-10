@@ -22,10 +22,7 @@ pub struct PulseDetectNode {
 
 impl PulseDetectNode {
     pub fn new(cfg: PulseConfig) -> Self {
-        Self {
-            cfg,
-            det: OokDetector::new(1.0, cfg),
-        }
+        Self { cfg, det: OokDetector::new(1.0, cfg) }
     }
 
     pub fn default_ook() -> Self {
@@ -74,11 +71,7 @@ impl Simple for PulseDetectNode {
         for p in pkgs.iter() {
             // Tag the burst so anything downstream, or a waterfall, can point
             // at exactly where in the stream it happened.
-            c.tag(Tag::new(
-                p.start_sample,
-                "burst",
-                TagValue::Float(p.snr_db as f64),
-            ));
+            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
         }
 
         // Report what was thrown away. Without this a mistuned chain produces
@@ -162,10 +155,7 @@ pub struct AskDetectNode {
 
 impl AskDetectNode {
     pub fn new(cfg: AskConfig) -> Self {
-        Self {
-            cfg,
-            det: AskDetector::new(1.0, cfg),
-        }
+        Self { cfg, det: AskDetector::new(1.0, cfg) }
     }
 
     pub fn default_ask() -> Self {
@@ -200,16 +190,8 @@ impl Simple for AskDetectNode {
         }
         let depth = self.det.depth_db() as f64;
         for p in pkgs.iter() {
-            c.tag(Tag::new(
-                p.start_sample,
-                "burst",
-                TagValue::Float(p.snr_db as f64),
-            ));
-            c.tag(Tag::new(
-                p.start_sample,
-                "ask_depth_db",
-                TagValue::Float(depth),
-            ));
+            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+            c.tag(Tag::new(p.start_sample, "ask_depth_db", TagValue::Float(depth)));
         }
 
         let s = self.det.take_stats();
@@ -274,9 +256,7 @@ impl Simple for AskDetectNode {
             MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
             HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
-                return Err(common::Error::other(format!(
-                    "ask_detect: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("ask_detect: unknown parameter {name:?}")))
             }
         }
         let rate = self.det.rate();
@@ -298,10 +278,7 @@ pub struct FskDetectNode {
 
 impl FskDetectNode {
     pub fn new(cfg: FskConfig) -> Self {
-        Self {
-            cfg,
-            det: FskDetector::new(1.0, cfg),
-        }
+        Self { cfg, det: FskDetector::new(1.0, cfg) }
     }
 
     pub fn default_fsk() -> Self {
@@ -337,18 +314,10 @@ impl Simple for FskDetectNode {
         }
         let sep = self.det.separation_hz() as f64;
         for p in pkgs.iter() {
-            c.tag(Tag::new(
-                p.start_sample,
-                "burst",
-                TagValue::Float(p.snr_db as f64),
-            ));
+            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
             // The measured deviation names a device family before anything has
             // decoded, so it is worth carrying even when no protocol matches.
-            c.tag(Tag::new(
-                p.start_sample,
-                "fsk_separation_hz",
-                TagValue::Float(sep),
-            ));
+            c.tag(Tag::new(p.start_sample, "fsk_separation_hz", TagValue::Float(sep)));
         }
 
         let s = self.det.take_stats();
@@ -393,14 +362,10 @@ impl Simple for FskDetectNode {
                 .label("Shortest credible symbol"),
             Param::int(MIN_PULSES, self.cfg.min_pulses as i64, 2..=512)
                 .label("Minimum pulses per packet"),
-            Param::float(
-                MIN_SEPARATION_HZ,
-                self.cfg.min_separation_hz as f64,
-                200.0..=200_000.0,
-            )
-            .unit("Hz")
-            .label("Minimum tone separation")
-            .log(),
+            Param::float(MIN_SEPARATION_HZ, self.cfg.min_separation_hz as f64, 200.0..=200_000.0)
+                .unit("Hz")
+                .label("Minimum tone separation")
+                .log(),
             Param::float(MIN_SNR_DB, self.cfg.min_snr_db as f64, 3.0..=40.0)
                 .unit("dB")
                 .label("Minimum SNR"),
@@ -419,9 +384,7 @@ impl Simple for FskDetectNode {
             MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
             HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
-                return Err(common::Error::other(format!(
-                    "fsk_detect: unknown parameter {name:?}"
-                )))
+                return Err(common::Error::other(format!("fsk_detect: unknown parameter {name:?}")))
             }
         }
         let rate = self.det.rate();
@@ -493,34 +456,22 @@ pub fn unmatched_event(
         // what makes one device look like a different one on every reception.
         Some(a) => {
             if let Some(f) = &a.framing {
-                framing_fields.push((
-                    "preamble_bits".into(),
-                    common::Value::Int(f.preamble_bits as i64),
-                ));
+                framing_fields
+                    .push(("preamble_bits".into(), common::Value::Int(f.preamble_bits as i64)));
                 framing_fields.push(("sync".into(), common::Value::Text(f.sync_hex())));
-                framing_fields.push((
-                    "frame_bytes".into(),
-                    common::Value::Int(f.content_bytes() as i64),
-                ));
+                framing_fields
+                    .push(("frame_bytes".into(), common::Value::Int(f.content_bytes() as i64)));
                 if !f.repeats.is_empty() {
-                    framing_fields.push((
-                        "copies".into(),
-                        common::Value::Int(f.repeats.len() as i64 + 1),
-                    ));
+                    framing_fields
+                        .push(("copies".into(), common::Value::Int(f.repeats.len() as i64 + 1)));
                 }
             }
             if let Some(f) = &a.framed {
-                framing_fields.push((
-                    "frame_len".into(),
-                    common::Value::Int(f.payload.len() as i64),
-                ));
+                framing_fields
+                    .push(("frame_len".into(), common::Value::Int(f.payload.len() as i64)));
                 framing_fields.push((
                     "whitening".into(),
-                    common::Value::Text(if f.whitened {
-                        "PN9".into()
-                    } else {
-                        "none".into()
-                    }),
+                    common::Value::Text(if f.whitened { "PN9".into() } else { "none".into() }),
                 ));
             }
             Decoded::bytes(UNKNOWN, center, at, a.frame_bytes().to_vec())
@@ -549,30 +500,19 @@ pub fn unmatched_event(
     let mut ev = ev.with_modulation(modulation);
     let mut fields: Vec<(String, common::Value)> = Vec::new();
     if let Some(m) = measure {
-        fields.push((
-            "confidence".into(),
-            common::Value::Float(m.confidence as f64),
-        ));
+        fields.push(("confidence".into(), common::Value::Float(m.confidence as f64)));
         if m.baud > 0.0 {
             fields.push(("baud".into(), common::Value::Float(m.baud as f64)));
         }
         if m.separation_hz > 0.0 {
-            fields.push((
-                "separation_hz".into(),
-                common::Value::Float(m.separation_hz as f64),
-            ));
+            fields.push(("separation_hz".into(), common::Value::Float(m.separation_hz as f64)));
         }
         if m.sweep_hz_s.abs() > 0.0 {
-            fields.push((
-                "sweep_hz_per_s".into(),
-                common::Value::Float(m.sweep_hz_s as f64),
-            ));
+            fields.push(("sweep_hz_per_s".into(), common::Value::Float(m.sweep_hz_s as f64)));
         }
         if m.symbol_period_us > 0.0 {
-            fields.push((
-                "symbol_period_us".into(),
-                common::Value::Float(m.symbol_period_us as f64),
-            ));
+            fields
+                .push(("symbol_period_us".into(), common::Value::Float(m.symbol_period_us as f64)));
         }
         if let Some(mode) = &m.mode {
             fields.push(("mode".into(), common::Value::Text(mode.clone())));
@@ -628,12 +568,7 @@ impl ProtocolDecodeNode {
             return;
         }
         let center = c.inputs[0].spec.center;
-        c.emit(Event::Decoded(unmatched_event(
-            pkg,
-            center,
-            self.modulation,
-            None,
-        )));
+        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation, None)));
     }
 
     pub fn all() -> Self {
@@ -826,11 +761,7 @@ pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
         baud: f.baud,
         separation_hz: f.separation_hz,
         sweep_hz_s: f.chirp_rate,
-        symbol_period_us: if f.cyclic_period_s > 0.0 {
-            f.cyclic_period_s * 1e6
-        } else {
-            0.0
-        },
+        symbol_period_us: if f.cyclic_period_s > 0.0 { f.cyclic_period_s * 1e6 } else { 0.0 },
     }
 }
 
@@ -838,8 +769,6 @@ impl Node for BurstRouteNode {
     fn name(&self) -> &str {
         "burst_route"
     }
-
-
 
     fn num_outputs(&self) -> usize {
         2
@@ -892,10 +821,8 @@ impl Node for BurstRouteNode {
             // A file per burst, written where the burst was cut, which on a
             // busy band is inside whatever fanout is running this node.
             if let Some(dir) = &self.dump_dir {
-                let path = dir.join(format!(
-                    "burst_{}_{}_{}.c64",
-                    center, rate as u64, b.start_sample
-                ));
+                let path =
+                    dir.join(format!("burst_{}_{}_{}.c64", center, rate as u64, b.start_sample));
                 if !path.exists() {
                     let mut bytes = Vec::with_capacity(b.iq.len() * 8);
                     for s in &b.iq {
@@ -947,11 +874,7 @@ impl Node for BurstRouteNode {
             if !b.packages.is_empty() {
                 let (m, iq) = evidence();
                 for p in &b.packages {
-                    c.tag(Tag::new(
-                        p.start_sample,
-                        "burst",
-                        TagValue::Float(p.snr_db as f64),
-                    ));
+                    c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
                     let mut p = p.clone();
                     p.center_hz = center;
                     let mut pkt = common::Packet::of_pulses(at_us, bandwidth_hz, p.clone());
@@ -984,10 +907,8 @@ impl Node for BurstRouteNode {
                     ));
                 }
                 if f.chirp_rate.abs() > 0.0 {
-                    fields.push((
-                        "sweep_hz_per_s".into(),
-                        common::Value::Float(f.chirp_rate as f64),
-                    ));
+                    fields
+                        .push(("sweep_hz_per_s".into(), common::Value::Float(f.chirp_rate as f64)));
                 }
                 if f.cyclic_period_s > 0.0 {
                     fields.push((
@@ -995,10 +916,7 @@ impl Node for BurstRouteNode {
                         common::Value::Float(f.cyclic_period_s as f64 * 1e6),
                     ));
                 }
-                fields.push((
-                    "confidence".into(),
-                    common::Value::Float(b.class.confidence as f64),
-                ));
+                fields.push(("confidence".into(), common::Value::Float(b.class.confidence as f64)));
 
                 // Name the mode where the parameters place one. This is the
                 // only caller: the router needs a family to pick a front end
@@ -1025,8 +943,7 @@ impl Node for BurstRouteNode {
                 // than a line of text. A piece of a transmission that is
                 // still going is the same news as the last piece, so those
                 // are reported every [`REPORT_S`].
-                let due = !b.continuous
-                    || self.last_report_s.is_none_or(|l| at - l >= REPORT_S);
+                let due = !b.continuous || self.last_report_s.is_none_or(|l| at - l >= REPORT_S);
                 if b.packages.is_empty() && due {
                     if b.continuous {
                         self.last_report_s = Some(at);
@@ -1091,12 +1008,8 @@ impl Node for BurstRouteNode {
                 .label("Margin over the runner-up required"),
             // Past one on purpose: the top of the range means never, and a
             // busy wideband tier wants that available without a rebuild.
-            Param::float(
-                REPORT_CONFIDENCE,
-                self.report_min_confidence as f64,
-                0.0..=1.01,
-            )
-            .label("Confidence before an undecodable burst is logged"),
+            Param::float(REPORT_CONFIDENCE, self.report_min_confidence as f64, 0.0..=1.01)
+                .label("Confidence before an undecodable burst is logged"),
         ]
     }
 

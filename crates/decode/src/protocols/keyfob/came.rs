@@ -21,18 +21,12 @@ pub struct Came {
 
 /// CAME 12-bit fixed code.
 pub fn came12_bit() -> Came {
-    Came {
-        name: "CAME-12bit",
-        frame_bits: 12,
-    }
+    Came { name: "CAME-12bit", frame_bits: 12 }
 }
 
 /// CAME 24-bit fixed code.
 pub fn came24_bit() -> Came {
-    Came {
-        name: "CAME-24bit",
-        frame_bits: 24,
-    }
+    Came { name: "CAME-24bit", frame_bits: 24 }
 }
 
 impl Protocol for Came {
@@ -94,9 +88,6 @@ mod tests {
     fn a_12bit_decoder_does_not_swallow_a_24bit_frame() {
         // Two 12-bit halves both decode, but the 24-bit frame does not match
         // the 12-bit frame length with corroboration.
-        assert_eq!(
-            came12_bit().decode(&input(24, 0xabc_def)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(came12_bit().decode(&input(24, 0xabc_def)), Err(DecodeError::NotThisProtocol));
     }
 }

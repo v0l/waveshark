@@ -98,11 +98,7 @@ impl Protocol for SomfyRts {
             slice_manchester_half(pkg, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
         // A detector may hand the level stream inverted; try both polarities.
         for inverted in [false, true] {
-            let r = if inverted {
-                raw.inverted()
-            } else {
-                raw.clone()
-            };
+            let r = if inverted { raw.inverted() } else { raw.clone() };
             for (pat, bits) in PREAMBLES {
                 if let Some(pos) = r.find(pat, *bits) {
                     let data_start = pos + *bits;
@@ -189,10 +185,7 @@ mod tests {
         f[6] = (address >> 16) as u8;
         // Checksum: the XOR of every nibble must come to zero, so set the
         // low nibble of byte 1 to the current nibble-XOR.
-        let sum: u8 = f
-            .iter()
-            .map(|&x| (x ^ (x >> 4)) & 0x0f)
-            .fold(0, |a, b| a ^ b);
+        let sum: u8 = f.iter().map(|&x| (x ^ (x >> 4)) & 0x0f).fold(0, |a, b| a ^ b);
         f[1] = (control << 4) | (sum & 0x0f);
         // Scramble: each byte XORs with the previous scrambled byte.
         for i in 1..DATA_BYTES {
@@ -263,25 +256,13 @@ mod tests {
     #[test]
     fn decodes_a_retransmission_frame() {
         // From a real capture: seed 0x5b, control Up, counter 0x1fe, addr 0x123456.
-        let p = frame(
-            0x5b,
-            2,
-            0x01fe,
-            0x123456,
-            &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00],
-            49,
-        );
+        let p = frame(0x5b, 2, 0x01fe, 0x123456, &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49);
         let raw = slice_manchester_half(&p, &SomfyRts.timing()).unwrap();
         // sanity: raw is a half-symbol stream, the sync search should find it
-        assert!(raw
-            .find(&[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49)
-            .is_some());
+        assert!(raw.find(&[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49).is_some());
         let r = SomfyRts.decode_package(&p).unwrap();
         assert_eq!(r.model, "Somfy-RTS");
-        assert_eq!(
-            r.get("control"),
-            Some(&crate::protocol::Value::Text("Up".into()))
-        );
+        assert_eq!(r.get("control"), Some(&crate::protocol::Value::Text("Up".into())));
         assert_eq!(r.get("counter"), Some(&crate::protocol::Value::Int(0x01fe)));
         assert_eq!(r.get("id"), Some(&crate::protocol::Value::Int(0x123456)));
         assert_eq!(r.crc_valid, Some(true));
@@ -289,14 +270,8 @@ mod tests {
 
     #[test]
     fn rejects_a_frame_whose_checksum_fails() {
-        let mut p = frame(
-            0x5b,
-            2,
-            0x01fe,
-            0x123456,
-            &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00],
-            49,
-        );
+        let mut p =
+            frame(0x5b, 2, 0x01fe, 0x123456, &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49);
         // Flip one data half-symbol by stretching a mark past its neighbour,
         // which corrupts a bit without disturbing the sync word.
         let n = p.pulses.len();
@@ -308,10 +283,7 @@ mod tests {
     #[test]
     fn rejects_noise_with_no_sync_word() {
         let pulses: Vec<_> = (0..40)
-            .map(|i| dsp::pulse::Pulse {
-                mark: TE * (1 + i % 3),
-                gap: TE * (1 + (i + 1) % 3),
-            })
+            .map(|i| dsp::pulse::Pulse { mark: TE * (1 + i % 3), gap: TE * (1 + (i + 1) % 3) })
             .collect();
         let p = Package {
             pulses,
@@ -328,10 +300,7 @@ mod tests {
     fn decodes_a_first_frame() {
         let p = frame(0xa7, 8, 0x0001, 0x0000aa, &[0xf0, 0xf0, 0xff, 0x00], 25);
         let r = SomfyRts.decode_package(&p).unwrap();
-        assert_eq!(
-            r.get("control"),
-            Some(&crate::protocol::Value::Text("Prog".into()))
-        );
+        assert_eq!(r.get("control"), Some(&crate::protocol::Value::Text("Prog".into())));
         assert_eq!(r.get("counter"), Some(&crate::protocol::Value::Int(1)));
         assert_eq!(r.get("id"), Some(&crate::protocol::Value::Int(0x0000aa)));
     }

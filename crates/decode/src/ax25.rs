@@ -63,16 +63,7 @@ impl Frame {
 
     /// The information field as text, when it is text.
     pub fn info_text(&self) -> String {
-        self.info
-            .iter()
-            .map(|&b| {
-                if (32..127).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect()
+        self.info.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect()
     }
 }
 
@@ -94,12 +85,8 @@ const MAX_PATH: usize = 8;
 
 fn address(b: &[u8]) -> Address {
     // Six characters, each shifted left by one bit, space padded.
-    let call: String = b[..6]
-        .iter()
-        .map(|c| (c >> 1) as char)
-        .collect::<String>()
-        .trim_end()
-        .to_string();
+    let call: String =
+        b[..6].iter().map(|c| (c >> 1) as char).collect::<String>().trim_end().to_string();
     Address {
         call,
         ssid: (b[6] >> 1) & 0x0F,
@@ -209,12 +196,7 @@ mod tests {
 
     #[test]
     fn a_digipeated_frame_keeps_its_path_in_order() {
-        let raw = build(
-            ("APRS", 0),
-            ("EI2ABC", 9),
-            &[("WIDE1", 1), ("WIDE2", 2)],
-            b"x",
-        );
+        let raw = build(("APRS", 0), ("EI2ABC", 9), &[("WIDE1", 1), ("WIDE2", 2)], b"x");
         let f = parse(&raw).unwrap();
         let path: Vec<String> = f.path.iter().map(|a| a.to_string()).collect();
         assert_eq!(path, vec!["WIDE1-1", "WIDE2-2"]);

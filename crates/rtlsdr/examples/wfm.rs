@@ -80,10 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // has.
     let offset = 400_000.0f64;
     sdr.set_center(Hz(station.get() - offset as u64))?;
-    println!(
-        "\nreceiving {station} (tuner at {}, {offset:.0} Hz digital offset)",
-        sdr.center()
-    );
+    println!("\nreceiving {station} (tuner at {}, {offset:.0} Hz digital offset)", sdr.center());
 
     let mut mixer = Mixer::new(-offset, RF_RATE as f64);
     let mut if_dec = FirDecim::design(IF_DECIM, 0.9, 80.0);
@@ -94,8 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // broadcast mono baseband ends at 15 kHz by definition, so anything above
     // that is pilot and subcarrier, never programme audio.
     const AUDIO_RATE: f64 = IF_RATE / AUDIO_DECIM as f64;
-    let mut audio_dec =
-        FirDecim::design(AUDIO_DECIM, 15_000.0 / (AUDIO_RATE / 2.0), 80.0);
+    let mut audio_dec = FirDecim::design(AUDIO_DECIM, 15_000.0 / (AUDIO_RATE / 2.0), 80.0);
     let mut deemph = Deemphasis::eu(IF_RATE / AUDIO_DECIM as f64);
 
     let (mut shifted, mut iq_if, mut disc) = (Vec::new(), Vec::new(), Vec::new());
@@ -134,10 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = all_disc.len().min(600_000);
     let x = &all_disc[..n];
     let pilot = goertzel(x, IF_RATE, 19_000.0);
-    let refs: Vec<f64> = [15_500.0, 17_000.0, 21_000.0, 23_000.0]
-        .iter()
-        .map(|f| goertzel(x, IF_RATE, *f))
-        .collect();
+    let refs: Vec<f64> =
+        [15_500.0, 17_000.0, 21_000.0, 23_000.0].iter().map(|f| goertzel(x, IF_RATE, *f)).collect();
     let noise = refs.iter().sum::<f64>() / refs.len() as f64;
     let snr = 20.0 * (pilot / noise.max(1e-30)).log10();
 
@@ -163,8 +157,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if err.abs() <= STEP * 1.5 {
             println!("peak at {:.2} Hz (within the {STEP} Hz search resolution of 19000)", best.0);
         } else {
-            println!("peak at {:.2} Hz (error {err:+.2} Hz -> {:+.2} ppm tuning offset)",
-                best.0, err / 19_000.0 * 1e6);
+            println!(
+                "peak at {:.2} Hz (error {err:+.2} Hz -> {:+.2} ppm tuning offset)",
+                best.0,
+                err / 19_000.0 * 1e6
+            );
         }
     } else {
         println!("No pilot. Either a mono station, or too weak.");

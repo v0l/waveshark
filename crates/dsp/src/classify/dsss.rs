@@ -30,7 +30,10 @@ impl Hypothesis for Dsss {
         // with the peak: beacons measure a ratio of only 3.3 against an
         // absolute peak of 0.90. Demanding a sharp single lag, which is right
         // for a cyclic prefix, refuses them.
-        e.filled * e.constant_envelope * e.chips * (1.0 - ramp(f.kurtosis, 2.4, 2.8))
+        e.filled
+            * e.constant_envelope
+            * e.chips
+            * (1.0 - ramp(f.kurtosis, 2.4, 2.8))
             * (1.0 - e.sweeping)
     }
 }

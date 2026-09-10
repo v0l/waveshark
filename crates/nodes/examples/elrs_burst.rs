@@ -39,7 +39,11 @@ fn main() {
         if let Payload::Packets(p) = o {
             for p in p {
                 if let common::PacketBody::Frame(f) = &p.body {
-                    eprintln!("{:?}", nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(f.center_hz)).map(|d| d.detail));
+                    eprintln!(
+                        "{:?}",
+                        nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(f.center_hz))
+                            .map(|d| d.detail)
+                    );
                 }
             }
         }

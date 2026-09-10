@@ -50,9 +50,7 @@ pub fn hann(n: usize) -> Vec<f32> {
         return vec![1.0; n];
     }
     let m = (n - 1) as f64;
-    (0..n)
-        .map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()) as f32)
-        .collect()
+    (0..n).map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / m).cos()) as f32).collect()
 }
 
 /// 4-term Blackman-Harris. -92 dB sidelobes, the right default for a waterfall

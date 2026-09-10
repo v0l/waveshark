@@ -153,9 +153,8 @@ pub fn row(
     let (mac, ssid, caps, channel, frequency) = match ty {
         "GSM" => {
             let (key, operator) = cell_key(ident)?;
-            let arfcn = dsp::gsm::arfcn(s.center_hz as f64)
-                .map(|n| n.to_string())
-                .unwrap_or_default();
+            let arfcn =
+                dsp::gsm::arfcn(s.center_hz as f64).map(|n| n.to_string()).unwrap_or_default();
             (key, name.unwrap_or("").to_string(), format!("GSM;{operator}"), String::new(), arfcn)
         }
         _ => (

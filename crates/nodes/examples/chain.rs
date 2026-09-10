@@ -24,9 +24,8 @@ fn parse_chain(s: &str) -> Result<Vec<NodeSpec>, String> {
             };
             let mut spec = NodeSpec::new(kind);
             for kv in args.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| format!("expected key=value, got {kv:?}"))?;
+                let (k, v) =
+                    kv.split_once('=').ok_or_else(|| format!("expected key=value, got {kv:?}"))?;
                 // Type is inferred from the literal: `true`/`false` are bools,
                 // anything with a dot is a float, otherwise an integer.
                 let val = if v == "true" || v == "false" {
@@ -71,12 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = StreamSpec::iq(buf.rate.as_f64(), buf.center);
     let mut g = build_chain(spec, &specs, &reg)?;
 
-    println!(
-        "input:  {} samples @ {} centred {}",
-        buf.len(),
-        buf.rate,
-        buf.center
-    );
+    println!("input:  {} samples @ {} centred {}", buf.len(), buf.rate, buf.center);
     print!("chain: ");
     for (i, (id, name)) in g.order().enumerate() {
         if i > 0 {
@@ -96,10 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (id, name) in g.order().collect::<Vec<_>>() {
         let params = g.node(id).unwrap().params();
         if !params.is_empty() {
-            let list: Vec<String> = params
-                .iter()
-                .map(|p| format!("{}={}", p.name, fmt_value(&p.value)))
-                .collect();
+            let list: Vec<String> =
+                params.iter().map(|p| format!("{}={}", p.name, fmt_value(&p.value))).collect();
             println!("  {name}: {}", list.join(" "));
         }
     }

@@ -195,10 +195,7 @@ impl Transmission {
 
     /// Unpack what [`Transmission::to_bytes`] produced.
     pub fn codewords_from_bytes(bytes: &[u8]) -> Vec<u32> {
-        bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
+        bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()
     }
 }
 

@@ -103,10 +103,7 @@ struct Run {
 }
 
 fn run(node: &mut WfmDemodNode, iq: &[C32]) -> Run {
-    let inspec = PortSpec {
-        spec: StreamSpec::iq(RATE, Hz::mhz(95)),
-        latency: 0,
-    };
+    let inspec = PortSpec { spec: StreamSpec::iq(RATE, Hz::mhz(95)), latency: 0 };
     let ins = [inspec];
     let spec = node.negotiate(&ins).expect("negotiate")[0];
     let mut audio = Vec::new();
@@ -125,12 +122,7 @@ fn run(node: &mut WfmDemodNode, iq: &[C32]) -> Run {
         tags.extend(tg);
         idx += chunk.len() as u64;
     }
-    Run {
-        audio,
-        events,
-        tags,
-        spec,
-    }
+    Run { audio, events, tags, spec }
 }
 
 #[test]
@@ -139,16 +131,8 @@ fn the_audio_port_is_two_interleaved_channels_at_twice_the_frame_rate() {
     let iq = broadcast(&rds_bits(0xC479, b"SUPERRAD", 4), 0.1, true);
     let r = run(&mut n, &iq);
     assert_eq!(r.spec.kind, PortKind::Real);
-    assert_eq!(
-        r.spec.rate,
-        RATE * 2.0,
-        "port rate must cover both channels"
-    );
-    assert_eq!(
-        r.audio.len() % 2,
-        0,
-        "interleaved output must be even length"
-    );
+    assert_eq!(r.spec.rate, RATE * 2.0, "port rate must cover both channels");
+    assert_eq!(r.audio.len() % 2, 0, "interleaved output must be even length");
     assert_eq!(r.audio.len(), iq.len() * 2);
 }
 
@@ -190,10 +174,7 @@ fn a_stereo_broadcast_separates_and_reports_its_blend() {
         re += (f[1] as f64).powi(2);
     }
     let sep = 10.0 * (le / re.max(1e-18)).log10();
-    assert!(
-        sep > 20.0,
-        "only {sep:.1} dB of separation through the node"
-    );
+    assert!(sep > 20.0, "only {sep:.1} dB of separation through the node");
 }
 
 #[test]
@@ -223,10 +204,7 @@ fn a_mono_broadcast_yields_identical_channels() {
     for f in r.audio[half..].chunks_exact(2) {
         worst = worst.max((f[0] - f[1]).abs());
     }
-    assert!(
-        worst < 0.02,
-        "channels differ by {worst} on a mono broadcast"
-    );
+    assert!(worst < 0.02, "channels differ by {worst} on a mono broadcast");
 }
 
 #[test]
@@ -246,10 +224,7 @@ fn disabling_stereo_still_produces_two_channels() {
 #[test]
 fn a_rate_too_low_for_the_subcarrier_is_refused_at_build_time() {
     let mut n = WfmDemodNode::new();
-    let low = PortSpec {
-        spec: StreamSpec::iq(48_000.0, Hz::mhz(95)),
-        latency: 0,
-    };
+    let low = PortSpec { spec: StreamSpec::iq(48_000.0, Hz::mhz(95)), latency: 0 };
     let err = n.negotiate(&[low]).unwrap_err();
     assert!(
         format!("{err}").contains("57 kHz"),
@@ -260,9 +235,7 @@ fn a_rate_too_low_for_the_subcarrier_is_refused_at_build_time() {
 #[test]
 fn a_non_iq_input_is_refused() {
     let mut n = WfmDemodNode::new();
-    let wrong = PortSpec {
-        spec: StreamSpec::iq(RATE, Hz::mhz(95)).with_kind(PortKind::Real),
-        latency: 0,
-    };
+    let wrong =
+        PortSpec { spec: StreamSpec::iq(RATE, Hz::mhz(95)).with_kind(PortKind::Real), latency: 0 };
     assert!(n.negotiate(&[wrong]).is_err());
 }

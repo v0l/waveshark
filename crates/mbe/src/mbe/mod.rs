@@ -277,10 +277,7 @@ pub struct MbeNoiseSequence {
 
 impl MbeNoiseSequence {
     pub fn new() -> Self {
-        Self {
-            sample: 3147.0,
-            current_buffer: [0.0; 256],
-        }
+        Self { sample: 3147.0, current_buffer: [0.0; 256] }
     }
 
     fn next(&mut self) -> f32 {
@@ -330,9 +327,7 @@ impl WhiteNoise {
     /// `length` samples scaled by `gain`, matching
     /// `WhiteNoiseGenerator.getSamples(length, gain)`.
     pub fn samples(&mut self, length: usize, gain: f32) -> Vec<f32> {
-        (0..length)
-            .map(|_| (self.next_unit() / 53125.0 * 2.0 - 1.0) * gain)
-            .collect()
+        (0..length).map(|_| (self.next_unit() / 53125.0 * 2.0 - 1.0) * gain).collect()
     }
 }
 
@@ -397,7 +392,11 @@ impl MbeSynthesizer {
 
     /// Generates 160 samples (20 ms) of voice audio using the model
     /// parameters, scaled to -1.0 to 1.0.
-    pub fn get_voice(&mut self, parameters: &ModelParameters, previous: &ModelParameters) -> [f32; SAMPLES_PER_FRAME] {
+    pub fn get_voice(
+        &mut self,
+        parameters: &ModelParameters,
+        previous: &ModelParameters,
+    ) -> [f32; SAMPLES_PER_FRAME] {
         let u = self.noise_sequence.next_buffer();
 
         let unvoiced = self.get_unvoiced(parameters, &u);
@@ -468,8 +467,7 @@ impl MbeSynthesizer {
 
                 let denominator = (b_max[l] - a_min[l]) as f32;
 
-                let scalor = UNVOICED_SCALING_COEFFICIENT * m[l]
-                    / (numerator / denominator).sqrt();
+                let scalor = UNVOICED_SCALING_COEFFICIENT * m[l] / (numerator / denominator).sqrt();
 
                 for n in a_min[l]..b_max[l] {
                     if n < 128 {
@@ -505,8 +503,7 @@ impl MbeSynthesizer {
             let current_uw = if n >= 32 { uw[n - 32] } else { 0.0 };
 
             unvoiced[n] = ((previous_window * previous_uw) + (current_window * current_uw))
-            / ((previous_window * previous_window)
-                + (current_window * current_window));
+                / ((previous_window * previous_window) + (current_window * current_window));
         }
 
         self.previous_uw = uw;
@@ -588,7 +585,8 @@ impl MbeSynthesizer {
                         let previous_phase = self.previous_phase_o[l as usize]
                             + (previous_frequency * nf * l as f32);
                         voiced[n] += 2.0
-                            * (synthesis_window(n as i32) * previous_m[l as usize]
+                            * (synthesis_window(n as i32)
+                                * previous_m[l as usize]
                                 * cos64(previous_phase));
 
                         let current_phase = current_phase_o[l as usize]
@@ -611,8 +609,7 @@ impl MbeSynthesizer {
                             - (phase_offset_per_frame * l as f32);
 
                         // Algorithm 138
-                        let wl = (ol
-                            - (TWO_PI * ((ol + std::f32::consts::PI) / TWO_PI).floor()))
+                        let wl = (ol - (TWO_PI * ((ol + std::f32::consts::PI) / TWO_PI).floor()))
                             / SAMPLES_PER_FRAME as f32;
 
                         // Algorithm 136 - phase function

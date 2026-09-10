@@ -131,20 +131,14 @@ impl HackRfDevice {
             .map(|(_, _, s)| s)
             .unwrap_or_else(|_| format!("index{index}"));
         let version = dev.version().unwrap_or_else(|_| "unknown".into());
-        let board = dev
-            .board_id()
-            .map(hackrf_usb::transport::board_id_name)
-            .unwrap_or("HackRF");
+        let board = dev.board_id().map(hackrf_usb::transport::board_id_name).unwrap_or("HackRF");
 
         let info = DeviceInfo {
             kind: DriverKind::HackRf,
             id: serial.clone(),
             label: format!("{board} {}", short_serial(&serial)),
             tuner: format!("MAX2837 / RFFC5072 (fw {version})"),
-            ranges: vec![TunerRange {
-                range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),
-                label: "1 MHz - 6 GHz",
-            }],
+            ranges: vec![TunerRange { range: Hz(FREQ_MIN)..=Hz(FREQ_MAX), label: "1 MHz - 6 GHz" }],
             rates: Vec::new(),
             rate_range: Sps(RATE_MIN)..=Sps(RATE_MAX),
             // The three real stages, in signal path order. A caller that
@@ -294,7 +288,11 @@ fn short_serial(s: &str) -> String {
     // Serials are 32 hex digits and mostly leading zeros; the tail identifies
     // the unit and is what is printed on comparison tools.
     let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
+    if t.len() > 8 {
+        t[t.len() - 8..].to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 impl Device for HackRfDevice {
@@ -358,10 +356,7 @@ impl Device for HackRfDevice {
 
     fn gains(&self) -> Vec<(String, GainMode)> {
         vec![
-            (
-                "amp".into(),
-                GainMode::Manual(if self.stages.amp { gain::AMP_DB } else { 0.0 }),
-            ),
+            ("amp".into(), GainMode::Manual(if self.stages.amp { gain::AMP_DB } else { 0.0 })),
             ("lna".into(), GainMode::Manual(self.stages.lna as f32)),
             ("vga".into(), GainMode::Manual(self.stages.vga as f32)),
         ]
@@ -393,10 +388,7 @@ impl Device for HackRfDevice {
 
     fn tx_gains(&self) -> Vec<(String, GainMode)> {
         vec![
-            (
-                "amp".into(),
-                GainMode::Manual(if self.tx_stages.amp { gain::AMP_DB } else { 0.0 }),
-            ),
+            ("amp".into(), GainMode::Manual(if self.tx_stages.amp { gain::AMP_DB } else { 0.0 })),
             ("txvga".into(), GainMode::Manual(self.tx_stages.txvga as f32)),
         ]
     }
@@ -668,8 +660,7 @@ impl HackRfStream {
             std::thread::sleep(want - elapsed);
         }
         self.silence_at = Some(std::time::Instant::now());
-        let buf =
-            IqBuf::new(std::mem::take(&mut self.samples), self.center, self.rate, self.seq);
+        let buf = IqBuf::new(std::mem::take(&mut self.samples), self.center, self.rate, self.seq);
         self.seq += n as u64;
         buf
     }
@@ -680,10 +671,7 @@ fn decode(bytes: &[u8], out: &mut Vec<C32>) {
     out.clear();
     out.reserve(bytes.len() / 2);
     for p in bytes.chunks_exact(2) {
-        out.push(C32::new(
-            p[0] as i8 as f32 * (1.0 / 128.0),
-            p[1] as i8 as f32 * (1.0 / 128.0),
-        ));
+        out.push(C32::new(p[0] as i8 as f32 * (1.0 / 128.0), p[1] as i8 as f32 * (1.0 / 128.0)));
     }
 }
 

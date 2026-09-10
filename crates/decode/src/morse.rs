@@ -97,20 +97,14 @@ pub fn encode(text: &str, wpm: f32) -> Package {
             }
             chars += 1;
             for el in pat.chars() {
-                pulses.push(Pulse {
-                    mark: if el == '-' { dot * 3 } else { dot },
-                    gap: dot,
-                });
+                pulses.push(Pulse { mark: if el == '-' { dot * 3 } else { dot }, gap: dot });
             }
         }
     }
     if let Some(p) = pulses.last_mut() {
         p.gap = dot * 7;
     }
-    Package {
-        pulses,
-        ..Default::default()
-    }
+    Package { pulses, ..Default::default() }
 }
 
 /// Read timings back as text.
@@ -165,11 +159,7 @@ mod tests {
         // dots, so at 1 wpm it takes 60 seconds. A timing table that gets
         // this wrong is wrong at every speed.
         let pkg = encode("PARIS", 1.0);
-        let total: u64 = pkg
-            .pulses
-            .iter()
-            .map(|p| p.mark as u64 + p.gap as u64)
-            .sum();
+        let total: u64 = pkg.pulses.iter().map(|p| p.mark as u64 + p.gap as u64).sum();
         assert_eq!(total, 60_000_000, "PARIS at 1 wpm is not a minute long");
     }
 

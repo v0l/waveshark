@@ -60,23 +60,13 @@ fn worker() -> Option<&'static Sender<Job>> {
                     while let Ok(job) = rx.recv() {
                         match job {
                             Job::Warm => {}
-                            Job::Tea1 {
-                                frames,
-                                range,
-                                chunk,
-                                done,
-                            } => {
+                            Job::Tea1 { frames, range, chunk, done } => {
                                 let g = tea1.get_or_insert_with(|| {
                                     GpuSearch::new().unwrap_or(GpuSearch::FALLBACK)
                                 });
                                 let _ = done.send((g.found, g.search(&frames, range, chunk)));
                             }
-                            Job::Ta61 {
-                                pairs,
-                                range,
-                                chunk,
-                                done,
-                            } => {
+                            Job::Ta61 { pairs, range, chunk, done } => {
                                 let g = ta61.get_or_insert_with(|| {
                                     Ta61Gpu::new().unwrap_or(Ta61Gpu::FALLBACK)
                                 });
@@ -106,12 +96,8 @@ pub fn warm() {
 /// to avoid the dependency for two setup calls.
 fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    static VT: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(std::ptr::null(), &VT),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
+    static VT: RawWakerVTable =
+        RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VT), |_| {}, |_| {}, |_| {});
     // SAFETY: the vtable's clone/wake/drop are all no-ops over a null pointer.
     let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) };
     let mut cx = Context::from_waker(&waker);
@@ -191,15 +177,7 @@ impl GpuSearch {
         let tx = worker()?.clone();
         Some(Promise::spawn_thread("tea1-gpu", move || {
             let (done, rx) = channel();
-            if tx
-                .send(Job::Tea1 {
-                    frames,
-                    range,
-                    chunk,
-                    done,
-                })
-                .is_err()
-            {
+            if tx.send(Job::Tea1 { frames, range, chunk, done }).is_err() {
                 return (false, None);
             }
             rx.recv().unwrap_or((false, None))
@@ -301,12 +279,7 @@ impl GpuSearch {
         let lut_a = self.lut_a.as_ref().unwrap();
         let lut_b = self.lut_b.as_ref().unwrap();
         assert!(frames.len() >= 2 && frames.len() <= MAX_FRAMES);
-        let ks_len = frames
-            .iter()
-            .map(|f| f.ct.len())
-            .min()
-            .unwrap_or(0)
-            .min(MAX_KS);
+        let ks_len = frames.iter().map(|f| f.ct.len()).min().unwrap_or(0).min(MAX_KS);
 
         let mut ivs = [0u32; MAX_FRAMES];
         let mut ct = [0u32; MAX_FRAMES * MAX_KS];
@@ -519,15 +492,7 @@ impl Ta61Gpu {
         let tx = worker()?.clone();
         Some(Promise::spawn_thread("ta61-gpu", move || {
             let (done, rx) = channel();
-            if tx
-                .send(Job::Ta61 {
-                    pairs,
-                    range,
-                    chunk,
-                    done,
-                })
-                .is_err()
-            {
+            if tx.send(Job::Ta61 { pairs, range, chunk, done }).is_err() {
                 return (false, None);
             }
             rx.recv().unwrap_or((false, None))
@@ -619,17 +584,14 @@ impl Ta61Gpu {
     }
 
     fn rw_buf(&self, label: &str) -> wgpu::Buffer {
-        self.device
-            .as_ref()
-            .unwrap()
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
+        self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
     }
 }
 
@@ -700,10 +662,7 @@ mod tests {
     use crate::tea::Timestamp;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]
@@ -712,22 +671,10 @@ mod tests {
             eprintln!("no GPU adapter; skipping");
             return;
         };
-        let ts = |frame| Timestamp {
-            tn: 1,
-            frame,
-            multiframe: 30,
-            hyperframe: 110,
-            uplink: false,
-        };
+        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
         let frames = vec![
-            Collision {
-                ts: ts(6),
-                ct: hex("151ef027"),
-            },
-            Collision {
-                ts: ts(7),
-                ct: hex("4d00159e"),
-            },
+            Collision { ts: ts(6), ct: hex("151ef027") },
+            Collision { ts: ts(7), ct: hex("4d00159e") },
         ];
         let got = gpu.search(&frames, 0..0x2_0000, 1 << 16);
         assert_eq!(got, Some(0x111), "GPU search finds the reference key");
@@ -739,22 +686,10 @@ mod tests {
             eprintln!("no GPU adapter; skipping");
             return;
         };
-        let ts = |frame| Timestamp {
-            tn: 1,
-            frame,
-            multiframe: 30,
-            hyperframe: 110,
-            uplink: false,
-        };
+        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
         let frames = vec![
-            Collision {
-                ts: ts(6),
-                ct: hex("151ef027"),
-            },
-            Collision {
-                ts: ts(7),
-                ct: hex("4d00159e"),
-            },
+            Collision { ts: ts(6), ct: hex("151ef027") },
+            Collision { ts: ts(7), ct: hex("4d00159e") },
         ];
         let Some(promise) = GpuSearch::spawn(frames, 0..0x2_0000, 1 << 16) else {
             panic!("worker did not start");
@@ -782,13 +717,8 @@ mod tests {
         // c whose guessed bytes pack small, so a narrow window reaches it.
         let c = [0x03u8, 0x11, 0x02, 0x00, 0x77, 0x01, 0x00, 0x88];
         let ssis = [0x12_3456u32, 0x00_4321, 0xab_cdef];
-        let pairs: Vec<IdPair> = ssis
-            .iter()
-            .map(|&ssi| IdPair {
-                ssi,
-                esi: encrypt_id(&c, ssi),
-            })
-            .collect();
+        let pairs: Vec<IdPair> =
+            ssis.iter().map(|&ssi| IdPair { ssi, esi: encrypt_id(&c, ssi) }).collect();
         // Guess = c0 | c2<<8 | c3<<16 | c5<<24 | c6<<32 = 0x01_0000_0203.
         let g = 0x0100_0203u64;
         let got = gpu.search(&pairs, g - 8..g + 8, 1 << 16);

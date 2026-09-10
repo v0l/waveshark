@@ -31,10 +31,7 @@ fn frames() -> Option<Vec<common::Frame>> {
         .chunks_exact(2)
         .map(|c| C32::new(c[0] as i8 as f32 / 128.0, c[1] as i8 as f32 / 128.0))
         .collect();
-    let spec = PortSpec {
-        spec: StreamSpec::iq(RATE, Hz(CENTER)),
-        latency: 0,
-    };
+    let spec = PortSpec { spec: StreamSpec::iq(RATE, Hz(CENTER)), latency: 0 };
     let mut node = nodes::droneid_nodes::DroneIdNode::new();
     node.negotiate(&spec).expect("the frame's own rate");
     let ins = [spec];
@@ -43,8 +40,7 @@ fn frames() -> Option<Vec<common::Frame>> {
     let mut out = Vec::new();
     for block in iq.chunks(65_536) {
         let mut o = Payload::Frames(Vec::new());
-        node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx)
-            .expect("process");
+        node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx).expect("process");
         out.extend(o.as_frames().unwrap_or(&[]).iter().cloned());
     }
     Some(out)

@@ -44,13 +44,8 @@ const WHITENING: [u8; 255] = {
 
 /// The header's five checksum bits over its twelve data bits, as the rows of
 /// a parity matrix.
-const HEADER_CHECKSUM: [u16; 5] = [
-    0b1111_0000_0000,
-    0b1000_1110_0001,
-    0b0100_1001_1010,
-    0b0010_0101_0111,
-    0b0001_0010_1111,
-];
+const HEADER_CHECKSUM: [u16; 5] =
+    [0b1111_0000_0000, 0b1000_1110_0001, 0b0100_1001_1010, 0b0010_0101_0111, 0b0001_0010_1111];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -148,10 +143,8 @@ fn decode_implicit_at(
         return Err(Error::BadCodingRate);
     }
     let n = 1u32 << sf;
-    let symbols: Vec<u16> = symbols
-        .iter()
-        .map(|&v| (v as i32 + offset as i32).rem_euclid(n as i32) as u16)
-        .collect();
+    let symbols: Vec<u16> =
+        symbols.iter().map(|&v| (v as i32 + offset as i32).rem_euclid(n as i32) as u16).collect();
     let ppm = if ldro { sf as usize - 2 } else { sf as usize };
     let rdd = p.coding_rate as usize + 4;
 
@@ -186,11 +179,7 @@ fn decode_implicit_at(
     };
 
     Ok(Frame {
-        header: Header {
-            length: p.length,
-            coding_rate: p.coding_rate,
-            has_crc: p.has_crc,
-        },
+        header: Header { length: p.length, coding_rate: p.coding_rate, has_crc: p.has_crc },
         payload,
         crc_ok,
         bin_offset: offset,
@@ -214,10 +203,8 @@ fn decode_at(symbols: &[u16], sf: u8, ldro: bool, offset: i16) -> Result<Frame, 
         return Err(Error::Short);
     }
     let n = 1u32 << sf;
-    let symbols: Vec<u16> = symbols
-        .iter()
-        .map(|&v| (v as i32 + offset as i32).rem_euclid(n as i32) as u16)
-        .collect();
+    let symbols: Vec<u16> =
+        symbols.iter().map(|&v| (v as i32 + offset as i32).rem_euclid(n as i32) as u16).collect();
     let gray = |v: u16, reduced: bool| -> u16 {
         let w = if reduced { v / 4 } else { v % n as u16 };
         w ^ (w >> 1)
@@ -239,11 +226,8 @@ fn decode_at(symbols: &[u16], sf: u8, ldro: bool, offset: i16) -> Result<Frame, 
 
     let bytes: Vec<u8> = out.chunks_exact(2).map(|c| c[0] | (c[1] << 4)).collect();
     let take = header.length.min(bytes.len());
-    let payload: Vec<u8> = bytes[..take]
-        .iter()
-        .enumerate()
-        .map(|(j, b)| b ^ WHITENING[j % WHITENING.len()])
-        .collect();
+    let payload: Vec<u8> =
+        bytes[..take].iter().enumerate().map(|(j, b)| b ^ WHITENING[j % WHITENING.len()]).collect();
 
     // The CRC bytes are not whitened and are not part of the length, so they
     // sit past the payload in the raw stream.
@@ -254,12 +238,7 @@ fn decode_at(symbols: &[u16], sf: u8, ldro: bool, offset: i16) -> Result<Frame, 
         Some(checksum(&payload) == want)
     };
 
-    Ok(Frame {
-        header,
-        payload,
-        crc_ok,
-        bin_offset: offset,
-    })
+    Ok(Frame { header, payload, crc_ok, bin_offset: offset })
 }
 
 fn parse_header(nibbles: &[u8]) -> Result<Header, Error> {
@@ -271,9 +250,7 @@ fn parse_header(nibbles: &[u8]) -> Result<Header, Error> {
     let got = HEADER_CHECKSUM
         .iter()
         .enumerate()
-        .fold(0u16, |acc, (i, row)| {
-            acc | (((row & bits).count_ones() as u16 & 1) << (4 - i))
-        });
+        .fold(0u16, |acc, (i, row)| acc | (((row & bits).count_ones() as u16 & 1) << (4 - i)));
     if got != want {
         return Err(Error::BadHeaderChecksum);
     }
@@ -346,18 +323,11 @@ pub fn checksum(payload: &[u8]) -> [u8; 2] {
             for b in &payload[..payload.len() - 2] {
                 crc ^= (*b as u16) << 8;
                 for _ in 0..8 {
-                    crc = if crc & 0x8000 != 0 {
-                        (crc << 1) ^ 0x1021
-                    } else {
-                        crc << 1
-                    };
+                    crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
                 }
             }
             let n = payload.len();
-            [
-                (crc as u8) ^ payload[n - 1],
-                ((crc >> 8) as u8) ^ payload[n - 2],
-            ]
+            [(crc as u8) ^ payload[n - 1], ((crc >> 8) as u8) ^ payload[n - 2]]
         }
     }
 }
@@ -443,9 +413,7 @@ impl Received {
     }
 
     pub fn meshtastic(&self) -> Option<Meshtastic> {
-        (self.sync_word == MESHTASTIC_SYNC)
-            .then(|| Meshtastic::parse(&self.payload))
-            .flatten()
+        (self.sync_word == MESHTASTIC_SYNC).then(|| Meshtastic::parse(&self.payload)).flatten()
     }
 
     /// The LoRaWAN frame this is, if it is one.
@@ -499,10 +467,7 @@ impl Received {
         let mut held: Vec<Channel> =
             crate::channel_keys::for_system(crate::channel_keys::System::Meshtastic)
                 .into_iter()
-                .map(|k| Channel {
-                    name: k.name,
-                    psk: k.key,
-                })
+                .map(|k| Channel { name: k.name, psk: k.key })
                 .collect();
         held.sort_by_key(|c| c.hash() != Some(m.channel_hash));
         for c in held {
@@ -605,10 +570,7 @@ mod tests {
 
     #[test]
     fn the_whitening_sequence_starts_where_it_should() {
-        assert_eq!(
-            &WHITENING[..8],
-            &[0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe1, 0xc2, 0x85]
-        );
+        assert_eq!(&WHITENING[..8], &[0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe1, 0xc2, 0x85]);
         assert_eq!(WHITENING[254], 0x7f);
         // A maximal length LFSR visits every non-zero state exactly once.
         let mut seen = [false; 256];
@@ -634,11 +596,8 @@ mod tests {
         let rdd = cr as usize + 4;
         let ppm = sf as usize;
 
-        let mut whitened: Vec<u8> = payload
-            .iter()
-            .enumerate()
-            .map(|(j, b)| b ^ WHITENING[j % WHITENING.len()])
-            .collect();
+        let mut whitened: Vec<u8> =
+            payload.iter().enumerate().map(|(j, b)| b ^ WHITENING[j % WHITENING.len()]).collect();
         whitened.extend_from_slice(&checksum(payload));
 
         // Low nibble first, the order the decoder reassembles bytes in.
@@ -706,15 +665,10 @@ mod tests {
     fn an_implicit_packet_round_trips_without_a_header() {
         for sf in [5u8, 6, 7] {
             for cr in 1..=4u8 {
-                let payload: Vec<u8> = (0..12u8)
-                    .map(|i| i.wrapping_mul(37).wrapping_add(5))
-                    .collect();
+                let payload: Vec<u8> =
+                    (0..12u8).map(|i| i.wrapping_mul(37).wrapping_add(5)).collect();
                 let symbols = encode_implicit(&payload, sf, cr);
-                let p = Implicit {
-                    length: payload.len(),
-                    coding_rate: cr,
-                    has_crc: true,
-                };
+                let p = Implicit { length: payload.len(), coding_rate: cr, has_crc: true };
                 let f = decode_implicit(&symbols, sf, false, p)
                     .unwrap_or_else(|e| panic!("SF{sf} 4/{}: {e:?}", cr + 4));
                 assert_eq!(f.payload, payload, "SF{sf} 4/{}", cr + 4);
@@ -727,15 +681,8 @@ mod tests {
     /// than used as a block width.
     #[test]
     fn an_implicit_decode_refuses_an_impossible_coding_rate() {
-        let p = Implicit {
-            length: 4,
-            coding_rate: 7,
-            has_crc: false,
-        };
-        assert!(matches!(
-            decode_implicit(&[0; 32], 7, false, p),
-            Err(Error::BadCodingRate)
-        ));
+        let p = Implicit { length: 4, coding_rate: 7, has_crc: false };
+        assert!(matches!(decode_implicit(&[0; 32], 7, false, p), Err(Error::BadCodingRate)));
     }
 
     #[test]
@@ -763,9 +710,6 @@ mod tests {
         let m = Meshtastic::parse(&payload).unwrap();
         assert_eq!(m.well_known_channel(), Some("LongFast (default key)"));
         payload[13] = 0x5b;
-        assert_eq!(
-            Meshtastic::parse(&payload).unwrap().well_known_channel(),
-            None
-        );
+        assert_eq!(Meshtastic::parse(&payload).unwrap().well_known_channel(), None);
     }
 }

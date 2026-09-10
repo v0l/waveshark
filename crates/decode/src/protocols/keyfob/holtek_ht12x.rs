@@ -69,9 +69,6 @@ mod tests {
 
     #[test]
     fn a_zero_code_is_rejected() {
-        assert_eq!(
-            HoltekHt12x.decode(&input(0)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(HoltekHt12x.decode(&input(0)), Err(DecodeError::NotThisProtocol));
     }
 }

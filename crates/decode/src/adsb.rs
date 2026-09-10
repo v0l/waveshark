@@ -45,7 +45,10 @@ pub struct Frame {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     /// Callsign, or the tail number when no flight number is filed.
-    Identification { callsign: String, category: u8 },
+    Identification {
+        callsign: String,
+        category: u8,
+    },
     /// One half of a position pair. Useless alone; see [`cpr_global`].
     AirbornePosition {
         /// Barometric or GNSS altitude in feet, absent when the aircraft is
@@ -73,7 +76,9 @@ pub enum Message {
         vertical_rate_fpm: i32,
     },
     /// A format this decoder does not parse, named by its type code.
-    Unsupported { type_code: u8 },
+    Unsupported {
+        type_code: u8,
+    },
     /// A reply to an interrogation, carrying a Comm-B register.
     ///
     /// DF20 answers with an altitude and DF21 with a squawk, and both attach
@@ -122,11 +127,7 @@ pub fn crc24(data: &[u8]) -> u32 {
     for &b in data {
         rem ^= (b as u32) << 16;
         for _ in 0..8 {
-            rem = if rem & 0x0080_0000 != 0 {
-                (rem << 1) ^ POLY
-            } else {
-                rem << 1
-            };
+            rem = if rem & 0x0080_0000 != 0 { (rem << 1) ^ POLY } else { rem << 1 };
             rem &= 0x00ff_ffff;
         }
     }
@@ -335,22 +336,14 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, FrameError> {
         });
     }
     if !extended {
-        return Ok(Frame {
-            df,
-            icao: None,
-            kind: Message::ShortReply,
-            raw: bytes.to_vec(),
-        });
+        return Ok(Frame { df, icao: None, kind: Message::ShortReply, raw: bytes.to_vec() });
     }
 
     let icao = ((bytes[1] as u32) << 16) | ((bytes[2] as u32) << 8) | bytes[3] as u32;
     let me = &bytes[4..11];
     let tc = me[0] >> 3;
     let kind = match tc {
-        1..=4 => Message::Identification {
-            callsign: callsign(me),
-            category: me[0] & 0x07,
-        },
+        1..=4 => Message::Identification { callsign: callsign(me), category: me[0] & 0x07 },
         5..=8 => Message::SurfacePosition {
             odd: me[2] & 0x04 != 0,
             lat_cpr: cpr_lat(me),
@@ -363,21 +356,14 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, FrameError> {
             lon_cpr: cpr_lon(me),
         },
         19 => match velocity(me) {
-            Some((ground_speed_kt, track_deg, vertical_rate_fpm)) => Message::Velocity {
-                ground_speed_kt,
-                track_deg,
-                vertical_rate_fpm,
-            },
+            Some((ground_speed_kt, track_deg, vertical_rate_fpm)) => {
+                Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm }
+            }
             None => Message::Unsupported { type_code: tc },
         },
         _ => Message::Unsupported { type_code: tc },
     };
-    Ok(Frame {
-        df,
-        icao: Some(icao),
-        kind,
-        raw: bytes.to_vec(),
-    })
+    Ok(Frame { df, icao: Some(icao), kind, raw: bytes.to_vec() })
 }
 
 /// The six bit character set callsigns are packed in, index by code.
@@ -389,10 +375,7 @@ fn callsign(me: &[u8]) -> String {
     // ends exactly at the end of the field. Assembling the whole ME into one
     // integer first is what keeps that last character from reading off the
     // end of the slice.
-    let v = me
-        .iter()
-        .take(7)
-        .fold(0u64, |acc, b| (acc << 8) | *b as u64);
+    let v = me.iter().take(7).fold(0u64, |acc, b| (acc << 8) | *b as u64);
     let mut s = String::with_capacity(8);
     for i in 0..8 {
         s.push(CHARSET[((v >> (42 - 6 * i)) & 0x3f) as usize] as char);
@@ -491,11 +474,7 @@ fn velocity(me: &[u8]) -> Option<(f64, f64, i32)> {
     // of one and six at the top of the next, with its sign the bit above.
     let vr_raw = (((me[4] as u32 & 0x07) << 6) | ((me[5] as u32 & 0xfc) >> 2)) as i32;
     let vr_sign = if me[4] & 0x08 != 0 { -1 } else { 1 };
-    let vertical_rate = if vr_raw == 0 {
-        0
-    } else {
-        vr_sign * (vr_raw - 1) * 64
-    };
+    let vertical_rate = if vr_raw == 0 { 0 } else { vr_sign * (vr_raw - 1) * 64 };
     Some((speed, track, vertical_rate))
 }
 
@@ -546,16 +525,8 @@ pub fn cpr_global(even: (u32, u32), odd: (u32, u32), odd_is_newer: bool) -> Opti
         return None;
     }
 
-    let (lat, nl) = if odd_is_newer {
-        (rlat_o, cpr_nl(rlat_o))
-    } else {
-        (rlat_e, cpr_nl(rlat_e))
-    };
-    let ni = if odd_is_newer {
-        (nl - 1.0).max(1.0)
-    } else {
-        nl.max(1.0)
-    };
+    let (lat, nl) = if odd_is_newer { (rlat_o, cpr_nl(rlat_o)) } else { (rlat_e, cpr_nl(rlat_e)) };
+    let ni = if odd_is_newer { (nl - 1.0).max(1.0) } else { nl.max(1.0) };
     let m = (lon_e * (nl - 1.0) - lon_o * nl + 0.5).floor();
     let lon_cpr = if odd_is_newer { lon_o } else { lon_e };
     let mut lon = (360.0 / ni) * (m.rem_euclid(ni) + lon_cpr);
@@ -579,11 +550,7 @@ pub fn cpr_local(reference: (f64, f64), cpr: (u32, u32), odd: bool) -> (f64, f64
     let lat = d_lat * (j + lat_cpr);
 
     let nl = cpr_nl(lat);
-    let ni = if odd {
-        (nl - 1.0).max(1.0)
-    } else {
-        nl.max(1.0)
-    };
+    let ni = if odd { (nl - 1.0).max(1.0) } else { nl.max(1.0) };
     let d_lon = 360.0 / ni;
     let m =
         (lon_ref / d_lon).floor() + ((lon_ref.rem_euclid(d_lon)) / d_lon - lon_cpr + 0.5).floor();
@@ -596,9 +563,7 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len() / 2)
-            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
-            .collect()
+        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap()).collect()
     }
 
     /// Frames from published worked examples. Every one of them ends in a
@@ -642,22 +607,11 @@ mod tests {
     fn an_airborne_position_carries_its_altitude_and_parity() {
         let e = parse(&hex(POS_EVEN)).unwrap();
         let o = parse(&hex(POS_ODD)).unwrap();
-        let Message::AirbornePosition {
-            altitude_ft: ae,
-            odd: oe,
-            ..
-        } = e.kind
-        else {
+        let Message::AirbornePosition { altitude_ft: ae, odd: oe, .. } = e.kind else {
             panic!("not a position")
         };
-        let Message::AirbornePosition { odd: oo, .. } = o.kind else {
-            panic!("not a position")
-        };
-        assert_eq!(
-            ae,
-            Some(38_000),
-            "altitude is 38000 ft in the worked example"
-        );
+        let Message::AirbornePosition { odd: oo, .. } = o.kind else { panic!("not a position") };
+        assert_eq!(ae, Some(38_000), "altitude is 38000 ft in the worked example");
         assert!(!oe, "the first frame is the even one");
         assert!(oo, "the second frame is the odd one");
     }
@@ -666,19 +620,13 @@ mod tests {
     fn two_frames_resolve_to_a_position() {
         // The worked example puts this aircraft over the Netherlands at
         // 52.2572 N, 3.91937 E.
-        let Message::AirbornePosition {
-            lat_cpr: le,
-            lon_cpr: ne,
-            ..
-        } = parse(&hex(POS_EVEN)).unwrap().kind
+        let Message::AirbornePosition { lat_cpr: le, lon_cpr: ne, .. } =
+            parse(&hex(POS_EVEN)).unwrap().kind
         else {
             panic!()
         };
-        let Message::AirbornePosition {
-            lat_cpr: lo,
-            lon_cpr: no,
-            ..
-        } = parse(&hex(POS_ODD)).unwrap().kind
+        let Message::AirbornePosition { lat_cpr: lo, lon_cpr: no, .. } =
+            parse(&hex(POS_ODD)).unwrap().kind
         else {
             panic!()
         };
@@ -693,12 +641,8 @@ mod tests {
     fn one_frame_and_a_reference_resolve_to_the_same_place() {
         // The cheap path, once a fix exists. A receiver at Schiphol is well
         // within the 180 nautical mile limit of the aircraft above.
-        let Message::AirbornePosition {
-            lat_cpr,
-            lon_cpr,
-            odd,
-            ..
-        } = parse(&hex(POS_EVEN)).unwrap().kind
+        let Message::AirbornePosition { lat_cpr, lon_cpr, odd, .. } =
+            parse(&hex(POS_EVEN)).unwrap().kind
         else {
             panic!()
         };
@@ -713,15 +657,8 @@ mod tests {
         // 832 feet per minute.
         let f = parse(&hex(VELOCITY)).unwrap();
         match f.kind {
-            Message::Velocity {
-                ground_speed_kt,
-                track_deg,
-                vertical_rate_fpm,
-            } => {
-                assert!(
-                    (ground_speed_kt - 159.20).abs() < 0.1,
-                    "speed {ground_speed_kt}"
-                );
+            Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
+                assert!((ground_speed_kt - 159.20).abs() < 0.1, "speed {ground_speed_kt}");
                 assert!((track_deg - 182.88).abs() < 0.01, "track {track_deg}");
                 assert_eq!(vertical_rate_fpm, -832);
             }
@@ -749,22 +686,12 @@ mod tests {
         // The address is the CRC remainder, believable only because something
         // upstream matched it against an aircraft already seen.
         assert_eq!(f.icao, Some(crc24(&hex("A0001838201584F23468207CDFA5"))));
-        let Message::CommB {
-            altitude_ft,
-            squawk,
-            report,
-        } = f.kind
-        else {
+        let Message::CommB { altitude_ft, squawk, report } = f.kind else {
             panic!("not read as a Comm-B reply")
         };
         assert_eq!(altitude_ft, Some(38_000), "altitude {altitude_ft:?}");
         assert_eq!(squawk, None, "a DF20 has no squawk in it");
-        assert_eq!(
-            report,
-            Some(crate::bds::Report::Identification {
-                callsign: "EXS2MF".into()
-            })
-        );
+        assert_eq!(report, Some(crate::bds::Report::Identification { callsign: "EXS2MF".into() }));
     }
 
     #[test]

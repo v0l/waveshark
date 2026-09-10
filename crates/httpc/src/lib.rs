@@ -18,18 +18,12 @@ use std::time::Duration;
 ///
 /// Name, version, and a URL somebody reading a log can go and look at, which
 /// is the convention every well-behaved crawler and client follows.
-pub const USER_AGENT: &str = concat!(
-    "WaveShark/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/v0l/waveshark)"
-);
+pub const USER_AGENT: &str =
+    concat!("WaveShark/", env!("CARGO_PKG_VERSION"), " (https://github.com/v0l/waveshark)");
 
 /// An asynchronous client, for anything running on the interface's runtime.
 pub fn client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(timeout)
-        .build()
+    reqwest::Client::builder().user_agent(USER_AGENT).timeout(timeout).build()
 }
 
 /// A blocking client, for a worker thread of its own.
@@ -37,10 +31,7 @@ pub fn client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
 /// Must not be built or used on a runtime thread: `reqwest`'s blocking client
 /// drives its own runtime and panics when it finds itself inside another.
 pub fn blocking(timeout: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
-    reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(timeout)
-        .build()
+    reqwest::blocking::Client::builder().user_agent(USER_AGENT).timeout(timeout).build()
 }
 
 #[cfg(test)]

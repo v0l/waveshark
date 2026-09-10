@@ -144,11 +144,7 @@ pub fn crc16(bytes: &[u8]) -> u16 {
         crc ^= u16::from(b);
         for _ in 0..8 {
             // Reflected, so the polynomial is 0x1021 bit-reversed.
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0x8408
-            } else {
-                crc >> 1
-            };
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
         }
     }
     crc
@@ -166,10 +162,7 @@ fn coord(raw: i32) -> Option<f64> {
 
 fn text(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[..end])
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    String::from_utf8_lossy(&b[..end]).chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Read a frame. `None` when it is too short or the CRC does not check.
@@ -193,11 +186,7 @@ pub fn parse(bytes: &[u8]) -> Option<Frame> {
         longitude: lon,
         altitude_m: f64::from(i16le(31)) / FEET,
         height_m: f64::from(i16le(33)) / FEET,
-        velocity: (
-            f64::from(i16le(35)),
-            f64::from(i16le(37)),
-            f64::from(i16le(39)),
-        ),
+        velocity: (f64::from(i16le(35)), f64::from(i16le(37)), f64::from(i16le(39))),
         yaw_deg: f64::from(i16le(41)) / 100.0,
         gps_time_ms: u64::from_le_bytes(b[43..51].try_into().ok()?),
         // The operator's pair is latitude then longitude, unlike the
@@ -242,16 +231,12 @@ pub fn fields(f: &Frame) -> Vec<(String, Value)> {
     v.push((
         "state".into(),
         Value::Text(
-            [
-                (f.in_air(), "airborne"),
-                (f.motors_on(), "motors"),
-                (f.gps_valid(), "fix"),
-            ]
-            .iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, name)| *name)
-            .collect::<Vec<_>>()
-            .join("+"),
+            [(f.in_air(), "airborne"), (f.motors_on(), "motors"), (f.gps_valid(), "fix")]
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>()
+                .join("+"),
         ),
     ));
     v.push(("sequence".into(), Value::Int(i64::from(f.sequence))));

@@ -64,11 +64,7 @@ fn crc16(data: &[u8]) -> u16 {
     for &b in data {
         crc ^= u16::from(b) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x1021
-            } else {
-                crc << 1
-            };
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
         }
     }
     crc
@@ -103,8 +99,6 @@ impl Packet {
     pub fn split_is_a_guess(&self) -> bool {
         true
     }
-
-
 }
 
 /// Read one XN297 packet from a bit stream, most significant bit first.
@@ -126,8 +120,7 @@ pub fn decode(bits: &[bool], from: usize) -> Option<Packet> {
     let after = start + PREAMBLE_BITS;
     let byte_at = |n: usize| -> Option<u8> {
         let at = after + n * 8;
-        (at + 8 <= bits.len())
-            .then(|| (0..8).fold(0u8, |a, k| (a << 1) | u8::from(bits[at + k])))
+        (at + 8 <= bits.len()).then(|| (0..8).fold(0u8, |a, k| (a << 1) | u8::from(bits[at + k])))
     };
     for addr_len in (3..=5usize).rev() {
         for payload_len in 1..=32usize {
@@ -135,11 +128,7 @@ pub fn decode(bits: &[bool], from: usize) -> Option<Packet> {
             let raw: Option<Vec<u8>> = (0..total).map(byte_at).collect();
             let Some(raw) = raw else { continue };
             for scrambled in [true, false] {
-                let table = if scrambled {
-                    &XOROUT_SCRAMBLED
-                } else {
-                    &XOROUT_PLAIN
-                };
+                let table = if scrambled { &XOROUT_SCRAMBLED } else { &XOROUT_PLAIN };
                 let Some(&xorout) = table.get(addr_len - 3 + payload_len) else {
                     continue;
                 };
@@ -157,8 +146,8 @@ pub fn decode(bits: &[bool], from: usize) -> Option<Packet> {
                 address.reverse();
                 let payload = (0..payload_len)
                     .map(|i| {
-                        let b = raw[addr_len + i]
-                            ^ if scrambled { SCRAMBLE[addr_len + i] } else { 0 };
+                        let b =
+                            raw[addr_len + i] ^ if scrambled { SCRAMBLE[addr_len + i] } else { 0 };
                         bit_reverse(b)
                     })
                     .collect();
@@ -193,25 +182,16 @@ pub fn encode(address: &[u8], payload: &[u8], scrambled: bool) -> Vec<bool> {
         raw.push(b ^ if scrambled { SCRAMBLE[i] } else { 0 });
     }
     for (i, b) in payload.iter().enumerate() {
-        let s = if scrambled {
-            SCRAMBLE[address.len() + i]
-        } else {
-            0
-        };
+        let s = if scrambled { SCRAMBLE[address.len() + i] } else { 0 };
         raw.push(bit_reverse(*b) ^ s);
     }
-    let table = if scrambled {
-        &XOROUT_SCRAMBLED
-    } else {
-        &XOROUT_PLAIN
-    };
+    let table = if scrambled { &XOROUT_SCRAMBLED } else { &XOROUT_PLAIN };
     let crc = crc16(&raw) ^ table[address.len() - 3 + payload.len()];
     raw.push((crc >> 8) as u8);
     raw.push(crc as u8);
 
-    let mut bits: Vec<bool> = (0..PREAMBLE_BITS)
-        .map(|k| PREAMBLE >> (PREAMBLE_BITS - 1 - k) & 1 != 0)
-        .collect();
+    let mut bits: Vec<bool> =
+        (0..PREAMBLE_BITS).map(|k| PREAMBLE >> (PREAMBLE_BITS - 1 - k) & 1 != 0).collect();
     for b in raw {
         for k in (0..8).rev() {
             bits.push(b >> k & 1 != 0);
@@ -346,9 +326,8 @@ mod tests {
         let mut passed = 0;
         let trials = 5_000;
         for _ in 0..trials {
-            let mut bits: Vec<bool> = (0..PREAMBLE_BITS)
-                .map(|k| PREAMBLE >> (PREAMBLE_BITS - 1 - k) & 1 != 0)
-                .collect();
+            let mut bits: Vec<bool> =
+                (0..PREAMBLE_BITS).map(|k| PREAMBLE >> (PREAMBLE_BITS - 1 - k) & 1 != 0).collect();
             bits.extend((0..400).map(|_| {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -360,10 +339,7 @@ mod tests {
             }
         }
         let rate = passed as f64 / trials as f64;
-        assert!(
-            rate < 0.02,
-            "{passed} of {trials} noise packets passed, {rate:.4}"
-        );
+        assert!(rate < 0.02, "{passed} of {trials} noise packets passed, {rate:.4}");
     }
 
     #[test]

@@ -197,7 +197,10 @@ fn main() {
         let q = |f: f64| ngaps[((ngaps.len() - 1) as f64 * f) as usize];
         println!(
             "narrowband gaps (ms): min {:.2}  25% {:.2}  median {:.2}  75% {:.2}",
-            ngaps[0], q(0.25), q(0.5), q(0.75)
+            ngaps[0],
+            q(0.25),
+            q(0.5),
+            q(0.75)
         );
     }
     // A control link keys on a clock. Whatever it modulates with, the gaps
@@ -214,10 +217,7 @@ fn main() {
     }
     let mut top: Vec<(usize, usize)> = hist.iter().copied().enumerate().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    println!(
-        "gaps between the {} narrowband bursts under 400 us, most common first:",
-        short.len()
-    );
+    println!("gaps between the {} narrowband bursts under 400 us, most common first:", short.len());
     for (bin, n) in top.iter().take(8).filter(|(_, n)| *n > 0) {
         println!("  {:.2}-{:.2} ms  {n}", *bin as f64 * 0.05, (*bin + 1) as f64 * 0.05);
     }
@@ -234,7 +234,11 @@ fn main() {
         let q = |f: f64| gaps[((gaps.len() - 1) as f64 * f) as usize];
         println!(
             "gaps between them (ms): min {:.2}  25% {:.2}  median {:.2}  75% {:.2}  max {:.1}",
-            gaps[0], q(0.25), q(0.5), q(0.75), gaps[gaps.len() - 1]
+            gaps[0],
+            q(0.25),
+            q(0.5),
+            q(0.75),
+            gaps[gaps.len() - 1]
         );
     }
 
@@ -336,63 +340,74 @@ fn main() {
         // An SX1280 transmits with I and Q swapped, so both ways up are
         // tried and the one that reads is reported.
         for (label, inverted) in [("", false), ("inv ", true)] {
-        for sf in 5..=9u8 {
-            let cfg = if inverted {
-                dsp::lora::Config::inverted_for_sf(sf)
-            } else {
-                dsp::lora::Config::for_sf(sf)
-            };
-            let mut demod = dsp::lora::Demod::new(cfg);
-            let samples = &res;
-            let mut at = 0usize;
-            let mut found = 0usize;
-            let mut syncs: std::collections::BTreeSet<u8> = Default::default();
-            while at < samples.len() {
-                match demod.detect(samples, at) {
-                    Some(p) => {
-                        syncs.insert(p.sync_word);
-                        found += 1;
-                        if p.sync_word == 0x12 {
-                            seen.push((p.start as f64 / (bw * dsp::lora::OVERSAMPLE as f64), sf, ch));
-                        }
-                        if p.sync_word == 0x12 && found <= 2 {
-                            // ExpressLRS agrees the length and the coding rate
-                            // in advance, so there is no header to read them
-                            // from.
-                            for cr in 1..=4u8 {
-                                let r = decode::lora::decode_implicit(
-                                    &p.symbols,
+            for sf in 5..=9u8 {
+                let cfg = if inverted {
+                    dsp::lora::Config::inverted_for_sf(sf)
+                } else {
+                    dsp::lora::Config::for_sf(sf)
+                };
+                let mut demod = dsp::lora::Demod::new(cfg);
+                let samples = &res;
+                let mut at = 0usize;
+                let mut found = 0usize;
+                let mut syncs: std::collections::BTreeSet<u8> = Default::default();
+                while at < samples.len() {
+                    match demod.detect(samples, at) {
+                        Some(p) => {
+                            syncs.insert(p.sync_word);
+                            found += 1;
+                            if p.sync_word == 0x12 {
+                                seen.push((
+                                    p.start as f64 / (bw * dsp::lora::OVERSAMPLE as f64),
                                     sf,
-                                    false,
-                                    decode::lora::Implicit { length: 8, coding_rate: cr, has_crc: false },
-                                );
-                                if let Ok(f) = r {
-                                    println!(
-                                        "    ch{ch} sf{sf} cr4/{} payload {}",
-                                        cr + 4,
-                                        f.payload.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                                    ch,
+                                ));
+                            }
+                            if p.sync_word == 0x12 && found <= 2 {
+                                // ExpressLRS agrees the length and the coding rate
+                                // in advance, so there is no header to read them
+                                // from.
+                                for cr in 1..=4u8 {
+                                    let r = decode::lora::decode_implicit(
+                                        &p.symbols,
+                                        sf,
+                                        false,
+                                        decode::lora::Implicit {
+                                            length: 8,
+                                            coding_rate: cr,
+                                            has_crc: false,
+                                        },
                                     );
+                                    if let Ok(f) = r {
+                                        println!(
+                                            "    ch{ch} sf{sf} cr4/{} payload {}",
+                                            cr + 4,
+                                            f.payload
+                                                .iter()
+                                                .map(|b| format!("{b:02x}"))
+                                                .collect::<String>()
+                                        );
+                                    }
                                 }
                             }
+                            // Past the whole packet, not past its first symbol:
+                            // resuming inside one finds it again and turns the
+                            // interval between packets into the interval between
+                            // sub-symbol offsets.
+                            at = p.start
+                                + demod.symbol_len() * (p.preamble_syms + p.symbols.len() + 6);
                         }
-                        // Past the whole packet, not past its first symbol:
-                        // resuming inside one finds it again and turns the
-                        // interval between packets into the interval between
-                        // sub-symbol offsets.
-                        at = p.start
-                            + demod.symbol_len() * (p.preamble_syms + p.symbols.len() + 6);
+                        None => break,
                     }
-                    None => break,
+                }
+                if found > 0 {
+                    println!(
+                        "{ch:>7}  {:>9.1}  {label}{sf:>3}  {found:>7}  {:?}",
+                        hz / 1e6,
+                        syncs.iter().map(|s| format!("0x{s:02x}")).collect::<Vec<_>>()
+                    );
                 }
             }
-            if found > 0 {
-                println!(
-                    "{ch:>7}  {:>9.1}  {label}{sf:>3}  {found:>7}  {:?}",
-                    hz / 1e6,
-                    syncs.iter().map(|s| format!("0x{s:02x}")).collect::<Vec<_>>()
-                );
-            }
-        }
         }
     }
 
@@ -416,11 +431,8 @@ fn main() {
         // interval whatever was missed either side of them.
         let mut gaps: Vec<f64> = Vec::new();
         for &ch in &chans {
-            let mut ts: Vec<f64> = seen
-                .iter()
-                .filter(|(_, s, c)| *s == sf && *c == ch)
-                .map(|(t, _, _)| *t)
-                .collect();
+            let mut ts: Vec<f64> =
+                seen.iter().filter(|(_, s, c)| *s == sf && *c == ch).map(|(t, _, _)| *t).collect();
             ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
             gaps.extend(ts.windows(2).map(|w| w[1] - w[0]).filter(|g| *g < 0.05));
         }

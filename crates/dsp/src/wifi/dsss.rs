@@ -172,21 +172,13 @@ impl DsssRx {
         let best = (0..self.symbol)
             .max_by(|&a, &b| {
                 let e = |p: usize| {
-                    self.corr[p..probe]
-                        .iter()
-                        .step_by(self.symbol)
-                        .map(|c| c.norm())
-                        .sum::<f32>()
+                    self.corr[p..probe].iter().step_by(self.symbol).map(|c| c.norm()).sum::<f32>()
                 };
                 e(a).partial_cmp(&e(b)).unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(0);
 
-        let syms: Vec<C32> = self.corr[best..]
-            .iter()
-            .step_by(self.symbol)
-            .copied()
-            .collect();
+        let syms: Vec<C32> = self.corr[best..].iter().step_by(self.symbol).copied().collect();
         if syms.len() < 40 {
             return;
         }
@@ -268,12 +260,7 @@ impl DsssRx {
             }
         }
         self.corr.clear();
-        self.corr.extend(
-            self.out_re
-                .iter()
-                .zip(self.out_im.iter())
-                .map(|(&r, &i)| C32::new(r, i)),
-        );
+        self.corr.extend(self.out_re.iter().zip(self.out_im.iter()).map(|(&r, &i)| C32::new(r, i)));
     }
 
     /// The header at `at` bits into the descrambled stream, and the frame
@@ -299,10 +286,7 @@ impl DsssRx {
         // The four fields are sent least significant bit first; the check
         // over them is sent most significant bit first, which is the one
         // place the byte order turns round.
-        let crc = plain
-            .get(at + 32..at + 48)?
-            .iter()
-            .fold(0u16, |a, &b| a << 1 | u16::from(b));
+        let crc = plain.get(at + 32..at + 48)?.iter().fold(0u16, |a, &b| a << 1 | u16::from(b));
         if header_crc(&header[..4]) != crc {
             return None;
         }
@@ -369,9 +353,7 @@ fn dqpsk(d: C32) -> (u8, u8) {
 }
 
 fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
-    bits.chunks(8)
-        .map(|c| c.iter().enumerate().fold(0u8, |a, (i, &b)| a | b << i))
-        .collect()
+    bits.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |a, (i, &b)| a | b << i)).collect()
 }
 
 /// The last seven raw bits before `at`, which is the descrambler's state

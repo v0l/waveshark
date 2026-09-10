@@ -24,7 +24,13 @@ use common::C32;
 /// Returns the new samples and their rate. Halving is a boxcar and a decimate
 /// by two, which is crude, but the signal being kept is at DC by then and a
 /// boxcar is flat there.
-pub fn to_signal(iq: &[C32], rate: f64, centre_hz: f64, occupied: f32, target: f32) -> (Vec<C32>, f64) {
+pub fn to_signal(
+    iq: &[C32],
+    rate: f64,
+    centre_hz: f64,
+    occupied: f32,
+    target: f32,
+) -> (Vec<C32>, f64) {
     let mut z: Vec<C32> = if centre_hz.abs() > rate * 1e-4 {
         let step = -std::f64::consts::TAU * centre_hz / rate;
         iq.iter()

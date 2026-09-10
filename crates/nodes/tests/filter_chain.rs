@@ -39,21 +39,13 @@ fn a_lowpass_stage_keeps_the_low_tone_and_loses_the_high_one() {
     let build = || {
         pipeline::chain(
             spec,
-            vec![Box::new(FirFilterNode::new(
-                dsp::filter::Response::Lowpass,
-                3_000.0,
-                0.0,
-                127,
-            ))],
+            vec![Box::new(FirFilterNode::new(dsp::filter::Response::Lowpass, 3_000.0, 0.0, 127))],
         )
         .expect("a filter is a chain of one")
     };
     let low = run(build(), &tone(rate, 500.0, 4096));
     let high = run(build(), &tone(rate, 12_000.0, 4096));
-    assert!(
-        level(&low) > 0.9,
-        "the tone below the cutoff should survive"
-    );
+    assert!(level(&low) > 0.9, "the tone below the cutoff should survive");
     assert!(level(&high) < 0.05, "the one above it should not");
 }
 
@@ -65,11 +57,7 @@ fn a_biquad_notch_stage_removes_the_carrier_it_is_pointed_at() {
     let build = || {
         pipeline::chain(
             spec,
-            vec![Box::new(IirFilterNode::new(
-                dsp::filter::Response::Bandstop,
-                2_000.0,
-                q,
-            ))],
+            vec![Box::new(IirFilterNode::new(dsp::filter::Response::Bandstop, 2_000.0, q))],
         )
         .expect("a filter is a chain of one")
     };

@@ -124,12 +124,7 @@ fn check(bytes: &[u8], whitened: bool, sync_len: usize) -> Option<Framed> {
     if crc16_ti(&bytes[..end]) != crc {
         return None;
     }
-    Some(Framed {
-        whitened,
-        sync_len,
-        payload: bytes[1..end].to_vec(),
-        crc,
-    })
+    Some(Framed { whitened, sync_len, payload: bytes[1..end].to_vec(), crc })
 }
 
 #[cfg(test)]
@@ -153,11 +148,7 @@ mod tests {
         // sequence has period 511 bits. A period of 255 or 512 means the
         // feedback tap is in the wrong place.
         let long: Vec<u8> = Pn9::new().take(600).collect();
-        assert_ne!(
-            long[0..64],
-            long[64..128],
-            "the sequence repeated far too soon"
-        );
+        assert_ne!(long[0..64], long[64..128], "the sequence repeated far too soon");
         // Eight shifts per byte, so the register comes back to its seed after
         // 511 bytes and the byte stream repeats there.
         assert_eq!(long[0..64], long[511..575]);
@@ -229,10 +220,7 @@ mod tests {
         frame.extend_from_slice(&payload);
         frame.extend_from_slice(&crc16_ti(&frame).to_be_bytes());
         frame.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            read_framed(&frame).map(|f| f.payload),
-            Some(payload.to_vec())
-        );
+        assert_eq!(read_framed(&frame).map(|f| f.payload), Some(payload.to_vec()));
     }
 
     #[test]

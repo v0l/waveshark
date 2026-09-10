@@ -59,10 +59,7 @@ impl Protocol for SchraderTpms {
             b[0] >> 4 == 0x0f && b[7] == crc8(&b[..7], 0x07, 0xf0)
         })
         .ok_or(match bits.len() {
-            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: FRAME_BYTES * 8,
-            },
+            n if n < FRAME_BYTES * 8 => DecodeError::WrongLength { got: n, want: FRAME_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -151,10 +148,7 @@ impl Protocol for ToyotaTpms {
 fn toyota_frame(bits: &BitBuffer, start: usize) -> Result<Report, DecodeError> {
     let payload = differential_manchester_decode(bits, start, 80);
     if payload.len() < TOYOTA_BITS {
-        return Err(DecodeError::WrongLength {
-            got: payload.len(),
-            want: TOYOTA_BITS,
-        });
+        return Err(DecodeError::WrongLength { got: payload.len(), want: TOYOTA_BITS });
     }
     let b = payload.as_padded_bytes();
     if b[8] != crc8(&b[..8], 0x07, 0x80) {
@@ -214,10 +208,7 @@ mod tests {
     fn a_corrupt_frame_fails_its_crc() {
         let mut frame = FRAME;
         frame[3] ^= 0x10;
-        assert_eq!(
-            SchraderTpms.decode(&burst(&frame, 3)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(SchraderTpms.decode(&burst(&frame, 3)), Err(DecodeError::CrcFailed));
     }
 
     /// A Toyota frame as it goes out: sync, then each bit as two half symbols,
@@ -294,10 +285,7 @@ mod tests {
     fn a_corrupt_toyota_frame_fails_its_crc() {
         let mut f = toyota_frame();
         f[2] ^= 0x08;
-        assert_eq!(
-            ToyotaTpms.decode(&toyota_burst(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(ToyotaTpms.decode(&toyota_burst(&f)), Err(DecodeError::CrcFailed));
     }
 
     #[test]
@@ -306,9 +294,6 @@ mod tests {
         let mut frame = FRAME;
         frame[0] = 0x26;
         frame[7] = crc8(&frame[..7], 0x07, 0xf0);
-        assert_eq!(
-            SchraderTpms.decode(&burst(&frame, 3)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(SchraderTpms.decode(&burst(&frame, 3)), Err(DecodeError::CrcFailed));
     }
 }

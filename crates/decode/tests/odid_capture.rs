@@ -67,11 +67,7 @@ fn the_aircraft_says_who_it_is() {
     // Twenty-eight in the recording. The floor is under that: what this
     // guards is a front end or a parser that stopped working, not the exact
     // number of times a beacon repeated itself.
-    assert!(
-        msgs.len() >= 20,
-        "read {} Open Drone ID messages, expected 28",
-        msgs.len()
-    );
+    assert!(msgs.len() >= 20, "read {} Open Drone ID messages, expected 28", msgs.len());
 
     let ids: Vec<_> = msgs
         .iter()

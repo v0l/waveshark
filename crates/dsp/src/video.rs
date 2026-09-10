@@ -123,9 +123,7 @@ impl Standard {
     /// neither. The two are 0.7% apart, which is far wider than a
     /// transmitter's timebase error, so measuring settles it.
     pub fn from_line_period(period_s: f64) -> Option<Self> {
-        [Self::Pal, Self::Ntsc]
-            .into_iter()
-            .find(|s| (period_s / s.line_s() - 1.0).abs() < 0.003)
+        [Self::Pal, Self::Ntsc].into_iter().find(|s| (period_s / s.line_s() - 1.0).abs() < 0.003)
     }
 
     /// What a setting or a menu calls it, and what [`FromStr`] reads back.
@@ -144,9 +142,7 @@ impl std::str::FromStr for Standard {
         match s.trim().to_ascii_lowercase().as_str() {
             "pal" => Ok(Self::Pal),
             "ntsc" => Ok(Self::Ntsc),
-            other => Err(common::Error::other(format!(
-                "no video standard called {other:?}"
-            ))),
+            other => Err(common::Error::other(format!("no video standard called {other:?}"))),
         }
     }
 }
@@ -323,17 +319,11 @@ pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
         return None;
     }
 
-    let mut gaps: Vec<f64> = edges
-        .windows(2)
-        .map(|w| (w[1] - w[0]) as f64 / rate)
-        .collect();
+    let mut gaps: Vec<f64> = edges.windows(2).map(|w| (w[1] - w[0]) as f64 / rate).collect();
     gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = gaps[gaps.len() / 2];
     let standard = Standard::from_line_period(median)?;
-    let agree = gaps
-        .iter()
-        .filter(|g| (*g / median - 1.0).abs() < 0.01)
-        .count();
+    let agree = gaps.iter().filter(|g| (*g / median - 1.0).abs() < 0.01).count();
     let agreement = agree as f32 / gaps.len() as f32;
     let coverage = coverage(&gaps, median, base.len() as f64 / rate);
     // Decided on coverage rather than on agreement, and measured rather than
@@ -349,14 +339,8 @@ pub fn find_lines(baseband: &[f32], rate: f64) -> Option<Lock> {
     // a lost pulse does not penalise. The strong AKK capture scores 0.99, the
     // weak one 0.3 to 0.6, and noise scores nothing because its median is at
     // no line period at all.
-    (coverage > 0.25).then_some(Lock {
-        standard,
-        pulses: edges.len(),
-        agreement,
-        coverage,
-    })
+    (coverage > 0.25).then_some(Lock { standard, pulses: edges.len(), agreement, coverage })
 }
-
 
 /// The sound a camera sends beside its picture.
 ///
@@ -720,11 +704,7 @@ impl SyncSeparator {
     }
 
     pub fn stats(&self) -> Stats {
-        Stats {
-            sync_level: self.sync_level,
-            black_level: self.black_level,
-            ..self.stats
-        }
+        Stats { sync_level: self.sync_level, black_level: self.black_level, ..self.stats }
     }
 
     /// Demodulate colour as well as luma. Costs a quadrature demodulation and
@@ -957,7 +937,9 @@ impl SyncSeparator {
         // product exactly for hours of samples, and folding the index instead
         // would step the phase every time it wrapped, since the subcarrier is
         // not a whole number of samples.
-        let phase_at = |k: usize| (w * (line_start + k as u64) as f64).rem_euclid(std::f64::consts::TAU) as f32;
+        let phase_at = |k: usize| {
+            (w * (line_start + k as u64) as f64).rem_euclid(std::f64::consts::TAU) as f32
+        };
         // The burst sits on the back porch, about 0.9 us after the sync ends
         // and ten cycles long.
         let b0 = self.samples(0.8e-6);
@@ -996,12 +978,12 @@ impl SyncSeparator {
             self.last_axis = Some(axis_plus);
             return Vec::new();
         };
-        let (theta, swing) = if wrap(axis_plus - prev_axis).abs() < wrap(axis_minus - prev_axis).abs()
-        {
-            (axis_plus, 1.0f32)
-        } else {
-            (axis_minus, -1.0f32)
-        };
+        let (theta, swing) =
+            if wrap(axis_plus - prev_axis).abs() < wrap(axis_minus - prev_axis).abs() {
+                (axis_plus, 1.0f32)
+            } else {
+                (axis_minus, -1.0f32)
+            };
         self.last_axis = Some(theta);
 
         // Quadrature demodulate against that reference and box filter to
@@ -1216,11 +1198,7 @@ mod tests {
         let f = out.last().unwrap();
         assert_eq!(f.height, 288);
         assert_eq!(f.width, 320);
-        assert!(
-            f.lines_seen > 250,
-            "only {} lines of 288 were found",
-            f.lines_seen
-        );
+        assert!(f.lines_seen > 250, "only {} lines of 288 were found", f.lines_seen);
     }
 
     /// The picture has to come back the right way round and at the right
@@ -1295,10 +1273,7 @@ mod tests {
             out.push(y * 0.7 + uv.0 * p.cos() + swing * uv.1 * p.sin());
         }
         let used = sync_len + back + active;
-        out.extend(std::iter::repeat_n(
-            0.0f32,
-            n(standard.line_s()).saturating_sub(used),
-        ));
+        out.extend(std::iter::repeat_n(0.0f32, n(standard.line_s()).saturating_sub(used)));
     }
 
     /// Colour bars through the whole chain: a burst, a chroma vector, the
@@ -1329,10 +1304,7 @@ mod tests {
         // box filter is still filling.
         let at = (f.width * 150 + 160) * 3;
         let (r, g, b) = (rgb[at], rgb[at + 1], rgb[at + 2]);
-        assert!(
-            b > r + 40 && b > g + 40,
-            "a blue vector should read blue, got r{r} g{g} b{b}"
-        );
+        assert!(b > r + 40 && b > g + 40, "a blue vector should read blue, got r{r} g{g} b{b}");
     }
 
     /// The positive test: a camera's sync pulses agree with each other, and

@@ -301,7 +301,10 @@ fn parse_sky(line: &str) -> Option<Sky> {
         .get("uSat")
         .and_then(|n| n.as_u64())
         .or_else(|| {
-            sats.map(|a| a.iter().filter(|s| s.get("used").and_then(|u| u.as_bool()) == Some(true)).count() as u64)
+            sats.map(|a| {
+                a.iter().filter(|s| s.get("used").and_then(|u| u.as_bool()) == Some(true)).count()
+                    as u64
+            })
         })
         .unwrap_or(0);
     let seen = v
@@ -454,8 +457,14 @@ mod tests {
             Transport::parse("/dev/ttyUSB0@4800"),
             Some(Transport::Serial { path: "/dev/ttyUSB0".into(), baud: 4_800 })
         );
-        assert_eq!(Transport::parse("gpsd:localhost"), Some(Transport::Gpsd("localhost:2947".into())));
-        assert_eq!(Transport::parse("127.0.0.1:2947"), Some(Transport::Gpsd("127.0.0.1:2947".into())));
+        assert_eq!(
+            Transport::parse("gpsd:localhost"),
+            Some(Transport::Gpsd("localhost:2947".into()))
+        );
+        assert_eq!(
+            Transport::parse("127.0.0.1:2947"),
+            Some(Transport::Gpsd("127.0.0.1:2947".into()))
+        );
         assert_eq!(Transport::parse(""), None);
     }
 
@@ -474,7 +483,8 @@ mod tests {
     /// second, for as long as it takes.
     #[test]
     fn a_tpv_without_a_fix_is_not_one() {
-        let line = r#"{"class":"TPV","device":"/dev/ttyACM0","mode":1,"time":"2026-09-07T09:42:50.000Z"}"#;
+        let line =
+            r#"{"class":"TPV","device":"/dev/ttyACM0","mode":1,"time":"2026-09-07T09:42:50.000Z"}"#;
         assert!(parse_tpv(line).is_none());
         // And neither is anything else gpsd sends on the same socket.
         assert!(parse_tpv(r#"{"class":"SKY","device":"/dev/ttyACM0","satellites":[]}"#).is_none());
@@ -489,7 +499,8 @@ mod tests {
         assert_eq!((s.used, s.seen), (0, 17));
         assert_eq!(s.hdop, Some(1.2));
         // Older daemons send the list without the counts.
-        let listed = r#"{"class":"SKY","satellites":[{"PRN":5,"used":true},{"PRN":6,"used":false}]}"#;
+        let listed =
+            r#"{"class":"SKY","satellites":[{"PRN":5,"used":true},{"PRN":6,"used":false}]}"#;
         let s = parse_sky(listed).expect("a sky");
         assert_eq!((s.used, s.seen), (1, 2));
         assert!(parse_sky(r#"{"class":"TPV","mode":1}"#).is_none());
@@ -500,8 +511,14 @@ mod tests {
     #[test]
     fn a_fix_goes_stale() {
         let s = Source {
-            cfg: Config { max_age: Duration::from_millis(30), ..Config::new(Transport::Gpsd("x:1".into())) },
-            state: Arc::new(Mutex::new(Some((Fix { lat: 1.0, lon: 2.0, ..Default::default() }, std::time::Instant::now())))),
+            cfg: Config {
+                max_age: Duration::from_millis(30),
+                ..Config::new(Transport::Gpsd("x:1".into()))
+            },
+            state: Arc::new(Mutex::new(Some((
+                Fix { lat: 1.0, lon: 2.0, ..Default::default() },
+                std::time::Instant::now(),
+            )))),
             connected: Arc::new(AtomicBool::new(true)),
             stop: Arc::new(AtomicBool::new(true)),
             fixes: Arc::new(std::sync::atomic::AtomicU64::new(1)),

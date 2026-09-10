@@ -426,10 +426,7 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
-            packet_log_on: kv
-                .get("packet_log_on")
-                .map(|v| *v == "true")
-                .unwrap_or(d.packet_log_on),
+            packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
             volume: f("volume", d.volume as f64) as f32,
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
@@ -755,5 +752,4 @@ mod tests {
         let back = Session::parse(&on.render());
         assert!(back.packet_log_on && back.survey_on, "a switch turned on was forgotten");
     }
-
 }

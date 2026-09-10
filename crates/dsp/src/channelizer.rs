@@ -299,7 +299,8 @@ impl Channelizer {
     /// transition.
     pub fn flat_half_width_hz(&self, input_rate: f64) -> f64 {
         let n = (self.channels * self.taps_per_branch) as f64;
-        let transition = (self.atten_db - 8.0) / (2.285 * 2.0 * std::f64::consts::PI * n) * input_rate;
+        let transition =
+            (self.atten_db - 8.0) / (2.285 * 2.0 * std::f64::consts::PI * n) * input_rate;
         (self.channel_bandwidth(input_rate) - transition) / 2.0
     }
 
@@ -540,12 +541,7 @@ mod parallel_tests {
 
         assert_eq!(serial.len(), parallel.len(), "frame count differs");
         for (i, (x, y)) in serial.iter().zip(&parallel).enumerate() {
-            assert!(
-                (x - y).norm() < 1e-5,
-                "frame {} channel {} differs: {x} vs {y}",
-                i / m,
-                i % m
-            );
+            assert!((x - y).norm() < 1e-5, "frame {} channel {} differs: {x} vs {y}", i / m, i % m);
         }
     }
 
@@ -625,10 +621,18 @@ mod pair_tests {
                 let (single, pair) = read(&mut c, rate, 3, f);
                 let inside_pair = f >= f_lo - flat && f <= f_lo + b + flat;
                 if inside_pair {
-                    assert!(pair.abs() < 0.1, "taps {taps}: pair reads {pair:.2} dB at {:+.2} B", k as f64 / 20.0);
+                    assert!(
+                        pair.abs() < 0.1,
+                        "taps {taps}: pair reads {pair:.2} dB at {:+.2} B",
+                        k as f64 / 20.0
+                    );
                 }
                 if (f - f_lo).abs() <= flat {
-                    assert!(single.abs() < 0.1, "taps {taps}: single reads {single:.2} dB at {:+.2} B", k as f64 / 20.0);
+                    assert!(
+                        single.abs() < 0.1,
+                        "taps {taps}: single reads {single:.2} dB at {:+.2} B",
+                        k as f64 / 20.0
+                    );
                 }
             }
         }

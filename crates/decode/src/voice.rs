@@ -56,13 +56,7 @@ fn unpack(bytes: &[u8; FRAME_BYTES]) -> [u8; FRAME_BITS] {
 /// is not in a SYNC PDU and has to be supplied (0 until tracked).
 #[cfg(feature = "tea")]
 pub fn timestamp(time: TdmaTime, hyperframe: u16, uplink: bool) -> Timestamp {
-    Timestamp {
-        tn: time.tn,
-        frame: time.frame,
-        multiframe: time.multiframe,
-        hyperframe,
-        uplink,
-    }
+    Timestamp { tn: time.tn, frame: time.frame, multiframe: time.multiframe, hyperframe, uplink }
 }
 
 /// Decrypt one STEC frame in place against the keystream for its slot.
@@ -98,9 +92,7 @@ impl Default for CallDecoder {
 
 impl CallDecoder {
     pub fn new() -> Self {
-        CallDecoder {
-            vocoder: Decoder::new(),
-        }
+        CallDecoder { vocoder: Decoder::new() }
     }
 
     /// One plaintext STEC frame (as `speech::decode` recovered it, decrypted
@@ -120,10 +112,7 @@ impl CallDecoder {
 pub fn frame_timestamps(time: TdmaTime, hyperframe: u16, uplink: bool) -> [Timestamp; 2] {
     let mut next = time;
     next.advance(1);
-    [
-        timestamp(time, hyperframe, uplink),
-        timestamp(next, hyperframe, uplink),
-    ]
+    [timestamp(time, hyperframe, uplink), timestamp(next, hyperframe, uplink)]
 }
 
 #[cfg(all(test, feature = "tea"))]
@@ -135,9 +124,7 @@ mod tests {
         let mut x = seed | 1;
         let mut f = [0u8; FRAME_BITS];
         for b in f.iter_mut() {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             *b = (x >> 63) as u8;
         }
         f
@@ -154,11 +141,7 @@ mod tests {
     /// receiver would (here just the channel decode), decrypt, recover.
     #[test]
     fn an_enciphered_slot_round_trips_to_plaintext() {
-        let time = TdmaTime {
-            tn: 1,
-            frame: 6,
-            multiframe: 30,
-        };
+        let time = TdmaTime { tn: 1, frame: 6, multiframe: 30 };
         let scramb = coding::scramb_init(901, 1, 5);
         let key = Key::Tea2(*b"\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa");
         let ts = frame_timestamps(time, 0, false);
@@ -170,10 +153,7 @@ mod tests {
 
         let chan = speech::encode(scramb, &ct_a, &ct_b);
         let (mut frames, crc_ok) = speech::decode(scramb, &chan);
-        assert!(
-            crc_ok,
-            "the channel decode still checks with ciphertext payload"
-        );
+        assert!(crc_ok, "the channel decode still checks with ciphertext payload");
 
         decrypt_frame(&mut frames[0], &key, &ts[0]);
         decrypt_frame(&mut frames[1], &key, &ts[1]);
@@ -195,11 +175,7 @@ mod tests {
         ]);
         let stec_b = stec_a; // any valid frame; we only compare the two paths
 
-        let time = TdmaTime {
-            tn: 1,
-            frame: 6,
-            multiframe: 30,
-        };
+        let time = TdmaTime { tn: 1, frame: 6, multiframe: 30 };
         let scramb = coding::scramb_init(901, 1, 5);
         let key = Key::Tea2(*b"\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa");
         let ts = frame_timestamps(time, 0, false);
@@ -222,17 +198,13 @@ mod tests {
         let mut keyed = CallDecoder::new();
         let ka = keyed.frame(&enc_frames[0], false);
 
-        assert_eq!(
-            ca, ka,
-            "keyed path recovers the same audio as the clear one"
-        );
+        assert_eq!(ca, ka, "keyed path recovers the same audio as the clear one");
         assert!(ca.iter().any(|&s| s != 0), "the audio is not silence");
     }
 
     fn parm_to_stec(parm: &[i16; 23]) -> [u8; FRAME_BITS] {
-        const BITNO: [u8; 23] = [
-            8, 9, 9, 8, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6,
-        ];
+        const BITNO: [u8; 23] =
+            [8, 9, 9, 8, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6];
         let mut bits = [0u8; FRAME_BITS];
         let mut idx = 0;
         for (p, &nb) in parm.iter().zip(BITNO.iter()) {
@@ -248,11 +220,7 @@ mod tests {
     /// XOR is actually keyed and not a no-op.
     #[test]
     fn the_wrong_key_does_not_recover_speech() {
-        let time = TdmaTime {
-            tn: 2,
-            frame: 9,
-            multiframe: 12,
-        };
+        let time = TdmaTime { tn: 2, frame: 9, multiframe: 12 };
         let ts = timestamp(time, 0, false);
         let right = Key::Tea1(0x1234_5678);
         let wrong = Key::Tea1(0x8765_4321);

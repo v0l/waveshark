@@ -328,17 +328,15 @@ impl AudioPlayer {
 
     fn open_on(device: Device, want_rate: u32) -> Result<(Self, AudioSink), AudioError> {
         let device_name = device.to_string();
-        let default = device
-            .default_output_config()
-            .map_err(|e| AudioError::Cpal(e.to_string()))?;
+        let default =
+            device.default_output_config().map_err(|e| AudioError::Cpal(e.to_string()))?;
 
         // f32 avoids a conversion in the callback.
         let supports_want = device
             .supported_output_configs()
             .map(|it| {
-                it.filter(|c| c.sample_format() == SampleFormat::F32).any(|c| {
-                    c.min_sample_rate() <= want_rate && want_rate <= c.max_sample_rate()
-                })
+                it.filter(|c| c.sample_format() == SampleFormat::F32)
+                    .any(|c| c.min_sample_rate() <= want_rate && want_rate <= c.max_sample_rate())
             })
             .unwrap_or(false);
 
@@ -352,11 +350,8 @@ impl AudioPlayer {
             return Err(AudioError::NoFormat);
         }
 
-        let config = StreamConfig {
-            channels,
-            sample_rate: rate,
-            buffer_size: cpal::BufferSize::Default,
-        };
+        let config =
+            StreamConfig { channels, sample_rate: rate, buffer_size: cpal::BufferSize::Default };
 
         let (tx, rx) = bounded::<Vec<f32>>(QUEUE_DEPTH);
         let (recycle_tx, recycle_rx) = bounded::<Vec<f32>>(QUEUE_DEPTH * 2);
@@ -440,12 +435,8 @@ impl AudioPlayer {
                             *s *= volume;
                         }
                     }
-                    cb_stats
-                        .samples_played
-                        .fetch_add(out.len() as u64, Ordering::Relaxed);
-                    cb_stats
-                        .backlog
-                        .fetch_sub((out.len() / ch as usize) as i64, Ordering::Relaxed);
+                    cb_stats.samples_played.fetch_add(out.len() as u64, Ordering::Relaxed);
+                    cb_stats.backlog.fetch_sub((out.len() / ch as usize) as i64, Ordering::Relaxed);
                 },
                 move |e| tracing::error!("audio stream error: {e}"),
                 None,
@@ -476,10 +467,7 @@ impl AudioPlayer {
             volume: 1.0,
         };
 
-        Ok((
-            Self { _stream: stream, stats, rate, channels, device_name },
-            sink,
-        ))
+        Ok((Self { _stream: stream, stats, rate, channels, device_name }, sink))
     }
 
     /// Actual output rate. May differ from what was requested.

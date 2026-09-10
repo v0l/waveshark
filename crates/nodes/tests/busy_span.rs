@@ -83,12 +83,9 @@ fn thirty_bursting_devices_over_sixteen_megahertz() {
     }
     let rate = 16_000_000.0;
     let iq = busy_band(rate, 30, 2.0);
-    let mut g = build_chain(
-        StreamSpec::iq(rate, Hz(869_525_000)),
-        &[NodeSpec::new("auto")],
-        &registry(),
-    )
-    .unwrap();
+    let mut g =
+        build_chain(StreamSpec::iq(rate, Hz(869_525_000)), &[NodeSpec::new("auto")], &registry())
+            .unwrap();
     let t0 = std::time::Instant::now();
     let mut packets = 0;
     for b in iq.chunks(262_144) {
@@ -101,10 +98,7 @@ fn thirty_bursting_devices_over_sixteen_megahertz() {
     let topo = g.topology();
     for n in &topo.nodes {
         for (name, c) in &n.phases {
-            eprintln!(
-                "    {:<18} p95 {:>8} us  mean {:>8.0} us",
-                name, c.p95_us, c.mean_us
-            );
+            eprintln!("    {:<18} p95 {:>8} us  mean {:>8.0} us", name, c.p95_us, c.mean_us);
         }
     }
     eprintln!(

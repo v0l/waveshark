@@ -358,11 +358,7 @@ mod tests {
         let est = estimate(&y, &v[20..60], 20).expect("a channel");
         let mut soft = vec![0.0f32; bits.len()];
         soft_bits(&y, &est, &mut soft);
-        let wrong = bits
-            .iter()
-            .zip(&soft)
-            .filter(|(&b, &s)| (s > 0.0) != (b == 1))
-            .count();
+        let wrong = bits.iter().zip(&soft).filter(|(&b, &s)| (s > 0.0) != (b == 1)).count();
         assert_eq!(wrong, 0, "{wrong} bits wrong through the echo");
     }
 
@@ -382,8 +378,7 @@ mod tests {
             state ^= state << 5;
             (state as f32 / u32::MAX as f32) - 0.5
         };
-        let noisy: Vec<C32> =
-            clean.iter().map(|&c| c + C32::new(rand(), rand()) * 0.7).collect();
+        let noisy: Vec<C32> = clean.iter().map(|&c| c + C32::new(rand(), rand()) * 0.7).collect();
         let est = estimate(&noisy, &v[20..60], 20).unwrap();
         let mut a = vec![0.0f32; bits.len()];
         let mut b = vec![0.0f32; bits.len()];

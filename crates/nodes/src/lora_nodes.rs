@@ -320,7 +320,9 @@ impl ChirpReader {
             let order: Vec<usize> = match self.locked_sf {
                 Some(sf) => {
                     let at = self.demods.iter().position(|d| d.spreading_factor() == sf);
-                    at.into_iter().chain((0..self.demods.len()).filter(|k| Some(*k) != at)).collect()
+                    at.into_iter()
+                        .chain((0..self.demods.len()).filter(|k| Some(*k) != at))
+                        .collect()
                 }
                 None => (0..self.demods.len()).collect(),
             };
@@ -421,10 +423,7 @@ impl LoraNode {
 /// The nearest standard bandwidth to a measured width, when the width is
 /// close enough to one to mean it.
 pub fn bandwidth_for(width_hz: f64) -> Option<f64> {
-    BANDWIDTHS_HZ
-        .iter()
-        .copied()
-        .find(|bw| width_hz >= bw * FILL && width_hz <= bw * 1.4)
+    BANDWIDTHS_HZ.iter().copied().find(|bw| width_hz >= bw * FILL && width_hz <= bw * 1.4)
 }
 
 /// Every standard bandwidth a measured width could be, nearest first.
@@ -471,11 +470,7 @@ impl Simple for LoraNode {
         let bw = if self.bandwidth_hz > 0.0 {
             self.bandwidth_hz
         } else {
-            let width = if i.spec.bandwidth > 0.0 {
-                i.spec.bandwidth
-            } else {
-                rate
-            };
+            let width = if i.spec.bandwidth > 0.0 { i.spec.bandwidth } else { rate };
             bandwidth_for(width).ok_or_else(|| {
                 common::Error::other(format!(
                     "lora: {width:.0} Hz is not one of its channels, which fill \
@@ -581,18 +576,11 @@ impl Simple for LoraNode {
             BANDWIDTH_HZ => self.bandwidth_hz = v.as_f64().unwrap_or(0.0).max(0.0),
             SF => {
                 let sf = v.as_f64().unwrap_or(0.0) as u8;
-                self.sf = if sf == 0 || dsp::lora::SPREADING_FACTORS.contains(&sf) {
-                    sf
-                } else {
-                    0
-                };
+                self.sf =
+                    if sf == 0 || dsp::lora::SPREADING_FACTORS.contains(&sf) { sf } else { 0 };
                 self.reader.unlock();
             }
-            _ => {
-                return Err(common::Error::other(format!(
-                    "lora: unknown parameter {name:?}"
-                )))
-            }
+            _ => return Err(common::Error::other(format!("lora: unknown parameter {name:?}"))),
         }
         Ok(())
     }
@@ -612,10 +600,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ("spreading_factor".into(), Value::Int(i64::from(r.sf))),
         ("bandwidth_hz".into(), Value::Float(r.bandwidth_hz)),
         ("coding_rate".into(), Value::Text(cr.clone())),
-        (
-            "sync_word".into(),
-            Value::Text(format!("0x{:02x}", r.sync_word)),
-        ),
+        ("sync_word".into(), Value::Text(format!("0x{:02x}", r.sync_word))),
         ("payload_len".into(), Value::Int(r.payload.len() as i64)),
     ];
 
@@ -624,7 +609,11 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut report = common::ReportDetail::Bare;
     let mesh = r.meshtastic();
     if let Some(m) = &mesh {
-        let dest = if m.is_broadcast() { "broadcast".to_string() } else { format!("{:08x}", m.destination) };
+        let dest = if m.is_broadcast() {
+            "broadcast".to_string()
+        } else {
+            format!("{:08x}", m.destination)
+        };
         fields.extend([
             ("source".into(), Value::Text(format!("{:08x}", m.source))),
             ("destination".into(), Value::Text(dest)),
@@ -649,10 +638,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if let Some(d) = &body {
         fields.push(("port".into(), Value::Text(d.port().into())));
         if d.data.reply_id != 0 {
-            fields.push((
-                "reply_to".into(),
-                Value::Text(format!("{:08x}", d.data.reply_id)),
-            ));
+            fields.push(("reply_to".into(), Value::Text(format!("{:08x}", d.data.reply_id))));
         }
         match &d.message {
             meshtastic::Message::Text(t) => {
@@ -762,9 +748,10 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                         | decode::meshcore::NodeType::Sensor
                 ),
             };
-            core_link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(
-                format!("{:02x}", a.hash()),
-            )));
+            core_link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
+                "{:02x}",
+                a.hash()
+            ))));
             fields.push(("node".into(), Value::Text(a.node_type.name().into())));
             fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
             if let Some(n) = &a.name {
@@ -814,21 +801,12 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         fields.push(("type".into(), Value::Text(f.mtype.name().into())));
         match &f.body {
             lorawan::Body::Join(j) => {
-                fields.push((
-                    "dev_eui".into(),
-                    Value::Text(lorawan::format_eui(j.dev_eui)),
-                ));
-                fields.push((
-                    "join_eui".into(),
-                    Value::Text(lorawan::format_eui(j.join_eui)),
-                ));
+                fields.push(("dev_eui".into(), Value::Text(lorawan::format_eui(j.dev_eui))));
+                fields.push(("join_eui".into(), Value::Text(lorawan::format_eui(j.join_eui))));
                 fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
             }
             lorawan::Body::Data(d) => {
-                fields.push((
-                    "dev_addr".into(),
-                    Value::Text(format!("{:08x}", d.dev_addr)),
-                ));
+                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
                 fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
                 if let Some(p) = d.f_port {
                     fields.push(("port".into(), Value::Int(i64::from(p))));
@@ -885,11 +863,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             format!(
                 "{shape}, {:08x} to {}, {} of {} hops left{chan}{says}",
                 m.source,
-                if m.is_broadcast() {
-                    "everyone".into()
-                } else {
-                    format!("{:08x}", m.destination)
-                },
+                if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
                 m.hop_limit,
                 m.hop_start,
             )
@@ -947,11 +921,9 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                     }
                     s
                 }
-                None => format!(
-                    "{shape}, {} byte payload, sync 0x{:02x}",
-                    r.payload.len(),
-                    r.sync_word
-                ),
+                None => {
+                    format!("{shape}, {} byte payload, sync 0x{:02x}", r.payload.len(), r.sync_word)
+                }
             },
         },
     };
@@ -974,12 +946,7 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             pipeline::event::Party::unit(format!("{:08x}", m.destination))
         }),
     });
-    let mut d = Decoded::bytes(
-            protocol,
-            center,
-            0.0,
-            r.payload.clone(),
-        )
+    let mut d = Decoded::bytes(protocol, center, 0.0, r.payload.clone())
         .with_modulation(common::Modulation::Css)
         .with_crc(r.crc_ok)
         .with_detail(detail)
@@ -994,19 +961,16 @@ pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .as_ref()
         .map(|m| common::Identity::new("meshtastic", format!("{:08x}", m.source)))
         .or_else(|| {
-            core.as_ref()
-                .and_then(|p| p.advert())
-                .map(|a| {
-                    common::Identity::new(
-                        "meshcore",
-                        a.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-                    )
-                })
+            core.as_ref().and_then(|p| p.advert()).map(|a| {
+                common::Identity::new(
+                    "meshcore",
+                    a.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                )
+            })
         });
-    if let (Some(who), Some(name)) = (
-        d.identity.as_mut(),
-        core.as_ref().and_then(|p| p.advert()).and_then(|a| a.name.clone()),
-    ) {
+    if let (Some(who), Some(name)) =
+        (d.identity.as_mut(), core.as_ref().and_then(|p| p.advert()).and_then(|a| a.name.clone()))
+    {
         who.name = Some(name);
     }
     Some(d)
@@ -1018,7 +982,6 @@ fn now_us() -> u64 {
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
-
 
 /// LoRa as the auto node knows it: placed on the classifier's verdict, not
 /// on width, because it is the dearest decoder to run and a chirp is the
@@ -1091,10 +1054,7 @@ mod tests {
     fn spec(rate: f64, bandwidth: f64) -> PortSpec {
         let mut s = StreamSpec::iq(rate, Hz(869_525_000));
         s.bandwidth = bandwidth;
-        PortSpec {
-            spec: s,
-            latency: 0,
-        }
+        PortSpec { spec: s, latency: 0 }
     }
 
     /// A source on 2.4 GHz is an SX128x, so the node reads it the other way
@@ -1139,15 +1099,9 @@ mod tests {
         let mut n = LoraNode::default();
         assert!(n.negotiate(&spec(2_000_000.0, 250_000.0)).is_ok());
         let mut n = LoraNode::default();
-        assert!(
-            n.negotiate(&spec(300_000.0, 250_000.0)).is_err(),
-            "under two samples a chip"
-        );
+        assert!(n.negotiate(&spec(300_000.0, 250_000.0)).is_err(), "under two samples a chip");
         let mut n = LoraNode::default();
-        assert!(
-            n.negotiate(&spec(2_000_000.0, 25_000.0)).is_err(),
-            "not a LoRa channel"
-        );
+        assert!(n.negotiate(&spec(2_000_000.0, 25_000.0)).is_err(), "not a LoRa channel");
     }
 }
 

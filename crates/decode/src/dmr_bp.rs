@@ -61,11 +61,8 @@ mod tests {
     #[test]
     fn key_one_is_the_table_entry_repeated() {
         let ks = keystream(1).unwrap();
-        let word = |from: usize| {
-            ks[from..from + 16]
-                .iter()
-                .fold(0u16, |a, &b| (a << 1) | u16::from(b))
-        };
+        let word =
+            |from: usize| ks[from..from + 16].iter().fold(0u16, |a, &b| (a << 1) | u16::from(b));
         assert_eq!(word(16), 0x1f00);
         assert_eq!(word(32), 0x1f00);
         assert_eq!(word(0), 0x1f00 & 0xff0f);

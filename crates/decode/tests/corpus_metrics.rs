@@ -114,10 +114,7 @@ fn how_far_into_the_noise_each_capture_survives() {
     const SEEDS: [u64; 3] = [0x9E3779B9, 0x517CC1B7, 0x2545F491];
     const LEVELS: [i32; 9] = [30, 24, 20, 16, 12, 9, 6, 3, 0];
 
-    println!(
-        "\n{:<44} {:>10}  decoded of 3 at each level",
-        "capture", "floor dB"
-    );
+    println!("\n{:<44} {:>10}  decoded of 3 at each level", "capture", "floor dB");
     let mut floors = Vec::new();
     for f in &fixtures {
         let src = sources::FileSource::open(&f.path).expect("open");
@@ -137,12 +134,9 @@ fn how_far_into_the_noise_each_capture_survives() {
             for seed in SEEDS {
                 let dirty = noisy(&buf.samples, snr as f64, seed ^ snr as u64);
                 write_cu8(&path, &dirty);
-                let ok = packages(&path).iter().any(|pkg| {
-                    protocols
-                        .decode_all(pkg)
-                        .iter()
-                        .any(|r| f.rtl_433_saw(r.model))
-                });
+                let ok = packages(&path)
+                    .iter()
+                    .any(|pkg| protocols.decode_all(pkg).iter().any(|r| f.rtl_433_saw(r.model)));
                 hits += ok as usize;
             }
             row += &format!("{hits}");
@@ -348,21 +342,13 @@ fn where_a_weak_capture_fails() {
                 FirDecim::design(decim, 0.9, 80.0).process(&iq, &mut narrow);
                 let r = rate / decim as f64;
                 let env: Vec<f32> = narrow.iter().map(|c| c.norm()).collect();
-                let mut det = OokDetector::new(
-                    r,
-                    PulseConfig {
-                        min_pulses: 8,
-                        ..Default::default()
-                    },
-                );
+                let mut det =
+                    OokDetector::new(r, PulseConfig { min_pulses: 8, ..Default::default() });
                 let mut pkgs = Vec::new();
                 det.process(&env, &mut pkgs);
-                let ok = pkgs.iter().any(|pkg| {
-                    protocols
-                        .decode_all(pkg)
-                        .iter()
-                        .any(|r| f.rtl_433_saw(r.model))
-                });
+                let ok = pkgs
+                    .iter()
+                    .any(|pkg| protocols.decode_all(pkg).iter().any(|r| f.rtl_433_saw(r.model)));
                 let tag = if ok {
                     "decode"
                 } else if !pkgs.is_empty() {
@@ -370,12 +356,7 @@ fn where_a_weak_capture_fails() {
                 } else {
                     "-"
                 };
-                line += &format!(
-                    "  {}{}:{:<6}",
-                    if centred { "mix/" } else { "raw/" },
-                    decim,
-                    tag
-                );
+                line += &format!("  {}{}:{:<6}", if centred { "mix/" } else { "raw/" }, decim, tag);
             }
         }
         println!("{line}");
@@ -410,10 +391,7 @@ fn how_the_pulses_degrade() {
         let env: Vec<f32> = narrow.iter().map(|c| c.norm()).collect();
         let mut det = OokDetector::new(
             buf.rate.as_f64(),
-            PulseConfig {
-                min_pulses: 8,
-                ..Default::default()
-            },
+            PulseConfig { min_pulses: 8, ..Default::default() },
         );
         let mut pkgs = Vec::new();
         det.process(&env, &mut pkgs);
@@ -422,12 +400,7 @@ fn how_the_pulses_degrade() {
             continue;
         };
         let marks: Vec<u32> = p.pulses.iter().map(|x| x.mark).collect();
-        let gaps: Vec<u32> = p
-            .pulses
-            .iter()
-            .map(|x| x.gap)
-            .take(p.pulses.len() - 1)
-            .collect();
+        let gaps: Vec<u32> = p.pulses.iter().map(|x| x.gap).take(p.pulses.len() - 1).collect();
         let spread = |v: &[u32]| -> String {
             let mut s = v.to_vec();
             s.sort_unstable();

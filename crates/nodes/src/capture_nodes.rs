@@ -22,9 +22,9 @@ use common::{Error, Hz, Result, SampleFormat, C32};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// How much of the disk the capture folder may take.
 ///
@@ -312,18 +312,12 @@ impl Simple for IqCaptureNode {
         // that is built and thrown away leaves no empty file behind.
         if self.sink.is_none() {
             if let Err(e) = self.open(now_us()) {
-                self.fail(
-                    format!("cannot open a capture in {}: {e}", self.dir.display()),
-                    c,
-                );
+                self.fail(format!("cannot open a capture in {}: {e}", self.dir.display()), c);
                 return Ok(());
             }
         }
         if let Err(e) = self.write(iq) {
-            let path = self
-                .path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+            let path = self.path().map(|p| p.display().to_string()).unwrap_or_default();
             self.fail(format!("cannot write {path}: {e}"), c);
             self.close();
         }
@@ -337,14 +331,10 @@ impl Simple for IqCaptureNode {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool(ENABLED, self.enabled).label("Write the span to disk"),
-            Param::float(
-                BUDGET_MB,
-                self.budget as f64 / (1 << 20) as f64,
-                16.0..=65_536.0,
-            )
-            .unit("MB")
-            .label("Stop when the folder reaches")
-            .log(),
+            Param::float(BUDGET_MB, self.budget as f64 / (1 << 20) as f64, 16.0..=65_536.0)
+                .unit("MB")
+                .label("Stop when the folder reaches")
+                .log(),
         ]
     }
 
@@ -358,9 +348,7 @@ impl Simple for IqCaptureNode {
                 self.budget = (v.as_f64().unwrap_or(0.0).max(0.0) * (1 << 20) as f64) as u64;
                 Ok(())
             }
-            _ => Err(Error::other(format!(
-                "iq_capture: unknown parameter {name:?}"
-            ))),
+            _ => Err(Error::other(format!("iq_capture: unknown parameter {name:?}"))),
         }
     }
 }
@@ -398,12 +386,7 @@ fn stamp(at_us: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
-        rem / 3600,
-        rem / 60 % 60,
-        rem % 60
-    )
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 fn now_us() -> u64 {
@@ -415,10 +398,7 @@ fn now_us() -> u64 {
 
 /// Anything that would confuse the name back into metadata, or a shell.
 fn sanitise(s: &str) -> String {
-    let s: String = s
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
+    let s: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
     if s.is_empty() {
         "capture".into()
     } else {
@@ -438,10 +418,7 @@ mod tests {
     }
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, center),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, center), latency: 0 }
     }
 
     fn feed(n: &mut IqCaptureNode, iq: &[C32], ins: &[PortSpec]) {
@@ -476,10 +453,7 @@ mod tests {
         let path = n.path().unwrap().to_path_buf();
         Simple::reset(&mut n);
 
-        let buf = sources::FileSource::open(&path)
-            .unwrap()
-            .read_all()
-            .unwrap();
+        let buf = sources::FileSource::open(&path).unwrap().read_all().unwrap();
         assert_eq!(buf.rate.0, rate as u64);
         assert_eq!(buf.center.0, center.0);
         assert_eq!(buf.samples.len(), iq.len());
@@ -592,13 +566,10 @@ pub const DESC: StageDesc = StageDesc {
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let default = SampleFormat::Cu8;
-    let format = SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
+    let format =
+        SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
     let mb = s.f64_or(BUDGET_MB, 0.0);
-    let budget = if mb > 0.0 {
-        (mb * (1u64 << 20) as f64) as u64
-    } else {
-        DEFAULT_BUDGET
-    };
+    let budget = if mb > 0.0 { (mb * (1u64 << 20) as f64) as u64 } else { DEFAULT_BUDGET };
     Ok(Box::new(
         IqCaptureNode::new(s.str_or(DIR, "."))
             .with_name(s.str_or(NAME, "capture"))

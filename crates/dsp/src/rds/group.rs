@@ -200,8 +200,7 @@ impl GroupDecoder {
         let want = if self.rt_len > 0 { self.rt_len } else { 64 };
         let mask = if want >= 64 { u64::MAX } else { (1u64 << want) - 1 };
         if self.rt_seen & mask == mask {
-            self.station.radiotext =
-                Some(decode_text(&self.rt_buf[..want]).trim_end().to_string());
+            self.station.radiotext = Some(decode_text(&self.rt_buf[..want]).trim_end().to_string());
         }
     }
 }
@@ -209,10 +208,7 @@ impl GroupDecoder {
 /// RDS uses its own character set; the printable ASCII range matches, and
 /// anything else is shown as a space rather than mangling the line.
 fn decode_text(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| if (0x20..0x7F).contains(b) { *b as char } else { ' ' })
-        .collect()
+    bytes.iter().map(|b| if (0x20..0x7F).contains(b) { *b as char } else { ' ' }).collect()
 }
 
 #[cfg(test)]

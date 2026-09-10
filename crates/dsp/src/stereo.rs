@@ -284,12 +284,8 @@ mod tests {
         a.process(&mpx, &mut x, &mut y);
         b.process_mono(&mpx, &mut z);
         assert_eq!(a.phases().len(), b.phases().len());
-        let worst = a
-            .phases()
-            .iter()
-            .zip(b.phases())
-            .map(|(p, q)| (p - q).abs())
-            .fold(0.0f64, f64::max);
+        let worst =
+            a.phases().iter().zip(b.phases()).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max);
         assert!(worst < 1e-9, "the two paths disagree about the pilot by {worst}");
     }
 
@@ -306,8 +302,8 @@ mod tests {
                 let t = i as f64 / RATE;
                 let sum = a + b;
                 let diff = a - b;
-                (sum + diff * (TAU * 2.0 * PILOT_HZ * t).cos()
-                    + pilot * (TAU * PILOT_HZ * t).cos()) as f32
+                (sum + diff * (TAU * 2.0 * PILOT_HZ * t).cos() + pilot * (TAU * PILOT_HZ * t).cos())
+                    as f32
             })
             .collect()
     }
@@ -329,11 +325,7 @@ mod tests {
         let (mut l, mut r) = (Vec::new(), Vec::new());
         d.process(&mpx, &mut l, &mut r);
         assert!(d.is_locked(), "did not lock, indicator {:.3}", d.lock());
-        assert!(
-            (d.pilot_freq() - PILOT_HZ).abs() < 20.0,
-            "locked to {:.1} Hz",
-            d.pilot_freq()
-        );
+        assert!((d.pilot_freq() - PILOT_HZ).abs() < 20.0, "locked to {:.1} Hz", d.pilot_freq());
     }
 
     #[test]
@@ -510,15 +502,26 @@ mod diag {
             consumed += chunk.len();
             let true_phase = (TAU * 19_000.0 * (consumed as f64) / RATE) % TAU;
             let mut e = d.phase - true_phase;
-            while e > std::f64::consts::PI { e -= TAU; }
-            while e < -std::f64::consts::PI { e += TAU; }
+            while e > std::f64::consts::PI {
+                e -= TAU;
+            }
+            while e < -std::f64::consts::PI {
+                e += TAU;
+            }
             let g = |x: &[f32], f: f64| {
-                let k = TAU * f / RATE; let c = 2.0 * k.cos();
+                let k = TAU * f / RATE;
+                let c = 2.0 * k.cos();
                 let (mut a, mut b) = (0.0f64, 0.0f64);
-                for &v in x { let t = v as f64 + c * a - b; b = a; a = t; }
+                for &v in x {
+                    let t = v as f64 + c * a - b;
+                    b = a;
+                    a = t;
+                }
                 (a * a + b * b - c * a * b).sqrt() / x.len() as f64
             };
-            let rms = |x: &[f32]| (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+            let rms = |x: &[f32]| {
+                (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+            };
             println!(
                 "n={consumed:>7} err {:+7.2}deg  L {:.4} R {:.4} sep {:5.1}dB | R@1k {:.5} R@2k {:.5} R@dc {:.5}",
                 e.to_degrees(), rms(&l), rms(&r),

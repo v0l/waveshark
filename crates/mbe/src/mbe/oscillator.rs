@@ -58,7 +58,8 @@ impl Oscillator {
         let new_im = re * a_im + im * a_re;
 
         // fastNormalize
-        let magnitude = (new_re as f64 * new_re as f64 + new_im as f64 * new_im as f64).sqrt() as f32;
+        let magnitude =
+            (new_re as f64 * new_re as f64 + new_im as f64 * new_im as f64).sqrt() as f32;
         if magnitude > 0.0 {
             self.current_angle = (new_re / magnitude, new_im / magnitude);
         } else {

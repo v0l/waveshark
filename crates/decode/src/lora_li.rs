@@ -38,9 +38,8 @@
 /// XORed into the payload before coding. Measured as the decode of an all-zero
 /// payload, and the eight byte sequence is the first eight of these, which is
 /// the evidence that it is one LFSR run rather than a function of the length.
-pub const WHITENING: [u8; 13] = [
-    0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe1, 0xc2, 0x85, 0x0b, 0x17, 0x2f, 0x5e, 0xbc,
-];
+pub const WHITENING: [u8; 13] =
+    [0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe1, 0xc2, 0x85, 0x0b, 0x17, 0x2f, 0x5e, 0xbc];
 
 /// Symbols at the reduced width before the rest run at the full spreading
 /// factor. Measured at SF7; see the module note about SF5.
@@ -58,9 +57,7 @@ pub struct Decoded {
 
 /// Bits each symbol of a packet carries.
 pub fn symbol_widths(sf: u8, symbols: usize) -> Vec<u8> {
-    (0..symbols)
-        .map(|i| if i < REDUCED_SYMBOLS { sf - 2 } else { sf })
-        .collect()
+    (0..symbols).map(|i| if i < REDUCED_SYMBOLS { sf - 2 } else { sf }).collect()
 }
 
 /// Symbols a packet of this length occupies.
@@ -74,12 +71,7 @@ pub fn symbol_count(sf: u8, len: usize) -> usize {
 }
 
 fn parity(d: [u8; 4]) -> [u8; 4] {
-    [
-        d[0] ^ d[1] ^ d[2],
-        d[1] ^ d[2] ^ d[3],
-        d[0] ^ d[1] ^ d[3],
-        d[0] ^ d[2] ^ d[3],
-    ]
+    [d[0] ^ d[1] ^ d[2], d[1] ^ d[2] ^ d[3], d[0] ^ d[1] ^ d[3], d[0] ^ d[2] ^ d[3]]
 }
 
 /// Read the payload out of a packet's symbols.
@@ -213,21 +205,17 @@ mod tests {
     const OFF_AIR: [([u16; 32], [u8; 13]); 2] = [
         (
             [
-                117, 81, 73, 5, 117, 17, 29, 5, 121, 76, 111, 77, 65, 21, 119, 42, 127, 75, 67,
-                15, 81, 83, 46, 80, 37, 49, 1, 93, 22, 35, 106, 52,
+                117, 81, 73, 5, 117, 17, 29, 5, 121, 76, 111, 77, 65, 21, 119, 42, 127, 75, 67, 15,
+                81, 83, 46, 80, 37, 49, 1, 93, 22, 35, 106, 52,
             ],
-            [
-                0x00, 0xfa, 0xb5, 0x67, 0xc5, 0x7c, 0x56, 0x58, 0x01, 0x1f, 0x7c, 0x78, 0x73,
-            ],
+            [0x00, 0xfa, 0xb5, 0x67, 0xc5, 0x7c, 0x56, 0x58, 0x01, 0x1f, 0x7c, 0x78, 0x73],
         ),
         (
             [
-                117, 81, 73, 5, 73, 17, 29, 5, 121, 72, 106, 77, 64, 20, 120, 42, 34, 118, 67,
-                15, 0, 83, 46, 80, 42, 52, 1, 93, 22, 35, 106, 116,
+                117, 81, 73, 5, 73, 17, 29, 5, 121, 72, 106, 77, 64, 20, 120, 42, 34, 118, 67, 15,
+                0, 83, 46, 80, 42, 52, 1, 93, 22, 35, 106, 116,
             ],
-            [
-                0x00, 0xfa, 0xb9, 0x67, 0xc5, 0x7c, 0x56, 0x58, 0x01, 0x1f, 0x7c, 0xe6, 0x39,
-            ],
+            [0x00, 0xfa, 0xb9, 0x67, 0xc5, 0x7c, 0x56, 0x58, 0x01, 0x1f, 0x7c, 0xe6, 0x39],
         ),
     ];
 
@@ -252,7 +240,8 @@ mod tests {
     #[test]
     fn a_payload_survives_the_round_trip() {
         for len in [8usize, 13] {
-            let payload: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(9)).collect();
+            let payload: Vec<u8> =
+                (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(9)).collect();
             let symbols = encode(&payload, 7, 8).expect("encode");
             assert_eq!(symbols.len(), symbol_count(7, len));
             let got = decode(&symbols, 7, 8, len).expect("decode");

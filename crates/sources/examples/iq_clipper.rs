@@ -75,10 +75,7 @@ fn main() {
         .rate_in
         .or_else(|| meta.rate.map(|r| r.as_f64()))
         .expect("a sample rate from the filename or --rate-in");
-    let center_in = args
-        .center_in
-        .or_else(|| meta.center.map(|c| c.as_f64()))
-        .unwrap_or(0.0);
+    let center_in = args.center_in.or_else(|| meta.center.map(|c| c.as_f64())).unwrap_or(0.0);
     let format_out = args
         .output
         .as_deref()
@@ -128,11 +125,7 @@ fn main() {
         100.0 * kept as f64 / total.max(1) as f64
     );
     for (a, b) in spans.iter().take(20) {
-        eprintln!(
-            "  {:>10.4} s  +{:>8.1} ms",
-            *a as f64 / rate,
-            (b - a) as f64 / rate * 1e3
-        );
+        eprintln!("  {:>10.4} s  +{:>8.1} ms", *a as f64 / rate, (b - a) as f64 / rate * 1e3);
     }
 
     let Some(out) = &args.output else {
@@ -333,12 +326,7 @@ fn parse_args() -> Args {
     let mut positional = Vec::new();
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
-        let mut value = || {
-            it.next()
-                .expect("option needs a value")
-                .parse()
-                .expect("a number")
-        };
+        let mut value = || it.next().expect("option needs a value").parse().expect("a number");
         match arg.as_str() {
             "--center-hz" => a.center_hz = Some(value()),
             "--rate" => a.rate_out = Some(value()),

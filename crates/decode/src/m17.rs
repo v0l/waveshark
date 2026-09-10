@@ -267,11 +267,7 @@ impl Meta {
         }
         let signed24 = |b: &[u8]| -> f64 {
             let v = i32::from(b[0]) << 16 | i32::from(b[1]) << 8 | i32::from(b[2]);
-            f64::from(if v & 0x80_0000 != 0 {
-                v - 0x100_0000
-            } else {
-                v
-            })
+            f64::from(if v & 0x80_0000 != 0 { v - 0x100_0000 } else { v })
         };
         // Both are binary fractions of a quarter and a half turn.
         let lat = signed24(&meta[3..6]) * 90.0 / 8_388_607.0;
@@ -289,14 +285,7 @@ impl Meta {
             2 => "handheld",
             _ => "other",
         };
-        Some(Meta::Position(Position {
-            lat,
-            lon,
-            altitude_m,
-            speed_kmh,
-            bearing_deg,
-            station,
-        }))
+        Some(Meta::Position(Position { lat, lon, altitude_m, speed_kmh, bearing_deg, station }))
     }
 }
 
@@ -329,11 +318,7 @@ pub enum Event {
     Packet { lsf: Option<Lsf>, data: Vec<u8> },
     /// A stream ended, either because the transmitter said so or because it
     /// stopped being heard. The conclusion drawn from the frames below.
-    Stream {
-        lsf: Option<Lsf>,
-        frames: u32,
-        complete: bool,
-    },
+    Stream { lsf: Option<Lsf>, frames: u32, complete: bool },
     /// One frame of a stream, as it arrived: its number, and the payload it
     /// carried, which for a voice stream is 40 ms of the vocoder's own
     /// bitstream.
@@ -342,11 +327,7 @@ pub enum Event {
     /// only "M0ABC talked for nine seconds" cannot reproduce the nine
     /// seconds, and at 3200 bit/s the frames it would need are 400 bytes a
     /// second: less than the row describing them.
-    StreamFrame {
-        lsf: Option<Lsf>,
-        number: u16,
-        payload: [u8; PAYLOAD_BYTES],
-    },
+    StreamFrame { lsf: Option<Lsf>, number: u16, payload: [u8; PAYLOAD_BYTES] },
 }
 
 impl Event {
@@ -356,20 +337,12 @@ impl Event {
         let (tag, lsf, rest): (u8, Option<&Lsf>, Vec<u8>) = match self {
             Event::LinkSetup { lsf, late } => (1, Some(lsf), vec![u8::from(*late)]),
             Event::Packet { lsf, data } => (2, lsf.as_ref(), data.clone()),
-            Event::Stream {
-                lsf,
-                frames,
-                complete,
-            } => {
+            Event::Stream { lsf, frames, complete } => {
                 let mut v = frames.to_be_bytes().to_vec();
                 v.push(u8::from(*complete));
                 (3, lsf.as_ref(), v)
             }
-            Event::StreamFrame {
-                lsf,
-                number,
-                payload,
-            } => {
+            Event::StreamFrame { lsf, number, payload } => {
                 let mut v = number.to_be_bytes().to_vec();
                 v.extend_from_slice(payload);
                 (4, lsf.as_ref(), v)
@@ -405,14 +378,8 @@ impl Event {
             return None;
         }
         Some(match (tag, rest.len()) {
-            (1, 1) => Event::LinkSetup {
-                lsf: lsf?,
-                late: rest[0] == 1,
-            },
-            (2, 3..) => Event::Packet {
-                lsf,
-                data: rest.to_vec(),
-            },
+            (1, 1) => Event::LinkSetup { lsf: lsf?, late: rest[0] == 1 },
+            (2, 3..) => Event::Packet { lsf, data: rest.to_vec() },
             (3, 5) => Event::Stream {
                 lsf,
                 frames: u32::from_be_bytes(rest[..4].try_into().ok()?),
@@ -486,21 +453,12 @@ impl Assembler {
                     self.last_sample = frame.start_sample;
                 }
                 if let Some(lsf) = Lsf::new(*bytes) {
-                    out.push(Event::LinkSetup {
-                        lsf: lsf.clone(),
-                        late: false,
-                    });
+                    out.push(Event::LinkSetup { lsf: lsf.clone(), late: false });
                     self.lsf = Some(lsf);
                     self.announced = true;
                 }
             }
-            Body::Stream {
-                lich,
-                number,
-                last,
-                payload,
-                ..
-            } => {
+            Body::Stream { lich, number, last, payload, .. } => {
                 let cnt = (lich[5] >> 5) as usize;
                 if cnt < 6 {
                     let mut chunk = [0u8; 5];
@@ -518,10 +476,7 @@ impl Assembler {
                 });
                 if !self.announced {
                     if let Some(lsf) = self.rebuild() {
-                        out.push(Event::LinkSetup {
-                            lsf: lsf.clone(),
-                            late: true,
-                        });
+                        out.push(Event::LinkSetup { lsf: lsf.clone(), late: true });
                         self.lsf = Some(lsf);
                         self.announced = true;
                     }
@@ -579,17 +534,10 @@ impl Assembler {
         let lsf = self.lsf.clone();
         if self.parts.iter().any(|p| p.is_some()) {
             if let Some(data) = self.packet() {
-                out.push(Event::Packet {
-                    lsf: lsf.clone(),
-                    data,
-                });
+                out.push(Event::Packet { lsf: lsf.clone(), data });
             }
         } else if self.frames > 0 {
-            out.push(Event::Stream {
-                lsf,
-                frames: self.frames,
-                complete: self.ended,
-            });
+            out.push(Event::Stream { lsf, frames: self.frames, complete: self.ended });
         }
         self.open = false;
         self.lsf = None;
@@ -612,11 +560,7 @@ impl Assembler {
         let mut data = Vec::new();
         for i in 0..=last as usize {
             let part = self.parts[i].as_ref()?;
-            let take = if i == last as usize {
-                valid as usize
-            } else {
-                25
-            };
+            let take = if i == last as usize { valid as usize } else { 25 };
             data.extend_from_slice(&part[..take]);
         }
         if data.len() < 3 || dsp::m17::fec::crc16(&data) != 0 {
@@ -715,10 +659,7 @@ mod tests {
     #[test]
     fn the_callsign_encoding_matches_the_published_example() {
         assert_eq!(Address::encode("AB1CD"), 0x9F_DD51);
-        assert_eq!(
-            Address::from_value(0x9F_DD51),
-            Address::Text("AB1CD".into())
-        );
+        assert_eq!(Address::from_value(0x9F_DD51), Address::Text("AB1CD".into()));
         assert_eq!(Address::from_value(BROADCAST), Address::Broadcast);
         assert_eq!(Address::from_value(0), Address::Empty);
         // Trailing spaces are zeros in the least significant digits, so they
@@ -776,15 +717,9 @@ mod tests {
         meta[12] = 0x20; // 50.0 km/h
 
         let lsf = lsf_of("ALL", "M0ABC", 1 | 2 << 1 | 1 << 5, &meta);
-        let Some(Meta::Position(p)) = lsf.metadata() else {
-            panic!("no position")
-        };
+        let Some(Meta::Position(p)) = lsf.metadata() else { panic!("no position") };
         assert!((p.lat - lat).abs() < 1e-4, "latitude came out at {}", p.lat);
-        assert!(
-            (p.lon - lon).abs() < 1e-4,
-            "longitude came out at {}",
-            p.lon
-        );
+        assert!((p.lon - lon).abs() < 1e-4, "longitude came out at {}", p.lon);
         assert_eq!(p.altitude_m, Some(50.0));
         assert_eq!(p.speed_kmh, Some(25.0));
         assert_eq!(p.bearing_deg, Some(90.0));
@@ -800,29 +735,14 @@ mod tests {
     }
 
     fn frame(body: Body, at: u64) -> Frame {
-        Frame {
-            body,
-            ber: 0.0,
-            correlation: 1.0,
-            evm: 0.0,
-            start_sample: at,
-        }
+        Frame { body, ber: 0.0, correlation: 1.0, evm: 0.0, start_sample: at }
     }
 
     fn stream_frame(lsf: &Lsf, cnt: u8, number: u16, last: bool, at: u64) -> Frame {
         let mut lich = [0u8; 6];
         lich[..5].copy_from_slice(&lsf.bytes[cnt as usize * 5..cnt as usize * 5 + 5]);
         lich[5] = cnt << 5;
-        frame(
-            Body::Stream {
-                lich,
-                lich_errors: 0,
-                number,
-                last,
-                payload: [0; 16],
-            },
-            at,
-        )
+        frame(Body::Stream { lich, lich_errors: 0, number, last, payload: [0; 16] }, at)
     }
 
     /// The point of the link information channel: a receiver that missed the
@@ -847,19 +767,10 @@ mod tests {
         // Rebuilt at the sixth frame, not the twelfth: the setup and the
         // closing summary are the conclusions, and every frame is reported
         // beside them as the evidence for it.
-        let summaries: Vec<&Event> = events
-            .iter()
-            .filter(|e| !matches!(e, Event::StreamFrame { .. }))
-            .collect();
+        let summaries: Vec<&Event> =
+            events.iter().filter(|e| !matches!(e, Event::StreamFrame { .. })).collect();
         assert_eq!(summaries.len(), 2, "{summaries:?}");
-        assert!(matches!(
-            summaries[1],
-            Event::Stream {
-                frames: 12,
-                complete: true,
-                ..
-            }
-        ));
+        assert!(matches!(summaries[1], Event::Stream { frames: 12, complete: true, .. }));
     }
 
     /// Every frame reaches the bus with its payload, which is what makes a
@@ -879,18 +790,13 @@ mod tests {
         let frames: Vec<(u16, [u8; PAYLOAD_BYTES])> = events
             .iter()
             .filter_map(|e| match e {
-                Event::StreamFrame {
-                    number, payload, ..
-                } => Some((*number, *payload)),
+                Event::StreamFrame { number, payload, .. } => Some((*number, *payload)),
                 _ => None,
             })
             .collect();
         assert_eq!(frames.len(), 4, "one event per frame heard");
         assert_eq!(frames[2].0, 2);
-        assert_eq!(
-            frames[2].1, [3u8; PAYLOAD_BYTES],
-            "the payload arrived as it was sent"
-        );
+        assert_eq!(frames[2].1, [3u8; PAYLOAD_BYTES], "the payload arrived as it was sent");
 
         // And it survives the trip over the bus, which is what the log holds.
         let e = &events[2];
@@ -903,27 +809,11 @@ mod tests {
         let mut a = Assembler::new(48_000.0);
         a.push(&frame(Body::Lsf(lsf.bytes), 0));
         for n in 0..4u16 {
-            a.push(&stream_frame(
-                &lsf,
-                (n % 6) as u8,
-                n,
-                false,
-                1920 * u64::from(n + 1),
-            ));
+            a.push(&stream_frame(&lsf, (n % 6) as u8, n, false, 1920 * u64::from(n + 1)));
         }
-        assert!(
-            a.poll(1920 * 6).is_empty(),
-            "closed while the stream was still running"
-        );
+        assert!(a.poll(1920 * 6).is_empty(), "closed while the stream was still running");
         let events = a.poll(48_000 * 3);
-        assert!(matches!(
-            events[..],
-            [Event::Stream {
-                frames: 4,
-                complete: false,
-                ..
-            }]
-        ));
+        assert!(matches!(events[..], [Event::Stream { frames: 4, complete: false, .. }]));
     }
 
     #[test]
@@ -943,14 +833,9 @@ mod tests {
             part[..chunk.len()].copy_from_slice(chunk);
             let eof = (i + 1) * 25 >= data.len();
             let counter = if eof { chunk.len() as u8 } else { i as u8 };
-            events.extend(a.push(&frame(
-                Body::Packet {
-                    data: part,
-                    eof,
-                    counter,
-                },
-                1920 * (i as u64 + 1),
-            )));
+            events.extend(
+                a.push(&frame(Body::Packet { data: part, eof, counter }, 1920 * (i as u64 + 1))),
+            );
         }
         let got = events.iter().find_map(|e| match e {
             Event::Packet { data, .. } => Some(data.clone()),
@@ -959,10 +844,7 @@ mod tests {
         let got = got.expect("no packet came out");
         assert_eq!(got[0], 0x05);
         assert_eq!(packet_protocol(got[0]), Some("SMS"));
-        assert_eq!(
-            &got[1..got.len() - 1],
-            "A message long enough to need two frames".as_bytes()
-        );
+        assert_eq!(&got[1..got.len() - 1], "A message long enough to need two frames".as_bytes());
     }
 
     /// A packet missing a fragment cannot be checked, and a message with a
@@ -984,43 +866,21 @@ mod tests {
             part[..chunk.len()].copy_from_slice(chunk);
             let eof = (i + 1) * 25 >= data.len();
             let counter = if eof { chunk.len() as u8 } else { i as u8 };
-            events.extend(a.push(&frame(
-                Body::Packet {
-                    data: part,
-                    eof,
-                    counter,
-                },
-                1920 * (i as u64 + 1),
-            )));
+            events.extend(
+                a.push(&frame(Body::Packet { data: part, eof, counter }, 1920 * (i as u64 + 1))),
+            );
         }
-        assert!(
-            events.is_empty(),
-            "an incomplete packet was reported: {events:?}"
-        );
+        assert!(events.is_empty(), "an incomplete packet was reported: {events:?}");
     }
 
     #[test]
     fn an_event_survives_the_trip_over_the_bus() {
         let lsf = lsf_of("M17-M17 C", "M0ABC", 1 | 2 << 1 | 3 << 7, &[]);
         for e in [
-            Event::LinkSetup {
-                lsf: lsf.clone(),
-                late: true,
-            },
-            Event::Packet {
-                lsf: Some(lsf.clone()),
-                data: vec![5, b'h', b'i', 0],
-            },
-            Event::Stream {
-                lsf: Some(lsf.clone()),
-                frames: 250,
-                complete: true,
-            },
-            Event::Stream {
-                lsf: None,
-                frames: 3,
-                complete: false,
-            },
+            Event::LinkSetup { lsf: lsf.clone(), late: true },
+            Event::Packet { lsf: Some(lsf.clone()), data: vec![5, b'h', b'i', 0] },
+            Event::Stream { lsf: Some(lsf.clone()), frames: 250, complete: true },
+            Event::Stream { lsf: None, frames: 3, complete: false },
         ] {
             assert_eq!(Event::parse(&e.to_bytes()), Some(e));
         }

@@ -95,13 +95,7 @@ impl Search {
             });
         }
         drop(tx);
-        Search {
-            rx,
-            stop,
-            workers: threads,
-            done: 0,
-            result: None,
-        }
+        Search { rx, stop, workers: threads, done: 0, result: None }
     }
 
     /// Non-blocking check on the search.
@@ -139,31 +133,16 @@ mod tests {
     use crate::tea::Timestamp;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]
     fn recovers_the_reference_key_in_the_background() {
         // The teatime crack vector; the reference short key is 0x111.
-        let ts = |frame| Timestamp {
-            tn: 1,
-            frame,
-            multiframe: 30,
-            hyperframe: 110,
-            uplink: false,
-        };
+        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
         let frames = vec![
-            Collision {
-                ts: ts(6),
-                ct: hex("151ef027"),
-            },
-            Collision {
-                ts: ts(7),
-                ct: hex("4d00159e"),
-            },
+            Collision { ts: ts(6), ct: hex("151ef027") },
+            Collision { ts: ts(7), ct: hex("4d00159e") },
         ];
         // A window that contains the key, swept across 4 workers.
         let mut s = Search::start_range(frames, 4, 0..0x1_0000);
@@ -187,24 +166,12 @@ mod tests {
 
     #[test]
     fn reports_exhausted_when_no_key_fits() {
-        let ts = |frame| Timestamp {
-            tn: 1,
-            frame,
-            multiframe: 30,
-            hyperframe: 110,
-            uplink: false,
-        };
+        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
         // Two frames whose plaintext does NOT agree under any key in the
         // window: distinct ciphertext with no common register there.
         let frames = vec![
-            Collision {
-                ts: ts(6),
-                ct: hex("151ef027"),
-            },
-            Collision {
-                ts: ts(7),
-                ct: hex("4d00159e"),
-            },
+            Collision { ts: ts(6), ct: hex("151ef027") },
+            Collision { ts: ts(7), ct: hex("4d00159e") },
         ];
         // A window that excludes 0x111.
         let mut s = Search::start_range(frames, 2, 0x2_0000..0x2_1000);

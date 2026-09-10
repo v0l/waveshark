@@ -57,10 +57,7 @@ impl Protocol for HoneywellSecurity {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         if bits.len() < 120 {
-            return Err(DecodeError::WrongLength {
-                got: bits.len(),
-                want: 120,
-            });
+            return Err(DecodeError::WrongLength { got: bits.len(), want: 120 });
         }
         let mut best = Err(DecodeError::NotThisProtocol);
         for at in 0..bits.len() - PREAMBLE_BITS {
@@ -78,10 +75,7 @@ impl Protocol for HoneywellSecurity {
 
 fn frame(decoded: &BitBuffer) -> Result<Report, DecodeError> {
     if decoded.len() < MSG_BYTES * 8 {
-        return Err(DecodeError::WrongLength {
-            got: decoded.len(),
-            want: MSG_BYTES * 8,
-        });
+        return Err(DecodeError::WrongLength { got: decoded.len(), want: MSG_BYTES * 8 });
     }
     let b = decoded.as_padded_bytes();
     let channel = b[0] >> 4;
@@ -180,10 +174,7 @@ mod tests {
     fn a_corrupt_frame_fails_its_crc() {
         let mut m = frame_5816();
         m[2] ^= 0x08;
-        assert_eq!(
-            HoneywellSecurity.decode(&burst(&m)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(HoneywellSecurity.decode(&burst(&m)), Err(DecodeError::CrcFailed));
     }
 
     #[test]
@@ -193,9 +184,6 @@ mod tests {
         let crc = crc16(&m[..4], 0x8005, 0);
         m[4] = (crc >> 8) as u8;
         m[5] = crc as u8;
-        assert_eq!(
-            HoneywellSecurity.decode(&burst(&m)),
-            Err(DecodeError::NotThisProtocol)
-        );
+        assert_eq!(HoneywellSecurity.decode(&burst(&m)), Err(DecodeError::NotThisProtocol));
     }
 }

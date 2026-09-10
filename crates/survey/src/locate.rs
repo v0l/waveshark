@@ -115,10 +115,8 @@ fn cost(points: &[Point], e: f64, n: f64) -> f64 {
 
 /// Where a device is, from its sightings, or None where they cannot say.
 pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
-    let placed: Vec<(f64, f64, f64)> = sightings
-        .iter()
-        .filter_map(|s| Some((s.lat?, s.lon?, f64::from(s.rssi_dbfs?))))
-        .collect();
+    let placed: Vec<(f64, f64, f64)> =
+        sightings.iter().filter_map(|s| Some((s.lat?, s.lon?, f64::from(s.rssi_dbfs?)))).collect();
     if placed.len() < MIN_SIGHTINGS {
         return None;
     }
@@ -128,20 +126,12 @@ pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
     let north_m = 111_320.0;
     let points: Vec<Point> = placed
         .iter()
-        .map(|&(lat, lon, db)| Point {
-            e: (lon - lon0) * east_m,
-            n: (lat - lat0) * north_m,
-            db,
-        })
+        .map(|&(lat, lon, db)| Point { e: (lon - lon0) * east_m, n: (lat - lat0) * north_m, db })
         .collect();
 
     // The drive's extent: how far apart the two furthest sightings are.
-    let (mut lo_e, mut hi_e, mut lo_n, mut hi_n) = (
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-    );
+    let (mut lo_e, mut hi_e, mut lo_n, mut hi_n) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
     for p in &points {
         lo_e = lo_e.min(p.e);
         hi_e = hi_e.max(p.e);
@@ -238,10 +228,7 @@ mod tests {
     }
 
     fn at(e: f64, n: f64) -> (f64, f64) {
-        (
-            LAT + n / 111_320.0,
-            LON + e / (111_320.0 * LAT.to_radians().cos()),
-        )
+        (LAT + n / 111_320.0, LON + e / (111_320.0 * LAT.to_radians().cos()))
     }
 
     /// A drive that goes round the block puts the transmitter inside it.
@@ -273,9 +260,8 @@ mod tests {
     fn a_straight_drive_says_abeam_and_says_it_is_unsure_which_side() {
         let (te, tn) = (0.0, 150.0);
         let mut seed = 0x9E37_79B9;
-        let s: Vec<Sighting> = (0..40)
-            .map(|k| heard(-500.0 + 25.0 * k as f64, 0.0, te, tn, &mut seed))
-            .collect();
+        let s: Vec<Sighting> =
+            (0..40).map(|k| heard(-500.0 + 25.0 * k as f64, 0.0, te, tn, &mut seed)).collect();
         let est = locate(&s).expect("an estimate");
         let (lat, _) = at(0.0, 0.0);
         let (_, lon_t) = at(te, tn);
@@ -284,10 +270,7 @@ mod tests {
         assert!(metres(lat, est.lon, lat, lon_t) < 60.0, "{est:?}");
         assert!(metres(est.lat, est.lon, lat, est.lon) < 200.0, "{est:?}");
         // And it says so.
-        assert!(
-            est.radius_m >= 100.0,
-            "sure of a side it cannot know: {est:?}"
-        );
+        assert!(est.radius_m >= 100.0, "sure of a side it cannot know: {est:?}");
     }
 
     /// Nothing is said from too few sightings, or from a receiver that did
@@ -295,20 +278,14 @@ mod tests {
     #[test]
     fn too_little_evidence_is_no_estimate() {
         let mut seed = 1;
-        let few: Vec<Sighting> = (0..3)
-            .map(|k| heard(k as f64 * 50.0, 0.0, 0.0, 100.0, &mut seed))
-            .collect();
+        let few: Vec<Sighting> =
+            (0..3).map(|k| heard(k as f64 * 50.0, 0.0, 0.0, 100.0, &mut seed)).collect();
         assert!(locate(&few).is_none());
-        let parked: Vec<Sighting> = (0..10)
-            .map(|_| heard(0.0, 0.0, 0.0, 100.0, &mut seed))
-            .collect();
+        let parked: Vec<Sighting> =
+            (0..10).map(|_| heard(0.0, 0.0, 0.0, 100.0, &mut seed)).collect();
         assert!(locate(&parked).is_none());
         let blind: Vec<Sighting> = (0..10)
-            .map(|k| Sighting {
-                rssi_dbfs: Some(-40.0),
-                at_us: k,
-                ..Default::default()
-            })
+            .map(|k| Sighting { rssi_dbfs: Some(-40.0), at_us: k, ..Default::default() })
             .collect();
         assert!(locate(&blind).is_none());
     }

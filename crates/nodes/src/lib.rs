@@ -7,89 +7,91 @@
 //! reconfiguration rather than a recompile.
 
 pub mod ais_nodes;
-pub mod ble_nodes;
-pub mod wifi_nodes;
-pub mod auto;
 pub mod aprs_nodes;
+pub mod auto;
 pub mod bank;
-pub mod video_nodes;
+pub mod bank_node;
+pub mod beacondb_nodes;
+pub mod ble_nodes;
 pub mod capture_nodes;
 pub mod decode_nodes;
+pub mod dmr_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
-pub mod dmr_nodes;
 pub mod elrs_nodes;
-pub mod m17_nodes;
-pub mod tetra_nodes;
-pub mod modes_nodes;
 pub mod feed_nodes;
+pub mod filter_nodes;
+pub mod frame_meter;
+pub mod gsm_nodes;
+pub mod homeassistant_nodes;
+pub mod keyed;
+pub mod lora_nodes;
+pub mod m17_nodes;
+pub mod mod_nodes;
+pub mod modes_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod protocol;
 pub mod scope_nodes;
-pub mod bank_node;
-pub mod filter_nodes;
-pub mod frame_meter;
-pub mod gsm_nodes;
-pub mod keyed;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
-pub mod beacondb_nodes;
-pub mod homeassistant_nodes;
-pub mod wigle_nodes;
-pub mod wfm;
-pub mod lora_nodes;
-pub mod mod_nodes;
+pub mod tetra_nodes;
 pub mod tx_nodes;
+pub mod video_nodes;
+pub mod wfm;
+pub mod wifi_nodes;
+pub mod wigle_nodes;
 pub mod wmbus_nodes;
 
+pub use ais_nodes::AisNode;
+pub use aprs_nodes::AprsNode;
+pub use auto::{AutoNode, AUTO_OPEN_DB};
 pub use bank::{ChannelBank, ChannelEvent, Gating};
+pub use bank_node::BankNode;
+pub use beacondb_nodes::{BeaconDbNode, BeaconDbStatus};
+pub use ble_nodes::BleNode;
 pub use capture_nodes::IqCaptureNode;
-pub use video_nodes::VideoNode;
-pub use wfm::WfmDemodNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode, UNKNOWN,
 };
-pub use ais_nodes::AisNode;
-pub use frame_meter::FrameMeter;
-pub use keyed::{keyed, keyed_mut, Keyed};
-pub use ble_nodes::BleNode;
-pub use wifi_nodes::WifiNode;
-pub use survey_nodes::SurveyNode;
-pub use beacondb_nodes::{BeaconDbNode, BeaconDbStatus};
-pub use homeassistant_nodes::{Broker, HomeAssistantNode, HomeAssistantStatus, Publish};
-pub use wigle_nodes::{Account, WigleNode, WigleStatus};
-pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
-pub use m17_nodes::M17Node;
-pub use tetra_nodes::TetraNode;
-pub use pocsag_nodes::PocsagNode;
-pub use modes_nodes::ModeSNode;
-pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
-pub use packet_nodes::{DedupeNode, PacketDecodeNode};
-pub use auto::{AutoNode, AUTO_OPEN_DB};
-pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
-pub use lora_nodes::LoraNode;
-pub use elrs_nodes::ElrsNode;
-pub use wmbus_nodes::WmbusNode;
-pub use tx_nodes::{
-    MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode,
-    MIC_GAIN_MAX,
-};
-pub use mod_nodes::{
-    AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
-    NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
-};
-pub use bank_node::BankNode;
-pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
-pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
-pub use sink_nodes::{AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode};
-pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use dsp_nodes::{
     AgcNode, AgcPreset, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode,
     MixerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
 };
+pub use elrs_nodes::ElrsNode;
+pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
+pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
+pub use frame_meter::FrameMeter;
+pub use homeassistant_nodes::{Broker, HomeAssistantNode, HomeAssistantStatus, Publish};
+pub use keyed::{keyed, keyed_mut, Keyed};
+pub use lora_nodes::LoraNode;
+pub use m17_nodes::M17Node;
+pub use mod_nodes::{
+    AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
+    NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
+};
+pub use modes_nodes::ModeSNode;
+pub use packet_nodes::{DedupeNode, PacketDecodeNode};
+pub use pocsag_nodes::PocsagNode;
+pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
+pub use scope_nodes::{ScopeFrame, ScopeNode};
+pub use sink_nodes::{
+    AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,
+};
+pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
+pub use survey_nodes::SurveyNode;
+pub use tetra_nodes::TetraNode;
+pub use tx_nodes::{
+    MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode,
+    MIC_GAIN_MAX,
+};
+pub use video_nodes::VideoNode;
+pub use wfm::WfmDemodNode;
+pub use wifi_nodes::WifiNode;
+pub use wigle_nodes::{Account, WigleNode, WigleStatus};
+pub use wmbus_nodes::WmbusNode;
 
 use common::Result;
 use pipeline::node::Node;
@@ -210,10 +212,7 @@ pub struct NodeSpec {
 
 impl NodeSpec {
     pub fn new(kind: &str) -> Self {
-        Self {
-            kind: kind.into(),
-            settings: Settings::new(),
-        }
+        Self { kind: kind.into(), settings: Settings::new() }
     }
 
     pub fn set(mut self, k: &str, v: pipeline::ParamValue) -> Self {
@@ -265,9 +264,7 @@ pub fn ook_chain(shift_hz: f64, decimate: usize, reset_us: u32) -> Vec<NodeSpec>
         NodeSpec::new("mixer").f("shift_hz", shift_hz),
         NodeSpec::new("decimate").i("factor", decimate as i64),
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", reset_us as f64)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", reset_us as f64).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -285,11 +282,7 @@ pub fn ook_chain(shift_hz: f64, decimate: usize, reset_us: u32) -> Vec<NodeSpec>
 /// The floor is what a gate is worth: idle channels cost the detector only,
 /// and that is most of the band most of the time.
 pub fn ism_detector_config() -> dsp::DetectorConfig {
-    dsp::DetectorConfig {
-        open_db: 6.0,
-        close_db: 3.0,
-        ..Default::default()
-    }
+    dsp::DetectorConfig { open_db: 6.0, close_db: 3.0, ..Default::default() }
 }
 
 /// Everything an ISM channel needs, in one graph.
@@ -312,10 +305,7 @@ pub fn ism_detector_config() -> dsp::DetectorConfig {
 /// that from the channel it is given.
 pub fn ism_decode_graph(input: StreamSpec) -> Result<Graph> {
     let mut b = Graph::builder(input);
-    let node = b.add_labeled(
-        "Classify and route",
-        Box::new(BurstRouteNode::default_ism()),
-    );
+    let node = b.add_labeled("Classify and route", Box::new(BurstRouteNode::default_ism()));
     b.source(node.i());
     b.output(node.o());
     b.build()

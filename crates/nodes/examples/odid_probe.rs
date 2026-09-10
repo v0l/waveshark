@@ -27,10 +27,7 @@ fn main() {
             }
         })
         .collect();
-    eprintln!(
-        "{:.2} s at {rate} S/s, centre {center}",
-        iq.len() as f64 / rate
-    );
+    eprintln!("{:.2} s at {rate} S/s, centre {center}", iq.len() as f64 / rate);
 
     // The data channels are where an extended advertisement puts its
     // payload, so they are read when asked for: ODID_DATA=1.
@@ -92,10 +89,7 @@ fn main() {
             None => 1.0,
         };
         let len = ((f.pdu.len() + 16) as f64 * 8.0 * spread * 1e-6 * rate) as u64;
-        keep.push((
-            f.start_sample.saturating_sub(margin),
-            f.start_sample + len + margin,
-        ));
+        keep.push((f.start_sample.saturating_sub(margin), f.start_sample + len + margin));
         let fields = decode::odid::fields(&msgs)
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
@@ -106,10 +100,7 @@ fn main() {
             Some(dsp::ble_coded::Coding::S2) => " LR/S2",
             None => "",
         };
-        println!(
-            "ch{}{phy} {:.0} dBFS {} {}",
-            f.channel, f.rssi_dbfs, adv.address, fields
-        );
+        println!("ch{}{phy} {:.0} dBFS {} {}", f.channel, f.rssi_dbfs, adv.address, fields);
     }
     eprintln!("{drones} of {} packets are Open Drone ID", frames.len());
 

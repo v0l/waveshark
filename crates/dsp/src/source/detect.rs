@@ -8,7 +8,6 @@ use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
-
 /// The scalars of one frame's floor pass: what every bin does with that
 /// frame, decided once from the shared counters.
 #[derive(Clone, Copy, Debug)]
@@ -864,7 +863,8 @@ impl SourceDetector {
         while lo <= self.bin_hi {
             let hi = (lo + width - 1).min(self.bin_hi);
             self.cap_scratch.clear();
-            self.cap_scratch.extend(self.floor.min[lo..=hi].iter().copied().filter(|m| m.is_finite()));
+            self.cap_scratch
+                .extend(self.floor.min[lo..=hi].iter().copied().filter(|m| m.is_finite()));
             let cap = if self.cap_scratch.is_empty() {
                 f32::INFINITY
             } else {
@@ -933,7 +933,8 @@ impl SourceDetector {
         // saturates the same way and is still two tones. The rest is what
         // the converter made of it.
         if frame_saturated && !runs.is_empty() {
-            let peak = |r: &(usize, usize)| (r.0..=r.1).map(|i| bins.ratio(i)).fold(0.0f32, f32::max);
+            let peak =
+                |r: &(usize, usize)| (r.0..=r.1).map(|i| bins.ratio(i)).fold(0.0f32, f32::max);
             let best = runs.iter().copied().max_by(|a, b| peak(a).total_cmp(&peak(b))).unwrap();
             let top = peak(&best);
             let pair_bins = (self.cfg.pair_hz / self.bin_hz()).round() as usize;
@@ -1223,9 +1224,9 @@ impl SourceDetector {
         // fraction, a 500 kHz LoRa channel fills a fifth of a 2.4 MS/s span
         // and would read as a blanket.
         let close_r = 10f32.powf(self.cfg.close_db / 10.0);
-        let lit_hz =
-            (self.bin_lo..=self.bin_hi).filter(|i| bins.ratio(*i) >= close_r).count() as f64
-                * self.bin_hz();
+        let lit_hz = (self.bin_lo..=self.bin_hi).filter(|i| bins.ratio(*i) >= close_r).count()
+            as f64
+            * self.bin_hz();
         let blanket = lit_hz > BLANKET_HZ;
         let born = self.tracks.len();
         for (si, s) in self.segs.iter().enumerate() {
@@ -1325,7 +1326,6 @@ impl SourceDetector {
                 k += 1;
             }
         }
-
     }
 
     /// Carry every track forward: what it covers now, whether it opens,
@@ -1505,18 +1505,13 @@ impl SourceDetector {
         let in_spur = |hz: f64| spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&hz));
         // The offset follows another transmission's envelope, so it is only
         // the spur while there is one to follow.
-        let others = self
-            .tracks
-            .iter()
-            .filter(|t| t.open && !in_spur(t.src.center_hz))
-            .count();
+        let others = self.tracks.iter().filter(|t| t.open && !in_spur(t.src.center_hz)).count();
         let locked = &self.locked;
         let mut refused: Vec<SourceId> = Vec::new();
         self.events.retain(|e| {
             let SourceEvent::Opened(s) = e else { return true };
-            let owned = locked
-                .iter()
-                .any(|o| o.holds(s.center_hz) && s.bandwidth_hz() <= o.max_width_hz);
+            let owned =
+                locked.iter().any(|o| o.holds(s.center_hz) && s.bandwidth_hz() <= o.max_width_hz);
             if owned || (others > 0 && in_spur(s.center_hz)) {
                 refused.push(s.id);
                 return false;
@@ -1534,7 +1529,6 @@ impl SourceDetector {
     pub fn capped(&self) -> u64 {
         self.capped
     }
-
 }
 
 /// Spectrum lit at once beyond which a frame is taken to be under one wide

@@ -153,8 +153,7 @@ impl Memory {
             }
             true
         });
-        self.pending
-            .retain(|id| !ids.contains(id) && !children.contains(id));
+        self.pending.retain(|id| !ids.contains(id) && !children.contains(id));
         self.expiring.extend(children.iter().copied());
         if !children.is_empty() {
             self.forget(&children);
@@ -227,11 +226,7 @@ impl AutoNode {
     /// Channels front ends have read something on this session, as
     /// (front end, centre, width) in hertz.
     pub fn remembered(&self) -> Vec<(&'static str, f64, f64)> {
-        self.memory
-            .channels()
-            .iter()
-            .map(|s| (s.name, s.center_hz, s.width_hz))
-            .collect()
+        self.memory.channels().iter().map(|s| (s.name, s.center_hz, s.width_hz)).collect()
     }
 
     /// Hand the detector every channel a front end owns, so nothing opens
@@ -250,11 +245,7 @@ impl AutoNode {
             .wide
             .iter()
             .filter_map(|m| m.band)
-            .map(|(lo, hi)| Owned {
-                lo_hz: lo - c,
-                hi_hz: hi - c,
-                max_width_hz: f64::INFINITY,
-            })
+            .map(|(lo, hi)| Owned { lo_hz: lo - c, hi_hz: hi - c, max_width_hz: f64::INFINITY })
             .collect();
         owned.extend(self.memory.owned(c));
         self.watch.set_owned(owned);
@@ -291,9 +282,7 @@ impl AutoNode {
         parent: Option<(&'static str, f64)>,
         settings: Settings,
     ) -> Option<Event> {
-        let e = self
-            .memory
-            .remember(name, center_hz, width_hz, hold_s, parent, settings)?;
+        let e = self.memory.remember(name, center_hz, width_hz, hold_s, parent, settings)?;
         self.apply_locked();
         Some(e)
     }

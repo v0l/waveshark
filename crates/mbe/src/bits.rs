@@ -12,11 +12,7 @@ pub struct BitFrame {
 
 impl BitFrame {
     pub fn new(size: usize) -> Self {
-        Self {
-            bits: vec![false; size],
-            size,
-            pointer: 0,
-        }
+        Self { bits: vec![false; size], size, pointer: 0 }
     }
 
     /// Builds a frame from `bits` with the pointer left at `size - 1`,
@@ -24,11 +20,7 @@ impl BitFrame {
     /// sub-message copies.
     pub fn from_bits(bits: &[bool]) -> Self {
         let size = bits.len();
-        Self {
-            bits: bits.to_vec(),
-            size,
-            pointer: size.saturating_sub(1),
-        }
+        Self { bits: bits.to_vec(), size, pointer: size.saturating_sub(1) }
     }
 
     /// Port of `fromBytes`. `big_endian` true matches Java's

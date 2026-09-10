@@ -13,10 +13,7 @@ const FFT: usize = 256;
 
 fn main() {
     let path = std::env::args().nth(1).expect("a capture");
-    let thresh_db: f32 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8.0);
+    let thresh_db: f32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(8.0);
     let src = sources::FileSource::open(&path).expect("open");
     let rate = src.rate().as_f64();
     let center = src.center().as_f64();
@@ -92,11 +89,7 @@ fn main() {
                 (slot @ Some(_), false) => {
                     let (start, peak) = slot.take().unwrap();
                     let hz = if k < FFT / 2 { k } else { k } as f64;
-                    let off = if k < FFT / 2 {
-                        hz * bin_hz
-                    } else {
-                        (hz - FFT as f64) * bin_hz
-                    };
+                    let off = if k < FFT / 2 { hz * bin_hz } else { (hz - FFT as f64) * bin_hz };
                     bursts.push(((center + off) / 1e6, t - start, peak));
                 }
                 (None, false) => {}

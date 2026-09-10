@@ -89,10 +89,7 @@ mod tests {
     use super::*;
 
     fn unhex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     fn hex(b: &[u8]) -> String {
@@ -103,12 +100,8 @@ mod tests {
     /// key/nonce wiring, which is the part an adapter can get wrong.
     #[test]
     fn counter_mode_matches_the_sp_800_38a_vector() {
-        let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c")
-            .try_into()
-            .unwrap();
-        let ctr: [u8; 16] = unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
-            .try_into()
-            .unwrap();
+        let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c").try_into().unwrap();
+        let ctr: [u8; 16] = unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff").try_into().unwrap();
         let mut data = unhex(
             "6bc1bee22e409f96e93d7e117393172a\
              ae2d8a571e03ac9c9eb76fac45af8e51\
@@ -128,9 +121,7 @@ mod tests {
     /// FIPS-197 appendix C.1, in both directions through the ECB helpers.
     #[test]
     fn ecb_matches_the_fips_197_vector_both_ways() {
-        let key: [u8; 16] = unhex("000102030405060708090a0b0c0d0e0f")
-            .try_into()
-            .unwrap();
+        let key: [u8; 16] = unhex("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
         let mut block = unhex("00112233445566778899aabbccddeeff");
         ecb_encrypt(&key, &mut block);
         assert_eq!(hex(&block), "69c4e0d86a7b0430d8cdb78070b4c55a");

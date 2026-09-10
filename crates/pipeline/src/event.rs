@@ -14,12 +14,7 @@ pub use common::{media, Decoded, Link, Party, PartyKind};
 #[derive(Clone, Debug)]
 pub enum Event {
     /// A detector believes there is a carrier here.
-    Detection {
-        center: Hz,
-        bandwidth: f64,
-        snr_db: f32,
-        at: f64,
-    },
+    Detection { center: Hz, bandwidth: f64, snr_db: f32, at: f64 },
 
     /// A decoder produced a frame.
     Decoded(Decoded),

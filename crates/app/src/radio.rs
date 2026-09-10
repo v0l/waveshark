@@ -1023,7 +1023,10 @@ fn block_start(finished: std::time::Instant, samples: usize, rate: f64) -> std::
 /// copies of a burst other channels read are already gone: the dedupe is a
 /// node in the graph, so every consumer of the bus sees the rows this
 /// returns.
-pub(crate) fn harvest(rx: &mut crate::chain::Receiver, at: std::time::Instant) -> Vec<DecodeRecord> {
+pub(crate) fn harvest(
+    rx: &mut crate::chain::Receiver,
+    at: std::time::Instant,
+) -> Vec<DecodeRecord> {
     let found = rx.decodes(at);
     if let Some(r) = rx.recorder_mut() {
         for d in &found {
@@ -4059,8 +4062,7 @@ pub(crate) mod tests {
             // A measurement of what the carrier looks like is not news once
             // a front end is reading it: at most the one piece cut before
             // the front end found its first sync burst.
-            let measured: Vec<&&DecodeRecord> =
-                mine.iter().filter(|r| r.model.is_none()).collect();
+            let measured: Vec<&&DecodeRecord> = mine.iter().filter(|r| r.model.is_none()).collect();
             assert!(
                 measured.len() <= 1,
                 "{:.4} MHz measured {} times while being read: {rows:?}",
@@ -5077,7 +5079,9 @@ mod zoom_tests {
             // that sits at the floor would otherwise fail one run in two.
             let clear = x(worst) >= FLOOR_X * 1.5;
             match (over > 0, known) {
-                (true, None) => slow.push(format!("{name}: worst block {:.2}x, floor {FLOOR_X}x", x(worst))),
+                (true, None) => {
+                    slow.push(format!("{name}: worst block {:.2}x, floor {FLOOR_X}x", x(worst)))
+                }
                 (true, Some(why)) => eprintln!("{name}: known slow, {why}"),
                 (false, Some(_)) if clear => recovered.push(name.clone()),
                 (false, _) => {}

@@ -226,9 +226,7 @@ impl DeviceInfo {
 
     /// Whether this device will transmit at `f`.
     pub fn covers_tx(&self, f: Hz) -> bool {
-        self.tx
-            .as_ref()
-            .is_some_and(|t| t.ranges.iter().any(|r| r.range.contains(&f)))
+        self.tx.as_ref().is_some_and(|t| t.ranges.iter().any(|r| r.range.contains(&f)))
     }
 }
 

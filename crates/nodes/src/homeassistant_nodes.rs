@@ -105,11 +105,19 @@ impl Broker {
     }
 
     fn prefix(&self) -> &str {
-        if self.prefix.trim().is_empty() { "homeassistant" } else { self.prefix.trim() }
+        if self.prefix.trim().is_empty() {
+            "homeassistant"
+        } else {
+            self.prefix.trim()
+        }
     }
 
     fn topic(&self) -> &str {
-        if self.topic.trim().is_empty() { "waveshark" } else { self.topic.trim() }
+        if self.topic.trim().is_empty() {
+            "waveshark"
+        } else {
+            self.topic.trim()
+        }
     }
 
     /// What the broker is told to publish if this receiver disappears, and
@@ -235,10 +243,7 @@ impl Publisher {
         HomeAssistantStatus {
             configured: broker.is_some(),
             connected: self.is_connected(),
-            host: broker
-                .as_ref()
-                .map(|b| format!("{}:{}", b.host, b.port))
-                .unwrap_or_default(),
+            host: broker.as_ref().map(|b| format!("{}:{}", b.host, b.port)).unwrap_or_default(),
             devices: 0,
             published: self.published.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
@@ -415,11 +420,8 @@ impl HomeAssistantNode {
     /// Which identity spaces to publish, as a comma-separated list, or empty
     /// for every one of them.
     pub fn set_spaces(&mut self, spaces: &str) {
-        self.spaces = spaces
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
+        self.spaces =
+            spaces.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
     }
 
     pub fn is_on(&self) -> bool {
@@ -439,7 +441,8 @@ impl HomeAssistantNode {
         let key = (space.clone(), ident.clone());
         let generation = self.publisher.generation();
         if let Some(known) = self.known.get(&key) {
-            if known.generation == generation && now.duration_since(known.last) < self.min_interval {
+            if known.generation == generation && now.duration_since(known.last) < self.min_interval
+            {
                 return;
             }
         } else if self.known.len() >= self.max_devices {
@@ -451,8 +454,10 @@ impl HomeAssistantNode {
         let state_topic = format!("{}/{}/{}/state", broker.topic(), slug(&space), slug(&ident));
 
         let readings = readings(p, d);
-        let entry = self.known.entry(key).or_insert_with(|| {
-            Known { announced: HashSet::new(), generation, last: now }
+        let entry = self.known.entry(key).or_insert_with(|| Known {
+            announced: HashSet::new(),
+            generation,
+            last: now,
         });
         // A broker that restarted has forgotten every retained configuration,
         // so a new connection is a new introduction.
@@ -565,7 +570,10 @@ impl Simple for HomeAssistantNode {
 /// The level is here rather than left out because it is the one reading every
 /// device has, and it is what says a sensor is going out of range before it
 /// stops reporting altogether.
-fn readings(p: &common::Packet, d: &common::Decoded) -> Vec<(String, common::Value, Option<String>)> {
+fn readings(
+    p: &common::Packet,
+    d: &common::Decoded,
+) -> Vec<(String, common::Value, Option<String>)> {
     let mut out: Vec<(String, common::Value, Option<String>)> = Vec::new();
     for (name, value) in &d.fields {
         if name.is_empty() || out.iter().any(|(n, _, _)| n == name) {
@@ -587,7 +595,11 @@ fn readings(p: &common::Packet, d: &common::Decoded) -> Vec<(String, common::Val
             Some("dB".into()),
         ));
     }
-    out.push(("frequency_mhz".into(), common::Value::Float(d.center.as_f64() / 1e6), Some("MHz".into())));
+    out.push((
+        "frequency_mhz".into(),
+        common::Value::Float(d.center.as_f64() / 1e6),
+        Some("MHz".into()),
+    ));
     out
 }
 
@@ -656,7 +668,9 @@ fn unit_of(name: &str) -> Option<String> {
 /// wrong device class is worse than none, since Home Assistant then refuses
 /// the entity's unit or draws it on the wrong axis.
 fn device_class(name: &str, unit: Option<&str>) -> Option<&'static str> {
-    let has = |s: &str| name == s || name.starts_with(&format!("{s}_")) || name.ends_with(&format!("_{s}"));
+    let has = |s: &str| {
+        name == s || name.starts_with(&format!("{s}_")) || name.ends_with(&format!("_{s}"))
+    };
     match unit? {
         "\u{b0}C" | "\u{b0}F" => Some("temperature"),
         "%" if has("humidity") || has("moisture") => Some("humidity"),
@@ -739,7 +753,11 @@ fn slug(s: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
         .collect();
     let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() { "unnamed".into() } else { trimmed }
+    if trimmed.is_empty() {
+        "unnamed".into()
+    } else {
+        trimmed
+    }
 }
 
 /// A field name as a person reads it: `temperature_c` is Temperature, since
@@ -795,8 +813,8 @@ mod tests {
     fn advertisement() -> Packet {
         packet(
             vec![
-                0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff,
-                0xe1, 0x02, 0x10, 0x00, 0x26, 0xc0,
+                0x00, 0x11, 0x3a, 0xf5, 0x0a, 0xcd, 0x31, 0xe8, 0x02, 0x01, 0x06, 0x07, 0xff, 0xe1,
+                0x02, 0x10, 0x00, 0x26, 0xc0,
             ],
             2_426_000_000,
         )
@@ -1098,7 +1116,11 @@ mod tests {
             .find(|(t, _)| t == &format!("homeassistant/sensor/{device}/rssi_dbfs/config"))
             .unwrap_or_else(|| panic!("no configuration for the level in {topics:?}"));
         assert!(config.1.contains("\"device_class\":\"signal_strength\""), "{}", config.1);
-        assert!(config.1.contains("\"state_topic\":\"waveshark/ble/e8_31_cd_0a_f5_3a/state\""), "{}", config.1);
+        assert!(
+            config.1.contains("\"state_topic\":\"waveshark/ble/e8_31_cd_0a_f5_3a/state\""),
+            "{}",
+            config.1
+        );
         let state = seen
             .iter()
             .find(|(t, _)| t == "waveshark/ble/e8_31_cd_0a_f5_3a/state")

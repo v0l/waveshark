@@ -59,7 +59,8 @@ impl Ring {
         self.calls += 1;
         if block_s > 0.0 {
             let b = block_s as f32;
-            self.block_s = if self.block_s > 0.0 { self.block_s + 0.1 * (b - self.block_s) } else { b };
+            self.block_s =
+                if self.block_s > 0.0 { self.block_s + 0.1 * (b - self.block_s) } else { b };
         }
     }
 

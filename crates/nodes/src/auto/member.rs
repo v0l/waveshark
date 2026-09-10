@@ -301,10 +301,7 @@ impl Member {
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let video = taps(&graph, PortKind::Video);
-        let router = graph
-            .order()
-            .find(|(_, n)| *n == "burst_route")
-            .map(|(id, _)| id);
+        let router = graph.order().find(|(_, n)| *n == "burst_route").map(|(id, _)| id);
         let flush_s = graph
             .order()
             .filter_map(|(id, _)| graph.node(id).map(|n| n.flush_s()))
@@ -439,10 +436,7 @@ impl Member {
         } else {
             f32::NAN
         };
-        Level {
-            rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(),
-            snr_db,
-        }
+        Level { rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(), snr_db }
     }
 
     /// Say that this front end read something, which puts it back on the
@@ -500,18 +494,21 @@ impl Member {
         self.read += samples as u64;
     }
 
-    fn run_now(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>, ring: &Ring) -> Vec<Event> {
+    fn run_now(
+        &mut self,
+        iq: &[C32],
+        at_us: u64,
+        out: &mut Vec<Packet>,
+        ring: &Ring,
+    ) -> Vec<Event> {
         if !iq.is_empty() && self.keeps_samples {
             let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
             self.peak_pow = self.peak_pow.max(pow);
             // The floor follows the quietest block and climbs a hundredth
             // a block, so a burst does not become the floor and a real
             // rise in the noise is learned within a second or so.
-            self.noise_pow = if self.noise_pow.is_nan() {
-                pow
-            } else {
-                pow.min(self.noise_pow * 1.01)
-            };
+            self.noise_pow =
+                if self.noise_pow.is_nan() { pow } else { pow.min(self.noise_pow * 1.01) };
         }
         self.read += iq.len() as u64;
         let first = out.len();
@@ -607,11 +604,7 @@ impl Member {
                 if f.center_hz == 0 {
                     f.center_hz = spec.map(|s| s.center.0).unwrap_or(0);
                 }
-                out.push(Packet::of_frame(
-                    at_us,
-                    spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    f,
-                ));
+                out.push(Packet::of_frame(at_us, spec.map(|s| s.bandwidth as u32).unwrap_or(0), f));
             }
         }
         events
@@ -642,10 +635,7 @@ pub(super) fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
 /// burst itself as a packet.
 fn reading_taps(g: &Graph, kind: PortKind) -> Vec<Out> {
     let publishes: Vec<_> = taps(g, PortKind::Packets).iter().map(|o| o.node).collect();
-    taps(g, kind)
-        .into_iter()
-        .filter(|o| !publishes.contains(&o.node))
-        .collect()
+    taps(g, kind).into_iter().filter(|o| !publishes.contains(&o.node)).collect()
 }
 
 #[cfg(test)]

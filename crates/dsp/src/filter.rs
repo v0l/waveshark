@@ -141,9 +141,7 @@ impl Biquad {
                 let b1 = -(1.0 + cos);
                 ((1.0 + cos) / 2.0, b1, (1.0 + cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
             }
-            Response::Bandpass => {
-                (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
-            }
+            Response::Bandpass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             Response::Bandstop => (1.0, -2.0 * cos, 1.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
         };
         Self {
@@ -245,7 +243,8 @@ mod tests {
     #[test]
     fn a_biquad_notch_removes_the_carrier_it_is_pointed_at() {
         let rate = 48_000.0;
-        let notch = Biquad::design(Response::Bandstop, rate, 1_000.0, Biquad::band_q(1_000.0, 100.0));
+        let notch =
+            Biquad::design(Response::Bandstop, rate, 1_000.0, Biquad::band_q(1_000.0, 100.0));
         assert!(iir_gain(notch, rate, 1_000.0) < 0.1, "the tone should go");
         assert!(iir_gain(notch, rate, 4_000.0) > 0.9, "and everything else stay");
     }

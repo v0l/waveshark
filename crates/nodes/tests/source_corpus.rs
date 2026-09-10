@@ -26,10 +26,7 @@ use sources::FileSource;
 const TIER_WIDTHS: [f64; 4] = [12_500.0, 31_250.0, 125_000.0, 500_000.0];
 
 fn load(f: &Fixture) -> common::IqBuf {
-    FileSource::open(&f.path)
-        .expect("open")
-        .read_all()
-        .expect("read")
+    FileSource::open(&f.path).expect("open").read_all().expect("read")
 }
 
 /// Distinct reports from a run of packages, the way the corpus harness
@@ -39,10 +36,7 @@ fn reports(pkgs: &[Package]) -> Vec<Report> {
     let mut out: Vec<Report> = Vec::new();
     for p in pkgs {
         for r in protocols.decode_all(p) {
-            if !out
-                .iter()
-                .any(|q| q.model == r.model && q.fields == r.fields)
-            {
+            if !out.iter().any(|q| q.model == r.model && q.fields == r.fields) {
                 out.push(r);
             }
         }
@@ -60,11 +54,7 @@ fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     // Silence at the end lets the last source drain its tail.
-    for block in buf
-        .samples
-        .chunks(16_384)
-        .chain(std::iter::repeat_n(&silence[..], 4))
-    {
+    for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
         let pk = g.output().as_packets().unwrap_or(&[]);
         out.extend(pk.iter().filter_map(|p| p.package().cloned()));
@@ -100,10 +90,7 @@ fn through_banks(buf: &common::IqBuf) -> Vec<Package> {
 }
 
 fn hits(f: &Fixture, reports: &[Report]) -> usize {
-    f.expected
-        .iter()
-        .filter(|e| reports.iter().any(|r| e.matches(r)))
-        .count()
+    f.expected.iter().filter(|e| reports.iter().any(|r| e.matches(r))).count()
 }
 
 #[test]
@@ -115,23 +102,13 @@ fn the_auto_node_hears_at_least_what_the_banks_did() {
     }
     let (mut want, mut bank_total, mut source_total) = (0usize, 0usize, 0usize);
     let mut lost: Vec<String> = Vec::new();
-    eprintln!(
-        "{:<44} {:>5} {:>5} {:>7}",
-        "capture", "want", "banks", "auto"
-    );
+    eprintln!("{:<44} {:>5} {:>5} {:>7}", "capture", "want", "banks", "auto");
     for f in &fixtures {
         let buf = load(f);
         let b = hits(f, &reports(&through_banks(&buf)));
         let s = hits(f, &reports(&through_auto(&buf)));
         let w = f.expected.len();
-        eprintln!(
-            "{:<44} {:>5} {:>5} {:>7}{}",
-            f.name,
-            w,
-            b,
-            s,
-            if s < b { "  <" } else { "" }
-        );
+        eprintln!("{:<44} {:>5} {:>5} {:>7}{}", f.name, w, b, s, if s < b { "  <" } else { "" });
         want += w;
         bank_total += b;
         source_total += s;
@@ -139,10 +116,7 @@ fn the_auto_node_hears_at_least_what_the_banks_did() {
             lost.push(format!("{} ({b} -> {s})", f.name));
         }
     }
-    eprintln!(
-        "{:<44} {:>5} {:>5} {:>7}",
-        "total", want, bank_total, source_total
-    );
+    eprintln!("{:<44} {:>5} {:>5} {:>7}", "total", want, bank_total, source_total);
     // Per capture, not in total: a gain on one recording does not excuse a
     // loss on another, since each is a device somebody owns.
     assert!(
@@ -165,9 +139,7 @@ fn the_bank_hears_what_the_ring_did() {
         eprintln!("skipping: no rtl_433 fixtures, run testdata/fetch.sh to enable");
         return;
     }
-    let banked = NodeSpec::new("auto")
-        .f("bank_channel_hz", 62_500.0)
-        .f("bank_min_channels", 4.0);
+    let banked = NodeSpec::new("auto").f("bank_channel_hz", 62_500.0).f("bank_min_channels", 4.0);
     let mut lost: Vec<String> = Vec::new();
     let (mut ring_total, mut bank_total) = (0usize, 0usize);
     for f in &fixtures {
@@ -181,8 +153,5 @@ fn the_bank_hears_what_the_ring_did() {
         }
     }
     eprintln!("ring {ring_total}, bank {bank_total}");
-    assert!(
-        lost.is_empty(),
-        "the bank lost decodes the ring found: {lost:?}"
-    );
+    assert!(lost.is_empty(), "the bank lost decodes the ring found: {lost:?}");
 }

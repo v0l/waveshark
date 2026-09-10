@@ -216,8 +216,7 @@ impl AfskDemod {
 /// transmitter uses to let the receiver's clock settle.
 pub fn encode(frame: &[u8], rate: f64, lead_flags: usize) -> Vec<f32> {
     // AX.25 bytes go on the air least significant bit first.
-    let data: Vec<bool> =
-        (0..frame.len() * 8).map(|i| frame[i / 8] >> (i % 8) & 1 == 1).collect();
+    let data: Vec<bool> = (0..frame.len() * 8).map(|i| frame[i / 8] >> (i % 8) & 1 == 1).collect();
     let lead: Vec<bool> = std::iter::repeat_n(hdlc::flag_bits(), lead_flags).flatten().collect();
     let levels = hdlc::encode_frame(&data, &lead);
 

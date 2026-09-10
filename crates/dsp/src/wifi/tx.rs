@@ -87,11 +87,7 @@ fn symbol(bits: &[u8], bpsc: usize, s: &Shape) -> Vec<C32> {
     for (k, &b) in bits.iter().enumerate() {
         woven[map[k]] = b;
     }
-    let turn = if s.quarter {
-        C32::new(0.0, 1.0)
-    } else {
-        C32::new(1.0, 0.0)
-    };
+    let turn = if s.quarter { C32::new(0.0, 1.0) } else { C32::new(1.0, 0.0) };
     for (n, &k) in s.carriers.iter().enumerate() {
         freq[ofdm::bin(k)] = ofdm::map(&woven[n * bpsc..(n + 1) * bpsc], bpsc) * turn;
     }
@@ -322,10 +318,8 @@ pub fn dsss_frame(psdu: &[u8], mbps: f32, rate: f64) -> Vec<C32> {
     }
 
     // Spread at the chip rate, then stretch to the receiver's rate.
-    let chips: Vec<C32> = symbols
-        .iter()
-        .flat_map(|s| BARKER.iter().map(move |&b| *s * b))
-        .collect();
+    let chips: Vec<C32> =
+        symbols.iter().flat_map(|s| BARKER.iter().map(move |&b| *s * b)).collect();
     let ratio = rate / CHIP_RATE;
     let n = (chips.len() as f64 * ratio) as usize;
     (0..n)

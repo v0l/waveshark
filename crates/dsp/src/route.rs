@@ -31,7 +31,7 @@
 //! to place the gap that ends a package.
 
 use crate::c4fm::{C4fmConfig, C4fmDetector, SymbolBurst};
-use crate::classify::{BurstClass, ClassifyConfig, Classifier, Modulation};
+use crate::classify::{BurstClass, Classifier, ClassifyConfig, Modulation};
 use crate::pulse::{LevelGate, Package};
 use crate::{AskConfig, AskDetector, FskConfig, FskDetector, OokDetector, PulseConfig};
 use common::C32;
@@ -490,7 +490,12 @@ mod tests {
     fn an_on_off_burst_goes_to_the_pulse_front_end_and_comes_back_with_timings() {
         let (bursts, mut r) = route(&ook_burst(&pattern(120), 500));
         assert_eq!(bursts.len(), 1, "expected one burst, got {}", bursts.len());
-        assert_eq!(bursts[0].routed_to, common::FrontEnd::Ook, "class was {:?}", bursts[0].class.modulation);
+        assert_eq!(
+            bursts[0].routed_to,
+            common::FrontEnd::Ook,
+            "class was {:?}",
+            bursts[0].class.modulation
+        );
         assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
         assert_eq!(r.take_stats().to_ook, 1);
     }
@@ -499,7 +504,12 @@ mod tests {
     fn a_frequency_keyed_burst_goes_to_the_two_level_front_end() {
         let (bursts, mut r) = route(&fsk_burst(&pattern(120), 500));
         assert_eq!(bursts.len(), 1);
-        assert_eq!(bursts[0].routed_to, common::FrontEnd::Fsk, "class was {:?}", bursts[0].class.modulation);
+        assert_eq!(
+            bursts[0].routed_to,
+            common::FrontEnd::Fsk,
+            "class was {:?}",
+            bursts[0].class.modulation
+        );
         assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
         let s = r.take_stats();
         assert_eq!((s.to_fsk, s.to_ook), (1, 0));
@@ -522,7 +532,11 @@ mod tests {
         r.flush(&mut bursts);
         assert_eq!(bursts.len(), 1);
         assert_eq!(bursts[0].class.modulation, Modulation::Unknown);
-        assert_eq!(bursts[0].routed_to, common::FrontEnd::OokFsk, "a refusal must not lose the burst");
+        assert_eq!(
+            bursts[0].routed_to,
+            common::FrontEnd::OokFsk,
+            "a refusal must not lose the burst"
+        );
         assert_eq!(r.take_stats().refused, 1);
     }
 

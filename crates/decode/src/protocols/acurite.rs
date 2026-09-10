@@ -73,10 +73,7 @@ impl Protocol for Acurite609Txc {
                 && (b[1] >> 4) & 0x7 == 0x2
         })
         .ok_or(match bits.len() {
-            n if n < TXC_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: TXC_BYTES * 8,
-            },
+            n if n < TXC_BYTES * 8 => DecodeError::WrongLength { got: n, want: TXC_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -130,10 +127,7 @@ impl Protocol for AcuriteTower {
                 && even_parity(&b[2..TOWER_BYTES - 1])
         })
         .ok_or(match bits.len() {
-            n if n < TOWER_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: TOWER_BYTES * 8,
-            },
+            n if n < TOWER_BYTES * 8 => DecodeError::WrongLength { got: n, want: TOWER_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -214,17 +208,12 @@ impl Protocol for AcuriteWind {
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         let bits = bits.inverted();
         let b = find_frame(&bits, WIND_BYTES, |b| {
-            matches!(
-                b[2] & 0x3f,
-                MSG_5N1_WIND_RAIN | MSG_5N1_WIND_TH | MSG_3N1_WIND_TH
-            ) && checksum8(&b[..WIND_BYTES - 1]) == b[WIND_BYTES - 1]
+            matches!(b[2] & 0x3f, MSG_5N1_WIND_RAIN | MSG_5N1_WIND_TH | MSG_3N1_WIND_TH)
+                && checksum8(&b[..WIND_BYTES - 1]) == b[WIND_BYTES - 1]
                 && even_parity(&b[2..WIND_BYTES - 1])
         })
         .ok_or(match bits.len() {
-            n if n < WIND_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: WIND_BYTES * 8,
-            },
+            n if n < WIND_BYTES * 8 => DecodeError::WrongLength { got: n, want: WIND_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -236,11 +225,7 @@ impl Protocol for AcuriteWind {
         };
         let message_type = b[2] & 0x3f;
         let three_in_one = message_type == MSG_3N1_WIND_TH;
-        let model = if three_in_one {
-            "Acurite-3n1"
-        } else {
-            "Acurite-5n1"
-        };
+        let model = if three_in_one { "Acurite-3n1" } else { "Acurite-5n1" };
         // The 3n1 spends two more bits of byte zero on the id, where the 5n1
         // keeps them for the sequence number. rtl_433 reads the sequence
         // number from both anyway, so the 3n1's is two bits of its own id.
@@ -278,20 +263,13 @@ impl Protocol for AcuriteWind {
         // Cup rotations per four seconds, with a fixed offset that only
         // applies once the cups are turning at all.
         let rotations = ((b[3] as i32 & 0x1f) << 3) | ((b[4] as i32 & 0x70) >> 4);
-        let wind_kmh = if rotations > 0 {
-            rotations as f64 * 0.8278 + 1.0
-        } else {
-            0.0
-        };
+        let wind_kmh = if rotations > 0 { rotations as f64 * 0.8278 + 1.0 } else { 0.0 };
         r = r.float("wind_avg_ms", round2(wind_kmh / 3.6));
 
         if message_type == MSG_5N1_WIND_RAIN {
             let rain = ((b[5] as i32 & 0x7f) << 7) | (b[6] as i32 & 0x7f);
-            Ok(r.float(
-                "wind_direction_deg",
-                WIND_DIRECTIONS[(b[4] & 0x0f) as usize] as f64 * 22.5,
-            )
-            .float("rain_total_mm", round2(rain as f64 * 0.254)))
+            Ok(r.float("wind_direction_deg", WIND_DIRECTIONS[(b[4] & 0x0f) as usize] as f64 * 22.5)
+                .float("rain_total_mm", round2(rain as f64 * 0.254)))
         } else {
             let raw = ((b[4] as i32 & 0x0f) << 7) | (b[5] as i32 & 0x7f);
             let temperature = fahrenheit_to_c((raw - 400) as f64 * 0.1)?;
@@ -299,8 +277,7 @@ impl Protocol for AcuriteWind {
             if humidity > 100 {
                 return Err(DecodeError::Implausible("humidity above 100%"));
             }
-            Ok(r.float("temperature_c", round1(temperature))
-                .int("humidity_pct", humidity as i64))
+            Ok(r.float("temperature_c", round1(temperature)).int("humidity_pct", humidity as i64))
         }
     }
 }
@@ -337,10 +314,7 @@ impl Protocol for Acurite606Tx {
             b[..3] != [0; 3] && lfsr_digest8(&b[..3], 0x98, 0xf1) == b[3]
         })
         .ok_or(match bits.len() {
-            n if n < TX606_BYTES * 8 => DecodeError::WrongLength {
-                got: n,
-                want: TX606_BYTES * 8,
-            },
+            n if n < TX606_BYTES * 8 => DecodeError::WrongLength { got: n, want: TX606_BYTES * 8 },
             _ => DecodeError::CrcFailed,
         })?;
 
@@ -402,19 +376,14 @@ impl Protocol for Acurite986 {
                 crc8le(&f[..4], 0x07, 0) == f[4]
             })
             .ok_or(match bits.len() {
-                n if n < A986_BYTES * 8 => DecodeError::WrongLength {
-                    got: n,
-                    want: A986_BYTES * 8,
-                },
+                n if n < A986_BYTES * 8 => {
+                    DecodeError::WrongLength { got: n, want: A986_BYTES * 8 }
+                }
                 _ => DecodeError::CrcFailed,
             })?;
 
         let magnitude = (f[0] & 0x7f) as f64;
-        let fahrenheit = if f[0] & 0x80 != 0 {
-            -magnitude
-        } else {
-            magnitude
-        };
+        let fahrenheit = if f[0] & 0x80 != 0 { -magnitude } else { magnitude };
         // A fridge or a freezer, so the useful range is small and anything
         // outside it is a frame that found the CRC by luck.
         if !(-40.0..=90.0).contains(&fahrenheit) {
@@ -476,9 +445,7 @@ mod tests {
 
     #[test]
     fn decodes_a_609txc_frame() {
-        let r = Acurite609Txc
-            .decode(&BitBuffer::from_bytes(&txc(0xb2, 21.7, 48, false)))
-            .unwrap();
+        let r = Acurite609Txc.decode(&BitBuffer::from_bytes(&txc(0xb2, 21.7, 48, false))).unwrap();
         assert_eq!(r.get("id"), Some(&Value::Int(0xb2)));
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.7)));
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
@@ -488,9 +455,7 @@ mod tests {
 
     #[test]
     fn a_609txc_reads_below_zero() {
-        let r = Acurite609Txc
-            .decode(&BitBuffer::from_bytes(&txc(0x11, -12.3, 61, true)))
-            .unwrap();
+        let r = Acurite609Txc.decode(&BitBuffer::from_bytes(&txc(0x11, -12.3, 61, true))).unwrap();
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(-12.3)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
     }
@@ -515,10 +480,7 @@ mod tests {
     fn a_corrupt_609txc_frame_fails_its_checksum() {
         let mut f = txc(0xb2, 21.7, 48, false);
         f[3] ^= 0x10;
-        assert_eq!(
-            Acurite609Txc.decode(&BitBuffer::from_bytes(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(Acurite609Txc.decode(&BitBuffer::from_bytes(&f)), Err(DecodeError::CrcFailed));
     }
 
     /// Build a tower frame, in the polarity the decoder sees before inverting.
@@ -571,10 +533,7 @@ mod tests {
     fn a_592tx_without_a_humidity_sensor_reports_no_humidity() {
         let f = tower(0x0abc, 0b10, 20.0, 127, true);
         let r = AcuriteTower.decode(&tower_bits(&f)).unwrap();
-        assert!(
-            r.get("humidity_pct").is_none(),
-            "127 is 'no sensor', not 127%"
-        );
+        assert!(r.get("humidity_pct").is_none(), "127 is 'no sensor', not 127%");
     }
 
     #[test]
@@ -584,10 +543,7 @@ mod tests {
         let mut f = tower(0x1234, 0b11, 18.4, 55, true);
         f[4] ^= 0x80;
         f[6] = checksum8(&f[..6]);
-        assert_eq!(
-            AcuriteTower.decode(&tower_bits(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(AcuriteTower.decode(&tower_bits(&f)), Err(DecodeError::CrcFailed));
     }
 
     #[test]
@@ -595,10 +551,7 @@ mod tests {
         let mut f = tower(0x1234, 0b11, 18.4, 55, true);
         f[2] = (f[2] & 0xc0) | 0x31;
         f[6] = checksum8(&f[..6]);
-        assert_eq!(
-            AcuriteTower.decode(&tower_bits(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(AcuriteTower.decode(&tower_bits(&f)), Err(DecodeError::CrcFailed));
     }
 
     /// Finish a weather station frame: parity bits, then the checksum.
@@ -641,9 +594,7 @@ mod tests {
 
     #[test]
     fn decodes_a_5n1_wind_and_rain_frame() {
-        let frames: Vec<Vec<u8>> = (0..3)
-            .map(|seq| wind_rain(0x347, seq, 4, 0x04, 66))
-            .collect();
+        let frames: Vec<Vec<u8>> = (0..3).map(|seq| wind_rain(0x347, seq, 4, 0x04, 66)).collect();
         let r = AcuriteWind.decode(&wind_bits(&frames)).unwrap();
         assert_eq!(r.model, "Acurite-5n1");
         assert_eq!(r.get("id"), Some(&Value::Int(0x347)));
@@ -660,14 +611,9 @@ mod tests {
         // No two copies are identical, because each carries its own sequence
         // number, so the only evidence left is that the rows repeat at the
         // frame's own period.
-        let frames: Vec<Vec<u8>> = (0..3)
-            .map(|seq| wind_rain(0x347, seq, 4, 0x04, 66))
-            .collect();
+        let frames: Vec<Vec<u8>> = (0..3).map(|seq| wind_rain(0x347, seq, 4, 0x04, 66)).collect();
         let bits = wind_bits(&frames);
-        assert_eq!(
-            AcuriteWind.decode(&bits).unwrap().get("sequence_num"),
-            Some(&Value::Int(0))
-        );
+        assert_eq!(AcuriteWind.decode(&bits).unwrap().get("sequence_num"), Some(&Value::Int(0)));
     }
 
     #[test]
@@ -725,21 +671,14 @@ mod tests {
     fn a_corrupt_606tx_frame_fails_its_digest() {
         let mut f = tx606(163, 1, 10.1, true, false);
         f[2] ^= 0x04;
-        assert_eq!(
-            Acurite606Tx.decode(&BitBuffer::from_bytes(&f)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(Acurite606Tx.decode(&BitBuffer::from_bytes(&f)), Err(DecodeError::CrcFailed));
     }
 
     /// A 986 transmission: two rows, each 40 bits, sent least significant bit
     /// first, which is what the decoder's row test and its reflection expect.
     fn a986_bits(fahrenheit: i8, id: u16, probe: u8, battery_low: bool) -> BitBuffer {
         let mut f = [0u8; A986_BYTES];
-        f[0] = if fahrenheit < 0 {
-            0x80 | (-fahrenheit) as u8
-        } else {
-            fahrenheit as u8
-        };
+        f[0] = if fahrenheit < 0 { 0x80 | (-fahrenheit) as u8 } else { fahrenheit as u8 };
         f[1] = (id >> 8) as u8;
         f[2] = id as u8;
         f[3] = ((if battery_low { 1 } else { 0 }) << 1) | probe;
@@ -788,26 +727,18 @@ mod tests {
                 b.mark_row();
             }
             let flip = i % 40 == 12;
-            b.push(if flip {
-                !good.get(i).unwrap()
-            } else {
-                good.get(i).unwrap()
-            });
+            b.push(if flip { !good.get(i).unwrap() } else { good.get(i).unwrap() });
         }
         assert_eq!(Acurite986.decode(&b), Err(DecodeError::CrcFailed));
     }
 
     #[test]
     fn a_5n1_frame_with_a_bad_checksum_is_refused() {
-        let mut frames: Vec<Vec<u8>> = (0..3)
-            .map(|seq| wind_rain(0x347, seq, 4, 0x04, 66))
-            .collect();
+        let mut frames: Vec<Vec<u8>> =
+            (0..3).map(|seq| wind_rain(0x347, seq, 4, 0x04, 66)).collect();
         for f in frames.iter_mut() {
             f[5] ^= 0x01;
         }
-        assert_eq!(
-            AcuriteWind.decode(&wind_bits(&frames)),
-            Err(DecodeError::CrcFailed)
-        );
+        assert_eq!(AcuriteWind.decode(&wind_bits(&frames)), Err(DecodeError::CrcFailed));
     }
 }

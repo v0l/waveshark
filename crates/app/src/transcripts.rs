@@ -877,13 +877,8 @@ mod work {
             if t.waiting {
                 return;
             }
-            let job = Job {
-                key: key.clone(),
-                at: t.started,
-                pcm: t.pcm.clone(),
-                rate: t.rate,
-                settled,
-            };
+            let job =
+                Job { key: key.clone(), at: t.started, pcm: t.pcm.clone(), rate: t.rate, settled };
             let asked = t.seconds();
             if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
                 if let Some(t) = self.talking.get_mut(key) {

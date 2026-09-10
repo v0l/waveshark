@@ -63,16 +63,8 @@ fn main() {
             continue;
         }
         let secs = at_us / 1_000_000 % 86_400;
-        let ascii: String = bytes
-            .iter()
-            .map(|b| {
-                if b.is_ascii_graphic() {
-                    *b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
+        let ascii: String =
+            bytes.iter().map(|b| if b.is_ascii_graphic() { *b as char } else { '.' }).collect();
         println!(
             "{:02}:{:02}:{:02} {:10.4} MHz key{} snr {:5.1} {:3} B {}  {}  | {}",
             secs / 3600,

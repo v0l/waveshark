@@ -858,9 +858,9 @@ impl StripParam {
     /// What a parameter name sets, and which strip, or `None` for a name
     /// that is not one of these.
     pub fn parse(name: &str) -> Option<(Self, usize)> {
-        Self::ALL.into_iter().find_map(|p| {
-            name.strip_prefix(p.word()).and_then(|k| k.parse().ok()).map(|k| (p, k))
-        })
+        Self::ALL
+            .into_iter()
+            .find_map(|p| name.strip_prefix(p.word()).and_then(|k| k.parse().ok()).map(|k| (p, k)))
     }
 }
 
@@ -889,16 +889,12 @@ impl AudioBusNode {
     pub fn bus_mut(&mut self) -> &mut AudioBus {
         &mut self.bus
     }
-
 }
 
 impl pipeline::node::Node for AudioBusNode {
     fn name(&self) -> &str {
         "audio_bus"
     }
-
-
-
 
     fn num_inputs(&self) -> usize {
         self.bus.strips.len().max(1)
@@ -1078,9 +1074,7 @@ impl pipeline::node::Node for AudioBusNode {
                 Param::float(&StripParam::Vol.name(k), s.volume as f64, 0.0..=1.0)
                     .label(&format!("{name} level")),
             );
-            p.push(
-                Param::bool(&StripParam::Mute.name(k), s.muted).label(&format!("{name} mute")),
-            );
+            p.push(Param::bool(&StripParam::Mute.name(k), s.muted).label(&format!("{name} mute")));
         }
         p
     }
@@ -1512,7 +1506,6 @@ mod tests {
         );
     }
 
-
     /// The call list's meter moves for every call the bus hears, whether or
     /// not anybody has subscribed to it.
     ///
@@ -1534,9 +1527,8 @@ mod tests {
         // Nothing is subscribed, so nothing is mixed.
         assert!(b.gain_for(&voice("M17-M17 C", "M0ABC", &pcm)).is_none());
         b.track(&call, 0.01);
-        let key = common::ConversationKey::new("M17", 433_475_000.0)
-            .to(Some("M17-M17 C".into()))
-            .meter();
+        let key =
+            common::ConversationKey::new("M17", 433_475_000.0).to(Some("M17-M17 C".into())).meter();
         let level = |b: &AudioBus| {
             b.levels().into_iter().find(|(k, _)| *k == key).map(|(_, v)| v).unwrap_or(0.0)
         };
@@ -1585,7 +1577,6 @@ mod tests {
         assert!(!out[1].as_voice().unwrap_or(&[]).is_empty(), "and it is still on the tap");
     }
 
-
     /// Audio that names no party is heard, and is not a call.
     ///
     /// A camera's sound subcarrier is the other half of a transmission
@@ -1627,5 +1618,4 @@ mod tests {
         assert!(mix.iter().any(|v| v.abs() > 0.1), "the sound was not heard");
         assert!(n.bus_mut().take_calls().is_empty(), "a subcarrier became a call");
     }
-
 }

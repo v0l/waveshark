@@ -38,7 +38,8 @@ fn main() {
         "{:.2} s at {rate} S/s, centre {:.1} MHz, channel {}",
         iq.len() as f64 / rate,
         center / 1e6,
-        decode::video_channels::name_at(center as u64, 3_000_000).unwrap_or_else(|| "not in the plan".into())
+        decode::video_channels::name_at(center as u64, 3_000_000)
+            .unwrap_or_else(|| "not in the plan".into())
     );
 
     // A transmitter deviates about 6 MHz peak, so that is what maps to full

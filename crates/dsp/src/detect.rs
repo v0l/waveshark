@@ -440,10 +440,7 @@ impl Detector {
     }
 
     pub fn floor_db(&self, ch: usize) -> f32 {
-        self.ch
-            .get(ch)
-            .map(|s| 10.0 * s.floor.floor().max(1e-30).log10())
-            .unwrap_or(f32::NAN)
+        self.ch.get(ch).map(|s| 10.0 * s.floor.floor().max(1e-30).log10()).unwrap_or(f32::NAN)
     }
 
     /// Peak power in dB seen on each channel since the last call, then clear.

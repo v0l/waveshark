@@ -79,12 +79,7 @@ pub struct Address {
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Most significant byte first, which is how every tool prints one.
-        let s: Vec<String> = self
-            .bytes
-            .iter()
-            .rev()
-            .map(|b| format!("{b:02X}"))
-            .collect();
+        let s: Vec<String> = self.bytes.iter().rev().map(|b| format!("{b:02X}")).collect();
         write!(f, "{}", s.join(":"))
     }
 }
@@ -162,21 +157,13 @@ pub fn parse(pdu: &[u8]) -> Option<Advertisement> {
         return None;
     }
     let pdu_type = PduType::from_bits(pdu[0]);
-    let address = Address {
-        bytes: pdu[2..8].try_into().ok()?,
-        random: pdu[0] & 0x40 != 0,
-    };
+    let address = Address { bytes: pdu[2..8].try_into().ok()?, random: pdu[0] & 0x40 != 0 };
     // The types that carry a second address carry it directly after the
     // first, and the flag for it is a different bit of the same header byte.
-    let directed = matches!(
-        pdu_type,
-        PduType::AdvDirectInd | PduType::ScanReq | PduType::ConnectInd
-    );
+    let directed =
+        matches!(pdu_type, PduType::AdvDirectInd | PduType::ScanReq | PduType::ConnectInd);
     let (target, rest) = if directed && pdu.len() >= 14 {
-        let t = Address {
-            bytes: pdu[8..14].try_into().ok()?,
-            random: pdu[0] & 0x80 != 0,
-        };
+        let t = Address { bytes: pdu[8..14].try_into().ok()?, random: pdu[0] & 0x80 != 0 };
         (Some(t), &pdu[14..])
     } else {
         (None, &pdu[8..])
@@ -194,13 +181,7 @@ pub fn parse(pdu: &[u8]) -> Option<Advertisement> {
         let body = &pdu[2..];
         let (ext, adv_a, ptr) = parse_extended_header(body)?;
         aux = ptr;
-        (
-            &body[ext..],
-            adv_a.unwrap_or(Address {
-                bytes: [0; 6],
-                random: false,
-            }),
-        )
+        (&body[ext..], adv_a.unwrap_or(Address { bytes: [0; 6], random: false }))
     } else {
         (rest, address)
     };
@@ -228,16 +209,7 @@ pub fn parse(pdu: &[u8]) -> Option<Advertisement> {
         i += 1 + len;
     }
 
-    Some(Advertisement {
-        pdu_type,
-        address,
-        target,
-        data,
-        name,
-        company,
-        tx_power,
-        aux,
-    })
+    Some(Advertisement { pdu_type, address, target, data, name, company, tx_power, aux })
 }
 
 /// Walk an extended header: its length, the flags that say which optional
@@ -305,14 +277,7 @@ impl Advertisement {
         f.push(("address".into(), Value::Text(self.address.to_string())));
         f.push((
             "address_kind".into(),
-            Value::Text(
-                if self.address.random {
-                    "random"
-                } else {
-                    "public"
-                }
-                .into(),
-            ),
+            Value::Text(if self.address.random { "random" } else { "public" }.into()),
         ));
         if let Some(t) = self.target {
             f.push(("target".into(), Value::Text(t.to_string())));
@@ -412,10 +377,7 @@ mod tests {
         let a = parse(&pdu).expect("a PDU");
         assert_eq!(a.pdu_type, PduType::ScanReq);
         assert!(a.address.random, "the scanner used a random address");
-        assert_eq!(
-            a.target.map(|t| t.to_string()).as_deref(),
-            Some("6C:70:CB:EF:72:4D")
-        );
+        assert_eq!(a.target.map(|t| t.to_string()).as_deref(), Some("6C:70:CB:EF:72:4D"));
     }
 
     /// A payload whose structure lengths run past the end is truncated
@@ -423,9 +385,7 @@ mod tests {
     /// before the break is kept and the rest is dropped.
     #[test]
     fn a_payload_that_overruns_stops_rather_than_inventing_a_structure() {
-        let pdu = [
-            0x00, 0x0b, 1, 2, 3, 4, 5, 6, 0x02, 0x01, 0x06, 0x40, 0x09, b'x',
-        ];
+        let pdu = [0x00, 0x0b, 1, 2, 3, 4, 5, 6, 0x02, 0x01, 0x06, 0x40, 0x09, b'x'];
         let a = parse(&pdu).expect("a PDU");
         assert_eq!(a.data.len(), 1, "only the flags structure is complete");
         assert_eq!(a.name, None);

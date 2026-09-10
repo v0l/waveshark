@@ -55,8 +55,13 @@ pub enum ParamRange {
     None,
     /// Continuous, rendered as a slider. `log` picks a logarithmic taper,
     /// which is what you want for bandwidths and squelch thresholds.
-    Float { range: RangeInclusive<f64>, log: bool },
-    Int { range: RangeInclusive<i64> },
+    Float {
+        range: RangeInclusive<f64>,
+        log: bool,
+    },
+    Int {
+        range: RangeInclusive<i64>,
+    },
     Choices(Vec<String>),
 }
 

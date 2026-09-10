@@ -130,11 +130,8 @@ const TOL_US: u32 = 120;
 /// ceiling.
 fn tolerance(pkg: &Package) -> u32 {
     let n = pkg.pulses.len().saturating_sub(1);
-    let mut widths: Vec<u32> = pkg.pulses[..n]
-        .iter()
-        .flat_map(|p| [p.mark, p.gap])
-        .filter(|w| *w > 0)
-        .collect();
+    let mut widths: Vec<u32> =
+        pkg.pulses[..n].iter().flat_map(|p| [p.mark, p.gap]).filter(|w| *w > 0).collect();
     if widths.len() < 4 {
         return TOL_US;
     }
@@ -277,11 +274,7 @@ fn cluster(hist: Vec<(u32, usize)>) -> Vec<u32> {
     // forty turns a clean two-symbol burst into an unclassifiable three. Short
     // bursts have no such luxury, so below eight pulses every width counts.
     let floor = if total >= 8 { (total / 10).max(2) } else { 1 };
-    let mut v: Vec<u32> = hist
-        .into_iter()
-        .filter(|(_, n)| *n >= floor)
-        .map(|(c, _)| c)
-        .collect();
+    let mut v: Vec<u32> = hist.into_iter().filter(|(_, n)| *n >= floor).map(|(c, _)| c).collect();
     v.sort_unstable();
     v
 }
@@ -293,10 +286,7 @@ mod tests {
 
     fn pkg(pulses: &[(u32, u32)]) -> Package {
         Package {
-            pulses: pulses
-                .iter()
-                .map(|(m, g)| Pulse { mark: *m, gap: *g })
-                .collect(),
+            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
             snr_db: 20.0,
             rssi_dbfs: -12.0,
             start_sample: 0,
@@ -307,10 +297,7 @@ mod tests {
 
     /// A PWM train: the mark carries the bit, gaps are fixed.
     fn pwm(bits: &[u8]) -> Package {
-        pkg(&bits
-            .iter()
-            .map(|b| (if *b == 1 { 500 } else { 1500 }, 500))
-            .collect::<Vec<_>>())
+        pkg(&bits.iter().map(|b| (if *b == 1 { 500 } else { 1500 }, 500)).collect::<Vec<_>>())
     }
 
     #[test]
@@ -420,11 +407,7 @@ mod tests {
         ];
         let a = analyze(&pkg(&runs)).expect("an analysis");
         assert_eq!(a.coding, Coding::Nrz);
-        assert!(
-            (48..=56).contains(&a.short_us),
-            "symbol read as {} us",
-            a.short_us
-        );
+        assert!((48..=56).contains(&a.short_us), "symbol read as {} us", a.short_us);
     }
 
     /// An NRZ burst as the FSK detector hands one over: runs of like symbols
@@ -510,11 +493,7 @@ mod tests {
             b.bits.as_bytes(),
             "the two phases were identical, so this test says nothing"
         );
-        assert_eq!(
-            a.frame_bytes(),
-            b.frame_bytes(),
-            "alignment did not survive a phase shift"
-        );
+        assert_eq!(a.frame_bytes(), b.frame_bytes(), "alignment did not survive a phase shift");
     }
 
     #[test]
@@ -523,16 +502,8 @@ mod tests {
         let air = whitened_transmission(&payload);
         let a = analyze(&nrz_package(&air, 52, false)).expect("analysis");
         let f = a.framing.as_ref().expect("a preamble");
-        assert!(
-            f.preamble_bits >= 32,
-            "preamble read as {} bits",
-            f.preamble_bits
-        );
-        assert!(
-            f.sync_hex().starts_with("2dd4"),
-            "sync came out as {}",
-            f.sync_hex()
-        );
+        assert!(f.preamble_bits >= 32, "preamble read as {} bits", f.preamble_bits);
+        assert!(f.sync_hex().starts_with("2dd4"), "sync came out as {}", f.sync_hex());
         let framed = a.framed.as_ref().expect("a frame");
         assert!(framed.whitened);
         assert_eq!(framed.payload, payload);

@@ -169,10 +169,7 @@ macro_rules! node_options {
         }
 
         fn set_param(&mut self, name: &str, _value: ParamValue) -> Result<()> {
-            Err(common::Error::other(format!(
-                "{}: unknown parameter {name:?}",
-                self.name()
-            )))
+            Err(common::Error::other(format!("{}: unknown parameter {name:?}", self.name())))
         }
     };
 }

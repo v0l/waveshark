@@ -174,7 +174,11 @@ impl Enumerated {
     pub fn label(&self) -> String {
         let name = if self.name.is_empty() { "LimeSDR" } else { &self.name };
         let tail = short_serial(&self.serial);
-        if tail.is_empty() { name.to_string() } else { format!("{name} {tail}") }
+        if tail.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {tail}")
+        }
     }
 }
 
@@ -190,17 +194,17 @@ pub fn enumerate() -> Vec<Enumerated> {
     if n <= 0 {
         return Vec::new();
     }
-    list.iter()
-        .take(n as usize)
-        .enumerate()
-        .map(|(i, s)| Enumerated::parse(i, cstr(s)))
-        .collect()
+    list.iter().take(n as usize).enumerate().map(|(i, s)| Enumerated::parse(i, cstr(s))).collect()
 }
 
 /// Serial tails identify a unit; the leading zeros do not.
 fn short_serial(s: &str) -> String {
     let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
+    if t.len() > 8 {
+        t[t.len() - 8..].to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 /// Raw device pointer. LimeSuite has no thread affinity requirement, only a
@@ -321,7 +325,8 @@ impl LimeSdr {
         )?;
         // TX stays off. It draws current and puts the PA in a state we have no
         // reason to be in on a receive-only tool.
-        let _ = unsafe { ffi::LMS_EnableChannel(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, false) };
+        let _ =
+            unsafe { ffi::LMS_EnableChannel(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, false) };
 
         let firmware = unsafe {
             let p = ffi::LMS_GetDeviceInfo(handle.ptr());
@@ -334,7 +339,8 @@ impl LimeSdr {
         };
 
         let antennas = rx_antennas(&handle);
-        let channels = unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_RX) }.max(1) as usize;
+        let channels =
+            unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_RX) }.max(1) as usize;
         // A LimeSDR-USB is 2x2 and a Mini is 1x1, so this is asked rather
         // than assumed: a board with one transmitter told it had two would
         // fail at the second stream rather than at the setting that asked
@@ -526,9 +532,14 @@ impl LimeSdr {
     /// Frequency the LO actually landed on after the PLL rounded.
     pub fn actual_center(&self) -> Hz {
         let mut f = 0.0f64;
-        let rc =
-            unsafe { ffi::LMS_GetLOFrequency(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, &mut f) };
-        if rc == ffi::LMS_SUCCESS { Hz(f.round() as u64) } else { self.center }
+        let rc = unsafe {
+            ffi::LMS_GetLOFrequency(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, &mut f)
+        };
+        if rc == ffi::LMS_SUCCESS {
+            Hz(f.round() as u64)
+        } else {
+            self.center
+        }
     }
 
     pub fn actual_rate(&self) -> Sps {
@@ -536,7 +547,11 @@ impl LimeSdr {
         let rc = unsafe {
             ffi::LMS_GetSampleRate(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, &mut host, &mut rf)
         };
-        if rc == ffi::LMS_SUCCESS { Sps(host.round() as u64) } else { self.rate }
+        if rc == ffi::LMS_SUCCESS {
+            Sps(host.round() as u64)
+        } else {
+            self.rate
+        }
     }
 
     /// Temperature of the LMS7002M die in degrees Celsius.
@@ -548,12 +563,16 @@ impl LimeSdr {
 }
 
 fn rx_antennas(handle: &Handle) -> Vec<Antenna> {
-    let n = unsafe { ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, std::ptr::null_mut()) };
+    let n = unsafe {
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, std::ptr::null_mut())
+    };
     if n <= 0 {
         return Vec::new();
     }
     let mut list = vec![[0 as std::os::raw::c_char; 16]; n as usize];
-    let n = unsafe { ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, list.as_mut_ptr()) };
+    let n = unsafe {
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, list.as_mut_ptr())
+    };
     list.iter()
         .take(n.max(0) as usize)
         .enumerate()
@@ -590,7 +609,9 @@ impl Device for LimeSdr {
             self.apply_antenna(f)?;
         }
         check(
-            unsafe { ffi::LMS_SetLOFrequency(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, f.0 as f64) },
+            unsafe {
+                ffi::LMS_SetLOFrequency(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, f.0 as f64)
+            },
             "LMS_SetLOFrequency",
         )
         .inspect_err(|_| self.center = prev)?;
@@ -611,7 +632,10 @@ impl Device for LimeSdr {
         // Oversampling 0 lets LimeSuite pick the highest ratio the decimation
         // chain supports at this rate, which is what keeps the ADC noise
         // spread out rather than folded into the span.
-        check(unsafe { ffi::LMS_SetSampleRate(self.handle.ptr(), r.0 as f64, 0) }, "LMS_SetSampleRate")?;
+        check(
+            unsafe { ffi::LMS_SetSampleRate(self.handle.ptr(), r.0 as f64, 0) },
+            "LMS_SetSampleRate",
+        )?;
         self.rate = r;
         self.apply_lpf(r)?;
         drop(_g);
@@ -682,7 +706,11 @@ impl Device for LimeSdr {
                 self.try_calibrate();
             }
             "test_signal" => {
-                let sig = if on { ffi::lms_testsig_t_LMS_TESTSIG_NCODIV8 } else { ffi::lms_testsig_t_LMS_TESTSIG_NONE };
+                let sig = if on {
+                    ffi::lms_testsig_t_LMS_TESTSIG_NCODIV8
+                } else {
+                    ffi::lms_testsig_t_LMS_TESTSIG_NONE
+                };
                 let _g = self.handle.ctl.lock().unwrap();
                 check(
                     unsafe {
@@ -798,7 +826,12 @@ impl Device for LimeSdr {
         let _g = self.handle.ctl.lock().unwrap();
         check(
             unsafe {
-                ffi::LMS_SetGaindB(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, db.round() as u32)
+                ffi::LMS_SetGaindB(
+                    self.handle.ptr(),
+                    ffi::LMS_CH_TX,
+                    self.tx_chan,
+                    db.round() as u32,
+                )
             },
             "LMS_SetGaindB",
         )?;
@@ -808,9 +841,8 @@ impl Device for LimeSdr {
 
     fn tx_gains(&self) -> Vec<(String, GainMode)> {
         let mut db = 0u32;
-        let rc = unsafe {
-            ffi::LMS_GetGaindB(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, &mut db)
-        };
+        let rc =
+            unsafe { ffi::LMS_GetGaindB(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, &mut db) };
         let v = if rc == ffi::LMS_SUCCESS { db as f32 } else { self.tx_gain_db };
         vec![("gain".into(), GainMode::Manual(v))]
     }
@@ -1184,9 +1216,8 @@ impl TxStream for LimeTxStream {
         // Off, not idle: an enabled transmit chain draws current and leaves
         // the driver stage biased with nothing to send.
         let _g = self.handle.ctl.lock().unwrap();
-        let _ = unsafe {
-            ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, self.chan, false)
-        };
+        let _ =
+            unsafe { ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, self.chan, false) };
     }
 }
 

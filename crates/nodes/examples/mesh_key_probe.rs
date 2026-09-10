@@ -4,16 +4,8 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let text = std::fs::read_to_string(&a[1]).unwrap();
     let psk = decode::channel_keys::parse_key(&a[3]).expect("a key");
-    let chan = decode::meshtastic::Channel {
-        name: a[2].clone(),
-        psk: psk.clone(),
-    };
-    eprintln!(
-        "channel {} hash {:?} key {:?}",
-        a[2],
-        chan.hash(),
-        chan.key()
-    );
+    let chan = decode::meshtastic::Channel { name: a[2].clone(), psk: psk.clone() };
+    eprintln!("channel {} hash {:?} key {:?}", a[2], chan.hash(), chan.key());
     let (mut n, mut on_hash, mut opened, mut default) = (0, 0, 0, 0);
     for line in text.lines() {
         let bytes: Vec<u8> = (0..line.len() / 2)

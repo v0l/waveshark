@@ -10,9 +10,7 @@ use std::time::Instant;
 fn chain() -> Vec<NodeSpec> {
     vec![
         NodeSpec::new("envelope"),
-        NodeSpec::new("pulse_detect")
-            .f("reset_us", 10_000.0)
-            .i("min_pulses", 20),
+        NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
         NodeSpec::new("protocol_decode"),
     ]
 }
@@ -22,9 +20,7 @@ fn chain() -> Vec<NodeSpec> {
 fn signal(n: usize, rate: f64) -> Vec<C32> {
     let mut seed = 12345u64;
     let mut rng = move || {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         ((seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
     };
     (0..n)
@@ -34,27 +30,18 @@ fn signal(n: usize, rate: f64) -> Vec<C32> {
             let on = ((t * 1000.0) as u64).is_multiple_of(3);
             let a = if on { 0.5 } else { 0.0 };
             let ph = (t * 40_000.0 * std::f64::consts::TAU).rem_euclid(std::f64::consts::TAU);
-            C32::new(
-                a * ph.cos() as f32 + rng() * 0.05,
-                a * ph.sin() as f32 + rng() * 0.05,
-            )
+            C32::new(a * ph.cos() as f32 + rng() * 0.05, a * ph.sin() as f32 + rng() * 0.05)
         })
         .collect()
 }
 
 fn main() {
-    let rate: f64 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2_400_000.0);
+    let rate: f64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2_400_000.0);
     let secs = 2.0;
     let n = (rate * secs) as usize;
     println!("input: {:.1} MS/s, {secs}s, {n} samples", rate / 1e6);
     println!("threads: {}\n", rayon::current_num_threads());
-    println!(
-        "{:>6}  {:>10}  {:>9}  {:>10}  {:>8}",
-        "chans", "ch rate", "ch BW", "wall", "x real"
-    );
+    println!("{:>6}  {:>10}  {:>9}  {:>10}  {:>8}", "chans", "ch rate", "ch BW", "wall", "x real");
 
     let sig = signal(n, rate);
     for &chans in &[8usize, 16, 32, 64, 128, 256, 512] {

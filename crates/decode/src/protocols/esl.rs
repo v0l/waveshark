@@ -63,18 +63,12 @@ pub struct Esl {
 impl Esl {
     /// OpenEPaperLink's own configuration: 38.3835 kbit/s, 26 us per bit.
     pub fn sub_ghz_38k() -> Self {
-        Self {
-            name: "ESL-38k",
-            bit_us: 26,
-        }
+        Self { name: "ESL-38k", bit_us: 26 }
     }
 
     /// The stock Chroma configuration: 249.939 kbit/s, 4 us per bit.
     pub fn sub_ghz_250k() -> Self {
-        Self {
-            name: "ESL-250k",
-            bit_us: 4,
-        }
+        Self { name: "ESL-250k", bit_us: 4 }
     }
 }
 
@@ -146,9 +140,7 @@ fn preamble_ends(bits: &BitBuffer) -> Vec<usize> {
 
 fn bytes_from(bits: &BitBuffer, at: usize) -> Vec<u8> {
     let n = (bits.len().saturating_sub(at)) / 8;
-    (0..n)
-        .filter_map(|i| bits.extract(at + i * 8, 8).map(|v| v as u8))
-        .collect()
+    (0..n).filter_map(|i| bits.extract(at + i * 8, 8).map(|v| v as u8)).collect()
 }
 
 /// Packet types, from `oepl-proto.h`.
@@ -240,9 +232,7 @@ fn parse(model: &'static str, p: &[u8]) -> Option<Report> {
             if le16(p, 3) != PAN {
                 return None;
             }
-            r = r
-                .text("to", mac(&p[5..13]))
-                .text("from", format!("{:04X}", le16(p, 13)));
+            r = r.text("to", mac(&p[5..13])).text("from", format!("{:04X}", le16(p, 13)));
             15
         }
         _ => return None,
@@ -266,9 +256,7 @@ fn parse(model: &'static str, p: &[u8]) -> Option<Report> {
                 .int("hw_type", i64::from(body[6]))
                 .int("wakeup", i64::from(body[7]));
             if n >= 12 {
-                r = r
-                    .int("fw", i64::from(le16(body, 9)))
-                    .int("channel", i64::from(body[11]));
+                r = r.int("fw", i64::from(le16(body, 9))).int("channel", i64::from(body[11]));
             }
             r
         }
@@ -278,16 +266,16 @@ fn parse(model: &'static str, p: &[u8]) -> Option<Report> {
             .int("data_size", i64::from(le32(body, 9)))
             .int("data_type", i64::from(body[13]))
             .int("next_checkin_min", i64::from(le16(body, 15))),
-        ("block-request", n) if n >= 17 => r
-            .text("data_ver", format!("{:016X}", le64(body, 1)))
-            .int("block", i64::from(body[9])),
+        ("block-request", n) if n >= 17 => {
+            r.text("data_ver", format!("{:016X}", le64(body, 1))).int("block", i64::from(body[9]))
+        }
         ("block-part", n) if n >= 3 => r
             .int("block", i64::from(body[1]))
             .int("part", i64::from(body[2]))
             .int("bytes", n as i64 - 3),
-        ("tag-return-data", n) if n >= 10 => r
-            .int("part", i64::from(body[1]))
-            .text("data_ver", format!("{:016X}", le64(body, 2))),
+        ("tag-return-data", n) if n >= 10 => {
+            r.int("part", i64::from(body[1])).text("data_ver", format!("{:016X}", le64(body, 2)))
+        }
         _ => r,
     })
 }
@@ -379,10 +367,7 @@ mod tests {
         body.push(0x20);
         body.push(0);
         body.extend_from_slice(&15u16.to_le_bytes());
-        let bits = on_air(
-            &[0xc7, 0x0a, 0xc7, 0x0a],
-            &with_checksum(&head, 0xe6, &body),
-        );
+        let bits = on_air(&[0xc7, 0x0a, 0xc7, 0x0a], &with_checksum(&head, 0xe6, &body));
 
         let r = Esl::sub_ghz_38k().decode(&bits).expect("a frame");
         assert_eq!(r.fields["type"], Value::Text("avail-data-info".into()));

@@ -175,16 +175,10 @@ pub enum ReportDetail {
     },
     /// A shore station or a navigation mark: something that reports a place
     /// and does not move.
-    Station {
-        aid: bool,
-    },
+    Station { aid: bool },
     /// APRS says what a station is with a symbol rather than with a message
     /// type, and puts everything it has no field for in the comment.
-    Aprs {
-        symbol_table: char,
-        symbol_code: char,
-        comment: Option<String>,
-    },
+    Aprs { symbol_table: char, symbol_code: char, comment: Option<String> },
     Mesh {
         long_name: Option<String>,
         short_name: Option<String>,
@@ -199,10 +193,7 @@ pub enum ReportDetail {
     /// A MeshCore node from its advert. What it is decides how it is drawn:
     /// a repeater, a room server or a sensor is installed somewhere, a chat
     /// node is carried.
-    MeshCore {
-        role: &'static str,
-        fixed: bool,
-    },
+    MeshCore { role: &'static str, fixed: bool },
     /// A handset flying something: the stick positions it sent, and what the
     /// link said about itself.
     ///

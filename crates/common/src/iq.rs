@@ -97,10 +97,7 @@ impl SampleFormat {
             Self::Cs8 => {
                 const SCALE: f32 = 1.0 / 128.0;
                 for c in raw.chunks_exact(2) {
-                    out.push(C32::new(
-                        c[0] as i8 as f32 * SCALE,
-                        c[1] as i8 as f32 * SCALE,
-                    ));
+                    out.push(C32::new(c[0] as i8 as f32 * SCALE, c[1] as i8 as f32 * SCALE));
                 }
             }
             Self::Cs16 => {

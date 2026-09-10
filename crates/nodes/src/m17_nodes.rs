@@ -170,10 +170,7 @@ impl M17Node {
             out.extend(pcm.iter().map(|s| *s as f32 / 32768.0));
         }
         self.voice_now.extend_from_slice(&out);
-        Some(std::sync::Arc::new(common::Speech {
-            pcm: out,
-            rate: VOICE_HZ,
-        }))
+        Some(std::sync::Arc::new(common::Speech { pcm: out, rate: VOICE_HZ }))
     }
 }
 
@@ -192,9 +189,6 @@ impl Node for M17Node {
         "m17"
     }
 
-
-
-
     fn num_inputs(&self) -> usize {
         1
     }
@@ -210,9 +204,7 @@ impl Node for M17Node {
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
-            return Err(common::Error::other(
-                "m17 needs its channel inside the span",
-            ));
+            return Err(common::Error::other("m17 needs its channel inside the span"));
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         let audio_rate = rate / factor as f64;
@@ -291,9 +283,7 @@ impl Node for M17Node {
                         .voice_stream
                         .then(|| (lsf.source().to_string(), lsf.destination().to_string()));
                 }
-                let audio = matches!(e, Event::StreamFrame { .. })
-                    .then(|| heard.take())
-                    .flatten();
+                let audio = matches!(e, Event::StreamFrame { .. }).then(|| heard.take()).flatten();
                 events.push((e, audio, Some(f.start_sample)));
             }
         }
@@ -301,12 +291,7 @@ impl Node for M17Node {
         // A transmission that stopped mid-stream ends when nothing more is
         // heard, so the assembler has to be told the time even when no frame
         // arrived.
-        events.extend(
-            self.assembler
-                .poll(self.samples)
-                .into_iter()
-                .map(|e| (e, None, None)),
-        );
+        events.extend(self.assembler.poll(self.samples).into_iter().map(|e| (e, None, None)));
 
         // The channel is reported whether or not anybody is on it, so a
         // listener can see the front end is there before it has heard
@@ -421,9 +406,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             // or may not be text. Only the one the specification says is text
             // is shown as text.
             if *id == 0x05 {
-                let s = String::from_utf8_lossy(payload)
-                    .trim_end_matches('\0')
-                    .to_string();
+                let s = String::from_utf8_lossy(payload).trim_end_matches('\0').to_string();
                 fields.push(("message".into(), Value::Text(s.clone())));
                 text = Some(s);
             }
@@ -433,9 +416,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         // audio is rebuilt from. The row is deliberately thin: a list showing
         // twenty-five of these a second is a list nobody reads, and the
         // interface folds them into the transmission they belong to.
-        Event::StreamFrame {
-            number, payload, ..
-        } => {
+        Event::StreamFrame { number, payload, .. } => {
             fields.push(("frame".into(), Value::Int(i64::from(*number))));
             // 40 ms, the one duration in M17 that needs no clock, so anything
             // counting airtime can add these up without waiting for the
@@ -448,9 +429,7 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 _ => "M17-Stream",
             }
         }
-        Event::Stream {
-            frames, complete, ..
-        } => {
+        Event::Stream { frames, complete, .. } => {
             // The end of the run of frames, each of which carried its own
             // 40 ms; anything adding airtime up has done so already.
             fields.push(("frames".into(), Value::Int(i64::from(*frames))));
@@ -493,7 +472,6 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
     Some(d)
 }
-
 
 pub struct M17;
 
@@ -546,10 +524,7 @@ mod tests {
     use dsp::m17::{fec, frame_symbols, preamble_symbols, Kind, BAUD};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     #[test]
@@ -645,48 +620,21 @@ mod tests {
         // A kilohertz off frequency, because a handheld is.
         let iq = modulate(&symbols, rate, 1_000.0);
         let frames = run(&iq, rate, center);
-        let all: Vec<Decoded> = frames
-            .iter()
-            .filter_map(|f| m17_decoded(f, Hz(center as u64)))
-            .collect();
+        let all: Vec<Decoded> =
+            frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
         // Every frame is on the bus as evidence; these are the two rows that
         // describe the transmission as a whole.
-        let rows: Vec<Decoded> = all
-            .iter()
-            .filter(|d| !d.fields.iter().any(|(k, _)| k == "frame"))
-            .cloned()
-            .collect();
-        assert_eq!(
-            rows.len(),
-            2,
-            "expected a setup row and a stream row: {rows:?}"
-        );
-        assert_eq!(
-            all.len(),
-            27,
-            "25 frames, a setup and a summary: {}",
-            all.len()
-        );
+        let rows: Vec<Decoded> =
+            all.iter().filter(|d| !d.fields.iter().any(|(k, _)| k == "frame")).cloned().collect();
+        assert_eq!(rows.len(), 2, "expected a setup row and a stream row: {rows:?}");
+        assert_eq!(all.len(), 27, "25 frames, a setup and a summary: {}", all.len());
 
         assert_eq!(rows[0].protocol, "M17-Setup");
-        let get = |d: &Decoded, k: &str| {
-            d.fields
-                .iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.clone())
-        };
-        assert_eq!(
-            get(&rows[0], "from"),
-            Some(common::Value::Text("M0ABC".into()))
-        );
-        assert_eq!(
-            get(&rows[0], "to"),
-            Some(common::Value::Text("M17-M17 C".into()))
-        );
-        assert_eq!(
-            get(&rows[0], "mode"),
-            Some(common::Value::Text("voice".into()))
-        );
+        let get =
+            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get(&rows[0], "from"), Some(common::Value::Text("M0ABC".into())));
+        assert_eq!(get(&rows[0], "to"), Some(common::Value::Text("M17-M17 C".into())));
+        assert_eq!(get(&rows[0], "mode"), Some(common::Value::Text("voice".into())));
         assert_eq!(get(&rows[0], "can"), Some(common::Value::Int(5)));
         assert_eq!(rows[0].crc_ok, Some(true));
 
@@ -694,18 +642,11 @@ mod tests {
         assert_eq!(get(&rows[1], "frames"), Some(common::Value::Int(25)));
         // The airtime is on the frames, 40 ms each, live while the stream
         // runs; the end row does not say it again.
-        let frames: Vec<&Decoded> = all
-            .iter()
-            .filter(|d| d.fields.iter().any(|(k, _)| k == "frame"))
-            .collect();
-        let seconds: f64 = frames
-            .iter()
-            .filter_map(|d| get(d, "seconds")?.as_f64())
-            .sum();
+        let frames: Vec<&Decoded> =
+            all.iter().filter(|d| d.fields.iter().any(|(k, _)| k == "frame")).collect();
+        let seconds: f64 = frames.iter().filter_map(|d| get(d, "seconds")?.as_f64()).sum();
         assert!((seconds - 1.0).abs() < 1e-6, "{seconds}");
-        assert!(frames
-            .iter()
-            .all(|d| get(d, "live") == Some(common::Value::Bool(true))));
+        assert!(frames.iter().all(|d| get(d, "live") == Some(common::Value::Bool(true))));
         assert_eq!(get(&rows[1], "seconds"), None);
     }
 
@@ -753,16 +694,11 @@ mod tests {
         let payloads: Vec<[u8; 16]> = frames
             .iter()
             .filter_map(|f| match m17::Event::parse(f) {
-                Some(m17::Event::StreamFrame {
-                    number: 7, payload, ..
-                }) => Some(payload),
+                Some(m17::Event::StreamFrame { number: 7, payload, .. }) => Some(payload),
                 _ => None,
             })
             .collect();
-        assert!(
-            !payloads.is_empty(),
-            "nothing decoded from the reference frames"
-        );
+        assert!(!payloads.is_empty(), "nothing decoded from the reference frames");
         for p in &payloads {
             assert_eq!(*p, PAYLOAD, "payload differs from the reference");
         }
@@ -826,11 +762,7 @@ mod tests {
             (seconds - 1.0).abs() < 0.1,
             "{seconds} seconds of speech from a one second transmission"
         );
-        assert_eq!(
-            live,
-            speech.len(),
-            "what was published live is what was kept"
-        );
+        assert_eq!(live, speech.len(), "what was published live is what was kept");
     }
 
     /// A text message sent in packet mode, which is the other thing an M17
@@ -857,25 +789,13 @@ mod tests {
         }
 
         let frames = run(&modulate(&symbols, rate, 0.0), rate, center);
-        let rows: Vec<Decoded> = frames
-            .iter()
-            .filter_map(|f| m17_decoded(f, Hz(center as u64)))
-            .collect();
-        let packet = rows
-            .iter()
-            .find(|r| r.protocol == "M17-Packet")
-            .expect("no packet row");
-        assert_eq!(
-            packet.text.as_deref(),
-            Some("CQ CQ CQ de M0ABC, testing M17 packet mode")
-        );
+        let rows: Vec<Decoded> =
+            frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
+        let packet = rows.iter().find(|r| r.protocol == "M17-Packet").expect("no packet row");
+        assert_eq!(packet.text.as_deref(), Some("CQ CQ CQ de M0ABC, testing M17 packet mode"));
         assert_eq!(packet.media_type, media::TEXT);
         assert_eq!(
-            packet
-                .fields
-                .iter()
-                .find(|(n, _)| n == "packet_type")
-                .map(|(_, v)| v.clone()),
+            packet.fields.iter().find(|(n, _)| n == "packet_type").map(|(_, v)| v.clone()),
             Some(common::Value::Text("SMS".into()))
         );
     }

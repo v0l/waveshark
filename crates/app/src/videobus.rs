@@ -305,8 +305,6 @@ impl pipeline::node::Node for VideoBusNode {
         "video_bus"
     }
 
-
-
     /// One per feed drawn into it, plus the spare a chain drawn by hand
     /// lands on. The transmissions are told apart by what they carry, not by
     /// which wire brought them.

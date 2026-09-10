@@ -31,9 +31,8 @@ const Q11_GAIN_I0: i16 = 2896; // sqrt(2) in Q11
 const LCODE: usize = 60;
 
 /// The parameter layout Bits2prm/Prm2bits use, in bits per field.
-pub const BITNO: [u8; PARM_SIZE] = [
-    8, 9, 9, 8, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6,
-];
+pub const BITNO: [u8; PARM_SIZE] =
+    [8, 9, 9, 8, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6, 5, 14, 1, 1, 6];
 
 /// The decoder's state, carried between frames.
 pub struct Decoder {
@@ -48,9 +47,7 @@ pub struct Decoder {
     last_ener_cod: i16,
 }
 
-const LSP_INIT: [i16; P] = [
-    30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000,
-];
+const LSP_INIT: [i16; P] = [30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000];
 
 impl Default for Decoder {
     fn default() -> Self {
@@ -534,12 +531,8 @@ fn d_d4i60(index: i16, sign: i16, shift: i16, zero_f: &[i16], cod: &mut [i16]) {
 
     // F points at zero_f[64]; F -= shift; p_k = F - pos_k. Indices into zero_f.
     let fbase = 64i32 - shift as i32;
-    let (p0, p1, p2, p3) = (
-        fbase - pos0 as i32,
-        fbase - pos1 as i32,
-        fbase - pos2 as i32,
-        fbase - pos3 as i32,
-    );
+    let (p0, p1, p2, p3) =
+        (fbase - pos0 as i32, fbase - pos1 as i32, fbase - pos2 as i32, fbase - pos3 as i32);
     let at = |b: i32, i: usize| zero_f[(b + i as i32) as usize];
     for i in 0..LCODE {
         let mut l = l_mult0(at(p0, i), Q11_GAIN_I0);

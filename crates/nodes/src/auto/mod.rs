@@ -194,10 +194,8 @@ impl AutoNode {
         let seen = self.announced.entry(self.slots[k].center_hz.0).or_default();
         let members = &self.slots[k].members;
         out.extend(packets.into_iter().filter(|p| {
-            let key = members
-                .iter()
-                .filter_map(|m| m.protocol)
-                .find_map(|proto| proto.dedupe_key(p));
+            let key =
+                members.iter().filter_map(|m| m.protocol).find_map(|proto| proto.dedupe_key(p));
             let Some(key) = key else { return true };
             if seen.contains(&key) {
                 return false;
@@ -311,8 +309,6 @@ impl Node for AutoNode {
         DESC.name
     }
 
-
-
     fn num_inputs(&self) -> usize {
         1
     }
@@ -329,9 +325,7 @@ impl Node for AutoNode {
     /// get, so the node is not an empty box on a quiet band.
     fn subgraphs(&self) -> Vec<Topology> {
         let mut out: Vec<Topology> = self.wide.iter().map(|m| m.graph.topology()).collect();
-        out.extend(
-            self.slots.iter().flat_map(|s| s.members.iter()).map(|m| m.graph.topology()),
-        );
+        out.extend(self.slots.iter().flat_map(|s| s.members.iter()).map(|m| m.graph.topology()));
         if out.is_empty() {
             out.extend(self.template.as_ref().map(|g| g.topology()));
         }
@@ -378,10 +372,7 @@ impl Node for AutoNode {
     }
 
     fn phases(&self) -> Vec<(String, pipeline::cost::Cost)> {
-        self.phases
-            .iter()
-            .map(|(n, r)| (n.clone(), r.cost()))
-            .collect()
+        self.phases.iter().map(|(n, r)| (n.clone(), r.cost())).collect()
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -391,11 +382,8 @@ impl Node for AutoNode {
         }
         self.rate = i.spec.rate;
         self.center = i.spec.center;
-        self.input_bw = if i.spec.bandwidth > 0.0 {
-            i.spec.bandwidth.min(i.spec.rate)
-        } else {
-            i.spec.rate
-        };
+        self.input_bw =
+            if i.spec.bandwidth > 0.0 { i.spec.bandwidth.min(i.spec.rate) } else { i.spec.rate };
         self.rebuild()?;
         // Packets are events in time, not a sampled stream, and each one
         // carries its own frequency and width.
@@ -495,8 +483,7 @@ impl Node for AutoNode {
         // picture. Whichever member holds the claim keeps running, so the
         // claim can be given back.
         let span = (c0 - self.input_bw / 2.0, c0 + self.input_bw / 2.0);
-        let claimant =
-            |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
+        let claimant = |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
         // The span, kept once for every front end over it rather than once
         // each: they are all handed the same block. A gated front end needs
         // it whether or not it produces packets, since the lead-in it wakes
@@ -524,8 +511,8 @@ impl Node for AutoNode {
                         // the air, something else owns the span, or this
                         // front end is sampling the air rather than reading
                         // all of it.
-                        let awake = m.awake(detecting, iq.len(), rate)
-                            && (!watching || claimant(m));
+                        let awake =
+                            m.awake(detecting, iq.len(), rate) && (!watching || claimant(m));
                         if !awake {
                             m.sleep(iq.len());
                             return WideResult {
@@ -804,10 +791,7 @@ mod tests {
     use pipeline::node::Node;
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, center),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, center), latency: 0 }
     }
 
     #[test]
@@ -816,10 +800,7 @@ mod tests {
         let out = Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
         assert_eq!(out[0].kind, PortKind::Packets);
         assert!(n.wide().is_empty(), "nothing span-wide belongs at 433 MHz");
-        assert!(
-            !Node::subgraphs(&n).is_empty(),
-            "the burst front end is shown before any source"
-        );
+        assert!(!Node::subgraphs(&n).is_empty(), "the burst front end is shown before any source");
     }
 
     /// Noise with a keyed carrier `offset` hertz up from the centre for the
@@ -990,7 +971,13 @@ mod tests {
     }
 
     /// How many of `blocks` blocks of `iq` a span-wide front end read.
-    fn blocks_read(n: &mut AutoNode, rate: f64, center: Hz, iq: &[C32], name: &str) -> (usize, usize) {
+    fn blocks_read(
+        n: &mut AutoNode,
+        rate: f64,
+        center: Hz,
+        iq: &[C32],
+        name: &str,
+    ) -> (usize, usize) {
         let ins = [spec(rate, center)];
         let mut read = 0usize;
         let mut blocks = 0usize;
@@ -1084,23 +1071,14 @@ mod tests {
         let mut plain = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut plain, &[spec(rate, center)]).unwrap();
         let measured = openings(&mut plain, rate, center, &iq);
-        assert!(
-            measured.iter().any(|o| (o - 356_000.0).abs() < 5_000.0),
-            "{measured:?}"
-        );
-        assert!(
-            !measured.iter().any(|o| (o - 350_000.0).abs() < 1.0),
-            "not on the grid yet"
-        );
+        assert!(measured.iter().any(|o| (o - 356_000.0).abs() < 5_000.0), "{measured:?}");
+        assert!(!measured.iter().any(|o| (o - 350_000.0).abs() < 1.0), "not on the grid yet");
 
         let mut planned = AutoNode::new("auto", SourceConfig::default());
         planned.set_raster(Some((0.0, 25_000.0)));
         Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
         let locked = openings(&mut planned, rate, center, &iq);
-        assert!(
-            locked.iter().any(|o| (o - 350_000.0).abs() < 1.0),
-            "{locked:?}"
-        );
+        assert!(locked.iter().any(|o| (o - 350_000.0).abs() < 1.0), "{locked:?}");
 
         // Half a channel off the grid is not on it, and stays as measured.
         let iq = keyed(rate, 362_500.0);
@@ -1108,10 +1086,7 @@ mod tests {
         planned.set_raster(Some((0.0, 25_000.0)));
         Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
         let between = openings(&mut planned, rate, center, &iq);
-        assert!(
-            between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0),
-            "{between:?}"
-        );
+        assert!(between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0), "{between:?}");
         assert!(!between
             .iter()
             .any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0));
@@ -1174,10 +1149,7 @@ mod tests {
             opened.iter().any(|o| (o - 350_000.0).abs() < 10_000.0),
             "the real one opened: {opened:?}"
         );
-        assert!(
-            !opened.iter().any(|o| o.abs() < 10_000.0),
-            "the spur opened: {opened:?}"
-        );
+        assert!(!opened.iter().any(|o| o.abs() < 10_000.0), "the spur opened: {opened:?}");
     }
 
     #[test]
@@ -1232,10 +1204,7 @@ mod tests {
             samples: Vec::new(),
         };
         let wide = n.open(&source(1, 6.5e6)).unwrap();
-        assert!(
-            wide.members.iter().all(|m| m.router.is_none()),
-            "a 6.5 MHz source was classified"
-        );
+        assert!(wide.members.iter().all(|m| m.router.is_none()), "a 6.5 MHz source was classified");
         assert!(wide.evidence.is_some(), "and left no evidence of itself");
 
         // An ExpressLRS channel visit measures over a megahertz and must
@@ -1321,12 +1290,8 @@ mod tests {
             .expect("a remembered channel keeps the classifier");
         router.verdicts.push((dsp::Modulation::Chirp, 125_000.0));
         n.place_on_verdict(0, false);
-        let placed: Vec<f64> = n.slots[0]
-            .members
-            .iter()
-            .filter(|m| m.name == "lora")
-            .map(|m| m.channel_hz)
-            .collect();
+        let placed: Vec<f64> =
+            n.slots[0].members.iter().filter(|m| m.name == "lora").map(|m| m.channel_hz).collect();
         assert!(placed.contains(&125_000.0), "placed {placed:?}");
         assert!(placed.contains(&250_000.0), "the remembered channel went: {placed:?}");
     }
@@ -1395,10 +1360,7 @@ mod tests {
         assert_eq!(locked[0].0, "ble");
         assert!((locked[0].1 - 2_426_000_000.0).abs() < 1.0, "{locked:?}");
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2450))]).unwrap();
-        assert!(
-            n.wide().is_empty(),
-            "no advertising channel inside that span"
-        );
+        assert!(n.wide().is_empty(), "no advertising channel inside that span");
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
@@ -1410,9 +1372,7 @@ mod tests {
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(5865))]).unwrap();
         assert!(
-            n.locked_channels()
-                .iter()
-                .all(|(name, ..)| *name != "video"),
+            n.locked_channels().iter().all(|(name, ..)| *name != "video"),
             "the span was claimed before anything was being read"
         );
         // Nothing is claimed until a front end says it is reading something,
@@ -1423,27 +1383,19 @@ mod tests {
         let left = n.answer(
             None,
             "video",
-            Request::Claim {
-                lo_hz: 5_855_000_000.0,
-                hi_hz: 5_875_000_000.0,
-            },
+            Request::Claim { lo_hz: 5_855_000_000.0, hi_hz: 5_875_000_000.0 },
             &mut said,
         );
         assert!(left.is_none(), "a claim is the auto node's to answer");
         let owned = n.locked_channels();
-        let (_, hz, w) = owned
-            .iter()
-            .find(|(name, ..)| *name == "video")
-            .expect("the claim was not taken");
+        let (_, hz, w) =
+            owned.iter().find(|(name, ..)| *name == "video").expect("the claim was not taken");
         assert!((hz - 5_865_000_000.0).abs() < 1.0, "{hz}");
         assert!((w - 20e6).abs() < 1.0, "{w}");
         // And it is kept: a picture fades and comes back, and a claim that
         // followed the signal would hand the band to the detector between
         // every field.
-        assert!(
-            n.claimed_whole_span(),
-            "a claim over the span leaves nothing to detect"
-        );
+        assert!(n.claimed_whole_span(), "a claim over the span leaves nothing to detect");
         // What needs the dial is handed back.
         let left = n.answer(None, "video", Request::Retune { center_hz: 1e9 }, &mut said);
         assert_eq!(left, Some(Request::Retune { center_hz: 1e9 }));
@@ -1493,10 +1445,7 @@ mod tests {
             hold_s: None,
             settings: Default::default(),
         };
-        assert_eq!(
-            n.answer(Some(0), "tetra", far.clone(), &mut said),
-            Some(far)
-        );
+        assert_eq!(n.answer(Some(0), "tetra", far.clone(), &mut said), Some(far));
         // The parent goes, and the traffic channel with it.
         let parent = n.memory.channels()[0].id;
         n.forget(&[parent]);
@@ -1569,10 +1518,7 @@ pub const DESC: StageDesc = StageDesc {
 pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
     let mut cfg = crate::source_nodes::watch_config(
         s,
-        SourceConfig {
-            open_db: AUTO_OPEN_DB,
-            ..Default::default()
-        },
+        SourceConfig { open_db: AUTO_OPEN_DB, ..Default::default() },
     );
     cfg.bank_channel_hz = s.f64_or(BANK_CHANNEL_HZ, cfg.bank_channel_hz);
     cfg.bank_min_channels = s.f64_or(BANK_MIN_CHANNELS, cfg.bank_min_channels as f64) as usize;

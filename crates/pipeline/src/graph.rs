@@ -573,11 +573,7 @@ impl Graph {
             Some(o) => wiring.out_slot_base[o.node.0] + o.port,
             // Default to the last node in execution order, which is what a
             // linear chain wants and an explicit `output()` overrides.
-            None => g
-                .order
-                .last()
-                .map(|&k| g.entries[k].out_slots[0])
-                .unwrap_or(INPUT_SLOT),
+            None => g.order.last().map(|&k| g.entries[k].out_slots[0]).unwrap_or(INPUT_SLOT),
         };
 
         g.specs[INPUT_SLOT] = b.input;
@@ -615,7 +611,10 @@ impl Graph {
             }
 
             let outs = self.entries[k].node.negotiate(&ins).map_err(|e| {
-                Error::other(format!("node {k} ({}) rejected its input: {e}", self.entries[k].label))
+                Error::other(format!(
+                    "node {k} ({}) rejected its input: {e}",
+                    self.entries[k].label
+                ))
             })?;
 
             let expect = self.entries[k].out_slots.len();
@@ -710,12 +709,18 @@ impl Graph {
     /// Each node's smoothed cost per call, in microseconds, for finding
     /// where a slow graph spends its time.
     pub fn run_costs(&self) -> Vec<(&str, f32)> {
-        self.order.iter().map(|&k| (self.entries[k].label.as_str(), self.entries[k].cost_us)).collect()
+        self.order
+            .iter()
+            .map(|&k| (self.entries[k].label.as_str(), self.entries[k].cost_us))
+            .collect()
     }
 
     /// Total microseconds spent in each node since it was built.
     pub fn total_costs(&self) -> Vec<(&str, u64)> {
-        self.order.iter().map(|&k| (self.entries[k].label.as_str(), self.entries[k].total_us)).collect()
+        self.order
+            .iter()
+            .map(|&k| (self.entries[k].label.as_str(), self.entries[k].total_us))
+            .collect()
     }
 
     /// Structure and negotiated rates, for drawing the graph.
@@ -732,11 +737,7 @@ impl Graph {
                 label: e.label.clone(),
                 kind: e.node.name().to_string(),
                 latency: self.latency[e.out_slots[0]],
-                inputs: e
-                    .in_slots
-                    .iter()
-                    .map(|&s| (s, self.specs[s]))
-                    .collect(),
+                inputs: e.in_slots.iter().map(|&s| (s, self.specs[s])).collect(),
                 outputs: e.out_slots.iter().map(|&s| (s, self.specs[s])).collect(),
                 inner: e.node.subgraphs(),
                 inner_count: e.node.subgraph_count(),
@@ -1022,7 +1023,8 @@ impl Graph {
             for &slot in &e.in_slots {
                 if slot == INPUT_SLOT {
                     s.push_str(&format!("  input -> n{k};\n"));
-                } else if let Some(src) = self.entries.iter().position(|x| x.out_slots.contains(&slot))
+                } else if let Some(src) =
+                    self.entries.iter().position(|x| x.out_slots.contains(&slot))
                 {
                     s.push_str(&format!("  n{src} -> n{k};\n"));
                 }
@@ -1388,11 +1390,8 @@ mod tests {
 
     #[test]
     fn output_latency_accumulates_through_rate_changes() {
-        let g = chain(
-            spec(),
-            vec![Box::new(Halve { delay: 64 }), Box::new(Halve { delay: 32 })],
-        )
-        .unwrap();
+        let g = chain(spec(), vec![Box::new(Halve { delay: 64 }), Box::new(Halve { delay: 32 })])
+            .unwrap();
         // 64 at rate/2 becomes 32 at rate/4, plus the second node's 32.
         assert_eq!(g.output_latency(), 64);
     }
@@ -1441,11 +1440,8 @@ mod tests {
 
         assert_eq!(g.label(c), Some("counting"), "a rebuilt node keeps its label");
         g.feed_iq(&ramp(4)).unwrap();
-        let n = g
-            .node(c)
-            .map(|n| n.as_any())
-            .and_then(|a| a.downcast_ref::<Counting>())
-            .map(|c| c.0);
+        let n =
+            g.node(c).map(|n| n.as_any()).and_then(|a| a.downcast_ref::<Counting>()).map(|c| c.0);
         assert_eq!(n, Some(12), "the node kept counting rather than starting over");
     }
 

@@ -6,31 +6,14 @@ use pipeline::StreamSpec;
 
 fn main() {
     let path = std::env::args().nth(1).expect("file");
-    let rate: f64 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2_048_000.0);
-    let centre: f64 = std::env::args()
-        .nth(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(869_200_000.0);
+    let rate: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(2_048_000.0);
+    let centre: f64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(869_200_000.0);
     // Through the file source, so the format and the rate come from the
     // name rather than from an assumption that every capture is cu8.
-    let buf = sources::FileSource::open(std::path::Path::new(&path))
-        .unwrap()
-        .read_all()
-        .unwrap();
+    let buf = sources::FileSource::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
     let iq: Vec<C32> = buf.samples.clone();
-    let rate = if buf.rate.as_f64() > 0.0 {
-        buf.rate.as_f64()
-    } else {
-        rate
-    };
-    let centre = if buf.center.0 > 0 {
-        buf.center.as_f64()
-    } else {
-        centre
-    };
+    let rate = if buf.rate.as_f64() > 0.0 { buf.rate.as_f64() } else { rate };
+    let centre = if buf.center.0 > 0 { buf.center.as_f64() } else { centre };
     let mut g = build_chain(
         StreamSpec::iq(rate, Hz(centre as i64 as u64)),
         &[NodeSpec::new("auto")],
@@ -99,7 +82,9 @@ fn main() {
             }
         }
         if std::env::var_os("PHASES").is_some() && i % 500 == 499 {
-            if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+            if let Some(a) = g
+                .order()
+                .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
             {
                 let mut ph: Vec<_> = a.phases();
@@ -115,16 +100,25 @@ fn main() {
             }
         }
         if std::env::var_os("STICKY").is_some() && i % 2000 == 0 {
-            if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+            if let Some(a) = g
+                .order()
+                .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
                 .map(|n| n.as_any())
                 .and_then(|x| x.downcast_ref::<nodes::AutoNode>())
             {
-                eprintln!("t {:6.2}s sticky {:?} open {}", i as f64 * block as f64 / rate, a.remembered(), a.active());
+                eprintln!(
+                    "t {:6.2}s sticky {:?} open {}",
+                    i as f64 * block as f64 / rate,
+                    a.remembered(),
+                    a.active()
+                );
             }
         }
         if std::env::var_os("SOURCES").is_some() && i % 200 == 0 {
-            if let Some(a) = g.order().find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+            if let Some(a) = g
+                .order()
+                .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
                 .map(|n| n.as_any())
                 .and_then(|x| x.downcast_ref::<nodes::AutoNode>())

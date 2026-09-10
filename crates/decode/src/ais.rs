@@ -51,18 +51,11 @@ pub enum Message {
     /// Type 4, a shore station reporting its own position and the time. Worth
     /// keeping: it is a fixed point whose coordinates are surveyed, which
     /// makes it the one thing on the map that can check the receiver.
-    BaseStation {
-        position: Option<(f64, f64)>,
-        utc: Option<Utc>,
-    },
+    BaseStation { position: Option<(f64, f64)>, utc: Option<Utc> },
     /// Types 5 and 24, which carry the name a vessel is known by.
     Static(Static),
     /// Type 21, a buoy or beacon rather than a vessel.
-    AidToNavigation {
-        name: Option<String>,
-        position: Option<(f64, f64)>,
-        aid_type: u8,
-    },
+    AidToNavigation { name: Option<String>, position: Option<(f64, f64)>, aid_type: u8 },
     /// A type this decoder does not read, named so the log still counts it.
     Unsupported { msg_type: u8 },
 }
@@ -128,10 +121,7 @@ struct Bits<'a> {
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            len: data.len() * 8,
-        }
+        Self { data, len: data.len() * 8 }
     }
 
     fn u(&self, start: usize, len: usize) -> Option<u64> {
@@ -150,11 +140,7 @@ impl<'a> Bits<'a> {
     fn i(&self, start: usize, len: usize) -> Option<i64> {
         let v = self.u(start, len)?;
         let sign = 1u64 << (len - 1);
-        Some(if v & sign != 0 {
-            v as i64 - (1i64 << len)
-        } else {
-            v as i64
-        })
+        Some(if v & sign != 0 { v as i64 - (1i64 << len) } else { v as i64 })
     }
 
     /// Six bit ASCII, as AIS packs names and callsigns.
@@ -202,10 +188,7 @@ pub fn parse(payload: &[u8]) -> Result<Frame, ParseError> {
 
     let kind = match msg_type {
         1..=3 => Message::Position(class_a(&b)),
-        4 => Message::BaseStation {
-            position: b.coord(79, 107),
-            utc: utc(&b),
-        },
+        4 => Message::BaseStation { position: b.coord(79, 107), utc: utc(&b) },
         5 => Message::Static(Static {
             imo: b.u(40, 30).map(|v| v as u32).filter(|v| *v != 0),
             callsign: b.text(70, 42),
@@ -229,19 +212,11 @@ pub fn parse(payload: &[u8]) -> Result<Frame, ParseError> {
                 callsign: b.text(90, 42),
                 ..Static::default()
             },
-            _ => Static {
-                name: b.text(40, 120),
-                ..Static::default()
-            },
+            _ => Static { name: b.text(40, 120), ..Static::default() },
         }),
         _ => Message::Unsupported { msg_type },
     };
-    Ok(Frame {
-        msg_type,
-        repeat,
-        mmsi,
-        kind,
-    })
+    Ok(Frame { msg_type, repeat, mmsi, kind })
 }
 
 /// Types 1, 2 and 3: the Class A position report.
@@ -382,9 +357,7 @@ mod tests {
         let f = parse(&unarmor("13HOI:0P0000VOHLCnHQKwvL05Ip")).unwrap();
         assert_eq!(f.msg_type, 1);
         assert_eq!(f.mmsi, 227_006_760, "a French MMSI, MID 227");
-        let Message::Position(p) = f.kind else {
-            panic!("{f:?}")
-        };
+        let Message::Position(p) = f.kind else { panic!("{f:?}") };
         let (lat, lon) = p.position.expect("a fix");
         assert!((lat - 49.475_576).abs() < 1e-5, "latitude {lat}");
         assert!((lon - 0.131_38).abs() < 1e-5, "longitude {lon}");
@@ -401,9 +374,7 @@ mod tests {
     fn a_second_class_a_report_lands_in_san_francisco_bay() {
         let f = parse(&unarmor("15M67FC000G?ufbE`FepT@3n00Sa")).unwrap();
         assert_eq!(f.mmsi, 366_053_209, "a US MMSI, MID 366");
-        let Message::Position(p) = f.kind else {
-            panic!("{f:?}")
-        };
+        let Message::Position(p) = f.kind else { panic!("{f:?}") };
         let (lat, lon) = p.position.expect("a fix");
         assert!((lat - 37.802_118).abs() < 1e-5, "latitude {lat}");
         assert!((lon - -122.341_618).abs() < 1e-5, "longitude {lon}");
@@ -418,9 +389,7 @@ mod tests {
         let f = parse(&unarmor("B6CdCm0t3`tba35f@V9faHi7kP06")).unwrap();
         assert_eq!(f.msg_type, 18);
         assert_eq!(f.mmsi, 423_302_100);
-        let Message::Position(p) = f.kind else {
-            panic!("{f:?}")
-        };
+        let Message::Position(p) = f.kind else { panic!("{f:?}") };
         let (lat, lon) = p.position.expect("a fix");
         assert!((lat - 40.005_283).abs() < 1e-5, "latitude {lat}");
         assert!((lon - 53.010_996).abs() < 1e-5, "longitude {lon}");
@@ -437,9 +406,7 @@ mod tests {
         let f = parse(&p).unwrap();
         assert_eq!(f.msg_type, 5);
         assert_eq!(f.mmsi, 351_759_000);
-        let Message::Static(s) = f.kind else {
-            panic!("{f:?}")
-        };
+        let Message::Static(s) = f.kind else { panic!("{f:?}") };
         assert_eq!(s.name.as_deref(), Some("EVER DIADEM"));
         assert_eq!(s.callsign.as_deref(), Some("3FOF8"));
         assert_eq!(s.imo, Some(9_134_270));
@@ -469,9 +436,7 @@ mod tests {
     fn a_base_station_reports_a_position_and_the_time() {
         let f = parse(&unarmor("403OviQuMGCqWrRO9>E6fE700@GO")).unwrap();
         assert_eq!(f.msg_type, 4);
-        let Message::BaseStation { position, utc } = f.kind else {
-            panic!("{f:?}")
-        };
+        let Message::BaseStation { position, utc } = f.kind else { panic!("{f:?}") };
         let (lat, lon) = position.expect("a surveyed position");
         assert!((lat - 36.883_766).abs() < 1e-5, "latitude {lat}");
         assert!((lon - -76.352_361).abs() < 1e-5, "longitude {lon}");
@@ -501,9 +466,7 @@ mod tests {
             payload[i / 8] |= b << (7 - i % 8);
         }
         let f = parse(&payload).unwrap();
-        let Message::Position(p) = f.kind else {
-            panic!()
-        };
+        let Message::Position(p) = f.kind else { panic!() };
         assert_eq!(p.position, None, "the no-fix sentinel must not be plotted");
         assert_eq!(f.mmsi, 123_456_789);
     }
@@ -517,9 +480,7 @@ mod tests {
         // Enough for the header and nothing else: readable, with no position.
         let f = parse(&[0x04, 0x00, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(f.msg_type, 1);
-        let Message::Position(p) = f.kind else {
-            panic!()
-        };
+        let Message::Position(p) = f.kind else { panic!() };
         assert_eq!(p.position, None);
     }
 

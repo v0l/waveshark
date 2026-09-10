@@ -384,12 +384,13 @@ impl RdsDemod {
                     // that leads by less than the margin can never take over,
                     // which pins the choice to whichever arm happened to be
                     // ahead first.
-                    let (arg, top) = self
-                        .arms
-                        .iter()
-                        .enumerate()
-                        .fold((0usize, f64::MIN), |acc, (i, a)| {
-                            if a.energy > acc.1 { (i, a.energy) } else { acc }
+                    let (arg, top) =
+                        self.arms.iter().enumerate().fold((0usize, f64::MIN), |acc, (i, a)| {
+                            if a.energy > acc.1 {
+                                (i, a.energy)
+                            } else {
+                                acc
+                            }
                         });
                     if top > self.arms[self.best].energy * SWITCH_MARGIN {
                         self.best = arg;
@@ -417,7 +418,9 @@ mod tests {
 
     /// Modulate bits onto a 57 kHz subcarrier the way a transmitter does, and
     /// return the multiplex along with the pilot phase per sample.
-    pub(super) fn modulate_pub(bits: &[u8]) -> (Vec<f32>, Vec<f64>) { modulate(bits) }
+    pub(super) fn modulate_pub(bits: &[u8]) -> (Vec<f32>, Vec<f64>) {
+        modulate(bits)
+    }
 
     fn modulate(bits: &[u8]) -> (Vec<f32>, Vec<f64>) {
         modulate_rot(bits, 0.0)
@@ -469,12 +472,8 @@ mod tests {
         let mut best = 0usize;
         let mut best_score = 0usize;
         for off in 0..40usize {
-            let score = got
-                .iter()
-                .zip(want[off..].iter())
-                .take(200)
-                .filter(|(a, b)| a == b)
-                .count();
+            let score =
+                got.iter().zip(want[off..].iter()).take(200).filter(|(a, b)| a == b).count();
             if score > best_score {
                 best_score = score;
                 best = off;
@@ -609,11 +608,21 @@ mod diag {
         let mut best_off = 0;
         let mut best_score = 0;
         for off in 0..40usize {
-            let sc = out[40..].iter().zip(bits[off..].iter()).take(200).filter(|(a, b)| a == b).count();
-            if sc > best_score { best_score = sc; best_off = off; }
+            let sc =
+                out[40..].iter().zip(bits[off..].iter()).take(200).filter(|(a, b)| a == b).count();
+            if sc > best_score {
+                best_score = sc;
+                best_off = off;
+            }
         }
-        let mism: Vec<usize> = out[40..].iter().zip(bits[best_off..].iter()).take(200)
-            .enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+        let mism: Vec<usize> = out[40..]
+            .iter()
+            .zip(bits[best_off..].iter())
+            .take(200)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
         println!("off {best_off} score {best_score}/200 mismatches at {mism:?}");
     }
 }

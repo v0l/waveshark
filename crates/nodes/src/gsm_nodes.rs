@@ -46,7 +46,6 @@ pub const GRANTED_CARRIER_HOLD_S: f64 = 60.0;
 /// once a grant.
 const ASK_AGAIN_FRAMES: u32 = 13_000;
 
-
 pub struct GsmNode {
     cfg: GsmConfig,
     /// Which carrier to watch, as a frequency.
@@ -189,8 +188,7 @@ impl Simple for GsmNode {
         }
         self.arfcn = gsm::arfcn(self.channel_hz).unwrap_or(u16::MAX);
         self.det = SchDetector::new(rate, center, self.channel_hz, self.cfg);
-        self.meter =
-            crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
+        self.meter = crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
         for t in &self.follow {
             self.det.follow(*t);
         }
@@ -409,17 +407,13 @@ fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
         fields.push((list_name.into(), Value::Text(list.clone())));
     }
     if !msg.pages.is_empty() {
-        let who =
-            msg.pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
+        let who = msg.pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
         fields.push(("paging".into(), Value::Text(who)));
         // A network pages by temporary identity, which it reallocates. One
         // that pages by permanent identity has given that up, and a row that
         // does not separate the two hides it.
-        let permanent = msg
-            .pages
-            .iter()
-            .filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_)))
-            .count();
+        let permanent =
+            msg.pages.iter().filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_))).count();
         if permanent > 0 {
             fields.push(("paged_by_identity".into(), Value::Int(permanent as i64)));
         }
@@ -560,7 +554,6 @@ fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
     }
     vec![d]
 }
-
 
 pub struct Gsm;
 
@@ -806,7 +799,9 @@ mod tests {
         };
         // A little noise, so the floor the level is measured against is a
         // floor rather than a divide by zero.
-        (0..n).map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.05).collect()
+        (0..n)
+            .map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.05)
+            .collect()
     }
     /// A page is a call from a cell to one handset, so a request naming two
     /// is two rows and two links. The phone is a party and never a device:
@@ -835,7 +830,6 @@ mod tests {
         assert!(rows.iter().all(|r| r.identity.is_none()));
     }
 
-
     /// Bursts at symbol positions, on a carrier `frames` long, at `rate`.
     fn carrier(frames: f64, bursts: &[(f64, Vec<u8>)], rate: f64) -> Vec<C32> {
         let sps = 8;
@@ -856,7 +850,9 @@ mod tests {
             seed ^= seed << 5;
             (seed as f32 / u32::MAX as f32) - 0.5
         };
-        (0..n).map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.02).collect()
+        (0..n)
+            .map(|i| base[(i as f64 * ratio) as usize] + C32::new(rand(), rand()) * 0.02)
+            .collect()
     }
 
     /// Run a node over a stream and return its frames and its requests.

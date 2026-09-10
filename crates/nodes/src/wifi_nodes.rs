@@ -71,10 +71,8 @@ pub fn channels() -> Vec<f64> {
 /// cover the band, and open the others when something says to. The 5 GHz
 /// channels do not overlap and are all here.
 pub fn starting_channels() -> Vec<f64> {
-    let mut v: Vec<f64> = [1u8, 6, 11, 13, 14]
-        .iter()
-        .filter_map(|&n| dsp::wifi::channel_2ghz(n))
-        .collect();
+    let mut v: Vec<f64> =
+        [1u8, 6, 11, 13, 14].iter().filter_map(|&n| dsp::wifi::channel_2ghz(n)).collect();
     v.extend(dsp::wifi::channels_5ghz());
     v
 }
@@ -205,13 +203,7 @@ impl Simple for WifiNode {
                 continue;
             }
             self.accepted += 1;
-            let bytes = mac::wrap(
-                &f.psdu,
-                f.rate.mcs,
-                f.rate.mbps,
-                f.rate.short_gi,
-                f.aggregated,
-            );
+            let bytes = mac::wrap(&f.psdu, f.rate.mcs, f.rate.mbps, f.rate.short_gi, f.aggregated);
             let mut frame =
                 common::Frame::measured(bytes, f.rssi_dbfs, f.snr_db).at(f.center_hz as u64);
             // Preamble, headers and as much of the payload as the cap allows.
@@ -265,10 +257,8 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             fields.push(("claims_channel".into(), Value::Int(i64::from(ch))));
         }
         if n.beacon_interval > 0 {
-            fields.push((
-                "beacon_ms".into(),
-                Value::Int(i64::from(n.beacon_interval) * 1024 / 1000),
-            ));
+            fields
+                .push(("beacon_ms".into(), Value::Int(i64::from(n.beacon_interval) * 1024 / 1000)));
         }
         let security = match (n.rsn, n.privacy) {
             (true, _) => "wpa2",
@@ -302,25 +292,15 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             odid.extend(pack);
         }
     }
-    let protocol = if odid.is_empty() {
-        "802.11"
-    } else {
-        "OpenDroneID"
-    };
+    let protocol = if odid.is_empty() { "802.11" } else { "OpenDroneID" };
     if !odid.is_empty() {
         let mut f = decode::odid::fields(&odid);
         f.append(&mut fields);
         fields = f;
     }
-    let detail = fields
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
     let link = pipeline::event::Link {
-        from: f
-            .source()
-            .map(|a| pipeline::event::Party::unit(a.to_string())),
+        from: f.source().map(|a| pipeline::event::Party::unit(a.to_string())),
         to: Some(if f.addr1.is_broadcast() {
             pipeline::event::Party::broadcast()
         } else {
@@ -426,11 +406,7 @@ impl Protocol for Wifi {
             Some(ch) => format!("WIFI {ch}"),
             None => "WIFI".into(),
         };
-        vec![Mark {
-            hz,
-            width_hz: CHANNEL_WIDTH_HZ,
-            label,
-        }]
+        vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label }]
     }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("wifi")]
@@ -462,10 +438,7 @@ mod tests {
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(center as u64)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
     }
 
     fn beacon() -> Vec<u8> {
@@ -530,10 +503,7 @@ mod tests {
         assert_eq!(r.mpdu, want);
         assert_eq!(r.mbps, 6);
         assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
-        assert!(
-            frames[0].iq.is_some(),
-            "a frame carries what it was read from"
-        );
+        assert!(frames[0].iq.is_some(), "a frame carries what it was read from");
 
         let d = wifi_decoded(&frames[0].bytes, Hz(2_437_000_000)).expect("a decode");
         assert_eq!(d.protocol, "802.11");
@@ -676,8 +646,7 @@ mod tests {
         let mut output = Payload::Frames(Vec::new());
         for block in samples.chunks(16_384) {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            n.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx)
-                .unwrap();
+            n.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx).unwrap();
         }
         assert!(
             output.as_frames().map(|f| !f.is_empty()).unwrap_or(false),
@@ -709,10 +678,7 @@ mod placement_tests {
     use pipeline::port::StreamSpec;
 
     fn spec(rate: f64, hz: Hz) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, hz),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, hz), latency: 0 }
     }
 
     /// The auto node places this for itself when the span is a channel, and

@@ -7,18 +7,9 @@ use sources::FileSource;
 
 fn main() {
     let path = std::env::args().nth(1).expect("file");
-    let shift: f64 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let cutoff: f64 = std::env::args()
-        .nth(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(125_000.0);
-    let buf = FileSource::open(std::path::Path::new(&path))
-        .unwrap()
-        .read_all()
-        .unwrap();
+    let shift: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let cutoff: f64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(125_000.0);
+    let buf = FileSource::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
     let rate = buf.rate.as_f64();
     let mut samples = buf.samples.clone();
     let mut ph = 0.0f64;
@@ -47,10 +38,7 @@ fn main() {
                 f.mode,
                 f.at as f64 / rate,
                 f.bytes.len(),
-                f.bytes
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
+                f.bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
             );
         }
     }

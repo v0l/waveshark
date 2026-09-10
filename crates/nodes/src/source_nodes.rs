@@ -86,10 +86,7 @@ impl SourceDetectNode {
 
     /// Sources open right now.
     pub fn live(&self) -> Vec<dsp::Source> {
-        self.detector
-            .as_ref()
-            .map(|d| d.live().copied().collect())
-            .unwrap_or_default()
+        self.detector.as_ref().map(|d| d.live().copied().collect()).unwrap_or_default()
     }
 
     /// Sources that opened in the last block.
@@ -103,12 +100,8 @@ impl SourceDetectNode {
         }
         let d = SourceDetector::new(self.rate, bandwidth, self.cfg);
         let keep = d.latency_samples();
-        self.extractor = Some(SourceExtractor::new(
-            self.rate,
-            self.center.as_f64(),
-            keep,
-            self.cfg,
-        ));
+        self.extractor =
+            Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
         self.detector = Some(d);
         self.input_bw = bandwidth;
         self.apply_band();
@@ -321,10 +314,7 @@ impl Simple for SourceDecodeNode {
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
         if i.spec.kind != PortKind::Sources {
-            return Err(common::Error::other(format!(
-                "{}: needs sources",
-                self.label
-            )));
+            return Err(common::Error::other(format!("{}: needs sources", self.label)));
         }
         let nominal = StreamSpec::iq(SourceConfig::default().min_rate_hz, i.spec.center);
         self.template = Some((self.make)(nominal)?);
@@ -364,9 +354,7 @@ impl Simple for SourceDecodeNode {
                 buf.iq_mut().extend_from_slice(&b.samples);
                 let evs = match g.run() {
                     Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
-                    Err(e) => vec![Event::Warning {
-                        message: format!("source {}: {e}", id.0),
-                    }],
+                    Err(e) => vec![Event::Warning { message: format!("source {}: {e}", id.0) }],
                 };
                 let pkgs: Vec<Package> = taps
                     .iter()
@@ -417,13 +405,7 @@ impl Simple for SourceDecodeNode {
     fn params(&self) -> Vec<Param> {
         self.template
             .as_ref()
-            .map(|g| {
-                g.topology()
-                    .nodes
-                    .into_iter()
-                    .flat_map(|n| n.params)
-                    .collect()
-            })
+            .map(|g| g.topology().nodes.into_iter().flat_map(|n| n.params).collect())
             .unwrap_or_default()
     }
 
@@ -454,10 +436,9 @@ impl Simple for SourceDecodeNode {
         match err {
             Some(e) => Err(e),
             None if found => Ok(()),
-            None => Err(common::Error::other(format!(
-                "{}: unknown parameter {name:?}",
-                self.label
-            ))),
+            None => {
+                Err(common::Error::other(format!("{}: unknown parameter {name:?}", self.label)))
+            }
         }
     }
 }
@@ -478,10 +459,7 @@ mod tests {
     use pipeline::node::Node;
 
     fn spec(rate: f64) -> PortSpec {
-        PortSpec {
-            spec: StreamSpec::iq(rate, Hz(433_920_000)),
-            latency: 0,
-        }
+        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
     }
 
     #[test]
@@ -502,10 +480,7 @@ mod tests {
         assert_eq!(out[0].kind, PortKind::Pulses);
         let inner = Node::subgraphs(&n).pop().expect("template graph");
         assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
-        assert!(
-            !Node::params(&n).is_empty(),
-            "the decoder's knobs are the node's"
-        );
+        assert!(!Node::params(&n).is_empty(), "the decoder's knobs are the node's");
     }
 
     #[test]
@@ -566,8 +541,5 @@ pub const SOURCE_DECODE: StageDesc = StageDesc {
 };
 
 pub fn build_source_decode(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(SourceDecodeNode::new(
-        "sources",
-        crate::ism_decode_graph,
-    )))
+    Ok(Box::new(SourceDecodeNode::new("sources", crate::ism_decode_graph)))
 }

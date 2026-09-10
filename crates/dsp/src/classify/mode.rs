@@ -178,8 +178,7 @@ pub fn identify(m: Modulation, f: &Features, centre_hz: f64) -> Option<&'static 
             && within(f.separation_hz as f64, k.tone_sep_hz)
             && within(f.chirp_rate as f64, k.sweep_hz_per_s)
             && (k.symbol_period_s.is_none()
-                || (f.cyclic_period_s > 0.0
-                    && within(f.cyclic_period_s as f64, k.symbol_period_s)))
+                || (f.cyclic_period_s > 0.0 && within(f.cyclic_period_s as f64, k.symbol_period_s)))
             && within(f.duration_us * 1e-6, k.duration_s)
             && within(centre_hz, k.centre_hz)
     })
@@ -194,17 +193,18 @@ mod tests {
     /// noticed for months.
     #[test]
     fn every_mode_has_a_family_a_detector_can_emit() {
-        let emitted: Vec<Modulation> = crate::classify::hypotheses()
-            .iter()
-            .map(|h| h.modulation())
-            .collect();
+        let emitted: Vec<Modulation> =
+            crate::classify::hypotheses().iter().map(|h| h.modulation()).collect();
         for m in MODES {
             assert!(
                 emitted.contains(&m.family),
                 "{} wants a family no hypothesis can emit",
                 m.name
             );
-            for (lo, hi) in [m.baud, m.tone_sep_hz, m.sweep_hz_per_s, m.symbol_period_s, m.duration_s].into_iter().flatten()
+            for (lo, hi) in
+                [m.baud, m.tone_sep_hz, m.sweep_hz_per_s, m.symbol_period_s, m.duration_s]
+                    .into_iter()
+                    .flatten()
             {
                 assert!(lo < hi, "{} has an inverted range", m.name);
             }

@@ -4,7 +4,7 @@
 //! Packed layout: `a[0]` holds Re[0], `a[1]` holds Re[128], and for
 //! `k` in 1..128 `a[2k]`/`a[2k+1]` hold Re[k]/Im[k].
 
-use rustfft::{FftPlanner, Fft};
+use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
 pub const FFT_SIZE: usize = 256;
@@ -47,10 +47,8 @@ impl RealFft256 {
     /// Inverse transform of a packed spectrum, scaling by 1/256, producing
     /// 256 real samples. Matches jtransforms `realInverse(float[], true)`.
     pub fn inverse(&self, a: &mut [f32; FFT_SIZE]) {
-        let mut buf: Vec<rustfft::num_complex::Complex<f32>> = vec![
-            rustfft::num_complex::Complex::ZERO;
-            FFT_SIZE
-        ];
+        let mut buf: Vec<rustfft::num_complex::Complex<f32>> =
+            vec![rustfft::num_complex::Complex::ZERO; FFT_SIZE];
         buf[0] = rustfft::num_complex::Complex::new(a[0], 0.0);
         buf[128] = rustfft::num_complex::Complex::new(a[1], 0.0);
         for k in 1..128 {

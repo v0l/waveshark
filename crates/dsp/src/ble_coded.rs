@@ -109,10 +109,7 @@ pub fn encode_block(bits: &[bool], coding: Coding) -> Vec<bool> {
 fn despread(symbols: &[f32], coding: Coding) -> Vec<f32> {
     match coding {
         Coding::S2 => symbols.to_vec(),
-        Coding::S8 => symbols
-            .chunks_exact(4)
-            .map(|c| (c[0] + c[1] - c[2] - c[3]) / 4.0)
-            .collect(),
+        Coding::S8 => symbols.chunks_exact(4).map(|c| (c[0] + c[1] - c[2] - c[3]) / 4.0).collect(),
     }
 }
 
@@ -182,16 +179,10 @@ fn bits_to_bytes_lsb_first(bits: &[bool]) -> Vec<u8> {
 /// The preamble is not coded and not whitened, so it is the one part of the
 /// packet that can be correlated for directly.
 pub fn find_preamble(symbols: &[f32], from: usize) -> Option<usize> {
-    let want: Vec<f32> = (0..80)
-        .map(|i| if PREAMBLE[i % 8] { 1.0 } else { -1.0 })
-        .collect();
+    let want: Vec<f32> = (0..80).map(|i| if PREAMBLE[i % 8] { 1.0 } else { -1.0 }).collect();
     let mut best = (0usize, 0.0f32);
     for at in from..symbols.len().saturating_sub(want.len()) {
-        let score: f32 = want
-            .iter()
-            .zip(&symbols[at..])
-            .map(|(w, s)| w * s.signum())
-            .sum();
+        let score: f32 = want.iter().zip(&symbols[at..]).map(|(w, s)| w * s.signum()).sum();
         if score > best.1 {
             best = (at, score);
         }
@@ -254,12 +245,7 @@ pub fn decode(symbols: &[f32], channel: u8) -> Option<CodedFrame> {
     if crc24(&whitened[..len]) != sent {
         return None;
     }
-    Some(CodedFrame {
-        access_address,
-        coding,
-        pdu: whitened[..len].to_vec(),
-        start,
-    })
+    Some(CodedFrame { access_address, coding, pdu: whitened[..len].to_vec(), start })
 }
 
 /// Build a packet the way a transmitter does: preamble, block 1 at S=8, then

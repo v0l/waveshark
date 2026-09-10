@@ -308,7 +308,8 @@ mod tests {
         for (level, us) in symbols {
             let f = offset_hz + if *level { deviation_hz } else { -deviation_hz };
             for _ in 0..sp(*us) {
-                phase = (phase + std::f64::consts::TAU * f / RATE).rem_euclid(std::f64::consts::TAU);
+                phase =
+                    (phase + std::f64::consts::TAU * f / RATE).rem_euclid(std::f64::consts::TAU);
                 v.push(C32::new(
                     amp * phase.cos() as f32 + rng(),
                     amp * phase.sin() as f32 + rng(),
@@ -336,7 +337,8 @@ mod tests {
 
     #[test]
     fn recovers_symbol_timings_from_a_keyed_carrier() {
-        let syms = nrz(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 100);
+        let syms =
+            nrz(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 100);
         let iq = burst(&syms, 25_000.0, 0.0, 1.0, 0.02);
         let (pkgs, _) = detect(&iq, FskConfig::default());
 
@@ -357,7 +359,8 @@ mod tests {
     fn a_tuning_offset_does_not_move_the_threshold() {
         // The tones sit 40 kHz off centre, far more than the deviation. A
         // fixed threshold at zero hertz would call every symbol a mark.
-        let syms = nrz(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 100);
+        let syms =
+            nrz(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 100);
         let clean = burst(&syms, 25_000.0, 0.0, 1.0, 0.02);
         let offset = burst(&syms, 25_000.0, 40_000.0, 1.0, 0.02);
         let (a, _) = detect(&clean, FskConfig::default());

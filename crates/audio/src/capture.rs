@@ -109,16 +109,13 @@ impl AudioCapture {
 
     fn open_on(device: Device, want_rate: u32) -> Result<Self, AudioError> {
         let device_name = device.to_string();
-        let default = device
-            .default_input_config()
-            .map_err(|e| AudioError::Cpal(e.to_string()))?;
+        let default = device.default_input_config().map_err(|e| AudioError::Cpal(e.to_string()))?;
 
         let supports_want = device
             .supported_input_configs()
             .map(|it| {
-                it.filter(|c| c.sample_format() == SampleFormat::F32).any(|c| {
-                    c.min_sample_rate() <= want_rate && want_rate <= c.max_sample_rate()
-                })
+                it.filter(|c| c.sample_format() == SampleFormat::F32)
+                    .any(|c| c.min_sample_rate() <= want_rate && want_rate <= c.max_sample_rate())
             })
             .unwrap_or(false);
         if default.sample_format() != SampleFormat::F32 && !supports_want {
@@ -188,7 +185,9 @@ impl AudioCapture {
     pub fn tap(&self) -> Arc<dyn AudioSource> {
         Arc::new(Tap {
             shared: self.shared.clone(),
-            at: Mutex::new(self.shared.ring.lock().map(|r| r.base + r.buf.len() as u64).unwrap_or(0)),
+            at: Mutex::new(
+                self.shared.ring.lock().map(|r| r.base + r.buf.len() as u64).unwrap_or(0),
+            ),
             missed: AtomicU64::new(0),
         })
     }
@@ -341,11 +340,7 @@ mod tests {
         // The reason a tap has its own position: a meter and a transmitter
         // reading the same microphone must not take samples from each other.
         let shared = Arc::new(Shared {
-            ring: Mutex::new(Ring {
-                buf: (0..10).map(|i| i as f32).collect(),
-                cap: 10,
-                base: 0,
-            }),
+            ring: Mutex::new(Ring { buf: (0..10).map(|i| i as f32).collect(), cap: 10, base: 0 }),
             rate: 48_000.0,
             overruns: AtomicU64::new(0),
         });
