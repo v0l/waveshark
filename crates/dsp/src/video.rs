@@ -408,6 +408,13 @@ const SOUND_DEVIATION_HZ: f64 = 100e3;
 /// transmitters copy; without it the sound is thin and hissy.
 const DEEMPHASIS_S: f64 = 50e-6;
 
+/// Samples between reseeding the mixer's rotation from its exact phase.
+///
+/// A thousand steps of an f32 rotation drift by about a millionth, which is
+/// far inside what a 100 kHz-deviation subcarrier is read to; a whole block
+/// of them at 20 MS/s would not be.
+const RESEED: usize = 1024;
+
 impl Sound {
     /// A reader for composite at `rate`, or `None` when the stream cannot
     /// hold a subcarrier at all: below about 13 MS/s the 6.5 MHz one is
@@ -470,14 +477,32 @@ impl Sound {
         // across blocks: restarting it each block puts a step in the
         // demodulator's output at every boundary, which is a click at the
         // block rate.
+        //
+        // A rotation rather than a sine a sample, as the chroma reference in
+        // [`SyncSeparator::chroma_of`] is: this runs over the whole span, so
+        // at 20 MS/s a pair of double-precision trig calls a sample was forty
+        // million of them a second and most of what hearing a camera cost.
+        // Reseeded from the exact phase every [`RESEED`] samples, since an
+        // f32 rotation left to run for a whole block drifts in amplitude as
+        // well as in phase.
         let step = hz / self.rate;
+        let turn = -std::f64::consts::TAU * step;
+        let (dc, ds) = (turn.cos() as f32, turn.sin() as f32);
         self.mixed.clear();
         self.mixed.reserve(base.len());
-        for &x in base {
-            let a = -std::f64::consts::TAU * self.phase;
-            self.mixed.push(C32::new(x * a.cos() as f32, x * a.sin() as f32));
-            self.phase = (self.phase + step).fract();
+        let (mut c, mut s) = (0.0f32, 0.0f32);
+        for (k, &x) in base.iter().enumerate() {
+            if k % RESEED == 0 {
+                let a = -std::f64::consts::TAU * (self.phase + step * k as f64).fract();
+                c = a.cos() as f32;
+                s = a.sin() as f32;
+            }
+            self.mixed.push(C32::new(x * c, x * s));
+            let (nc, ns) = (c * dc - s * ds, s * dc + c * ds);
+            c = nc;
+            s = ns;
         }
+        self.phase = (self.phase + step * base.len() as f64).fract();
         let mixed = std::mem::take(&mut self.mixed);
         let mut narrow = Vec::new();
         self.down.process(&mixed, &mut narrow);
@@ -1091,20 +1116,15 @@ impl SyncSeparator {
             return None;
         }
         let mut out = Vec::with_capacity(self.width * height * 3);
+        // The rows are found once a row and not once a pixel: at 640 by 288,
+        // fifty fields a second, the two bounds-checked lookups a pixel were
+        // most of what building the picture cost.
         for r in 0..height {
+            let luma = self.lines.get(r).map(|row| &row[..]).unwrap_or(&[]);
+            let chroma = self.chroma.get(r).map(|row| &row[..]).unwrap_or(&[]);
             for c in 0..self.width {
-                let y = self
-                    .lines
-                    .get(r)
-                    .and_then(|row| row.get(c))
-                    .map(|&v| f32::from(v) / 255.0)
-                    .unwrap_or(0.0);
-                let (u, v) = self
-                    .chroma
-                    .get(r)
-                    .and_then(|row| row.get(c))
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
+                let y = luma.get(c).map(|&v| f32::from(v) / 255.0).unwrap_or(0.0);
+                let (u, v) = chroma.get(c).copied().unwrap_or((0.0, 0.0));
                 // U and V are the weighted colour differences, so undoing the
                 // weights gives B-Y and R-Y, and green follows from the luma
                 // equation.

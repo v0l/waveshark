@@ -4951,44 +4951,61 @@ mod zoom_tests {
         // Every reason here was measured with `--bench-iq`, which prints the
         // auto node's phases; none of them is the span-wide burst router any
         // more, which is what they all used to say.
+        //
+        // What they mostly say now is the classifier. It costs about 1.3 ms
+        // of one core per burst, measured on a 30000 sample burst at
+        // 2.5 MS/s, and that is spread over a level histogram, four
+        // Welch-averaged transforms and two autocorrelations, none of which
+        // is more than a quarter of it; halving the window it measures takes
+        // the corpus from 46 of 52 captures named right to 42, so the cost is
+        // the measurement rather than an overhead around it. A band where
+        // several megahertz-wide sources burst at once therefore asks for
+        // more classification than a block has time for, and that is a
+        // throughput problem rather than a spike.
         const KNOWN_SLOW: &[(&str, &str)] = &[
             (
                 "droneid_mini4k_2444.5M_15360k.cs8",
-                "the DroneID correlator over a source megahertz wide, 1.7 ms of a 8.5 ms block, \
-                 under a source opening from its lead-in",
+                "the DroneID correlator over a source megahertz wide and the classifier behind \
+                 it, 1.6 and 1.9 ms of an 8.5 ms block, under a source opening from its lead-in",
             ),
             (
                 "odid_bt5lr_holybro_2474M_20000k.cs8",
                 "classifying the coded-PHY bursts of several megahertz-wide sources at once, \
-                 17 ms in the worst block of 6.5",
+                 5 ms of a 6.5 ms block on average and 14 in the worst. They are auxiliary \
+                 advertising on data channels, which the BLE front end does not read, so no \
+                 front end has already decoded what is being measured",
             ),
             (
                 "odid_holybro_2431M_20000k.cs8",
-                "the same, with the chirp decoders placed on those verdicts behind it",
+                "the same, with the chirp decoders behind it: the classifier names an 855 kHz \
+                 Bluetooth burst a chirp at full confidence, and LoRa and ExpressLRS are each \
+                 placed on that for 2.9 ms a block",
             ),
             (
                 "offair/elrs_100hz_2415M_20000k.cs8",
                 "classifying a handset's channel visit, 44 ms and 1.4 MHz wide, which is one \
-                 burst that costs three blocks",
+                 burst that costs three blocks, beside the chirp decoder it places",
             ),
             (
                 "offair/ofdm_wifi_2462M_20000k.cs8",
-                "extracting the 5 MHz source the Wi-Fi opens at 15 MS/s and correlating DroneID \
-                 over it, 3 ms each of a 6.5 ms block beside 2 ms of detection",
+                "the Wi-Fi front end reading the channel it is on, 4 ms of a 6.5 ms block, \
+                 beside 1.8 ms cutting the sources the same signal opens out of the span",
             ),
             (
                 "offair/ofdm_wifi_frames_2462M_20000k.cs8",
-                "the same, beside the Wi-Fi front end reading the span it is on",
+                "the same, and DroneID correlating over each of the two 5 MHz sources the \
+                 Wi-Fi opens, since a source that wide could be a DroneID burst",
             ),
             (
                 "offair/gfsk_ble_2426M_20000k.cs8",
-                "one block at 1.3x on four threads, the BLE front end and the detector at \
-                 1.2 ms each of 6.5 and 12 ms outside any node",
+                "the closest of them: 2.9x on four threads with the BLE front end and the \
+                 detector at about 1.2 ms each of 6.5, and one block in ten at half that speed",
             ),
             (
                 "pal_camera_5865M_20000k.cs8",
-                "the video front end itself: 5.2 ms of every 6.5 ms block demodulating 20 MS/s \
-                 of FM carrier",
+                "the video front end itself: 3.8 ms of every 6.5 ms block, which is two FM \
+                 discriminators, one at 10 MS/s for the picture and one at 20 for the sound \
+                 subcarrier, and the field assembly between them",
             ),
         ];
         let mut slow: Vec<String> = Vec::new();
