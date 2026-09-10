@@ -28,11 +28,18 @@ const TAKE: usize = 1 << 15;
 /// A forward and inverse plan of one size.
 type Pair = (Arc<dyn Fft<f32>>, Arc<dyn Fft<f32>>);
 
-/// Plans made so far, by size.
+/// Plans made so far, by size, and the buffers the transforms run in.
 #[derive(Default)]
 struct Plans {
     planner: Option<FftPlanner<f32>>,
     made: Vec<(usize, Pair)>,
+    /// The correlation buffer and the transform's own scratch, kept between
+    /// bursts. Both are a quarter of a megabyte at the sizes used here, and
+    /// `Fft::process` allocates and zeroes the scratch on every call: four
+    /// transforms a burst were a megabyte of allocation for arithmetic that
+    /// reuses the same two buffers every time.
+    buf: Vec<C32>,
+    scratch: Vec<C32>,
 }
 
 thread_local! {
@@ -41,17 +48,14 @@ thread_local! {
     static PLANS: RefCell<Plans> = RefCell::new(Plans::default());
 }
 
-fn plans(n: usize) -> Pair {
-    PLANS.with(|p| {
-        let mut p = p.borrow_mut();
-        if let Some((_, pair)) = p.made.iter().find(|(k, _)| *k == n) {
-            return pair.clone();
-        }
-        let planner = p.planner.get_or_insert_with(FftPlanner::new);
-        let pair = (planner.plan_fft_forward(n), planner.plan_fft_inverse(n));
-        p.made.push((n, pair.clone()));
-        pair
-    })
+fn plans(p: &mut Plans, n: usize) -> Pair {
+    if let Some((_, pair)) = p.made.iter().find(|(k, _)| *k == n) {
+        return pair.clone();
+    }
+    let planner = p.planner.get_or_insert_with(FftPlanner::new);
+    let pair = (planner.plan_fft_forward(n), planner.plan_fft_inverse(n));
+    p.made.push((n, pair.clone()));
+    pair
 }
 
 /// Peak, its lag, and the peak over the median across lags.
@@ -88,28 +92,36 @@ fn correlate(src: impl Iterator<Item = C32>, len: usize, lag_min: usize) -> Cycl
         return Cyclic { peak: 0.0, lag: 0, ratio: 1.0 };
     }
     let n = (2 * take).next_power_of_two();
-    let (forward, inverse) = plans(n);
-    let mut buf = vec![C32::new(0.0, 0.0); n];
-    for (b, s) in buf.iter_mut().zip(src.take(take)) {
-        *b = s;
-    }
-    forward.process(&mut buf);
-    for b in buf.iter_mut() {
-        *b = C32::new(b.norm_sqr(), 0.0);
-    }
-    inverse.process(&mut buf);
-
-    let r0 = buf[0].re.max(1e-20);
     let hi = (take / 2).min(8192).max(lag_min + 1);
     let mut best = (0.0f32, 0usize);
     let mut vals: Vec<f32> = Vec::with_capacity(hi.saturating_sub(lag_min));
-    for (k, b) in buf.iter().enumerate().take(hi).skip(lag_min) {
-        let v = b.norm() / r0;
-        vals.push(v);
-        if v > best.0 {
-            best = (v, k);
+    PLANS.with(|p| {
+        let p = &mut *p.borrow_mut();
+        let (forward, inverse) = plans(p, n);
+        let need = forward.get_inplace_scratch_len().max(inverse.get_inplace_scratch_len());
+        if p.scratch.len() < need {
+            p.scratch.resize(need, C32::new(0.0, 0.0));
         }
-    }
+        p.buf.clear();
+        p.buf.resize(n, C32::new(0.0, 0.0));
+        for (b, s) in p.buf.iter_mut().zip(src.take(take)) {
+            *b = s;
+        }
+        forward.process_with_scratch(&mut p.buf, &mut p.scratch);
+        for b in p.buf.iter_mut() {
+            *b = C32::new(b.norm_sqr(), 0.0);
+        }
+        inverse.process_with_scratch(&mut p.buf, &mut p.scratch);
+
+        let r0 = p.buf[0].re.max(1e-20);
+        for (k, b) in p.buf.iter().enumerate().take(hi).skip(lag_min) {
+            let v = b.norm() / r0;
+            vals.push(v);
+            if v > best.0 {
+                best = (v, k);
+            }
+        }
+    });
     if vals.is_empty() {
         return Cyclic { peak: 0.0, lag: 0, ratio: 1.0 };
     }
