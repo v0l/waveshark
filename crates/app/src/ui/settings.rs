@@ -1361,15 +1361,16 @@ impl App {
                     ui,
                     "publish",
                     "Which kinds of transmitter are worth a permanent device, comma \
-                     separated. Blank is everything, which on a Bluetooth band means the \
+                     separated. ism,wmbus is a house's own sensors and meters. \
+                     Blank or all is everything, which on a Bluetooth band means the \
                      handsets walking past: those rotate their address every quarter of an \
-                     hour, and Home Assistant keeps every one it is told about. ism,wmbus \
-                     is a house's own sensors and meters.",
+                     hour, each is a message every ten seconds, and Home Assistant keeps \
+                     every one it is told about.",
                 );
                 ui.add(
                     egui::TextEdit::singleline(&mut ha.spaces)
                         .desired_width(ui.available_width())
-                        .hint_text("everything"),
+                        .hint_text("ism,wmbus"),
                 );
                 ui.add_space(10.0);
 

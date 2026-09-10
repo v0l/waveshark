@@ -378,6 +378,11 @@ impl Publisher {
 struct Known {
     /// Fields already given a configuration message.
     announced: HashSet<String>,
+    /// The name and vendor those messages carried. A device is usually first
+    /// heard from a frame that says neither, and the frame that names it
+    /// comes later; the configurations go out again when it does, since the
+    /// device block is in them and nowhere else.
+    named: (Option<String>, Option<String>),
     /// The connection those messages were sent over. A broker that restarted
     /// has lost them, and its generation says so.
     generation: u64,
@@ -451,6 +456,9 @@ impl HomeAssistantNode {
     pub fn set_spaces(&mut self, spaces: &str) {
         self.spaces =
             spaces.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+        if self.spaces.iter().any(|s| s == "all") {
+            self.spaces.clear();
+        }
     }
 
     pub fn is_on(&self) -> bool {
@@ -483,8 +491,10 @@ impl HomeAssistantNode {
         let state_topic = format!("{}/{}/{}/state", broker.topic(), slug(&space), slug(&ident));
 
         let readings = readings(p, d);
+        let fresh = !self.known.contains_key(&key);
         let entry = self.known.entry(key).or_insert_with(|| Known {
             announced: HashSet::new(),
+            named: (None, None),
             generation,
             last: now,
         });
@@ -494,28 +504,36 @@ impl HomeAssistantNode {
             entry.announced.clear();
             entry.generation = generation;
         }
-        let fresh = entry.announced.is_empty();
-        for (name, value, unit) in &readings {
-            if entry.announced.len() >= MAX_FIELDS || entry.announced.contains(name) {
+        // A name learned since the last announcement is worth announcing
+        // again: what was said was "BLE e8:31:cd", and the house should
+        // read "Kitchen scale". A name that goes away is not unlearned.
+        let name = crate::survey_nodes::name_of(d).or_else(|| entry.named.0.clone());
+        let vendor = crate::survey_nodes::vendor_of(d).or_else(|| entry.named.1.clone());
+        if (name.as_ref(), vendor.as_ref()) != (entry.named.0.as_ref(), entry.named.1.as_ref()) {
+            entry.announced.clear();
+            entry.named = (name.clone(), vendor.clone());
+        }
+        for (field, value, unit) in &readings {
+            if entry.announced.len() >= MAX_FIELDS || entry.announced.contains(field) {
                 continue;
             }
             if !matches!(value, common::Value::Float(_) | common::Value::Int(_)) {
                 continue;
             }
-            entry.announced.insert(name.clone());
+            entry.announced.insert(field.clone());
             let config = discovery(
                 &broker,
                 &node_id,
                 &state_topic,
-                name,
+                field,
                 unit.as_deref(),
                 &space,
                 &ident,
-                crate::survey_nodes::name_of(d).as_deref(),
-                crate::survey_nodes::vendor_of(d).as_deref(),
+                name.as_deref(),
+                vendor.as_deref(),
             );
             self.publisher.send(
-                &format!("{}/sensor/{node_id}/{}/config", broker.prefix(), slug(name)),
+                &format!("{}/sensor/{node_id}/{}/config", broker.prefix(), slug(field)),
                 config,
                 true,
             );
@@ -524,7 +542,10 @@ impl HomeAssistantNode {
             self.devices += 1;
         }
         entry.last = now;
-        self.publisher.send(&state_topic, state(&readings), true);
+        // Not retained: a reading is a moment, the entity expires it, and a
+        // retained state is one more message the broker keeps and replays
+        // for every device that was ever heard.
+        self.publisher.send(&state_topic, state(&readings), false);
     }
 }
 
@@ -1075,6 +1096,44 @@ mod tests {
             config.contains("\"value_template\":\"{{ value_json.temperature_c }}\""),
             "{config}"
         );
+    }
+
+    /// A device named by a later frame is announced again with its name.
+    ///
+    /// The name lives in the device block of each entity's configuration
+    /// and nowhere else, and the configurations went out once, on the
+    /// first frame, which for a BLE device is an advertisement without one.
+    /// The house then showed an address forever, whatever the device later
+    /// said it was called.
+    #[test]
+    fn a_name_learned_later_is_announced() {
+        let mut first = packet(vec![1], 2_426_000_000);
+        let mut d = common::Decoded::bytes("ble", common::Hz(2_426_000_000), 0.0, vec![1]);
+        d.fields = vec![("rssi_dbm".into(), common::Value::Int(-60))];
+        d.identity = Some(common::Identity::new("ble", "aa:bb"));
+        first.decodes.push(d.clone());
+        let mut n = node();
+        n.min_interval = Duration::ZERO;
+        run(&mut n, vec![first]);
+        let before = n.known.values().next().unwrap().announced.len();
+        assert!(before > 0);
+        assert_eq!(n.known.values().next().unwrap().named, (None, None));
+
+        let mut named = packet(vec![1], 2_426_000_000);
+        d.identity = Some(common::Identity::new("ble", "aa:bb").named("Kitchen scale"));
+        named.decodes.push(d.clone());
+        run(&mut n, vec![named]);
+        let k = n.known.values().next().unwrap();
+        assert_eq!(k.named.0.as_deref(), Some("Kitchen scale"));
+        assert_eq!(k.announced.len(), before, "announced again, the same fields");
+        assert_eq!(n.status().devices, 1, "the same device, not a second one");
+
+        // A frame without the name does not unlearn it.
+        let mut plain = packet(vec![1], 2_426_000_000);
+        d.identity = Some(common::Identity::new("ble", "aa:bb"));
+        plain.decodes.push(d);
+        run(&mut n, vec![plain]);
+        assert_eq!(n.known.values().next().unwrap().named.0.as_deref(), Some("Kitchen scale"));
     }
 
     /// The network leg, against a socket that speaks just enough MQTT to

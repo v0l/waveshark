@@ -308,6 +308,15 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A device that names itself after it was first heard is renamed in Home
+  Assistant. The name is in the entity configurations, which went out once
+  on the first frame, so a Bluetooth device heard first from an unnamed
+  advertisement stayed an address for good.
+- The Home Assistant feed publishes a house's sensors and meters unless told
+  otherwise, rather than everything: on a 2.4 GHz span "everything" was a
+  device per Bluetooth address, each reporting every ten seconds. Readings
+  are no longer retained on the broker either, since the entity expires
+  them itself.
 - A Fine Offset weather station and a Hanshow shelf label are devices in
   the device database and in Home Assistant. Both name their transmitter in
   a field not called `id`, so neither counted as identified, and a house

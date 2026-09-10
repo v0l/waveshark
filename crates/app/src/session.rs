@@ -66,6 +66,12 @@ impl RadioSettings {
     }
 }
 
+/// What the house is told about unless the operator says otherwise: the
+/// sensors and meters, not the phones walking past. Blank means everything,
+/// and on a 2.4 GHz span that was a device per Bluetooth address at a
+/// message every ten seconds each, hundreds a minute.
+pub const DEFAULT_HA_SPACES: &str = "ism,wmbus";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
     /// Device label, matched against what is attached at startup. A label
@@ -276,7 +282,7 @@ impl Default for Session {
             ha_password: String::new(),
             ha_prefix: String::new(),
             ha_topic: String::new(),
-            ha_spaces: String::new(),
+            ha_spaces: DEFAULT_HA_SPACES.into(),
             ha_on: false,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
@@ -445,7 +451,10 @@ impl Session {
             ha_password: kv.get("ha_password").map(|v| v.to_string()).unwrap_or_default(),
             ha_prefix: kv.get("ha_prefix").map(|v| v.to_string()).unwrap_or_default(),
             ha_topic: kv.get("ha_topic").map(|v| v.to_string()).unwrap_or_default(),
-            ha_spaces: kv.get("ha_spaces").map(|v| v.to_string()).unwrap_or_default(),
+            ha_spaces: kv
+                .get("ha_spaces")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| DEFAULT_HA_SPACES.into()),
             ha_on: kv.get("ha_on").map(|v| *v == "true").unwrap_or(false),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
