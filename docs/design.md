@@ -606,23 +606,28 @@ the next thing to take on. `WifiSpan::process` sums over its awake channels:
 | DC block, mean power | 86 | on the decimated block |
 | `read_dsss` and the OFDM scan | 500 | the preamble searches, on the decimated block |
 
-Two things follow. The resampler's inner loop shifted its history a sample at
-a time, which is half a history of complex moves per input sample and as much
-work again as the taps; keeping the history twice over so a tap is one index
-below the last took the same measurement from 686 us to 390. And the decimator
-is per channel, so five channels 5 MHz apart and 20 MHz wide filter the same
-spectrum five times: the front end would be better off decimating the span
-once and mixing at the lower rate, which is a third of the work in each of the
-four channels that duplicates it. It is not done because each channel's filter
-is what band-limits it before the searches, so the change has to move that
-filtering after the mix and hold the frame counts while it does.
+The resampler's inner loop shifted its history a sample at a time, which is
+half a history of complex moves per input sample and as much work again as the
+taps; keeping the history twice over so a tap is one index below the last took
+the same measurement from 686 us to 390.
 
 A ratio within a few per cent of one still costs what any ratio costs: 24 taps
 per phase per output sample, because `Rational` sizes its filter for a real
 rate change and its design rate is the interpolation factor times the input.
 Folding the decimation and the resampling into one rational step from the
 span's rate to `RATE_HZ` would remove the `decim` stage entirely, at the price
-of a sharper prototype at a higher design rate; not measured.
+of a sharper prototype: 61.44 to 20 has a transition of about 0.2% of the
+input rate and wants several hundred taps. Not measured, and the per-channel
+way is the cheaper one on the numbers.
+
+The five channels look like they decimate the same spectrum five times, since
+they are 5 MHz apart and 20 MHz wide, and they do not: each channel's filter
+is cut for its own channel (9 MHz, 91 taps, and only the outputs that survive
+the decimation are computed, 43690 of them), while one pass over the span that
+kept the whole 10 MHz every channel needs would have to stop before 20.48
+minus 10 MHz and is 464 taps, which is what the five cost together. The cost
+is the sharpness of the anti-alias filter, which is set by the beacon furthest
+away that must not fold in, not by the number of channels.
 
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.
