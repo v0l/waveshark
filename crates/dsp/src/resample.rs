@@ -24,8 +24,13 @@ pub struct Rational {
     per_phase: usize,
     /// `phases[p][k]` is tap `p + k * l` of the prototype.
     phases: Vec<Vec<f32>>,
-    /// The newest samples, oldest first, `per_phase` of them.
+    /// The newest `per_phase` samples twice over, so tap `k` of any phase is
+    /// one index below the last, with no wrap to test and nothing to shift.
+    /// Half a history per input sample is what shifting the window cost, and
+    /// it was as much work again as the taps.
     hist: Vec<C32>,
+    /// Where the next input sample goes, and so where the newest one is.
+    w: usize,
     acc: usize,
 }
 
@@ -59,7 +64,7 @@ impl Rational {
                 phase.push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
             }
         }
-        Self { l, m, per_phase, phases, hist: vec![C32::default(); per_phase], acc: 0 }
+        Self { l, m, per_phase, phases, hist: vec![C32::default(); per_phase * 2], w: 0, acc: 0 }
     }
 
     /// Output samples per input sample, as the ratio it was built for.
@@ -74,6 +79,7 @@ impl Rational {
 
     pub fn reset(&mut self) {
         self.hist.iter_mut().for_each(|x| *x = C32::default());
+        self.w = 0;
         self.acc = 0;
     }
 
@@ -84,19 +90,28 @@ impl Rational {
             return;
         }
         out.reserve(input.len() * self.l / self.m + 1);
+        let n = self.per_phase;
         for &x in input {
-            self.hist.rotate_left(1);
-            self.hist[self.per_phase - 1] = x;
+            self.hist[self.w] = x;
+            self.hist[self.w + n] = x;
             while self.acc < self.l {
                 let h = &self.phases[self.acc];
                 let mut sum = C32::default();
-                for (k, &t) in h.iter().enumerate() {
-                    sum += self.hist[self.per_phase - 1 - k] * t;
+                // Tap `k` is `k` samples below the newest, which the doubled
+                // history holds at a contiguous run of indices.
+                let mut at = self.w + n;
+                for &t in h.iter() {
+                    sum += self.hist[at] * t;
+                    at -= 1;
                 }
                 out.push(sum);
                 self.acc += self.m;
             }
             self.acc -= self.l;
+            self.w += 1;
+            if self.w == n {
+                self.w = 0;
+            }
         }
     }
 }
