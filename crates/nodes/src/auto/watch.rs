@@ -187,6 +187,12 @@ impl AutoNode {
         let mut cfg = self.cfg;
         let want = (widest * cfg.width_margin * 1.5).min(self.rate / 4.0);
         cfg.max_width_hz = cfg.max_width_hz.max(want);
+        // And the widest a source can be and still be read by anything at
+        // all: past the burst router's own width nothing downstream
+        // demodulates a cut source, so it is extracted at its width rather
+        // than at two and a half times it. See
+        // [`dsp::SourceConfig::read_width_hz`] and [`super::place::routable`].
+        cfg.read_width_hz = protocol::router_max_width_hz();
         cfg
     }
 
@@ -247,10 +253,15 @@ impl AutoNode {
         if self.rate <= 0.0 {
             return Ok(());
         }
-        let d = SourceDetector::new(self.rate, self.input_bw, self.detector_cfg());
+        let cfg = self.detector_cfg();
+        let d = SourceDetector::new(self.rate, self.input_bw, cfg);
         let keep = d.latency_samples();
+        // The same settings for both halves: the widest source worth opening
+        // and the widest worth oversampling are two answers from the one
+        // registry, and an extractor built from the raw configuration would
+        // hear the second of them as "everything".
         self.watch.extractor =
-            Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, self.cfg));
+            Some(SourceExtractor::new(self.rate, self.center.as_f64(), keep, cfg));
         self.watch.detector = Some(d);
         self.slots.clear();
         self.memory.cut_again();
