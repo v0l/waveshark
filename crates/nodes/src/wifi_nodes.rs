@@ -21,7 +21,7 @@
 //! the two can be compared, and the port centre stays the truth about where
 //! the receiver was listening.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape, Stickiness};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
 use common::Result;
 use decode::wifi as mac;
@@ -29,6 +29,7 @@ use dsp::wifi::{ofdm, WifiConfig, WifiFrame, WifiSpan};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// One channel's width, which is the whole span this reads.
 pub const CHANNEL_WIDTH_HZ: f64 = ofdm::CHANNEL_WIDTH_HZ;
@@ -359,6 +360,18 @@ impl Protocol for Wifi {
     }
     fn placement(&self) -> Placement {
         Placement::Channels(channels())
+    }
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 1_000_000 }
+    }
+    /// A MAC frame arrives tagged with the 20 MHz channel it was read on, and
+    /// carries a CRC-32 over the whole of itself that the front end already
+    /// checked.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !is_wifi_channel(p.center_hz() as f64) {
+            return None;
+        }
+        wifi_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn shape(&self) -> Shape {
         Shape {
@@ -704,4 +717,15 @@ mod placement_tests {
         Node::negotiate(&mut n, &[spec(2.4e6, Hz::mhz(2437))]).unwrap();
         assert!(!n.wide().contains(&"wifi"), "{:?}", n.wide());
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "wifi",
+    summary: "One 20 MHz 802.11a/g channel: OFDM, the legacy rates, and the MAC frame",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(WifiNode::default()))
 }

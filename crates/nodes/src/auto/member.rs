@@ -1,5 +1,6 @@
-//! One decoder over one stream: its graph, the ring of samples behind it,
-//! and the level every packet leaves with.
+//! One decoder over one stream: its graph, its place in the ring of samples
+//! every decoder on that stream shares, and the level every packet leaves
+//! with.
 
 use common::{Packet, Result, C32};
 use pipeline::event::Event;
@@ -11,14 +12,112 @@ use std::collections::VecDeque;
 use crate::protocol::{Placed, Protocol};
 use crate::{build_chain, NodeSpec};
 
-/// How often a transmission that never ends is reported, in seconds.
+/// What a packet leaves a member measured at, where the front end that read
+/// it measured nothing itself.
+struct Level {
+    rssi_dbfs: f32,
+    snr_db: f32,
+}
+
+/// The samples behind one stream, kept once however many front ends read it.
 ///
-/// A base station carrier is on all day. The burst front end cuts it into
-/// pieces of half a second to have something to measure, and a row per
-/// piece would be a list of nothing else. One when it is found, then one
-/// every so often to say it is still there, is what "which channels are
-/// busy" needs.
-const REPORT_S: f64 = 5.0;
+/// A packet from a front end that did not cut its own samples out leaves with
+/// the stream it was read from, up to [`IQ_KEEP_S`]: a packet in the log
+/// without its samples cannot be decoded again by anything written later, and
+/// a row that says only what one decoder made of a burst is an event, not a
+/// packet. The ring belongs to the stream and not to the front end because
+/// every front end on a source reads the same samples: a slot with the
+/// classifier and four decoders on it kept five copies of them.
+pub(super) struct Ring {
+    samples: Vec<C32>,
+    /// Stream index of `samples[0]`. Counts on across a trim and a reset, so
+    /// a member's cursor into it stays meaningful.
+    base: u64,
+    rate: f64,
+    center_hz: u64,
+    /// Whether anything reading this stream can produce a packet at all, and
+    /// so whether the samples are worth keeping.
+    ///
+    /// A picture is not a packet: the video front end publishes fields and
+    /// nothing else, so every sample copied here is copied to be thrown away.
+    /// At 20 MS/s that is [`RING_MAX_S`] seconds of complex samples, 320 MB
+    /// held and rewritten for a stream with no packet to hang it on, and the
+    /// memory traffic was most of what the video front end appeared to cost.
+    pub(super) keeps: bool,
+}
+
+impl Ring {
+    pub(super) fn new(spec: StreamSpec) -> Self {
+        Self {
+            samples: Vec::new(),
+            base: 0,
+            rate: spec.rate,
+            center_hz: spec.center.0,
+            keeps: false,
+        }
+    }
+
+    /// Stream index one past the newest sample held.
+    pub(super) fn end(&self) -> u64 {
+        self.base + self.samples.len() as u64
+    }
+
+    pub(super) fn base(&self) -> u64 {
+        self.base
+    }
+
+    pub(super) fn samples(&self) -> &[C32] {
+        &self.samples
+    }
+
+    /// Add a block of the stream.
+    pub(super) fn push(&mut self, iq: &[C32]) {
+        if !self.keeps || iq.is_empty() {
+            return;
+        }
+        self.samples.extend_from_slice(iq);
+        // Trimmed once it holds twice what is kept, not every block: trimming
+        // a full ring by a block's worth moves the whole of it down, and a
+        // few sources doing that on every block was gigabytes a second of
+        // memmove on a busy band, more than the decoding they were keeping
+        // the samples for.
+        let cap = (RING_MAX_S * self.rate) as usize;
+        if self.samples.len() >= 2 * cap {
+            let drop = self.samples.len() - cap;
+            self.samples.drain(..drop);
+            self.base += drop as u64;
+        }
+    }
+
+    /// Forget what is held, keeping the stream position: a cursor into it is
+    /// still where it was.
+    pub(super) fn reset(&mut self) {
+        self.base = self.end();
+        self.samples.clear();
+    }
+
+    /// The samples a packet read over `[from, to)` leaves with.
+    ///
+    /// The end of that run, not all of it. A packet arrives when its burst
+    /// ends, so the samples worth carrying are the last ones; the rest is
+    /// however long the channel was quiet before it. Two seconds of a
+    /// 2.4 MS/s source is sixteen megabytes a packet in the log, which is how
+    /// a day's log reached 122 GB.
+    fn burst(&self, from: u64, to: u64) -> Option<std::sync::Arc<common::IqBurst>> {
+        let keep = ((IQ_KEEP_S * self.rate) as u64).max(1);
+        let to = to.min(self.end());
+        let from = from.max(to.saturating_sub(keep)).max(self.base);
+        if to <= from {
+            return None;
+        }
+        let (a, b) = ((from - self.base) as usize, (to - self.base) as usize);
+        Some(std::sync::Arc::new(common::IqBurst {
+            rate: self.rate,
+            center_hz: self.center_hz,
+            samples: self.samples[a..b].to_vec(),
+        }))
+    }
+}
 
 /// One decoder over one stream: a graph, and where its packets come out.
 pub(super) struct Member {
@@ -62,16 +161,13 @@ pub(super) struct Member {
     /// level of the transmission it came from rather than nothing. NaN
     /// until [`Slot::open`] sets it from the source block.
     pub(super) source_snr_db: f32,
-    /// Peak mean-square power of the extracted stream since the last frame
+    /// Peak mean-square power of the extracted stream since the last packet
     /// left, held across the blocks a transmission spans. A frame decoder
     /// reads bits and reports no level, but the samples it read have one,
-    /// and the loudest block of a page is the page's RSSI. Reset when a
-    /// frame is emitted, so the tail silence after it does not drag the
-    /// next transmission's level down.
+    /// and the loudest block of a page is the page's RSSI. Reset once
+    /// anything has left carrying it, so the tail silence after it does not
+    /// drag the next transmission's level down.
     pub(super) peak_pow: f32,
-    /// When a transmission still going was last reported, in seconds of
-    /// stream, so it is reported every [`REPORT_S`] rather than every piece.
-    pub(super) last_report_s: Option<f64>,
     /// Width of the channel this front end was placed for, in hertz, or
     /// zero for one that measures the burst rather than reading a channel.
     pub(super) channel_hz: f64,
@@ -81,13 +177,12 @@ pub(super) struct Member {
     /// terminator ends on a second and a half of silence, so dropping the
     /// decoder when the source closes drops the page or the over with it.
     pub(super) flush_s: f64,
-    /// The source's samples since the last packet left, up to
-    /// [`RING_MAX_S`], so a packet from a front end that did not cut its
-    /// own samples out still leaves with the stream it was read from. A
-    /// packet in the log without its samples cannot be decoded again by
-    /// anything written later, and a row that says only what one decoder
-    /// made of a burst is an event, not a packet.
-    pub(super) ring: Vec<C32>,
+    /// Where this front end has read to in its stream, and where the samples
+    /// the next packet leaves with begin: the point the last packet took its
+    /// own from. Both are indices into the stream's [`Ring`], which several
+    /// front ends share.
+    pub(super) read: u64,
+    pub(super) since: u64,
     /// Quietest block power seen, rising slowly, so a source whose level the
     /// detector did not measure (a channel kept open for the session) still
     /// reports a signal to noise ratio on its packets.
@@ -107,16 +202,10 @@ pub(super) struct Member {
     /// [`Protocol::watch`].
     pub(super) watched: usize,
     pub(super) since_read: f64,
-    /// Whether this front end can produce a packet at all, and so whether
-    /// the ring and the levels behind it are worth keeping.
-    ///
-    /// A picture is not a packet: the video front end publishes fields and
-    /// nothing else, so every sample copied into its ring is copied to be
-    /// thrown away. At 20 MS/s the ring is [`RING_MAX_S`] seconds of complex
-    /// samples, which is 320 MB held and rewritten for a member that has no
-    /// packet to hang it on, and the memory traffic was most of what the
-    /// video front end appeared to cost.
-    keeps_samples: bool,
+    /// Whether this front end can produce a packet at all, and so whether the
+    /// stream behind it is worth keeping. A stream is kept when any front end
+    /// on it says so; see [`Ring::keeps`].
+    pub(super) keeps_samples: bool,
     /// Samples still to be read before the live ones: what a decoder placed
     /// late has to catch up on, and every block that arrives while it does.
     /// Read a bounded amount a block. Two seconds of history through six
@@ -140,18 +229,18 @@ const CATCHUP_MIN: usize = 16_384;
 /// Longest run of samples kept behind a packet, in seconds.
 const RING_MAX_S: f64 = 2.0;
 
-/// Most verdicts kept for one source. A source producing more distinct
-/// modulations and widths than this is a channel with a lot in it, and the
-/// decoders the first few placed are what it gets.
-const VERDICTS_MAX: usize = 8;
-
-/// How much of that ring a packet leaves with.
+/// How much of that ring a packet leaves with, in seconds.
 ///
 /// The ring is long because a front end may need to look back; a packet only
 /// needs the transmission it was read from. A quarter of a second holds any
 /// burst this receiver decodes, including a LoRa packet at the highest
 /// spreading factor over the narrowest bandwidth.
 const IQ_KEEP_S: f64 = 0.25;
+
+/// Most verdicts kept for one source. A source producing more distinct
+/// modulations and widths than this is a channel with a lot in it, and the
+/// decoders the first few placed are what it gets.
+const VERDICTS_MAX: usize = 8;
 
 impl Member {
     /// The burst front end for a stream.
@@ -202,8 +291,8 @@ impl Member {
         reg: &Registry,
     ) -> Result<Self> {
         let graph = build_chain(spec, &chain, reg)?;
-        let pulses = taps(&graph, PortKind::Pulses);
-        let frames = taps(&graph, PortKind::Frames);
+        let pulses = reading_taps(&graph, PortKind::Pulses);
+        let frames = reading_taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let video = taps(&graph, PortKind::Video);
@@ -231,10 +320,10 @@ impl Member {
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
-            last_report_s: None,
             channel_hz: 0.0,
             flush_s,
-            ring: Vec::new(),
+            read: 0,
+            since: 0,
             noise_pow: f32::NAN,
             verdicts: Vec::new(),
             backlog: VecDeque::new(),
@@ -271,16 +360,51 @@ impl Member {
         at < on
     }
 
+    /// What everything this member produces is measured at, unless the front
+    /// end measured it itself.
+    ///
+    /// One rule for every kind of packet, since a level that depends on which
+    /// tap a packet came out of is a level of something else. The front end's
+    /// own measurement stands wherever it made one: it read the channel the
+    /// packet came off, and nothing here knows the channel better. Failing
+    /// that, what the detector measured for this source, which is this
+    /// transmitter against the span's floor. Failing that, the extracted
+    /// stream's own: the loudest block since the last packet left, over the
+    /// quietest block seen, which is all there is for a channel kept open
+    /// that the detector never measured.
+    fn level(&self) -> Level {
+        let snr_db = if self.source_snr_db.is_finite() {
+            self.source_snr_db
+        } else if self.noise_pow > 0.0 {
+            10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10()
+        } else {
+            f32::NAN
+        };
+        Level {
+            rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(),
+            snr_db,
+        }
+    }
+
     /// Say that this front end read something, which puts it back on the
     /// whole stream for its hold.
     pub(super) fn read_something(&mut self) {
         self.since_read = 0.0;
     }
 
-    /// Give a member placed late the samples it missed. They are read a
-    /// bounded amount a block from then on, ahead of whatever arrives.
-    pub(super) fn catch_up(&mut self, history: &[C32]) {
-        self.backlog.extend(history.iter().copied());
+    /// Give a member placed late everything its stream holds, and put its
+    /// cursor where that starts. It is read a bounded amount a block from
+    /// then on, ahead of whatever arrives.
+    pub(super) fn catch_up_from(&mut self, ring: &Ring) {
+        self.read = ring.base();
+        self.since = ring.base();
+        self.backlog.extend(ring.samples().iter().copied());
+    }
+
+    /// More to read before the live stream: the flush after a source that has
+    /// already closed.
+    pub(super) fn catch_up(&mut self, iq: &[C32]) {
+        self.backlog.extend(iq.iter().copied());
     }
 
     /// Whether there is still history to read before the live stream.
@@ -291,22 +415,33 @@ impl Member {
     /// Run one block through and collect what came out as packets. With a
     /// backlog, the block joins the queue and a bounded amount of the
     /// queue is read instead.
-    pub(super) fn run(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
+    pub(super) fn run(
+        &mut self,
+        iq: &[C32],
+        at_us: u64,
+        out: &mut Vec<Packet>,
+        ring: &Ring,
+    ) -> Vec<Event> {
         if self.backlog.is_empty() {
-            return self.run_now(iq, at_us, out);
+            return self.run_now(iq, at_us, out, ring);
         }
         self.backlog.extend(iq.iter().copied());
         let budget = (iq.len().max(CATCHUP_MIN) * CATCHUP_RATIO).min(self.backlog.len());
         let take: Vec<C32> = self.backlog.drain(..budget).collect();
         let mut events = Vec::new();
         for chunk in take.chunks(16_384) {
-            events.extend(self.run_now(chunk, at_us, out));
+            events.extend(self.run_now(chunk, at_us, out, ring));
         }
         events
     }
 
-    fn run_now(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>) -> Vec<Event> {
-        let rate = self.graph.input_spec().rate;
+    /// Pass over a block this front end is not reading, so its place in the
+    /// stream is still where the samples behind it are.
+    pub(super) fn skip(&mut self, samples: usize) {
+        self.read += samples as u64;
+    }
+
+    fn run_now(&mut self, iq: &[C32], at_us: u64, out: &mut Vec<Packet>, ring: &Ring) -> Vec<Event> {
         if !iq.is_empty() && self.keeps_samples {
             let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
             self.peak_pow = self.peak_pow.max(pow);
@@ -318,49 +453,29 @@ impl Member {
             } else {
                 pow.min(self.noise_pow * 1.01)
             };
-            self.ring.extend_from_slice(iq);
-            // Trimmed once it holds twice what is kept, not every block:
-            // trimming a full ring by a block's worth moves the whole of it
-            // down, and five members on each of a few sources doing that on
-            // every block was gigabytes a second of memmove on a busy band,
-            // more than the decoding they were keeping the samples for.
-            let cap = (RING_MAX_S * rate) as usize;
-            if self.ring.len() >= 2 * cap {
-                let drop = self.ring.len() - cap;
-                self.ring.drain(..drop);
-            }
         }
+        self.read += iq.len() as u64;
         let first = out.len();
         let events = self.run_graph(iq, at_us, out);
         // What the front end did not cut out for itself is given the stream
         // since the last packet, and the level it stood at.
+        let level = self.level();
         let mut attached = false;
         for p in &mut out[first..] {
-            if p.iq.is_none() && !self.ring.is_empty() {
-                // The end of the ring, not all of it. A packet arrives when
-                // its burst ends, so the samples worth carrying are the last
-                // ones; the rest is however long the channel was quiet
-                // before it. Two seconds of a 2.4 MS/s source is sixteen
-                // megabytes a packet in the log, which is how a day's log
-                // reached 122 GB.
-                let keep = (IQ_KEEP_S * rate) as usize;
-                let from = self.ring.len().saturating_sub(keep.max(1));
-                p.iq = Some(std::sync::Arc::new(common::IqBurst {
-                    rate,
-                    center_hz: self.graph.input_spec().center.0,
-                    samples: self.ring[from..].to_vec(),
-                }));
-                attached = true;
+            if p.iq.is_none() {
+                p.iq = ring.burst(self.since, self.read);
+                attached |= p.iq.is_some();
             }
-            let snr = if self.noise_pow > 0.0 {
-                10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10()
-            } else {
-                f32::NAN
-            };
-            p.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), snr);
+            p.fill_level(level.rssi_dbfs, level.snr_db);
+        }
+        if out.len() > first {
+            // Everything read this far has left carrying the loudest block it
+            // was read from; the next transmission on this source measures
+            // its own.
+            self.peak_pow = 0.0;
         }
         if attached {
-            self.ring.clear();
+            self.since = self.read;
         }
         events
     }
@@ -374,26 +489,16 @@ impl Member {
         let buf = self.graph.input_buf();
         buf.clear();
         buf.iq_mut().extend_from_slice(iq);
-        let mut events = match self.graph.run() {
-            Ok(ev) => ev.to_vec(),
-            Err(e) => vec![Event::Warning {
-                stage: self.name.into(),
-                message: e.to_string(),
-            }],
+        let mut events: Vec<Event> = match self.graph.run() {
+            Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
+            Err(e) => vec![Event::Warning { message: format!("{}: {e}", self.name) }],
         };
         if let Some(id) = self.router {
-            let spec = self.graph.spec_of(id.o());
-            let center_hz = spec.map(|s| s.center.0).unwrap_or(0);
-            let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
             let node = self
                 .graph
                 .node(id)
-                .and_then(|n| n.as_any())
+                .map(|n| n.as_any())
                 .and_then(|a| a.downcast_ref::<crate::BurstRouteNode>());
-            // The samples are at the rate the router was fed, which is the
-            // source's extraction rate; the router's own output port is a
-            // packet stream and carries no rate.
-            let rate = self.graph.input_spec().rate;
             for b in node.map(|n| n.routed()).unwrap_or(&[]) {
                 // The same modulation at a clearly different width is a
                 // second verdict, not a repeat of the first: that is what
@@ -406,96 +511,11 @@ impl Member {
                 if !self.verdicts.iter().any(same) && self.verdicts.len() < VERDICTS_MAX {
                     self.verdicts.push((b.class.modulation, w));
                 }
-                // A diagnostic: with `SR_DUMP_BURSTS` naming a directory,
-                // every burst the router cut is written there as
-                // interleaved f32 IQ, named with the centre, the rate and
-                // the start sample, which is what the classifier's
-                // `score_a_dumped_burst` test reads. How
-                // a verdict on a real signal came out is otherwise
-                // invisible, and that is how the TETRA carriers were found
-                // to be read as OFDM.
-                if let Some(dir) = std::env::var_os("SR_DUMP_BURSTS") {
-                    let path = std::path::Path::new(&dir).join(format!(
-                        "burst_{}_{}_{}.c64",
-                        center_hz, rate as u64, b.start_sample
-                    ));
-                    if !path.exists() {
-                        let mut bytes = Vec::with_capacity(b.iq.len() * 8);
-                        for c in &b.iq {
-                            bytes.extend_from_slice(&c.re.to_le_bytes());
-                            bytes.extend_from_slice(&c.im.to_le_bytes());
-                        }
-                        let _ = std::fs::write(path, bytes);
-                    }
-                }
-                let m = crate::decode_nodes::measure_of(b, center_hz as f64);
-                let iq = Some(std::sync::Arc::new(common::IqBurst {
-                    rate,
-                    center_hz,
-                    samples: b.iq.clone(),
-                }));
-                if b.packages.is_empty() {
-                    // A burst nothing reads is worth a row when the
-                    // classifier named it as something no front end here
-                    // reads, and was sure: a chirp, a carrier. One a front
-                    // end read and got no pulses from is too short or too
-                    // weak to be a packet, and one the classifier could not
-                    // name is a gate opening on noise inside a stream; a
-                    // list of those is a list of nothing.
-                    if b.routed_to != common::FrontEnd::None
-                        || b.class.confidence < 0.5
-                        || !b.class.modulation.is_named()
-                    {
-                        continue;
-                    }
-                    // A piece of a transmission that is still going is the
-                    // same news as the last piece, most of the time.
-                    if b.continuous {
-                        let t = b.start_sample as f64 / rate.max(1.0);
-                        if self.last_report_s.is_some_and(|l| t - l < REPORT_S) {
-                            continue;
-                        }
-                        self.last_report_s = Some(t);
-                    }
-                    // The level is filled from the source's own in `run`,
-                    // which is where the samples are; the classifier measures
-                    // the burst against the noise it found and reports
-                    // nothing when it never found any.
-                    let mut pkt = Packet::of_pulses(
-                        at_us,
-                        bandwidth_hz,
-                        common::Package {
-                            pulses: Vec::new(),
-                            snr_db: if b.class.features.snr_db > 0.0 {
-                                b.class.features.snr_db
-                            } else {
-                                f32::NAN
-                            },
-                            rssi_dbfs: f32::NAN,
-                            start_sample: b.start_sample,
-                            center_hz,
-                            modulation: None,
-                        },
-                    );
-                    pkt.measure = Some(m);
-                    pkt.iq = iq.clone();
-                    out.push(pkt);
-                    continue;
-                }
-                for p in &b.packages {
-                    let mut pkg = p.clone();
-                    pkg.center_hz = center_hz;
-                    let mut pkt = Packet::of_pulses(at_us, bandwidth_hz, pkg);
-                    pkt.measure = Some(m.clone());
-                    pkt.iq = iq.clone();
-                    out.push(pkt);
-                }
             }
-            // The front end's own report of a burst nothing reads is the
-            // measurement it just handed over; a second row would say the
-            // same thing.
+            // The classifier's own report of a burst nothing reads is the
+            // packet it just published, which carries the measurement and
+            // the samples; a second row would say less about the same thing.
             events.retain(|e| !matches!(e, Event::Decoded(d) if d.protocol == "unidentified"));
-            return events;
         }
         for t in &self.pulses {
             let spec = self.graph.spec_of(*t);
@@ -514,19 +534,9 @@ impl Member {
             let Some(pk) = self.graph.buf(*t).and_then(|p| p.as_packets()) else {
                 continue;
             };
-            // Taken as they are, except for a level the front end left
-            // unmeasured: a dechirp reports its processing gain, not a
-            // channel level, so the LoRa node leaves both NaN and the
-            // source's own measurement fills them here. A front end that did
-            // measure keeps what it said.
-            for p in pk {
-                let mut p = p.clone();
-                p.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), self.source_snr_db);
-                out.push(p);
-            }
-            if !pk.is_empty() {
-                self.peak_pow = 0.0;
-            }
+            // Taken as they are; whatever level the front end left unmeasured
+            // is filled once, in [`Member::run_now`], from [`Member::level`].
+            out.extend(pk.iter().cloned());
         }
         for t in &self.frames {
             let spec = self.graph.spec_of(*t);
@@ -534,23 +544,15 @@ impl Member {
                 continue;
             };
             for f in frames {
-                // What the front end measured, where it measured anything:
-                // it read the channel this frame came off, and the source's
-                // own level is of the whole extraction. The fills are for a
-                // front end that has not been taught to measure yet.
                 let mut f = f.clone();
                 if f.center_hz == 0 {
                     f.center_hz = spec.map(|s| s.center.0).unwrap_or(0);
                 }
-                let mut pkt =
-                    Packet::of_frame(at_us, spec.map(|s| s.bandwidth as u32).unwrap_or(0), f);
-                pkt.fill_level(10.0 * self.peak_pow.max(1e-20).log10(), self.source_snr_db);
-                out.push(pkt);
-            }
-            // The page has left carrying the loudest block it was read
-            // from; the next transmission on this source measures its own.
-            if !frames.is_empty() {
-                self.peak_pow = 0.0;
+                out.push(Packet::of_frame(
+                    at_us,
+                    spec.map(|s| s.bandwidth as u32).unwrap_or(0),
+                    f,
+                ));
             }
         }
         events
@@ -572,6 +574,21 @@ pub(super) fn taps(g: &Graph, kind: PortKind) -> Vec<Out> {
         .collect()
 }
 
+/// The same, less the ports of a node that publishes packets of its own.
+///
+/// A node that builds its own packets has said everything it has to say about
+/// what it read, measurement and samples and all; its other ports are what
+/// the rest of its chain reads, not a second account of the same bursts. The
+/// classifier is both: packages out to whatever demodulates them, and the
+/// burst itself as a packet.
+fn reading_taps(g: &Graph, kind: PortKind) -> Vec<Out> {
+    let publishes: Vec<_> = taps(g, PortKind::Packets).iter().map(|o| o.node).collect();
+    taps(g, kind)
+        .into_iter()
+        .filter(|o| !publishes.contains(&o.node))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,20 +603,22 @@ mod tests {
         let spec = StreamSpec::iq(rate, Hz::mhz(868));
         let reg = crate::registry();
         let mut m = Member::classifier(spec, NodeSpec::new("burst_route"), &reg).unwrap();
-        let history = vec![C32::new(0.0, 0.0); (2.0 * rate) as usize];
-        m.catch_up(&history);
+        let mut ring = Ring::new(spec);
+        ring.keeps = true;
+        ring.push(&vec![C32::new(0.0, 0.0); (2.0 * rate) as usize]);
+        m.catch_up_from(&ring);
         assert!(m.behind());
         let block = vec![C32::new(0.0, 0.0); 13_600];
         let mut out = Vec::new();
         let before = m.backlog.len();
-        m.run(&block, 0, &mut out);
+        m.run(&block, 0, &mut out, &ring);
         let read = before + block.len() - m.backlog.len();
         assert_eq!(read, CATCHUP_MIN * CATCHUP_RATIO);
         // And it does catch up, block by block, until the live stream is
         // read directly again.
         let mut blocks = 0;
         while m.behind() {
-            m.run(&block, 0, &mut out);
+            m.run(&block, 0, &mut out, &ring);
             blocks += 1;
         }
         assert!((8..=16).contains(&blocks), "caught up in {blocks} blocks");

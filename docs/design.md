@@ -118,8 +118,8 @@ and the zoom decimator, the spectrum, the recorder's ring, the raw IQ capture,
 the band extractions and front ends the scanner table asks for, the transmit
 chain, the feeds from other receivers, seven to nine stages per listening
 channel depending on what the mode needs, or three for a channel that decodes
-rather than plays, the packet bus and the protocols and the tracker, and the
-audio bus that `sync_audio` draws behind them. Every one of them is a registry
+rather than plays, the packet bus and the protocols and the dedupe and the
+tracker, and the audio bus that `sync_audio` draws behind them. Every one of them is a registry
 stage with settings and wires, named by an id computed from what it is for,
 which is what lets a node keep its state across the rebuild that changed the
 shape around it.
@@ -277,9 +277,11 @@ stream its decoder reads (`Shape`: channel widths, the slowest rate it
 accepts, the rate to feed it, whether it reads the span or a cut source,
 and which classifier verdicts it waits for), what happens to a channel once
 it has read there (`Stickiness`), the chain of stages that reads a placed
-channel, and which of its packets are the same news twice. The scanner
-table, the strip's mode menu and the spectrum's markers ask the same
-registry, so adding a protocol is one `impl Protocol` and nothing else:
+channel, how a frame on the packet bus is recognised as its own
+(`FrameClaim`, and `read_frame` to read it) and which of its packets are the
+same news twice. The scanner table, the strip's mode menu and the spectrum's
+markers ask the same registry, so adding a protocol is one `impl Protocol`
+and nothing else:
 the auto node finds it, a block can pin it, a strip channel can be set to
 it, and the chain view labels it.
 
@@ -704,7 +706,11 @@ which move with the RF gain.
 A transmission is something the receiver is doing, so it is in the graph like
 everything else, and the chain view draws it as the TX side. Four derived
 stages (`chain::derived_patch`): `tx_clock`, the source (`mic` or `tone`), the
-modulator (`fm_mod` or `am_mod`) and `radio_tx`. It is drawn whether or not a
+modulator (`fm_mod` or `am_mod`) and `radio_tx`. A fifth, `tx_monitor`, sits
+at the head of the receive chain and sums what `radio_tx` handed the antenna
+back onto the span, shifted to where it is transmitting, for the length of an
+over a half duplex radio cannot hear. It is the one node in the receiver that
+mixes what it heard with what it sent. It is drawn whether or not a
 key is down, for the same reason the raw capture is: a chain that exists only
 while transmitting cannot be looked at before transmitting, which is exactly
 when an operator wants to look at it, and building it at key-down would rebuild
@@ -717,9 +723,10 @@ refuses every one of them and transmits its own idle filler, which on air is a
 carrier full of holes.
 
 A port carries which way it points (`port::Flow`), so a demodulator wired into
-a radio sink is refused at build time rather than radiating nonsense; GNU Radio
-has no equivalent, and a mistake on this side of the antenna leaves the
-building. Keying is on stream tags rather than inferred from the samples going
+a radio sink is refused at build time rather than radiating nonsense, as is a
+node fed by both directions at once unless it says it means it
+(`Node::joins_flows`, which only the monitor does); GNU Radio has no
+equivalent, and a mistake on this side of the antenna leaves the building. Keying is on stream tags rather than inferred from the samples going
 quiet: `tx_start`, `tx_end`, and `tx_at` for a transmission that has to land in
 a slot.
 
@@ -733,7 +740,7 @@ starved converter, and the ADC health check says so.
 
 The modulators are shared with anything that produces timings, so a protocol
 with a timing table adds an encoder and reuses the carrier: `morse_tx` is one
-node holding a keyer and an OOK modulator, shown through `Node::subgraph`, the
+node holding a keyer and an OOK modulator, shown through `Node::subgraphs`, the
 transmit mirror of a front end. Tests run the whole path into
 `sources::FileSink` and demodulate the file back
 (`crates/nodes/tests/nfm_tx_path.rs`, `morse_round_trip.rs`), so the round trip

@@ -276,15 +276,14 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// A frame whose level the front end has not measured yet.
+    /// A frame at what the front end that read it measured.
     ///
-    /// Every caller of this is a front end with a measurement to make, so
-    /// treat it as a to-do rather than as the normal case: what it produces
-    /// is a row in the list reading NaN.
-    pub fn unmeasured(bytes: Vec<u8>) -> Self {
-        Self { bytes, center_hz: 0, rssi_dbfs: f32::NAN, snr_db: f32::NAN, iq: None }
-    }
-
+    /// There is no constructor without a level. A front end holds the samples
+    /// its frame came from and is the only thing that can say how strong it
+    /// was, so a frame reaching the bus without one is a front end that has
+    /// not been finished; [`crate::Packet::fill_level`] is for a source that
+    /// measured the extraction rather than the burst, and a remote feed
+    /// passes on what its own receiver reported.
     pub fn measured(bytes: Vec<u8>, rssi_dbfs: f32, snr_db: f32) -> Self {
         Self { bytes, center_hz: 0, rssi_dbfs, snr_db, iq: None }
     }
@@ -441,6 +440,94 @@ pub struct Voice {
     /// Decoded in the last block. Empty when the channel is idle, which is
     /// still worth reporting: it says the front end is there and listening.
     pub pcm: Vec<f32>,
+}
+
+/// Which conversation a block of speech belongs to.
+///
+/// One type rather than a string each end formats for itself. The audio bus
+/// keys who is talking now on it, the transcriber files what was said under
+/// it, the call list rows on it and a meter is read back by it, and a row
+/// showed no transcript the moment any two of them spelled it differently.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConversationKey {
+    /// The system it was heard on: "M17", "DMR", or what an analogue channel
+    /// is called on the bus.
+    pub system: String,
+    /// Centre of the channel, to the hertz. Rounded from the frequency the
+    /// front end reported, so the key can be compared and hashed.
+    pub channel_hz: u64,
+    /// The talkgroup, reflector or party being called, where the system
+    /// names one.
+    pub to: Option<String>,
+    /// Who is talking, where the system says. `None` on a meter's key: a
+    /// meter belongs to the channel and the group, and a caller changing
+    /// mid-conversation must not move it.
+    pub from: Option<String>,
+}
+
+/// How far apart two frequencies can be and still be the same channel.
+///
+/// A rounding rather than a channel: the narrowest grid anything here uses
+/// is 12.5 kHz, and the same talkgroup found by two front ends a few hundred
+/// hertz apart is one conversation rather than two rows.
+pub const CHANNEL_MATCH_HZ: f64 = 500.0;
+
+impl ConversationKey {
+    pub fn new(system: impl Into<String>, channel_hz: f64) -> Self {
+        Self {
+            system: system.into(),
+            channel_hz: channel_hz.max(0.0) as u64,
+            to: None,
+            from: None,
+        }
+    }
+
+    pub fn to(mut self, to: Option<String>) -> Self {
+        self.to = to;
+        self
+    }
+
+    pub fn from(mut self, from: Option<String>) -> Self {
+        self.from = from;
+        self
+    }
+
+    /// The key of the conversation this speech is part of.
+    pub fn of(v: &Voice) -> Self {
+        Self::new(v.system, v.channel_hz).to(v.to.clone()).from(v.from.clone())
+    }
+
+    /// The same conversation with nobody named as talking: what a meter is
+    /// filed under, since a trunked carrier holds several groups and each of
+    /// them meters on its own.
+    pub fn meter(&self) -> Self {
+        Self { from: None, ..self.clone() }
+    }
+
+    /// Whether two keys name the same conversation, allowing for the
+    /// hundreds of hertz two front ends can disagree about a channel by.
+    /// A caller either side may be unnamed: on TETRA the grant names who is
+    /// talking and the traffic that follows does not.
+    pub fn same_conversation(&self, other: &Self) -> bool {
+        self.system == other.system
+            && self.to == other.to
+            && self.channel_hz.abs_diff(other.channel_hz) < CHANNEL_MATCH_HZ as u64
+            && (self.from == other.from || self.from.is_none() || other.from.is_none())
+    }
+}
+
+impl std::fmt::Display for ConversationKey {
+    /// What a person, a log line or a saved transcript reads.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}:{}",
+            self.system,
+            self.channel_hz,
+            self.to.as_deref().unwrap_or(""),
+            self.from.as_deref().unwrap_or("")
+        )
+    }
 }
 
 /// How a video frame's samples are laid out.

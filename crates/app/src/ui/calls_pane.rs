@@ -39,7 +39,7 @@ pub(super) enum Action {
     Clear,
     /// Read everything the model heard on one conversation, in the
     /// transcript view.
-    Transcript(String),
+    Transcript(common::ConversationKey),
 }
 
 /// The call list, over what it lists and what it has subscribed to.
@@ -63,7 +63,6 @@ impl CallList<'_> {
     pub(super) fn show(mut self, ui: &mut egui::Ui) -> Option<Action> {
         let now = std::time::Instant::now();
         let calls: Vec<Call> = self.st.list.active(now).into_iter().cloned().collect();
-        self.st.subscribe_new(&calls, self.cmds);
         let levels = self.radio.map(|r| r.status.call_levels()).unwrap_or_default();
         let mut act = None;
 
@@ -106,7 +105,7 @@ impl CallList<'_> {
 
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
         let mut tune_to = None;
-        let mut read: Option<String> = None;
+        let mut read: Option<common::ConversationKey> = None;
         let mut toggled: Vec<Rule> = Vec::new();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
@@ -176,7 +175,7 @@ impl CallList<'_> {
                     // The way into the transcript, on the rows that have one.
                     // A call the model read nothing on gets no button rather
                     // than a button onto an empty pane.
-                    let key = c.transcript_key();
+                    let key = c.key();
                     if self.said.has(&key) {
                         let x: f32 = rect.left()
                             + 12.0
@@ -214,8 +213,7 @@ impl CallList<'_> {
                         // the one after the faders, so a call nobody has
                         // subscribed to still shows that somebody is talking.
                         if i == LEVEL_COL {
-                            let key =
-                                crate::audiobus::AudioBus::key_of(&c.system, c.channel_hz, &c.to);
+                            let key = c.key().meter();
                             let peak = levels
                                 .iter()
                                 .find(|(k, _)| *k == key)
@@ -333,7 +331,7 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
             if c.encrypted { theme::FAULT } else { party },
         ),
         (c.from.clone().unwrap_or_else(|| "-".into()), theme::VALUE),
-        (c.codec.clone().unwrap_or_else(|| "-".into()), theme::LEGEND),
+        (c.codec.unwrap_or("-").to_string(), theme::LEGEND),
         // The meter is painted over this one; the text is what a row without
         // a level would have shown.
         (String::new(), theme::VALUE),

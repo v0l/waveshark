@@ -11,7 +11,7 @@
 //! frame that passed a check sequence, this carries a run of codewords that
 //! passed theirs.
 
-use crate::protocol::{Mark, Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::pocsag::{self, Body};
@@ -20,6 +20,7 @@ use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::{media, Decoded};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// A common UK and European paging channel, and only the default the node is
 /// built with before the scanner table tells it where to listen.
@@ -204,6 +205,19 @@ impl Protocol for Pocsag {
     fn placement(&self) -> Placement {
         Placement::Anywhere
     }
+    /// The widest of the paging allocations, so every narrower claim inside
+    /// them is offered a frame first.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 65_000_000 }
+    }
+    /// A transmitter empties its queue in one go, so a transmission is a row
+    /// per page rather than one row.
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
+            return None;
+        }
+        Some(pocsag_decoded(bytes, common::Hz(p.center_hz())))
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
@@ -225,7 +239,7 @@ impl Protocol for Pocsag {
         vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label: "POCSAG".into() }]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("pocsag").f("channel_hz", at.center_hz)]
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
 }
 
@@ -338,4 +352,18 @@ mod tests {
         assert_eq!(decodes[1].protocol, "POCSAG-Numeric");
         assert_eq!(decodes[1].text.as_deref(), Some("112"));
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "pocsag",
+    summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(PocsagNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

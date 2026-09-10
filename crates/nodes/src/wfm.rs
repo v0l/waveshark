@@ -19,6 +19,7 @@ use pipeline::event::{media, Decoded, Event};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// Peak deviation of broadcast FM.
 const DEVIATION_HZ: f64 = 75_000.0;
@@ -36,8 +37,6 @@ pub struct WfmDemodNode {
     left: Vec<f32>,
     right: Vec<f32>,
     bits: Vec<u8>,
-    /// Last reported values, so a metric is only emitted when it moves.
-    last_blend: f32,
     was_locked: bool,
     last_text: Option<String>,
     samples: u64,
@@ -64,7 +63,6 @@ impl WfmDemodNode {
             left: Vec::new(),
             right: Vec::new(),
             bits: Vec::new(),
-            last_blend: -1.0,
             was_locked: false,
             last_text: None,
             samples: 0,
@@ -143,10 +141,6 @@ fn render(s: &dsp::rds::Station) -> String {
 impl Node for WfmDemodNode {
     fn name(&self) -> &str {
         "wfm_demod"
-    }
-
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
     }
 
     fn num_inputs(&self) -> usize {
@@ -242,14 +236,6 @@ impl Node for WfmDemodNode {
             ));
             self.was_locked = locked;
         }
-        let blend = self.stereo.blend();
-        if (blend - self.last_blend).abs() > 0.02 {
-            self.last_blend = blend;
-            c.emit(Event::Metric {
-                name: "stereo_blend",
-                value: blend as f64,
-            });
-        }
         self.samples += self.left.len() as u64;
         Ok(())
     }
@@ -262,7 +248,6 @@ impl Node for WfmDemodNode {
         }
         self.sync = BlockSync::new();
         self.groups.reset();
-        self.last_blend = -1.0;
         self.was_locked = false;
         self.last_text = None;
         self.samples = 0;
@@ -290,4 +275,15 @@ impl Node for WfmDemodNode {
             ))),
         }
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "wfm_demod",
+    summary: "Broadcast FM with stereo and RDS, from a wide IF",
+    category: Category::Demod,
+    feeds_bus: false,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(WfmDemodNode::new()))
 }

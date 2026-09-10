@@ -238,6 +238,14 @@ pub struct Edits {
     pub settings: Vec<(u64, String, pipeline::param::ParamValue)>,
 }
 
+/// Whether a setting the operator changed on a derived stage is theirs to
+/// keep, given the stage, the setting's name and the stage as the receiver
+/// derived it.
+///
+/// Supplied rather than decided here: this module holds the drawing, and
+/// which stages the strip owns is what the plan says.
+pub type OperatorOwns = fn(&Stage, &str, &Stage) -> bool;
+
 impl Edits {
     pub fn is_empty(&self) -> bool {
         self.stages.is_empty()
@@ -247,27 +255,13 @@ impl Edits {
             && self.settings.is_empty()
     }
 
-    /// Whether a setting on a derived stage is the operator's to override.
-    ///
-    /// A listening channel's stages and the audio bus's levels are the
-    /// strip's: what the operator sets on them by hand goes back into the
-    /// strip rather than sitting here as an override the strip would fight.
-    /// The level of a bus input the strip did not set, which is a chain the
-    /// operator drew, is the exception, since the strip has no other place
-    /// to keep it.
-    fn own_settings(st: &Stage, name: &str, base: &Stage) -> bool {
-        if st.settings.contains_key("channel") {
-            return false;
-        }
-        if st.kind == "audio_bus" {
-            return (name.starts_with("vol") || name.starts_with("mute"))
-                && !base.settings.contains_key(name);
-        }
-        true
-    }
-
     /// What was changed, read off a graph edited from `base`.
-    pub fn diff(full: &Patch, base: &Patch) -> Self {
+    ///
+    /// `operator_owns` says which changed settings are edits at all: some
+    /// belong to the plan, which writes them again on every rebuild, and
+    /// which those are is a fact about the plan rather than about a graph.
+    /// See [`crate::chain::operator_owns`].
+    pub fn diff(full: &Patch, base: &Patch, operator_owns: OperatorOwns) -> Self {
         let mut e = Edits::default();
         for st in &full.stages {
             if !Patch::is_derived(st.id) {
@@ -278,7 +272,7 @@ impl Edits {
                 continue;
             };
             for (name, v) in &st.settings {
-                if was.settings.get(name) != Some(v) && Self::own_settings(st, name, was) {
+                if was.settings.get(name) != Some(v) && operator_owns(st, name, was) {
                     e.settings.push((st.id, name.clone(), v.clone()));
                 }
             }
@@ -497,6 +491,11 @@ fn parse_port(s: &str) -> Option<(u64, usize)> {
 mod tests {
     use super::*;
 
+    /// A plan that owns no settings, so every change is the operator's.
+    fn every_setting(_: &Stage, _: &str, _: &Stage) -> bool {
+        true
+    }
+
     #[test]
     fn edits_are_what_a_drawing_differs_from_the_derived_graph_by() {
         use pipeline::param::ParamValue;
@@ -520,7 +519,7 @@ mod tests {
             .settings
             .insert("size".into(), ParamValue::Int(4096));
 
-        let e = Edits::diff(&full, &base);
+        let e = Edits::diff(&full, &base, every_setting);
         assert_eq!(e.stages.len(), 1);
         assert_eq!(e.removed, vec![Patch::DERIVED_BASE + 1]);
         assert_eq!(e.links.len(), 2, "{:?}", e.links);
@@ -540,7 +539,7 @@ mod tests {
         assert_eq!(back, e);
         assert_eq!(places_back, places);
         // No edits is no edits, so a fresh receiver is not told anything.
-        assert!(Edits::diff(&base, &base).is_empty());
+        assert!(Edits::diff(&base, &base, every_setting).is_empty());
     }
 
     #[test]

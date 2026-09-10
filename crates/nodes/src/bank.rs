@@ -356,10 +356,9 @@ impl ChannelBank {
                 buf.clear();
                 buf.iq_mut().extend_from_slice(&lanes[c]);
                 let evs = match g.run() {
-                    Ok(ev) => ev.to_vec(),
+                    Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
                     Err(e) => vec![Event::Warning {
-                        stage: format!("channel {c}"),
-                        message: e.to_string(),
+                        message: format!("channel {c}: {e}"),
                     }],
                 };
                 // Read back what the front end detected, before the protocols

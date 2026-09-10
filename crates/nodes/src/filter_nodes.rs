@@ -18,6 +18,7 @@ use dsp::fir::Fir;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 const ATTEN_DB: f64 = 70.0;
 
@@ -334,4 +335,59 @@ impl Simple for IirFilterNode {
         self.redesign(n);
         Ok(())
     }
+}
+
+/// The setting names these stages read.
+const RESPONSE: &str = "response";
+const FREQ_HZ: &str = "freq_hz";
+const WIDTH_HZ: &str = "width_hz";
+const TAPS: &str = "taps";
+const Q: &str = "q";
+
+/// Where a filter sits and how wide it is before anything says otherwise.
+const DEFAULT_FREQ_HZ: f64 = 5_000.0;
+const DEFAULT_WIDTH_HZ: f64 = 2_000.0;
+const DEFAULT_TAPS: i64 = 127;
+
+/// A Butterworth biquad, which is the flattest passband a single section has.
+const DEFAULT_Q: f64 = 0.707;
+
+pub const FIR_FILTER: StageDesc = StageDesc {
+    name: "fir_filter",
+    summary: "Windowed-sinc pass or block filter: linear phase, and \
+              as sharp as the taps you pay for",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_fir(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(FirFilterNode::new(
+        response(s),
+        s.f64_or(FREQ_HZ, DEFAULT_FREQ_HZ),
+        s.f64_or(WIDTH_HZ, DEFAULT_WIDTH_HZ),
+        s.i64_or(TAPS, DEFAULT_TAPS).clamp(3, 4095) as usize,
+    )))
+}
+
+pub const IIR_FILTER: StageDesc = StageDesc {
+    name: "iir_filter",
+    summary: "Biquad pass or block filter: a handful of coefficients \
+              where an FIR would need hundreds, at the cost of phase",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_iir(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let freq = s.f64_or(FREQ_HZ, DEFAULT_FREQ_HZ);
+    // A band is described by its width everywhere except in the arithmetic,
+    // which wants a resonance.
+    let q = match s.get(WIDTH_HZ) {
+        Some(w) => Biquad::band_q(freq, w.as_f64().unwrap_or(1.0)),
+        None => s.f64_or(Q, DEFAULT_Q),
+    };
+    Ok(Box::new(IirFilterNode::new(response(s), freq, q)))
+}
+
+fn response(s: &Settings) -> Response {
+    Response::from_name(s.str_or(RESPONSE, "lowpass")).unwrap_or(Response::Lowpass)
 }

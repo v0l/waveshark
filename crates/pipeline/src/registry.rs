@@ -4,18 +4,62 @@ use crate::param::ParamValue;
 use crate::node::Node;
 use common::{Error, Result};
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// Settings passed to a stage constructor.
 pub type Settings = BTreeMap<String, ParamValue>;
 
 type Factory = Box<dyn Fn(&Settings) -> Result<Box<dyn Node>> + Send + Sync>;
 
+/// What a stage is for, which is how the stage menu groups them.
+///
+/// A closed set, so a stage filed under a heading nobody draws is a build
+/// error rather than a stage missing from the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Category {
+    Transmit,
+    Filter,
+    Demod,
+    Decode,
+    Audio,
+    Video,
+    Sink,
+}
+
+impl Category {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transmit => "transmit",
+            Self::Filter => "filter",
+            Self::Demod => "demod",
+            Self::Decode => "decode",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Sink => "sink",
+        }
+    }
+}
+
+impl fmt::Display for Category {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StageDesc {
     pub name: &'static str,
     pub summary: &'static str,
-    /// Grouping for the UI: "filter", "demod", "decode", "sink".
-    pub category: &'static str,
+    /// Grouping for the UI.
+    pub category: Category,
+    /// Whether what this stage reads belongs on the packet bus, so a host
+    /// wires its tail there.
+    ///
+    /// A front end producing bursts, frames or packets says yes; a stage the
+    /// bus feeds says no, or the graph would have a cycle in it. Declared
+    /// here because the wires are drawn from a description, before any node
+    /// exists to be asked what it negotiated.
+    pub feeds_bus: bool,
 }
 
 /// Every stage type known to this build.
@@ -54,12 +98,17 @@ impl Registry {
         self.entries.values().map(|(d, _)| d)
     }
 
-    pub fn by_category<'a>(&'a self, cat: &'a str) -> impl Iterator<Item = &'a StageDesc> {
+    pub fn by_category(&self, cat: Category) -> impl Iterator<Item = &StageDesc> {
         self.list().filter(move |d| d.category == cat)
     }
 
     pub fn contains(&self, name: &str) -> bool {
         self.entries.contains_key(name)
+    }
+
+    /// What the registry knows about one stage type.
+    pub fn desc(&self, name: &str) -> Option<&StageDesc> {
+        self.entries.get(name).map(|(d, _)| d)
     }
 }
 

@@ -7,6 +7,12 @@
 
 use crate::{Hz, Value};
 
+/// Media types for [`Decoded::media_type`].
+///
+/// These describe what `payload` holds, which is a separate question from a
+/// port's kind: that one picks the buffer layout a port carries, while these
+/// say what a finished frame's bytes mean. A JPEG from SSTV and a JSON object
+/// from RDS are both `Vec<u8>` and only differ here.
 pub mod media {
     /// Undecoded bytes: packed bits, a raw frame.
     pub const BYTES: &str = "application/octet-stream";
@@ -245,21 +251,68 @@ impl Identity {
     }
 }
 
-/// How long a transmission held the channel, for the call list.
+/// What protects a transmission, where the decode says anything.
+///
+/// Three states rather than a flag, because "this one says nothing" is not
+/// "this one is in the clear": TETRA names the cipher in the grant and not
+/// in the traffic that follows, and a call list that read every frame as a
+/// verdict flipped the row back to clear while it was still enciphered.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Secrecy {
+    /// This decode says nothing either way, so whatever was said before it
+    /// stands.
+    #[default]
+    Unsaid,
+    /// This decode says the traffic is in the clear.
+    Clear,
+    /// Enciphered, named as the system names it where it named one:
+    /// "AIE-3", "E2E", "privacy".
+    Encrypted(Option<String>),
+}
+
+impl Secrecy {
+    /// Whether there is any point listening to it.
+    pub fn encrypted(&self) -> bool {
+        matches!(self, Secrecy::Encrypted(_))
+    }
+
+    /// The cipher's name, where the system gave one.
+    pub fn cipher(&self) -> Option<&str> {
+        match self {
+            Secrecy::Encrypted(name) => name.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// How long a transmission held the channel, and what it carried, for the
+/// call list.
 ///
 /// `voice` is the decoder asserting that speech was carried, which only a
 /// decoder that knows can say: a destination alone is not a call, or every
-/// short data message would be one.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+/// short data message would be one. What is here is what the call list
+/// reads: a decoder joins the list by filling this in rather than by
+/// spelling field names the list happens to look for.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Airtime {
     pub seconds: f64,
     pub voice: bool,
     /// The transmission is still running, so a list can show it as live
     /// rather than as one that ended the moment it was heard.
     pub live: bool,
+    pub secrecy: Secrecy,
+    /// The vocoder the speech is in, as the front end names it: "AMBE+2
+    /// 2450", "Codec 2 3200", "ACELP 4.6k".
+    pub codec: Option<&'static str>,
 }
 
 /// A successfully decoded frame from some protocol.
+///
+/// The conclusion and nothing else. How strongly it was heard, the samples it
+/// was read from, the speech it carried and the width it came through are the
+/// evidence, and they stay on the [`crate::Packet`] this is attached to: a
+/// copy on the conclusion is a second place to look for a level, and the two
+/// disagreed as soon as one of them was filled in by a fallback.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decoded {
     /// Protocol identifier: "pocsag", "ais", "adsb", "rds".
@@ -285,16 +338,6 @@ pub struct Decoded {
     /// protocol name does not imply it: plenty of devices exist in both an
     /// OOK and an FSK variant.
     pub modulation: Option<crate::Modulation>,
-    /// The width it was heard through, in hertz.
-    ///
-    /// Carried rather than inferred from the keying. The same burst arrives in
-    /// every bank tier that covers its frequency, and telling those copies
-    /// apart from a device genuinely repeating its packet is the difference
-    /// between one row in the log and four. That worked by accident while the
-    /// keying was guessed from the channel width, since the two tiers then
-    /// always disagreed about the keying; a classifier that gets both tiers
-    /// right takes the accident away.
-    pub bandwidth_hz: Option<f64>,
     /// The fields, timings or whatever else the decoder can say about this
     /// frame beyond naming it. Kept apart from `text` so a list can put the
     /// protocol in one column and its detail in another.
@@ -307,22 +350,6 @@ pub struct Decoded {
     /// them, and none of them should be parsing a display string to get there.
     /// Ordered as the decoder emitted them, which is how they read best.
     pub fields: Vec<(String, Value)>,
-    /// Received level in dBFS and signal to noise in dB, when the decoder
-    /// measured them.
-    ///
-    /// Both, because either alone misleads: a strong packet in a noisy channel
-    /// and a weak one in a quiet channel can share an SNR, and only the level
-    /// says whether the front end is near clipping.
-    pub rssi_dbfs: Option<f32>,
-    pub snr_db: Option<f32>,
-    /// The burst's own samples, when the front end kept them. See
-    /// [`crate::Packet::iq`].
-    pub iq: Option<std::sync::Arc<crate::IqBurst>>,
-    /// Decoded speech, for a protocol that carries it.
-    ///
-    /// A voice transmission is not readable as bytes: what it said is in the
-    /// audio, so the audio is the payload a view wants.
-    pub audio: Option<std::sync::Arc<crate::Speech>>,
     /// Who it was between, where the protocol names them. See [`Link`].
     pub link: Option<Link>,
     /// Where the transmitter said it was. What the map plots.
@@ -348,13 +375,8 @@ impl Decoded {
             text: None,
             crc_ok: None,
             modulation: None,
-            bandwidth_hz: None,
             detail: None,
             fields: Vec::new(),
-            rssi_dbfs: None,
-            snr_db: None,
-            iq: None,
-            audio: None,
             link: None,
             position: None,
             report: ReportDetail::Bare,
@@ -393,16 +415,6 @@ impl Decoded {
         self
     }
 
-    pub fn with_iq(mut self, iq: Option<std::sync::Arc<crate::IqBurst>>) -> Self {
-        self.iq = iq;
-        self
-    }
-
-    pub fn with_audio(mut self, audio: Option<std::sync::Arc<crate::Speech>>) -> Self {
-        self.audio = audio;
-        self
-    }
-
     pub fn with_fields(mut self, fields: Vec<(String, Value)>) -> Self {
         self.fields = fields;
         self
@@ -413,29 +425,8 @@ impl Decoded {
         self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
 
-    /// Received level and signal to noise, both in dB.
-    pub fn with_level(mut self, rssi_dbfs: f32, snr_db: f32) -> Self {
-        self.rssi_dbfs = Some(rssi_dbfs);
-        self.snr_db = Some(snr_db);
-        self
-    }
-
     pub fn with_modulation(mut self, m: crate::Modulation) -> Self {
         self.modulation = Some(m);
-        self
-    }
-
-    /// Signal to noise alone, in dB, for a decode whose level was measured
-    /// for the whole transmission rather than for this frame: a pager page
-    /// or an M17 stream carries the source's SNR but no per-frame RSSI.
-    pub fn with_snr(mut self, snr_db: f32) -> Self {
-        self.snr_db = Some(snr_db);
-        self
-    }
-
-    /// The channel width the frame was heard through.
-    pub fn with_bandwidth(mut self, hz: f64) -> Self {
-        self.bandwidth_hz = Some(hz);
         self
     }
 
@@ -476,5 +467,52 @@ impl Decoded {
             Some((prefix, "")) => mine.starts_with(prefix) && mine[prefix.len()..].starts_with('/'),
             _ => mine == pattern,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(media: &'static str) -> Decoded {
+        Decoded::bytes("test", Hz::hz(1), 0.0, vec![1, 2, 3]).with_media(media)
+    }
+
+    #[test]
+    fn a_plain_frame_defaults_to_opaque_bytes() {
+        let f = Decoded::bytes("fineoffset", Hz::hz(433_920_000), 0.0, vec![0xAB]);
+        assert_eq!(f.media_type, media::BYTES);
+        assert!(!f.is_image());
+    }
+
+    #[test]
+    fn images_are_recognised_by_family_not_by_protocol() {
+        assert!(d(media::JPEG).is_image());
+        assert!(d(media::PNG).is_image());
+        assert!(!d(media::JSON).is_image());
+    }
+
+    #[test]
+    fn wildcard_patterns_match_a_family() {
+        let jpeg = d(media::JPEG);
+        assert!(jpeg.matches_media("image/*"));
+        assert!(jpeg.matches_media("*/*"));
+        assert!(jpeg.matches_media("image/jpeg"));
+        assert!(!jpeg.matches_media("image/png"));
+        assert!(!jpeg.matches_media("audio/*"));
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_a_family_boundary_does_not_match() {
+        // "image/*" must not match "imagery/x", which a naive starts_with does.
+        let odd = d("imagery/x");
+        assert!(!odd.matches_media("image/*"));
+    }
+
+    #[test]
+    fn parameters_do_not_break_matching() {
+        let t = d("text/plain;charset=utf-8");
+        assert!(t.matches_media("text/plain"));
+        assert!(t.matches_media("text/*"));
     }
 }

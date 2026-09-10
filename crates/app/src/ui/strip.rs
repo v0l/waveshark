@@ -3,7 +3,7 @@
 
 use super::state::AudioState;
 use super::*;
-use crate::audiobus::AudioBusNode;
+use crate::audiobus::StripParam;
 use crate::radio::TxSource;
 use pipeline::param::ParamValue;
 
@@ -752,10 +752,9 @@ impl Strip<'_> {
                 // show, but each has a level and a meter like everything
                 // else that reaches the speaker. Set by the same route the
                 // chain view uses, since the level is the bus's parameter.
-                let (bus, strips) =
-                    self.radio.map(|r| r.status.strips()).unwrap_or((None, Vec::new()));
-                if let Some(bus) = bus {
-                    for s in strips.iter().filter(|s| s.channel.is_none() && !s.voice) {
+                let strips = self.radio.map(|r| r.status.strips()).unwrap_or_default();
+                if let Some(bus) = strips.bus_node {
+                    for s in strips.inputs.iter().filter(|s| s.channel.is_none() && !s.voice) {
                         egui::Frame::NONE
                             .fill(theme::PANEL)
                             .stroke(Stroke::new(1.0, theme::ETCH))
@@ -781,14 +780,14 @@ impl Strip<'_> {
                                     if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
                                         self.cmds.push(Cmd::NodeParam(
                                             bus,
-                                            AudioBusNode::param_of(s.port, "vol"),
+                                            StripParam::Vol.name(s.port),
                                             ParamValue::Float(v as f64),
                                         ));
                                     }
                                     if Self::mute_button(ui, s.muted, "Mute this input").clicked() {
                                         self.cmds.push(Cmd::NodeParam(
                                             bus,
-                                            AudioBusNode::param_of(s.port, "mute"),
+                                            StripParam::Mute.name(s.port),
                                             ParamValue::Bool(!s.muted),
                                         ));
                                     }

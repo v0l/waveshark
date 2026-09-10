@@ -24,6 +24,7 @@ use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// How much of the disk the capture folder may take.
 ///
@@ -335,9 +336,9 @@ impl Simple for IqCaptureNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::bool("enabled", self.enabled).label("Write the span to disk"),
+            Param::bool(ENABLED, self.enabled).label("Write the span to disk"),
             Param::float(
-                "budget_mb",
+                BUDGET_MB,
                 self.budget as f64 / (1 << 20) as f64,
                 16.0..=65_536.0,
             )
@@ -349,11 +350,11 @@ impl Simple for IqCaptureNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "enabled" => {
+            ENABLED => {
                 self.set_enabled(v.as_bool().unwrap_or(true));
                 Ok(())
             }
-            "budget_mb" => {
+            BUDGET_MB => {
                 self.budget = (v.as_f64().unwrap_or(0.0).max(0.0) * (1 << 20) as f64) as u64;
                 Ok(())
             }
@@ -370,10 +371,7 @@ impl IqCaptureNode {
     fn fail(&mut self, message: String, c: &mut NodeCtx<'_>) {
         if !self.reported {
             self.reported = true;
-            c.emit(pipeline::event::Event::Warning {
-                stage: "iq_capture".into(),
-                message: message.clone(),
-            });
+            c.warn(message.clone());
         }
         self.error = Some(message);
         self.full = true;
@@ -575,4 +573,37 @@ mod tests {
         assert_eq!(meta.center, Some(Hz(433_475_000)));
         assert_eq!(meta.rate, Some(common::Sps(2_400_000)));
     }
+}
+
+/// The setting names this stage reads.
+const DIR: &str = "dir";
+const NAME: &str = "name";
+const FORMAT: &str = "format";
+const BUDGET_MB: &str = "budget_mb";
+const ENABLED: &str = "enabled";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "iq_capture",
+    summary: "Write the span to a file as it arrives, so a signal \
+              nothing decodes can be worked on off the air",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let default = SampleFormat::Cu8;
+    let format = SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
+    let mb = s.f64_or(BUDGET_MB, 0.0);
+    let budget = if mb > 0.0 {
+        (mb * (1u64 << 20) as f64) as u64
+    } else {
+        DEFAULT_BUDGET
+    };
+    Ok(Box::new(
+        IqCaptureNode::new(s.str_or(DIR, "."))
+            .with_name(s.str_or(NAME, "capture"))
+            .with_format(format)
+            .with_budget(budget)
+            .with_enabled(s.bool_or(ENABLED, true)),
+    ))
 }

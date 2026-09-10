@@ -18,6 +18,7 @@ use dsp::Spectrum;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// How the converter is being driven, measured on the samples of the last
 /// spectrum frame.
@@ -111,6 +112,16 @@ pub struct SpectrumNode {
     collecting: bool,
 }
 
+/// The transform size a spectrum stage's description asks for, rounded down
+/// to the power of two the transform takes.
+///
+/// One reading of the setting, so the size a stage asks for and the size a
+/// node already has are compared on the same terms.
+pub fn spectrum_size(settings: &Settings) -> usize {
+    let size = settings.i64_or(SIZE, DEFAULT_SPECTRUM_SIZE).clamp(64, 32_768) as usize;
+    1usize << (usize::BITS - 1 - size.leading_zeros()) as usize
+}
+
 impl SpectrumNode {
     pub fn new(size: usize) -> Self {
         Self {
@@ -164,6 +175,11 @@ impl SpectrumNode {
     pub fn set_smoothing(&mut self, v: f32) {
         self.spec.smoothing = v.clamp(0.0, 1.0);
     }
+
+    /// How much of the last frame the next one keeps.
+    pub fn smoothing(&self) -> f32 {
+        self.spec.smoothing
+    }
 }
 
 impl Simple for SpectrumNode {
@@ -173,6 +189,12 @@ impl Simple for SpectrumNode {
 
     fn is_sink(&self) -> bool {
         true
+    }
+
+    /// The transform cannot be resized, and one holding an average of
+    /// another band is worse than one starting empty.
+    fn survives_rebuild(&self, retuned: bool, settings: &Settings) -> bool {
+        !retuned && self.size() == spectrum_size(settings)
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
@@ -365,6 +387,10 @@ pub trait PacketSink: Send + 'static {
 pub struct PacketBusNode {
     sink: Option<Box<dyn PacketSink>>,
     inputs: usize,
+    /// Which inputs have already been reported for putting a packet on the
+    /// bus with no level. Once each, because the offender is a front end and
+    /// it will do it for every packet it produces.
+    unmeasured: std::collections::HashSet<usize>,
 }
 
 impl PacketBusNode {
@@ -372,6 +398,7 @@ impl PacketBusNode {
         Self {
             sink: None,
             inputs: inputs.max(1),
+            unmeasured: std::collections::HashSet::new(),
         }
     }
 
@@ -398,6 +425,30 @@ impl PacketBusNode {
     /// port that nothing connected.
     pub fn set_inputs(&mut self, n: usize) {
         self.inputs = n.max(1);
+        self.unmeasured.clear();
+    }
+
+    /// Say so, once, when a packet arrives without a finite level.
+    ///
+    /// The one place every packet passes through, so a front end that has not
+    /// been taught to measure is named here rather than showing up as a blank
+    /// column in the list and a row nobody can sort, judge or compare. A feed
+    /// from another receiver is the honest exception: the far end reports
+    /// what it measured, and the AVR format reports nothing.
+    fn check_measured(&mut self, k: usize, p: &common::Packet, ctx: &mut NodeCtx<'_>) {
+        if p.rssi_dbfs().is_finite() && p.snr_db().is_finite() {
+            return;
+        }
+        if !self.unmeasured.insert(k) {
+            return;
+        }
+        ctx.warn(format!(
+            "input {k} put a packet on the bus at {:.4} MHz with no level: \
+             rssi {}, snr {}",
+            p.center_hz() as f64 / 1e6,
+            p.rssi_dbfs(),
+            p.snr_db()
+        ));
     }
 
     /// Packets written to the sink, or zero when there is none.
@@ -434,20 +485,15 @@ impl pipeline::node::Node for PacketBusNode {
         "packet_bus"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
+    /// How many inputs the bus has is how many things feed it, which changes
+    /// with every retune. It is carried across rebuilds because it holds the
+    /// open log file, so it has to be told.
+    fn configure(&mut self, settings: &Settings) {
+        self.set_inputs(settings.i64_or(INPUTS, 1).max(1) as usize);
     }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
-    /// Needed so a rebuild can lift the bus out of the old graph and put it
-    /// in the new one. Without it the open file is dropped on the next
-    /// retune, and logging silently stops.
-    fn into_any(self: Box<Self>) -> Option<Box<dyn std::any::Any>> {
-        Some(self)
-    }
+
 
     fn num_inputs(&self) -> usize {
         self.inputs
@@ -484,6 +530,7 @@ impl pipeline::node::Node for PacketBusNode {
         let out = outputs[0].packets_mut();
         for (k, payload) in inputs.iter().enumerate() {
             let spec = ctx.inputs.get(k).map(|p| p.spec);
+            let from = out.len();
             match payload {
                 Payload::Pulses(pkgs) => {
                     let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
@@ -509,6 +556,14 @@ impl pipeline::node::Node for PacketBusNode {
                 // strongly, and none of that should be replaced with ours.
                 Payload::Packets(ps) => out.extend(ps.iter().cloned()),
                 _ => {}
+            }
+            // Checked as it goes on, so what is judged is what the bus will
+            // carry: a packet built here from pulses or from a frame.
+            if let Some(p) = out[from..]
+                .iter()
+                .find(|p| !(p.rssi_dbfs().is_finite() && p.snr_db().is_finite()))
+            {
+                self.check_measured(k, p, ctx);
             }
         }
         if let Some(sink) = self.sink.as_mut() {
@@ -788,4 +843,47 @@ mod adc_tests {
             .collect();
         assert!(AdcHealth::measure(&railed).clipping());
     }
+}
+
+/// The setting names these stages read.
+const INPUTS: &str = "inputs";
+const SIZE: &str = "size";
+
+/// Bins in the display transform when nothing has asked for more.
+const DEFAULT_SPECTRUM_SIZE: i64 = 1_024;
+
+pub const PACKET_BUS: StageDesc = StageDesc {
+    name: "packet_bus",
+    summary: "Gather bursts, frames and packets from every front end \
+              into one stream, and write them to the log",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build_packet_bus(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(PacketBusNode::new(s.i64_or(INPUTS, 1).max(1) as usize)))
+}
+
+pub const DC_BLOCK: StageDesc = StageDesc {
+    name: "dc_block",
+    summary: "Remove the centre spur a direct-conversion receiver \
+              produces, by measuring it rather than notching it out",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_dc_block(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(DcBlockNode::new()))
+}
+
+pub const SPECTRUM: StageDesc = StageDesc {
+    name: "spectrum",
+    summary: "An FFT display of whatever is wired into it, drawn \
+              alongside the receiver's own",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build_spectrum(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(SpectrumNode::new(spectrum_size(s))))
 }

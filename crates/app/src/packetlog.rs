@@ -887,7 +887,7 @@ mod tests {
         Packet::of_frame(
             at_us,
             2_000_000,
-            common::Frame::unmeasured(bytes.to_vec()).at(1_090_000_000),
+            common::Frame::measured(bytes.to_vec(), -18.0, 12.0).at(1_090_000_000),
         )
     }
 
@@ -1106,7 +1106,8 @@ mod tests {
     fn speech_is_not_evidence_and_is_not_logged() {
         let d = dir("voice");
         let mut log = PacketLog::new(d.clone());
-        let mut over = Packet::of_frame(AT, 12_500, common::Frame::unmeasured(Vec::new()));
+        let mut over =
+            Packet::of_frame(AT, 12_500, common::Frame::measured(Vec::new(), -30.0, 20.0));
         over.audio =
             Some(std::sync::Arc::new(common::Speech { pcm: vec![0.1; 48_000], rate: 48_000.0 }));
         log.write(&over);

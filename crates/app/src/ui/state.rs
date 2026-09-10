@@ -282,7 +282,7 @@ impl ChainState {
     /// Hand the patch to the radio thread, remembering what was sent so that
     /// one handed back after a refusal can be told apart from an echo.
     pub fn send_patch(&mut self, cmds: &mut Vec<Cmd>) {
-        self.edits = crate::patch::Edits::diff(&self.patch, &self.base);
+        self.edits = crate::patch::Edits::diff(&self.patch, &self.base, crate::chain::operator_owns);
         self.patch_sent = Some(self.patch.clone());
         cmds.push(Cmd::Edits(self.edits.clone()));
         self.save_patch();
@@ -606,7 +606,7 @@ pub(super) struct TranscriptState {
     pub log: crate::transcripts::TranscriptLog,
     /// The conversation being read on its own, by its key, or `None` for
     /// everything the receiver heard. Set by the call list's own button.
-    pub only: Option<String>,
+    pub only: Option<common::ConversationKey>,
     /// What the operator typed in the filter box.
     pub filter: String,
     /// Whether the model has been asked to load, so the button says so once

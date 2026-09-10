@@ -11,16 +11,20 @@
 //! stream is 25 frames a second and none of them means anything on its own,
 //! whereas "M0ABC called M17-M17 C for nine seconds" is one row in a log.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
 use decode::m17::{self, Assembler, DataType, Event};
-use dsp::m17::{Body, Frame, M17Config, M17Demod, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ};
+use dsp::m17::{
+    Body, Frame, M17Config, M17Demod, BAUD, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ,
+    SYMBOLS_PER_FRAME,
+};
 use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::{media, Decoded};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// The M17 calling frequency in Region 1, and only the default the node is
 /// built with before the scanner table says where to listen.
@@ -44,6 +48,11 @@ pub const VOICE_HZ: f64 = 8_000.0;
 /// bits of payload, which at 3200 bit/s is two 20 ms codec frames.
 const C2_FRAME_BYTES: usize = 8;
 
+/// Channel samples kept behind the demodulator, in seconds. A stream frame is
+/// 40 ms and the events that bracket one are no longer, so this is the frame
+/// plus the lead-in a reader wants either side of it.
+const IQ_KEEP_S: f64 = 0.5;
+
 pub struct M17Node {
     channel_hz: f64,
     mixer: Mixer,
@@ -55,6 +64,12 @@ pub struct M17Node {
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
     frames: Vec<Frame>,
+    /// What the channel was doing behind each event, so every packet carries
+    /// the level it was heard at and the samples it was read from.
+    meter: crate::FrameMeter,
+    /// Rate the discriminator and the meter run at, for turning a frame's
+    /// symbol position into samples.
+    audio_rate: f64,
     /// The vocoder, and the speech of the transmission being heard now.
     ///
     /// Held across blocks because a transmission spans many of them, and the
@@ -96,6 +111,8 @@ impl M17Node {
             narrow: Vec::new(),
             audio: Vec::new(),
             frames: Vec::new(),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, IQ_KEEP_S),
+            audio_rate: AUDIO_HZ,
             codec: Codec2::new(Codec2Mode::MODE_3200),
             voice_now: Vec::new(),
             voice_stream: false,
@@ -120,6 +137,18 @@ impl M17Node {
     /// The channel this node is listening on.
     pub fn channel_hz(&self) -> f64 {
         self.channel_hz
+    }
+
+    /// One event as a frame: its bytes, what it was heard at, and the samples
+    /// it was read from where it came from a frame on the air.
+    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::Frame {
+        let Some(at) = start_sample else {
+            return common::Frame::measured(bytes, self.meter.rssi_dbfs(), self.meter.snr_db())
+                .at(self.channel_hz as u64);
+        };
+        let len = (SYMBOLS_PER_FRAME as f64 * self.audio_rate / BAUD) as usize;
+        let snr_db = self.meter.snr_db_at(at, len);
+        self.meter.frame_measured(bytes, at, len, snr_db)
     }
 
     /// The source and destination of the transmission being heard, while one
@@ -164,13 +193,7 @@ impl Node for M17Node {
     }
 
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         1
@@ -202,6 +225,8 @@ impl Node for M17Node {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.demod = M17Demod::new(audio_rate, M17Config::default());
         self.assembler = Assembler::new(audio_rate);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, IQ_KEEP_S);
+        self.audio_rate = audio_rate;
         self.samples = 0;
 
         // Packets rather than frames, because a voice transmission carries
@@ -230,6 +255,7 @@ impl Node for M17Node {
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
         self.decim.process(&self.mixed, &mut self.narrow);
+        self.meter.feed(&self.narrow);
         self.audio.clear();
         self.fm.process(&self.narrow, &mut self.audio);
         self.samples += self.audio.len() as u64;
@@ -241,9 +267,11 @@ impl Node for M17Node {
         self.audio = audio;
 
         self.voice_now.clear();
-        // Each event with the speech of the frame it came from, where it is
-        // a stream frame of a voice transmission.
-        let mut events: Vec<(Event, Option<std::sync::Arc<common::Speech>>)> = Vec::new();
+        // Each event with the speech of the frame it came from, where it is a
+        // stream frame of a voice transmission, and where that frame sat in
+        // the stream, so it can be measured on its own samples.
+        let mut events: Vec<(Event, Option<std::sync::Arc<common::Speech>>, Option<u64>)> =
+            Vec::new();
         for f in &frames {
             let mut heard = None;
             // The vocoder runs here rather than in the assembler: what a
@@ -266,7 +294,7 @@ impl Node for M17Node {
                 let audio = matches!(e, Event::StreamFrame { .. })
                     .then(|| heard.take())
                     .flatten();
-                events.push((e, audio));
+                events.push((e, audio, Some(f.start_sample)));
             }
         }
         self.frames = frames;
@@ -277,7 +305,7 @@ impl Node for M17Node {
             self.assembler
                 .poll(self.samples)
                 .into_iter()
-                .map(|e| (e, None)),
+                .map(|e| (e, None, None)),
         );
 
         // The channel is reported whether or not anybody is on it, so a
@@ -296,13 +324,12 @@ impl Node for M17Node {
             pcm: std::mem::take(&mut self.voice_now),
         });
 
-        let center_hz = self.channel_hz as u64;
         let at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
         let out = outputs[OUT_PACKETS].packets_mut();
-        for (e, audio) in &events {
+        for (e, audio, at) in &events {
             self.accepted += 1;
             if matches!(e, Event::Stream { .. }) {
                 // The transmission ended, so there is nobody to subscribe to
@@ -310,10 +337,12 @@ impl Node for M17Node {
                 self.talking = None;
                 self.voice_stream = false;
             }
-            // A frame that reached here passed its checks; the front end
-            // measures no level per transmission, so the source's own is
-            // filled in above it.
-            let frame = common::Frame::unmeasured(e.to_bytes()).at(center_hz);
+            // A frame that reached here passed its checks, and it carries
+            // what it was heard at: the level of its own 40 ms, the ratio to
+            // the channel's floor, and the samples it was read from. The end
+            // of a transmission is the assembler's conclusion rather than a
+            // frame off the air, so it takes the channel's level instead.
+            let frame = self.frame_at(e.to_bytes(), *at);
             let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
             p.audio = audio.clone();
             out.push(p);
@@ -331,6 +360,7 @@ impl Node for M17Node {
         self.fm.reset();
         self.demod.reset();
         self.assembler = Assembler::new(AUDIO_HZ);
+        self.meter.reset();
     }
 }
 
@@ -477,6 +507,16 @@ impl Protocol for M17 {
     fn placement(&self) -> Placement {
         Placement::Anywhere
     }
+    /// Its frequency cannot identify it: it runs wherever an amateur puts it,
+    /// which includes the 2 m channels APRS uses and the 70 cm ones near the
+    /// pager bands. A tagged event of an exact length carrying a link setup
+    /// frame whose CRC checks is the more specific claim anyway.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Tagged
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        m17_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
@@ -494,7 +534,7 @@ impl Protocol for M17 {
         &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("m17").f("channel_hz", at.center_hz)]
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
 }
 
@@ -839,4 +879,18 @@ mod tests {
             Some(common::Value::Text("SMS".into()))
         );
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "m17",
+    summary: "One M17 channel: narrowband FM, 4-FSK at 4800 baud, link setup and packets",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(M17Node::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

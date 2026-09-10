@@ -25,6 +25,36 @@ pub enum Sideband {
     Lower,
 }
 
+impl Sideband {
+    /// What a setting or a menu calls it, and what [`FromStr`] reads back.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Upper => "usb",
+            Self::Lower => "lsb",
+        }
+    }
+}
+
+impl std::str::FromStr for Sideband {
+    type Err = common::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "usb" | "upper" => Ok(Self::Upper),
+            "lsb" | "lower" => Ok(Self::Lower),
+            other => Err(common::Error::other(format!(
+                "no sideband called {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for Sideband {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Stopband attenuation of the sideband filter.
 ///
 /// Opposite-sideband rejection is what this number buys, and 60 dB is what a

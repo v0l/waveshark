@@ -23,9 +23,11 @@ pub mod registry;
 
 pub use cost::Cost;
 pub use event::{Decoded, Event, Request};
-pub use graph::{chain, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT};
+pub use graph::{
+    chain, Emitted, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT,
+};
 pub use node::{Node, NodeCtx, PortSpec, Simple};
 pub use param::{Param, ParamRange, ParamValue};
 pub use registry::Registry as NodeRegistry;
 pub use port::{Payload, PortKind, StreamSpec, Tag, TagValue};
-pub use registry::{Registry, Settings, SettingsExt, StageDesc};
+pub use registry::{Category, Registry, Settings, SettingsExt, StageDesc};

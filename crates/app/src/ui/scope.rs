@@ -362,20 +362,16 @@ impl Scope<'_> {
             }
             // At least two pixels, or a narrow sensor on a wide span vanishes.
             let (cx0, cx1) = if cx1 - cx0 < 2.0 { (cx0 - 1.0, cx0 + 1.0) } else { (cx0, cx1) };
+            // A locked channel measured nothing, so it says nothing rather
+            // than reading zero decibels.
+            let level = match s.snr_db {
+                Some(db) => format!("  {db:.0} dB"),
+                None => String::new(),
+            };
             let label = if s.bandwidth_hz >= 1e6 {
-                format!(
-                    "{:.4} MHz  {:.0} kHz  {:.0} dB",
-                    s.center_hz / 1e6,
-                    s.bandwidth_hz / 1e3,
-                    s.snr_db
-                )
+                format!("{:.4} MHz  {:.0} kHz{level}", s.center_hz / 1e6, s.bandwidth_hz / 1e3)
             } else {
-                format!(
-                    "{:.4} MHz  {:.1} kHz  {:.0} dB",
-                    s.center_hz / 1e6,
-                    s.bandwidth_hz / 1e3,
-                    s.snr_db
-                )
+                format!("{:.4} MHz  {:.1} kHz{level}", s.center_hz / 1e6, s.bandwidth_hz / 1e3)
             };
             let width = label.len() as f32 * 5.6 + 6.0;
             let row = rows.iter().position(|end| *end < cx0).unwrap_or(rows.len());

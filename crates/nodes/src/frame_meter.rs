@@ -86,11 +86,13 @@ impl FrameMeter {
         10.0 * self.peak_pow.max(1e-20).log10()
     }
 
+    /// Peak against floor, both clamped at the same -200 dBFS [`Self::rssi_dbfs`]
+    /// reports for silence. A channel that has been digitally silent since the
+    /// node was built has a floor below anything a sample can express, and the
+    /// answer there is "as far above nothing as the peak is" rather than NaN:
+    /// a level that is not a number cannot be sorted, compared or drawn.
     pub fn snr_db(&self) -> f32 {
-        if !(self.floor_pow > 0.0) {
-            return f32::NAN;
-        }
-        10.0 * (self.peak_pow / self.floor_pow).max(1.0).log10()
+        10.0 * (self.peak_pow.max(1e-20) / self.floor_pow.max(1e-20)).max(1.0).log10()
     }
 
     /// Everything read since the last frame was taken, which is the burst
@@ -139,6 +141,19 @@ impl FrameMeter {
         }
         let pow = s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
         Some(10.0 * pow.max(1e-20).log10())
+    }
+
+    /// A frame's own power against the channel's floor, in dB.
+    ///
+    /// For a front end whose demodulator reports no ratio of its own but does
+    /// say where its frame sat. [`Self::snr_db`] answers with the loudest
+    /// block since the last frame, which on a front end that reads a frame
+    /// every forty milliseconds is usually some other frame.
+    pub fn snr_db_at(&self, start_sample: u64, len: usize) -> f32 {
+        match self.power_dbfs_at(start_sample, len) {
+            Some(p) => (p - 10.0 * self.floor_pow.max(1e-20).log10()).max(0.0),
+            None => self.snr_db(),
+        }
     }
 
     /// A frame at what its own samples measured, with those samples behind

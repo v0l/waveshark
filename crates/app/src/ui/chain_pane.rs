@@ -253,7 +253,7 @@ impl Chain<'_> {
         // written here, so a decoder added to the build appears in it without
         // this file being touched.
         let reg = crate::chain::registry();
-        let mut by_category: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+        let mut by_category: Vec<(pipeline::Category, Vec<(&str, &str)>)> = Vec::new();
         for d in reg.list() {
             match by_category.iter_mut().find(|(c, _)| *c == d.category) {
                 Some((_, v)) => v.push((d.name, d.summary)),
@@ -264,7 +264,7 @@ impl Chain<'_> {
         let mut add: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (category, stages) in &by_category {
-                ui.label(legend(category));
+                ui.label(legend(category.label()));
                 for (name, summary) in stages {
                     let w = egui::Button::new(egui::RichText::new(*name).size(12.0))
                         .fill(theme::WELL)

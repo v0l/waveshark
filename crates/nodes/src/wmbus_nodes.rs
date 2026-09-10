@@ -7,13 +7,14 @@
 //! reach the packet bus as any other frame does, and the protocols node
 //! reads the address out of them; see [`decode::wmbus`].
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use dsp::wmbus::{Demod, CHIP_RATE};
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, StageDesc};
 
 /// Width a mode T or C transmission occupies, for the port and the log.
 pub const CHANNEL_WIDTH_HZ: f64 = 250_000.0;
@@ -71,23 +72,13 @@ impl Simple for WmbusNode {
         Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let (Some(iq), Some(d)) = (i.as_iq(), self.demod.as_mut()) else {
             return Ok(());
         };
         self.meter.feed(iq);
-        let rate = c.inputs[0].spec.rate.max(1.0);
         for f in d.process(iq) {
             self.frames += 1;
-            c.emit(Event::Metric {
-                name: "wmbus_mode",
-                value: if f.mode == dsp::wmbus::Mode::T {
-                    1.0
-                } else {
-                    2.0
-                },
-            });
-            let _ = rate;
             o.frames_mut().push(self.meter.frame(f.bytes.clone()));
         }
         Ok(())
@@ -107,8 +98,7 @@ pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let r = decode::wmbus::parse(bytes, None)?;
     let mut d = Decoded::bytes("Wireless-MBus", center, 0.0, bytes.to_vec())
         .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_bandwidth(CHANNEL_WIDTH_HZ);
+        .with_crc(Some(true));
     let fields: Vec<(String, common::Value)> = r
         .fields
         .iter()
@@ -158,6 +148,16 @@ impl Protocol for Wmbus {
     fn placement(&self) -> Placement {
         Placement::Bands(dsp::wmbus::BANDS.to_vec())
     }
+    /// The wider of the two meter bands, the 868.95 MHz uplink.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: 500_000 }
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        if !dsp::wmbus::is_wmbus_band(p.center_hz() as f64) {
+            return None;
+        }
+        Some(wmbus_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
@@ -177,4 +177,15 @@ impl Protocol for Wmbus {
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("wmbus")]
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "wmbus",
+    summary: "Wireless M-Bus meter frames, modes T and C at 100 kchip/s",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(WmbusNode::new()))
 }

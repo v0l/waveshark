@@ -789,7 +789,7 @@ fn replay(path: &str) -> anyhow::Result<()> {
             Ok(recs) if recs.is_empty() => println!("{name}: nothing decoded"),
             Ok(recs) => {
                 for r in &recs {
-                    if r.model == "unknown" {
+                    if !r.is_known() {
                         unknown += 1;
                     } else {
                         decoded += 1;
@@ -800,7 +800,7 @@ fn replay(path: &str) -> anyhow::Result<()> {
                         r.modulation,
                         r.rssi_dbfs,
                         r.snr_db,
-                        r.model,
+                        r.protocol(),
                         r.bytes.len(),
                         r.detail,
                     );

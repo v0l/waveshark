@@ -92,7 +92,7 @@ fn main() -> common::Result<()> {
     let mut sent = 0;
     let mut idle = 0;
     if let Some(n) = g.node_mut(id) {
-        if let Some(tx) = n.as_any_mut().and_then(|a| a.downcast_mut::<TxSinkNode>()) {
+        if let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>() {
             tx.finish(std::time::Duration::from_secs(2));
             sent = tx.written();
             idle = tx.underruns();

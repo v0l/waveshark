@@ -47,7 +47,7 @@ pub(super) struct VideoPane<'a> {
     pub frame: Option<VideoFrame>,
     /// Every transmission the bus is seeing, with what it is called and how
     /// complete its last picture was.
-    pub inputs: Vec<(String, String, f32)>,
+    pub inputs: Vec<crate::chain::VideoInput>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -63,8 +63,8 @@ impl VideoPane<'_> {
             theme::Line::new().legend("watching").show(ui);
             let mut want = st.watching.clone();
             let shown = match &want {
-                Some(k) => match self.inputs.iter().find(|(key, _, _)| key == k) {
-                    Some((_, label, complete)) => format!("{label}  {:.0}%", complete * 100.0),
+                Some(k) => match self.inputs.iter().find(|i| &i.key == k) {
+                    Some(i) => format!("{}  {:.0}%", i.label, i.completeness * 100.0),
                     // Off the air, but still what was asked for.
                     None => format!(
                         "{}  (waiting)",
@@ -78,11 +78,11 @@ impl VideoPane<'_> {
                 .width(240.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut want, None, "best picture");
-                    for (key, label, complete) in &self.inputs {
+                    for i in &self.inputs {
                         ui.selectable_value(
                             &mut want,
-                            Some(key.clone()),
-                            format!("{label}  {:.0}%", complete * 100.0),
+                            Some(i.key.clone()),
+                            format!("{}  {:.0}%", i.label, i.completeness * 100.0),
                         );
                     }
                     if self.inputs.is_empty() {
@@ -103,8 +103,8 @@ impl VideoPane<'_> {
             if want != st.watching {
                 st.watching_label = want
                     .as_ref()
-                    .and_then(|k| self.inputs.iter().find(|(key, _, _)| key == k))
-                    .map(|(_, label, _)| label.clone());
+                    .and_then(|k| self.inputs.iter().find(|i| &i.key == k))
+                    .map(|i| i.label.clone());
                 st.watching = want.clone();
                 self.cmds.push(Cmd::WatchVideo(match want {
                     Some(k) => vec![crate::videobus::Rule::Channel(k)],

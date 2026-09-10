@@ -215,7 +215,7 @@ fn lane_height(topo: &Topology, places: &[Place], lane: usize) -> f32 {
         .iter()
         .zip(places)
         .filter(|(_, p)| p.col == lane)
-        .map(|(n, _)| n.inner.as_ref().map(|t| t.nodes.len()).unwrap_or(0))
+        .map(|(n, _)| n.inner.iter().map(|t| t.nodes.len()).sum::<usize>())
         .max()
         .unwrap_or(0);
     let phases = topo
@@ -866,16 +866,20 @@ pub fn draw(
         let below = if node.phases.is_empty() { r.bottom() } else { phases(&p, r, &node.phases) };
 
         // A composite draws what it runs inside itself, so a bank is not an
-        // opaque box with several hundred decoders hidden in it.
-        if let Some(inner) = &node.inner {
-            let mut iy = below + INNER_GAP;
+        // opaque box with several hundred decoders hidden in it, and a node
+        // holding a graph per front end is not one box for all of them.
+        let mut iy = below + INNER_GAP;
+        for (g, inner) in node.inner.iter().enumerate() {
             for (k, sub) in inner.nodes.iter().enumerate() {
                 let ir = Rect::from_center_size(
                     Pos2::new(x, iy + INNER_H / 2.0),
                     Vec2::new(box_w - 22.0, INNER_H),
                 );
                 p.rect(ir, 3.0, theme::WELL, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
-                let text = if k == 0 && node.inner_count > 1 {
+                // The count belongs on the first row of the first chain: it
+                // says how many times that chain runs, which is a bank's
+                // hundreds of channels all running the one drawn.
+                let text = if g == 0 && k == 0 && node.inner_count > 1 {
                     format!("{}  x{}", sub.label, node.inner_count)
                 } else {
                     sub.label.clone()
@@ -1604,7 +1608,7 @@ mod tests {
             latency: 0,
             inputs: ins.iter().map(|i| (*i, s)).collect(),
             outputs: vec![(out, s)],
-            inner: None,
+            inner: Vec::new(),
             inner_count: 1,
             sink: false,
             params: Vec::new(),
@@ -1970,12 +1974,12 @@ mod tests {
             output_slot: 2,
             rates: Vec::new(),
         };
-        t.nodes[2].inner = Some(Box::new(inner));
+        t.nodes[2].inner = vec![inner];
         t.nodes[2].inner_count = 74;
         let places = layout(&t);
         let lane = places[2].col;
         let with = lane_height(&t, &places, lane);
-        t.nodes[2].inner = None;
+        t.nodes[2].inner = Vec::new();
         let without = lane_height(&t, &places, lane);
         assert!(with > without, "a bank's channel chain has to fit somewhere");
     }

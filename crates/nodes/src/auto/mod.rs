@@ -23,20 +23,20 @@
 //! about where things are that the node keeps, because it is knowledge about
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
-use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
-use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
+use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceState, C32};
+use dsp::{SourceConfig, SourceDetector, SourceEvent};
 use pipeline::event::{Event, Request};
 use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
-use pipeline::registry::Registry;
+use pipeline::registry::{Category, Registry, Settings, SettingsExt, StageDesc};
 use pipeline::Graph;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-use crate::protocol::{self, CHANNEL_WIDTH_TOLERANCE};
+use crate::protocol;
 
 mod member;
 mod memory;
@@ -44,10 +44,10 @@ mod place;
 mod requests;
 mod watch;
 
-use member::Member;
-use memory::{Sticky, STICKY_ID_BASE};
+use member::{Member, Ring};
+use memory::{Memory, STICKY_ID_BASE};
 use place::Slot;
-use watch::snap_to_raster;
+use watch::Watch;
 
 /// SNR a bin must reach before the auto node opens a source there.
 ///
@@ -63,40 +63,26 @@ pub struct AutoNode {
     rate: f64,
     center: Hz,
     input_bw: f64,
-    band: Option<(f64, f64)>,
-    spur: Option<f64>,
-    /// Around the spur, in absolute hertz, once the resolution is known.
-    spur_band: Option<(f64, f64)>,
-    /// The channel plan on this band, as an origin and a step in hertz, when
-    /// there is one. See [`snap_to_raster`].
-    raster: Option<(f64, f64)>,
-    detector: Option<SourceDetector>,
-    extractor: Option<SourceExtractor>,
+    /// What finds the sources and cuts them out, and where it may look.
+    watch: Watch,
     reg: Registry,
     slots: Vec<Slot>,
     /// Decoders that watch the whole span, and the bands they own, in
     /// absolute hertz, where no source is opened.
     wide: Vec<Member>,
+    /// The span itself, behind them: every span-wide front end is handed the
+    /// same block, so the samples a packet of theirs leaves with are kept
+    /// once.
+    wide_ring: Ring,
     /// The burst front end at a nominal rate, for the view and the
     /// parameters before any source has opened.
     template: Option<Graph>,
     events: Vec<SourceEvent>,
     blocks: Vec<SourceBlock>,
-    hits: Vec<(Hz, Event)>,
     /// Sources decoders were built for, over the node's life.
     built: u64,
-    sticky: Vec<Sticky>,
-    /// Channels ever remembered, so an id is never reused after a channel
-    /// is forgotten.
-    sticky_made: u64,
-    /// Channels to cut out from the next block on: newly heard ones, and
-    /// after a rebuild every one the span still covers.
-    pending_sticky: Vec<SourceId>,
-    /// Remembered channels nothing has decoded on for their hold, to be
-    /// closed on the next block.
-    expiring: Vec<SourceId>,
-    /// Seconds of stream so far, the clock a hold is measured on.
-    now_s: f64,
+    /// The channels the receiver has decided to keep listening on.
+    memory: Memory,
     /// What each channel has announced about itself, so a source that
     /// closes and opens again, or decoders rebuilt with the graph, do not
     /// log the same cell's identity a second time.
@@ -116,29 +102,108 @@ impl AutoNode {
             rate: 0.0,
             center: Hz(0),
             input_bw: 0.0,
-            band: None,
-            spur: None,
-            spur_band: None,
-            raster: None,
-            detector: None,
-            extractor: None,
+            watch: Watch::default(),
             reg: crate::registry(),
             slots: Vec::new(),
             wide: Vec::new(),
+            wide_ring: Ring::new(StreamSpec::iq(0.0, Hz(0))),
             template: None,
             events: Vec::new(),
             blocks: Vec::new(),
-            hits: Vec::new(),
             built: 0,
-            sticky: Vec::new(),
-            sticky_made: 0,
-            pending_sticky: Vec::new(),
-            expiring: Vec::new(),
-            now_s: 0.0,
+            memory: Memory::default(),
             announced: HashMap::new(),
             phases: BTreeMap::new(),
             phase_sum: BTreeMap::new(),
         }
+    }
+
+    /// Start cutting out the channels kept from earlier: opened once, at
+    /// their own width, never closed. The extractor takes them from the
+    /// current position, so a channel kept before a rebuild starts again
+    /// where the new span begins.
+    fn open_kept_channels(&mut self) {
+        let c0 = self.center.as_f64();
+        let half = self.input_bw / 2.0;
+        for id in self.memory.take_pending() {
+            let Some(st) = self.memory.find(id) else {
+                continue;
+            };
+            let (hz, width) = (st.center_hz, st.width_hz);
+            if (hz - c0).abs() + width / 2.0 > half {
+                continue;
+            }
+            // Not while the source that earned it is still open: two
+            // decoders on one channel are every burst twice in the log, and
+            // the new one would start mid-transmission without the header
+            // the old one read. It takes over once that source closes.
+            let busy = self.slots.iter().any(|sl| {
+                sl.id.0 < STICKY_ID_BASE && (sl.center_hz.as_f64() - hz).abs() <= width / 2.0
+            });
+            if busy {
+                self.memory.wait_for(id);
+                continue;
+            }
+            self.watch.open_channel(id, hz, width);
+        }
+        for id in self.memory.take_expiring() {
+            self.watch.close_channel(id);
+        }
+    }
+
+    /// Every front end whose channel the source could be was built for it and
+    /// asked; the one that read a frame has answered what the source is, and
+    /// from here it alone reads it.
+    ///
+    /// The others were each a decoder's worth of work per block and, for a
+    /// pager or a packet channel, a second row saying the same burst was
+    /// nothing. Where several widths of one protocol read, the protocol says
+    /// which to keep.
+    fn latch(&mut self, k: usize, heard: &[(&'static str, f64)]) {
+        if heard.is_empty() || self.slots[k].members.len() <= 1 {
+            return;
+        }
+        let mut keep: Vec<(&'static str, f64)> = Vec::new();
+        for p in protocol::all() {
+            let mut widths: Vec<f64> =
+                heard.iter().filter(|(n, _)| *n == p.id()).map(|(_, w)| *w).collect();
+            if widths.is_empty() {
+                continue;
+            }
+            p.resolve_widths(&mut widths);
+            keep.extend(widths.into_iter().map(|w| (p.id(), w)));
+        }
+        // The classifier stays on a remembered channel. The detector is
+        // locked out of one, so nothing else will ever find a second
+        // transmitter sharing the frequency, and dropping the classifier
+        // there is what made a LoRa network at another bandwidth invisible
+        // for the session. On an ordinary source it goes as before: the
+        // detector is still watching and will open the other signal itself.
+        let remembered = self.slots[k].remembered;
+        self.slots[k].members.retain(|m| {
+            (remembered && m.router.is_some())
+                || keep.iter().any(|(n, w)| *n == m.name && *w == m.channel_hz)
+        });
+    }
+
+    /// A cell's identity, once, per channel, whatever the decoders that read
+    /// it have been through since. Each protocol on the source says which of
+    /// its packets are the same news.
+    fn announce_once(&mut self, k: usize, packets: Vec<Packet>, out: &mut Vec<Packet>) {
+        let seen = self.announced.entry(self.slots[k].center_hz.0).or_default();
+        let members = &self.slots[k].members;
+        out.extend(packets.into_iter().filter(|p| {
+            let key = members
+                .iter()
+                .filter_map(|m| m.protocol)
+                .find_map(|proto| proto.dedupe_key(p));
+            let Some(key) = key else { return true };
+            if seen.contains(&key) {
+                return false;
+            }
+            seen.push(key);
+            true
+        }));
     }
 
     fn phase(&mut self, name: &str, us: u64, block_s: f64) {
@@ -151,15 +216,7 @@ impl AutoNode {
 
     /// Sources open right now.
     pub fn live(&self) -> Vec<dsp::Source> {
-        self.detector
-            .as_ref()
-            .map(|d| d.live().copied().collect())
-            .unwrap_or_default()
-    }
-
-    /// What decoded in the last block, and where.
-    pub fn hits(&self) -> &[(Hz, Event)] {
-        &self.hits
+        self.watch.live()
     }
 
     /// Sources with decoders on them right now.
@@ -175,64 +232,6 @@ impl AutoNode {
     /// The span-wide decoders running, by stage name.
     pub fn wide(&self) -> Vec<&'static str> {
         self.wide.iter().map(|m| m.name).collect()
-    }
-
-    /// Every node of one type among the decoders placed on sources, for a
-    /// caller that has its own API for it: the key manager reaching every
-    /// TETRA front end the scanner placed, the same as one placed by hand.
-    pub fn each_inner<T: 'static>(&self, mut f: impl FnMut(&T)) {
-        for slot in &self.slots {
-            for m in &slot.members {
-                for (id, _) in m.graph.order() {
-                    if let Some(t) = m
-                        .graph
-                        .node(id)
-                        .and_then(|n| n.as_any())
-                        .and_then(|a| a.downcast_ref::<T>())
-                    {
-                        f(t);
-                    }
-                }
-            }
-        }
-    }
-
-    /// The mutable counterpart of [`each_inner`](Self::each_inner).
-    pub fn each_inner_mut<T: 'static>(&mut self, mut f: impl FnMut(&mut T)) {
-        for slot in &mut self.slots {
-            for m in &mut slot.members {
-                let ids: Vec<_> = m.graph.order().map(|(id, _)| id).collect();
-                for id in ids {
-                    if let Some(t) = m
-                        .graph
-                        .node_mut(id)
-                        .and_then(|n| n.as_any_mut())
-                        .and_then(|a| a.downcast_mut::<T>())
-                    {
-                        f(t);
-                    }
-                }
-            }
-        }
-    }
-
-    /// The key status of every TETRA front end inside.
-    pub fn inner_tetra_status(&self) -> Vec<crate::tetra_nodes::KeyStatus> {
-        let mut out = Vec::new();
-        self.each_inner::<crate::tetra_nodes::TetraNode>(|t| out.extend(t.key_status()));
-        out
-    }
-
-    /// Install a key on every inner TETRA front end for a cell colour.
-    #[cfg(feature = "tea")]
-    pub fn set_inner_tetra_key(&mut self, colour: u8, key: decode::tea::Key) {
-        self.each_inner_mut::<crate::tetra_nodes::TetraNode>(|t| t.add_key(colour, key));
-    }
-
-    /// Install a TA61 identity secret on every inner TETRA front end.
-    #[cfg(feature = "tea")]
-    pub fn set_inner_tetra_id_secret(&mut self, colour: u8, c: [u8; 8]) {
-        self.each_inner_mut::<crate::tetra_nodes::TetraNode>(|t| t.add_id_secret(colour, c));
     }
 
     /// Speech from every front end inside, read off the ports it came out
@@ -286,6 +285,46 @@ impl AutoNode {
     }
 }
 
+/// What one span-wide front end made of a block.
+struct WideResult {
+    name: &'static str,
+    events: Vec<Event>,
+    packets: Vec<Packet>,
+    spent_us: u64,
+}
+
+/// What one front end on one source made of a block.
+struct MemberResult {
+    name: &'static str,
+    /// Each event with the front end that produced it, since they are merged
+    /// with the other members' before anything is answered.
+    events: Vec<(&'static str, Event)>,
+    packets: Vec<Packet>,
+    /// The channel width this front end was placed for, when it read
+    /// something. The classifier measuring a burst is not reading it.
+    read: Option<f64>,
+    spent_us: u64,
+}
+
+/// What the front ends on one source made of a block.
+struct SlotResult {
+    /// Which slot, since the fanout returns them in whatever order they
+    /// finished.
+    k: usize,
+    /// Each event with the front end that produced it, so a request is
+    /// answered to the one that asked rather than to a name a node inside it
+    /// wrote about itself.
+    events: Vec<(&'static str, Event)>,
+    packets: Vec<Packet>,
+    /// The source has closed and nothing is still catching up on it.
+    done: bool,
+    /// The front ends that read something, and the channel width each was
+    /// placed for.
+    heard: Vec<(&'static str, f64)>,
+    /// Processor time per front end, for the cost view.
+    spent: Vec<(&'static str, u64)>,
+}
+
 fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -300,16 +339,10 @@ const OUT_VIDEO: usize = 2;
 
 impl Node for AutoNode {
     fn name(&self) -> &str {
-        &self.label
+        DESC.name
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         1
@@ -319,16 +352,60 @@ impl Node for AutoNode {
         3
     }
 
-    fn subgraph(&self) -> Option<Topology> {
-        self.slots
-            .first()
-            .and_then(|s| s.members.first())
-            .map(|m| m.graph.topology())
-            .or_else(|| self.template.as_ref().map(|g| g.topology()))
+    /// Every chain running inside: the span-wide front ends, and each front
+    /// end on each source found. All of them, because each is a different
+    /// chain over a different stream, and one of them drawn with a number
+    /// beside it says a bank's kind of thing about something that is not a
+    /// bank. Before anything has opened, the burst front end a source would
+    /// get, so the node is not an empty box on a quiet band.
+    fn subgraphs(&self) -> Vec<Topology> {
+        let mut out: Vec<Topology> = self.wide.iter().map(|m| m.graph.topology()).collect();
+        out.extend(
+            self.slots.iter().flat_map(|s| s.members.iter()).map(|m| m.graph.topology()),
+        );
+        if out.is_empty() {
+            out.extend(self.template.as_ref().map(|g| g.topology()));
+        }
+        out
     }
 
-    fn subgraph_count(&self) -> usize {
-        self.slots.len().max(1)
+    /// The band watched, the tuner's own spur inside it and the channel plan
+    /// on it: all settled before the node goes into the graph, since what a
+    /// detector opens on is decided as the graph negotiates and the span has
+    /// usually moved since this node was last built.
+    fn configure(&mut self, settings: &Settings) {
+        self.set_band(crate::band_of(settings));
+        let spur = settings.f64_or("spur_hz", 0.0);
+        self.set_spur((spur > 0.0).then_some(spur));
+        let step = settings.f64_or("raster_hz", 0.0);
+        self.set_raster((step > 0.0).then(|| (settings.f64_or("raster_origin_hz", 0.0), step)));
+    }
+
+    /// Every decoder this node is running, span-wide and on a source, so
+    /// something asked of every node in the receiver is asked of them too:
+    /// the key manager reaches a front end the auto node placed a moment
+    /// ago as surely as one the scanner table did.
+    fn each_inner(&self, f: &mut dyn FnMut(&dyn Node)) {
+        for m in self.wide.iter().chain(self.slots.iter().flat_map(|s| s.members.iter())) {
+            for (id, _) in m.graph.order() {
+                if let Some(n) = m.graph.node(id) {
+                    f(n);
+                }
+            }
+        }
+    }
+
+    fn each_inner_mut(&mut self, f: &mut dyn FnMut(&mut dyn Node)) {
+        for m in
+            self.wide.iter_mut().chain(self.slots.iter_mut().flat_map(|s| s.members.iter_mut()))
+        {
+            let ids: Vec<_> = m.graph.order().map(|(id, _)| id).collect();
+            for id in ids {
+                if let Some(n) = m.graph.node_mut(id) {
+                    f(n);
+                }
+            }
+        }
     }
 
     fn phases(&self) -> Vec<(String, pipeline::cost::Cost)> {
@@ -373,9 +450,8 @@ impl Node for AutoNode {
         outputs: &mut [Payload],
         c: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        self.hits.clear();
         let iq = inputs[0].as_iq().unwrap_or(&[]);
-        if self.detector.is_none() || self.extractor.is_none() {
+        if !self.watch.ready() {
             return Ok(());
         }
         let at_us = now_us();
@@ -387,7 +463,6 @@ impl Node for AutoNode {
         let mut events: Vec<Event> = Vec::new();
         self.events.clear();
         let c0 = self.center.as_f64();
-        let spur = self.spur_band;
         let block_s = c.block_seconds;
         // While a camera is locked, the span is that camera and there is
         // nothing to detect in it. Every run inside a 20 MHz FM carrier is a
@@ -398,119 +473,25 @@ impl Node for AutoNode {
         // a receiver that cannot keep up rather than one that reads more. The
         // picture going away puts all of it back.
         let watching = self.claimed_whole_span();
-        let excluded: Vec<(f64, f64)> = self.wide.iter().filter_map(|m| m.band).collect();
-        let (Some(d), Some(e)) = (self.detector.as_mut(), self.extractor.as_mut()) else {
-            return Ok(());
-        };
+        // What a front end already owns, and the tuner's own centre, the
+        // detector refuses for itself; see [`AutoNode::apply_locked`] and
+        // [`dsp::SourceDetector::set_spur`].
         let t_detect = Instant::now();
-        let raw: Vec<SourceEvent> = if watching {
-            d.idle(iq.len());
-            Vec::new()
-        } else {
-            d.process(iq).to_vec()
-        };
+        let mut found = std::mem::take(&mut self.events);
+        self.watch.admit(iq, c0, watching, &mut found);
+        self.events = found;
         let detect_us = t_detect.elapsed().as_micros() as u64;
-        let others = d
-            .live()
-            .filter(|s| !spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&(c0 + s.center_hz))))
-            .count();
-        // A channel a front end has read on is that front end's, and nothing
-        // else runs in it: no detection, no burst router, no second decoder
-        // on the same signal. Whatever width the detector measures inside a
-        // remembered channel, it is the same transmitter the front end there
-        // is already reading, and opening a source for it spends a stream and
-        // an extraction to log the same burst twice.
-        let sticky = &self.sticky;
-        let covered = |hz: f64, w: f64| {
-            sticky.iter().any(|s| {
-                (s.center_hz - hz).abs() <= s.width_hz / 2.0
-                    && w <= s.width_hz * CHANNEL_WIDTH_TOLERANCE
-            })
-        };
-        self.events.extend(raw.iter().filter(|ev| {
-            let SourceEvent::Opened(s) = ev else {
-                return true;
-            };
-            let hz = c0 + s.center_hz;
-            if excluded.iter().any(|(lo, hi)| (*lo..=*hi).contains(&hz)) {
-                return false;
-            }
-            if covered(hz, s.bandwidth_hz()) {
-                return false;
-            }
-            // The tuner's centre while something else transmits: the
-            // offset following that something's envelope.
-            !(others > 0 && spur.is_some_and(|(lo, hi)| (lo..=hi).contains(&hz)))
-        }));
-        // A source plainly on a channel of the plan is that channel: what
-        // is cut out, and what is reported, is the channel rather than
-        // this frame's measurement of it.
-        if let Some(raster) = self.raster {
-            for ev in self.events.iter_mut() {
-                if let SourceEvent::Opened(s) = ev {
-                    snap_to_raster(s, raster, c0);
-                }
-            }
-        }
-        // Channels kept from earlier: opened once, at their own width, never
-        // closed. The extractor takes them from the current position, so a
-        // channel kept before a rebuild starts again where the new span
-        // begins.
-        let half = self.input_bw / 2.0;
-        for id in std::mem::take(&mut self.pending_sticky) {
-            let Some(st) = self.sticky.iter().find(|s| s.id == id) else {
-                continue;
-            };
-            let off = st.center_hz - c0;
-            if off.abs() + st.width_hz / 2.0 > half {
-                continue;
-            }
-            // Not while the source that earned it is still open: two
-            // decoders on one channel are every burst twice in the log, and
-            // the new one would start mid-transmission without the header
-            // the old one read. It takes over once that source closes.
-            let busy = self.slots.iter().any(|sl| {
-                sl.id.0 < STICKY_ID_BASE
-                    && (sl.center_hz as f64 - st.center_hz).abs() <= st.width_hz / 2.0
-            });
-            if busy {
-                self.pending_sticky.push(id);
-                continue;
-            }
-            self.events.push(SourceEvent::Opened(dsp::Source {
-                id,
-                lo_hz: off - st.width_hz / 2.0,
-                hi_hz: off + st.width_hz / 2.0,
-                center_hz: off,
-                start_sample: d.position(),
-                end_sample: None,
-                peak_snr_db: f32::NAN,
-                frames: 0,
-            }));
-        }
-        for id in std::mem::take(&mut self.expiring) {
-            self.events.push(SourceEvent::Closed(dsp::Source {
-                id,
-                lo_hz: 0.0,
-                hi_hz: 0.0,
-                center_hz: 0.0,
-                start_sample: 0,
-                end_sample: None,
-                peak_snr_db: f32::NAN,
-                frames: 0,
-            }));
-        }
-        self.now_s = d.position() as f64 / rate;
+        self.open_kept_channels();
+        self.memory.set_now(self.watch.position() as f64 / rate);
         self.blocks.clear();
         let t_extract = Instant::now();
-        e.process(iq, &self.events, &mut self.blocks);
+        let mut blocks = std::mem::take(&mut self.blocks);
+        self.watch.cut(iq, &self.events, &mut blocks);
+        self.blocks = blocks;
         let extract_us = t_extract.elapsed().as_micros() as u64;
-        let (bank_feed_us, bank_start_us) = e.take_bank_cost();
+        let (bank_feed_us, bank_start_us) = self.watch.bank_cost();
         for ev in &self.events {
             if let SourceEvent::Opened(s) = ev {
-                if s.id.0 >= STICKY_ID_BASE {
-                    continue;
-                }
                 events.push(Event::Detection {
                     center: Hz((self.center.as_f64() + s.center_hz).max(0.0) as u64),
                     bandwidth: s.bandwidth_hz(),
@@ -543,20 +524,15 @@ impl Node for AutoNode {
         let span = (c0 - self.input_bw / 2.0, c0 + self.input_bw / 2.0);
         let claimant =
             |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
+        // The span, kept once for every front end over it rather than once
+        // each: they are all handed the same block.
+        self.wide_ring.keeps = self.wide.iter().any(|m| m.keeps_samples);
+        self.wide_ring.push(iq);
+        let wide_ring = &self.wide_ring;
         let wide = &mut self.wide;
         let slots = &mut self.slots;
         let t_fronts = Instant::now();
-        let (wide_results, results): (
-            Vec<(Vec<Event>, Vec<Packet>, &'static str, u64)>,
-            Vec<(
-                usize,
-                Vec<Event>,
-                Vec<Packet>,
-                bool,
-                Vec<(&'static str, f64)>,
-                Vec<(&'static str, u64)>,
-            )>,
-        ) = rayon::join(
+        let (wide_results, results): (Vec<WideResult>, Vec<SlotResult>) = rayon::join(
             || {
                 wide.par_iter_mut()
                     .map(|m| {
@@ -564,15 +540,26 @@ impl Node for AutoNode {
                         // this front end is sampling the air rather than
                         // reading all of it.
                         if (watching && !claimant(m)) || !m.wants(iq.len(), rate) {
-                            return (Vec::new(), Vec::new(), m.name, 0);
+                            m.skip(iq.len());
+                            return WideResult {
+                                name: m.name,
+                                events: Vec::new(),
+                                packets: Vec::new(),
+                                spent_us: 0,
+                            };
                         }
-                        let mut pk = Vec::new();
+                        let mut packets = Vec::new();
                         let t = Instant::now();
-                        let ev = m.run(iq, at_us, &mut pk);
-                        if !pk.is_empty() {
+                        let events = m.run(iq, at_us, &mut packets, wide_ring);
+                        if !packets.is_empty() {
                             m.read_something();
                         }
-                        (ev, pk, m.name, t.elapsed().as_micros() as u64)
+                        WideResult {
+                            name: m.name,
+                            events,
+                            packets,
+                            spent_us: t.elapsed().as_micros() as u64,
+                        }
                     })
                     .collect()
             },
@@ -595,45 +582,53 @@ impl Node for AutoNode {
                         // The flush is fed once, on the block that closed
                         // the source, not on every block after it.
                         let closed = b.is_some() && state == SourceState::Closed;
-                        let per: Vec<(
-                            Vec<Event>,
-                            Vec<Packet>,
-                            Option<(&'static str, f64)>,
-                            (&'static str, u64),
-                        )> = slot
+                        slot.ring.keeps = slot.members.iter().any(|m| m.keeps_samples);
+                        slot.ring.push(samples);
+                        let ring = &slot.ring;
+                        let per: Vec<MemberResult> = slot
                             .members
                             .par_iter_mut()
                             .map(|m| {
                                 let mut pk = Vec::new();
                                 let t = Instant::now();
-                                let mut ev = m.run(samples, at_us, &mut pk);
+                                let mut ev = m.run(samples, at_us, &mut pk, ring);
                                 if closed {
                                     let quiet =
                                         vec![C32::new(0.0, 0.0); (m.flush_s * rate) as usize];
-                                    ev.extend(m.run(&quiet, at_us, &mut pk));
+                                    ev.extend(m.run(&quiet, at_us, &mut pk, ring));
                                 }
                                 let us = t.elapsed().as_micros() as u64;
                                 let read = m.router.is_none() && !pk.is_empty();
-                                (ev, pk, read.then_some((m.name, m.channel_hz)), (m.name, us))
+                                // Which front end spoke, taken from the one
+                                // that was run rather than from a name a node
+                                // inside it wrote about itself: a request
+                                // routed by that is routed by a spelling.
+                                MemberResult {
+                                    name: m.name,
+                                    events: ev.into_iter().map(|e| (m.name, e)).collect(),
+                                    packets: pk,
+                                    read: read.then_some(m.channel_hz),
+                                    spent_us: us,
+                                }
                             })
                             .collect();
-                        let mut ev = Vec::new();
-                        let mut pk = Vec::new();
+                        let mut events = Vec::new();
+                        let mut packets = Vec::new();
                         let mut heard = Vec::new();
                         let mut spent = Vec::new();
-                        for (e2, p2, read, cost) in per {
-                            ev.extend(e2);
-                            pk.extend(p2);
-                            spent.push(cost);
-                            if let Some(r) = read {
+                        for r in per {
+                            events.extend(r.events);
+                            packets.extend(r.packets);
+                            spent.push((r.name, r.spent_us));
+                            if let Some(width) = r.read {
                                 slot.heard = true;
-                                heard.push(r);
+                                heard.push((r.name, width));
                             }
                         }
                         // A measurement of a source a front end reads is
                         // not news.
                         if slot.heard {
-                            pk.retain(|p| {
+                            packets.retain(|p| {
                                 !(p.measure.is_some()
                                     && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
                             });
@@ -646,31 +641,33 @@ impl Node for AutoNode {
                             // A wider stream for the same transmitter takes over
                             // from its start. Whatever this one made of the sliver it
                             // had is half a burst, and half a burst is not evidence.
-                            pk.clear();
-                            ev.retain(|e| !matches!(e, Event::Decoded(_)));
+                            packets.clear();
+                            events.retain(|(_, e)| !matches!(e, Event::Decoded(_)));
                         }
-                        Some((k, ev, pk, done, heard, spent))
+                        Some(SlotResult { k, events, packets, done, heard, spent })
                     })
                     .collect()
             },
         );
         let fronts_us = t_fronts.elapsed().as_micros() as u64;
         self.phase_sum.clear();
-        let mut asked: Vec<(Option<usize>, String, Request)> = Vec::new();
-        for (ev, pk, name, us) in wide_results {
-            for e in ev {
+        // What was asked, by the source it was asked on and the front end
+        // that asked. Answered once the slots have settled.
+        let mut asked: Vec<(Option<usize>, &'static str, Request)> = Vec::new();
+        for w in wide_results {
+            for e in w.events {
                 match e {
-                    Event::Request { stage, request } => asked.push((None, stage, request)),
+                    Event::Request(request) => asked.push((None, w.name, request)),
                     e => events.push(e),
                 }
             }
-            out.extend(pk);
-            *self.phase_sum.entry(name).or_default() += us;
+            out.extend(w.packets);
+            *self.phase_sum.entry(w.name).or_default() += w.spent_us;
         }
         let mut results = results;
-        results.sort_by_key(|(k, ..)| *k);
-        for (_, _, _, _, _, spent) in &results {
-            for (name, us) in spent {
+        results.sort_by_key(|r| r.k);
+        for r in &results {
+            for (name, us) in &r.spent {
                 *self.phase_sum.entry(name).or_default() += us;
             }
         }
@@ -684,8 +681,8 @@ impl Node for AutoNode {
             self.phase(&format!("{name} cpu"), us, block_s);
         }
         let mut closed = Vec::new();
-        for (k, ev, pk, done, heard, _) in results {
-            let center = Hz(self.slots[k].center_hz);
+        for SlotResult { k, events: ev, packets: pk, done, heard, .. } in results {
+            let center = self.slots[k].center_hz;
             let named = self.slots[k]
                 .members
                 .iter()
@@ -698,78 +695,19 @@ impl Node for AutoNode {
                     c.emit(e);
                 }
             }
-            // Latch. Every front end whose channel the source could be was
-            // built for it and asked; the one that read a frame has
-            // answered what the source is, and from here it alone reads
-            // it. The others were each a decoder's worth of work per block
-            // and, for a pager or a packet channel, a second row saying
-            // the same burst was nothing. Where several widths of one
-            // protocol read, the protocol says which to keep.
-            if !heard.is_empty() && self.slots[k].members.len() > 1 {
-                let mut keep: Vec<(&'static str, f64)> = Vec::new();
-                for p in protocol::all() {
-                    let mut widths: Vec<f64> = heard
-                        .iter()
-                        .filter(|(n, _)| *n == p.id())
-                        .map(|(_, w)| *w)
-                        .collect();
-                    if widths.is_empty() {
-                        continue;
-                    }
-                    p.resolve_widths(&mut widths);
-                    keep.extend(widths.into_iter().map(|w| (p.id(), w)));
-                }
-                // The classifier stays on a remembered channel. The
-                // detector is locked out of one, so nothing else will ever
-                // find a second transmitter sharing the frequency, and
-                // dropping the classifier there is what made a LoRa network
-                // at another bandwidth invisible for the session. On an
-                // ordinary source it goes as before: the detector is still
-                // watching and will open the other signal itself.
-                let remembered = self.slots[k].remembered;
-                self.slots[k].members.retain(|m| {
-                    (remembered && m.router.is_some())
-                        || keep.iter().any(|(n, w)| *n == m.name && *w == m.channel_hz)
-                });
-            }
+            self.latch(k, &heard);
             // A remembered channel that is still decoding is kept; one that
             // has gone quiet for its hold is given back to the detector.
             if !pk.is_empty() {
-                let hz = self.slots[k].center_hz as f64;
-                for st in self.sticky.iter_mut() {
-                    if (st.center_hz - hz).abs() <= st.width_hz / 2.0 {
-                        st.last_heard_s = self.now_s;
-                    }
-                }
+                self.memory.heard_at(self.slots[k].center_hz.as_f64());
             }
-            for e in ev {
+            for (name, e) in ev {
                 match e {
-                    Event::Request { stage, request } => asked.push((Some(k), stage, request)),
-                    e => {
-                        if matches!(e, Event::Decoded(_)) {
-                            self.hits.push((center, e.clone()));
-                        }
-                        events.push(e);
-                    }
+                    Event::Request(request) => asked.push((Some(k), name, request)),
+                    e => events.push(e),
                 }
             }
-            // A cell's identity, once, per channel, whatever the decoders
-            // that read it have been through since. Each protocol on the
-            // source says which of its packets are the same news.
-            let seen = self.announced.entry(center.0).or_default();
-            let members = &self.slots[k].members;
-            out.extend(pk.into_iter().filter(|p| {
-                let key = members
-                    .iter()
-                    .filter_map(|m| m.protocol)
-                    .find_map(|proto| proto.dedupe_key(p));
-                let Some(key) = key else { return true };
-                if seen.contains(&key) {
-                    return false;
-                }
-                seen.push(key);
-                true
-            }));
+            self.announce_once(k, pk, out);
             // A decoder placed this block on a source that has already
             // closed still has the history to read; the slot stays until
             // it has.
@@ -781,36 +719,28 @@ impl Node for AutoNode {
         // What the decoders asked for, answered here where it can be, and
         // handed on where it cannot. After the slots are settled, so a
         // release or a reshape closes what is there now.
-        for (k, stage, r) in asked {
+        for (k, name, r) in asked {
             let mut said = Vec::new();
-            if let Some(r) = self.answer(k, &stage, r, &mut said) {
-                c.emit(Event::Request { stage, request: r });
+            if let Some(r) = self.answer(k, name, r, &mut said) {
+                c.emit(Event::Request(r));
             }
             for e in said {
                 c.emit(e);
             }
         }
-        let now = self.now_s;
-        let expired: Vec<SourceId> = self
-            .sticky
-            .iter()
-            .filter(|s| s.hold_s.is_some_and(|h| now - s.last_heard_s > h))
-            .map(|s| s.id)
-            .collect();
+        let expired = self.memory.expire();
         if !expired.is_empty() {
-            self.expiring.extend(expired.iter().copied());
-            self.forget(&expired);
+            self.apply_locked();
             for id in expired {
                 let Some(st) = self.slots.iter().find(|s| s.id == id) else {
                     continue;
                 };
                 if let Some(m) = st.members.first() {
                     c.emit(Event::Warning {
-                        stage: self.label.clone(),
                         message: format!(
                             "{} quiet on {:.4} MHz; giving the channel back",
                             m.name,
-                            st.center_hz as f64 / 1e6
+                            st.center_hz.as_f64() / 1e6
                         ),
                     });
                 }
@@ -824,12 +754,6 @@ impl Node for AutoNode {
                 // Warnings are per burst and per source; across a whole band
                 // they arrive in the thousands.
                 Event::Warning { .. } => {}
-                Event::Decoded(_) => {
-                    if !self.hits.iter().any(|(_, h)| std::ptr::eq(h, &e)) {
-                        self.hits.push((self.center, e.clone()));
-                    }
-                    c.emit(e);
-                }
                 _ => c.emit(e),
             }
         }
@@ -837,17 +761,12 @@ impl Node for AutoNode {
     }
 
     fn reset(&mut self) {
-        if let Some(d) = &mut self.detector {
-            d.reset();
-        }
-        if let Some(e) = &mut self.extractor {
-            e.reset();
-        }
+        self.watch.reset();
         self.slots.clear();
+        self.wide_ring.reset();
         for m in &mut self.wide {
             m.graph.reset();
         }
-        self.hits.clear();
     }
 
     /// The detector's knobs, then the burst front end's.
@@ -888,17 +807,20 @@ impl Node for AutoNode {
                 return self.rebuild();
             }
             "raster_hz" => {
-                let origin = self.raster.map(|(o, _)| o).unwrap_or(0.0);
+                let origin = self.raster().map(|(o, _)| o).unwrap_or(0.0);
                 self.set_raster((f > 0.0).then_some((origin, f)));
             }
             "raster_origin_hz" => {
-                if let Some((_, step)) = self.raster {
-                    self.raster = Some((f, step));
+                if let Some((_, step)) = self.raster() {
+                    self.set_raster(Some((f, step)));
                 }
             }
             _ => {
                 // A front end's own knob: set on the template, so sources
-                // that open later start with it, and on every running copy.
+                // that open later start with it, and on every copy running
+                // now, on a source or over the span. A knob that reached the
+                // sources and not the span-wide front ends was a knob that
+                // did nothing at 1090 MHz.
                 let mut found = false;
                 let mut err = None;
                 let mut apply = |g: &mut Graph| {
@@ -917,10 +839,12 @@ impl Node for AutoNode {
                 if let Some(t) = &mut self.template {
                     apply(t);
                 }
-                for s in &mut self.slots {
-                    for m in &mut s.members {
-                        apply(&mut m.graph);
-                    }
+                for m in self
+                    .wide
+                    .iter_mut()
+                    .chain(self.slots.iter_mut().flat_map(|s| s.members.iter_mut()))
+                {
+                    apply(&mut m.graph);
                 }
                 return match err {
                     Some(e) => Err(e),
@@ -935,9 +859,10 @@ impl Node for AutoNode {
         // Thresholds and timings: read every frame, so the detector is
         // built again with them and nothing else changes.
         let cfg = self.detector_cfg();
-        if let Some(d) = &mut self.detector {
-            *d = SourceDetector::new(self.rate, self.input_bw, cfg);
+        let (rate, bw) = (self.rate, self.input_bw);
+        if self.watch.rebuild_detector(|| SourceDetector::new(rate, bw, cfg)) {
             self.apply_band();
+            self.apply_locked();
         }
         Ok(())
     }
@@ -962,7 +887,7 @@ mod tests {
         assert_eq!(out[0].kind, PortKind::Packets);
         assert!(n.wide().is_empty(), "nothing span-wide belongs at 433 MHz");
         assert!(
-            Node::subgraph(&n).is_some(),
+            !Node::subgraphs(&n).is_empty(),
             "the burst front end is shown before any source"
         );
     }
@@ -1284,7 +1209,7 @@ mod tests {
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
         let b = SourceBlock {
-            id: SourceId(1),
+            id: common::SourceId(1),
             state: SourceState::Opened,
             center_hz: 433_475_000,
             // The two-bin minimum the detector can report, which is what a
@@ -1322,7 +1247,7 @@ mod tests {
         assert_eq!(n.remembered(), [("pocsag", 433_475_000.0, 25_000.0)]);
         // And the slot built for it holds that front end and nothing else.
         let b = SourceBlock {
-            id: n.sticky[0].id,
+            id: n.memory.channels()[0].id,
             state: SourceState::Opened,
             center_hz: 433_475_000,
             bandwidth_hz: 25_000.0,
@@ -1356,7 +1281,7 @@ mod tests {
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(869))]).unwrap();
         n.remember("lora", 869_525_000.0, 250_000.0);
         let b = SourceBlock {
-            id: n.sticky[0].id,
+            id: n.memory.channels()[0].id,
             state: SourceState::Opened,
             center_hz: 869_525_000,
             bandwidth_hz: 250_000.0,
@@ -1514,7 +1439,7 @@ mod tests {
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(395))]).unwrap();
         n.remember_for("tetra", 395_100_000.0, 25_000.0, Some(1.0), None, Default::default());
         let b = SourceBlock {
-            id: n.sticky[0].id,
+            id: n.memory.channels()[0].id,
             state: SourceState::Opened,
             center_hz: 395_100_000,
             bandwidth_hz: 25_000.0,
@@ -1552,7 +1477,7 @@ mod tests {
             Some(far)
         );
         // The parent goes, and the traffic channel with it.
-        let parent = n.sticky[0].id;
+        let parent = n.memory.channels()[0].id;
         n.forget(&[parent]);
         assert!(n.remembered().is_empty(), "{:?}", n.remembered());
     }
@@ -1565,7 +1490,7 @@ mod tests {
         let mut n = AutoNode::new("auto", SourceConfig::default());
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(947))]).unwrap();
         let mut said = Vec::new();
-        let mut settings = pipeline::registry::Settings::new();
+        let mut settings = Settings::new();
         settings.insert("timeslot".into(), ParamValue::Int(1));
         settings.insert("anchor_span_sample".into(), ParamValue::Float(12_345.0));
         settings.insert("anchor_frame".into(), ParamValue::Int(100));
@@ -1580,7 +1505,7 @@ mod tests {
         };
         assert!(n.answer(None, "gsm", ask, &mut said).is_none());
         let b = SourceBlock {
-            id: n.sticky[0].id,
+            id: n.memory.channels()[0].id,
             state: SourceState::Opened,
             center_hz: 947_800_000,
             bandwidth_hz: 200_000.0,
@@ -1596,9 +1521,41 @@ mod tests {
             .graph
             .order()
             .filter_map(|(id, _)| m.graph.node(id))
-            .filter_map(|node| node.as_any())
+            .map(|node| node.as_any())
             .find_map(|a| a.downcast_ref::<crate::gsm_nodes::GsmNode>())
             .expect("a gsm node");
         assert!(gsm.anchored(), "the beacon's timing never reached it");
     }
+}
+
+/// The setting names this stage reads beyond the ones every watcher takes.
+const LABEL: &str = "label";
+
+/// What the box is called when a description does not name it.
+const DEFAULT_LABEL: &str = "Auto";
+const BANK_CHANNEL_HZ: &str = "bank_channel_hz";
+const BANK_MIN_CHANNELS: &str = "bank_min_channels";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "auto",
+    summary: "Find and decode everything in the span on its own: sources \
+              wherever something transmits, and the span-wide decoders \
+              where the span reaches them",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    let mut cfg = crate::source_nodes::watch_config(
+        s,
+        SourceConfig {
+            open_db: AUTO_OPEN_DB,
+            ..Default::default()
+        },
+    );
+    cfg.bank_channel_hz = s.f64_or(BANK_CHANNEL_HZ, cfg.bank_channel_hz);
+    cfg.bank_min_channels = s.f64_or(BANK_MIN_CHANNELS, cfg.bank_min_channels as f64) as usize;
+    let mut n = AutoNode::new(s.str_or(LABEL, DEFAULT_LABEL), cfg);
+    Node::configure(&mut n, s);
+    Ok(Box::new(n))
 }

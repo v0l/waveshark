@@ -20,6 +20,7 @@ use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// What a camera's transmission is called, on a frame and on the sound that
 /// came with it.
@@ -165,13 +166,7 @@ impl pipeline::node::Node for VideoNode {
         "video"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         1
@@ -280,13 +275,10 @@ impl pipeline::node::Node for VideoNode {
             // best part of twenty megahertz, and every run a detector finds
             // inside it is a piece of the picture rather than a signal of
             // its own.
-            c.request(
-                "video",
-                Request::Claim {
-                    lo_hz: self.center_hz - self.span_hz / 2.0,
-                    hi_hz: self.center_hz + self.span_hz / 2.0,
-                },
-            );
+            c.request(Request::Claim {
+                lo_hz: self.center_hz - self.span_hz / 2.0,
+                hi_hz: self.center_hz + self.span_hz / 2.0,
+            });
             // The samples that decided it are still video, so they are read
             // rather than thrown away.
             self.base.splice(0..0, priming);
@@ -311,7 +303,7 @@ impl pipeline::node::Node for VideoNode {
             } else if let Some(s) = self.sep.as_mut() {
                 s.reset();
             }
-            c.request("video", Request::Release);
+            c.request(Request::Release);
             return Ok(());
         }
         let label = decode::video_channels::name_at(self.center_hz as u64, 3_000_000);
@@ -386,15 +378,17 @@ impl pipeline::node::Node for VideoNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::bool("colour", self.colour).label("Colour"),
+            Param::bool(COLOUR, self.colour).label("Colour"),
             Param::choice(
-                "standard",
+                STANDARD,
                 match self.forced {
                     None => 0,
                     Some(Standard::Pal) => 1,
                     Some(Standard::Ntsc) => 2,
                 },
-                ["auto", "pal", "ntsc"].map(String::from).to_vec(),
+                [AUTO, Standard::Pal.label(), Standard::Ntsc.label()]
+                    .map(String::from)
+                    .to_vec(),
             )
             .label("Standard"),
         ]
@@ -402,18 +396,17 @@ impl pipeline::node::Node for VideoNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "colour" => {
+            COLOUR => {
                 self.colour = v.as_bool().unwrap_or(true);
                 // The separator is built with colour on or off, so it has to
                 // be rebuilt; the next block primes it again.
                 self.sep = None;
             }
-            "standard" => {
+            STANDARD => {
                 self.forced = match &v {
                     ParamValue::Choice(1) => Some(Standard::Pal),
                     ParamValue::Choice(2) => Some(Standard::Ntsc),
-                    ParamValue::Text(t) if t == "pal" => Some(Standard::Pal),
-                    ParamValue::Text(t) if t == "ntsc" => Some(Standard::Ntsc),
+                    ParamValue::Text(t) => t.parse().ok(),
                     _ => None,
                 };
                 self.sep = None;
@@ -537,7 +530,7 @@ mod tests {
             fields.extend(out[0].as_video().unwrap_or(&[]).iter().cloned());
             heard.extend(out[1].as_voice().unwrap_or(&[]).iter().cloned());
             asked.extend(events.into_iter().filter_map(|e| match e {
-                pipeline::event::Event::Request { request, .. } => Some(request),
+                pipeline::event::Event::Request(request) => Some(request),
                 _ => None,
             }));
         }
@@ -652,4 +645,24 @@ mod tests {
         // repeated one.
         assert!(fields.windows(2).all(|w| w[1].sequence > w[0].sequence));
     }
+}
+
+/// The setting names this stage reads.
+const STANDARD: &str = "standard";
+const COLOUR: &str = "colour";
+
+/// What the standard setting is called when the node is to measure it
+/// rather than be told.
+const AUTO: &str = "auto";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "video",
+    summary: "Analogue video: FM to composite, sync separation, PAL or NTSC fields, colour",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let forced = s.str_or(STANDARD, AUTO).parse().ok();
+    Ok(Box::new(VideoNode::new(forced, s.bool_or(COLOUR, true))))
 }

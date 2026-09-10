@@ -28,7 +28,7 @@
 //! What is not here yet: slot 2 is not separated from slot 1, so the node
 //! follows whichever slot it locks onto first.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::Result;
 use decode::dmr::{self, LinkControl};
@@ -41,6 +41,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 
 mod dmr_ambe;
 use dmr_ambe::Vocoder;
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// Tag identifying a packet body this node wrote: one DMR burst. "DB".
 ///
@@ -158,6 +159,34 @@ fn lc_link(flags: u8, dst: u32, src: u32) -> Option<pipeline::event::Link> {
     Some(pipeline::event::Link::between(Party::unit(src.to_string()), to))
 }
 
+/// What the link control says about the call itself: that it is speech, in
+/// which vocoder, and what protects it. The call list reads this rather than
+/// the fields beside it.
+fn lc_airtime(flags: u8, seconds: f64, live: bool) -> Option<common::Airtime> {
+    if flags & FLAG_HAVE_LC == 0 {
+        return None;
+    }
+    Some(common::Airtime {
+        seconds,
+        voice: true,
+        live,
+        secrecy: if flags & FLAG_ENCRYPTED != 0 {
+            common::Secrecy::Encrypted(Some(PRIVACY.into()))
+        } else {
+            common::Secrecy::Clear
+        },
+        codec: Some(CODEC),
+    })
+}
+
+/// DMR speech is always AMBE+2 at 2450 bit/s of speech under 1150 of FEC;
+/// there is no other vocoder in the standard.
+const CODEC: &str = "AMBE+2 2450";
+
+/// What the standard calls its own encryption, which is all a link control
+/// says about it.
+const PRIVACY: &str = "privacy";
+
 fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Value)>) {
     use common::Value;
     if flags & FLAG_HAVE_LC == 0 {
@@ -165,10 +194,7 @@ fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Va
     }
     let group = flags & FLAG_GROUP != 0;
     fields.push(("voice".to_string(), Value::Bool(true)));
-    // DMR speech is always AMBE+2 at 2450 bit/s of speech under 1150 of
-    // FEC; there is no other vocoder in the standard, so this is the one
-    // thing a listener can read off the mode alone.
-    fields.push(("codec".to_string(), Value::Text("AMBE+2 2450".to_string())));
+    fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
     fields.push(("to".to_string(), Value::Text(dst.to_string())));
     fields.push(("from".to_string(), Value::Text(src.to_string())));
     fields.push((
@@ -177,7 +203,7 @@ fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Va
     ));
     if flags & FLAG_ENCRYPTED != 0 {
         fields.push(("encrypted".to_string(), Value::Bool(true)));
-        fields.push(("encryption".to_string(), Value::Text("privacy".to_string())));
+        fields.push(("encryption".to_string(), Value::Text(PRIVACY.to_string())));
     }
     if flags & FLAG_EMERGENCY != 0 {
         fields.push(("emergency".to_string(), Value::Bool(true)));
@@ -211,6 +237,10 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if colour != 0xff {
         fields.push(("colour_code".to_string(), Value::Int(i64::from(colour))));
     }
+    // Seconds of the channel this row is worth, and whether the over is
+    // still running: a header opens one, a burst is 60 ms of it, and a
+    // terminator is the over ending.
+    let mut airtime = (0.0, false);
     let model = if pos == POS_DATA {
         let mut slot = bits[98..108].to_vec();
         slot.extend_from_slice(&bits[156..166]);
@@ -219,6 +249,7 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             Some(dmr::DT_VOICE_LC_HEADER) => {
                 lc_fields(flags, dst, src, &mut fields);
                 fields.push(("live".to_string(), Value::Bool(true)));
+                airtime = (0.0, true);
                 "DMR-Header"
             }
             Some(dmr::DT_TERMINATOR_LC) => {
@@ -240,6 +271,7 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         ));
         lc_fields(flags, dst, src, &mut fields);
         fields.push(("live".to_string(), Value::Bool(true)));
+        airtime = (0.06, true);
         "DMR-Voice"
     };
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
@@ -250,8 +282,8 @@ pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     d.link = lc_link(flags, dst, src);
     if flags & FLAG_HAVE_LC != 0 {
         d.identity = Some(common::Identity::new("dmr", src.to_string()));
-        d.airtime = Some(common::Airtime { seconds: 0.06, voice: true, live: true });
     }
+    d.airtime = lc_airtime(flags, airtime.0, airtime.1);
     Some(d)
 }
 
@@ -278,9 +310,8 @@ fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     d.link = lc_link(flags, dst, src);
     if flags & FLAG_HAVE_LC != 0 {
         d.identity = Some(common::Identity::new("dmr", src.to_string()));
-        d.airtime =
-            Some(common::Airtime { seconds: f64::from(bursts) * 0.06, voice: true, live: false });
     }
+    d.airtime = lc_airtime(flags, f64::from(bursts) * 0.06, false);
     Some(d)
 }
 
@@ -346,6 +377,11 @@ const REANCHOR: usize = 2;
 /// starts again. Six is one superframe, long enough to ride through a fade
 /// that would otherwise end the over.
 const MAX_MISSES: u32 = 8;
+
+/// Channel samples kept behind the symbol clock, in seconds: everything the
+/// framer may still read, which is a burst plus its re-anchoring.
+const KEEP_S: f64 =
+    (SYM_BURST + SLOT_STRIDE + MAX_MISSES as usize * SLOT_STRIDE) as f64 / BAUD;
 
 /// The DMR sync words as level-index strings (0=-3,1=-1,2=+1,3=+3), derived
 /// from the canonical hex by mapping each dibit 01,00,10,11. Voice bursts and
@@ -921,11 +957,9 @@ pub struct DmrNode {
     silent_samples: u64,
     /// Input sample rate, for the silence timeout.
     in_rate: f64,
-    /// Channel samples at `audio_rate`, kept behind the symbol clock so each
-    /// burst's packet can carry the samples it was read from; `narrow_base`
-    /// is the absolute index of `ring[0]`.
-    ring: Vec<common::C32>,
-    ring_base: usize,
+    /// The channel behind the symbol clock: what each burst was heard at and
+    /// the samples it was sliced from.
+    meter: crate::FrameMeter,
     audio_rate: f64,
     accepted: u64,
     /// The AMBE speech path. A zero-size stub without the `ambe` feature, so
@@ -963,8 +997,7 @@ impl DmrNode {
             idle_bursts: 0,
             silent_samples: 0,
             in_rate: AUDIO_HZ,
-            ring: Vec::new(),
-            ring_base: 0,
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S),
             audio_rate: AUDIO_HZ,
             accepted: 0,
             vocoder: Vocoder::new(),
@@ -999,26 +1032,12 @@ impl DmrNode {
         }))
     }
 
-    /// The channel samples a burst was read from, by its symbol index. The
-    /// filters ahead of the symbol clock delay the symbols by a few dozen
-    /// samples, which is inside the burst's own guard.
-    fn burst_iq(&self, at: usize) -> Option<std::sync::Arc<common::IqBurst>> {
-        let sps = self.audio_rate / BAUD;
-        let start = (at as f64 * sps) as usize;
-        let len = (SYM_BURST as f64 * sps) as usize;
-        if start < self.ring_base || start + len > self.ring_base + self.ring.len() {
-            return None;
-        }
-        let s = start - self.ring_base;
-        Some(std::sync::Arc::new(common::IqBurst {
-            rate: self.audio_rate,
-            center_hz: self.channel_hz as u64,
-            samples: self.ring[s..s + len].to_vec(),
-        }))
-    }
-
-    /// One burst as a packet: its bits, the framer's context, its speech
-    /// and the samples it came from.
+    /// One burst as a packet: its bits, the framer's context, its speech,
+    /// the level it was heard at and the samples it was sliced from.
+    ///
+    /// The samples are found by the burst's symbol index. The filters ahead
+    /// of the symbol clock delay the symbols by a few dozen samples, which is
+    /// inside the burst's own guard.
     fn packet(
         &mut self,
         at: usize,
@@ -1031,15 +1050,12 @@ impl DmrNode {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
         self.accepted += 1;
-        let frame = common::Frame::unmeasured(encode_burst(
-            pos,
-            self.framer.colour,
-            self.lc.as_ref(),
-            bits,
-        ))
-        .at(self.channel_hz as u64);
+        let sps = self.audio_rate / BAUD;
+        let bytes = encode_burst(pos, self.framer.colour, self.lc.as_ref(), bits);
+        let (start, len) = ((at as f64 * sps) as u64, (SYM_BURST as f64 * sps) as usize);
+        let snr_db = self.meter.snr_db_at(start, len);
+        let frame = self.meter.frame_measured(bytes, start, len, snr_db);
         let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
-        p.iq = self.burst_iq(at);
         p.audio = audio;
         p
     }
@@ -1058,6 +1074,14 @@ impl Protocol for Dmr {
     fn placement(&self) -> Placement {
         Placement::Anywhere
     }
+    /// Like M17 it runs wherever it is put, so it is recognised by its own
+    /// tagged body rather than by band.
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Tagged
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        dmr_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    }
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
@@ -1074,7 +1098,7 @@ impl Protocol for Dmr {
         &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new("dmr").f("channel_hz", at.center_hz)]
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
 }
 
@@ -1153,6 +1177,13 @@ mod tests {
         assert_eq!(get("from"), "2345678");
         assert_eq!(get("voice"), "true");
         assert_eq!(get("call_type"), "group");
+        // The same said in types, which is what the call list reads: 60 ms
+        // of speech in the one vocoder DMR has, in the clear, still running.
+        let air = d.airtime.as_ref().expect("a link control with no airtime");
+        assert!(air.voice && air.live);
+        assert_eq!(air.seconds, 0.06);
+        assert_eq!(air.codec, Some(CODEC));
+        assert_eq!(air.secrecy, common::Secrecy::Clear);
         // Not anyone else's frame.
         assert!(dmr_decoded(b"random", common::Hz(0)).is_none());
         assert!(dmr_decoded(b"DB", common::Hz(0)).is_none());
@@ -1248,13 +1279,17 @@ mod tests {
             rows.iter().any(|d| d.protocol == "DMR-Terminator"),
             "no terminator row"
         );
-        // Each burst carries the samples it was read from, and its bits read
-        // back as AMBE frames.
+        // Each burst carries what it was heard at, the samples it was read
+        // from, and bits that read back as AMBE frames.
         assert!(
             packets
                 .iter()
-                .all(|p| p.iq.as_ref().is_some_and(|q| !q.samples.is_empty())),
+                .all(|p| p.samples().is_some_and(|q| !q.samples.is_empty())),
             "a burst without its samples"
+        );
+        assert!(
+            packets.iter().all(|p| p.rssi_dbfs().is_finite() && p.snr_db().is_finite()),
+            "a burst without its level"
         );
         let frames = packets
             .iter()
@@ -1283,13 +1318,7 @@ impl Node for DmrNode {
     }
 
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
 
     fn num_inputs(&self) -> usize {
         1
@@ -1320,8 +1349,7 @@ impl Node for DmrNode {
         self.framer = Framer::new();
         self.in_rate = rate;
         self.audio_rate = audio_rate;
-        self.ring.clear();
-        self.ring_base = 0;
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
@@ -1345,17 +1373,7 @@ impl Node for DmrNode {
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
         self.decim.process(&self.mixed, &mut self.narrow);
-        // Behind the symbol clock by what the framer may still read: a
-        // burst and its re-anchoring, plus the filters' delay, in samples.
-        self.ring.extend_from_slice(&self.narrow);
-        let sps = self.audio_rate / BAUD;
-        let keep =
-            ((SYM_BURST + SLOT_STRIDE + MAX_MISSES as usize * SLOT_STRIDE) as f64 * sps) as usize;
-        if self.ring.len() > keep * 2 {
-            let drop = self.ring.len() - keep;
-            self.ring.drain(..drop);
-            self.ring_base += drop;
-        }
+        self.meter.feed(&self.narrow);
         self.audio.clear();
         self.fm.process(&self.narrow, &mut self.audio);
         let raw = std::mem::take(&mut self.audio);
@@ -1474,9 +1492,22 @@ impl Node for DmrNode {
         self.talking = false;
         self.lc = None;
         self.idle_bursts = 0;
-        self.ring.clear();
-        self.ring_base = 0;
+        self.meter.reset();
         self.silent_samples = 0;
         self.vocoder.reset();
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "dmr",
+    summary: "One DMR channel: narrowband FM, 4-FSK at 4800 baud, two-slot TDMA voice",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(DmrNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

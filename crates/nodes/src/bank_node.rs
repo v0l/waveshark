@@ -10,7 +10,7 @@
 //! times over.
 //!
 //! What the outer graph gets instead is a node that says what it contains:
-//! [`Node::subgraph`] reports the chain one channel runs and
+//! [`Node::subgraphs`] reports the chain one channel runs and
 //! [`Node::subgraph_count`] how many channels run it. So a view of the chain
 //! shows the bank's decoder rather than an opaque box, without pretending the
 //! channels are separate nodes.
@@ -25,6 +25,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::Graph;
 
 use crate::bank::{ChannelBank, Gating};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 pub struct BankNode {
     bank: ChannelBank,
@@ -236,17 +237,55 @@ impl BankNode {
 
 impl Simple for BankNode {
     fn name(&self) -> &str {
-        &self.label
+        DESC.name
     }
 
-    fn subgraph(&self) -> Option<Topology> {
+    fn subgraphs(&self) -> Vec<Topology> {
+        // The one chain every channel runs; `subgraph_count` says how many
+        // are running it.
         (0..self.bank.channels())
             .find_map(|c| self.bank.graph(c))
-            .map(|g| g.topology())
+            .map(|g| vec![g.topology()])
+            .unwrap_or_default()
     }
 
     fn subgraph_count(&self) -> usize {
         self.bank.channels()
+    }
+
+    /// The band the bank is limited to decides which of its channels get a
+    /// decoder, and that is settled while the graph negotiates: it has to be
+    /// set before the node goes in, on a bank that came through a rebuild as
+    /// much as on a fresh one, because the span has usually moved under it
+    /// since it was last built.
+    fn configure(&mut self, settings: &Settings) {
+        self.set_band(crate::band_of(settings));
+    }
+
+    /// The decoders on the channels that have one, so something asked of
+    /// every node in the receiver reaches them rather than stopping at the
+    /// bank.
+    fn each_inner(&self, f: &mut dyn FnMut(&dyn pipeline::node::Node)) {
+        for c in 0..self.bank.channels() {
+            let Some(g) = self.bank.graph(c) else { continue };
+            for (id, _) in g.order() {
+                if let Some(n) = g.node(id) {
+                    f(n);
+                }
+            }
+        }
+    }
+
+    fn each_inner_mut(&mut self, f: &mut dyn FnMut(&mut dyn pipeline::node::Node)) {
+        for c in 0..self.bank.channels() {
+            let Some(g) = self.bank.graph_mut(c) else { continue };
+            let ids: Vec<_> = g.order().map(|(id, _)| id).collect();
+            for id in ids {
+                if let Some(n) = g.node_mut(id) {
+                    f(n);
+                }
+            }
+        }
     }
 
     /// The gate in front of the channels, and then whatever the channel graph
@@ -360,7 +399,7 @@ mod tests {
         // chain to anything drawing the graph.
         let mut b = bank();
         Node::negotiate(&mut b, &[spec(2_400_000.0)]).unwrap();
-        let inner = Node::subgraph(&b).expect("the chain a channel runs");
+        let inner = Node::subgraphs(&b).pop().expect("the chain a channel runs");
         let names: Vec<&str> = inner.nodes.iter().map(|n| n.label.as_str()).collect();
         assert!(names.iter().any(|n| n.contains("Classify")), "{names:?}");
         assert_eq!(Node::subgraph_count(&b), b.channels());
@@ -375,7 +414,7 @@ mod tests {
         moved.spec.center = Hz(868_300_000);
         Node::negotiate(&mut b, &[moved]).unwrap();
         assert_eq!(b.channels(), before, "a retune is not a rebuild");
-        assert!(Node::subgraph(&b).is_some(), "the chains survived");
+        assert!(!Node::subgraphs(&b).is_empty(), "the chains survived");
     }
 
     #[test]
@@ -385,4 +424,33 @@ mod tests {
         Node::negotiate(&mut b, &[spec(1_024_000.0)]).unwrap();
         assert_eq!(b.channels(), 34, "1.024 MHz at 31.25 kHz");
     }
+}
+
+/// The width of one channel in the bank.
+const CHANNEL_HZ: &str = "channel_hz";
+
+/// The width a bank channelizes to when nothing has said otherwise: the
+/// narrowest ISM sensors are read at.
+const DEFAULT_CHANNEL_HZ: f64 = 31_250.0;
+
+pub const DESC: StageDesc = StageDesc {
+    name: "bank",
+    summary: "Channelize a band and run a burst front end in every \
+              channel of it at once",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let width = s.f64_or(CHANNEL_HZ, DEFAULT_CHANNEL_HZ).max(1.0);
+    // Every tier runs the same graph: what a channel holds is measured and
+    // then routed, rather than assumed from the width the tier was built at.
+    let label = if width >= 1e6 {
+        format!("{:.1} MHz bank", width / 1e6)
+    } else {
+        format!("{:.0} kHz bank", width / 1e3)
+    };
+    let mut n = BankNode::new(label, width, crate::ism_decode_graph);
+    Simple::configure(&mut n, s);
+    Ok(Box::new(n))
 }

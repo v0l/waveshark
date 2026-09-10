@@ -91,16 +91,6 @@ pub enum Front {
     Protocol { id: &'static str, hz: f64 },
 }
 
-/// Words the file has accepted for a protocol besides its own name.
-const ALIASES: [(&str, &str); 6] = [
-    ("modes", "mode_s"),
-    ("mode-s", "mode_s"),
-    ("adsb", "mode_s"),
-    ("pager", "pocsag"),
-    ("bluetooth", "ble"),
-    ("gsm-sch", "gsm"),
-];
-
 impl Front {
     /// A protocol by registry name, at its own default frequency.
     pub fn named(id: &str) -> Option<Front> {
@@ -177,9 +167,8 @@ impl Front {
             "banks" => return Some(Front::Banks(DEFAULT_WIDTHS.to_vec())),
             _ => {}
         }
-        let id =
-            ALIASES.iter().find(|(alias, _)| *alias == s).map(|(_, id)| *id).unwrap_or(s.as_str());
-        Front::named(id)
+        let p = nodes::protocol::by_word(&s)?;
+        Some(Front::Protocol { id: p.id(), hz: p.default_hz() })
     }
 }
 
