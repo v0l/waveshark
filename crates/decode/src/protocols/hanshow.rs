@@ -145,6 +145,7 @@ impl Protocol for Hanshow {
                 )
                 .text("wakeup_id", hex(&body[1..4]))
                 .text("esl_id", hex(&body[4..8]))
+                .identified_by("esl_id")
                 .int("wakeup_chan", i64::from(body[8]))
                 .int("group_chan", i64::from(body[9]))
                 .int("data_chan", i64::from(body[10]))

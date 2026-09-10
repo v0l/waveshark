@@ -36,7 +36,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long the broker holds a reading before Home Assistant shows the entity
@@ -168,6 +168,9 @@ pub struct Publisher {
     dropped: AtomicU64,
     error: Mutex<Option<String>>,
     started: AtomicBool,
+    /// Woken when the broker changes, so the thread does not sleep out a
+    /// retry before trying the address it was just given.
+    wake: std::sync::Condvar,
 }
 
 impl Publisher {
@@ -183,15 +186,21 @@ impl Publisher {
             dropped: AtomicU64::new(0),
             error: Mutex::new(None),
             started: AtomicBool::new(false),
+            wake: std::sync::Condvar::new(),
         })
     }
 
-    /// The one publisher, started the first time a node asks for it.
-    pub fn shared() -> Arc<Self> {
-        static PUBLISHER: OnceLock<Arc<Publisher>> = OnceLock::new();
-        let p = PUBLISHER.get_or_init(Publisher::inert);
+    /// A publisher with its connection thread running.
+    ///
+    /// One per receiver, owned by it and lent to every node in its graph,
+    /// so a rebuild keeps the connection and two receivers in one process
+    /// (two tests, say) do not take turns setting each other's broker.
+    /// It was a process-wide singleton, and a test building a receiver with
+    /// no broker cleared the broker of the one that had.
+    pub fn running() -> Arc<Self> {
+        let p = Self::inert();
         p.start();
-        p.clone()
+        p
     }
 
     fn start(self: &Arc<Self>) {
@@ -215,6 +224,7 @@ impl Publisher {
         }
         *held = want;
         self.disconnect();
+        self.wake.notify_all();
     }
 
     pub fn broker(&self) -> Option<Broker> {
@@ -276,7 +286,7 @@ impl Publisher {
         let mut wait = RETRY;
         loop {
             let Some(broker) = self.broker() else {
-                std::thread::sleep(RETRY);
+                self.pause(RETRY);
                 continue;
             };
             match self.connect(&broker) {
@@ -285,11 +295,18 @@ impl Publisher {
                     if let Ok(mut held) = self.error.lock() {
                         *held = Some(e);
                     }
-                    std::thread::sleep(wait);
+                    self.pause(wait);
                     wait = (wait * 2).min(RETRY_MAX);
                 }
             }
             self.connected.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Wait out a retry, or until the broker is changed under us.
+    fn pause(&self, for_: Duration) {
+        if let Ok(guard) = self.broker.lock() {
+            let _ = self.wake.wait_timeout(guard, for_);
         }
     }
 
@@ -387,8 +404,11 @@ pub struct HomeAssistantNode {
 }
 
 impl Default for HomeAssistantNode {
+    /// A node with nowhere to publish until a receiver lends it a publisher
+    /// (`set_publisher`). Built from the registry this way, since the
+    /// registry cannot know which receiver the stage is for.
     fn default() -> Self {
-        Self::with(Publisher::shared())
+        Self::with(Publisher::inert())
     }
 }
 
@@ -415,6 +435,15 @@ impl HomeAssistantNode {
 
     pub fn set_broker(&mut self, broker: Option<Broker>) {
         self.publisher.set_broker(broker);
+    }
+
+    /// Publish through this publisher from now on. What was announced over
+    /// the old one is forgotten, since the new one's broker has not heard it.
+    pub fn set_publisher(&mut self, p: Arc<Publisher>) {
+        if !Arc::ptr_eq(&self.publisher, &p) {
+            self.publisher = p;
+            self.known.clear();
+        }
     }
 
     /// Which identity spaces to publish, as a comma-separated list, or empty
@@ -796,6 +825,29 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     Ok(Box::new(HomeAssistantNode::default()))
 }
 
+/// One MQTT packet out of the front of a buffer, for a test standing in
+/// for a broker: its kind, its flags, its
+/// body, and how much of the buffer it took.
+pub fn mqtt_packet(buf: &[u8]) -> Option<(u8, u8, Vec<u8>, usize)> {
+    if buf.len() < 2 {
+        return None;
+    }
+    let (mut len, mut mult, mut i) = (0usize, 1usize, 1usize);
+    loop {
+        let b = *buf.get(i)?;
+        len += (b & 127) as usize * mult;
+        i += 1;
+        if b & 128 == 0 {
+            break;
+        }
+        mult *= 128;
+    }
+    if buf.len() < i + len {
+        return None;
+    }
+    Some((buf[0] >> 4, buf[0] & 0x0f, buf[i..i + len].to_vec(), i + len))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1129,25 +1181,5 @@ mod tests {
         assert_eq!(publisher.status().dropped, 0);
     }
 
-    /// One MQTT packet out of the front of a buffer: its kind, its flags, its
-    /// body, and how much of the buffer it took.
-    fn take_packet(buf: &[u8]) -> Option<(u8, u8, Vec<u8>, usize)> {
-        if buf.len() < 2 {
-            return None;
-        }
-        let (mut len, mut mult, mut i) = (0usize, 1usize, 1usize);
-        loop {
-            let b = *buf.get(i)?;
-            len += (b & 127) as usize * mult;
-            i += 1;
-            if b & 128 == 0 {
-                break;
-            }
-            mult *= 128;
-        }
-        if buf.len() < i + len {
-            return None;
-        }
-        Some((buf[0] >> 4, buf[0] & 0x0f, buf[i..i + len].to_vec(), i + len))
-    }
+    use super::mqtt_packet as take_packet;
 }

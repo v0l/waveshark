@@ -64,7 +64,10 @@ pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{feed_kind, FeedKind, FeedNode, FeedSpec, FEED_KINDS};
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use frame_meter::FrameMeter;
-pub use homeassistant_nodes::{Broker, HomeAssistantNode, HomeAssistantStatus, Publish};
+pub use homeassistant_nodes::{
+    mqtt_packet, Broker, HomeAssistantNode, HomeAssistantStatus, Publish,
+    Publisher as HomeAssistantPublisher,
+};
 pub use keyed::{keyed, keyed_mut, Keyed};
 pub use lora_nodes::LoraNode;
 pub use m17_nodes::M17Node;

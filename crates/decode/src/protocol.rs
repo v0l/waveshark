@@ -49,6 +49,17 @@ impl Report {
         self
     }
 
+    /// Name the field that identifies the transmitter, for a decoder that
+    /// calls it something other than `id`: a Fine Offset station's
+    /// `station_id`. Without this the report names no device, so it is
+    /// never a row in the device database and never a device in the house.
+    pub fn identified_by(mut self, k: &str) -> Self {
+        if let Some(v) = self.fields.get(k) {
+            self.device = Some(v.to_string());
+        }
+        self
+    }
+
     pub fn int(self, k: &str, v: i64) -> Self {
         self.set(k, Value::Int(v))
     }
