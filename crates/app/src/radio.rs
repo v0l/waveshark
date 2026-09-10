@@ -5042,11 +5042,15 @@ mod zoom_tests {
                 x(worst),
                 if over > 0 { format!(", {over} under {FLOOR_X}x") } else { String::new() },
             );
+            // A listed capture comes off the list once it clears the floor
+            // with room to spare, not the first time it lands over it: one
+            // that sits at the floor would otherwise fail one run in two.
+            let clear = x(worst) >= FLOOR_X * 1.5;
             match (over > 0, known) {
                 (true, None) => slow.push(format!("{name}: worst block {:.2}x, floor {FLOOR_X}x", x(worst))),
                 (true, Some(why)) => eprintln!("{name}: known slow, {why}"),
-                (false, Some(_)) => recovered.push(name.clone()),
-                (false, None) => {}
+                (false, Some(_)) if clear => recovered.push(name.clone()),
+                (false, _) => {}
             }
         }
         assert!(slow.is_empty(), "captures the receiver cannot keep up with:\n{}", slow.join("\n"));
