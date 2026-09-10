@@ -209,6 +209,8 @@ the code is in the commit log; what a decoder can and cannot do is in
   failed.
 
 ### Changed
+- The device database's record switch is on the devices view, beside the
+  export and feed buttons, as well as in Setup next to the GPS.
 
 - Less processor for the same signal on a wide span. Watching a 20 MS/s band
   costs about a third less than it did, hearing a camera about a fifth less,
