@@ -202,6 +202,11 @@ pub(super) struct Member {
     /// [`Protocol::watch`].
     pub(super) watched: usize,
     pub(super) since_read: f64,
+    /// Seconds since the detector last had a source open for a gated
+    /// span-wide front end, infinite while it never has, and whether it is
+    /// asleep now. See [`Protocol::wakes_on`] and [`Member::awake`].
+    since_detected_s: f64,
+    sleeping: bool,
     /// Whether this front end can produce a packet at all, and so whether the
     /// stream behind it is worth keeping. A stream is kept when any front end
     /// on it says so; see [`Ring::keeps`].
@@ -329,6 +334,8 @@ impl Member {
             backlog: VecDeque::new(),
             watched: 0,
             since_read: f64::INFINITY,
+            since_detected_s: f64::INFINITY,
+            sleeping: true,
             keeps_samples: !pulses_empty || !frames_empty || !packets_empty || router.is_some(),
         })
     }
@@ -358,6 +365,58 @@ impl Member {
         let at = self.watched % period.max(1);
         self.watched = self.watched.wrapping_add(samples);
         at < on
+    }
+
+    /// Whether the span is carrying anything this front end could be
+    /// reading, and account for the block either way.
+    ///
+    /// A front end that has claimed a band is reading it whatever the
+    /// detector can see, because the detector is shut out of a claimed band
+    /// and would never open a source there: a camera put to sleep the moment
+    /// it locked would drop the picture it had just found.
+    pub(super) fn awake(&mut self, detected: bool, samples: usize, rate: f64) -> bool {
+        let hold_s = match self.protocol.map(|p| p.wakes_on()) {
+            None | Some(crate::protocol::Wake::Always) => return true,
+            Some(crate::protocol::Wake::Detected { hold_s }) => hold_s,
+        };
+        if detected || self.band.is_some() {
+            self.since_detected_s = 0.0;
+            return true;
+        }
+        self.since_detected_s += samples as f64 / rate.max(1.0);
+        self.since_detected_s <= hold_s
+    }
+
+    /// Pass over a block this front end is asleep for.
+    pub(super) fn sleep(&mut self, samples: usize) {
+        self.sleeping = true;
+        self.skip(samples);
+    }
+
+    /// Give a front end that has just woken the lead-in the detector needed
+    /// to notice, out of the ring the span is kept in.
+    ///
+    /// Without it the front end starts reading in the middle of the burst
+    /// that woke it, which for a preamble-locked decoder is the same as not
+    /// reading it at all. Nothing before that: the ring is seconds deep, and
+    /// what happened before the detector saw anything is what this front end
+    /// was asleep through on purpose.
+    ///
+    /// `live` is the block about to be run, which is already in the ring and
+    /// must not be read twice.
+    pub(super) fn wake(&mut self, ring: &Ring, lead: usize, live: usize) {
+        if !self.sleeping {
+            return;
+        }
+        self.sleeping = false;
+        let held = ring.samples().len().saturating_sub(live).min(lead);
+        if held == 0 {
+            return;
+        }
+        self.read = ring.end() - (live + held) as u64;
+        self.since = self.read;
+        let to = ring.samples().len() - live;
+        self.backlog.extend(ring.samples()[to - held..to].iter().copied());
     }
 
     /// What everything this member produces is measured at, unless the front

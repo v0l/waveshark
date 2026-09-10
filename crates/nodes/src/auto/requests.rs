@@ -27,6 +27,32 @@ impl AutoNode {
             .any(|(a, b)| a <= lo && hi <= b)
     }
 
+    /// Close the sources inside a band a front end has just claimed.
+    ///
+    /// The claimant is reading all of it, so every run the detector opened
+    /// in there is a piece of what it is reading: a camera's 20 MHz carrier
+    /// opens dozens of them, each costing an extraction and a set of front
+    /// ends reporting sensors nobody transmitted. New ones stop opening
+    /// because the detector is shut out of a claimed band, but the ones
+    /// already open never close on their own, since a claimed span is one
+    /// the detector is no longer looking at and it is the detector that says
+    /// when a source has gone.
+    ///
+    /// The extraction is closed rather than the slot dropped, so each of
+    /// them ends the way any source does: one last block that says it
+    /// closed, the flush behind it, and whatever that finishes reading.
+    fn close_sources_inside(&mut self, lo_hz: f64, hi_hz: f64) {
+        let inside: Vec<common::SourceId> = self
+            .slots
+            .iter()
+            .filter(|s| (lo_hz..hi_hz).contains(&s.center_hz.as_f64()))
+            .map(|s| s.id)
+            .collect();
+        for id in inside {
+            self.watch.close_channel(id);
+        }
+    }
+
     /// Answer what a decoder asked, and return what only the receiver can
     /// answer.
     ///
@@ -68,6 +94,7 @@ impl AutoNode {
                             m.band = Some((lo, hi));
                         }
                         self.apply_locked();
+                        self.close_sources_inside(lo_hz, hi_hz);
                     }
                     Some(_) => {
                         if let Some(name) = name {

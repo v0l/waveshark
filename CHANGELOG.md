@@ -193,6 +193,11 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ### Changed
 
+- The Wi-Fi and video front ends stop reading a band nothing is transmitting
+  on, and start again the moment something does, so a quiet 2.4 or 5.8 GHz
+  span costs almost nothing. They used to demodulate an empty band all day.
+  A camera that has claimed the span now closes the sources found inside its
+  own carrier as well, which was most of what the receiver spent a picture on.
 - A wide signal nobody can decode leaves a row of its own: the centre, the
   width, how long it was on the air and how strong it was, as the detector
   measured them. The burst classifier no longer runs on a signal megahertz

@@ -515,6 +515,20 @@ impl SourceDetector {
         (self.cfg.min_frames + 1) * self.hop + self.n
     }
 
+    /// Whether the detector is still measuring the floor, and so cannot yet
+    /// say that nothing is transmitting.
+    ///
+    /// A stream is not looked at for its first [`SETTLE_FRAMES`] frames,
+    /// which at 20 MS/s is over a tenth of a second: a consumer that reads
+    /// only while a source is open is deaf for all of it unless it knows to
+    /// keep reading until the detector can answer. A stream silent from its
+    /// first sample never settles, because there is nothing to measure a
+    /// floor against, and it is also the one case where nothing being open
+    /// is certainly right.
+    pub fn settling(&self) -> bool {
+        !self.silent_so_far && self.frame < self.settle_at + SETTLE_FRAMES
+    }
+
     /// Channels a front end is already reading, as offsets from the centre.
     /// Nothing is opened inside one; see [`Owned`].
     pub fn set_owned(&mut self, channels: Vec<Owned>) {

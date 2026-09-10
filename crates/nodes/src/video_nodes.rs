@@ -480,6 +480,15 @@ impl Protocol for Video {
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim
     }
+    /// Nothing at all until something transmits in the span. A camera's
+    /// carrier is on for seconds at a time, so an empty band is an empty
+    /// band, and demodulating 20 MS/s of it costs most of a core for a
+    /// picture nobody is sending. Once the front end has locked it claims
+    /// the span and the detector stops looking, which is why a claim keeps
+    /// it awake by itself.
+    fn wakes_on(&self) -> crate::protocol::Wake {
+        crate::protocol::Wake::Detected { hold_s: 1.0 }
+    }
     /// Not by the receiver: the front end needs the whole span for the
     /// sound and narrows the picture itself. See [`Video::chain`].
     fn narrow_span(&self) -> bool {
