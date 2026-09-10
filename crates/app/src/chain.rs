@@ -3840,6 +3840,8 @@ fn record(
         bytes: d.payload.clone(),
         crc: d.crc_ok,
         link: d.link.clone(),
+        report: d.report.clone(),
+        identity: d.identity.clone(),
         iq: p.samples().cloned(),
         audio: p.audio.clone(),
         airtime: d.airtime.clone(),

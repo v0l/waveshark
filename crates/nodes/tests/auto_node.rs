@@ -488,6 +488,23 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
         assert!(detail.contains("rc 51") || detail.contains("rc 50"), "{detail}");
         assert!(detail.contains(" 86 "), "throttle was low: {detail}");
         assert!(!detail.contains("armed"), "{detail}");
+        // The sticks the views draw, as microseconds rather than as counts.
+        // This is a Full rate, so eight channels arrive: the four sticks and
+        // AUX2-5, with nothing said about AUX6-9. The throttle is at 988 us,
+        // the bottom of the CRSF span, which is the raw 86 the detail shows.
+        let common::ReportDetail::Control { channels, armed, uplink_power_mw } = &r.report else {
+            panic!("an rc packet with no control report: {r:?}")
+        };
+        assert_eq!(armed, &Some(false), "{r:?}");
+        assert!(channels[..8].iter().all(Option::is_some), "{channels:?}");
+        assert!(channels[8..].iter().all(Option::is_none), "{channels:?}");
+        assert_eq!(channels[2], Some(988), "throttle in us: {channels:?}");
+        // Two sticks centred to within a count, which is 1.25 us.
+        assert!(channels[..2].iter().flatten().all(|us| (1495..=1520).contains(us)), "{channels:?}");
+        // Power index 0, which the firmware's own enum order makes 10 mW.
+        // The bench handset's setting was not recorded, so this pins what the
+        // packet says rather than what the transmitter was told to do.
+        assert_eq!(uplink_power_mw, &Some(10), "{r:?}");
     }
     let channels: std::collections::BTreeSet<u64> = rows.iter().map(|r| r.center.0 / 100_000).collect();
     // The four channel visits in the capture, in hundreds of kilohertz.

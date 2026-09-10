@@ -203,7 +203,28 @@ pub enum ReportDetail {
         role: &'static str,
         fixed: bool,
     },
+    /// A handset flying something: the stick positions it sent, and what the
+    /// link said about itself.
+    ///
+    /// Microseconds, because that is the quantity every one of these links
+    /// carries whatever it puts on the air: FrSky and FlySky send servo pulse
+    /// widths, ExpressLRS sends ten bit counts over the CRSF range and the
+    /// conversion happens in its decoder rather than in a view. A channel is
+    /// absent where the frame did not carry it, since FrSky sends 1 to 8 and
+    /// 9 to 16 in alternate frames and ExpressLRS's ordinary rate sends four,
+    /// and a missing channel is not a stick at zero.
+    Control {
+        channels: [Option<u16>; CONTROL_CHANNELS],
+        /// Where the link says, which is not the same as the aircraft being
+        /// armed: a handset reports what it is asking for.
+        armed: Option<bool>,
+        uplink_power_mw: Option<u16>,
+    },
 }
+
+/// How many channels a control report has room for. Sixteen is what every
+/// hobby link here carries at most.
+pub const CONTROL_CHANNELS: usize = 16;
 
 /// Half a position, as Mode S sends it.
 ///

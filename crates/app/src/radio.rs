@@ -849,6 +849,15 @@ pub struct DecodeRecord {
     /// is a kind and an identifier, and reading one out of a display string
     /// is how a talkgroup and a callsign end up in the same row.
     pub link: Option<pipeline::event::Link>,
+    /// What the transmission said about the transmitter besides where it was,
+    /// as the decoder recovered it: an aircraft's altitude, a vessel's
+    /// heading, a handset's sticks. Typed for the same reason `link` is.
+    pub report: common::ReportDetail,
+    /// Who transmitted, where the decoder could say. The device database rows
+    /// on this, and a view holding one row per transmitter needs it for the
+    /// same reason: an identifier read out of a display field is a number two
+    /// protocols can both produce.
+    pub identity: Option<common::Identity>,
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
@@ -916,6 +925,8 @@ impl DecodeRecord {
             bytes: vec![1, 2, 3],
             crc: Some(true),
             link: None,
+            report: common::ReportDetail::Bare,
+            identity: None,
             iq: None,
             audio: None,
             airtime: None,
@@ -1343,7 +1354,12 @@ impl RadioControls {
             choices: dev.choices(),
             ppm,
             reach: Self::reach_of(dev),
-            tunable: dev.info().kind != common::device::DriverKind::IqStream,
+            // A stream is pinned by whoever feeds it and a capture by
+            // whoever recorded it; both dials are readouts.
+            tunable: !matches!(
+                dev.info().kind,
+                common::device::DriverKind::IqStream | common::device::DriverKind::File
+            ),
         }
     }
 }
