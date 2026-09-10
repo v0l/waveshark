@@ -20,6 +20,7 @@
 //! the same split every other protocol here keeps.
 
 use common::C32;
+use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Subcarrier spacing, which fixes the FFT size for a given rate.
@@ -30,6 +31,9 @@ pub const CARRIERS: usize = 600;
 
 /// The rate the frame is defined at: 1024 bins of 15 kHz.
 pub const RATE: f64 = 15_360_000.0;
+
+/// The channel a burst occupies: 600 carriers 15 kHz apart, plus guards.
+pub const WIDTH_HZ: f64 = 10_000_000.0;
 
 /// Where a 2.4 GHz burst has been seen. The list is `proto17/dji_droneid`'s,
 /// which is observation rather than specification: there may be others.
@@ -269,6 +273,267 @@ impl BurstFinder {
         }
         out.extend(best);
         out
+    }
+}
+
+/// A burst one centre of a span produced.
+///
+/// The bits are what [`frame_bits`] made of it; whether they are a frame is
+/// for the CRC-16 in `decode::droneid` to say, which is the other side of the
+/// byte boundary this file stops at.
+#[derive(Clone, Debug)]
+pub struct SpanBurst {
+    /// The centre it was read on, which in a span holding several is not the
+    /// tuner's own.
+    pub center_hz: f64,
+    /// The 176 bytes of the code block, the DroneID frame first.
+    pub frame: Vec<u8>,
+    /// Mean power over the burst itself, in dBFS.
+    pub rssi_dbfs: f32,
+    /// That against the channel a burst length before it, in dB, or what the
+    /// correlation says where there was nothing to measure against.
+    pub snr_db: f32,
+    /// The samples it was read from, at [`SpanBurst::rate`].
+    pub samples: Vec<C32>,
+    /// The channel's own rate: the span's over a whole number.
+    pub rate: f64,
+}
+
+/// Half the occupied bandwidth: 600 carriers 15 kHz apart is 9 MHz, so this
+/// is what a channel filter has to keep, and the band the energy gate reads.
+const HALF_OCCUPIED_HZ: f64 = 4_600_000.0;
+
+/// A burst: nine symbols, which is what the energy gate must not step over.
+const BURST_S: f64 = 0.00072;
+
+/// Every centre a span holds, each with a correlator that runs only while its
+/// channel is lit.
+///
+/// The centres are fixed and known, so this is `wifi::WifiSpan`'s
+/// arrangement: one transform a block says which of them have anything in
+/// them, and each lit centre is mixed down and read on its own. What it
+/// replaces is a correlator per source the detector opened wide enough to be
+/// a burst, which on a busy 2.4 GHz band is Wi-Fi splatter: eleven sources
+/// over the same spectrum, each extracted at 15.36 MS/s and each searching
+/// for the same five possible bursts.
+pub struct DroneIdSpan {
+    rxs: Vec<ChannelRx>,
+    /// The one transform every centre's energy gate reads.
+    span: crate::gate::SpanGate,
+}
+
+struct ChannelRx {
+    center_hz: f64,
+    /// The channel's own rate, which is the span's over `factor`.
+    rate: f64,
+    factor: usize,
+    mixer: Option<crate::Mixer>,
+    /// The channel filter, which is also the decimator where the span is
+    /// wider than the channel by a whole number. It runs at a factor of one
+    /// too: the correlation is normalised by the energy in its window, so
+    /// everything left in the window that is not the burst lowers the score.
+    decim: crate::fir::FirDecim,
+    finder: BurstFinder,
+    /// The channel stream: the overlap kept from the last block, the block
+    /// itself, and enough behind both to measure a burst against the channel
+    /// before it.
+    buf: Vec<C32>,
+    /// Channel-stream index of `buf[0]`.
+    base: u64,
+    /// Where the last burst that produced bits began, so one straddling a
+    /// block boundary is not read twice: the overlap is correlated again in
+    /// the block that follows it.
+    last: Option<u64>,
+    /// Whether this centre has anything on it this block.
+    gate: crate::gate::ChannelGate,
+    mixed: Vec<C32>,
+}
+
+impl ChannelRx {
+    /// A receiver for one centre of a span, or `None` when the span does not
+    /// hold the whole channel.
+    fn new(
+        span_rate: f64,
+        span_hz: f64,
+        center_hz: f64,
+        threshold: f32,
+        gate: &crate::gate::SpanGate,
+    ) -> Option<Self> {
+        let shift = center_hz - span_hz;
+        if shift.abs() + WIDTH_HZ / 2.0 > span_rate / 2.0 + 1.0 {
+            return None;
+        }
+        let factor = (span_rate / RATE + 1e-6).floor().max(1.0) as usize;
+        let rate = span_rate / factor as f64;
+        Some(Self {
+            center_hz,
+            rate,
+            factor,
+            mixer: (shift.abs() > 0.5).then(|| crate::Mixer::new(-shift, span_rate)),
+            decim: crate::fir::FirDecim::design_hz(span_rate, factor, HALF_OCCUPIED_HZ, 60.0),
+            finder: BurstFinder::new(rate, threshold),
+            buf: Vec::new(),
+            base: 0,
+            last: None,
+            gate: crate::gate::ChannelGate::new(gate, shift, HALF_OCCUPIED_HZ),
+            mixed: Vec::new(),
+        })
+    }
+
+    /// The overlap correlated ahead of each new block, which is what reads a
+    /// burst that straddles the boundary: two burst lengths, since a burst
+    /// found in the last one has no room left to demodulate.
+    fn overlap(&self) -> usize {
+        2 * burst_len(self.rate)
+    }
+
+    /// Samples kept behind the overlap, for the level a burst is measured
+    /// against: [`SpanBurst::snr_db`] wants a burst length of channel a burst
+    /// length before the burst.
+    fn keep(&self) -> usize {
+        4 * burst_len(self.rate)
+    }
+
+    /// Pass over a block this channel is not being read on.
+    ///
+    /// What it holds is not continuous with what arrives next, so it is
+    /// dropped rather than joined to it; the clock carries on, because a
+    /// burst is named by where it sat in the stream.
+    fn doze(&mut self, span_samples: usize) {
+        self.base += (self.buf.len() + span_samples / self.factor) as u64;
+        self.buf.clear();
+    }
+
+    /// Mix this channel down, read it, and say what it found.
+    fn feed(&mut self, iq: &[C32], out: &mut Vec<SpanBurst>) {
+        let held = self.buf.len();
+        match self.mixer.as_mut() {
+            Some(m) => {
+                self.mixed.clear();
+                m.process(iq, &mut self.mixed);
+                let mixed = std::mem::take(&mut self.mixed);
+                self.decim.process(&mixed, &mut self.buf);
+                self.mixed = mixed;
+            }
+            None => self.decim.process(iq, &mut self.buf),
+        }
+        let (rate, overlap) = (self.rate, self.overlap());
+        let len = burst_len(rate);
+        // Everything that has not been correlated yet, and the overlap in
+        // front of it: a burst in the overlap was found last block without
+        // the samples to demodulate it, and has them now.
+        let from = held.saturating_sub(overlap);
+        for found in self.finder.find(&self.buf[from..]) {
+            let Some(start) = found.zc4_at.checked_sub(symbol_offset(rate, 4)) else {
+                continue;
+            };
+            let at = from + start;
+            let absolute = self.base + at as u64;
+            if self.last.is_some_and(|l| absolute.saturating_sub(l) < len as u64) {
+                continue;
+            }
+            let Some(frame) = frame_bits(&self.buf, at, rate) else {
+                continue;
+            };
+            self.last = Some(absolute);
+            let samples = self.buf[at..at + len].to_vec();
+            let signal = power_dbfs(&samples);
+            // The floor next to the burst rather than the channel's own,
+            // which on a channel a link keeps busy is the link. A burst
+            // length of quiet a burst length before it is what a detector
+            // would have measured against.
+            let noise = at.checked_sub(2 * len).map(|q| power_dbfs(&self.buf[q..q + len]));
+            out.push(SpanBurst {
+                center_hz: self.center_hz,
+                frame,
+                rssi_dbfs: signal,
+                // Nothing to measure against is a level of nothing, not a
+                // level of zero: the correlation is all that is left.
+                snr_db: match noise {
+                    Some(n) => signal - n,
+                    None => 20.0 * found.score.max(1e-6).log10(),
+                },
+                samples,
+                rate,
+            });
+        }
+        let drop = self.buf.len().saturating_sub(self.keep());
+        self.buf.drain(..drop);
+        self.base += drop as u64;
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.base = 0;
+        self.last = None;
+        self.decim.reset();
+        self.gate.reset();
+        if let Some(m) = self.mixer.as_mut() {
+            m.reset();
+        }
+    }
+}
+
+/// Mean power of a run of samples, in dBFS.
+fn power_dbfs(iq: &[C32]) -> f32 {
+    if iq.is_empty() {
+        return -200.0;
+    }
+    let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
+    10.0 * pow.max(1e-20).log10()
+}
+
+impl DroneIdSpan {
+    /// A receiver for each of `centers` the span reaches, or `None` when it
+    /// reaches none of them or is too slow for the frame.
+    pub fn new(rate: f64, center_hz: f64, centers: &[f64], threshold: f32) -> Option<Self> {
+        if rate + 1.0 < RATE {
+            return None;
+        }
+        let span = crate::gate::SpanGate::new(rate, BURST_S);
+        let rxs: Vec<ChannelRx> = centers
+            .iter()
+            .filter_map(|&c| ChannelRx::new(rate, center_hz, c, threshold, &span))
+            .collect();
+        (!rxs.is_empty()).then_some(Self { rxs, span })
+    }
+
+    /// The centres being read, low first.
+    pub fn channels(&self) -> Vec<f64> {
+        self.rxs.iter().map(|r| r.center_hz).collect()
+    }
+
+    pub fn reset(&mut self) {
+        for r in self.rxs.iter_mut() {
+            r.reset();
+        }
+    }
+
+    /// Read every lit centre, appending what each one found.
+    ///
+    /// The channels are independent, so they run in parallel; each holds its
+    /// own buffers and its own state, and nothing is shared but the samples
+    /// they all read.
+    pub fn process(&mut self, iq: &[C32], out: &mut Vec<SpanBurst>) {
+        if iq.is_empty() {
+            return;
+        }
+        self.span.measure(iq);
+        let span = &self.span;
+        let found: Vec<Vec<SpanBurst>> = self
+            .rxs
+            .par_iter_mut()
+            .map(|r| {
+                let mut mine = Vec::new();
+                if !r.gate.awake(span) {
+                    r.doze(iq.len());
+                    return mine;
+                }
+                r.feed(iq, &mut mine);
+                mine
+            })
+            .collect();
+        out.extend(found.into_iter().flatten());
     }
 }
 

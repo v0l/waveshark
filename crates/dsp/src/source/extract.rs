@@ -121,17 +121,97 @@ fn sharp_decimator(rate: f64, factor: usize, passband_hz: f64, atten_db: f64) ->
     FirDecim::new(fir::lowpass(taps, cutoff, atten_db), factor)
 }
 
+/// The wideband history every source is cut from.
+///
+/// A ring with a wrapping write index rather than a buffer that is drained
+/// when it doubles. Draining moves everything still held down by whatever
+/// was dropped, and what is held is the history a reopened source starts
+/// again from: at 61.44 MS/s that is 18 million samples, so one block in
+/// every hundred and forty spent 6 ms memmoving 148 MB, measured on the busy
+/// span capture, in a block whose whole budget is 2.1 ms. Wrapping costs the
+/// same per sample written and nothing per block.
+pub(super) struct History {
+    buf: Vec<C32>,
+    /// Wideband index of the oldest sample held.
+    base: u64,
+    /// How many are held, which is the buffer's length once it has filled.
+    len: usize,
+    /// Where in the buffer the next sample goes.
+    head: usize,
+}
+
+impl History {
+    pub(super) fn new(cap: usize) -> Self {
+        Self { buf: vec![C32::default(); cap.max(1)], base: 0, len: 0, head: 0 }
+    }
+
+    /// Wideband index of the oldest sample held.
+    pub(super) fn first(&self) -> u64 {
+        self.base
+    }
+
+    /// One past the newest.
+    pub(super) fn end(&self) -> u64 {
+        self.base + self.len as u64
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.base = 0;
+        self.len = 0;
+        self.head = 0;
+    }
+
+    pub(super) fn push(&mut self, input: &[C32]) {
+        let cap = self.buf.len();
+        // A block longer than the whole history: only the newest `cap` of it
+        // can be held, and the rest is counted as having gone past.
+        let (input, skipped) = match input.len() > cap {
+            true => (&input[input.len() - cap..], (input.len() - cap) as u64),
+            false => (input, 0),
+        };
+        self.base += skipped;
+        // In two pieces where the write reaches the end of the buffer and
+        // carries on at its start.
+        let (head, tail) = input.split_at((cap - self.head).min(input.len()));
+        for chunk in [head, tail] {
+            if chunk.is_empty() {
+                continue;
+            }
+            self.buf[self.head..self.head + chunk.len()].copy_from_slice(chunk);
+            self.head = (self.head + chunk.len()) % cap;
+        }
+        let was = self.len;
+        self.len = (self.len + input.len()).min(cap);
+        // Whatever the write ran over is no longer held.
+        self.base += (was + input.len() - self.len) as u64;
+    }
+
+    /// The two runs holding `[a, b)`, oldest first. The second is empty
+    /// unless the range crosses the buffer's end.
+    pub(super) fn parts(&self, a: u64, b: u64) -> (&[C32], &[C32]) {
+        let cap = self.buf.len();
+        let a = a.max(self.base);
+        let b = b.min(self.end());
+        if b <= a {
+            return (&[], &[]);
+        }
+        let start = (self.head + cap - self.len) % cap;
+        let from = (start + (a - self.base) as usize) % cap;
+        let n = (b - a) as usize;
+        match from + n <= cap {
+            true => (&self.buf[from..from + n], &[]),
+            false => (&self.buf[from..], &self.buf[..n - (cap - from)]),
+        }
+    }
+}
+
 /// Turns the detector's sources into streams, from a ring of the wideband
 /// input.
 pub struct SourceExtractor {
     cfg: SourceConfig,
     rate: f64,
     center_hz: f64,
-    ring: Vec<C32>,
-    /// Wideband index of `ring[0]`.
-    base: u64,
-    /// Samples the ring keeps behind the newest block.
-    keep: usize,
+    ring: History,
     lead: u64,
     tail: u64,
     chans: Vec<Chan>,
@@ -171,9 +251,12 @@ impl SourceExtractor {
             cfg,
             rate,
             center_hz,
-            ring: Vec::new(),
-            base: 0,
-            keep,
+            // Twice what a source can reach back for, which is what the
+            // buffer this replaced held at its fullest: it grew to twice
+            // `keep` and was then drained back to `keep`, so anything asked
+            // of it got between one and two of them. A ring that held one
+            // lost a decode of the source corpus.
+            ring: History::new(2 * keep),
             lead,
             tail,
             chans: Vec::new(),
@@ -227,7 +310,6 @@ impl SourceExtractor {
 
     pub fn reset(&mut self) {
         self.ring.clear();
-        self.base = 0;
         self.chans.clear();
         self.commands.clear();
         if let Some(b) = &mut self.bank {
@@ -247,11 +329,14 @@ impl SourceExtractor {
     /// wide, from wideband sample `from`.
     fn cut(&mut self, id: SourceId, offset_hz: f64, width_hz: f64, from: u64, snr_db: f32) {
         let bw = (width_hz * self.cfg.width_margin).max(self.cfg.bin_hz * 2.0);
-        let want = (bw * self.cfg.oversample).max(self.cfg.min_rate_hz);
+        // Oversampled where something will demodulate it, and at its own
+        // width where nothing can: see [`SourceConfig::read_width_hz`].
+        let over = if width_hz > self.cfg.read_width_hz { 1.0 } else { self.cfg.oversample };
+        let want = (bw * over).max(self.cfg.min_rate_hz);
         // Whether the rate came from the width or from the floor, which
         // decides what the extraction filter should keep.
-        let floored = bw * self.cfg.oversample < self.cfg.min_rate_hz;
-        let start = from.saturating_sub(self.lead).max(self.base);
+        let floored = bw * over < self.cfg.min_rate_hz;
+        let start = from.saturating_sub(self.lead).max(self.ring.first());
         // How far back the stream starts is bounded by the work of reading
         // it, in samples of the stream rather than in time. A candidate can
         // sit unopened for as long as it is present, too wide or with no
@@ -262,7 +347,7 @@ impl SourceExtractor {
         // long it waited for room, and 66 ms of a Wi-Fi source, a hundred of
         // its frames. Bounding it by time instead cut the sensors: the busy
         // span test loses twelve of 116 packets at 20 ms of lead.
-        let end = self.base + self.ring.len() as u64;
+        let end = self.ring.end();
         let decim = (self.rate / (want.max(bw))).max(1.0) as u64;
         let start = start.max(end.saturating_sub(CATCH_UP_SAMPLES * decim));
 
@@ -329,11 +414,11 @@ impl SourceExtractor {
                 return None;
             }
         } else {
-            let from = bank.sample_at(need).max(self.base);
-            if from < self.base + bank.delay {
+            let from = bank.sample_at(need).max(self.ring.first());
+            if from < self.ring.first() + bank.delay {
                 return None;
             }
-            bank.start(&self.ring, self.base, from);
+            bank.start(&self.ring, from);
             if need < bank.base {
                 return None;
             }
@@ -351,8 +436,8 @@ impl SourceExtractor {
     /// reasons of its own goes through [`Self::open_channel`] and
     /// [`Self::close`], which take effect here too.
     pub fn process(&mut self, input: &[C32], events: &[SourceEvent], out: &mut Vec<SourceBlock>) {
-        self.ring.extend_from_slice(input);
-        let end = self.base + self.ring.len() as u64;
+        self.ring.push(input);
+        let end = self.ring.end();
         if let Some(b) = &mut self.bank {
             if b.running {
                 b.feed(input, end - input.len() as u64);
@@ -391,7 +476,6 @@ impl SourceExtractor {
             }
         }
 
-        let base = self.base;
         let ring = &self.ring;
         let bank = self.bank.as_ref();
         let pace = (input.len() as u64 * CATCH_UP_PACE).max(1);
@@ -399,9 +483,7 @@ impl SourceExtractor {
             .chans
             .par_iter_mut()
             .filter_map(|c| match c.feed {
-                Feed::Direct => {
-                    Self::extract_block(c, &Gather::Ring { ring, base }, c.cursor, end, pace)
-                }
+                Feed::Direct => Self::extract_block(c, &Gather::Ring { ring }, c.cursor, end, pace),
                 Feed::Bank { m, pair, next } => {
                     let b = bank?;
                     let g = Gather::Bank { bank: b, m, pair };
@@ -431,18 +513,6 @@ impl SourceExtractor {
                     }
                 }
             }
-        }
-
-        // Nothing still refers to anything older than the newest `keep`
-        // samples, and every cursor is at the ring's end. Trimmed only once
-        // the ring holds twice that, so the shift of what is kept happens
-        // once per history length rather than once per block: at 20 MS/s
-        // the history is six million samples, and moving it down every
-        // block was the whole cost of an empty band.
-        if self.ring.len() >= 2 * self.keep {
-            let drop = self.ring.len() - self.keep;
-            self.ring.drain(..drop);
-            self.base += drop as u64;
         }
     }
 
@@ -540,7 +610,7 @@ const CATCH_UP_SAMPLES: u64 = 1 << 20;
 const CATCH_UP_PACE: u64 = 8;
 
 enum Gather<'a> {
-    Ring { ring: &'a [C32], base: u64 },
+    Ring { ring: &'a History },
     Bank { bank: &'a Bank, m: usize, pair: bool },
 }
 
@@ -548,7 +618,7 @@ impl Gather<'_> {
     /// The oldest position still held.
     fn first(&self) -> u64 {
         match self {
-            Gather::Ring { base, .. } => *base,
+            Gather::Ring { ring } => ring.first(),
             Gather::Bank { bank, .. } => bank.base,
         }
     }
@@ -581,7 +651,18 @@ impl Gather<'_> {
     /// bank has to be read channel by channel, into `scratch`.
     fn samples<'b>(&'b self, a: u64, b: u64, scratch: &'b mut Vec<C32>) -> &'b [C32] {
         match self {
-            Gather::Ring { ring, base } => &ring[(a - base) as usize..(b - base) as usize],
+            Gather::Ring { ring } => match ring.parts(a, b) {
+                (run, []) => run,
+                (head, tail) => {
+                    // Only where the range crosses the buffer's end, which is
+                    // one block in a history length, and only the range asked
+                    // for rather than the whole ring.
+                    scratch.clear();
+                    scratch.extend_from_slice(head);
+                    scratch.extend_from_slice(tail);
+                    scratch
+                }
+            },
             Gather::Bank { bank, m, pair } => {
                 scratch.clear();
                 bank_channel(bank, *m, *pair, a, b, scratch);
@@ -600,5 +681,47 @@ impl Gather<'_> {
                 c.cursor = bank.sample_at(reached).min(end);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::History;
+    use common::C32;
+
+    fn run(from: u64, n: usize) -> Vec<C32> {
+        (0..n).map(|i| C32::new((from as usize + i) as f32, 0.0)).collect()
+    }
+
+    /// Every sample read back out of the ring is the one that was written at
+    /// that index, across as many wraps as it takes: an off-by-one here is a
+    /// source cut from the wrong samples and no test downstream would say
+    /// which.
+    #[test]
+    fn what_comes_out_is_what_went_in_wherever_the_write_wrapped() {
+        let cap = 100usize;
+        let mut h = History::new(cap);
+        let mut written = 0u64;
+        for block in [30usize, 30, 30, 30, 7, 55] {
+            h.push(&run(written, block));
+            written += block as u64;
+            assert_eq!(h.end(), written);
+            assert_eq!(h.first(), written.saturating_sub(cap as u64));
+            let (a, b) = h.parts(h.first(), h.end());
+            let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
+            let want: Vec<f32> = (h.first()..h.end()).map(|i| i as f32).collect();
+            assert_eq!(got, want, "after {written} samples");
+        }
+        // A run asked for inside what is held, wrapped or not.
+        let (a, b) = h.parts(h.end() - 10, h.end());
+        let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
+        assert_eq!(got, ((written - 10)..written).map(|i| i as f32).collect::<Vec<_>>());
+        // And a block longer than the whole ring keeps its newest `cap`.
+        h.push(&run(written, 250));
+        written += 250;
+        assert_eq!(h.first(), written - cap as u64);
+        let (a, b) = h.parts(h.first(), h.end());
+        let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
+        assert_eq!(got, ((written - cap as u64)..written).map(|i| i as f32).collect::<Vec<_>>());
     }
 }

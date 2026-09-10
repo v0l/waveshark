@@ -1376,9 +1376,12 @@ mod tests {
         assert!(n.wide().is_empty(), "Mode S needs 2 MS/s");
         // Bluetooth advertising is one of these and not a scanner block:
         // the three channels are where the standard put them, and this is
-        // the only thing that places the front end on them.
+        // the only thing that places the front end on them. A span there
+        // holds one of DroneID's centres as well, and both read it: an
+        // aircraft broadcasts inside the Wi-Fi and Bluetooth traffic rather
+        // than instead of it.
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2426))]).unwrap();
-        assert_eq!(n.wide(), ["ble"]);
+        assert_eq!(n.wide(), ["ble", "droneid"]);
         // And it owns its channel from the moment the span reaches it,
         // rather than after something decodes there: the spectrum draws it
         // as a locked channel and the detector stays out of it.

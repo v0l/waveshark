@@ -156,6 +156,21 @@ pub struct SourceConfig {
     pub tail_us: u32,
     /// Output rate as a multiple of the extracted width.
     pub oversample: f64,
+    /// The widest source anything downstream demodulates, in hertz.
+    ///
+    /// A source wider than this is cut at its own width rather than at
+    /// [`SourceConfig::oversample`] times it. Oversampling is for a
+    /// demodulator that needs samples per symbol; what a source too wide for
+    /// any decoder leaves is a row saying something transmitted, with the
+    /// samples it was measured from behind it, and that row wants the band
+    /// rather than two and a half times it. Measured on the 61.44 MS/s
+    /// capture of a busy 2.4 GHz band: twenty of the fifty-three sources are
+    /// Wi-Fi carriers four to eight megahertz wide, and every one was being
+    /// cut at 20 or 30 MS/s for nothing.
+    ///
+    /// Infinite by default, which is every source oversampled as before;
+    /// the auto node sets it from the registry.
+    pub read_width_hz: f64,
     /// Lowest rate a source is extracted at. A pulse read at a few kS/s has
     /// no timing left to measure.
     pub min_rate_hz: f64,
@@ -265,6 +280,7 @@ impl Default for SourceConfig {
             lead_us: 5_000,
             tail_us: 30_000,
             oversample: 2.5,
+            read_width_hz: f64::INFINITY,
             min_rate_hz: 25_000.0,
             width_margin: 1.5,
             extent_db: 20.0,
