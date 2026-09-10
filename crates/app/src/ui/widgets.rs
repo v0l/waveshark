@@ -34,82 +34,56 @@ const PEAK: f32 = 0.90;
 const GREEN: Color32 = Color32::from_rgb(0x6F, 0xD1, 0x8A);
 const AMBER: Color32 = Color32::from_rgb(0xE8, 0xB0, 0x3E);
 
-/// A level meter.
+/// A level meter, painted into a rectangle already laid out.
+///
+/// A painter rather than a widget, like [`cell`]: whoever draws the row owns
+/// the rectangle, and a fader's track is this same meter drawn inside it.
 ///
 /// The scale is not linear in amplitude. Speech spends most of its time well
 /// below full scale, and a linear bar leaves that as a stub near the left end
 /// where no movement is readable. The square root spreads the quiet half of
 /// the range across most of the bar, which is where the useful reading is.
-pub struct Vu {
-    peak: f32,
-    width: f32,
-}
+pub fn vu(p: &egui::Painter, r: Rect, peak: f32) {
+    // An empty meter still has to read as a meter. Drawn as a well with
+    // an engraved edge and its two region marks, so a silent channel
+    // looks silent rather than looking like a control that failed to
+    // appear.
+    p.rect_filled(r, 1.0, theme::WELL);
+    p.rect_stroke(r, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
 
-impl Vu {
-    pub fn new(peak: f32) -> Self {
-        Self { peak, width: 120.0 }
+    let at = |v: f32| r.left() + v.clamp(0.0, 1.0).sqrt() * r.width();
+    for (v, c) in [(WARN, AMBER), (PEAK, theme::FAULT)] {
+        let x = at(v);
+        p.line_segment(
+            [Pos2::new(x, r.top() + 1.0), Pos2::new(x, r.bottom() - 1.0)],
+            Stroke::new(1.0, c.gamma_multiply(0.45)),
+        );
     }
 
-    pub fn width(mut self, w: f32) -> Self {
-        self.width = w;
-        self
+    let peak = peak.clamp(0.0, 1.0);
+    if peak <= 0.001 {
+        return;
     }
-
-    /// Paint a meter into a rectangle already laid out, for the tables that
-    /// paint their own rows rather than filling them with widgets.
-    pub fn paint(p: &egui::Painter, r: Rect, peak: f32) {
-        // An empty meter still has to read as a meter. Drawn as a well with
-        // an engraved edge and its two region marks, so a silent channel
-        // looks silent rather than looking like a control that failed to
-        // appear.
-        p.rect_filled(r, 1.0, theme::WELL);
-        p.rect_stroke(r, 1.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
-
-        let at = |v: f32| r.left() + v.clamp(0.0, 1.0).sqrt() * r.width();
-        for (v, c) in [(WARN, AMBER), (PEAK, theme::FAULT)] {
-            let x = at(v);
-            p.line_segment(
-                [Pos2::new(x, r.top() + 1.0), Pos2::new(x, r.bottom() - 1.0)],
-                Stroke::new(1.0, c.gamma_multiply(0.45)),
+    // Filled in three pieces so the bar carries its own colour where it
+    // reaches: the reading is the colour as much as the length.
+    let end = at(peak);
+    let mut x = r.left();
+    for (limit, colour) in [(WARN, GREEN), (PEAK, AMBER), (1.0, theme::FAULT)] {
+        let stop = at(limit).min(end);
+        if stop > x {
+            p.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(x, r.top() + 1.0),
+                    Pos2::new(stop.max(x + 1.0), r.bottom() - 1.0),
+                ),
+                0.0,
+                colour,
             );
         }
-
-        let peak = peak.clamp(0.0, 1.0);
-        if peak <= 0.001 {
-            return;
+        x = stop;
+        if x >= end {
+            break;
         }
-        // Filled in three pieces so the bar carries its own colour where it
-        // reaches: the reading is the colour as much as the length.
-        let end = at(peak);
-        let mut x = r.left();
-        for (limit, colour) in [(WARN, GREEN), (PEAK, AMBER), (1.0, theme::FAULT)] {
-            let stop = at(limit).min(end);
-            if stop > x {
-                p.rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(x, r.top() + 1.0),
-                        Pos2::new(stop.max(x + 1.0), r.bottom() - 1.0),
-                    ),
-                    0.0,
-                    colour,
-                );
-            }
-            x = stop;
-            if x >= end {
-                break;
-            }
-        }
-    }
-}
-
-impl Widget for Vu {
-    fn ui(self, ui: &mut Ui) -> Response {
-        let w = self.width.min(ui.available_width()).max(24.0);
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(w, VU_H), Sense::hover());
-        if ui.is_rect_visible(r) {
-            Vu::paint(ui.painter(), r, self.peak);
-        }
-        resp
     }
 }
 
@@ -156,11 +130,7 @@ impl Widget for Fader<'_> {
         }
 
         let p = ui.painter();
-        Vu::paint(
-            p,
-            Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)),
-            self.peak,
-        );
+        vu(p, Rect::from_center_size(rect.center(), Vec2::new(rect.width(), VU_H)), self.peak);
 
         // Amber, because the handle is the one part of this the operator set,
         // and outlined so it stays legible crossing a lit bar of any colour.

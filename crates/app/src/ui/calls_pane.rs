@@ -223,7 +223,7 @@ impl CallList<'_> {
                                 Pos2::new(x, rect.center().y - super::widgets::VU_H / 2.0),
                                 Vec2::new(w - 10.0, super::widgets::VU_H),
                             );
-                            Vu::paint(&p, r, peak);
+                            widgets::vu(&p, r, peak);
                         } else {
                             widgets::cell(&p, rect, x, *w, text, *col);
                         }

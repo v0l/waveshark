@@ -492,8 +492,6 @@ pub enum Cmd {
     /// input of the video bus, or everything, which is what a receiver
     /// watching one channel wants and what a receiver scanning several does.
     WatchVideo(Vec<crate::videobus::Rule>),
-    /// Stop a replay part way through.
-    StopPlay,
     /// The level all call audio is heard at, from the channel strip.
     CallVolume {
         volume: f32,
@@ -726,7 +724,9 @@ impl TxSource {
 pub enum TxMode {
     /// 2.5 kHz deviation, the 12.5 kHz channel standard.
     Nfm,
-    /// 5 kHz deviation, on the 25 kHz grid.
+    /// 5 kHz deviation, on the 25 kHz grid. No receive mode selects it, so
+    /// nothing transmits it outside the tests that pin its deviation.
+    #[cfg_attr(not(test), allow(dead_code))]
     Fm,
     /// 75 kHz deviation, which is broadcast FM and 200 kHz wide.
     Wfm,
@@ -762,18 +762,6 @@ impl TxMode {
             Self::Wfm => "WFM",
             Self::Am => "AM",
             Self::Carrier => "CW",
-        }
-    }
-
-    /// What the transmission occupies, for the strip to show and for a band
-    /// plan check to compare against.
-    pub fn bandwidth(self) -> f64 {
-        match self {
-            Self::Nfm => 12_500.0,
-            Self::Fm => 25_000.0,
-            Self::Wfm => 200_000.0,
-            Self::Am => 8_000.0,
-            Self::Carrier => 500.0,
         }
     }
 }
@@ -1296,6 +1284,9 @@ pub struct RadioControls {
     pub tx_stages: Vec<common::GainStage>,
     pub toggles: Vec<common::Toggle>,
     pub choices: Vec<common::Choice>,
+    /// Read by the agent surface, which reports the whole control set; the
+    /// settings modal keeps its own copy.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub ppm: f64,
     /// Where the tuner reaches, in hertz: the lowest and highest of its
     /// ranges. What the dial is clamped to, which used to be the RTL-SDR's
@@ -2308,11 +2299,6 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::WatchVideo(rules) => {
                 self.plan.settings.watching = rules;
                 self.rx.apply_settings(&self.plan);
-            }
-            Cmd::StopPlay => {
-                if let Some(b) = self.rx.audio_mut() {
-                    b.bus_mut().stop_replay();
-                }
             }
             Cmd::CallVolume { volume, muted } => {
                 self.plan.audio.calls = volume;

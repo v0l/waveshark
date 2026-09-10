@@ -63,15 +63,19 @@ const MAX_GAIN_DB: f32 = 30.0;
 /// tell whether anything changed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rule {
-    /// Everything any source decodes.
+    /// Everything any source decodes. The pane offers a group or a caller
+    /// today; this is the rest of the vocabulary the bus answers to.
+    #[cfg_attr(not(test), allow(dead_code))]
     Everything,
     /// One talkgroup, reflector or destination, whatever the system calls it.
     Group(String),
     /// One caller, wherever they transmit.
     Caller(String),
     /// Whatever is heard on one channel, to within its own width.
+    #[cfg_attr(not(test), allow(dead_code))]
     Channel(f64),
     /// One system: every M17 call, every DMR call.
+    #[cfg_attr(not(test), allow(dead_code))]
     System(String),
 }
 
@@ -86,17 +90,6 @@ impl Rule {
             Rule::Caller(c) => v.from.is_some_and(|f| f.eq_ignore_ascii_case(c)),
             Rule::Channel(hz) => (v.channel_hz - hz).abs() < common::CHANNEL_MATCH_HZ,
             Rule::System(s) => v.system.eq_ignore_ascii_case(s),
-        }
-    }
-
-    /// How the interface writes it.
-    pub fn label(&self) -> String {
-        match self {
-            Rule::Everything => "everything".into(),
-            Rule::Group(g) => format!("group {g}"),
-            Rule::Caller(c) => format!("caller {c}"),
-            Rule::Channel(hz) => format!("channel {:.4} MHz", hz / 1e6),
-            Rule::System(s) => format!("system {s}"),
         }
     }
 }
@@ -342,6 +335,7 @@ impl AudioBus {
         &self.strips
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn strip_mut(&mut self, k: usize) -> Option<&mut Strip> {
         self.strips.get_mut(k)
     }
@@ -353,6 +347,7 @@ impl AudioBus {
         self.strips.resize_with(n.max(1), Strip::new);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn subscriptions(&self) -> &[Subscription] {
         &self.subs
     }
@@ -404,6 +399,7 @@ impl AudioBus {
 
     /// Whether any call at all is being listened to, which decides whether a
     /// source needs to do the work of decoding speech.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn listening(&self) -> bool {
         !self.muted && !self.calls_muted && self.subs.iter().any(|s| !s.muted)
     }
@@ -678,15 +674,18 @@ impl AudioBus {
         self.replay.clear();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn replaying(&self) -> bool {
         !self.replay.is_empty()
     }
 
     /// Seconds of replay left to play.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn replay_left(&self) -> f64 {
         self.replay.len() as f64 / self.out_rate.max(1.0)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_heard(&self) -> Option<&str> {
         self.last.as_deref()
     }
@@ -783,6 +782,8 @@ impl AudioBus {
 /// of what it sounded like. A transmission worth keeping is worth a file of
 /// its own, and a file is what a spectrogram, a player or another decoder can
 /// be pointed at.
+/// Only the speech-to-text path writes one out.
+#[cfg_attr(not(any(feature = "stt", test)), allow(dead_code))]
 pub fn write_wav(path: &Path, speech: &Speech) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {

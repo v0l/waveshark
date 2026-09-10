@@ -38,12 +38,6 @@ impl Dial {
         Self { hot: None, wheel: Wheel::default() }
     }
 
-    /// Draw the readout and apply wheel input. Returns the possibly-updated
-    /// frequency.
-    pub fn show(&mut self, ui: &mut Ui, hz: f64, size: f32) -> DialOut {
-        self.show_tunable(ui, hz, size, true)
-    }
-
     /// The same readout on a tuner that cannot be moved: a network stream
     /// pinned by whoever feeds it. The digits are drawn but take no input,
     /// and say so, since a dial that looks live and ignores every drag reads

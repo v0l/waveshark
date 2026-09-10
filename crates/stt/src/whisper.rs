@@ -360,8 +360,6 @@ fn candle(e: candle_core::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn resampling_lands_on_whisper_rate() {
         let pcm = vec![0.0f32; 8000];

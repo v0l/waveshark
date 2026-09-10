@@ -197,7 +197,9 @@ pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
     })
 }
 
-/// How far an estimate is from a position, in metres.
+/// How far an estimate is from a position, in metres. What the locator's
+/// own test measures the estimate against.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn error_m(est: &Estimate, lat: f64, lon: f64) -> f64 {
     metres(est.lat, est.lon, lat, lon)
 }
