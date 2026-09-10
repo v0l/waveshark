@@ -428,8 +428,74 @@ reliably, and the front end built on the verdict reads the samples it
 missed from the ring the burst front end keeps, so a short packet is read
 whole after the fact and a long one is caught up and followed live. The
 three off-air Meshtastic captures decode as before, and the LoRa line is
-gone from the busy-span breakdown. The burst router's classification, once
-per burst on every source, is what remains.
+gone from the busy-span breakdown.
+
+### What a decoder is placed on, and when it runs
+
+Three things now decide whether a decoder runs at all, and all three came
+out of timing the captures rather than out of design. The gate is
+`every_capture_runs_faster_than_real_time` in `crates/app/src/radio.rs`,
+which replays every capture in `testdata` through the whole receiver in
+HackRF-sized blocks and fails a block slower than the samples in it;
+`--bench-iq` prints the same run's slowest blocks with the auto node's own
+phases under them.
+
+The burst router is a decoder with a width like any other, and it is placed
+where that width fits (`protocol::router_max_width_hz`). Its width is what
+reads it: the pulse front ends inside it read sensor channels up to
+`dsp::route::MAX_PULSE_CHANNEL_HZ`, and the decoders that wait for one of
+its verdicts read chirp channels up to 812.5 kHz, so a source wider than the
+widest of those with the usual tolerance gets no router. It used to be
+placed on every source, including the twenty megahertz one the detector
+opens for the Wi-Fi in a 2.4 GHz band: the per-sample gate ran over all of
+it at 19 ns a sample, 100 of the 147 million samples every router saw were
+that one source, and each Wi-Fi frame in it cost 3 to 6 ms to classify for a
+verdict no front end could read. On the 802.11 frames capture that took the
+router from 5.2 ms a block to 0.09.
+
+What a source that wide leaves instead is the detector's own measurement
+(`auto::evidence`): a centre, a width, how long it was on the air, the level
+it stood at, no modulation, and the samples it was measured from. One row
+when the source closes, and one every five seconds while it does not, which
+is what the router reports a transmission that will not end at. Otherwise an
+unknown five megahertz signal would leave no trace at all.
+
+The span-wide front ends whose traffic outlasts a detector frame are gated
+on the detector (`Protocol::wakes_on`). Wi-Fi and video read nothing while
+nothing is open in the span, and are handed the lead-in out of the span ring
+when something opens; Mode S, AIS and Bluetooth advertising always run,
+because a Mode S reply is over before a source could open and the other two
+own channels the detector is kept out of. The gate is any source and not one
+as wide as the signal, because the detector's extent is every bin within
+20 dB of a run's peak and that is far narrower than the transmission: one
+802.11b beacon capture opens sources of 9 kHz, 181 kHz, 571 kHz and 1.9 MHz
+for the same access point, and a camera's 20 MHz carrier opens runs of
+55 kHz to 1.4 MHz and never one wider. A front end holding a claim stays
+awake by itself, since the detector is shut out of a claimed band, and the
+sources already open inside one are closed when the claim is taken: they are
+pieces of what the claimant is reading, and with the detector idle nothing
+else would ever close them. That took the camera capture from 0.87x to 1.0x
+real time.
+
+And the classifier measures a burst at the resolution the decision needs.
+Its edge finding walks the whole burst, which is what decides which
+`max_samples` of it are measured, so it wants a symbol's resolution and not
+a sample's: a two millisecond burst of a 20 MS/s span is 40000 samples and
+was walked whole, a hundred times finer than the same burst wants at
+250 kS/s, and it was the largest single part of classifying one. It is now
+thinned to `EDGE_RATE_HZ`, which leaves every capture in the corpus and
+every channel the bank cuts untouched. Two more went with it: the survey
+transform in front of the measurement is skipped where zooming is off, which
+is everywhere the receiver runs it, and the two correlations that look for a
+repeat are skipped on a burst none of the three hypotheses that read them
+could score. The corpus is unchanged at 46 of 52 by name and so is every
+off-air share.
+
+What is left, measured per capture at 20 MS/s, is the front ends themselves:
+the DroneID correlator on a source megahertz wide, the classifier on a
+Bluetooth coded-PHY burst or an ExpressLRS channel visit, and the video
+demodulator, which is 5.2 ms of every 6.5 ms block on its own. Those are the
+reasons beside each entry of `KNOWN_SLOW`.
 
 The banks are still a front end a block can ask for by name, kept for that
 comparison; the section below describes them.
