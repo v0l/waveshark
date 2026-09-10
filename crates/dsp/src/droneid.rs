@@ -21,8 +21,7 @@
 
 use common::C32;
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, Fft, FftPlanner};
-use std::sync::Arc;
+use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Subcarrier spacing, which fixes the FFT size for a given rate.
 pub const CARRIER_SPACING_HZ: f64 = 15_000.0;
@@ -300,28 +299,12 @@ pub struct SpanBurst {
     pub rate: f64,
 }
 
-/// How far over its own floor a centre has to be before it is correlated.
-///
-/// Three decibels, as `wifi::WifiSpan` uses for the same job: the gate is
-/// there to skip a channel nothing is transmitting in, not to judge a burst.
-/// A DroneID burst sits at 20 dB and more over the floor of the channel it
-/// is in, and so does the Wi-Fi it shares the band with, which is why the
-/// gate saves nothing on a busy 2.4 GHz band and everything on an empty one.
-const WAKE_RATIO: f32 = 2.0;
-
-/// Blocks a centre keeps being read after its level drops. A burst is 720 us
-/// and a block at 61.44 MS/s is 2.1 ms, so this is what reads one that
-/// straddles a boundary whole.
-const HANGOVER: u8 = 8;
-
-/// The transform the per-centre energy test runs on. Coarse on purpose: 256
-/// bins over a 61.44 MHz span is 240 kHz a bin, which places a 10 MHz channel
-/// to within a bin and costs a few microseconds a block.
-const POWER_FFT: usize = 256;
-
 /// Half the occupied bandwidth: 600 carriers 15 kHz apart is 9 MHz, so this
-/// is what a channel filter has to keep.
+/// is what a channel filter has to keep, and the band the energy gate reads.
 const HALF_OCCUPIED_HZ: f64 = 4_600_000.0;
+
+/// A burst: nine symbols, which is what the energy gate must not step over.
+const BURST_S: f64 = 0.00072;
 
 /// Every centre a span holds, each with a correlator that runs only while its
 /// channel is lit.
@@ -335,10 +318,8 @@ const HALF_OCCUPIED_HZ: f64 = 4_600_000.0;
 /// for the same five possible bursts.
 pub struct DroneIdSpan {
     rxs: Vec<ChannelRx>,
-    /// The transform the per-centre energy is measured with, and its buffers.
-    fft: Arc<dyn Fft<f32>>,
-    spectrum: Vec<f32>,
-    scratch: Vec<C32>,
+    /// The one transform every centre's energy gate reads.
+    span: crate::gate::SpanGate,
 }
 
 struct ChannelRx {
@@ -363,30 +344,27 @@ struct ChannelRx {
     /// block boundary is not read twice: the overlap is correlated again in
     /// the block that follows it.
     last: Option<u64>,
-    /// Bins of the span's spectrum this channel occupies.
-    band: (usize, usize),
-    /// The quietest this channel has been, and whether it is being read.
-    floor: f32,
-    active: bool,
-    hangover: u8,
-    seen: u32,
+    /// Whether this centre has anything on it this block.
+    gate: crate::gate::ChannelGate,
     mixed: Vec<C32>,
 }
 
 impl ChannelRx {
     /// A receiver for one centre of a span, or `None` when the span does not
     /// hold the whole channel.
-    fn new(span_rate: f64, span_hz: f64, center_hz: f64, threshold: f32) -> Option<Self> {
+    fn new(
+        span_rate: f64,
+        span_hz: f64,
+        center_hz: f64,
+        threshold: f32,
+        gate: &crate::gate::SpanGate,
+    ) -> Option<Self> {
         let shift = center_hz - span_hz;
         if shift.abs() + WIDTH_HZ / 2.0 > span_rate / 2.0 + 1.0 {
             return None;
         }
         let factor = (span_rate / RATE + 1e-6).floor().max(1.0) as usize;
         let rate = span_rate / factor as f64;
-        let bin = |hz: f64| -> usize {
-            let k = (hz / span_rate * POWER_FFT as f64).round() as i64;
-            k.rem_euclid(POWER_FFT as i64) as usize
-        };
         Some(Self {
             center_hz,
             rate,
@@ -397,11 +375,7 @@ impl ChannelRx {
             buf: Vec::new(),
             base: 0,
             last: None,
-            band: (bin(shift - HALF_OCCUPIED_HZ), bin(shift + HALF_OCCUPIED_HZ)),
-            floor: 0.0,
-            active: true,
-            hangover: 0,
-            seen: 0,
+            gate: crate::gate::ChannelGate::new(gate, shift, HALF_OCCUPIED_HZ),
             mixed: Vec::new(),
         })
     }
@@ -418,40 +392,6 @@ impl ChannelRx {
     /// length before the burst.
     fn keep(&self) -> usize {
         4 * burst_len(self.rate)
-    }
-
-    /// Whether this channel is worth reading this block: three decibels over
-    /// the quietest it has been.
-    fn awake(&mut self, spectrum: &[f32]) -> bool {
-        let (lo, hi) = self.band;
-        let mut power = 0.0f32;
-        let mut n = 0usize;
-        let mut k = lo;
-        loop {
-            power += spectrum[k];
-            n += 1;
-            if k == hi {
-                break;
-            }
-            k = (k + 1) % spectrum.len();
-        }
-        let power = power / n.max(1) as f32;
-        if self.floor == 0.0 || power < self.floor {
-            self.floor = power.max(1e-12);
-        } else if !self.active {
-            self.floor += (power - self.floor) * 1e-3;
-        }
-        // Awake for the first blocks whatever the level, since the floor is
-        // whatever the first block held: a stream that opens on a burst would
-        // otherwise sleep through it.
-        self.seen = self.seen.saturating_add(1);
-        if power > self.floor * WAKE_RATIO || self.seen <= HANGOVER as u32 {
-            self.hangover = HANGOVER;
-        } else {
-            self.hangover = self.hangover.saturating_sub(1);
-        }
-        self.active = self.hangover > 0;
-        self.active
     }
 
     /// Pass over a block this channel is not being read on.
@@ -527,6 +467,7 @@ impl ChannelRx {
         self.base = 0;
         self.last = None;
         self.decim.reset();
+        self.gate.reset();
         if let Some(m) = self.mixer.as_mut() {
             m.reset();
         }
@@ -549,14 +490,12 @@ impl DroneIdSpan {
         if rate + 1.0 < RATE {
             return None;
         }
-        let rxs: Vec<ChannelRx> =
-            centers.iter().filter_map(|&c| ChannelRx::new(rate, center_hz, c, threshold)).collect();
-        (!rxs.is_empty()).then(|| Self {
-            rxs,
-            fft: FftPlanner::new().plan_fft_forward(POWER_FFT),
-            spectrum: vec![0.0; POWER_FFT],
-            scratch: Vec::new(),
-        })
+        let span = crate::gate::SpanGate::new(rate, BURST_S);
+        let rxs: Vec<ChannelRx> = centers
+            .iter()
+            .filter_map(|&c| ChannelRx::new(rate, center_hz, c, threshold, &span))
+            .collect();
+        (!rxs.is_empty()).then_some(Self { rxs, span })
     }
 
     /// The centres being read, low first.
@@ -575,26 +514,6 @@ impl DroneIdSpan {
         }
     }
 
-    /// The span's power per bin over this block, which is what says which
-    /// centres have anything in them.
-    fn measure(&mut self, iq: &[C32]) {
-        self.spectrum.iter_mut().for_each(|x| *x = 0.0);
-        let step = (iq.len() / 8).max(POWER_FFT);
-        let mut at = 0usize;
-        while at + POWER_FFT <= iq.len() {
-            self.scratch.clear();
-            self.scratch.extend_from_slice(&iq[at..at + POWER_FFT]);
-            self.fft.process(&mut self.scratch);
-            // The loudest window rather than the mean of them: a burst is
-            // 720 us and a block at 61.44 MS/s is 2.1 ms, so a mean over the
-            // block buries a burst that only fills a third of it.
-            for (s, x) in self.spectrum.iter_mut().zip(self.scratch.iter()) {
-                *s = s.max(x.norm_sqr() / POWER_FFT as f32);
-            }
-            at += step;
-        }
-    }
-
     /// Read every lit centre, appending what each one found.
     ///
     /// The channels are independent, so they run in parallel; each holds its
@@ -604,14 +523,14 @@ impl DroneIdSpan {
         if iq.is_empty() {
             return;
         }
-        self.measure(iq);
-        let spectrum = &self.spectrum;
+        self.span.measure(iq);
+        let span = &self.span;
         let found: Vec<Vec<SpanBurst>> = self
             .rxs
             .par_iter_mut()
             .map(|r| {
                 let mut mine = Vec::new();
-                if !r.awake(spectrum) {
+                if !r.gate.awake(span) {
                     r.doze(iq.len());
                     return mine;
                 }
