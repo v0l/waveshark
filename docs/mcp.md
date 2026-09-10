@@ -40,7 +40,8 @@ that, it needs its own flag and its own thinking.
 
 Observation: `status`, `list_devices`, `spectrum`, `list_channels`, `packets`,
 `calls`, `transcript`, `messages`, `links`, `control_links`, `tracks`,
-`satellites`, `chain`, `scanners`, `memory`, `list_protocols`, `screenshot`.
+`satellites`, `chain`, `patch`, `list_stage_kinds`, `scanners`, `memory`,
+`list_protocols`, `screenshot`.
 
 Control: `start_receiver`, `stop_receiver`, `select_device`, `tune`,
 `set_span`, `set_gain`, `set_toggle`, `set_choice`, `set_ppm`, `set_location`,
@@ -48,10 +49,53 @@ Control: `start_receiver`, `stop_receiver`, `select_device`, `tune`,
 `set_decode`, `set_dc_block`, `set_view`, `set_record`, `set_capture_iq`,
 `set_packet_log`, `set_node_param`.
 
-`set_node_param` is the wide one: it reaches any parameter of any node in the
-running graph, by the id `chain` reports, which is the same route the chain
-view uses. What it cannot do is draw a graph, since an edit is a patch rather
-than a setting.
+Graph: `add_stage`, `remove_stage`, `connect`, `disconnect`, `undo_edit`,
+`redo_edit`, `reset_graph`, `set_manual`.
+
+`set_node_param` reaches any parameter of any node in the running graph, by
+the id `chain` reports, which is the same route the chain view uses.
+
+## Drawing the graph
+
+The graph is the receiver, so an agent that can only change settings can only
+change half of it. `patch` is the graph as something to edit: every stage with
+the id an edit names it by, whether the receiver derived it or somebody added
+it, the wires, and what has been changed so far. `list_stage_kinds` is the
+node registry, which is what can be placed.
+
+```
+add_stage   {kind: "mixer"}                    -> stage 1
+add_stage   {kind: "fm_demod"}                 -> stage 2
+connect     {source: {from: "span"}, to_stage: 1, to_port: 0}
+connect     {source: {from: "stage", id: 1, port: 0}, to_stage: 2, to_port: 0}
+```
+
+Three things to know about ids. A patch stage id is not the node id `chain`
+reports: nodes are positions in the built graph and are renumbered on every
+rebuild, so `chain` carries the patch id beside each node as `stage`, and
+`patch` carries the node id beside each stage as `node`. Ids the operator's
+own stages take count up from one; the enormous ones are stages the receiver
+derived, and those can be deleted and rewired like any other. And
+`patch.head` and `patch.span` name the receiver's own markers, for pointing
+the spectrum or the recorder at a stage instead of at the head of the chain.
+
+What is kept is the difference from the graph the receiver draws for itself,
+not the drawing, so an edit survives a retune, a zoom and a new front end.
+`reset_graph` throws the difference away; `undo_edit` and `redo_edit` are the
+same history the chain view's buttons walk.
+
+Every edit is answered by the rebuild that took it, not by the frame that
+asked for it. The receiver refuses a graph it cannot build and hands the
+previous one back, so a tool that answered immediately would report success
+for a graph that never ran. A refused edit comes back as an error carrying the
+receiver's own words, for example `the patch was refused: graph has a cycle
+involving: Mixer, FM discriminator`. If nothing has rebuilt within two and a
+half seconds the answer says so rather than waiting longer, and with no radio
+running the edit is kept and applied when one starts.
+
+`set_manual` is not needed for any of this. Edits apply whether or not the
+graph is unlocked; the lock only decides whether a hand can drag and wire in
+the window.
 
 ## Units, and what an answer means
 

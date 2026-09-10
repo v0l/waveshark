@@ -78,6 +78,8 @@ pub enum Action {
     Tracks(args::Limit),
     Satellites(args::Limit),
     Chain,
+    Patch,
+    StageKinds,
     Scanners,
     Memory,
     Protocols,
@@ -110,6 +112,20 @@ pub enum Action {
     CaptureIq(args::Switch),
     PacketLog(args::PacketLog),
     NodeParam(args::NodeParam),
+
+    // Drawing the graph. Every one of these is an edit on top of the graph
+    // the receiver derives, so a retune keeps it, and every one of them is
+    // answered by the rebuild that took it rather than by the frame that
+    // asked for it: an edit that will not build is refused and the previous
+    // graph goes back.
+    AddStage(args::StageKind),
+    RemoveStage(args::StageId),
+    Connect(args::Connect),
+    Disconnect(args::Disconnect),
+    UndoEdit,
+    RedoEdit,
+    ResetGraph,
+    Manual(args::Switch),
 }
 
 pub mod args {
@@ -309,6 +325,46 @@ pub mod args {
         /// Where to write the log, or omit for the default folder.
         pub dir: Option<String>,
         pub on: bool,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct StageKind {
+        /// A stage type from `list_stage_kinds`.
+        pub kind: String,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct StageId {
+        /// A stage id from `patch`, not a node id from `chain`.
+        pub stage: u64,
+    }
+
+    /// Where a wire starts.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(tag = "from", rename_all = "lowercase")]
+    pub enum Tap {
+        /// The receiver's own samples after the DC block and the zoom, which
+        /// is what every automatic branch reads.
+        Span,
+        /// An output port of another stage in the patch.
+        Stage { id: u64, port: usize },
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Connect {
+        pub source: Tap,
+        /// The stage being fed, by its patch id.
+        pub to_stage: u64,
+        /// Which of its inputs. An input takes one producer, so this
+        /// replaces whatever was feeding it.
+        pub to_port: usize,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Disconnect {
+        /// The stage whose input is being freed, by its patch id.
+        pub stage: u64,
+        pub port: usize,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]

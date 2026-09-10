@@ -226,6 +226,11 @@ pub struct App {
     /// on the spot because egui hands the image back on a later frame.
     #[cfg(feature = "mcp")]
     agent_shots: Vec<tokio::sync::oneshot::Sender<crate::agent::Reply>>,
+    /// Graph edits an agent made, waiting for the rebuild that takes them:
+    /// an edit that will not build is refused, and answering before the
+    /// receiver has tried would be answering the wrong question.
+    #[cfg(feature = "mcp")]
+    agent_edits: Vec<agent::PendingEdit>,
 }
 
 /// Which settings panel is open. Each pane owns its own, because spectrum and
@@ -590,6 +595,8 @@ impl Default for App {
             agent: None,
             #[cfg(feature = "mcp")]
             agent_shots: Vec::new(),
+            #[cfg(feature = "mcp")]
+            agent_edits: Vec::new(),
         }
     }
 }
