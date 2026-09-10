@@ -266,7 +266,10 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
-
+- The radio thread no longer stalls for a tenth of a second on every
+  spectrum frame in a CUDA build. The transcript's device list was rebuilt
+  each frame, and naming a card means opening it, so the speed trace was a
+  sawtooth and samples were dropped by the million.
 - A channel a front end has locked onto reads no level on the spectrum and
   on the dashboard, rather than "NaN dB". A lock is a decision the receiver
   made and not a measurement, so there is no level to print.

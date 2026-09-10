@@ -287,11 +287,16 @@ pub struct DeviceEntry {
 
 /// Every device this build could run on, `Auto` first.
 ///
-/// Enumerated rather than probed: a card is listed if the driver reports
-/// it, and whether it can run the kernels is found out when it is opened.
-/// Probing every card at listing time would open every one of them each
-/// time a pane is drawn.
+/// Enumerated once: naming a CUDA card means creating a context on it,
+/// which measured at about 100 ms per card, and a list that was rebuilt for
+/// every spectrum frame stalled the radio thread for that long each time.
+/// A card plugged in after start is not listed until the next start.
 pub fn devices() -> Vec<DeviceEntry> {
+    static ONCE: std::sync::OnceLock<Vec<DeviceEntry>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(enumerate).clone()
+}
+
+fn enumerate() -> Vec<DeviceEntry> {
     #[allow(unused_mut)]
     let mut out = vec![
         DeviceEntry { choice: DeviceChoice::Auto, label: "Auto".into() },

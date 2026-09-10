@@ -17,6 +17,7 @@ use tracing_subscriber::Layer;
 pub struct Acc {
     pub total: Duration,
     pub calls: u64,
+    pub max: Duration,
 }
 
 static ACC: Mutex<Option<BTreeMap<&'static str, Acc>>> = Mutex::new(None);
@@ -58,6 +59,7 @@ pub fn record(name: &'static str, d: Duration) {
             let e = map.entry(name).or_default();
             e.total += d;
             e.calls += 1;
+            e.max = e.max.max(d);
         }
     }
 }
@@ -96,16 +98,17 @@ pub fn report(wall: Duration) {
     // CPU burned. rf_read sitting near 100% means the thread is idle in the
     // USB read, which is what it should be doing.
     println!(
-        "\n{:<18} {:>10} {:>12} {:>11} {:>10}",
-        "span", "calls", "total ms", "us/call", "% of wall"
+        "\n{:<18} {:>10} {:>12} {:>11} {:>11} {:>10}",
+        "span", "calls", "total ms", "us/call", "max us", "% of wall"
     );
     for (name, a) in rows {
         println!(
-            "{:<18} {:>10} {:>12.1} {:>11.1} {:>9.1}%",
+            "{:<18} {:>10} {:>12.1} {:>11.1} {:>11.1} {:>9.1}%",
             name,
             a.calls,
             a.total.as_secs_f64() * 1e3,
             a.total.as_secs_f64() * 1e6 / a.calls.max(1) as f64,
+            a.max.as_secs_f64() * 1e6,
             a.total.as_secs_f64() / wall.as_secs_f64() * 100.0
         );
     }

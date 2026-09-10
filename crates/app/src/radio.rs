@@ -2051,6 +2051,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             let work = std::time::Instant::now();
             let block_secs = buf.samples.len() as f64 / self.plan.rate.max(1.0);
 
+            let _b = tracing::info_span!("block").entered();
             self.meter_mic();
             // Whether the monitor stage draws what is going out on the span.
             // Only while the radio is deaf: a full duplex one hears its own
@@ -2062,21 +2063,34 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             if let Flow::Stop = self.process(&buf.samples) {
                 return Ok(());
             }
-            if let Flow::Stop = self.publish_spectrum() {
-                return Ok(());
+            {
+                let _s = tracing::info_span!("publish_spectrum").entered();
+                if let Flow::Stop = self.publish_spectrum() {
+                    return Ok(());
+                }
             }
-            self.publish_status();
+            {
+                let _s = tracing::info_span!("publish_status").entered();
+                self.publish_status();
+            }
 
             // Stamped at the start of the block rather than at the moment the
             // decode fell out of it, by the same arithmetic a replay uses.
             let at = block_start(std::time::Instant::now(), buf.samples.len(), self.plan.rate);
-            if let Flow::Stop = self.harvest_decodes(at) {
-                return Ok(());
+            {
+                let _s = tracing::info_span!("harvest").entered();
+                if let Flow::Stop = self.harvest_decodes(at) {
+                    return Ok(());
+                }
             }
-
-            let _a = tracing::info_span!("audio").entered();
-            self.play();
-            self.publish_stations();
+            {
+                let _a = tracing::info_span!("audio").entered();
+                self.play();
+            }
+            {
+                let _s = tracing::info_span!("stations").entered();
+                self.publish_stations();
+            }
             self.status.push_speed((block_secs / work.elapsed().as_secs_f64().max(1e-9)) as f32);
         }
     }
