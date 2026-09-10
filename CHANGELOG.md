@@ -315,6 +315,11 @@ the code is in the commit log; what a decoder can and cannot do is in
   and are not in a published binary.
 
 ### Fixed
+- A DJI drone broadcasting its serial is read while Wi-Fi is on the band. The
+  DroneID front end now reads the five 2.4 GHz centres straight off the span,
+  the way the Wi-Fi one reads its channels, and what it reads reaches the
+  packet list: on the bench capture of a Mini 4K the receiver read nothing at
+  all before and reads all seven of the aircraft's bursts now.
 - A device that names itself after it was first heard is renamed in Home
   Assistant. The name is in the entity configurations, which went out once
   on the first frame, so a Bluetooth device heard first from an unnamed

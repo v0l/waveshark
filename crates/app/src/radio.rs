@@ -3723,6 +3723,54 @@ pub(crate) mod tests {
         every_row_carries_its_measurements(&wifi);
     }
 
+    /// DJI DroneID through the whole receiver: the 2.4 GHz block puts `auto`
+    /// on the span, `auto` runs the DroneID front end across it because one
+    /// of the five centres is inside it, and what comes back is the aircraft
+    /// naming itself.
+    ///
+    /// The count and the sequence numbers are the same seven bursts
+    /// `nodes/tests/droneid_capture.rs` reads through the node alone, so a
+    /// difference between the two is the receiver around the front end and
+    /// not the front end. Nothing decoded here at all until the front end
+    /// read the span rather than a source cut out of it, because the source
+    /// the detector opened for a 720 us burst is not the 10 MHz channel the
+    /// frame occupies.
+    #[test]
+    fn a_drone_naming_itself_is_read_off_the_span() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/droneid_mini4k_2444.5M_15360k.cs8");
+        if !p.exists() {
+            eprintln!("skipping: droneid_mini4k_2444.5M_15360k.cs8 absent, run testdata/fetch.sh");
+            return;
+        }
+        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let dji: Vec<&DecodeRecord> =
+            out.iter().filter(|r| r.model == Some("DJI-DroneID")).collect();
+        let seq: Vec<String> = dji
+            .iter()
+            .filter_map(|r| {
+                r.detail.split_whitespace().find(|w| w.starts_with("sequence=")).map(str::to_string)
+            })
+            .collect();
+        assert_eq!(seq.len(), 7, "read {} bursts: {seq:?}", dji.len());
+        assert_eq!(
+            seq,
+            [437, 439, 440, 440, 441, 442, 444].map(|n| format!("sequence={n}")).to_vec()
+        );
+        for r in &dji {
+            assert_eq!(r.crc, Some(true), "a frame without its CRC got through: {r:?}");
+            assert!(r.detail.contains("serial=F8PJC254J001JR4R"), "read as {}", r.detail);
+            assert!(
+                (r.freq - 2_444_500_000.0).abs() < 1e6,
+                "reported at {} Hz rather than on the centre it was read on",
+                r.freq
+            );
+        }
+        every_row_carries_its_measurements(&dji);
+    }
+
     /// 802.11b beacons off the mixed capture: the same band, the same access
     /// point, and the announcement rather than the traffic.
     ///
