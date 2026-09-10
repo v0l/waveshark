@@ -527,6 +527,9 @@ pub enum Cmd {
     /// Submit what is heard to beaconDB, or stop. Another node on the packet
     /// bus, and a command for the same reason the WiGLE feed is one.
     BeaconDb(bool),
+    /// Publish every device heard to this MQTT broker, so Home Assistant
+    /// builds them, or `None` to stop. A node on the same bus again.
+    HomeAssistant(Option<nodes::Publish>),
     /// Read the receiver's own position from this GPS, or `None` for the
     /// local gpsd, which is what the reader looks for on its own. There is no
     /// off: a fix moves the station position, and no fix leaves it alone.
@@ -1248,6 +1251,9 @@ pub struct Status {
     pub wigle: parking_lot::Mutex<Option<nodes::WigleStatus>>,
     /// The same for the beaconDB feed.
     pub beacondb: parking_lot::Mutex<Option<nodes::BeaconDbStatus>>,
+    /// And for the feed into the house: the broker, whether it is up, and
+    /// how many devices have been announced to it.
+    pub homeassistant: parking_lot::Mutex<Option<nodes::HomeAssistantStatus>>,
     /// Every input of the bus, and where the bus is in the graph, so a strip
     /// the operator drew can be given a level by the same route the chain
     /// view uses.
@@ -1398,6 +1404,7 @@ impl Default for Status {
             survey_heard: AtomicU64::new(0),
             wigle: parking_lot::Mutex::new(None),
             beacondb: parking_lot::Mutex::new(None),
+            homeassistant: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new(Strips::default()),
             call_levels: parking_lot::Mutex::new(Vec::new()),
             heard: parking_lot::Mutex::new(Vec::new()),
@@ -2233,6 +2240,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 self.plan.settings.beacondb = on;
                 self.rx.apply_settings(&self.plan);
             }
+            Cmd::HomeAssistant(broker) => {
+                self.plan.settings.homeassistant = broker;
+                self.rx.apply_settings(&self.plan);
+            }
             Cmd::Gps(transport) => crate::station::set_source(transport),
             Cmd::PacketLogCap(cap) => self.rx.set_log_cap(cap),
             Cmd::CaptureCap(bytes) => self.rx.set_capture_cap(bytes),
@@ -2815,6 +2826,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         {
             let now = self.rx.beacondb_status();
             let mut held = self.status.beacondb.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        {
+            let now = self.rx.homeassistant_status();
+            let mut held = self.status.homeassistant.lock();
             if *held != now {
                 *held = now;
             }

@@ -36,6 +36,7 @@ pub mod sink_nodes;
 pub mod source_nodes;
 pub mod survey_nodes;
 pub mod beacondb_nodes;
+pub mod homeassistant_nodes;
 pub mod wigle_nodes;
 pub mod wfm;
 pub mod lora_nodes;
@@ -57,6 +58,7 @@ pub use ble_nodes::BleNode;
 pub use wifi_nodes::WifiNode;
 pub use survey_nodes::SurveyNode;
 pub use beacondb_nodes::{BeaconDbNode, BeaconDbStatus};
+pub use homeassistant_nodes::{Broker, HomeAssistantNode, HomeAssistantStatus, Publish};
 pub use wigle_nodes::{Account, WigleNode, WigleStatus};
 pub use aprs_nodes::AprsNode;
 pub use dmr_nodes::DmrNode;
@@ -187,6 +189,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (survey_nodes::DESC, survey_nodes::build),
     (wigle_nodes::DESC, wigle_nodes::build),
     (beacondb_nodes::DESC, beacondb_nodes::build),
+    (homeassistant_nodes::DESC, homeassistant_nodes::build),
 ];
 
 /// Every node type compiled into this build, ready to make one by name.

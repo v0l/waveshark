@@ -1261,6 +1261,185 @@ impl App {
         }
     }
 
+    /// Where every device heard goes into the house.
+    ///
+    /// One address and a switch. Everything else has a working default,
+    /// because a person setting this up has already configured a broker once
+    /// in Home Assistant and should not have to do it twice.
+    pub(super) fn homeassistant_modal(&mut self, ctx: &egui::Context) {
+        if !self.survey.homeassistant.open {
+            return;
+        }
+        let mut close = false;
+        let mut apply = false;
+        let r = egui::containers::Modal::new(egui::Id::new("homeassistant"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                modal_title(ui, "Publish to Home Assistant");
+                hint(
+                    ui,
+                    "Every transmitter the decoders can name becomes a device in Home \
+                     Assistant over MQTT discovery, and every number they recover becomes an \
+                     entity under it: a weather station's temperature, a tyre sensor's \
+                     pressure, and the level each was heard at.",
+                );
+                ui.add_space(6.0);
+                hint(
+                    ui,
+                    "It publishes to the broker Home Assistant is already using, in plain \
+                     MQTT. What goes out is what your neighbours are transmitting as well as \
+                     what you are, so point it at a broker on your own network.",
+                );
+                ui.add_space(10.0);
+
+                let ha = &mut self.survey.homeassistant;
+                legend_help(
+                    ui,
+                    "broker",
+                    "The host running Mosquitto, or whatever Home Assistant's MQTT \
+                     integration is pointed at.",
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut ha.host)
+                            .desired_width(ui.available_width() - 90.0)
+                            .hint_text("homeassistant.local"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut ha.port)
+                            .desired_width(70.0)
+                            .hint_text("1883"),
+                    );
+                });
+                ui.add_space(8.0);
+
+                legend_help(ui, "user", "Blank where the broker allows anonymous clients.");
+                ui.add(
+                    egui::TextEdit::singleline(&mut ha.username)
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(6.0);
+                legend_help(
+                    ui,
+                    "password",
+                    "Kept in the session file in plain text, so treat it as a password that \
+                     lives on this machine.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut ha.password)
+                        .password(true)
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(8.0);
+
+                legend_help(
+                    ui,
+                    "discovery prefix",
+                    "What Home Assistant listens under. Blank means homeassistant, which is \
+                     what it uses unless somebody changed it.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut ha.prefix)
+                        .desired_width(ui.available_width())
+                        .hint_text("homeassistant"),
+                );
+                ui.add_space(6.0);
+                legend_help(
+                    ui,
+                    "topic",
+                    "What this receiver's own topics live under. Blank means waveshark.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut ha.topic)
+                        .desired_width(ui.available_width())
+                        .hint_text("waveshark"),
+                );
+                ui.add_space(8.0);
+
+                legend_help(
+                    ui,
+                    "publish",
+                    "Which kinds of transmitter are worth a permanent device, comma \
+                     separated. Blank is everything, which on a Bluetooth band means the \
+                     handsets walking past: those rotate their address every quarter of an \
+                     hour, and Home Assistant keeps every one it is told about. ism,wmbus \
+                     is a house's own sensors and meters.",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut ha.spaces)
+                        .desired_width(ui.available_width())
+                        .hint_text("everything"),
+                );
+                ui.add_space(10.0);
+
+                let on_help = "While this is on, every named transmitter heard is announced \
+                               once and then reported at most every few seconds. A city \
+                               centre holds thousands of Bluetooth addresses, so the node \
+                               stops at a couple of hundred devices.";
+                if check_help(ui, &mut ha.on, "Publish while receiving", on_help).changed() {
+                    apply = true;
+                }
+                ui.add_space(10.0);
+
+                match self.survey.homeassistant.status.as_ref() {
+                    Some(s) if s.configured => {
+                        theme::Line::new()
+                            .legend(if s.connected { "connected" } else { "connecting" })
+                            .value(s.host.clone())
+                            .legend("devices")
+                            .value(s.devices.to_string())
+                            .legend("published")
+                            .value(s.published.to_string())
+                            .size(11.0)
+                            .show(ui);
+                        if s.dropped > 0 {
+                            hint(
+                                ui,
+                                &format!(
+                                    "{} readings dropped: the broker was not keeping up",
+                                    s.dropped
+                                ),
+                            );
+                        }
+                        if let Some(e) = &s.error {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(e).small().color(theme::FAULT),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    }
+                    Some(_) => hint(ui, "nothing is being published"),
+                    None => hint(ui, "no receiver running, so nothing is being published"),
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(crate::i18n::t("ui.close")).clicked() {
+                            close = true;
+                        }
+                        if ui.button("APPLY").clicked() {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if apply {
+            self.apply_homeassistant();
+        }
+        if close {
+            self.survey.homeassistant.open = false;
+        }
+    }
+
     pub(super) fn remote_modal(&mut self, ctx: &egui::Context) {
         let Some(mut edit) = self.remote.take() else {
             return;

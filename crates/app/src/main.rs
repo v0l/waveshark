@@ -688,6 +688,7 @@ fn scan(
     survey: Option<PathBuf>,
     gps: Option<gps::Transport>,
     location: Option<(f64, f64)>,
+    ha: Option<nodes::Publish>,
     dc_on: bool,
     print: bool,
 ) {
@@ -717,6 +718,10 @@ fn scan(
     }
     r.send(radio::Cmd::PacketLog(packet_log.clone()));
     r.send(radio::Cmd::Survey(survey.clone()));
+    if let Some(p) = ha.clone() {
+        eprintln!("publishing devices to {}:{}", p.broker.host, p.broker.port);
+        r.send(radio::Cmd::HomeAssistant(Some(p)));
+    }
     if let Some(t) = gps.clone() {
         r.send(radio::Cmd::Gps(Some(t)));
     }
@@ -827,6 +832,38 @@ fn parse_gps(s: &str) -> Result<gps::Transport, String> {
     gps::Transport::parse(s).ok_or_else(|| format!("{s:?} is not a serial port or a gpsd address"))
 }
 
+/// `homeassistant.local`, `host:1883`, or `mqtt://user:pass@host:1883`.
+///
+/// One argument rather than five, because what a person has in front of them
+/// is the line their broker is described by somewhere else.
+fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
+    let rest = s.trim().trim_start_matches("mqtt://");
+    if rest.is_empty() {
+        return Err("expected [user:password@]host[:port]".into());
+    }
+    let (creds, hostport) = match rest.rsplit_once('@') {
+        Some((c, h)) => (Some(c), h),
+        None => (None, rest),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse().map_err(|_| format!("{p:?} is not a port"))?),
+        None => (hostport, 1883u16),
+    };
+    if host.is_empty() {
+        return Err("no host in the broker address".into());
+    }
+    let (username, password) = match creds {
+        Some(c) => match c.split_once(':') {
+            Some((u, p)) => (u.to_string(), p.to_string()),
+            None => (c.to_string(), String::new()),
+        },
+        None => (String::new(), String::new()),
+    };
+    let broker =
+        nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
+    Ok(nodes::Publish { broker, spaces: String::new() })
+}
+
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
@@ -911,6 +948,16 @@ struct Args {
     /// Start the radio as soon as the window opens, without a click on play
     #[arg(long)]
     run: bool,
+
+    /// Publish every device heard to this MQTT broker, so Home Assistant
+    /// builds them: [user:password@]host[:port]
+    #[arg(long, value_name = "BROKER", value_parser = parse_broker)]
+    ha_broker: Option<nodes::Publish>,
+
+    /// Publish only these identity spaces, comma separated: `ism,wmbus` is a
+    /// house's own sensors and meters without the street's handsets
+    #[arg(long, value_name = "SPACES")]
+    ha_spaces: Option<String>,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1244,6 +1291,10 @@ fn main() -> eframe::Result<()> {
             survey,
             args.gps.clone(),
             args.location,
+            args.ha_broker.clone().map(|mut p| {
+                p.spaces = args.ha_spaces.clone().unwrap_or_default();
+                p
+            }),
             !args.no_dc,
             args.print_log,
         );
@@ -1321,6 +1372,10 @@ fn main() -> eframe::Result<()> {
             }
             if let Some((lat, lon)) = args.location {
                 app.set_location(lat, lon);
+            }
+            if let Some(mut p) = args.ha_broker.clone() {
+                p.spaces = args.ha_spaces.clone().unwrap_or_default();
+                app.publish_to(p);
             }
             app.shot = args.shot.clone();
             app.shot_after = args.shot_after;
