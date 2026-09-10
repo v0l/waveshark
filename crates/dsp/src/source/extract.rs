@@ -251,6 +251,19 @@ impl SourceExtractor {
         // decides what the extraction filter should keep.
         let floored = bw * self.cfg.oversample < self.cfg.min_rate_hz;
         let start = from.saturating_sub(self.lead).max(self.base);
+        // How far back the stream starts is bounded by the work of reading
+        // it, in samples of the stream rather than in time. A candidate can
+        // sit unopened for as long as it is present, too wide or with no
+        // room, and opening it from its birth handed a 20 MHz source's
+        // front ends half a second of 15 MS/s in one block, 170 ms measured
+        // on a 2.4 GHz capture. A million samples of the stream is half a
+        // second for a sensor at 2 MS/s, which is its whole burst however
+        // long it waited for room, and 66 ms of a Wi-Fi source, a hundred of
+        // its frames. Bounding it by time instead cut the sensors: the busy
+        // span test loses twelve of 116 packets at 20 ms of lead.
+        let end = self.base + self.ring.len() as u64;
+        let decim = (self.rate / (want.max(bw))).max(1.0) as u64;
+        let start = start.max(end.saturating_sub(CATCH_UP_SAMPLES * decim));
 
         let (feed, rate, shift) = match self.bank_feed(offset_hz, bw, want, start) {
             Some(feed @ Feed::Bank { m, .. }) => {
@@ -511,10 +524,15 @@ impl SourceExtractor {
 
 /// Where a channel's samples come from, and how positions in it relate to the
 /// wideband sample count everything else here is indexed by.
+/// The most samples of its own stream a source opens with from history.
+const CATCH_UP_SAMPLES: u64 = 1 << 20;
+
 /// How many blocks' worth of history a stream behind the ring's end reads
-/// in one block. Four keeps up with anything short of the whole ring
-/// arriving at once, and clears a third of a second of lead-in in a tenth.
-const CATCH_UP_PACE: u64 = 4;
+/// in one block. Eight: at four the busy span test loses one packet of 116
+/// and at two it loses two, so a stream that lags is not read quite as it
+/// would be live, and eight is the least that reads the same. With the
+/// catch-up bounded above, eight is at most a million samples in a block.
+const CATCH_UP_PACE: u64 = 8;
 
 enum Gather<'a> {
     Ring { ring: &'a [C32], base: u64 },
