@@ -722,12 +722,15 @@ margin   = 8 kHz
 
 [ACARS]
 # The aircraft datalink channels, which differ by region: 131.725 is the
-# European primary, 131.525 its secondary, and 131.550 is the North American
-# primary. All three fit in one span, so all three are watched.
-range    = 131.5 - 131.75 MHz
-span     = 300 kHz
+# European primary and 131.525 and 131.825 the other two European operational
+# control channels, while 131.550 is the ARINC primary in North America and
+# the worldwide fallback. All four fit in one span, so all four are watched.
+# Most European airline traffic has moved to VDL Mode 2 up at 136.675 to
+# 136.975, which is a different waveform and is not read here.
+range    = 131.5 - 131.85 MHz
+span     = 400 kHz
 front    = acars
-channels = 131.525 MHz, 131.550 MHz, 131.725 MHz
+channels = 131.525 MHz, 131.550 MHz, 131.725 MHz, 131.825 MHz
 margin   = 15 kHz
 
 [POCSAG]
