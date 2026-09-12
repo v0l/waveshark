@@ -104,3 +104,41 @@ fn the_recording_decodes_as_the_martin_1_picture_the_reference_gets() {
     }
     eprintln!("worst block difference from the reference picture: {worst:.1} counts");
 }
+
+/// A transmission that stops part way ends there.
+///
+/// The decoder runs on its own clock once it has the header, so noise after
+/// the transmitter stops reads as lines and it will fill the rest of the
+/// picture with them. Half of this recording, then silence: the picture has
+/// to end where the signal did.
+#[test]
+fn a_transmission_that_stopped_does_not_get_written_to_the_end() {
+    let Some((audio, rate)) = audio() else { return };
+    let half = audio.len() / 2;
+
+    let mut rx = sstv::Receiver::new(rate);
+    for block in audio[..half].chunks(4096) {
+        rx.push(block);
+    }
+    let sent = rx.picture().map(|p| p.lines).unwrap_or(0);
+    // Half the recording is a bit over half the picture, since the header and
+    // the tail either side are not picture.
+    assert!((120..=160).contains(&sent), "half the recording read {sent} lines");
+
+    // Then a minute of the quiet that follows a transmission.
+    for _ in 0..30 {
+        rx.push(&vec![0.0; rate as usize]);
+    }
+    let p = rx.picture().expect("the picture");
+    // Not exactly what was read before the silence: the line that straddles
+    // the cut is still readable, and the detector needs a line or two of
+    // nothing before it calls the transmission over. What matters is that it
+    // stops there rather than running on to 256.
+    assert!(
+        (sent..=sent + 3).contains(&p.lines),
+        "{} lines after the signal stopped at {sent}",
+        p.lines
+    );
+    assert!(!rx.receiving(), "the decoder is listening for the next one");
+    assert_eq!(p.height, 256, "the picture is still a whole Martin 1 frame");
+}

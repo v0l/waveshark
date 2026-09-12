@@ -269,7 +269,7 @@ fn align_sync(
     mode: &Mode,
     meter: &mut ToneMeter,
     want_start: bool,
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     let rate = meter.rate();
     let window = (mode.sync_pulse * 1.4 * rate).round() as usize;
     if from + window >= audio.len() {
@@ -284,11 +284,14 @@ fn align_sync(
         at += 1;
     }
     let end = at + window / 2;
-    if want_start {
-        Some(end.saturating_sub((mode.sync_pulse * rate).round() as usize))
-    } else {
-        Some(end)
-    }
+    let start = match want_start {
+        true => end.saturating_sub((mode.sync_pulse * rate).round() as usize),
+        false => end,
+    };
+    // How far it had to walk, which is the only thing that tells a line that
+    // arrived from one the decoder invented: in noise the hunt runs until
+    // something crosses the threshold, and something always does.
+    Some((start, at - from))
 }
 
 /// Decode the first picture in `audio`, or `None` where there is no header.
@@ -303,11 +306,18 @@ pub fn decode(audio: &[f32], rate: f64) -> Option<Picture> {
     rx.picture().cloned()
 }
 
+/// How a line came out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Read {
+    /// The audio ran out part way. On a live stream the rest is still
+    /// coming; at the end of one it never will.
+    Hungry,
+    /// Read, with the sync where it was expected and the picture at a level
+    /// the rest of the transmission was at.
+    Line { synced: bool, level: f32 },
+}
+
 /// One line of the picture, read into the channel planes.
-///
-/// Returns where the next line starts, or `None` when the audio runs out
-/// part way: a line half read is not written, since a viewer cannot tell a
-/// half-read line from a received one.
 fn read_line(
     audio: &[f32],
     base: u64,
@@ -316,9 +326,14 @@ fn read_line(
     line: usize,
     seq: &mut u64,
     planes: &mut [Vec<Vec<u8>>],
-) -> bool {
+) -> Read {
     let rate = meter.rate();
     let here = |abs: u64| -> Option<usize> { abs.checked_sub(base).map(|v| v as usize) };
+    // A sync found more than this far from where the clock said it would be
+    // is not this line's sync. A quarter of a line is far more drift than any
+    // transmitter has and far less than a line of noise needs.
+    let slack = (mode.line_time * 0.25 * rate).round() as usize;
+    let mut synced = true;
 
     if mode.sync_channel > 0 && line == 0 {
         // Scottie's sync sits inside the line, so the first line starts
@@ -332,9 +347,21 @@ fn read_line(
             if line > 0 || chan > 0 {
                 *seq += (mode.line_time * rate).round() as u64;
             }
-            let Some(from) = here(*seq) else { return false };
-            let Some(found) = align_sync(audio, from, mode, meter, true) else { return false };
-            *seq = base + found as u64;
+            let Some(from) = here(*seq) else { return Read::Hungry };
+            let Some((found, walked)) = align_sync(audio, from, mode, meter, true) else {
+                return Read::Hungry;
+            };
+            // A sync found where one was not due is something in the noise,
+            // not this line: keep the clock's own answer, read the line at
+            // the timing it predicts, and let the caller decide what a run of
+            // unsynced lines means. Following it instead walked the decoder
+            // off the end of the buffer and left it reading silence for
+            // ever.
+            if walked <= slack {
+                *seq = base + found as u64;
+            } else {
+                synced = false;
+            }
         }
         let half = mode.half_scan && chan > 0;
         let pixel_time = if half { mode.half_pixel_time() } else { mode.pixel_time() };
@@ -356,13 +383,22 @@ fn read_line(
             let at = (*seq as f64 - base as f64 + from * rate).round() as isize;
             let len = (((to - from) * rate).round() as usize).max(4);
             if at < 0 || at as usize + len >= audio.len() {
-                return false;
+                return Read::Hungry;
             }
             row[chan][px] = luma(meter.peak_hz(&audio[at as usize..at as usize + len]));
         }
     }
+    // The level of the line, for telling a transmission that stopped from
+    // one that faded: the picture tones are a constant amplitude, so a line
+    // of quiet is a line of nothing.
+    let from = here(*seq).unwrap_or(0);
+    let span = ((mode.line_time * rate).round() as usize).min(audio.len().saturating_sub(from));
+    let level = match span {
+        0 => 0.0,
+        n => (audio[from..from + n].iter().map(|v| v * v).sum::<f32>() / n as f32).sqrt(),
+    };
     planes[line] = row;
-    true
+    Read::Line { synced, level }
 }
 
 /// One line of the picture as RGB, which is where a mode's colour order and
@@ -445,12 +481,30 @@ enum State {
         seq: u64,
         line: usize,
         planes: Vec<Vec<Vec<u8>>>,
+        /// Lines read but not painted: they had no sync where one was due, or
+        /// arrived far below the level the picture has been at, so they wait
+        /// until a good line proves them part of a fade rather than the end
+        /// of the transmission.
+        held: usize,
+        /// The loudest the transmission has been, for telling a fade from
+        /// nothing at all.
+        loud: f32,
     },
 }
 
 /// How much audio to keep while hunting: enough for the header search window
 /// plus the jump it steps by.
 const HUNT_KEEP: f64 = HDR_SIZE + 0.5;
+
+/// Lines with no sync, or with no signal, before the transmission is taken to
+/// be over. Three is longer than any burst of interference lasts and shorter
+/// than anybody would want painted into their picture.
+const LOST_LINES: usize = 3;
+
+/// How far below the loudest the picture has been a line has to be for it to
+/// count as nothing arriving. 26 dB down: a fade that deep has no picture in
+/// it either.
+const QUIET: f32 = 0.05;
 
 impl Receiver {
     pub fn new(rate: f64) -> Self {
@@ -516,7 +570,7 @@ impl Receiver {
                     // Scottie opens with a sync pulse before the picture.
                     let from = (seq - self.base) as usize;
                     match align_sync(&self.audio, from, mode, &mut self.meter, false) {
-                        Some(at) => seq = self.base + at as u64,
+                        Some((at, _)) => seq = self.base + at as u64,
                         None => return,
                     }
                 }
@@ -533,6 +587,8 @@ impl Receiver {
                     seq,
                     line: 0,
                     planes: vec![vec![vec![0u8; mode.width]; mode.channels]; mode.height],
+                    held: 0,
+                    loud: 0.0,
                 };
                 return;
             }
@@ -560,7 +616,8 @@ impl Receiver {
         // buffer and the meter, and the borrow checker will not have both
         // halves of the receiver at once.
         let taken = std::mem::replace(&mut self.state, State::Hunting);
-        let State::Reading { mode, mut seq, mut line, mut planes } = taken else {
+        let State::Reading { mode, mut seq, mut line, mut planes, mut held, mut loud } = taken
+        else {
             return None;
         };
         let rate = self.rate;
@@ -584,7 +641,7 @@ impl Receiver {
             if !ending && have < seq + reach {
                 break;
             }
-            if !read_line(
+            match read_line(
                 &self.audio,
                 self.base,
                 &mut self.meter,
@@ -595,15 +652,36 @@ impl Receiver {
             ) {
                 // Out of audio part way: on a live stream the rest is still
                 // coming, at the end of one it never will.
-                complete = ending;
-                break;
+                Read::Hungry => {
+                    complete = ending;
+                    break;
+                }
+                // A transmission that stopped leaves the decoder reading its
+                // own clock across noise, and it will fill the rest of the
+                // picture with it. A line with no sync where one was due, or
+                // one far below the level the picture has been at, is not a
+                // line, and a few in a row is the end of the transmission.
+                Read::Line { synced, level } => {
+                    loud = loud.max(level);
+                    let quiet = loud > 0.0 && level < loud * QUIET;
+                    held = match !synced || quiet {
+                        true => held + 1,
+                        false => 0,
+                    };
+                }
             }
             line += 1;
-            // Robot 36 needs the next line's colour difference to convert
-            // this one, so conversion runs one line behind it.
+            if held >= LOST_LINES {
+                // What is held is noise, so it is never painted: the picture
+                // ends at the last line that arrived.
+                complete = true;
+                break;
+            }
             let ready = match mode.alt_scan {
-                true => line.saturating_sub(1),
-                false => line,
+                // Robot 36 needs the next line's colour difference to convert
+                // this one, so conversion runs one line behind it.
+                true => line.saturating_sub(held + 1),
+                false => line.saturating_sub(held),
             };
             let canvas = self.canvas.as_mut().expect("a canvas while reading");
             while canvas.lines < ready {
@@ -639,7 +717,7 @@ impl Receiver {
                 }
             }
         } else {
-            self.state = State::Reading { mode, seq, line, planes };
+            self.state = State::Reading { mode, seq, line, planes, held, loud };
         }
         if rows.is_empty() && !complete {
             return None;

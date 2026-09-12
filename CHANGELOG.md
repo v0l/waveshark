@@ -47,6 +47,9 @@ the code is in the commit log.
   detector has fired.
 
 ### Fixed
+- An SSTV transmission that stopped part way being filled to the bottom with
+  noise. The picture now ends where the signal did, and the receiver goes
+  back to listening for the next one.
 - A green stripe down the right of a Robot 36 or 72 picture, from the last
   pixels of a line being read partly from the next line's sync pulse.
 - An SSTV picture drawing only its first line in the video pane while the
