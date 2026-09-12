@@ -1656,9 +1656,25 @@ impl Status {
     /// Publish a field, or clear the pane when the receiver stops producing
     /// them: a still picture left on the screen after the transmitter went
     /// away is the worst thing a video pane can do.
+    ///
+    /// A picture is new when anything about it is, not when its number is.
+    /// The number counts fields for a camera, but names the picture for a
+    /// still, so an SSTV transmission keeps one number for two minutes while
+    /// its lines fill in: comparing numbers alone published the first line
+    /// and nothing after it.
     fn set_video(&self, frame: Option<common::VideoFrame>) {
         let mut cur = self.video.lock();
-        if cur.as_ref().map(|f| f.sequence) != frame.as_ref().map(|f| f.sequence) {
+        let same = match (cur.as_ref(), frame.as_ref()) {
+            (Some(a), Some(b)) => {
+                a.sequence == b.sequence
+                    && a.lines_seen == b.lines_seen
+                    && a.channel_hz == b.channel_hz
+                    && (a.width, a.height) == (b.width, b.height)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
             *cur = frame;
         }
     }
@@ -3557,6 +3573,34 @@ pub(crate) mod tests {
     /// carrier megahertz wide never opened as one source, the runs inside it
     /// opened instead, and a camera arrived as a packet list of sensors that
     /// were not there.
+    /// A still that grew is published again. Keying on the picture number
+    /// alone left the pane holding the first line of an SSTV transmission
+    /// while the bus filled the rest in.
+    #[test]
+    fn a_picture_filling_in_is_published_each_time() {
+        let status = Status::default();
+        let frame = |lines: usize| common::VideoFrame {
+            system: "SSTV",
+            channel_hz: 144_500_000.0,
+            label: Some("Martin 1".into()),
+            width: 2,
+            height: 4,
+            aspect: 4.0 / 3.0,
+            pixels: common::Pixels::Rgb8,
+            samples: std::sync::Arc::new(vec![0u8; 2 * 4 * 3]),
+            lines_seen: lines,
+            sequence: 1,
+            update: common::Update::Whole,
+            cadence: common::Cadence::Still,
+        };
+        status.set_video(Some(frame(1)));
+        assert_eq!(status.video().map(|f| f.lines_seen), Some(1));
+        status.set_video(Some(frame(3)));
+        assert_eq!(status.video().map(|f| f.lines_seen), Some(3), "the picture grew");
+        status.set_video(None);
+        assert!(status.video().is_none(), "and it can be cleared");
+    }
+
     #[test]
     fn a_camera_reaches_the_video_bus_through_the_receiver() {
         let Some(buf) = camera_fixture() else {
