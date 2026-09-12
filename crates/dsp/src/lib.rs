@@ -44,6 +44,7 @@ pub mod squelch;
 pub mod ssb;
 pub mod stereo;
 pub mod tetra;
+pub mod tone;
 pub(crate) mod twolevel;
 pub mod video;
 pub mod wifi;

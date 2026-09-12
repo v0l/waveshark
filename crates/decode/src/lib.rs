@@ -52,6 +52,7 @@ pub mod protocols;
 pub mod recover;
 pub mod rs;
 pub mod slicer;
+pub mod sstv;
 #[cfg(feature = "tea")]
 pub mod ta61;
 #[cfg(feature = "tea")]

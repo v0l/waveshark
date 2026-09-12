@@ -36,6 +36,7 @@ pub mod protocol;
 pub mod scope_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
+pub mod sstv_nodes;
 pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod tx_nodes;
@@ -87,6 +88,7 @@ pub use sink_nodes::{
     AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,
 };
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
+pub use sstv_nodes::SstvNode;
 pub use survey_nodes::SurveyNode;
 pub use tetra_nodes::TetraNode;
 pub use tx_nodes::{
@@ -164,6 +166,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (modes_nodes::DESC, modes_nodes::build),
     (ais_nodes::DESC, ais_nodes::build),
     (gsm_nodes::DESC, gsm_nodes::build),
+    (sstv_nodes::DESC, sstv_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),

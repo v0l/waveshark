@@ -32,6 +32,10 @@ pub struct Rational {
     /// Where the next input sample goes, and so where the newest one is.
     w: usize,
     acc: usize,
+    /// Buffers for [`Rational::process_real`], kept so a per-block call does
+    /// not allocate.
+    scratch_in: Vec<C32>,
+    scratch_out: Vec<C32>,
 }
 
 impl Rational {
@@ -64,7 +68,17 @@ impl Rational {
                 phase.push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
             }
         }
-        Self { l, m, per_phase, phases, hist: vec![C32::default(); per_phase * 2], w: 0, acc: 0 }
+        Self {
+            l,
+            m,
+            per_phase,
+            phases,
+            hist: vec![C32::default(); per_phase * 2],
+            w: 0,
+            acc: 0,
+            scratch_in: Vec::new(),
+            scratch_out: Vec::new(),
+        }
     }
 
     /// Output samples per input sample, as the ratio it was built for.
@@ -113,6 +127,26 @@ impl Rational {
                 self.w = 0;
             }
         }
+    }
+
+    /// The same for real samples: audio, a discriminator's output, an
+    /// envelope. The imaginary half costs half the multiplies and is thrown
+    /// away, which is cheap enough that a second filter is not worth keeping.
+    pub fn process_real(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.is_identity() {
+            out.extend_from_slice(input);
+            return;
+        }
+        self.scratch_in.clear();
+        self.scratch_in.extend(input.iter().map(|x| C32::new(*x, 0.0)));
+        self.scratch_out.clear();
+        let (mut i, mut o) =
+            (std::mem::take(&mut self.scratch_in), std::mem::take(&mut self.scratch_out));
+        self.process(&i, &mut o);
+        out.extend(o.iter().map(|c| c.re));
+        i.clear();
+        self.scratch_in = i;
+        self.scratch_out = o;
     }
 }
 
