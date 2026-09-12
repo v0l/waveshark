@@ -9,6 +9,32 @@ each data publisher requires; read it before adding a data source. A
 measurement or a trap that explains a shape goes in a comment next to that
 code.
 
+## A protocol is layers, and the layers are shared
+
+A new protocol is mostly other protocols' parts. Put each piece at the layer
+it belongs to, named for the waveform or the code rather than for the device,
+and a later protocol gets it for nothing.
+
+- **`crates/dsp`, one module per waveform.** `afsk`, `ask`, `c4fm`, `fsk`,
+  `fourlevel`, `msk`, `gmsk` (in `m17/`), `lora`, `wifi`. A module here is
+  named after the modulation and parameterised by rate, baud and deviation. It
+  knows nothing about the device: `dsp::msk` reads any MSK, and ACARS is one
+  configuration of it.
+- **Framing and slicing are their own modules**, above the waveform and below
+  the protocol: `dsp::hdlc`, `dsp::slice`, `decode::slicer`, `decode::framing`,
+  `decode::whiten`.
+- **Codes and checks live in `decode::bits`**: CRCs, LFSR digests, parity,
+  reflection, Golay, BCH, Reed-Solomon. A new polynomial goes there with a
+  test, not into the decoder that needed it first.
+- **`crates/decode`, one module per protocol payload.** Bytes in, fields out,
+  no DSP and no graph.
+- **`crates/nodes`, one `*_nodes.rs` per protocol**, which wires a channel to
+  a waveform to a payload and is the only layer that knows about the graph.
+
+The test for whether a piece is at the right layer: could a second protocol
+using the same modulation, the same framing or the same polynomial call it
+without touching it? If not, it is in the wrong file.
+
 ## Build
 
 `tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both

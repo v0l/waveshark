@@ -208,6 +208,19 @@ pub fn crc16(data: &[u8], poly: u16, init: u16) -> u16 {
     crc
 }
 
+/// LSB-first CRC-16, `poly` in its reflected representation: 0x8408 is the
+/// CCITT polynomial as X.25, ARINC 618 and a dozen packet radios use it.
+pub fn crc16le(data: &[u8], poly: u16, init: u16) -> u16 {
+    let mut crc = init;
+    for &b in data {
+        crc ^= b as u16;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ poly } else { crc >> 1 };
+        }
+    }
+    crc
+}
+
 /// Simple additive checksum, truncated to 8 bits.
 pub fn checksum8(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |a, b| a.wrapping_add(*b))

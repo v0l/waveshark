@@ -16,6 +16,10 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- ACARS, the messages aircraft and ground stations send each other on the VHF
+  airband: who sent it, the aircraft's registration and flight number, the
+  label and the text. Point a channel at 131.725 across Europe or 131.550 in
+  North America.
 - Hideki weather sensors, sold as Cresta, TFA Nexus, Irox, Mebus and the
   Bresser 5CH: the thermo-hygrometer, the temperature-only sensor, the
   anemometer and the rain gauge.
