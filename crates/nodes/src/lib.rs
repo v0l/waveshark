@@ -28,6 +28,7 @@ pub mod homeassistant_nodes;
 pub mod keyed;
 pub mod lora_nodes;
 pub mod m17_nodes;
+pub mod mic_in;
 pub mod mod_nodes;
 pub mod modes_nodes;
 pub mod packet_nodes;
@@ -75,6 +76,7 @@ pub use homeassistant_nodes::{
 pub use keyed::{keyed, keyed_mut, Keyed};
 pub use lora_nodes::LoraNode;
 pub use m17_nodes::M17Node;
+pub use mic_in::MicInNode;
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FmModNode, FskModNode, OokModNode, FM_DEVIATION_HZ,
     NBFM_DEVIATION_HZ, WBFM_DEVIATION_HZ,
@@ -166,6 +168,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (modes_nodes::DESC, modes_nodes::build),
     (ais_nodes::DESC, ais_nodes::build),
     (gsm_nodes::DESC, gsm_nodes::build),
+    (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (video_nodes::DESC, video_nodes::build),

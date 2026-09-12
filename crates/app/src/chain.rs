@@ -3368,6 +3368,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "tx_clock" => "Transmit clock".into(),
         "tx_monitor" => "Transmit monitor".into(),
         "mic" => "Microphone".into(),
+        "mic_in" => "Microphone in".into(),
         "tone" => "Test tone".into(),
         "fm_mod" => "FM modulator".into(),
         "am_mod" => "AM modulator".into(),
@@ -3605,6 +3606,19 @@ fn add_patch(
                 Some(s) => Box::new(nodes::TxSinkNode::new(s)) as Box<dyn pipeline::node::Node>,
                 None => Box::new(nodes::TxSinkNode::idle()) as Box<dyn pipeline::node::Node>,
             },
+            // The receive side of the same microphone: a decoder that reads
+            // audio, fed from the device rather than from the air.
+            None if st.kind == "mic_in" => {
+                match tx.as_ref().and_then(|t| t.mic.clone()) {
+                    Some(src) => {
+                        Box::new(nodes::MicInNode::new(src)) as Box<dyn pipeline::node::Node>
+                    }
+                    // Unlike the transmit stage this does not wait: it
+                    // produces silence, so whatever is wired behind it stays
+                    // in the graph until a device turns up.
+                    None => Box::new(nodes::MicInNode::idle()) as Box<dyn pipeline::node::Node>,
+                }
+            }
             None if st.kind == "mic" => {
                 let src = tx.as_ref().and_then(|t| t.mic.clone());
                 match src {

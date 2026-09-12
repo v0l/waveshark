@@ -16,6 +16,10 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- A microphone input stage, so a decoder can read audio from the machine's
+  own input rather than off the air: hold a phone playing SSTV beside the
+  laptop, wire "Microphone in" to an SSTV stage in the chain view, and the
+  picture builds.
 - SSTV pictures on the video bus: Martin 1 and 2, Scottie 1, 2 and DX, and
   Robot 36 and 72, read from the two metre calling frequency at 144.500 or
   from any chain that produces audio. The picture builds on screen as it
