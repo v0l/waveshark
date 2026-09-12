@@ -34,7 +34,7 @@
 
 use crate::bits::{checksum8, crc8le, even_parity, lfsr_digest8, BitBuffer};
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::protocols::{find_frame, rows_of};
+use crate::protocols::{find_frame, rows_of, rows_within};
 use crate::slicer::Timing;
 
 pub struct Acurite609Txc;
@@ -310,6 +310,15 @@ impl Protocol for Acurite606Tx {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
+        // The frame is a row of its own, and rtl_433 refuses a row longer than
+        // 33 bits before it looks at anything else. That length test is load
+        // bearing: a 36 bit Prologue frame slices at these very timings, and
+        // an eight bit digest over three bytes passes on one window in 256, so
+        // without it this decoder reads a Prologue transmission as a 606TX at
+        // the same temperature and reports a verified integrity check for it.
+        if !rows_within(bits, 32..=33) {
+            return Err(DecodeError::NotThisProtocol);
+        }
         let b = find_frame(bits, TX606_BYTES, |b| {
             b[..3] != [0; 3] && lfsr_digest8(&b[..3], 0x98, 0xf1) == b[3]
         })

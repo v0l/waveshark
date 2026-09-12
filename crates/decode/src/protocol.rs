@@ -165,11 +165,13 @@ impl Protocols {
         p.add(Box::new(LacrosseIt::tx29()));
         p.add(Box::new(LacrosseIt::tx35()));
         p.add(Box::new(NexusTh));
+        p.add(Box::new(PrologueTh));
         p.add(Box::new(Rubicson));
         p.add(Box::new(Bresser3Ch));
         p.add(Box::new(GtWt02));
         p.add(Box::new(GtWt03));
         p.add(Box::new(FineOffsetWh51));
+        p.add(Box::new(AmbientF007th));
         p.add(Box::new(OregonV3));
         p.add(Box::new(OregonV2));
         p.add(Box::new(X10Rf));
