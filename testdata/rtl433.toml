@@ -540,3 +540,19 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "9beda7b405e078dd5cac3763812d248c6dd59d8ee61009ca070293fed9d250da"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/01/gfile001.json"
 description = "A sensor with no humidity element, which sends 0xcc in its place and so is the check that the field is dropped rather than reported as 204%"
+
+[[sample]]
+name = "interlogix_motion_319.5M_250k.cu8"
+sha256 = "90c7cb7573ec1cde2a52b06a1144c18395c809ba6ad7eafe14b66d4a52ba98a1"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/interlogix/06/motion_319.5M_250k.cu8"
+reference_sha256 = "cfbb92762b7c16bfea669e6c09ca6724dd7af9ccecb9322c9e74d72c0de2ff92"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/interlogix/06/motion_319.5M_250k.json"
+description = "A motion detector firing, sent eight times over three seconds. A different device type nibble and a different set of latches from the contact above"
+
+[[sample]]
+name = "interlogix_tamper_319.5M_250k.cu8"
+sha256 = "5daf4cc5603bb34a8a4b40ccfb9927ddc9504f65ed65f718d12944cff7078a62"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/interlogix/06/tamper_319.5M_250k.cu8"
+reference_sha256 = "12efb745df8422121018263d4598666ea5912de51420390e86b2d3838962a0a4"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/interlogix/06/tamper_319.5M_250k.json"
+description = "The same detector with its case opened, which differs from the capture above in one latch bit and is what a decoder reading the wrong bit still passes the parity check on"

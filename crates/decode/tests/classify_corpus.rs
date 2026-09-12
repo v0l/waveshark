@@ -64,6 +64,16 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
          arise; the test harness has no bank",
     ),
     (
+        "interlogix_tamper_319.5M_250k.cu8",
+        "the sensor keys 122 us pulses with gaps as short as 96 us, so a window \
+         holding a whole transmission is 90% carrier and its envelope fits \
+         nearly one level: every window here measures an envelope ratio under \
+         0.2 and none scores as keyed. Not weakness, the bursts stand 26 dB \
+         above the floor, and the same family's motion capture scrapes a \
+         verdict from one window in fourteen. The decoder reads every \
+         transmission in both",
+    ),
+    (
         "tpms_toyota_b_433.92M_250k.cu8",
         "one strong spike sets the upper envelope level for the whole window, \
          putting the packet below the threshold the level runs are measured \

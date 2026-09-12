@@ -15,9 +15,13 @@
 //! - `humi` 8 bits percent, 0xcc when the sensor has no humidity element
 //!
 //! There is no checksum, so the corroboration is the transmission's own shape:
-//! a frame is claimed only where four of the burst's rows are 36 bits long and
-//! identical, which is what rtl_433 requires of it too. Nothing weaker will
-//! do, because a four bit constant lets one window in sixteen through.
+//! a frame is claimed only where two of the burst's rows are 36 bits long and
+//! identical, or where a package is one such row and nothing else. Nothing
+//! weaker will do, because a four bit constant lets one window in sixteen
+//! through. rtl_433 asks for four copies of the seven the sensor sends, which
+//! it can because its reset limit holds a whole transmission in one buffer;
+//! this receiver's detector cuts a package at the 9 ms gap between copies, so
+//! asking for four here reads none of these sensors at all.
 //!
 //! The Alecto V1 family (Auriol, Unitec W186-F) sends the same 36 bits at the
 //! same timings with a real checksum in the last nibble, and rtl_433 resolves
@@ -31,8 +35,9 @@ use crate::slicer::Timing;
 pub struct PrologueTh;
 
 const FRAME_BITS: usize = 36;
-/// What rtl_433 asks of a burst before it will read one without a checksum.
-const COPIES: usize = 4;
+/// Copies of the frame a burst must carry before it is read without a
+/// checksum, or one where the package holds a single frame and nothing else.
+const COPIES: usize = 2;
 
 impl Protocol for PrologueTh {
     fn name(&self) -> &'static str {
@@ -80,12 +85,17 @@ impl Protocol for PrologueTh {
     }
 }
 
-/// The 36 bit row this burst sent at least [`COPIES`] times.
+/// The 36 bit row this burst sent at least [`COPIES`] times, or the one row a
+/// package holding a single copy is.
 ///
 /// Rows rather than bit offsets, because the 9000 us gap between copies is
 /// where the slicer cut and a frame starts there or nowhere. A row longer than
 /// 37 bits is not this protocol: rtl_433 allows the one trailing zero a
 /// detector adds and nothing beyond it.
+///
+/// A package that is one frame long and nothing else is the detector agreeing
+/// with the frame's own boundaries, and is accepted on that alone, as the
+/// Nexus decoder accepts it.
 fn repeated_row(bits: &BitBuffer) -> Option<[u8; 5]> {
     // The slicer marks a row where it cut, which leaves the first copy's start
     // unmarked: it is where the buffer begins.
@@ -99,7 +109,8 @@ fn repeated_row(bits: &BitBuffer) -> Option<[u8; 5]> {
         .filter(|(start, end)| (FRAME_BITS..=FRAME_BITS + 1).contains(&(end - start)))
         .map(|(start, _)| bits.slice(start, FRAME_BITS))
         .collect();
-    let row = rows.iter().find(|r| rows.iter().filter(|o| o == r).count() >= COPIES)?;
+    let alone = rows.len() == 1 && bits.len() <= FRAME_BITS + 1;
+    let row = rows.iter().find(|r| alone || rows.iter().filter(|o| o == r).count() >= COPIES)?;
     let mut b = [0u8; 5];
     b.copy_from_slice(&row.as_padded_bytes()[..5]);
     Some(b)
@@ -178,11 +189,21 @@ mod tests {
     }
 
     #[test]
-    fn three_copies_are_not_enough_to_claim_a_frame_with_no_checksum() {
-        assert_eq!(
-            PrologueTh.decode(&burst(5, 167, 3, 146, 90, false, 3)),
-            Err(DecodeError::NotThisProtocol)
-        );
-        assert!(PrologueTh.decode(&burst(5, 167, 3, 146, 90, false, 4)).is_ok());
+    fn a_frame_inside_a_longer_burst_needs_a_copy_of_itself() {
+        // One copy in a package holding other rows is a window that happened
+        // to have the type nibble in the right place, and there are four bits
+        // of that.
+        let mut once = burst(5, 167, 3, 146, 90, false, 1);
+        once.mark_row();
+        once.extend(false, 20);
+        assert_eq!(PrologueTh.decode(&once), Err(DecodeError::NotThisProtocol));
+        assert!(PrologueTh.decode(&burst(5, 167, 3, 146, 90, false, 2)).is_ok());
+    }
+
+    #[test]
+    fn a_package_holding_one_frame_and_nothing_else_is_read() {
+        // What the detector hands over for these sensors: it cuts on the 9 ms
+        // gap, so each of the seven copies arrives on its own.
+        assert!(PrologueTh.decode(&burst(9, 78, 1, 10, 0xcc, false, 1)).is_ok());
     }
 }
