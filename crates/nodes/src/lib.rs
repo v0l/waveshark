@@ -6,6 +6,7 @@
 //! discrimination instead of an envelope), and that should be a
 //! reconfiguration rather than a recompile.
 
+pub mod acars_nodes;
 pub mod ais_nodes;
 pub mod aprs_nodes;
 pub mod auto;
@@ -44,6 +45,7 @@ pub mod wifi_nodes;
 pub mod wigle_nodes;
 pub mod wmbus_nodes;
 
+pub use acars_nodes::AcarsNode;
 pub use ais_nodes::AisNode;
 pub use aprs_nodes::AprsNode;
 pub use auto::{AutoNode, AUTO_OPEN_DB};
@@ -164,6 +166,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (ble_nodes::DESC, ble_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),
     (droneid_nodes::DESC, droneid_nodes::build),
+    (acars_nodes::DESC, acars_nodes::build),
     (aprs_nodes::DESC, aprs_nodes::build),
     (m17_nodes::DESC, m17_nodes::build),
     (tetra_nodes::DESC, tetra_nodes::build),

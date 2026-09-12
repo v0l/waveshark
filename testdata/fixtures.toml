@@ -530,3 +530,32 @@ elrs_link = "6f37"
 elrs_rows = 107
 elrs_hop_visits = 30
 sources_opened = 53
+
+[[capture]]
+name = "acars_acarsdec_12500.wav"
+sha256 = "752acabede3f96e8f137567e8218fe3cd9aab61130b9198d0cbce6cf2cf53b80"
+url = "https://raw.githubusercontent.com/TLeconte/acarsdec/339f63eb91a890cfe5b199ad70814cfe86702d1e/test.wav"
+compression = "none"
+center_hz = 0
+rate_sps = 12_500
+format = "wav"
+description = """
+Not IQ and not this project's recording: four ACARS channels of off-air
+audio, already AM detected and decimated to 12.5 kHz, shipped as `test.wav`
+with Thierry Leconte's acarsdec and fetched here from that repository at a
+pinned commit.
+
+It is here because it is the only ACARS evidence with an independent decode
+attached. acarsdec 3.7 built from that commit reads seven messages out of it,
+and `crates/decode/tests/acars_capture.rs` asserts the same seven with the
+registrations, flight numbers and labels that decoder printed, so agreement
+is between two implementations rather than with this one's own assumptions.
+
+What it cannot exercise is the receiver above the audio: the AM channel, the
+tuning and the graph are not in the file. That still wants a recording of
+131.725 or 131.550 off an aerial.
+
+The aircraft in it are real: five registrations, four flight numbers and one
+engine report from an Air France flight, transmitted in the clear as ACARS
+always is.
+"""

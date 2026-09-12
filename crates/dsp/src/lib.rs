@@ -30,6 +30,7 @@ pub mod lte_turbo;
 pub mod m17;
 pub mod mixer;
 pub mod modes;
+pub mod msk;
 pub mod pocsag;
 pub mod pulse;
 pub mod rds;
