@@ -395,6 +395,28 @@ that gives detection its sensitivity takes thirty frames to decay after a
 45 dB signal stops, and single bins of noise inside a wide extent reach the
 close threshold a few times a frame.
 
+What the extent cannot say is how much bandwidth a burst's *timing* needs,
+and that is a limitation rather than a setting. An Interlogix security sensor
+keying 122 us pulses measures 13.7 kHz at the 20 dB extent and is cut 20.5 kHz
+wide; its pulses need a passband of 11.5 kHz either side, measured by filtering
+the capture at a fixed output rate and stepping the passband, where 11 kHz
+reads nothing and 12 kHz reads all sixty pulses. So the front end on that
+source reads eight pulses of sixty while a channel bank on the same recording
+reads every one, and `testdata/rtl433.toml` holds the sensor's motion captures
+but not the contact one that shows it.
+
+Every way of widening the cut by a constant was measured and each cost a
+decode somewhere else, which is why none of them is here. A `width_margin` of
+2.5 loses five of the busy span's 116 packets. Filling a narrow source's
+stream to its own Nyquist, as a source whose rate came from the floor already
+is, loses two of the four Fine Offset copies in `auto_node`, since a
+neighbour 56 kHz away puts keying sidebands into the wider passband. Adding
+the detector's own guard bins to the width loses a narrow 868 MHz OOK burst
+from the Meshtastic capture. The fix that does not trade one sensor for
+another is `Request::Reshape`: read the source as cut, notice the burst fills
+the channel it was given, and ask for a wider one out of the history, which is
+the door the detector already opens for a chirp that outgrows its extent.
+
 Three more were found at the start of a stream. A capture can open with a
 quarter second of full-scale constant while the tuner settles, which is a
 carrier at DC and an empty floor everywhere else, so silence is judged on a
