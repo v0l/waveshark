@@ -542,6 +542,53 @@ impl Pixels {
     }
 }
 
+/// How a picture arrives, and so how long one is worth keeping.
+///
+/// Not a preference: a camera and an SSTV transmission want opposite
+/// treatment. A field that stopped arriving means the transmitter has gone,
+/// and holding it on the screen claims a picture that is not there. A still
+/// is finished when it stops arriving, and dropping it a moment later throws
+/// away the only copy of what was received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cadence {
+    /// Fields at the transmission's own rate, each superseding the last.
+    Live,
+    /// One picture built over seconds or minutes and then kept.
+    Still,
+}
+
+impl Cadence {
+    /// How long a picture stays worth showing after the last update.
+    pub fn hold_s(self) -> f64 {
+        match self {
+            // Long enough to ride a dropout on a fading link, short enough
+            // that nobody mistakes a still of a departed transmitter for a
+            // live picture.
+            Self::Live => 0.5,
+            // A finished picture is evidence. It stays until something
+            // replaces it or the receiver is retuned.
+            Self::Still => 3600.0,
+        }
+    }
+}
+
+/// What a [`VideoFrame`] carries: a picture, or part of one being built.
+///
+/// A front end that builds a picture a line at a time should send the lines
+/// it just decoded, not the whole picture again. SSTV rescanned its own audio
+/// every sixteen lines to hand over a picture that was mostly the same as the
+/// last one, which costs the decode sixteen times over and gives a viewer a
+/// picture that flashes rather than one that fills in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Update {
+    /// The whole picture, superseding whatever was there.
+    Whole,
+    /// Rows from `first` onwards, as many as the samples hold. They are
+    /// painted into the picture the bus is keeping for this transmission,
+    /// which [`VideoFrame::sequence`] identifies.
+    Rows { first: usize },
+}
+
 /// A picture as it was received, with what it was received from.
 ///
 /// The video counterpart of [`Voice`], and here for the same reason: a field
@@ -587,9 +634,17 @@ pub struct VideoFrame {
     /// third of its lines is a picture of a fade, and a receiver that draws it
     /// without saying so is claiming more than it knows.
     pub lines_seen: usize,
-    /// Fields since the front end started, so a viewer can tell a repeated
-    /// frame from a still picture.
+    /// Which picture this is.
+    ///
+    /// For [`Update::Whole`] it counts fields, so a viewer can tell a
+    /// repeated frame from a still. For [`Update::Rows`] it names the picture
+    /// the rows belong to: rows with a new number start a new canvas, which
+    /// is how a second SSTV transmission does not paint over the first.
     pub sequence: u64,
+    /// Whole picture or rows of one.
+    pub update: Update,
+    /// How it arrives, and so how long it is kept.
+    pub cadence: Cadence,
 }
 
 impl VideoFrame {
@@ -599,6 +654,20 @@ impl VideoFrame {
             return 0.0;
         }
         self.lines_seen as f32 / self.height as f32
+    }
+
+    /// Bytes one row of this picture occupies.
+    pub fn stride(&self) -> usize {
+        self.width * self.pixels.bytes()
+    }
+
+    /// How many rows the samples hold, which for [`Update::Rows`] is the
+    /// batch rather than the picture.
+    pub fn rows(&self) -> usize {
+        match self.stride() {
+            0 => 0,
+            s => self.samples.len() / s,
+        }
     }
 }
 

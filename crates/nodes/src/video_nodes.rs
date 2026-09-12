@@ -352,6 +352,10 @@ impl pipeline::node::Node for VideoNode {
                 samples: std::sync::Arc::new(samples),
                 lines_seen: f.lines_seen,
                 sequence: self.sequence,
+                // A field at a time, each superseding the last, and worth
+                // nothing once they stop arriving.
+                update: common::Update::Whole,
+                cadence: common::Cadence::Live,
             });
         }
         Ok(())

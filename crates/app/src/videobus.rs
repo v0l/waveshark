@@ -85,6 +85,9 @@ pub struct Channel {
     /// Ignore this one entirely.
     pub muted: bool,
     pub last: Option<VideoFrame>,
+    /// The picture rows are being painted into, for a front end that sends
+    /// them rather than whole pictures, and which picture it is.
+    canvas: Option<(u64, Vec<u8>, Vec<bool>)>,
     /// Fields that have arrived on it, so a view can show a rate and tell a
     /// live channel from one that stopped.
     pub fields: u64,
@@ -101,7 +104,8 @@ impl Channel {
 
     /// Whether it is still arriving.
     pub fn live(&self) -> bool {
-        self.since_s <= HOLD_S
+        let hold = self.last.as_ref().map_or(HOLD_S, |f| f.cadence.hold_s());
+        self.since_s <= hold
     }
 }
 
@@ -152,7 +156,13 @@ impl VideoBus {
         self.rules = rules;
     }
 
-    /// Take a field, whichever input it arrived on.
+    /// Take a field or a batch of lines, whichever input it arrived on.
+    ///
+    /// Lines are painted into the picture this bus keeps for the
+    /// transmission and what goes on is the whole picture so far, so a
+    /// consumer sees pictures whether a front end sends fields or rows. A
+    /// front end that sent whole pictures as they filled in would be decoding
+    /// each line as many times as there are lines left.
     pub fn push(&mut self, _input: usize, frame: VideoFrame) {
         let key = key_of(&frame);
         let label =
@@ -170,11 +180,20 @@ impl VideoBus {
         let c = &mut self.channels[k];
         c.fields += 1;
         c.since_s = 0.0;
-        c.last = Some(frame.clone());
+        let f = match frame.update {
+            common::Update::Whole => {
+                c.canvas = None;
+                frame
+            }
+            common::Update::Rows { first } => match paint(c, &frame, first) {
+                Some(whole) => whole,
+                None => return,
+            },
+        };
+        c.last = Some(f.clone());
         if c.muted {
             return;
         }
-        let f = frame;
         if !self.rules.iter().any(|r| r.matches(&f)) {
             return;
         }
@@ -203,7 +222,8 @@ impl VideoBus {
     /// [`HOLD_S`] of silence: a still picture of a transmitter that has gone
     /// away is the worst thing this bus could hand a view.
     pub fn watched(&self) -> Option<&VideoFrame> {
-        (self.since_s <= HOLD_S).then(|| self.held.as_ref()).flatten()
+        let f = self.held.as_ref()?;
+        (self.since_s <= f.cadence.hold_s()).then_some(f)
     }
 
     /// The picture to publish on the output port this block, which is only
@@ -249,10 +269,45 @@ impl VideoBus {
     }
 }
 
-/// How long a picture is worth showing after the last field arrived. Long
-/// enough to ride a dropout on a fading link, short enough that nobody
-/// mistakes a still of a departed transmitter for a live picture.
+/// How long a picture with nothing to say about its own cadence is worth
+/// showing. [`common::Cadence`] is what decides for one that does: a camera's
+/// field is stale in half a second and an SSTV picture is kept.
 const HOLD_S: f64 = 0.5;
+
+/// Paint a batch of rows into the channel's picture, and hand back the whole
+/// picture as it now stands.
+///
+/// A batch whose picture number is new starts a fresh canvas, which is how a
+/// second transmission does not paint over the first. A batch that does not
+/// fit the canvas is dropped: a row count that disagrees with the geometry is
+/// a bug upstream, and painting it would smear the picture.
+fn paint(c: &mut Channel, batch: &VideoFrame, first: usize) -> Option<VideoFrame> {
+    let stride = batch.stride();
+    let rows = batch.rows();
+    if stride == 0 || rows == 0 || first + rows > batch.height {
+        return None;
+    }
+    let fresh = !matches!(&c.canvas, Some((seq, _, _)) if *seq == batch.sequence);
+    if fresh {
+        c.canvas =
+            Some((batch.sequence, vec![0; stride * batch.height], vec![false; batch.height]));
+    }
+    let (_, buf, filled) = c.canvas.as_mut()?;
+    if buf.len() != stride * batch.height {
+        return None;
+    }
+    buf[first * stride..(first + rows) * stride].copy_from_slice(&batch.samples);
+    for row in filled.iter_mut().skip(first).take(rows) {
+        *row = true;
+    }
+    let seen = filled.iter().filter(|v| **v).count();
+    Some(VideoFrame {
+        samples: std::sync::Arc::new(buf.clone()),
+        lines_seen: seen,
+        update: common::Update::Whole,
+        ..batch.clone()
+    })
+}
 
 /// Transmissions kept. A band holds forty channels of the analogue plan and
 /// nothing tunes across more than one band at a time.
@@ -401,7 +456,71 @@ mod tests {
             samples: std::sync::Arc::new(vec![0u8; 4 * 288]),
             lines_seen: lines,
             sequence: 1,
+            update: common::Update::Whole,
+            cadence: common::Cadence::Live,
         }
+    }
+
+    /// A batch of rows of a still picture, as an SSTV front end sends them.
+    fn rows(channel_hz: f64, picture: u64, first: usize, n: usize, shade: u8) -> VideoFrame {
+        VideoFrame {
+            system: "SSTV",
+            channel_hz,
+            label: Some("Martin 1".into()),
+            width: 4,
+            height: 8,
+            aspect: 4.0 / 3.0,
+            pixels: Pixels::Rgb8,
+            samples: std::sync::Arc::new(vec![shade; 4 * n * 3]),
+            lines_seen: n,
+            sequence: picture,
+            update: common::Update::Rows { first },
+            cadence: common::Cadence::Still,
+        }
+    }
+
+    /// Rows are painted into the picture the bus keeps, and what comes out is
+    /// the whole picture so far: a front end reads each line once, and a
+    /// viewer still sees a picture rather than a strip.
+    #[test]
+    fn rows_fill_in_the_picture_the_bus_holds() {
+        let mut bus = VideoBus::new();
+        bus.push(0, rows(144.5e6, 1, 0, 2, 0x40));
+        let f = bus.published().expect("a picture from the first rows");
+        assert_eq!(f.lines_seen, 2, "two rows painted");
+        assert_eq!(f.samples.len(), 4 * 8 * 3, "the whole canvas, not the batch");
+        assert!(matches!(f.update, common::Update::Whole), "what leaves the bus is a picture");
+
+        bus.clear();
+        bus.push(0, rows(144.5e6, 1, 2, 6, 0x80));
+        let f = bus.published().expect("a picture");
+        assert_eq!(f.lines_seen, 8, "the picture is whole");
+        assert_eq!(f.samples[0], 0x40, "the first rows are still there");
+        assert_eq!(f.samples[4 * 2 * 3], 0x80, "and the later ones are behind them");
+
+        // A second transmission is a second picture, not paint over the
+        // first: the number on the batch is what says so.
+        bus.clear();
+        bus.push(0, rows(144.5e6, 2, 0, 1, 0x10));
+        let f = bus.published().expect("a picture");
+        assert_eq!(f.lines_seen, 1, "the new picture has one row");
+        assert_eq!(f.samples[4 * 2 * 3], 0, "the old picture is gone");
+    }
+
+    /// A still is kept and a field is not: half a second after a camera stops
+    /// there is no picture, and an SSTV transmission that finished is still
+    /// on the screen a minute later.
+    #[test]
+    fn a_still_outlives_a_field() {
+        let mut bus = VideoBus::new();
+        bus.push(0, frame(5_800e6, "F4", 288));
+        bus.idle(1.0);
+        assert!(bus.watched().is_none(), "a camera that stopped is not a picture");
+
+        let mut bus = VideoBus::new();
+        bus.push(0, rows(144.5e6, 1, 0, 8, 0x40));
+        bus.idle(60.0);
+        assert!(bus.watched().is_some(), "a finished picture is kept");
     }
 
     /// Two cameras on one wire are two channels. Everything the auto node

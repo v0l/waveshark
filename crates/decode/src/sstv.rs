@@ -292,94 +292,88 @@ fn align_sync(
 }
 
 /// Decode the first picture in `audio`, or `None` where there is no header.
+///
+/// The whole-buffer form of [`Receiver`], and the same code: a test that
+/// decodes a recording and a node reading a live stream must not be two
+/// decoders that agree only by luck.
 pub fn decode(audio: &[f32], rate: f64) -> Option<Picture> {
-    let mut meter = ToneMeter::new(rate);
-    let header_end = find_header(audio, &mut meter)?;
-    let vis = read_vis(audio, header_end, &mut meter)?;
-    let mode = mode_of(vis)?;
-    let start = header_end + (VIS_BIT * 9.0 * rate).round() as usize;
-    Some(scan(audio, &mut meter, mode, start))
+    let mut rx = Receiver::new(rate);
+    rx.push(audio);
+    rx.finish();
+    rx.picture().cloned()
 }
 
-/// Walk the line timings, sampling one window per pixel.
-fn scan(audio: &[f32], meter: &mut ToneMeter, mode: &'static Mode, start: usize) -> Picture {
+/// One line of the picture, read into the channel planes.
+///
+/// Returns where the next line starts, or `None` when the audio runs out
+/// part way: a line half read is not written, since a viewer cannot tell a
+/// half-read line from a received one.
+fn read_line(
+    audio: &[f32],
+    base: u64,
+    meter: &mut ToneMeter,
+    mode: &'static Mode,
+    line: usize,
+    seq: &mut u64,
+    planes: &mut [Vec<Vec<u8>>],
+) -> bool {
     let rate = meter.rate();
-    let (w, h) = (mode.width, mode.height);
-    // Channel planes, as sent: the colour conversion comes after.
-    let mut planes = vec![vec![vec![0u8; w]; mode.channels]; h];
-    let mut done = 0usize;
+    let here = |abs: u64| -> Option<usize> { abs.checked_sub(base).map(|v| v as usize) };
 
-    let mut seq = start;
-    if mode.start_sync {
-        match align_sync(audio, seq, mode, meter, false) {
-            Some(s) => seq = s,
-            None => return picture(mode, &planes, 0),
+    if mode.sync_channel > 0 && line == 0 {
+        // Scottie's sync sits inside the line, so the first line starts
+        // before the pulse that was just found.
+        let back = ((mode.offsets[mode.sync_channel] + mode.scan_time) * rate).round() as u64;
+        *seq = seq.saturating_sub(back);
+    }
+    let mut row = vec![vec![0u8; mode.width]; mode.channels];
+    for chan in 0..mode.channels {
+        if chan == mode.sync_channel {
+            if line > 0 || chan > 0 {
+                *seq += (mode.line_time * rate).round() as u64;
+            }
+            let Some(from) = here(*seq) else { return false };
+            let Some(found) = align_sync(audio, from, mode, meter, true) else { return false };
+            *seq = base + found as u64;
+        }
+        let pixel_time =
+            if mode.half_scan && chan > 0 { mode.half_pixel_time() } else { mode.pixel_time() };
+        let half_window = pixel_time * mode.window_factor / 2.0;
+        let window = (half_window * 2.0 * rate).round() as usize;
+        for px in 0..mode.width {
+            let centre = mode.offsets[chan] + px as f64 * pixel_time - half_window;
+            let at = (*seq as f64 - base as f64 + centre * rate).round() as isize;
+            if at < 0 || at as usize + window >= audio.len() {
+                return false;
+            }
+            row[chan][px] = luma(meter.peak_hz(&audio[at as usize..at as usize + window]));
         }
     }
-
-    'lines: for line in 0..h {
-        if mode.sync_channel > 0 && line == 0 {
-            // Scottie's sync sits inside the line, so the first line starts
-            // before the pulse that was just found.
-            let back = ((mode.offsets[mode.sync_channel] + mode.scan_time) * rate).round() as usize;
-            seq = seq.saturating_sub(back);
-        }
-        for chan in 0..mode.channels {
-            if chan == mode.sync_channel {
-                if line > 0 || chan > 0 {
-                    seq += (mode.line_time * rate).round() as usize;
-                }
-                match align_sync(audio, seq, mode, meter, true) {
-                    Some(s) => seq = s,
-                    None => break 'lines,
-                }
-            }
-            let pixel_time =
-                if mode.half_scan && chan > 0 { mode.half_pixel_time() } else { mode.pixel_time() };
-            let half_window = pixel_time * mode.window_factor / 2.0;
-            let window = (half_window * 2.0 * rate).round() as usize;
-            for px in 0..w {
-                let centre = mode.offsets[chan] + px as f64 * pixel_time - half_window;
-                let at = (seq as f64 + centre * rate).round() as isize;
-                if at < 0 || at as usize + window >= audio.len() {
-                    break 'lines;
-                }
-                let at = at as usize;
-                planes[line][chan][px] = luma(meter.peak_hz(&audio[at..at + window]));
-            }
-        }
-        done = line + 1;
-    }
-    picture(mode, &planes, done)
+    planes[line] = row;
+    true
 }
 
-/// Turn the channel planes into RGB, which is where a mode's colour order
-/// and Robot 36's alternating colour difference are undone.
-fn picture(mode: &'static Mode, planes: &[Vec<Vec<u8>>], lines: usize) -> Picture {
-    let (w, h) = (mode.width, mode.height);
-    let mut rgb = vec![0u8; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let px = match (mode.channels, mode.colour) {
-                (3, Colour::Gbr) => (planes[y][2][x], planes[y][0][x], planes[y][1][x]),
-                (3, Colour::Yuv) => yuv(planes[y][0][x], planes[y][2][x], planes[y][1][x]),
-                (2, Colour::Yuv) => {
-                    // Robot 36 sends R-Y on even lines and B-Y on odd ones,
-                    // so each line borrows the other from its neighbour.
-                    let odd = y % 2;
-                    let a = planes[y.saturating_sub(odd.wrapping_sub(1) & 1)][1][x];
-                    let b = planes[y.saturating_sub(odd)][1][x];
-                    yuv(planes[y][0][x], a, b)
-                }
-                _ => (planes[y][0][x], planes[y][0][x], planes[y][0][x]),
-            };
-            let at = (y * w + x) * 3;
-            rgb[at] = px.0;
-            rgb[at + 1] = px.1;
-            rgb[at + 2] = px.2;
-        }
+/// One line of the picture as RGB, which is where a mode's colour order and
+/// Robot 36's alternating colour difference are undone.
+fn convert_row(mode: &'static Mode, planes: &[Vec<Vec<u8>>], y: usize, out: &mut [u8]) {
+    for x in 0..mode.width {
+        let px = match (mode.channels, mode.colour) {
+            (3, Colour::Gbr) => (planes[y][2][x], planes[y][0][x], planes[y][1][x]),
+            (3, Colour::Yuv) => yuv(planes[y][0][x], planes[y][2][x], planes[y][1][x]),
+            (2, Colour::Yuv) => {
+                // Robot 36 sends R-Y on even lines and B-Y on odd ones, so
+                // each line borrows the other from its neighbour.
+                let odd = y % 2;
+                let a = planes[y.saturating_sub(odd.wrapping_sub(1) & 1)][1][x];
+                let b = planes[y.saturating_sub(odd)][1][x];
+                yuv(planes[y][0][x], a, b)
+            }
+            _ => (planes[y][0][x], planes[y][0][x], planes[y][0][x]),
+        };
+        out[x * 3] = px.0;
+        out[x * 3 + 1] = px.1;
+        out[x * 3 + 2] = px.2;
     }
-    Picture { mode, width: w, height: h, rgb, lines }
 }
 
 /// The conversion every SSTV decoder uses, which is JPEG's YCbCr.
@@ -391,32 +385,60 @@ fn yuv(y: u8, cr: u8, cb: u8) -> (u8, u8, u8) {
     (r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8)
 }
 
+/// Rows that have just been read, for a consumer that paints them into a
+/// picture rather than redrawing one.
+#[derive(Clone, Debug)]
+pub struct Lines {
+    pub mode: &'static Mode,
+    /// Which picture these belong to, counted from the receiver's first.
+    pub picture: u64,
+    /// The row the batch starts at.
+    pub first: usize,
+    /// The rows themselves, RGB, row major.
+    pub rgb: Vec<u8>,
+    /// Whether the transmission is over: every line read, or the decoder
+    /// giving up on one that stopped part way.
+    pub complete: bool,
+}
+
 /// A picture being received, fed audio as it arrives.
 ///
 /// A transmission is two minutes long, so a node cannot wait for the end of
 /// the stream and cannot keep the stream either. This keeps what it needs: a
-/// few seconds while it is hunting for a header, and the picture's own audio
-/// once it has found one.
+/// few seconds while it is hunting for a header, and from then on only the
+/// audio of the line it is reading.
+///
+/// Lines are read once, as the audio for each arrives, and handed over as
+/// they are. The first version rescanned the whole transmission every
+/// sixteen lines to hand over a picture, which is the same decode done
+/// sixteen times and a picture that flashes rather than one that fills in.
 pub struct Receiver {
     rate: f64,
     meter: ToneMeter,
     audio: Vec<f32>,
-    /// Where in `audio` the picture starts, once the header has been read.
-    start: Option<(usize, &'static Mode)>,
-    /// Samples dropped off the front, so a caller can count in absolute time.
-    dropped: u64,
-    /// How many lines were published for the picture in progress, so a
-    /// partial picture is only redrawn when it has grown.
-    published: usize,
+    /// Absolute position of `audio[0]`, since the buffer is drained as lines
+    /// are read and every timing here is absolute.
+    base: u64,
+    state: State,
+    /// Pictures started, which names the one being received.
+    pictures: u64,
+    canvas: Option<Picture>,
+}
+
+enum State {
+    Hunting,
+    Reading {
+        mode: &'static Mode,
+        /// Where the current line starts.
+        seq: u64,
+        line: usize,
+        planes: Vec<Vec<Vec<u8>>>,
+    },
 }
 
 /// How much audio to keep while hunting: enough for the header search window
 /// plus the jump it steps by.
 const HUNT_KEEP: f64 = HDR_SIZE + 0.5;
-
-/// How often a picture in progress is handed out, in lines. Every line would
-/// be a full rescan of the picture's audio for one new row.
-const PUBLISH_EVERY: usize = 16;
 
 impl Receiver {
     pub fn new(rate: f64) -> Self {
@@ -424,9 +446,10 @@ impl Receiver {
             rate,
             meter: ToneMeter::new(rate),
             audio: Vec::new(),
-            start: None,
-            dropped: 0,
-            published: 0,
+            base: 0,
+            state: State::Hunting,
+            pictures: 0,
+            canvas: None,
         }
     }
 
@@ -435,25 +458,36 @@ impl Receiver {
         *self = Self::new(rate);
     }
 
-    /// Feed audio. Returns a picture whenever there is more of one to show:
-    /// partly filled as it is received, and once more when it is complete.
-    pub fn push(&mut self, audio: &[f32]) -> Option<Picture> {
-        self.audio.extend_from_slice(audio);
-        match self.start {
-            None => self.hunt(),
-            Some((at, mode)) => self.fill(at, mode),
-        }
-    }
-
     /// Whether a transmission is being received right now.
     pub fn receiving(&self) -> bool {
-        self.start.is_some()
+        matches!(self.state, State::Reading { .. })
     }
 
-    fn hunt(&mut self) -> Option<Picture> {
+    /// The picture as it stands, complete or not.
+    pub fn picture(&self) -> Option<&Picture> {
+        self.canvas.as_ref()
+    }
+
+    /// Feed audio. Returns whatever lines that completed.
+    pub fn push(&mut self, audio: &[f32]) -> Option<Lines> {
+        self.audio.extend_from_slice(audio);
+        if matches!(self.state, State::Hunting) {
+            self.hunt();
+        }
+        self.advance(false)
+    }
+
+    /// No more audio is coming: give up on the picture in progress and hand
+    /// over what was read. What a file ends in, and what a transmission that
+    /// faded out becomes.
+    pub fn finish(&mut self) -> Option<Lines> {
+        self.advance(true)
+    }
+
+    fn hunt(&mut self) {
         let need = (HDR_SIZE * self.rate).round() as usize;
         if self.audio.len() < need {
-            return None;
+            return;
         }
         if let Some(end) = find_header(&self.audio, &mut self.meter) {
             // The VIS code is 240 ms behind the header, which on a live
@@ -461,52 +495,144 @@ impl Receiver {
             // optional: reading it early fails, and treating that as a bad
             // header threw the header away and the picture with it.
             if self.audio.len() < end + (VIS_BIT * 8.0 * self.rate).round() as usize {
-                return None;
+                return;
             }
-            if let Some(vis) = read_vis(&self.audio, end, &mut self.meter) {
-                if let Some(mode) = mode_of(vis) {
-                    let start = end + (VIS_BIT * 9.0 * self.rate).round() as usize;
-                    self.start = Some((start, mode));
-                    self.published = 0;
-                    return None;
+            if let Some(mode) = read_vis(&self.audio, end, &mut self.meter).and_then(mode_of) {
+                let mut seq =
+                    self.base + (end + (VIS_BIT * 9.0 * self.rate).round() as usize) as u64;
+                if mode.start_sync {
+                    // Scottie opens with a sync pulse before the picture.
+                    let from = (seq - self.base) as usize;
+                    match align_sync(&self.audio, from, mode, &mut self.meter, false) {
+                        Some(at) => seq = self.base + at as u64,
+                        None => return,
+                    }
                 }
+                self.pictures += 1;
+                self.canvas = Some(Picture {
+                    mode,
+                    width: mode.width,
+                    height: mode.height,
+                    rgb: vec![0; mode.width * mode.height * 3],
+                    lines: 0,
+                });
+                self.state = State::Reading {
+                    mode,
+                    seq,
+                    line: 0,
+                    planes: vec![vec![vec![0u8; mode.width]; mode.channels]; mode.height],
+                };
+                return;
             }
             // A header with a VIS this receiver cannot read is still a
             // header: skip past it rather than finding it again every block.
-            self.audio.drain(..end);
-            self.dropped += end as u64;
-            return None;
+            self.drain_to(self.base + end as u64);
+            return;
         }
         let keep = (HUNT_KEEP * self.rate).round() as usize;
         if self.audio.len() > keep {
-            let cut = self.audio.len() - keep;
-            self.audio.drain(..cut);
-            self.dropped += cut as u64;
+            self.drain_to(self.base + (self.audio.len() - keep) as u64);
         }
-        None
     }
 
-    fn fill(&mut self, at: usize, mode: &'static Mode) -> Option<Picture> {
-        let have = self.audio.len().saturating_sub(at) as f64 / self.rate;
-        let whole = mode.line_time * mode.height as f64;
-        let lines = ((have / mode.line_time) as usize).min(mode.height);
-        let complete = have >= whole;
-        if !complete && lines < self.published + PUBLISH_EVERY {
+    fn drain_to(&mut self, abs: u64) {
+        let Some(cut) = abs.checked_sub(self.base) else { return };
+        let cut = (cut as usize).min(self.audio.len());
+        self.audio.drain(..cut);
+        self.base += cut as u64;
+    }
+
+    /// Read as many lines as the audio in hand allows.
+    fn advance(&mut self, ending: bool) -> Option<Lines> {
+        // Taken out of `self` for the duration: reading a line needs the
+        // buffer and the meter, and the borrow checker will not have both
+        // halves of the receiver at once.
+        let taken = std::mem::replace(&mut self.state, State::Hunting);
+        let State::Reading { mode, mut seq, mut line, mut planes } = taken else {
+            return None;
+        };
+        let rate = self.rate;
+        // A line cannot be read until the audio behind the last pixel of its
+        // last channel has arrived, plus the window the sync search walks.
+        let reach = mode.line_time
+            + mode.offsets.iter().take(mode.channels).fold(0.0f64, |m, o| m.max(*o))
+            + mode.scan_time
+            + 2.0 * mode.sync_pulse;
+        let reach = (reach * rate).round() as u64;
+
+        let mut first = line;
+        let mut rows: Vec<u8> = Vec::new();
+        let mut complete = false;
+        loop {
+            if line >= mode.height {
+                complete = true;
+                break;
+            }
+            let have = self.base + self.audio.len() as u64;
+            if !ending && have < seq + reach {
+                break;
+            }
+            if !read_line(
+                &self.audio,
+                self.base,
+                &mut self.meter,
+                mode,
+                line,
+                &mut seq,
+                &mut planes,
+            ) {
+                // Out of audio part way: on a live stream the rest is still
+                // coming, at the end of one it never will.
+                complete = ending;
+                break;
+            }
+            line += 1;
+            // Robot 36 needs the next line's colour difference to convert
+            // this one, so conversion runs one line behind it.
+            let ready = match mode.alt_scan {
+                true => line.saturating_sub(1),
+                false => line,
+            };
+            let canvas = self.canvas.as_mut().expect("a canvas while reading");
+            while canvas.lines < ready {
+                let y = canvas.lines;
+                let mut row = vec![0u8; mode.width * 3];
+                convert_row(mode, &planes, y, &mut row);
+                canvas.rgb[y * mode.width * 3..(y + 1) * mode.width * 3].copy_from_slice(&row);
+                canvas.lines += 1;
+                if rows.is_empty() {
+                    first = y;
+                }
+                rows.extend_from_slice(&row);
+            }
+            // The audio behind a line that is read is not needed again.
+            let keep = seq.saturating_sub((mode.line_time * rate).round() as u64);
+            self.drain_to(keep);
+        }
+
+        if complete {
+            // The last line of an alternating-scan mode has no neighbour to
+            // borrow from, so it converts against itself.
+            if let (Some(canvas), true) = (self.canvas.as_mut(), mode.alt_scan) {
+                while canvas.lines < line {
+                    let y = canvas.lines;
+                    let mut row = vec![0u8; mode.width * 3];
+                    convert_row(mode, &planes, y, &mut row);
+                    canvas.rgb[y * mode.width * 3..(y + 1) * mode.width * 3].copy_from_slice(&row);
+                    canvas.lines += 1;
+                    if rows.is_empty() {
+                        first = y;
+                    }
+                    rows.extend_from_slice(&row);
+                }
+            }
+        } else {
+            self.state = State::Reading { mode, seq, line, planes };
+        }
+        if rows.is_empty() && !complete {
             return None;
         }
-        let picture = scan(&self.audio, &mut self.meter, mode, at);
-        self.published = picture.lines;
-        if complete {
-            // Keep whatever came after the picture: two transmissions back to
-            // back are two pictures, not one and a half.
-            let used = at + (whole * self.rate).round() as usize;
-            let used = used.min(self.audio.len());
-            self.audio.drain(..used);
-            self.dropped += used as u64;
-            self.start = None;
-            self.published = 0;
-        }
-        Some(picture)
+        Some(Lines { mode, picture: self.pictures, first, rgb: rows, complete })
     }
 }
 
