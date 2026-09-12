@@ -16,6 +16,8 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- Alecto V1 weather sensors and the Auriol, Silvercrest and Ventus rebadges of
+  them: the thermo-hygrometer and the rain gauge. Wind is not read yet.
 - Interlogix, GE and UTC security sensors on 319.5 MHz, and the ELK-319DWM and
   Alula RE101 modules with them. A row names the sensor by the serial on its
   label and says whether the contact is open, the case has been lifted or the

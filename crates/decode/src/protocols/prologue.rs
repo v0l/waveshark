@@ -28,7 +28,7 @@
 //! the collision by decoder priority. Here the frame is handed over instead: a
 //! frame satisfying that checksum is theirs.
 
-use crate::bits::{reflect8, BitBuffer};
+use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::Timing;
 
@@ -57,7 +57,7 @@ impl Protocol for PrologueTh {
         if b[0] & 0xf0 != 0x90 && b[0] & 0xf0 != 0x50 {
             return Err(DecodeError::NotThisProtocol);
         }
-        if alecto_checksum(&b) {
+        if super::alecto::checksum_ok(&b) {
             return Err(DecodeError::NotThisProtocol);
         }
 
@@ -114,16 +114,6 @@ fn repeated_row(bits: &BitBuffer) -> Option<[u8; 5]> {
     let mut b = [0u8; 5];
     b.copy_from_slice(&row.as_padded_bytes()[..5]);
     Some(b)
-}
-
-/// The Alecto V1 checksum: the nibbles of the first four bytes summed with
-/// every byte bit-reversed, biased by whether the frame is a rain message, and
-/// compared against the top nibble of the fifth.
-fn alecto_checksum(b: &[u8; 5]) -> bool {
-    let sum: u32 =
-        b[..4].iter().map(|x| reflect8(*x)).map(|x| (x & 0x0f) as u32 + (x >> 4) as u32).sum();
-    let sum = if b[1] & 0x7f == 0x6c { sum + 7 } else { 0x0f_u32.wrapping_sub(sum) };
-    reflect8(((sum & 0x0f) << 4) as u8) == b[4] >> 4
 }
 
 #[cfg(test)]
