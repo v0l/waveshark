@@ -14,15 +14,17 @@
 //! itself when fields stop arriving rather than leaving the last one on the
 //! screen: a still picture of a transmitter that has gone away is the worst
 //! thing this pane could do.
+//!
+//! An SSTV picture is the opposite case and says so through
+//! [`common::Cadence`]: it arrives a line at a time over two minutes and is
+//! finished when it stops arriving, so it is kept rather than cleared.
 
 use super::*;
 use common::{Pixels, VideoFrame};
 
-/// How long a picture stays on screen after the last field.
-///
-/// Two fields is 40 ms, which is far too twitchy for a link fading in and
-/// out; half a second is long enough to ride a dropout and short enough that
-/// nobody mistakes it for a live picture.
+/// How long a picture with nothing to say about its cadence stays on screen.
+/// What a frame does say is [`common::Cadence::hold_s`], which is half a
+/// second for a camera and an hour for a picture that was built and finished.
 const HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Default)]
@@ -121,7 +123,12 @@ impl VideoPane<'_> {
                 st.shown = Some(f);
             }
         }
-        if st.last.is_some_and(|t| t.elapsed() > HOLD) {
+        let hold = st
+            .shown
+            .as_ref()
+            .map(|f| std::time::Duration::from_secs_f64(f.cadence.hold_s()))
+            .unwrap_or(HOLD);
+        if st.last.is_some_and(|t| t.elapsed() > hold) {
             st.texture = None;
             st.shown = None;
             st.last = None;

@@ -65,19 +65,26 @@ fn a_picture_played_at_the_microphone_reaches_the_video_bus() {
         pictures.extend(video.as_video().unwrap_or(&[]).iter().cloned());
     }
 
-    // Sixteen partial pictures as it builds and the finished one: handing
-    // them over as they grow is the reason a viewer sees anything before the
-    // two minutes are up.
-    assert_eq!(pictures.len(), 17, "pictures handed to the bus");
-    let last = pictures.last().expect("a picture");
-    assert_eq!(last.system, "SSTV");
-    assert_eq!(last.label.as_deref(), Some("Martin 1"));
-    assert_eq!((last.width, last.height), (320, 256));
-    assert_eq!(last.lines_seen, 256, "the finished picture is whole");
-    assert_eq!(last.channel_hz, 144_500_000.0);
+    // Lines as they are read, not pictures: every one of the 256 arrives
+    // once, in order, and the bus is what paints them into a canvas.
+    let rows: usize = pictures.iter().map(|p| p.rows()).sum();
+    assert_eq!(rows, 256, "every line of the picture, once");
     assert_eq!(sstv.pictures(), 1, "one picture completed");
 
-    // And they grow: a bus showing the newest is showing more each time.
-    let growth: Vec<usize> = pictures.iter().map(|p| p.lines_seen).collect();
-    assert!(growth.windows(2).all(|w| w[1] > w[0]), "lines went backwards: {growth:?}");
+    let mut want = 0usize;
+    for p in &pictures {
+        assert_eq!(p.system, "SSTV");
+        assert_eq!(p.label.as_deref(), Some("Martin 1"));
+        assert_eq!((p.width, p.height), (320, 256));
+        assert_eq!(p.channel_hz, 144_500_000.0);
+        assert_eq!(p.cadence, common::Cadence::Still, "a picture that is kept");
+        assert_eq!(p.sequence, 1, "all of one transmission");
+        match p.update {
+            common::Update::Rows { first } => {
+                assert_eq!(first, want, "lines arrived out of order");
+                want += p.rows();
+            }
+            common::Update::Whole => panic!("SSTV sends lines, not whole pictures"),
+        }
+    }
 }

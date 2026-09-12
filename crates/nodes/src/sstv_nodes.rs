@@ -7,15 +7,14 @@
 //! sideband demodulator instead, so the node reads either a baseband channel
 //! or, where a chain already has one, an audio stream.
 //!
-//! What reaches the video bus is a picture with the lines that have arrived
-//! so far, handed over every sixteen lines rather than at the end: a
-//! transmission is two minutes long, and a viewer watching a picture build is
-//! how an operator knows the receiver is on the right channel before those
-//! two minutes are spent.
+//! What reaches the video bus is the lines themselves, as each is read. The
+//! bus keeps the canvas they are painted into, so a transmission appears
+//! line by line over its two minutes rather than in jumps, and nothing
+//! rescans audio it has already read.
 
 use crate::protocol::{Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
-use common::{Pixels, Result, VideoFrame};
+use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::sstv;
 use dsp::resample::Rational;
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -57,7 +56,6 @@ pub struct SstvNode {
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
     at_rate: Vec<f32>,
-    sequence: u64,
     pictures: u64,
 }
 
@@ -80,7 +78,6 @@ impl SstvNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             at_rate: Vec::new(),
-            sequence: 0,
             pictures: 0,
         }
     }
@@ -90,24 +87,31 @@ impl SstvNode {
         self.pictures
     }
 
-    fn publish(&mut self, p: sstv::Picture, out: &mut Vec<VideoFrame>) {
-        self.sequence += 1;
-        if p.lines == p.height {
+    fn publish(&mut self, lines: sstv::Lines, out: &mut Vec<VideoFrame>) {
+        if lines.complete {
             self.pictures += 1;
+        }
+        let rows = lines.rgb.len() / (lines.mode.width * 3);
+        if rows == 0 {
+            return;
         }
         out.push(VideoFrame {
             system: SYSTEM,
             channel_hz: self.channel_hz,
-            label: Some(p.mode.name.to_string()),
-            width: p.width,
-            height: p.height,
+            label: Some(lines.mode.name.to_string()),
+            width: lines.mode.width,
+            height: lines.mode.height,
             // SSTV pictures are 4:3 whatever their pixel count, which is 320
             // by 256 in the Martin and Scottie modes.
             aspect: 4.0 / 3.0,
             pixels: Pixels::Rgb8,
-            samples: std::sync::Arc::new(p.rgb),
-            lines_seen: p.lines,
-            sequence: self.sequence,
+            samples: std::sync::Arc::new(lines.rgb),
+            // Of this batch. What the picture as a whole has is the bus's to
+            // count, since the bus is what holds it.
+            lines_seen: rows,
+            sequence: lines.picture,
+            update: Update::Rows { first: lines.first },
+            cadence: Cadence::Still,
         });
     }
 }

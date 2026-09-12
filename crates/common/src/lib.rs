@@ -26,8 +26,8 @@ pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};
 pub use modulation::Modulation;
 pub use pulse::{
-    ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody, Pixels, Pulse,
-    Speech, VideoFrame, Voice, CHANNEL_MATCH_HZ,
+    Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody,
+    Pixels, Pulse, Speech, Update, VideoFrame, Voice, CHANNEL_MATCH_HZ,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use units::{Hz, Sps};
