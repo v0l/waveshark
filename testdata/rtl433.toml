@@ -484,3 +484,59 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "ad4a4f50ca1a448b5b0cee1ffc841de0475336c083d439c9b731704d6ebb9269"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/m-bus/05/g003_868.6M_1000k.json"
 description = "The same Kamstrup meter transmitting again, differing only in its access counter, which is the check that a decode reads the frame rather than a constant"
+
+[[sample]]
+name = "ambient_f007th_a_433.92M_250k.cu8"
+sha256 = "7e65c6931c6cd2aa1b2f7ee7b6255baebc19e70cd1db0b5ccb66988f42eeb3e8"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/01/f007th.cu8"
+reference_sha256 = "15fc478c03cbee05183703685e7b2c810aa901651f00c1e66c48b280f12f06a4"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/01/f007th.json"
+description = "Five F007TH sensors on five channels in one recording, two and a half seconds apart, which is what makes it worth having: a decoder that reads the first and the strongest still fails this one"
+
+[[sample]]
+name = "ambient_f007th_b_433.92M_250k.cu8"
+sha256 = "053207689d5e23341351e007dfd7e5feb5d9bcd0c0ce79e8c8e82e20c5c613ec"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/02/f007th-001.cu8"
+reference_sha256 = "cf1d69bea7a7fd682d808093435784c353468ea53624f8c352f5d53760766798"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/02/f007th-001.json"
+description = "The same sensor reading -4.6 F, which is the only capture here where the temperature offset is subtracted below zero"
+
+[[sample]]
+name = "ambient_f007th_c_433.92M_250k.cu8"
+sha256 = "e1dc6fcde1c3c3bbb487823c593a9565e7d498dcb369eb3d6c86a7969a0459b0"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/03/g002_433.92M_250k.cu8"
+reference_sha256 = "43bd28313d9597de24ec4699472a34cb4c9f5df8b0778777d444eb097d7681af"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ambient_weather/03/g002_433.92M_250k.json"
+description = "A third recording at 15% humidity, low enough to be outside the manual's stated range and so a check that the sanity rules are rtl_433's rather than tighter"
+
+[[sample]]
+name = "prologue_a_433.92M_250k.cu8"
+sha256 = "cb533e9105044480a6de83246515620e53424414ae528a12c6325c7b1a8c89fa"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/02/prologue_-760_40_ch1.cu8"
+reference_sha256 = "ceadbde7f456e8ea39b5f615073e27c5509e3cd82bb3b05721b8b94d4fe779ac"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/02/prologue_-760_40_ch1.json"
+description = "A subtype 5 sensor reading -7.6 C, which is the sign extension this frame's twelve bit temperature needs"
+
+[[sample]]
+name = "prologue_b_433.92M_250k.cu8"
+sha256 = "ec672933cee085c85dbf78a2302989a94291d676c0d3dca39eac9e60a86569a4"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/02/prologue_146_90_ch3_btn.cu8"
+reference_sha256 = "86757bcbeb1a28a79e9f2ca24ad23a30fbb141d1766b4e39c26045e0a76b8df6"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/02/prologue_146_90_ch3_btn.json"
+description = "The same family on channel 3 with the button pressed, which is the only capture here where that flag is set"
+
+[[sample]]
+name = "prologue_c_433.92M_250k.cu8"
+sha256 = "148855567f827999d56054363ea0ed7fafa2a63d255364aa3f2066c0080a0142"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/03/g002_433.92M_250k.cu8"
+reference_sha256 = "c33a27237e6c8642478f697cd2bc1cb576d7938c46549730b8f806617f029145"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/03/g002_433.92M_250k.json"
+description = "Subtype 9 with a low battery and a humidity of zero, which the sensor means as a reading rather than as the 0xcc that says it has no humidity element"
+
+[[sample]]
+name = "prologue_d_433.92M_250k.cu8"
+sha256 = "8b7332ae48bb804bc9cf2ab144ba77fbd4e57bc1decb6ee1c1a0d40c8ed27c61"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/01/gfile001.cu8"
+reference_sha256 = "9beda7b405e078dd5cac3763812d248c6dd59d8ee61009ca070293fed9d250da"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/01/gfile001.json"
+description = "A sensor with no humidity element, which sends 0xcc in its place and so is the check that the field is dropped rather than reported as 204%"

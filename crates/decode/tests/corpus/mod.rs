@@ -499,6 +499,30 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Prologue-TH",
+        ours: "Prologue-TH",
+        fields: &[
+            ("subtype", "subtype", Num),
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("humidity", "humidity_pct", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("button", "button", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Ambientweather-F007TH",
+        ours: "Ambientweather-F007TH",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_F", "temperature_c", FromF),
+            ("humidity", "humidity_pct", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "Bresser-3CH",
         ours: "Bresser-3CH",
         fields: &[

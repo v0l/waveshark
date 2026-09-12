@@ -10,6 +10,21 @@ the code is in the commit log; what a decoder can and cannot do is in
 
 ## [Unreleased]
 
+### Added
+
+- Ambient Weather F007TH thermo-hygrometers, sold as the F012TH, the SwitchDoc
+  F016TH and TFA's 30.3208.02 sender, on 433.92 and 868 MHz.
+- Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
+  NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
+  thermometer.
+
+### Fixed
+
+- An Acurite 606TX reading no longer appears for a Prologue sensor's
+  transmission. The two send at the same timings and the 606TX's digest is
+  eight bits, so one frame in a few hundred was reported as a second sensor at
+  the same temperature, with a passing integrity check.
+
 ## [0.2.0] - 2026-09-12
 
 ### Added

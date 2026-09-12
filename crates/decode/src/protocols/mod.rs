@@ -10,6 +10,7 @@
 //! stops a checksum-free protocol claiming every burst on the band.
 
 mod acurite;
+mod ambient;
 mod bresser;
 mod esl;
 mod ev1527;
@@ -21,6 +22,7 @@ mod keyfob;
 mod lacrosse;
 mod nexus;
 mod oregon;
+mod prologue;
 mod rubicson;
 mod security;
 mod somfy_rts;
@@ -28,6 +30,7 @@ mod tpms;
 mod x10;
 
 pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, AcuriteWind};
+pub use ambient::AmbientF007th;
 pub use bresser::Bresser3Ch;
 pub use esl::Esl;
 pub use ev1527::Ev1527;
@@ -42,6 +45,7 @@ pub use keyfob::{
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;
 pub use oregon::{OregonV2, OregonV3};
+pub use prologue::PrologueTh;
 pub use rubicson::Rubicson;
 pub use security::HoneywellSecurity;
 pub use somfy_rts::SomfyRts;
@@ -83,6 +87,24 @@ pub(crate) fn find_frame(
 ///
 /// Bytes come back reflected, because the protocols that need this are the
 /// ones transmitting least significant bit first.
+/// Could this buffer hold a frame whose row is `row_bits` long?
+///
+/// A row is where the slicer cut, which is where the transmitter stopped, so a
+/// burst whose every row is a different length is a different protocol however
+/// well a window inside it checksums. Several rtl_433 decoders test the row
+/// length before anything else for exactly that reason.
+///
+/// A buffer with no cut in it is one row, which is what the detector says it
+/// is: a burst it saw begin and end. That is the common case here, since the
+/// gap between copies is usually long enough to end the package rather than
+/// only the row.
+pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<usize>) -> bool {
+    let starts: Vec<usize> = if bits.rows().is_empty() { vec![0] } else { bits.rows().to_vec() };
+    let starts = &starts[..];
+    let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
+    starts.iter().copied().zip(ends).any(|(start, end)| row_bits.contains(&(end - start)))
+}
+
 pub(crate) fn rows_of(
     bits: &BitBuffer,
     want: usize,
