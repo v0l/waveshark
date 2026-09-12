@@ -150,6 +150,38 @@ impl Rational {
     }
 }
 
+/// How to get from a radio's rate to the rate a decoder wants: decimate by a
+/// whole number first, then resample what is left.
+///
+/// The decimation factor is not simply the ratio rounded. 2.048 MS/s over 46
+/// is 44521.7, which has no small ratio to 44100 at all, so a node that
+/// rounded refused the rate its radio was running at. Over 40 it is 51200,
+/// and 51200 to 44100 is 512 over 441. So try every factor from the largest
+/// down and take the first whose remainder is a ratio worth filtering.
+///
+/// Returns the factor and the resampler, the latter `None` where the
+/// decimation alone lands on the wanted rate.
+pub fn stage(
+    rate_in: f64,
+    rate_out: f64,
+    max_denominator: usize,
+) -> Option<(usize, Option<Rational>)> {
+    if rate_in < rate_out {
+        return None;
+    }
+    let most = (rate_in / rate_out).floor().max(1.0) as usize;
+    for factor in (1..=most).rev() {
+        let mid = rate_in / factor as f64;
+        if (mid - rate_out).abs() < 1.0 {
+            return Some((factor, None));
+        }
+        if let Some(r) = Rational::new(mid, rate_out, max_denominator) {
+            return Some((factor, Some(r)));
+        }
+    }
+    None
+}
+
 /// `a / b` in lowest terms, or `None` when the denominator is over the bound.
 fn ratio(a: f64, b: f64, max_denominator: usize) -> Option<(usize, usize)> {
     // Both rates are whole numbers of hertz in every case this receiver has,
@@ -173,6 +205,31 @@ fn gcd(a: u64, b: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Every rate a radio in this receiver runs at has to reach the rates the
+    /// decoders want. The ones that bit: 2.048 MS/s to 44.1 kHz, which is
+    /// what a HackRF hands an SSTV channel.
+    #[test]
+    fn every_radio_rate_reaches_the_decoder_rates() {
+        for rate in [
+            250_000.0,
+            1_024_000.0,
+            2_048_000.0,
+            2_400_000.0,
+            2_880_000.0,
+            8_000_000.0,
+            10_000_000.0,
+            20_000_000.0,
+            61_440_000.0,
+        ] {
+            for want in [44_100.0, 48_000.0, 105_000.0, 12_500.0] {
+                let (factor, _) = super::stage(rate, want, 4096)
+                    .unwrap_or_else(|| panic!("{rate} to {want} has no path"));
+                let mid = rate / factor as f64;
+                assert!(mid >= want, "{rate} to {want} decimated below the wanted rate");
+            }
+        }
+    }
+
     use super::*;
 
     fn tone(hz: f64, rate: f64, n: usize) -> Vec<C32> {
