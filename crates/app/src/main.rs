@@ -46,6 +46,7 @@ mod meshnode;
 mod messages;
 mod packetlog;
 mod patch;
+mod picsave;
 mod prof;
 mod radio;
 mod record;

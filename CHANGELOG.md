@@ -20,6 +20,10 @@ the code is in the commit log.
   own input rather than off the air: hold a phone playing SSTV beside the
   laptop, wire "Microphone in" to an SSTV stage in the chain view, and the
   picture builds.
+- Every still picture the receiver finishes is written to
+  `~/.local/share/waveshark/pictures` as a PNG, named for when it arrived,
+  what sent it and where it was received. A transmission that stopped part
+  way is written too, with the percentage in its name.
 - SSTV pictures on the video bus: Martin 1 and 2, Scottie 1, 2 and DX, and
   Robot 36 and 72, read from the two metre calling frequency at 144.500 or
   from any chain that produces audio. The picture builds on screen as it

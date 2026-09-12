@@ -50,6 +50,8 @@ pub(super) struct VideoPane<'a> {
     /// Every transmission the bus is seeing, with what it is called and how
     /// complete its last picture was.
     pub inputs: Vec<crate::chain::VideoInput>,
+    /// Pictures written to disk this session, newest last.
+    pub saved: Vec<std::path::PathBuf>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -102,6 +104,22 @@ impl VideoPane<'_> {
                 n => format!("{n} channels"),
             };
             theme::Line::new().legend(&count).show(ui);
+            // Every finished still is written out without being asked, so
+            // the only thing a person needs from the pane is where they went.
+            if let Some(last) = self.saved.last() {
+                ui.add_space(12.0);
+                let n = self.saved.len();
+                let what = match n {
+                    1 => "1 picture saved".to_string(),
+                    n => format!("{n} pictures saved"),
+                };
+                let dir = last.parent().unwrap_or(last).display().to_string();
+                let r = theme::Line::new().legend(&what).show(ui);
+                r.on_hover_text(dir.clone());
+                if ui.small_button("open").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
+                }
+            }
             if want != st.watching {
                 st.watching_label = want
                     .as_ref()

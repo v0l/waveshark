@@ -1150,6 +1150,9 @@ pub struct Status {
     /// Every input of the video bus: which one, what it is called, and how
     /// complete its last picture was. What a pane offers to switch between.
     video_inputs: parking_lot::Mutex<Vec<crate::chain::VideoInput>>,
+    /// Pictures written to disk, newest last, so a view can say where they
+    /// went without watching the directory itself.
+    pictures: parking_lot::Mutex<Vec<std::path::PathBuf>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
     /// What each scope stage in the chain is seeing, by node id.
@@ -1415,6 +1418,7 @@ impl Default for Status {
             stations: parking_lot::Mutex::new(Vec::new()),
             video: parking_lot::Mutex::new(None),
             video_inputs: parking_lot::Mutex::new(Vec::new()),
+            pictures: parking_lot::Mutex::new(Vec::new()),
             chain: parking_lot::Mutex::new(None),
             scopes: parking_lot::Mutex::new(Vec::new()),
             chain_latency: AtomicU32::new(0),
@@ -1635,6 +1639,11 @@ impl Status {
     /// What the video bus is receiving, whether or not it is being watched.
     pub fn video_inputs(&self) -> Vec<crate::chain::VideoInput> {
         self.video_inputs.lock().clone()
+    }
+
+    /// Pictures written to disk this session, newest last.
+    pub fn pictures(&self) -> Vec<std::path::PathBuf> {
+        self.pictures.lock().clone()
     }
 
     fn set_video_inputs(&self, inputs: Vec<crate::chain::VideoInput>) {
@@ -2902,6 +2911,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.status.logged.store(self.rx.logged(), Ordering::Relaxed);
         self.status.set_video(self.rx.watched_video());
         self.status.set_video_inputs(self.rx.video_inputs());
+        if let Some(saved) = self.rx.pictures_saved() {
+            let mut cur = self.status.pictures.lock();
+            if cur.len() != saved.len() {
+                *cur = saved;
+            }
+        }
         self.status.log_bytes.store(self.rx.log_bytes(), Ordering::Relaxed);
         self.status.log_full.store(self.rx.log_full(), Ordering::Relaxed);
         let chans = self.rx.bank_channels();
