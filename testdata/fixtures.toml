@@ -559,3 +559,30 @@ The aircraft in it are real: five registrations, four flight numbers and one
 engine report from an Air France flight, transmitted in the clear as ACARS
 always is.
 """
+
+[[capture]]
+name = "vdl2_model_136.975M_1050k.wav"
+sha256 = "50a8dc2b270362d0f85f92c7dcf458fb3706e2ce0221ba2dfa86b6a5128a124b"
+url = "https://raw.githubusercontent.com/szpajder/dumpvdl2/686e87f2294ef6275855ba7364bd4bb9a0f8f56a/test/vdl2_model_16b_1050kHz.wav"
+compression = "none"
+center_hz = 136_975_000
+rate_sps = 1_050_000
+format = "s16"
+description = """
+A modelled VDL Mode 2 transmission, shipped as `test/vdl2_model_16b_1050kHz.wav`
+with Tomasz Lemiech's dumpvdl2 and fetched here from that repository at a
+pinned commit. Despite the extension it is interleaved 16-bit signed IQ at
+1.05 MS/s behind a 44-byte WAV header, not audio.
+
+It is synthetic, so it proves the block layer and not the receiver: one
+ground station burst carrying two AVLC information frames, 303 and 175
+octets, addressed from 345678 to aircraft A23721 and carrying a TAF and a
+pair of METARs for Rochester and Washington National. dumpvdl2 2.7.0 built
+from the same commit reads exactly those two frames, and
+`crates/decode/tests/vdl2_capture.rs` asserts the same two with the same
+addresses and lengths.
+
+What it cannot show is acquisition on a real signal: no fading, no doppler,
+one burst in a silent band. An off-air recording of 136.975 would test the
+sync metric properly and is what this corpus still wants.
+"""
