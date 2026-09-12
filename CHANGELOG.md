@@ -47,6 +47,8 @@ the code is in the commit log.
   detector has fired.
 
 ### Fixed
+- An SSTV picture drawing only its first line in the video pane while the
+  file saved to disk was complete.
 - SSTV and VDL Mode 2 refusing to run on a radio at 2.048 MS/s.
 - An Acurite 606TX reading no longer appears for a Prologue sensor's
   transmission. The two send at the same timings and the 606TX's digest is
