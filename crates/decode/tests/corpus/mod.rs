@@ -499,6 +499,51 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Hideki-TS04",
+        ours: "Hideki-TS04",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("humidity", "humidity_pct", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Hideki-Temperature",
+        ours: "Hideki-Temperature",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Hideki-Rain",
+        ours: "Hideki-Rain",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("rain_mm", "rain_total_mm", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "Hideki-Wind",
+        ours: "Hideki-Wind",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("wind_avg_mi_h", "wind_avg_ms", FromMph),
+            ("wind_max_mi_h", "wind_gust_ms", FromMph),
+            ("wind_dir_deg", "wind_direction_deg", Num),
+            ("wind_approach", "wind_approach", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "AlectoV1-Temperature",
         ours: "AlectoV1-Temperature",
         fields: &[

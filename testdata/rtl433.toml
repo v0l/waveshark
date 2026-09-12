@@ -588,3 +588,43 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "46dea17ce7210dc36718ecd228065c98a83bb833e9504a64f9d9a1191b1dd35d"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/04/g011_433.92M_250k.json"
 description = "Filed under prologue upstream because the two families share their timings and their frame length: rtl_433 reads it as Alecto because the checksum passes, and so must this. The capture that proves the two decoders do not claim each other's transmissions"
+
+[[sample]]
+name = "hideki_ts04_a_433.92M_250k.cu8"
+sha256 = "1588acfd55c0129143d4eae1e70be9ee2fb120829dbf9adaba03b00cde3ea6fd"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/01/ch1_-440_38.cu8"
+reference_sha256 = "db3fc5255543c1ee598cdfd0821bd2bf551a6b2ddd4c6568fd6495f7ddb936b6"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/01/ch1_-440_38.json"
+description = "A thermo-hygrometer at -4.4 C, which is the only capture here where the sign bit of a BCD temperature is clear"
+
+[[sample]]
+name = "hideki_ts04_b_433.92M_250k.cu8"
+sha256 = "8c08035eea114308721bc55e5732a182351f4b58512c385f876b1125fa8b41e0"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/01/ch3_251_69.cu8"
+reference_sha256 = "187d6d95704d266a0a1baa76cc39a8ad07ac3dfd6f296fcfd1c00ed544b7a7a8"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/01/ch3_251_69.json"
+description = "The same sensor family on channel 3 at 25.1 C and 69%"
+
+[[sample]]
+name = "hideki_temperature_433.92M_250k.cu8"
+sha256 = "cddb893f4bb05465e2431fb5ff366adeb82418b4fbc7f7c82bcdafca237c502c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/05/g001_433.92M_250k.cu8"
+reference_sha256 = "fb4fc58e3f3af2c7d631d16435e2a295ee6a56ce0d057783733169e714eeac78"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/05/g001_433.92M_250k.json"
+description = "A temperature-only sensor, two bytes shorter, which is how the frame says which sensor sent it"
+
+[[sample]]
+name = "hideki_rain_433.92M_250k.cu8"
+sha256 = "0fdd1495ec845c9d9528182b0419648e4ed7d8bfc00c1441f380dec1892c397c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/03/gfile061.cu8"
+reference_sha256 = "f12c489cd41c6487878f39a4d485f456039707a04f9ec5da62a21ca2d50e03af"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/03/gfile061.json"
+description = "The rain gauge at 663.6 mm, a tipping bucket count of 0.7 mm each, and the one message whose battery bit is in a different byte"
+
+[[sample]]
+name = "hideki_wind_433.92M_250k.cu8"
+sha256 = "5c3cd6f43425068f50dd529ae25c20638af7aea5659380b0193499bd6e3fd3eb"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/04/gfile310.cu8"
+reference_sha256 = "72dc1e729081535e1442e343cacaa37a368cafbe1ca855f32fd9024d700fe2ad"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/04/gfile310.json"
+description = "The anemometer, thirteen bytes with a temperature, a speed, a gust and a vane code, reading 67.5 degrees in still air"

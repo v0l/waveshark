@@ -16,6 +16,9 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- Hideki weather sensors, sold as Cresta, TFA Nexus, Irox, Mebus and the
+  Bresser 5CH: the thermo-hygrometer, the temperature-only sensor, the
+  anemometer and the rain gauge.
 - Alecto V1 weather sensors and the Auriol, Silvercrest and Ventus rebadges of
   them: the thermo-hygrometer and the rain gauge. Wind is not read yet.
 - Interlogix, GE and UTC security sensors on 319.5 MHz, and the ELK-319DWM and
