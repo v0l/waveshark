@@ -1,363 +1,211 @@
 # Working on WaveShark
 
-Read [`docs/design.md`](docs/design.md) first. It has the layout, the
-measurements behind the current shape, and the mistakes that produced it. Then
-[`docs/protocols.md`](docs/protocols.md) for what is decoded and what is not,
-[`docs/views.md`](docs/views.md) before adding a pane,
-[`docs/references.md`](docs/references.md) before adding a data source or a
-decoder, since it holds the terms each publisher asks for and the rules two
-of them make the code follow,
-[`docs/mcp.md`](docs/mcp.md) before adding or changing what an agent can reach
-over `--mcp-listen`, and
-[`docs/web.md`](docs/web.md) only knowing it is a plan and not a status report.
-What follows is the two rules that are easiest to break without noticing, and
-the procedure for adding a capture to the test corpus.
+The code is the description of the receiver. There is no second one: start at
+`crates/nodes/src/protocol.rs` for the decoder registry and
+`crates/app/src/chain.rs` for the graph the receiver builds. What a protocol
+reads is in its own module and in the tests beside it. The one page outside
+the code is [`docs/references.md`](docs/references.md), which holds the terms
+each data publisher requires; read it before adding a data source. A
+measurement or a trap that explains a shape goes in a comment next to that
+code.
 
-Two cargo features change what builds: `tea` is TETRA decryption and key
-recovery, and `ambe` is DMR speech through `crates/mbe`. Both are on by
-default, so a plain `cargo test` at the root builds them and `crates/mbe` is
-compiled through the `ambe` feature, though it is still not a default
-workspace member and `cargo test -p mbe` has to be asked for by name. What the
-release workflow publishes is built with `--no-default-features --features
-limesdr,stt,mcp`, because a cipher and a patent-encumbered vocoder are things
-a person compiles for themselves rather than things this project ships. `mcp`
-is the agent server behind `--mcp-listen` and is shipped: nothing listens
-until an address is given.
+## Build
 
-## Everything the receiver does is in the graph
+`tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both
+default on, so `cargo test` at the root builds them; `crates/mbe` is not a
+default workspace member and `cargo test -p mbe` must be asked for by name.
+Releases build `--no-default-features --features limesdr,stt,mcp`. `mcp` is
+the agent server behind `--mcp-listen`, which listens only when given an
+address.
 
-The flow graph is not an implementation detail of the signal path. It is the
-description of what the receiver is doing, and the chain view is that
-description drawn. Anything the receiver does that is not a node is invisible
-there: it cannot be seen, tapped, parameterised, saved in a patch, or moved by
-an operator, and the drawing on the screen is then a lie by omission.
+## Everything the receiver does is a node
 
-So: **if it processes, routes, records, mixes or decides, it is a node.** The
-spectrum is a node. The recorder's ring is a node. The DC blocker, the packet
-bus, the packet log, the raw IQ capture, every front end the scanner table
-places, and every decoder the auto node builds for a source it found are all
-nodes. A helper that runs once per block from the radio thread is not a design
-choice, it is a node somebody has not written yet.
-
-What this rules out in practice:
+If it processes, routes, records, mixes or decides, it is a node in the flow
+graph; anything else cannot be seen, tapped, parameterised, saved in a patch
+or moved by an operator, and the chain view is then wrong.
 
 - No processing in the radio loop. `crates/app/src/radio.rs` moves blocks and
-  commands. If you find yourself filtering, mixing or deciding in it, that
-  belongs in a node the graph holds.
-- The same applies to transmitting. `derived_patch` draws four stages,
-  `tx_clock`, the source, the modulator and `radio_tx`, whether or not a key is
-  down, so the chain can be looked at before it is used.
-- No state that only one hard-coded stage can produce. Reaching into a named
-  stage by field (`self.m17`, `self.record`) works until the same front end
-  exists somewhere else. Live speech was read from the one M17 stage the
-  scanner table places, so every M17 transmission the auto node found for
-  itself decoded, logged, and played back as silence. The fix was a port kind
-  every front end can publish on: `Receiver::voices` reads `PortKind::Voice`
-  off the whole graph rather than off a named stage.
-- No behaviour keyed on a protocol name where a capability will do. Ask nodes
-  what they can do; do not keep a list here of which ones can.
-- A composite node owns inner graphs and must say so through
-  `Node::subgraphs`, or the work it does disappears from the view. The auto
-  node is a node holding a graph per front end on every open source, and
-  reports all of them; a bank is a node holding hundreds of channels running
-  the one chain, and reports that with a count.
+  commands.
+- Transmit is drawn too: `derived_patch` builds `tx_clock`, the source, the
+  modulator and `radio_tx` whether or not a key is down.
+- No state only one hard-coded stage can produce. Publish on a port kind every
+  front end can use and read it off the whole graph, as `Receiver::voices`
+  reads `PortKind::Voice`, rather than reaching into `self.m17`.
+- No behaviour keyed on a protocol name where a capability will do.
+- A composite node reports its inner graphs through `Node::subgraphs`.
+- Audio is summed on `AudioBusNode` (`crates/app/src/audiobus.rs`), which owns
+  every level, mute, subscription, the master and the clip. Nowhere else.
 
-Reading state back by downcasting is fine and is how the spectrum, the
-recorder and the capture are read. What is not fine is the work itself
-happening outside.
+Reading state back by downcasting is fine, and is how the spectrum, the
+recorder and the capture are read.
 
-The speaker is on the graph too. `PortKind::Voice` carries decoded speech
-with the call it belongs to, front ends publish it on a port of their own,
-every listening channel's chain ends in real audio, and `AudioBusNode`
-(`crates/app/src/audiobus.rs`) is the node all of them are wired into: one
-input per strip, a level and a mute on each, the subscriptions that decide
-which calls are heard, the master, the clip, and one stereo output the radio
-thread hands to the device. The mix used to be a loop in the radio thread and
-the faders were fields on a channel list, so a demodulator drawn by hand had
-nothing to be wired to. If you find yourself summing audio anywhere but on
-the bus, or keeping a level anywhere but as one of its parameters, you are
-adding that back.
+## A protocol is one `impl Protocol`
 
-## A protocol is one `impl Protocol`, and nothing else
+`crates/nodes/src/protocol.rs` declares the trait; each `*_nodes.rs` has the
+one implementation, registered in `protocol::all()`. It says where the
+protocol can be, what stream it reads, how sticky a channel is, the chain of
+stages that reads it, and which packets repeat. The auto node, the scanner
+table, the mode menu, the spectrum markers and the chain labels all ask the
+registry.
 
-What the receiver knows about a protocol lives in one place:
-`crates/nodes/src/protocol.rs` declares the trait, and each `*_nodes.rs` has
-the one implementation for its protocol, registered in `protocol::all()`.
-Where it can be, what stream it reads, how sticky a channel it has read on
-is, the chain of stages that reads it, and which packets repeat. The auto
-node, the scanner table, the strip's mode menu, the spectrum markers and the
-chain view labels all ask that registry and keep no list of their own.
+Adding a protocol is a node, an `impl Protocol`, and a line in
+`protocol::all()`. A `match` on a protocol name in `crates/nodes/src/auto/`,
+`chain.rs` or `scanners.rs` is a question that belongs on the trait. The test
+beside the registry builds every chain and checks the declared outputs against
+what it negotiates.
 
-So: **adding a protocol is a node, an `impl Protocol`, and a line in
-`protocol::all()`.** If you find yourself matching on a protocol's name in
-`crates/nodes/src/auto/`, in `chain.rs` or in `scanners.rs`, the question you
-are answering belongs on the trait. The test beside the registry builds every
-protocol's chain and checks its declared outputs against what the chain
-negotiates, so a wrong declaration fails there rather than as a wire drawn
-to the wrong port.
+A decoder too dear to run always may wait for the classifier
+(`Shape::families`) and be built late from the ring; only LoRa does. A decoder
+needing more than the stream it was given asks with `pipeline::Request`
+(claim, channel, reshape, release, retune) rather than reaching for the
+detector.
 
-Two things the trait deliberately does not do. A decoder that is dear to run
-may wait for the burst classifier's verdict (`Shape::families`) and be built
-late from the ring; only LoRa does, because the classifier is sure of a
-chirp and was measured to name an off-air M17 handheld `Unknown` for its
-whole transmission. And a decoder that needs more than the stream it was
-given asks for it (`pipeline::Request`: a claim, a channel beside it, a
-reshape, a release, a retune) rather than reaching for the detector; the
-auto node answers what it can and the receiver logs the rest.
+## A known set of values is an enum
 
-## A known set of values is an enum, not a string
+Parse a string once, at the edge, into an enum, and match on that afterwards.
 
-A string is what an outside source hands over and what a person reads. It is
-not how the code should carry a choice from a set it knows. **Parse it once,
-at the edge, into an enum, and match on that everywhere after.**
+- The type lives beside its one `parse` or `FromStr`.
+- Keep the original string beside the enum for display; decide from the enum.
+- An unknown value is a variant (`Other`, `Unknown`), not a fallback string.
+- Avoid `_ =>` where the set is closed, so a new variant fails the build.
+- Booleans that cannot all be true are one enum.
 
-A `match` on a string is a bug waiting for a spelling: the SatNOGS mode field
-was compared against `"FM"` in one place, `"fm"` in another and `"FMN"`
-nowhere, so a LoRa downlink was handed the auto front end because nothing had
-thought to write `"LoRa"`. The compiler cannot see any of that. It can see a
-missing arm of an enum.
-
-The rule in practice:
-
-- The type lives beside the thing that parses it, with one `parse` (or
-  `FromStr`) and no second opinion elsewhere.
-- Keep the original string beside the enum where it is displayed, since what
-  a source called something is worth showing. Display from the string, decide
-  from the enum.
-- An unknown value is a variant (`Other`, `Unknown`), not a fallback string
-  compared later.
-- Avoid `_ =>` where the set is closed: the wildcard is what stops a new
-  variant from failing the build in the places that must handle it.
-- The same goes for booleans in a row: three `bool` fields that cannot all be
-  true are one enum.
-
-The exception is an identifier that is genuinely open, such as a protocol id
-from the registry or a call sign. Where the set is fixed by a specification
-or by this code, it is a type.
+The exception is a genuinely open identifier: a registry protocol id, a call
+sign.
 
 ## Words on the screen go through `theme::Line`
 
-Every caption, reading, sentence and label a pane draws is a `theme::Line`
-(`crates/app/src/theme.rs`), shown with `show` or, where the text is prose or
-came off the air, `wrapped`. **No `egui::Label`, no `RichText`, no `ui.label`
-in a pane.** The reason is baseline alignment: `Line` lays a row out as one
-galley and paints it on a fixed baseline, whatever faces and sizes it holds,
-so a legend, a number in the readout face and a note beside them sit on the
-same line. A `Label` centres its own galley instead, so two of them next to
-each other land on baselines a pixel or two apart, and a row with a control
-between its caption and its reading cannot be one galley at all.
+Every caption, reading, sentence and label in a pane is a `theme::Line`
+(`crates/app/src/theme.rs`), drawn with `show`, or `wrapped` for prose and text
+off the air. No `egui::Label`, no `RichText`, no `ui.label` in a pane: `Line`
+paints a row as one galley on a fixed baseline, which a `Label` cannot do.
 
-It also decides which face a thing is drawn in, and that is a meaning rather
-than a style: `legend` is a silkscreened caption, `value` a reading, `set`
-something the operator chose, `heard` something the radio heard, `words` text
-off the air, `note` a sentence for a person. Reaching for `RichText` skips
-that choice, so a frequency ends up in the prose face and a sentence in the
-tabular one.
+The face is a meaning: `legend` a silkscreened caption, `value` a reading,
+`set` an operator's choice, `heard` what the radio heard, `words` text off the
+air, `note` a sentence for a person.
 
-The helpers in `crates/app/src/ui/widgets.rs` (`hint`, `cell`, `row`, `card`)
-are built on `Line` for the same reason, and a new one belongs there rather
-than in a pane. Painted text is the one exception: a table cell inside a
-row painted onto an allocated rect goes through `widgets::cell`, which owns
-that call, and the spectrum's own axis labels are drawn by the painter
-because they are part of a plot and not part of a row.
-
-Older panes still call `ui.label` directly, `burst.rs` and `chain_pane.rs`
-most of all. That is a debt, not a precedent: convert what you touch, and do
-not add more.
+Helpers built on `Line` live in `crates/app/src/ui/widgets.rs` (`hint`, `cell`,
+`row`, `card`); a new one belongs there. Painted text is the exception: a table
+cell goes through `widgets::cell`, and the spectrum's axis labels are painter
+calls because they are part of a plot. `burst.rs` and `chain_pane.rs` still
+call `ui.label`; convert what you touch and add no more.
 
 ## Every HTTP request goes out under the same name
 
-`crates/httpc` holds the user agent and builds every client, asynchronous or
-blocking. **No `reqwest::Client::builder()` anywhere else.** The string is how
-the far end sees this program: a tile server that blocks an unnamed client
-blocks the map, and an operator whose upload was refused needs the log at the
-other end to say what sent it. There were four copies of the same constant and
-one client, in `meshnode`, that set no agent at all, which is the state this
-rule exists to prevent returning to. `crates/datasets` still fetches over
-`ureq` and takes the same string from `httpc::USER_AGENT`.
-
-## The changelog is for the person running it
-
-`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com). A
-change somebody running the receiver would notice, a protocol it now reads,
-a pane, a setting, a fix for something that was wrong on screen, gets a
-line under `[Unreleased]` in the same commit, under `Added`, `Changed`,
-`Fixed` or `Removed`. A refactor, a test, a doc edit does not. Write the
-line for the person, not the code: "Bluetooth LE advertising", not
-"add BleNode".
-
-A release is `tools/changelog.sh release X.Y.Z` (which dates the section
-and fixes the compare links), the version in `Cargo.toml`, one commit, and
-the tag `vX.Y.Z` pushed. The release workflow takes its notes from that
-section and refuses a tag that has none; CI checks the file has an
-`[Unreleased]` section and that a tagged version has its own.
-
-## What is pushed is what somebody will read
-
-Before pushing, count what is going out: `git log --oneline @{u}..HEAD`.
-**More than ten commits is a branch to squash, not a branch to push.** Nobody
-reads forty commits, and a history of "fix", "wip" and "actually fix" costs
-every later reader the work of telling which one was the real change. Squash
-it into the few commits a person would want to bisect: one per change that
-stands on its own, each building and passing its tests on its own.
-
-What not to squash away: a commit somebody else has already pulled, and a
-merge that records two lines of work meeting. Rewriting either is worse than
-a long history.
+`crates/httpc` holds the user agent and builds every client, async or
+blocking. No `reqwest::Client::builder()` anywhere else. `crates/datasets`
+fetches over `ureq` and takes the same string from `httpc::USER_AGENT`.
 
 ## Every packet carries what it was heard at
 
-A row in the packet list is evidence, and evidence that does not say how
-strong it was is half a row. **Every packet reaching the bus has a finite
-`rssi_dbfs`, a finite `snr_db`, and the samples it was read from in `iq`.**
-Not most of them, not the ones whose front end happens to measure: all of
-them. Without those three a row cannot be sorted by strength, a fade cannot
-be told from a decoder that broke, a weak decode cannot be judged, and there
-is nothing to look at when the bytes are wrong.
+Every packet reaching the bus has a finite `rssi_dbfs`, a finite `snr_db`, and
+the samples it was read from in `iq`. A `f32::NAN` in a level is a bug.
 
-The front end measures, because the front end is the only thing holding the
-samples the frame came from. A level taken later is a level of something
-else: a 16 kHz packet channel inside 2.4 MS/s of band is 0.7% of the power,
-so a reading from the span says what the band was doing, not what the
-transmitter was. Where a demodulator already measures, as Mode S does off its
-preamble and BLE does off the floor either side of the burst, that number is
-the one to carry; where it does not, `nodes::FrameMeter` measures the
-channel and keeps a short ring so the frame gets its own samples back.
-
-This has been rediscovered more than once because it is easy to break at a
-port boundary rather than in a decoder. `Payload::Frames` carried
-`Vec<Vec<u8>>` for a year, which quietly threw away the measurements of every
-front end that produced frames instead of pulses; the fix was to make the
-port carry `common::Frame`. If you add a payload kind, a bus, a feed or a
-sink, ask what happens to the level and the samples as they cross it.
-A `f32::NAN` in a level is a bug, not a value.
+The front end measures, because it holds the samples the frame came from: a
+level taken from the span is a level of the band, not of the transmitter. Where
+a demodulator already measures, as Mode S does off its preamble and BLE off the
+floor either side of a burst, carry that; otherwise `nodes::FrameMeter`
+measures the channel and keeps a short ring so the frame gets its samples back.
+This breaks at port boundaries rather than in decoders, so when adding a
+payload kind, bus, feed or sink, ask what happens to the level and the samples
+crossing it.
 
 ## The graph is the same graph in both modes
 
-Manual mode is a lock on editing and nothing else. The receiver draws its
-graph from the plan on every rebuild (`derived_patch`: the head with its DC
-blocker and zoom, the spectrum, the recorder's ring, the raw capture, the front
-ends the scanner table puts on the span, the listening channels, the transmit
-chain, the feeds, the protocol decoder and the tracker, and the buses), and
-what the operator changed is kept apart from it as
-`patch::Edits`: stages added, derived stages removed, wires drawn or moved,
-settings overridden. Every rebuild is derived graph, then edits on top, then
-`sync_audio` to put the strip's stages in step with the result. The edits
-apply whether or not the graph is unlocked, and the derived part follows the
-dial, the zoom, the scanner table and the strip whether or not it is.
+Manual mode is a lock on editing. `derived_patch` draws the graph from the plan
+on every rebuild: the head with its DC blocker and zoom, the spectrum, the
+recorder's ring, the raw capture, the scanner table's front ends, the listening
+channels, the transmit chain, the feeds, the protocol decoder, the tracker and
+the buses. What the operator changed is kept apart as `patch::Edits`, applied
+on top, then `sync_audio` puts the strip's stages in step. Both halves apply
+whether or not the graph is unlocked.
 
 The interface never sends a whole graph. It holds the running patch and the
-base the receiver drew underneath it (`Status::patch` publishes both), edits
-the running one, and sends `Edits::diff(edited, base)`; that is also what is
-saved to `~/.config/waveshark/edits`. A saved whole drawing was the bug this
-replaces: taking the graph over swapped in a graph derived for another
-tuning, another zoom and another day's front ends, so manual mode behaved
-like a different receiver and every pan rebuilt around a stale head.
+base beneath it (`Status::patch` publishes both) and sends
+`Edits::diff(edited, base)`, which is also what `~/.config/waveshark/edits`
+holds.
 
-When you add something the receiver does regardless of mode, put it in
-`derived_patch` or `sync_audio`; it will be there in both modes. Two
-consequences worth knowing. The build reapplies a derived stage's settings on
-every rebuild, so a value set on one by hand survives only as an edit:
-`Receiver::set_node_param` writes it into the running patch and the radio
-thread reads the edits back off it. A setting the strip owns (a channel's
-squelch or gain control, a bus level) is not an edit but a plan value, pulled
-back into the plan and published as `Status::levels` so the strip follows;
-`chain::operator_owns`, which `Edits::diff` is given, is where that line is
-drawn. And a node's identity
-across rebuilds is its derived id, so a channel's stages are keyed by mode and
-rate and not by offset; the mixer's shift is a setting, and keying on it meant
-every channel was rebuilt, and forgot its station, whenever the dial moved
-under it.
+Anything the receiver does regardless of mode goes in `derived_patch` or
+`sync_audio`. Three consequences:
 
-## A test says how much was read, not that something was
+- A derived stage's settings are reapplied every rebuild, so a hand-set value
+  survives only as an edit; `Receiver::set_node_param` writes it into the
+  running patch.
+- A setting the strip owns (squelch, gain, bus level) is a plan value, not an
+  edit, pulled back into the plan and published as `Status::levels`.
+  `chain::operator_owns` draws that line.
+- A node's identity across rebuilds is its derived id, keyed by mode and rate
+  and never by offset; the mixer's shift is a setting.
 
-The receiver's job is to read everything that is there, so a test that only
-proves it read *something* is not testing the thing. `assert!(decoded >= 1)`
-and `assert!(!rows.is_empty())` pass when fourteen of fifteen packets have
-been thrown away, which is the failure that matters and the one they hide.
-A capture is a fixed input, so the count is fixed too: **assert the number.**
+## A test says how much was read
 
-What to pin, wherever the test has it: how many packets decoded, how many
-rows came out, how many carried a measurement, which callsigns and ids, and
-which channels they were read on. Where an independent implementation has
-read the same file, assert what it said rather than what this code currently
-produces, and put the provenance in the test's doc comment so a later reader
-can tell a broken decoder from a wrong expectation.
+Assert the number. `assert!(decoded >= 1)` and `assert!(!rows.is_empty())` pass
+when fourteen of fifteen packets were thrown away. Pin how many packets
+decoded, how many rows came out, how many carried a measurement, which
+callsigns and ids, and which channels they were read on. Where another
+implementation read the same file, assert what it said and put the provenance
+in the test's doc comment.
 
-The rule this exists for: **an optimisation may not change any of those
-numbers.** Faster is a claim about time and nothing else. If a change makes
-a count smaller, that is the change being wrong, and "it only dropped the
-repeats" or "only the rows nothing decoded" is the same sentence as "it reads
-less than it did". Run the affected tests before and after and expect the
-same numbers, not merely a pass.
+An optimisation may not change any of those numbers. Run the affected tests
+before and after and expect the same numbers, not merely a pass. Where the
+signal will not allow exactness, pin a floor and a ceiling with a comment
+saying which. A skip for an absent fixture prints the name and
+`run testdata/fetch.sh`.
 
-Be as exact as the signal allows and no more. A decoder whose count moves
-with a fade or a scheduler is pinned with a floor and a ceiling and a comment
-saying which, not with `>= 1`. A skip for an absent fixture is not a pass
-either: print the name and `run testdata/fetch.sh`.
+Tests that time the audio chain check `cfg!(debug_assertions)` and skip, so run
+those in release. The rest need no release build: the dev profile compiles the
+signal path at `opt-level = 3`.
+
+## The changelog is for the person running it
+
+`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com). A change
+somebody running the receiver would notice gets a line under `[Unreleased]` in
+the same commit, under `Added`, `Changed`, `Fixed` or `Removed`. A refactor or
+a test does not. Write it for the person: "Bluetooth LE advertising", not "add
+BleNode".
+
+A release is `tools/changelog.sh release X.Y.Z`, the version in `Cargo.toml`,
+one commit, and the tag `vX.Y.Z` pushed. The release workflow takes its notes
+from that section and refuses a tag with none; CI checks that `[Unreleased]`
+exists and that a tagged version has its own section.
+
+## Commits
+
+Count what is going out with `git log --oneline @{u}..HEAD`. More than ten
+commits is a branch to squash into the few a person would want to bisect, each
+building and passing its tests alone. Do not rewrite a commit somebody else has
+pulled, or a merge recording two lines of work meeting.
 
 ## Adding a capture to the test corpus
 
-Recorded IQ lives on nostr.download and is fetched by `testdata/fetch.sh`,
-never committed: it is near-incompressible and would bloat history permanently
-for data that never changes. `testdata/*.cu8` and friends are gitignored. What
-is committed is the manifest entry, and it carries the hash, so a capture that
-silently changed cannot invalidate an expectation quietly.
+Recorded IQ lives on nostr.download, is fetched by `testdata/fetch.sh` and is
+never committed; `testdata/*.cu8` and friends are gitignored. The manifest
+entry carries the hash. A capture earns its place by failing something that
+synthesised signals do not.
 
-A capture earns its place by failing something. Synthesised signals share every
-assumption the code makes and pass; the M17 fixture is here because three
-separate faults threw a real transmission away and every one of them was
-invisible on synthesised M17.
+1. **Record and trim.** Capture with the "Capture the raw span" switch or
+   `--capture-iq`, into `~/.local/share/waveshark/captures`. Cut to the
+   shortest span holding the evidence, keeping noise around it for the
+   detector's floor, and cut the zeros a radio delivers while its stream
+   starts. `cargo run --release -p sources --example iq_clipper` cuts:
+   `--bursts` keeps the transmissions and drops the silence, `--seconds N`
+   with `--skip N` keeps a window, and `--center-hz` with `--rate` mixes and
+   resamples, which a wideband recording needs before it can be cut on power
+   at all. A tuned output is one channel rather than the band, so name it for
+   what it holds and say so in the manifest.
 
-1. **Record and trim.** Capture with the "Capture the raw span" switch in the
-   radio settings, or `--capture-iq`, into
-   `~/.local/share/waveshark/captures`. Cut it to the shortest span that
-   contains the evidence, keeping enough noise around it for the detector's
-   floor. A radio delivers zeros for the first seconds while its stream starts:
-   cut those, or the whole band appears to switch on at once and every source
-   opens in the same frame.
+   Margin matters: the BLE capture reads five of eleven packets as MSK with
+   4 ms either side and six of eleven with 2 ms, because the floor is a
+   percentile of the file. Every join is a discontinuity, and cutting the
+   1090 MHz capture close manufactured a Mode S frame out of a splice, so that
+   one is uploaded whole. Run the tests that use the capture before and after
+   and expect the same numbers. Whatever the test does not look at is published
+   anyway, so where an identity is in the recording, say so in the description.
 
-   `cargo run --release -p sources --example iq_clipper` does the cutting, and
-   `--help` lists everything. With `--bursts` it keeps the samples the
-   transmissions were in and drops the silence, which on a packet capture is
-   most of the file: the BLE fixture is a seventeenth of what was recorded and
-   every packet still decodes. With `--seconds N` (and `--skip N`) it keeps a
-   window, which is all a continuous signal allows. Clipping copies bytes
-   straight out of the input, so the output is the same recording at the same
-   scale.
-
-   It also tunes. `--center-hz` and `--rate` mix and resample, which is what a
-   wideband recording needs before it can be cut at all: 61.44 MS/s of 2.4 GHz
-   is mostly Wi-Fi whatever else is in it, so clipping on power keeps three
-   quarters of the file, while the same recording tuned to the 15.36 MS/s a
-   DroneID frame lives at clips to a twenty-sixth and every burst still
-   decodes to the same bytes. Tuning breaks the promise above: the output is a
-   filtered, shifted, resampled view of one channel rather than the band, so
-   name it for what it now holds and say in the manifest entry that it was
-   tuned.
-
-   Two things to check before uploading a cut. The margin either side of a
-   burst is not decoration: a detector takes its noise floor from a percentile
-   of the file, so cutting too close moves the floor and the capture stops
-   being evidence of what it was evidence of. The BLE capture reads five of
-   eleven packets as MSK with 4 ms of margin, as it did uncut, and six of
-   eleven with 2 ms. And every join is a discontinuity: cutting the 1090 MHz
-   capture close manufactured a Mode S frame out of a splice, which is why
-   that one is uploaded whole. Run the tests that use the capture before and
-   after and expect the same numbers, not merely a pass.
-
-   Cut for what is in the file as well as for its size. A recording is of a
-   real band at a real place and time, and whatever the test does not look at
-   is published anyway. Where the identity is the evidence, say so in the
-   description rather than pretending otherwise.
-
-2. **Name it so the file carries its own metadata.**
-   `<what>_<centre>M_<rate>k.<format>`, for example
+2. **Name it** `<what>_<centre>M_<rate>k.<format>`, for example
    `m17_openrtx_434.02M_2400k.cu8`. `sources::parse_filename` reads the centre
-   and rate out of it; guessing a sample rate wrong rescales every pulse width
-   and breaks every decoder downstream. The centre is the tuner's, not the
-   signal's. Avoid bare digit tokens: a sequence number was once read as a
-   sample rate of 1 Hz.
+   and rate from it, and the centre is the tuner's, not the signal's. Avoid
+   bare digit tokens: a sequence number was once read as a rate of 1 Hz.
 
 3. **Compress and upload.**
 
@@ -372,36 +220,22 @@ invisible on synthesised M17.
        https://nostr.download/upload
    ```
 
-   The response carries the sha256, and the URL is that hash with the
-   compression suffix. The manifest hash is of the compressed upload.
+   The response carries the sha256; the URL is that hash with the compression
+   suffix, and the manifest hash is of the compressed upload.
 
 4. **Add the manifest entry** to `testdata/fixtures.toml`, or
    `testdata/offair.toml` for a capture labelled by what it demonstrates rather
    than by an independent decode. Both take `name`, `sha256`, `url`,
-   `compression`, `center_hz`, `rate_sps`, `format` and a description saying
-   what the capture is evidence of and how that was established. A
-   `fixtures.toml` entry then takes a `[capture.expect]` block with the values
-   a test asserts; an `offair.toml` entry takes `family`, which is only ever
-   what the capture demonstrates, and `receiver`, and asserts nothing beyond
-   the classifier's verdict. Write the description for somebody who has to
-   decide, two years from now, whether a failing assertion means the code broke
-   or the expectation was wrong.
+   `compression`, `center_hz`, `rate_sps`, `format` and a description of what
+   the capture is evidence of and how that was established. A `fixtures.toml`
+   entry adds a `[capture.expect]` block of asserted values; an `offair.toml`
+   entry adds `family` and `receiver` and asserts nothing beyond the
+   classifier's verdict.
 
 5. **Verify the round trip.** Delete the local file, run `./testdata/fetch.sh`,
-   and check the hash of what comes back matches what you uploaded. A manifest
-   entry nobody has fetched is a test that fails on every machine but yours.
+   and check the hash of what comes back.
 
-6. **Write the test against the receiver, not against a node**, when the
-   capture is evidence about the receiver: `crates/app/src/radio.rs` has
-   `replay_receiver` and `replay_blocks`, which run the same path as the live
-   radio including the scanner table. Skip cleanly when the fixture is absent,
-   printing the name and `run testdata/fetch.sh`, so a fresh clone still
-   passes without network access. Assert what an independent implementation or
-   the transmission itself says, such as a callsign or a CRC, rather than what
-   this code currently produces.
-
-Run the tests that time the audio chain in release. They check
-`cfg!(debug_assertions)` and return with a printed note, so a debug run passes
-by skipping them rather than by measuring anything. The rest do not need it: the workspace
-already builds the signal path and the test binaries at `opt-level = 3` in the
-dev profile.
+6. **Write the test against the receiver** where the capture is evidence about
+   the receiver: `crates/app/src/radio.rs` has `replay_receiver` and
+   `replay_blocks`, which run the live radio's path including the scanner
+   table. Skip cleanly when the fixture is absent.

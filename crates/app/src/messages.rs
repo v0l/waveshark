@@ -129,8 +129,8 @@ impl DecodeRecord {
     /// This is the one place the convention lives, so anything holding a
     /// record can ask it for a message: the packet log as it appends, a feed,
     /// or a view added later. It reads fields rather than switching on the
-    /// protocol, which is what keeps `docs/views.md` true, and a decoder joins
-    /// the message view by naming its fields the way everything else does.
+    /// protocol, so a decoder joins the message view by naming its fields the
+    /// way everything else does.
     ///
     /// Borrowing rather than consuming, hence `to_` and not `into_`: the
     /// record carries on to the packet log, and the message is a second

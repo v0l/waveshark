@@ -1,11 +1,9 @@
 //! Score the blind modulation classifier against real recordings.
 //!
-//! The devices in rtl_433's corpus are known, so their modulation is known:
-//! `docs/protocols.md` names it per family, taken from rtl_433's own device
-//! table. That makes these 52 captures a labelled set for a classifier that is
-//! otherwise tuned entirely against signals this project generated itself,
-//! which is the same weakness the protocol table calls **synthetic** and the
-//! same reason that label exists.
+//! The devices in rtl_433's corpus are known, so their modulation is known,
+//! from rtl_433's own device table. That makes these 52 captures a labelled
+//! set for a classifier that is otherwise tuned entirely against signals this
+//! project generated itself.
 //!
 //! What is checked is the *family*, amplitude keyed against frequency keyed,
 //! because that is the decision the router actually makes: it picks a front
@@ -21,8 +19,7 @@ use common::C32;
 use dsp::{Classifier, ClassifyConfig, Modulation};
 
 /// The captures whose device transmits FSK. Everything else in the corpus is
-/// on-off keyed. Both lists come from `docs/protocols.md`, which took them
-/// from rtl_433's device definitions.
+/// on-off keyed. Both lists come from rtl_433's device definitions.
 const FSK_CAPTURES: &[&str] =
     &["fineoffset_wh51", "lacrosse_tx29it", "lacrosse_tx35dthit", "tpms_toyota"];
 

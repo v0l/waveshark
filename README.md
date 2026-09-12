@@ -30,7 +30,6 @@ decoded or not.
 
 It transmits too, on a radio that can: a microphone or a tone into NFM, WFM or
 AM, drawn as the TX side of the same flow graph.
-[`docs/protocols.md`](docs/protocols.md) is the roadmap.
 
 ## Hardware
 
@@ -155,7 +154,6 @@ can take a picture of that window to see what it did. It can read the
 spectrum, the packets, the calls, the transcript and the tracker, change
 anything in the signal chain, and draw the chain itself: add stages, wire
 them and take them out again. It cannot transmit.
-[`docs/mcp.md`](docs/mcp.md) has the tools and the reasoning.
 
 ## Command line
 
@@ -192,19 +190,18 @@ of them, plus ADS-B against dump1090, and off-air captures of M17, DMR, TETRA
 and Meshtastic are asserted against what the transmission itself says. Those
 tests need `testdata/fetch.sh` to have pulled the recordings, and skip cleanly
 when it has not, which is also what happens in CI. Coverage is the thin part,
-thirty-nine ISM decoders where the goal is hundreds, and the browser build
-([`docs/web.md`](docs/web.md)) is still a plan.
+thirty-nine ISM decoders where the goal is hundreds, and the browser build is
+still a plan.
 
-## Documentation
+## Where to read next
 
-[`docs/design.md`](docs/design.md) is how it works inside,
-[`docs/protocols.md`](docs/protocols.md) the protocol roadmap,
-[`docs/views.md`](docs/views.md) how a view attaches to the packet bus,
-[`docs/mcp.md`](docs/mcp.md) how an agent drives it, and
-[`docs/references.md`](docs/references.md) everything this leans on that
-somebody else wrote.
+The code. `crates/nodes/src/protocol.rs` is the registry every decoder is
+reached through, `crates/app/src/chain.rs` draws the graph the receiver runs,
+and each `crates/decode/src/protocols/*.rs` carries the frame layout it
+decodes. [`docs/references.md`](docs/references.md) is the one page kept
+outside the code, because the terms a publisher asks for are an obligation
+rather than an explanation.
 
 ## Licence
 
-GPL-3.0-or-later, text in [`LICENSE`](LICENSE), reasoning at the end of
-[`docs/design.md`](docs/design.md).
+GPL-3.0-or-later, text in [`LICENSE`](LICENSE).

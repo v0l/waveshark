@@ -5,8 +5,7 @@ All notable changes to WaveShark are recorded here. The format follows
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries say what changed for somebody running the receiver. What changed in
-the code is in the commit log; what a decoder can and cannot do is in
-`docs/protocols.md`.
+the code is in the commit log.
 
 ## [Unreleased]
 
@@ -48,7 +47,7 @@ the code is in the commit log; what a decoder can and cannot do is in
   window. It can also draw the chain by hand: add stages, wire them, delete
   them, undo, and go back to the automatic graph. It drives the
   receiver on the screen rather than one of its own, so what it does can be
-  watched. It cannot transmit. See [`docs/mcp.md`](docs/mcp.md).
+  watched. It cannot transmit.
 
 - "Open capture…" in the receiver list. Pick a recorded capture and it
   becomes the receiver, playing back at the rate it was recorded at through
