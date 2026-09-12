@@ -134,8 +134,7 @@ impl VideoPane<'_> {
         });
         ui.add_space(4.0);
         if let Some(f) = self.frame {
-            let new = st.shown.as_ref().is_none_or(|s| s.sequence != f.sequence);
-            if new {
+            if is_new(st.shown.as_ref(), &f) {
                 st.texture = Some(upload(ui.ctx(), &f, st.texture.take()));
                 st.last = Some(std::time::Instant::now());
                 st.shown = Some(f);
@@ -206,6 +205,23 @@ impl VideoPane<'_> {
     }
 }
 
+/// Whether this picture is worth uploading over the one on screen.
+///
+/// Not the sequence number alone. For a camera that counts fields, so every
+/// one differs; for a still it names the picture, and every row of an SSTV
+/// transmission carries the same number for two minutes. Keying on it alone
+/// drew the first line of a picture and then nothing for the rest of the
+/// transmission, while the file on disk was complete.
+fn is_new(shown: Option<&VideoFrame>, f: &VideoFrame) -> bool {
+    shown.is_none_or(|s| {
+        s.sequence != f.sequence
+            || s.lines_seen != f.lines_seen
+            || s.width != f.width
+            || s.height != f.height
+            || s.channel_hz != f.channel_hz
+    })
+}
+
 /// Put a field into a texture, reusing the one already there when the size
 /// matches: a field is half a megabyte and this runs fifty times a second.
 fn upload(
@@ -226,5 +242,39 @@ fn upload(
             t
         }
         _ => ctx.load_texture("video", image, egui::TextureOptions::LINEAR),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(sequence: u64, lines: usize) -> VideoFrame {
+        VideoFrame {
+            system: "SSTV",
+            channel_hz: 144_500_000.0,
+            label: Some("Martin 1".into()),
+            width: 2,
+            height: 4,
+            aspect: 4.0 / 3.0,
+            pixels: Pixels::Rgb8,
+            samples: std::sync::Arc::new(vec![0u8; 2 * 4 * 3]),
+            lines_seen: lines,
+            sequence,
+            update: common::Update::Whole,
+            cadence: common::Cadence::Still,
+        }
+    }
+
+    /// A picture filling in is the same picture with more of it, and that has
+    /// to reach the screen: this is the bug where an SSTV transmission drew
+    /// one line and then sat there for two minutes.
+    #[test]
+    fn a_still_that_grew_is_drawn_again() {
+        let one = frame(1, 1);
+        assert!(is_new(None, &one), "the first picture is new");
+        assert!(!is_new(Some(&one), &one), "the same picture is not");
+        assert!(is_new(Some(&one), &frame(1, 2)), "a line arrived");
+        assert!(is_new(Some(&frame(1, 4)), &frame(2, 1)), "and a new transmission");
     }
 }
