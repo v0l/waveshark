@@ -336,17 +336,29 @@ fn read_line(
             let Some(found) = align_sync(audio, from, mode, meter, true) else { return false };
             *seq = base + found as u64;
         }
-        let pixel_time =
-            if mode.half_scan && chan > 0 { mode.half_pixel_time() } else { mode.pixel_time() };
+        let half = mode.half_scan && chan > 0;
+        let pixel_time = if half { mode.half_pixel_time() } else { mode.pixel_time() };
+        let scan_time = if half { mode.half_scan_time } else { mode.scan_time };
         let half_window = pixel_time * mode.window_factor / 2.0;
         let window = (half_window * 2.0 * rate).round() as usize;
+        // The window is several pixels wide, so at the ends of a scan it
+        // reaches past it. Where what follows is a separator pulse that is
+        // where the smearing stops, but a Robot mode's colour difference
+        // ends the line, so the last pixels read the next line's sync pulse:
+        // at 1200 Hz both differences come out at zero, which is a bright
+        // green stripe down the right of the picture.
+        let first = mode.offsets[chan];
+        let last = first + scan_time;
         for px in 0..mode.width {
-            let centre = mode.offsets[chan] + px as f64 * pixel_time - half_window;
-            let at = (*seq as f64 - base as f64 + centre * rate).round() as isize;
-            if at < 0 || at as usize + window >= audio.len() {
+            let centre = first + px as f64 * pixel_time;
+            let from = (centre - half_window).max(first);
+            let to = (centre + half_window).min(last);
+            let at = (*seq as f64 - base as f64 + from * rate).round() as isize;
+            let len = (((to - from) * rate).round() as usize).max(4);
+            if at < 0 || at as usize + len >= audio.len() {
                 return false;
             }
-            row[chan][px] = luma(meter.peak_hz(&audio[at as usize..at as usize + window]));
+            row[chan][px] = luma(meter.peak_hz(&audio[at as usize..at as usize + len]));
         }
     }
     planes[line] = row;

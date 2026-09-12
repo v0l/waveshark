@@ -47,6 +47,8 @@ the code is in the commit log.
   detector has fired.
 
 ### Fixed
+- A green stripe down the right of a Robot 36 or 72 picture, from the last
+  pixels of a line being read partly from the next line's sync pulse.
 - An SSTV picture drawing only its first line in the video pane while the
   file saved to disk was complete.
 - SSTV and VDL Mode 2 refusing to run on a radio at 2.048 MS/s.
