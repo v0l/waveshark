@@ -18,6 +18,7 @@ mod ev1527;
 mod fineoffset;
 mod globaltronics;
 mod hanshow;
+mod hideki;
 mod interlogix;
 mod ism868_link;
 mod keyfob;
@@ -40,6 +41,7 @@ pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
 pub use globaltronics::{GtWt02, GtWt03};
 pub use hanshow::Hanshow;
+pub use hideki::Hideki;
 pub use interlogix::InterlogixSecurity;
 pub use ism868_link::Ism868Link;
 pub use keyfob::{

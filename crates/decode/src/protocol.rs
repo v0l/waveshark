@@ -164,6 +164,7 @@ impl Protocols {
         p.add(Box::new(LacrosseTx141thBv2));
         p.add(Box::new(LacrosseIt::tx29()));
         p.add(Box::new(LacrosseIt::tx35()));
+        p.add(Box::new(Hideki));
         p.add(Box::new(NexusTh));
         p.add(Box::new(AlectoV1));
         p.add(Box::new(PrologueTh));
