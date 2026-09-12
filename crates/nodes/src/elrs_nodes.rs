@@ -45,7 +45,7 @@
 //! The long interleaved coding is measured at SF7 and 4/8, which is the
 //! 100 Hz Full and 150 Hz rates, and `decode::lora_li` refuses the rest
 //! rather than guess; the packet is still reported as a chirp it could not
-//! read. `docs/protocols.md` says how to measure another.
+//! read. `decode::lora_li` says how another rate was measured.
 
 use crate::lora_nodes::{ChirpReader, Found};
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};

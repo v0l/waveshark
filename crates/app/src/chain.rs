@@ -1073,8 +1073,7 @@ impl Receiver {
     /// What decoders asked of the receiver since the last call.
     ///
     /// Nothing reads this yet: a decoder can ask the receiver to move the
-    /// dial, and what it asked is kept here for whatever does that. See
-    /// `docs/design.md`.
+    /// dial, and what it asked is kept here for whatever does that.
     #[allow(dead_code)]
     pub fn take_requests(&mut self) -> Vec<(String, pipeline::Request)> {
         std::mem::take(&mut self.requests)

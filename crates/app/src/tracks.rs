@@ -1,8 +1,8 @@
 //! Moving things, assembled from whatever on the bus reports a position.
 //!
-//! A view over the packet stream in the sense `docs/views.md` means: it reads
-//! frames and knows nothing about how they reached it. Point it at live
-//! packets or at a day of the packet log and it behaves the same way.
+//! A view over the packet stream: it reads frames and knows nothing about how
+//! they reached it. Point it at live packets or at a day of the packet log and
+//! it behaves the same way.
 //!
 //! This began as a list of aircraft and is now a list of tracks, because a
 //! second protocol arrived that reports positions. That generalisation was

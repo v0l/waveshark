@@ -195,7 +195,7 @@ source opened within half a channel of each carrier. If a later change makes
 the receiver report a third carrier here, check it against the spectrum before
 assuming a regression; the band has weaker traffic in it that comes and goes.
 
-Recorded 2026-09-03 near the receiver in docs/design.md, DC blocker on, at a
+Recorded 2026-09-03 on an RTL-SDR, DC blocker on, at a
 gain chosen so the peak sits 20 dB below full scale with no clipping. An
 earlier attempt at the default 32 dB put the carriers at under one ADC code
 and is not what is uploaded here.

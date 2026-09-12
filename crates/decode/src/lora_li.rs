@@ -5,9 +5,8 @@
 //! about them, ExpressLRS writes the register and lets the modem do it, and no
 //! open decoder implements them. What is here was measured off a RadioMaster
 //! RP2 by transmitting payloads chosen one bit at a time and reading where
-//! each bit landed, then confirmed against a TX16S off air. The procedure and
-//! the evidence are in `docs/protocols.md`, and the measurement itself is in
-//! `testdata/sx1280_cr_li_*_map.json`.
+//! each bit landed, then confirmed against a TX16S off air. The measurement
+//! itself is in `testdata/sx1280_cr_li_*_map.json`.
 //!
 //! # What it turned out to be
 //!

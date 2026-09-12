@@ -823,7 +823,7 @@ pub struct DecodeRecord {
     ///
     /// This is what makes the packet list a bus rather than a display: a map,
     /// a chart or an image pane reads these rather than the bytes or the
-    /// summary line. See `docs/views.md`.
+    /// summary line.
     pub fields: Vec<(String, common::Value)>,
     /// What the payload is, as a media type, so a view can claim packets it
     /// knows how to render without knowing the protocol that made them.

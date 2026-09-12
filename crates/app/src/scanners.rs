@@ -725,7 +725,8 @@ margin   = 8 kHz
 # paging channel that is the same across Europe. Commercial paging is
 # national: 138 to 153 MHz in the UK, 929 to 932 MHz in the United States,
 # 450 to 470 MHz in much of Europe. Point this at a channel you can hear, and
-# read the note about pager traffic in docs/protocols.md before logging it.
+# know that pager traffic carries names, addresses and medical detail before
+# logging it.
 range    = 439.9 - 440.1 MHz
 span     = 100 kHz
 front    = pocsag
