@@ -291,7 +291,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "audio",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "cpal",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "num-complex",
  "serde",
@@ -1608,7 +1608,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "datasets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "csv",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "decode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "bytemuck",
@@ -1781,7 +1781,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "num-complex",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "gps"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "libc",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "hackrf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "crossbeam-channel",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "hackrf-usb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nusb",
  "thiserror 2.0.20",
@@ -3017,7 +3017,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "httpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest",
 ]
@@ -3297,7 +3297,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iqnet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "crossbeam-channel",
@@ -3518,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "limesdr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "limesdr-sys",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "limesdr-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -3642,7 +3642,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mbe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rustfft",
 ]
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "nodes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "audio",
  "candle-core",
@@ -4458,7 +4458,7 @@ dependencies = [
 
 [[package]]
 name = "orbit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "datasets",
@@ -4625,7 +4625,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pipeline"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "num-complex",
@@ -5308,7 +5308,7 @@ dependencies = [
 
 [[package]]
 name = "rtlsdr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "audio",
  "common",
@@ -5320,7 +5320,7 @@ dependencies = [
 
 [[package]]
 name = "rtlsdr-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -5890,7 +5890,7 @@ dependencies = [
 
 [[package]]
 name = "sources"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "dsp",
@@ -5985,7 +5985,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "audio",
@@ -6006,7 +6006,7 @@ dependencies = [
 
 [[package]]
 name = "stt-cuda"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -6021,7 +6021,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "survey"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "common",
  "dsp",
