@@ -14,8 +14,10 @@
 //! still catching anything structural: a shifted line, a swapped channel, a
 //! mode read at the wrong speed.
 //!
-//! In practice the two agree to a tenth of a count a block, so the tolerance
-//! below is loose only against a different platform's FFT.
+//! In practice the two agree to about a count a block. What differs is the
+//! edge columns: the sampling window here is clipped to the scan it belongs
+//! to, where the reference lets it run past the end, which is what puts a
+//! green stripe down the right of a Robot picture.
 
 use decode::sstv;
 
