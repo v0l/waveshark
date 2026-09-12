@@ -1210,6 +1210,11 @@ impl Receiver {
         self.video().and_then(|n| n.bus().watched().cloned())
     }
 
+    /// Pictures the receiver has written to disk, newest last.
+    pub fn pictures_saved(&self) -> Option<Vec<std::path::PathBuf>> {
+        self.stage::<crate::picsave::PictureSaveNode>(derived::PICTURES).map(|n| n.saved().to_vec())
+    }
+
     /// Every transmission the video bus has seen.
     pub fn video_inputs(&self) -> Vec<VideoInput> {
         let Some(bus) = self.video().map(|n| n.bus()) else {
@@ -2231,6 +2236,8 @@ pub mod derived {
     pub const DEDUPE: u64 = Patch::DERIVED_BASE + 20;
     /// What is heard, on its way into the house over MQTT.
     pub const HOMEASSISTANT: u64 = Patch::DERIVED_BASE + 21;
+    /// Every still picture the receiver finishes, on its way to disk.
+    pub const PICTURES: u64 = Patch::DERIVED_BASE + 22;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -2696,6 +2703,11 @@ fn sync_video(p: &mut crate::patch::Patch) {
     // has an input to land on.
     s.insert("inputs".into(), V::Int(feeds.len() as i64 + 1));
     p.add_derived(bus, "video_bus", s);
+
+    // And what the bus publishes is written out, so a picture that took two
+    // minutes to arrive is not lost when the next one starts.
+    let save = p.add_derived(derived::PICTURES, "picture_save", Settings::new());
+    p.connect(Source::Stage(bus, 0), (save, 0));
 }
 
 /// Whether a setting the operator changed on a derived stage is an edit of
@@ -3402,6 +3414,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "packet_bus" => "Packet log".into(),
         "audio_bus" => "Audio".into(),
         "video_bus" => "Video".into(),
+        "picture_save" => "Pictures".into(),
         "wfm_demod" => "WFM demod".into(),
         "ssb_demod" => "SSB demodulator".into(),
         "mode_s" => "1090 Mode S".into(),
@@ -3521,6 +3534,7 @@ pub fn registry() -> pipeline::registry::Registry {
             Ok(Box::new(n) as Box<dyn pipeline::node::Node>)
         },
     );
+    r.register(crate::picsave::DESC, crate::picsave::build);
     r.register(
         StageDesc {
             name: "audio_bus",

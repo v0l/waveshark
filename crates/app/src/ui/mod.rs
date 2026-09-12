@@ -1615,11 +1615,12 @@ impl App {
 
     /// Draw whatever the video bus is publishing.
     fn video_view(&mut self, ui: &mut egui::Ui) {
-        let (frame, inputs) = match self.radio.as_ref() {
-            Some(r) => (r.status.video(), r.status.video_inputs()),
-            None => (None, Vec::new()),
+        let (frame, inputs, saved) = match self.radio.as_ref() {
+            Some(r) => (r.status.video(), r.status.video_inputs(), r.status.pictures()),
+            None => (None, Vec::new(), Vec::new()),
         };
-        video_pane::VideoPane { st: &mut self.video, frame, inputs, cmds: &mut self.cmds }.show(ui);
+        video_pane::VideoPane { st: &mut self.video, frame, inputs, saved, cmds: &mut self.cmds }
+            .show(ui);
     }
 
     /// Fold in who the audio bus is hearing, and subscribe to anything new.
