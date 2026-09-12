@@ -31,6 +31,9 @@ pub enum Modulation {
     /// sign each symbol, so instead of one line it shows a pair a symbol
     /// rate apart.
     Dqpsk,
+    /// Eight phases, the step between symbols carrying the bits, which is
+    /// what VDL Mode 2 keys.
+    D8psk,
     /// Frequency swept linearly, which is chirp spread spectrum and radar.
     Chirp,
     /// Many carriers with a cyclic prefix. Told from the rest of the
@@ -82,6 +85,7 @@ impl Modulation {
             Modulation::Psk2 => "BPSK",
             Modulation::Psk4 => "QPSK",
             Modulation::Dqpsk => "pi/4-DQPSK",
+            Modulation::D8psk => "D8PSK",
             Modulation::Chirp => "chirp",
             Modulation::Ofdm => "OFDM",
             Modulation::Dsss => "DSSS",
@@ -152,6 +156,7 @@ impl Modulation {
             "BPSK" | "PSK2" => Some(Self::Psk2),
             "QPSK" | "PSK4" => Some(Self::Psk4),
             "PI4DQPSK" | "DQPSK" => Some(Self::Dqpsk),
+            "D8PSK" | "PSK8" | "8PSK" => Some(Self::D8psk),
             "CHIRP" => Some(Self::Chirp),
             "CSS" | "LORA" => Some(Self::Css),
             "PPM" => Some(Self::Ppm),
@@ -167,7 +172,7 @@ impl Modulation {
 
     /// Every verdict, so a caller can round-trip or list them without
     /// keeping its own copy of the set.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Ook,
         Self::Ask,
         Self::Fsk2,
@@ -176,6 +181,7 @@ impl Modulation {
         Self::Psk2,
         Self::Psk4,
         Self::Dqpsk,
+        Self::D8psk,
         Self::Chirp,
         Self::Ofdm,
         Self::Dsss,

@@ -50,12 +50,14 @@ pub mod protocol;
 pub mod protocols;
 #[cfg(feature = "tea")]
 pub mod recover;
+pub mod rs;
 pub mod slicer;
 #[cfg(feature = "tea")]
 pub mod ta61;
 #[cfg(feature = "tea")]
 pub mod tea;
 pub mod tetra;
+pub mod vdl2;
 pub mod video_channels;
 pub mod vocoder;
 pub mod voice;

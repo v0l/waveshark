@@ -39,6 +39,7 @@ pub mod source_nodes;
 pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod tx_nodes;
+pub mod vdl2_nodes;
 pub mod video_nodes;
 pub mod wfm;
 pub mod wifi_nodes;
@@ -92,6 +93,7 @@ pub use tx_nodes::{
     MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode,
     MIC_GAIN_MAX,
 };
+pub use vdl2_nodes::Vdl2Node;
 pub use video_nodes::VideoNode;
 pub use wfm::WfmDemodNode;
 pub use wifi_nodes::WifiNode;
@@ -162,6 +164,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (modes_nodes::DESC, modes_nodes::build),
     (ais_nodes::DESC, ais_nodes::build),
     (gsm_nodes::DESC, gsm_nodes::build),
+    (vdl2_nodes::DESC, vdl2_nodes::build),
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),

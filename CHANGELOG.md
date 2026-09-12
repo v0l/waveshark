@@ -16,6 +16,10 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- VDL Mode 2, the datalink most European airline traffic moved onto: which
+  aircraft and which ground station, the frame type, and the ACARS message
+  where a frame carries one. The scanner table watches the five channels from
+  136.725 up to the common signalling channel at 136.975.
 - ACARS, the messages aircraft and ground stations send each other on the VHF
   airband: who sent it, the aircraft's registration and flight number, the
   label and the text. Point a channel at 131.725 across Europe or 131.550 in

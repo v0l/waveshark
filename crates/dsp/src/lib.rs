@@ -14,6 +14,7 @@ pub mod blend;
 pub mod c4fm;
 pub mod channelizer;
 pub mod classify;
+pub mod d8psk;
 pub mod dc;
 pub mod demod;
 pub mod detect;

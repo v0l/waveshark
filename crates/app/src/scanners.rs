@@ -733,6 +733,16 @@ front    = acars
 channels = 131.525 MHz, 131.550 MHz, 131.725 MHz, 131.825 MHz
 margin   = 15 kHz
 
+[VDL2]
+# The VHF datalink sub-band, which is the same plan everywhere: 136.975 is
+# the common signalling channel every ground station carries, and the four
+# below it are the ones European traffic moved onto as ACARS emptied out.
+range    = 136.65 - 137.0 MHz
+span     = 400 kHz
+front    = vdl2
+channels = 136.725 MHz, 136.775 MHz, 136.825 MHz, 136.875 MHz, 136.975 MHz
+margin   = 25 kHz
+
 [POCSAG]
 # The amateur DAPNET network, which runs POCSAG at 1200 baud and is the one
 # paging channel that is the same across Europe. Commercial paging is
@@ -978,9 +988,9 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "ACARS", "POCSAG", "GSM", "GSM 850", "GSM 900", "DCS 1800",
-                "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169", "ISM 315", "SLP 426",
-                "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4", "ISM 5.8"
+                "ADS-B", "AIS", "APRS", "ACARS", "VDL2", "POCSAG", "GSM", "GSM 850", "GSM 900",
+                "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169", "ISM 315",
+                "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4", "ISM 5.8"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from
