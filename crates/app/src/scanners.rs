@@ -733,6 +733,16 @@ front    = acars
 channels = 131.525 MHz, 131.550 MHz, 131.725 MHz, 131.825 MHz
 margin   = 15 kHz
 
+[SSTV]
+# The two metre calling frequency, which is where a picture is sent across
+# Europe. The shortwave ones (14.230 and 7.171) need a sideband demodulator
+# in front and a receiver that reaches them.
+range    = 144.49 - 144.51 MHz
+span     = 48 kHz
+front    = sstv
+channels = 144.500 MHz
+margin   = 12.5 kHz
+
 [VDL2]
 # The VHF datalink sub-band, which is the same plan everywhere: 136.975 is
 # the common signalling channel every ground station carries, and the four
@@ -988,9 +998,10 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "ACARS", "VDL2", "POCSAG", "GSM", "GSM 850", "GSM 900",
-                "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169", "ISM 315",
-                "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4", "ISM 5.8"
+                "ADS-B", "AIS", "APRS", "ACARS", "SSTV", "VDL2", "POCSAG", "GSM", "GSM 850",
+                "GSM 900", "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169",
+                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4",
+                "ISM 5.8"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from
@@ -1073,7 +1084,11 @@ mod tests {
         };
         assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::named("mode_s").unwrap()]);
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::named("ais").unwrap()]);
-        assert_eq!(fronts(144_800_000.0, 2_400_000.0), [Front::protocol("aprs", 144_800_000.0)]);
+        assert_eq!(
+            fronts(144_800_000.0, 2_400_000.0),
+            [Front::protocol("aprs", 144_800_000.0), Front::protocol("sstv", 144_500_000.0)],
+            "a 2.4 MHz span over 144.8 reaches the SSTV calling frequency too"
+        );
         assert_eq!(fronts(439_987_500.0, 500_000.0), [Front::protocol("pocsag", 439_987_500.0)]);
         // M17 has no channel of its own to list: it runs wherever an amateur
         // puts it, and `auto` finds it there. A block naming one frequency
@@ -1100,7 +1115,7 @@ mod tests {
         // way, and the dial is only where somebody is looking.
         assert_eq!(
             kinds(&s.fronts(145_500_000.0, 2_400_000.0)),
-            [Front::protocol("aprs", 144_800_000.0)]
+            [Front::protocol("aprs", 144_800_000.0), Front::protocol("sstv", 144_500_000.0)]
         );
     }
 

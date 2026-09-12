@@ -500,6 +500,7 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::droneid_nodes::DroneId,
         &crate::video_nodes::Video,
         &crate::acars_nodes::Acars,
+        &crate::sstv_nodes::Sstv,
         &crate::vdl2_nodes::Vdl2,
         &crate::aprs_nodes::Aprs,
         &crate::pocsag_nodes::Pocsag,

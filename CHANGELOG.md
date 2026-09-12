@@ -16,6 +16,10 @@ the code is in the commit log.
 - Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
   NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
   thermometer.
+- SSTV pictures on the video bus: Martin 1 and 2, Scottie 1, 2 and DX, and
+  Robot 36 and 72, read from the two metre calling frequency at 144.500 or
+  from any chain that produces audio. The picture builds on screen as it
+  arrives rather than appearing two minutes later.
 - VDL Mode 2, the datalink most European airline traffic moved onto: which
   aircraft and which ground station, the frame type, and the ACARS message
   where a frame carries one. The scanner table watches the five channels from

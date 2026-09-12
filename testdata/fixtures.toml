@@ -586,3 +586,30 @@ What it cannot show is acquisition on a real signal: no fading, no doppler,
 one burst in a silent band. An off-air recording of 136.975 would test the
 sync metric properly and is what this corpus still wants.
 """
+
+[[capture]]
+name = "sstv_martin1_44100.wav"
+sha256 = "7022216f09c71794a9d29d45dd2ba2fb734e0f99295f443702932a9b3cf8b675"
+url = "https://nostr.download/7022216f09c71794a9d29d45dd2ba2fb734e0f99295f443702932a9b3cf8b675.wav"
+compression = "none"
+center_hz = 0
+rate_sps = 44_100
+format = "wav"
+description = """
+Not IQ: 117 seconds of demodulated audio carrying one Martin 1 SSTV picture,
+320 by 256 in GBR order. It is `examples/m1.ogg` from colaclanth's Python
+sstv decoder, converted to mono 16-bit PCM at the rate it was recorded at.
+
+That decoder ships the picture it gets out of this recording beside it as
+`examples/m1.png`, so there is an independent decode to check against, and
+`crates/decode/tests/sstv_capture.rs` asserts a block signature taken from
+that PNG rather than from this code.
+
+Two things about the conversion, since both matter to a later reader. The
+source is lossy Vorbis, so this WAV is what the Vorbis decoder produced and
+not the original off-air audio; decoding it with the reference gives back
+`m1.png` to within one count per channel. Resampling is not harmless: the
+same reference decoder at 22.05 kHz differs from its own 44.1 kHz output by
+a mean of 4.5 counts a channel, and at 11.025 kHz by 6.6, because its
+analysis windows are counted in samples. Keep the rate.
+"""
