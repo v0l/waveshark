@@ -720,6 +720,16 @@ front    = aprs
 channels = 144.800 MHz
 margin   = 8 kHz
 
+[ACARS]
+# The aircraft datalink channels, which differ by region: 131.725 is the
+# European primary, 131.525 its secondary, and 131.550 is the North American
+# primary. All three fit in one span, so all three are watched.
+range    = 131.5 - 131.75 MHz
+span     = 300 kHz
+front    = acars
+channels = 131.525 MHz, 131.550 MHz, 131.725 MHz
+margin   = 15 kHz
+
 [POCSAG]
 # The amateur DAPNET network, which runs POCSAG at 1200 baud and is the one
 # paging channel that is the same across Europe. Commercial paging is
@@ -965,7 +975,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "POCSAG", "GSM", "GSM 850", "GSM 900", "DCS 1800",
+                "ADS-B", "AIS", "APRS", "ACARS", "POCSAG", "GSM", "GSM 850", "GSM 900", "DCS 1800",
                 "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169", "ISM 315", "SLP 426",
                 "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4", "ISM 5.8"
             ]
