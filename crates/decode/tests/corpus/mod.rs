@@ -499,6 +499,21 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Interlogix-Security",
+        ours: "Interlogix-Security",
+        fields: &[
+            ("id", "id", Text),
+            ("subtype", "subtype", Text),
+            ("raw_message", "raw_message", Text),
+            ("battery_ok", "battery_ok", Bool),
+            ("switch1", "switch1", Text),
+            ("switch2", "switch2", Text),
+            ("switch3", "switch3", Text),
+            ("switch4", "switch4", Text),
+            ("switch5", "switch5", Text),
+        ],
+    },
+    ModelSpec {
         rtl: "Prologue-TH",
         ours: "Prologue-TH",
         fields: &[
