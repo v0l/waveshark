@@ -556,3 +556,35 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "12efb745df8422121018263d4598666ea5912de51420390e86b2d3838962a0a4"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/interlogix/06/tamper_319.5M_250k.json"
 description = "The same detector with its case opened, which differs from the capture above in one latch bit and is what a decoder reading the wrong bit still passes the parity check on"
+
+[[sample]]
+name = "alectov1_thermo_a_433.92M_250k.cu8"
+sha256 = "a001611c62b88b9ad2965caa14615e9c8ca221cdb4b9b1aee2c3a5b788edc79c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile002.cu8"
+reference_sha256 = "237918f7e8f98d37b3f026a415e40b84555d9bec4a5e0202d4ed078ab0625e3c"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile002.json"
+description = "A thermo-hygrometer on the outdoor channel of an Alecto station, reading 28.8 C at 36%"
+
+[[sample]]
+name = "alectov1_thermo_b_433.92M_250k.cu8"
+sha256 = "564e55fa6214cae350f1be56fff11717fa21983db04d34e6955a533d3aa34fe6"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile005.cu8"
+reference_sha256 = "8eb4436677e13b066a0e48dd4702ce55b72bc70ce72ff7504031b9236dda9330"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile005.json"
+description = "A second sensor on channel 3, which is the check that the channel comes out of the id byte rather than being assumed"
+
+[[sample]]
+name = "alectov1_rain_433.92M_250k.cu8"
+sha256 = "8f4cd9011a15dbc66568933ec3c4f7b72627dfa21a2402b4bbe1d1279861bc85"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile004.cu8"
+reference_sha256 = "01da4eed8d52c65f1803e061f7d404b51c83f39e3f9ea068179961a6e512cde7"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/alectov1/gfile004.json"
+description = "The rain gauge of the same station at 188 mm, whose message type replaces the temperature and humidity with a tipping-bucket count"
+
+[[sample]]
+name = "alectov1_thermo_c_433.92M_250k.cu8"
+sha256 = "bd0190093a2dff73330bd26ce2e54e3cb4525b866d269981d3c0aaf1f85eb872"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/04/g011_433.92M_250k.cu8"
+reference_sha256 = "46dea17ce7210dc36718ecd228065c98a83bb833e9504a64f9d9a1191b1dd35d"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/prologue/04/g011_433.92M_250k.json"
+description = "Filed under prologue upstream because the two families share their timings and their frame length: rtl_433 reads it as Alecto because the checksum passes, and so must this. The capture that proves the two decoders do not claim each other's transmissions"

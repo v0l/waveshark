@@ -10,6 +10,7 @@
 //! stops a checksum-free protocol claiming every burst on the band.
 
 mod acurite;
+mod alecto;
 mod ambient;
 mod bresser;
 mod esl;
@@ -31,6 +32,7 @@ mod tpms;
 mod x10;
 
 pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, AcuriteWind};
+pub use alecto::AlectoV1;
 pub use ambient::AmbientF007th;
 pub use bresser::Bresser3Ch;
 pub use esl::Esl;

@@ -499,6 +499,27 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "AlectoV1-Temperature",
+        ours: "AlectoV1-Temperature",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("humidity", "humidity_pct", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
+        rtl: "AlectoV1-Rain",
+        ours: "AlectoV1-Rain",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("rain_mm", "rain_total_mm", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "Interlogix-Security",
         ours: "Interlogix-Security",
         fields: &[
