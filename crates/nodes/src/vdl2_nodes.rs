@@ -93,12 +93,11 @@ impl Simple for Vdl2Node {
         }
         // Decimate as far as whole samples allow, then resample the rest: the
         // symbol clock is 10500, which divides almost no radio's rate.
-        let factor = (rate / want).floor().max(1.0) as usize;
-        let mid = rate / factor as f64;
+        let (factor, resample) = dsp::resample::stage(rate, want, 4096)
+            .ok_or_else(|| common::Error::other("vdl2 cannot reach 105 kHz from here"))?;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.resample = Rational::new(mid, want, 4096)
-            .ok_or_else(|| common::Error::other("vdl2 cannot resample this rate"))?;
+        self.resample = resample.unwrap_or_else(|| Rational::with_ratio(1, 1));
         self.demod = D8pskDemod::new(D8pskConfig::VDL2);
         self.meter = crate::FrameMeter::new(want, self.channel_hz as u64, 2.0);
 
@@ -237,6 +236,16 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::Hz;
+
+    /// The same rates, against the 105 kHz the demodulator runs at.
+    #[test]
+    fn an_awkward_radio_rate_is_still_accepted() {
+        for rate in [2_048_000.0, 2_400_000.0, 2_880_000.0, 8_000_000.0, 20_000_000.0] {
+            let mut n = Vdl2Node::new(DEFAULT_HZ);
+            let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(136_975_000)), latency: 0 };
+            n.negotiate(&spec).unwrap_or_else(|e| panic!("{rate} refused: {e}"));
+        }
+    }
 
     #[test]
     fn the_channel_has_to_be_inside_the_span_and_wide_enough() {

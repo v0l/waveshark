@@ -124,17 +124,19 @@ impl Simple for SstvNode {
                 if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
                     return Err(common::Error::other("sstv needs its channel inside the span"));
                 }
-                let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
+                let (factor, resample) = dsp::resample::stage(rate, AUDIO_HZ, 4096)
+                    .ok_or_else(|| common::Error::other("sstv cannot reach 44.1 kHz from here"))?;
                 let mid = rate / factor as f64;
                 self.mixer = Mixer::new(center - self.channel_hz, rate);
                 self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
                 self.fm = FmDemod::new(mid, DEVIATION_HZ);
-                self.resample = rational(mid)?;
+                self.resample = resample;
             }
             // Real audio, which is what a sideband chain on the shortwave
             // calling frequencies produces.
             PortKind::Real => {
-                self.resample = rational(i.spec.rate)?;
+                self.resample = dsp::resample::stage(i.spec.rate.max(AUDIO_HZ), AUDIO_HZ, 4096)
+                    .and_then(|(_, r)| r);
             }
             _ => return Err(common::Error::other("sstv reads baseband or audio")),
         }
@@ -180,15 +182,6 @@ impl Simple for SstvNode {
         self.fm.reset();
         self.rx.reset();
     }
-}
-
-fn rational(from: f64) -> Result<Option<Rational>> {
-    if (from - AUDIO_HZ).abs() < 1.0 {
-        return Ok(None);
-    }
-    Rational::new(from, AUDIO_HZ, 4096)
-        .map(Some)
-        .ok_or_else(|| common::Error::other("sstv cannot resample this rate"))
 }
 
 pub struct Sstv;
@@ -256,6 +249,17 @@ mod tests {
         let out = n.negotiate(&near).expect("a channel in the span");
         assert_eq!(out.kind, PortKind::Video);
         assert_eq!(out.center, Hz(144_500_000));
+    }
+
+    /// The rate a HackRF runs at. It has no whole-number path to 44.1 kHz,
+    /// which is what the first version tried for and refused the radio over.
+    #[test]
+    fn an_awkward_radio_rate_is_still_accepted() {
+        for rate in [2_048_000.0, 2_400_000.0, 2_880_000.0, 8_000_000.0, 20_000_000.0] {
+            let mut n = SstvNode::new(DEFAULT_HZ);
+            let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(144_500_000)), latency: 0 };
+            n.negotiate(&spec).unwrap_or_else(|e| panic!("{rate} refused: {e}"));
+        }
     }
 
     /// A chain that already has audio, which is what the shortwave modes need,
