@@ -190,6 +190,17 @@ the same commit, under `Added`, `Changed`, `Fixed` or `Removed`. A refactor or
 a test does not. Write it for the person: "Bluetooth LE advertising", not "add
 BleNode".
 
+**One line, under about fifteen words, and no how.** The reader is scanning a
+list to find out whether to upgrade, not reading an account of the work. Name
+the protocol, the pane or the fault and stop. Never list the parts of a fix,
+never explain the mechanism, never write a second sentence justifying the
+first. The reasoning belongs in a code comment where it is findable, and the
+measurements in the test that pins them.
+
+Good: `SSTV pictures: Martin, Scottie and Robot modes, on the video pane.`
+Good: `A green stripe down the right of a Robot picture.`
+Bad: anything with a colon followed by three clauses, or the word "which".
+
 A release is `tools/changelog.sh release X.Y.Z`, the version in `Cargo.toml`,
 one commit, and the tag `vX.Y.Z` pushed. The release workflow takes its notes
 from that section and refuses a tag with none; CI checks that `[Unreleased]`

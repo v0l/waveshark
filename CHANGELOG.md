@@ -11,57 +11,37 @@ the code is in the commit log.
 
 ### Added
 
-- Ambient Weather F007TH thermo-hygrometers, sold as the F012TH, the SwitchDoc
-  F016TH and TFA's 30.3208.02 sender, on 433.92 and 868 MHz.
-- Prologue thermo-hygrometers and the sensors that share their frame: FreeTec
-  NC-7104, Pearl NC-7159-675, ThermoPro TX2 and the TFA 30.3240.10 pool
-  thermometer.
-- A microphone input stage, so a decoder can read audio from the machine's
-  own input rather than off the air: hold a phone playing SSTV beside the
-  laptop, wire "Microphone in" to an SSTV stage in the chain view, and the
-  picture builds.
-- Every still picture the receiver finishes is written to
-  `~/.local/share/waveshark/pictures` as a PNG, named for when it arrived,
-  what sent it and where it was received. A transmission that stopped part
-  way is written too, with the percentage in its name.
-- SSTV pictures on the video bus: Martin 1 and 2, Scottie 1, 2 and DX, and
-  Robot 36 and 72, read from the two metre calling frequency at 144.500 or
-  from any chain that produces audio. The picture builds on screen as it
-  arrives rather than appearing two minutes later.
-- VDL Mode 2, the datalink most European airline traffic moved onto: which
-  aircraft and which ground station, the frame type, and the ACARS message
-  where a frame carries one. The scanner table watches the five channels from
-  136.725 up to the common signalling channel at 136.975.
-- ACARS, the messages aircraft and ground stations send each other on the VHF
-  airband: who sent it, the aircraft's registration and flight number, the
-  label and the text. Point a channel at 131.725 across Europe or 131.550 in
-  North America.
-- Hideki weather sensors, sold as Cresta, TFA Nexus, Irox, Mebus and the
-  Bresser 5CH: the thermo-hygrometer, the temperature-only sensor, the
-  anemometer and the rain gauge.
-- Alecto V1 weather sensors and the Auriol, Silvercrest and Ventus rebadges of
-  them: the thermo-hygrometer and the rain gauge. Wind is not read yet.
-- Interlogix, GE and UTC security sensors on 319.5 MHz, and the ELK-319DWM and
-  Alula RE101 modules with them. A row names the sensor by the serial on its
-  label and says whether the contact is open, the case has been lifted or the
-  detector has fired.
+- SSTV pictures on the video pane: Martin 1 and 2, Scottie 1, 2 and DX, Robot
+  36 and 72, on 144.500 or any chain with audio.
+- Every still picture is saved to `~/.local/share/waveshark/pictures`.
+- A microphone input stage, so a decoder can read audio from the machine
+  rather than off the air.
+- VDL Mode 2, the aircraft datalink most European traffic uses, on 136.725 to
+  136.975.
+- ACARS on the airband, on 131.525 to 131.825 and 131.550.
+- Ambient Weather F007TH thermo-hygrometers, sold as the F012TH, SwitchDoc
+  F016TH and TFA 30.3208.02.
+- Prologue thermo-hygrometers, sold as FreeTec NC-7104, Pearl NC-7159-675,
+  ThermoPro TX2 and TFA 30.3240.10.
+- Hideki weather sensors, sold as Cresta, TFA Nexus, Irox, Mebus and Bresser
+  5CH: temperature, humidity, wind and rain.
+- Alecto V1 weather sensors, and the Auriol, Silvercrest and Ventus rebadges.
+  Wind is not read yet.
+- Interlogix, GE and UTC security sensors on 319.5 MHz, with the ELK-319DWM
+  and Alula RE101 modules.
+
+### Changed
+
+- SSTV holds up better on a weak signal.
 
 ### Fixed
-- Robot 36 and 72 colours. The two colour differences were the wrong way
-  round, and a Robot 36 line borrowed the missing half from the line before
-  it rather than the one after, so cyan came out green.
-- An SSTV transmission that stopped part way being filled to the bottom with
-  noise. The picture now ends where the signal did, and the receiver goes
-  back to listening for the next one.
-- A green stripe down the right of a Robot 36 or 72 picture, from the last
-  pixels of a line being read partly from the next line's sync pulse.
-- An SSTV picture drawing only its first line in the video pane while the
-  file saved to disk was complete.
-- SSTV and VDL Mode 2 refusing to run on a radio at 2.048 MS/s.
-- An Acurite 606TX reading no longer appears for a Prologue sensor's
-  transmission. The two send at the same timings and the 606TX's digest is
-  eight bits, so one frame in a few hundred was reported as a second sensor at
-  the same temperature, with a passing integrity check.
+
+- Robot 36 and 72 colours: cyan came out green.
+- A green stripe down the right of a Robot picture.
+- An SSTV transmission that stopped part way being filled with noise.
+- An SSTV picture drawing only its first line in the pane.
+- SSTV and VDL Mode 2 refusing a radio at 2.048 MS/s.
+- An Acurite 606TX reading appearing for a Prologue sensor's transmission.
 
 ## [0.2.0] - 2026-09-12
 
@@ -264,11 +244,6 @@ the code is in the commit log.
   failed.
 
 ### Changed
-- SSTV decoding holds up better on a weak signal: the audio is band-limited
-  to the tones a transmission uses before anything reads it, a sync pulse has
-  to last to be believed rather than being whatever crossed a threshold
-  first, and a pixel whose tone was not a picture tone is filled in from its
-  neighbours instead of appearing as black or white speckle.
 - A hopping link is read as one transmitter rather than as a new signal on
   every channel it visits. Once an ExpressLRS handset's link has been read
   once, the receiver knows the eighty channels it uses and hands each visit
