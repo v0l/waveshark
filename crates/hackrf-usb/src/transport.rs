@@ -55,6 +55,8 @@ pub enum StreamControl {
     SetAmpEnable(bool),
     /// Set TX VGA (IF) gain (dB, 0-47 in 1 dB steps)
     SetTxvgaGain(u32),
+    /// Enable/disable the antenna port bias tee
+    SetAntennaEnable(bool),
 }
 
 /// Handle for receiving streaming data from a HackRF device.
@@ -188,6 +190,13 @@ impl AsyncReadControlHandle {
     pub fn set_txvga_gain(&self, gain_db: u32) -> Result<()> {
         self.ctrl_tx
             .send(StreamControl::SetTxvgaGain(gain_db))
+            .map_err(|_| Error::StreamingError("control channel closed".to_string()))
+    }
+
+    /// Put the bias tee on the antenna socket on or off.
+    pub fn set_antenna_enable(&self, enable: bool) -> Result<()> {
+        self.ctrl_tx
+            .send(StreamControl::SetAntennaEnable(enable))
             .map_err(|_| Error::StreamingError("control channel closed".to_string()))
     }
 }
@@ -1186,6 +1195,11 @@ fn streaming_thread(
                 StreamControl::SetTxvgaGain(gain) => {
                     tracing::warn!("transmit gain {} dB requested while receiving", gain);
                 }
+                StreamControl::SetAntennaEnable(enable) => {
+                    if let Err(e) = dev.set_antenna_enable(enable) {
+                        tracing::warn!("HackRF set bias tee={} failed: {}", enable, e);
+                    }
+                }
             }
         }
 
@@ -1380,6 +1394,11 @@ fn transmitting_thread(
                 StreamControl::SetAmpEnable(enable) => {
                     if let Err(e) = dev.set_amp_enable(enable) {
                         tracing::warn!("HackRF set amp enable={} failed: {}", enable, e);
+                    }
+                }
+                StreamControl::SetAntennaEnable(enable) => {
+                    if let Err(e) = dev.set_antenna_enable(enable) {
+                        tracing::warn!("HackRF set bias tee={} failed: {}", enable, e);
                     }
                 }
                 // Receive gains have no meaning while transmitting.

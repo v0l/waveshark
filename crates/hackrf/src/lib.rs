@@ -84,6 +84,9 @@ struct Wanted {
     center: Hz,
     rate: Sps,
     stages: gain::Stages,
+    /// The bias tee is a front end setting like the amp, so entering receive
+    /// mode clears it and it has to be put back with the rest.
+    bias_tee: bool,
 }
 
 /// Open the unit again and put it back to work receiving.
@@ -101,6 +104,7 @@ fn reopen_rx(index: usize, want: Wanted) -> Result<AsyncReadHandle> {
     c.set_amp_enable(want.stages.amp).map_err(map_err)?;
     c.set_lna_gain(want.stages.lna).map_err(map_err)?;
     c.set_vga_gain(want.stages.vga).map_err(map_err)?;
+    c.set_antenna_enable(want.bias_tee).map_err(map_err)?;
     Ok(handle)
 }
 
@@ -117,6 +121,7 @@ pub struct HackRfDevice {
     rate: Sps,
     stages: gain::Stages,
     tx_stages: gain::TxStages,
+    bias_tee: bool,
 
     shared: std::sync::Arc<Shared>,
     /// The index this unit was opened at, for reopening it after an over.
@@ -211,6 +216,7 @@ impl HackRfDevice {
             rate: Sps(8_000_000),
             stages: gain::Stages::from_total(32.0),
             tx_stages: gain::TxStages::default(),
+            bias_tee: false,
             shared: std::sync::Arc::new(Shared {
                 rx: parking_lot::Mutex::new(None),
                 tx: parking_lot::Mutex::new(None),
@@ -220,6 +226,7 @@ impl HackRfDevice {
                     center: Hz(100_000_000),
                     rate: Sps(8_000_000),
                     stages: gain::Stages::from_total(32.0),
+                    bias_tee: false,
                 }),
             }),
             index,
@@ -265,6 +272,14 @@ impl HackRfDevice {
             d.set_txvga_gain(txvga).map_err(map_err)?;
         }
         Ok(())
+    }
+
+    fn apply_bias_tee(&self) -> Result<()> {
+        self.shared.want.lock().bias_tee = self.bias_tee;
+        match self.ctl() {
+            Some(c) => c.set_antenna_enable(self.bias_tee).map_err(map_err),
+            None => self.hw()?.set_antenna_enable(self.bias_tee).map_err(map_err),
+        }
     }
 
     fn apply_gain(&self) -> Result<()> {
@@ -364,6 +379,26 @@ impl Device for HackRfDevice {
 
     fn rate_needs_restart(&self) -> bool {
         true
+    }
+
+    fn toggles(&self) -> Vec<common::Toggle> {
+        vec![common::Toggle {
+            name: "bias_tee".into(),
+            label: "Bias tee".into(),
+            help: "Puts 3.3 V at 50 mA on the antenna socket to power a mast head amplifier. Not enough for a satellite LNB, which wants 13 or 18 V at a few hundred milliamps. Leave it off unless you know what is on the other end of the cable, because a shorted or DC coupled antenna takes the current."
+                .into(),
+            on: self.bias_tee,
+        }]
+    }
+
+    fn set_toggle(&mut self, name: &str, on: bool) -> Result<()> {
+        match name {
+            "bias_tee" => {
+                self.bias_tee = on;
+                self.apply_bias_tee()
+            }
+            _ => Err(Error::other(format!("no setting named {name:?}"))),
+        }
     }
 
     fn set_tx_gain(&mut self, stage: &str, mode: GainMode) -> Result<()> {
