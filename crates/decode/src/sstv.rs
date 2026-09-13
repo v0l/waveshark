@@ -410,14 +410,18 @@ fn convert_row(mode: &'static Mode, planes: &[Vec<Vec<u8>>], y: usize, out: &mut
     for x in 0..mode.width {
         let px = match (mode.channels, mode.colour) {
             (3, Colour::Gbr) => (planes[y][2][x], planes[y][0][x], planes[y][1][x]),
-            (3, Colour::Yuv) => yuv(planes[y][0][x], planes[y][2][x], planes[y][1][x]),
+            // Robot 72 sends luminance, then R-Y, then B-Y.
+            (3, Colour::Yuv) => yuv(planes[y][0][x], planes[y][1][x], planes[y][2][x]),
             (2, Colour::Yuv) => {
-                // Robot 36 sends R-Y on even lines and B-Y on odd ones, so
-                // each line borrows the other from its neighbour.
-                let odd = y % 2;
-                let a = planes[y.saturating_sub(odd.wrapping_sub(1) & 1)][1][x];
-                let b = planes[y.saturating_sub(odd)][1][x];
-                yuv(planes[y][0][x], a, b)
+                // Robot 36 sends one colour difference a line: R-Y on the
+                // even ones, B-Y on the odd. So a line has half of what it
+                // needs and borrows the other half from the line after it,
+                // which is why conversion runs a line behind the scan.
+                let (cr, cb) = match y % 2 == 0 {
+                    true => (planes[y][1][x], planes[(y + 1).min(mode.height - 1)][1][x]),
+                    false => (planes[y - 1][1][x], planes[y][1][x]),
+                };
+                yuv(planes[y][0][x], cr, cb)
             }
             _ => (planes[y][0][x], planes[y][0][x], planes[y][0][x]),
         };
