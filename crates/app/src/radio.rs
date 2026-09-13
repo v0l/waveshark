@@ -273,19 +273,22 @@ fn restart(
     center: Hz,
     gain: GainMode,
     ppm: f64,
-) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>, f64)> {
+    offset: f64,
+) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>)> {
     // The device needs a moment to release its USB claim; reopening
     // immediately gets "already in use".
     std::thread::sleep(std::time::Duration::from_millis(150));
     let mut dev = crate::devices::open(entry)?;
     dev.set_rate(rate)?;
-    // Reopening resets the correction, and a span change that silently threw
-    // it away would put every frequency back where it was wrong.
-    let soft = apply_ppm(dev.as_mut(), ppm);
-    dev.set_center(tuned(center, soft))?;
+    // Reopening resets the correction and the converter, and a span change
+    // that silently threw either away would put every frequency back where it
+    // was wrong.
+    dev.correct(ppm);
+    dev.set_offset(offset);
+    dev.set_dial(center)?;
     let _ = dev.set_gain("tuner", gain);
     let stream = dev.start_rx()?;
-    Ok((dev, stream, soft))
+    Ok((dev, stream))
 }
 
 /// Open the radio for transmit, and say what the graph should key.
@@ -309,14 +312,23 @@ fn tx_plan_for(ch: &ChannelSpec, center: Hz) -> Option<crate::chain::TxPlan> {
 
 /// The transmit chain to draw, from the channels as they are now.
 ///
-/// The first channel that can transmit, because the radio has one transmitter
-/// and the chain view has one transmit chain to draw. Which channel is keyed
-/// is decided when a key goes down; this is only what the graph holds ready.
-fn derive_tx(plan: &Plan, can_transmit: bool) -> Option<crate::chain::TxPlan> {
+/// One channel, because the radio has one transmitter and the chain view has
+/// one transmit chain to draw. The channel going on air is that one; with
+/// nothing keyed it is the first that can transmit, which is what the graph
+/// holds ready.
+///
+/// `on_air` matters as soon as there are two transmit channels, which is one
+/// recalled from the bank beside the one already on the strip: without it the
+/// rebuild that puts a key on air drew the first channel's chain instead, so
+/// a channel set to MIC transmitted the other one's test tone.
+fn derive_tx(plan: &Plan, can_transmit: bool, on_air: Option<u64>) -> Option<crate::chain::TxPlan> {
     if !can_transmit {
         return None;
     }
-    plan.channels.iter().find_map(|c| tx_plan_for(c, plan.center))
+    let keyed = on_air
+        .and_then(|id| plan.channels.iter().find(|c| c.id == id))
+        .and_then(|c| tx_plan_for(c, plan.center));
+    keyed.or_else(|| plan.channels.iter().find_map(|c| tx_plan_for(c, plan.center)))
 }
 
 fn key_up(
@@ -394,34 +406,6 @@ fn key_up(
 /// and nothing moved. Where the device will not do it, the offset is applied
 /// to every frequency asked for instead, which is the same correction one
 /// step further out.
-fn apply_ppm(dev: &mut dyn common::Device, ppm: f64) -> f64 {
-    let _ = dev.set_ppm(ppm);
-    match (dev.ppm() - ppm).abs() < 0.001 {
-        true => 0.0,
-        false => ppm,
-    }
-}
-
-/// What to ask the hardware for so the receiver ends up on `want`.
-///
-/// A reference running fast by `ppm` puts the local oscillator that much
-/// above where it was asked for, so the request goes that much below.
-fn tuned(want: Hz, ppm: f64) -> Hz {
-    match ppm == 0.0 {
-        true => want,
-        false => Hz((want.as_f64() / (1.0 + ppm * 1e-6)).round().max(0.0) as u64),
-    }
-}
-
-/// The inverse: where the receiver actually is, given what the hardware was
-/// asked for. What the dial and the spectrum are labelled with.
-fn untuned(hw: Hz, ppm: f64) -> Hz {
-    match ppm == 0.0 {
-        true => hw,
-        false => Hz((hw.as_f64() * (1.0 + ppm * 1e-6)).round().max(0.0) as u64),
-    }
-}
-
 /// Shortest gap between retunes.
 ///
 /// A retune is a blocking USB control transfer costing about 25 ms on the
@@ -476,6 +460,11 @@ pub enum Cmd {
     NodeParam(usize, String, pipeline::param::ParamValue),
     /// Reference oscillator correction, in parts per million.
     Ppm(f64),
+    /// What to add to the tuner's frequency to get the frequency at the
+    /// aerial, in hertz. Positive for a converter that mixes down, such as a
+    /// satellite LNB; negative for one that mixes up, such as an HF
+    /// upconverter. Zero for an aerial straight into the radio.
+    Offset(f64),
     /// Narrow the span in software by decimating what the radio delivers.
     ///
     /// A HackRF cannot sample below 2 MS/s, so a 12.5 kHz channel is a
@@ -1291,6 +1280,10 @@ pub struct RadioControls {
     /// settings modal keeps its own copy.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub ppm: f64,
+    /// What the dial reads above the tuner, in hertz, and zero for an aerial
+    /// straight into the radio.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub offset: f64,
     /// Where the tuner reaches, in hertz: the lowest and highest of its
     /// ranges. What the dial is clamped to, which used to be the RTL-SDR's
     /// 24 to 1766 MHz whatever radio was connected.
@@ -1308,6 +1301,7 @@ impl Default for RadioControls {
             toggles: Vec::new(),
             choices: Vec::new(),
             ppm: 0.0,
+            offset: 0.0,
             reach: (24e6, 1766e6),
             tunable: true,
         }
@@ -1315,26 +1309,12 @@ impl Default for RadioControls {
 }
 
 impl RadioControls {
-    /// The lowest and highest frequency across a device's tuner ranges.
-    fn reach_of(dev: &dyn common::Device) -> (f64, f64) {
-        let mut lo = f64::INFINITY;
-        let mut hi = 0.0f64;
-        for r in &dev.info().ranges {
-            lo = lo.min(r.range.start().as_f64());
-            hi = hi.max(r.range.end().as_f64());
-        }
-        if lo.is_finite() && hi > lo {
-            (lo, hi)
-        } else {
-            (24e6, 1766e6)
-        }
-    }
-
-    /// `ppm` is the correction in force, which is not always the device's
-    /// own: one that cannot correct itself is corrected by the radio thread,
-    /// and reading the setting back off the driver would report zero and
-    /// throw away what was just typed.
-    fn read(dev: &dyn common::Device, ppm: f64) -> Self {
+    /// The correction and the converter come off the device rather than out
+    /// of the driver: a driver that cannot correct itself reports zero, which
+    /// would throw away what was just typed, and the reach on the aerial's
+    /// side is not the reach of the tuner.
+    fn read(dev: &dyn common::Device) -> Self {
+        let (ppm, offset) = (dev.asked_ppm(), dev.offset());
         let now = dev.gains();
         let stages = dev
             .info()
@@ -1356,7 +1336,10 @@ impl RadioControls {
             toggles: dev.toggles(),
             choices: dev.choices(),
             ppm,
-            reach: Self::reach_of(dev),
+            offset,
+            // Already on the aerial's side of the converter: the front end
+            // moves the ranges it reports with the offset.
+            reach: dev.reach(),
             // A stream is pinned by whoever feeds it and a capture by
             // whoever recorded it; both dials are readouts.
             tunable: !matches!(
@@ -1702,10 +1685,14 @@ pub struct Radio {
 impl Radio {
     /// Start streaming from an RTL-SDR. `repaint` is called on every frame so
     /// the UI wakes without polling.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         entry: crate::devices::Entry,
         center: Hz,
         rate: Sps,
+        // The local oscillator of whatever is on the cable, which the dial
+        // reads above the tuner. Zero for an aerial.
+        offset: f64,
         fft: usize,
         repaint: impl Fn() + Send + 'static,
     ) -> Self {
@@ -1724,7 +1711,7 @@ impl Radio {
             .name("radio".into())
             .spawn(move || {
                 if let Err(e) =
-                    run(entry, center, rate, fft, cmd_rx, frame_tx, dec_tx, &st, repaint)
+                    run(entry, center, rate, offset, fft, cmd_rx, frame_tx, dec_tx, &st, repaint)
                 {
                     *st.error.lock() = Some(e.to_string());
                 }
@@ -1884,13 +1871,6 @@ enum Block {
     Lost,
 }
 
-/// The correction asked for, and however much of it this thread has to apply
-/// itself because the device would not.
-struct Ppm {
-    asked: f64,
-    soft: f64,
-}
-
 /// The transmit side of the radio, between and during overs.
 struct Tx {
     /// The radio's own transmit gain.
@@ -1943,7 +1923,6 @@ struct RadioThread<'a, R: Fn()> {
     /// configuration rather than structure.
     scanners: crate::scanners::Scanners,
     audio: AudioIo,
-    ppm: Ppm,
     tx: Tx,
     status: &'a Status,
     cmd: Receiver<Cmd>,
@@ -1973,6 +1952,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         entry: crate::devices::Entry,
         center: Hz,
         rate: Sps,
+        offset: f64,
         fft: usize,
         cmd: Receiver<Cmd>,
         frames: Sender<Frame>,
@@ -1981,12 +1961,18 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         repaint: R,
     ) -> anyhow::Result<Self> {
         let mut dev = crate::devices::open(&entry)?;
-        // Clamp to what this radio can actually do: the app's last span may
-        // have come from a different device entirely.
+        // What is on the cable is known before the radio is opened, and has
+        // to be: with a converter the saved dial is in the Ku band, and a
+        // tuner asked for that whole refuses, which used to stop the radio
+        // starting at all.
+        dev.set_offset(offset);
+        // Clamp to what this radio can actually do: the app's last span and
+        // the last dial may have come from a different device entirely.
         let info_rates = dev.info().rate_range.clone();
         let rate = Sps(rate.0.clamp(info_rates.start().0, info_rates.end().0));
         dev.set_rate(rate)?;
-        dev.set_center(center)?;
+        let (lo, hi) = dev.reach();
+        dev.set_dial(Hz(center.as_f64().clamp(lo, hi).round() as u64))?;
         dev.set_gain("tuner", GainMode::Auto)?;
 
         // The device the session asked for arrives as a command once the
@@ -2001,10 +1987,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
         let stream = dev.start_rx()?;
         status.running.store(true, Ordering::Relaxed);
-        status.set_radio(RadioControls::read(dev.as_ref(), 0.0));
+        status.set_radio(RadioControls::read(dev.as_ref()));
 
         let mut plan = Plan {
-            center: dev.center(),
+            center: dev.dial(),
             rate: dev.rate().as_f64(),
             zoom: 1,
             dc_block: true,
@@ -2052,7 +2038,6 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 sink,
                 mic: None,
             },
-            ppm: Ppm { asked: 0.0, soft: 0.0 },
             tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None },
             status,
             cmd,
@@ -2213,29 +2198,45 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 // The driver snaps to what the hardware supports, so the
                 // control has to be told what it actually got rather than what
                 // it asked for.
-                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 self.rx.remeasure_dc();
             }
             Cmd::Toggle(name, on) => {
                 if let Err(e) = self.dev.set_toggle(&name, on) {
                     *self.status.error.lock() = Some(format!("{name}: {e}"));
                 }
-                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 // Any of these changes the offset, and a stale estimate shows
                 // up as a spur that was not there a moment ago.
                 self.rx.remeasure_dc();
             }
             Cmd::Choice(name, value) => return self.set_choice(&name, &value),
             Cmd::Ppm(v) => {
-                self.ppm.asked = v;
-                self.ppm.soft = apply_ppm(self.dev.as_mut(), v);
+                self.dev.correct(v);
                 // Nothing moves until the tuner is asked for a frequency
                 // again, so ask now: a correction that only took effect on the
                 // next drag of the dial is a correction nobody can see
                 // themselves setting.
                 self.want_center = Some(self.plan.center);
                 self.last_tune = std::time::Instant::now() - self.tune_gap;
-                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
+                self.needs_rebuild = true;
+            }
+            Cmd::Offset(hz) => {
+                // The dial moves with the offset, so the receiver stays on
+                // the signal it was on and the tuner is not asked for a
+                // frequency it cannot reach. Setting 9750 on a dial at
+                // 474 MHz otherwise asks for minus 9.2 GHz, and the dial is
+                // then stranded below everything the radio can do.
+                let moved = hz - self.dev.offset();
+                self.dev.set_offset(hz);
+                self.plan.center = Hz((self.plan.center.as_f64() + moved).max(0.0) as u64);
+                // Same as a correction: nothing moves until the tuner is
+                // asked again, and a setting that only took effect on the
+                // next drag of the dial is one nobody can see themselves set.
+                self.want_center = Some(self.plan.center);
+                self.last_tune = std::time::Instant::now() - self.tune_gap;
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 self.needs_rebuild = true;
             }
             Cmd::Record(dir) => self.set_recording(dir),
@@ -2427,14 +2428,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // synthesiser, so keying moved it to the transmit frequency; leaving
         // it there means the waterfall comes back tuned to wherever the
         // channel transmits, which looks like reception never resumed at all.
-        let want = tuned(self.plan.center, self.ppm.soft);
-        if self.dev.center() != want {
-            if let Err(e) = self.dev.set_center(want) {
+        if self.dev.dial() != self.plan.center {
+            if let Err(e) = self.dev.set_dial(self.plan.center) {
                 *self.status.error.lock() =
                     Some(format!("could not retune after transmitting: {e}"));
             }
         }
-        self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+        self.status.set_radio(RadioControls::read(self.dev.as_ref()));
     }
 
     /// Put a channel on air.
@@ -2505,11 +2505,17 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // bandwidth stopped the receiver dead.
         if self.dev.rate_needs_restart() {
             self.release_stream();
-            match restart(&self.entry, r, self.plan.center, self.gain, self.ppm.asked) {
-                Ok((d, s, soft)) => {
+            match restart(
+                &self.entry,
+                r,
+                self.plan.center,
+                self.gain,
+                self.dev.asked_ppm(),
+                self.dev.offset(),
+            ) {
+                Ok((d, s)) => {
                     self.dev = d;
                     self.stream = Some(s);
-                    self.ppm.soft = soft;
                 }
                 Err(e) => {
                     *self.status.error.lock() = Some(format!("cannot change span: {e}"));
@@ -2544,7 +2550,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         } else if let Err(e) = self.dev.set_choice(name, value) {
             *self.status.error.lock() = Some(format!("{name}: {e}"));
         }
-        self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+        self.status.set_radio(RadioControls::read(self.dev.as_ref()));
         self.rx.remeasure_dc();
         Flow::Go
     }
@@ -2573,7 +2579,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // The transmit chain follows the strip like every other derived stage:
         // change a channel's mode or its shift and the chain view shows what
         // would go out, keyed or not.
-        let want = derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed));
+        let want = derive_tx(
+            &self.plan,
+            self.status.can_transmit.load(Ordering::Relaxed),
+            self.tx.keying_for,
+        );
         if want != self.plan.tx && !self.rx.keyed() {
             self.plan.tx = want;
             self.needs_rebuild = true;
@@ -2626,11 +2636,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return Ok(());
         }
         let _t = tracing::info_span!("set_center").entered();
-        self.dev.set_center(tuned(f, self.ppm.soft))?;
+        self.dev.set_dial(f)?;
         // The plan is labelled with where the receiver is, not with what the
         // tuner was asked for: the dial, the spectrum and every channel offset
         // are read against it.
-        self.plan.center = untuned(self.dev.center(), self.ppm.soft);
+        self.plan.center = self.dev.dial();
         self.needs_rebuild = true;
         self.want_center = None;
         self.last_tune = std::time::Instant::now();
@@ -2648,11 +2658,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.plan.fronts = fronts_here(&self.scanners, &self.plan, self.scan_on);
         // The transmit chain follows the dial too: a channel's transmit
         // frequency is its offset from wherever the receiver is now.
-        if !self.rx.keyed() {
-            self.plan.tx = derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed));
-        }
         let before: Vec<u64> = self.rx.channels().iter().map(|c| c.spec.id).collect();
         let keying_now = self.tx.keying_for.take();
+        // A key waiting on this rebuild is not keyed yet, so the chain has to
+        // be drawn for the channel about to go on air rather than for
+        // whichever one comes first on the strip.
+        if !self.rx.keyed() {
+            self.plan.tx =
+                derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed), keying_now);
+        }
         if let Err(e) = self.rx.rebuild(&self.plan) {
             // A patch is drawn wire by wire, so most of the time it is half a
             // graph, and a type mismatch between two stages is an ordinary
@@ -2746,7 +2760,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 Sps(self.plan.rate as u64),
                 self.plan.center,
                 self.gain,
-                self.ppm.asked,
+                self.dev.asked_ppm(),
+                self.dev.offset(),
             ) {
                 Ok(got) => {
                     back = Some(got);
@@ -2756,11 +2771,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
         }
         match back {
-            Some((d, s, soft)) => {
+            Some((d, s)) => {
                 self.dev = d;
                 self.stream = Some(s);
-                self.ppm.soft = soft;
-                self.status.set_radio(RadioControls::read(self.dev.as_ref(), self.ppm.asked));
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 *self.status.error.lock() = Some("radio came back".into());
                 self.needs_rebuild = true;
                 Block::Restarted
@@ -3076,6 +3090,7 @@ fn run(
     entry: crate::devices::Entry,
     center: Hz,
     rate: Sps,
+    offset: f64,
     fft: usize,
     cmd: Receiver<Cmd>,
     frames: Sender<Frame>,
@@ -3083,7 +3098,8 @@ fn run(
     status: &Status,
     repaint: impl Fn(),
 ) -> anyhow::Result<()> {
-    RadioThread::open(entry, center, rate, fft, cmd, frames, decodes, status, repaint)?.run()
+    RadioThread::open(entry, center, rate, offset, fft, cmd, frames, decodes, status, repaint)?
+        .run()
 }
 
 /// Take the levels the nodes hold into the plan, and tell the strip when
@@ -3177,19 +3193,39 @@ pub(crate) mod tests {
     use super::*;
     use crate::chain::OOK_CHANNEL_HZ;
 
-    /// The correction has to move the request the opposite way to the error,
-    /// and it has to come back to the frequency the operator asked for, or
-    /// the dial reads one thing and the receiver hears another.
+    /// Two transmit channels, which is what recalling one from the bank
+    /// makes: the chain is drawn for the one going on air, not for whichever
+    /// is first on the strip. Without this the rebuild that puts a key on air
+    /// replaced the keyed channel's plan with the first channel's, so a
+    /// channel set to MIC transmitted the other one's test tone.
     #[test]
-    fn a_correction_offsets_the_request_and_reads_back_where_it_started() {
-        let want = Hz(145_000_000);
-        let hw = tuned(want, 20.0);
-        assert!(hw.get() < want.get(), "a fast reference is asked for a lower frequency");
-        let moved = want.get() - hw.get();
-        assert!((2_800..3_000).contains(&moved), "20 ppm of 145 MHz moved {moved} Hz");
-        assert_eq!(untuned(hw, 20.0), want);
-        assert_eq!(untuned(tuned(want, -7.5), -7.5), want);
-        assert_eq!(tuned(want, 0.0), want);
+    fn the_transmit_chain_follows_the_channel_going_on_air() {
+        let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(145_000_000));
+        let ch = |id: u64, offset: f64, source: TxSource| ChannelSpec {
+            id,
+            label: format!("CH{id}"),
+            offset_hz: offset,
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 1.0,
+            muted: false,
+            squelch_db: None,
+            voice: false,
+            agc: true,
+            tx: Some(TxSpec { source, ..Default::default() }),
+        };
+        plan.channels = vec![ch(1, 25_000.0, TxSource::Tone), ch(2, -50_000.0, TxSource::Mic)];
+        let first = derive_tx(&plan, true, None).expect("a chain to hold ready");
+        assert_eq!(first.spec.source, TxSource::Tone);
+        assert_eq!(first.on_air, Hz(145_025_000));
+        let keyed = derive_tx(&plan, true, Some(2)).expect("the keyed channel's chain");
+        assert_eq!(keyed.spec.source, TxSource::Mic);
+        assert_eq!(keyed.on_air, Hz(144_950_000));
+        // A channel that cannot transmit does not take the chain away from
+        // one that can.
+        plan.channels.push(ChannelSpec { id: 3, tx: None, ..plan.channels[0].clone() });
+        assert_eq!(derive_tx(&plan, true, Some(3)), Some(first));
+        assert_eq!(derive_tx(&plan, false, Some(2)), None);
     }
 
     #[test]

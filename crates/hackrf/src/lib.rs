@@ -117,6 +117,9 @@ impl Shared {
 pub struct HackRfDevice {
     dev: Option<HackRf>,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     stages: gain::Stages,
@@ -212,6 +215,7 @@ impl HackRfDevice {
         let mut d = Self {
             dev: Some(dev),
             info,
+            tuning: Default::default(),
             center: Hz(100_000_000),
             rate: Sps(8_000_000),
             stages: gain::Stages::from_total(32.0),
@@ -311,6 +315,14 @@ fn short_serial(s: &str) -> String {
 }
 
 impl Device for HackRfDevice {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }
@@ -942,6 +954,7 @@ mod tests {
                 center: Hz(433_920_000),
                 rate: Sps(2_000_000),
                 stages: gain::Stages::from_total(32.0),
+                bias_tee: false,
             }),
         });
         let mut st = HackRfStream {
@@ -989,6 +1002,7 @@ mod tests {
                 center: Hz(433_920_000),
                 rate: Sps(2_000_000),
                 stages: gain::Stages::from_total(32.0),
+                bias_tee: false,
             }),
         });
         let mut st = HackRfStream {

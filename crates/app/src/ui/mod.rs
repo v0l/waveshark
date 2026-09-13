@@ -185,6 +185,9 @@ pub struct App {
     /// one in `radio_settings`; this is where the radios not in use keep
     /// theirs, because a correction is a property of one crystal.
     ppm_by_device: std::collections::BTreeMap<String, f64>,
+    /// What the dial reads above the tuner, in hertz, by device label, kept
+    /// for the same reason: the dish is on one radio's cable.
+    offset_by_device: std::collections::BTreeMap<String, f64>,
     /// Whether the radio has a freshly opened device that has not yet been
     /// given the settings. Set on connect and on reset, cleared once the
     /// driver has reported its controls and the settings have gone to it.
@@ -575,6 +578,7 @@ impl Default for App {
             audio_in: String::new(),
             radio_settings: Default::default(),
             ppm_by_device: Default::default(),
+            offset_by_device: Default::default(),
             radio_dirty: false,
             feeds: Vec::new(),
             feed_host: String::new(),
@@ -652,6 +656,7 @@ impl App {
             audio_in: s.audio_in.clone(),
             radio_settings,
             ppm_by_device: s.ppm.clone(),
+            offset_by_device: s.offset.clone(),
             feeds: s.feeds.clone(),
             log_cap_mb: s.log_cap_mb,
             capture_cap_mb: s.capture_cap_mb,
@@ -724,6 +729,7 @@ impl App {
             toggles: rs.toggles.clone(),
             choices: rs.choices.clone(),
             ppm: self.ppm_by_device.clone(),
+            offset: self.offset_by_device.clone(),
             tx_gain_db: rs.tx_gain_db,
             location: self.location,
             language: crate::i18n::language().code().to_string(),
@@ -827,6 +833,7 @@ impl App {
             }
         }
         self.send(Cmd::Ppm(want.ppm));
+        self.send(Cmd::Offset(want.offset));
         if !controls.tx_stages.is_empty() {
             self.send(Cmd::TxGain(want.tx_gain_db));
         }
@@ -956,8 +963,30 @@ impl App {
     /// against that radio so it is not applied to the next one.
     pub fn set_ppm(&mut self, ppm: f64) {
         self.radio_settings.ppm = ppm;
+        self.radio_dirty = true;
         if let Some(d) = self.device.as_ref() {
             self.ppm_by_device.insert(d.label.clone(), ppm);
+        }
+    }
+
+    /// Tell the receiver what sits between the aerial and the radio in use,
+    /// and keep the figure against that radio: an LNB is on one cable.
+    pub fn set_offset(&mut self, hz: f64) {
+        // The dial reads on the aerial's side of the converter, so it moves
+        // with the offset: the radio stays where it was and the number over
+        // it changes, rather than the dial staying put and the radio being
+        // asked for a frequency that is now nine gigahertz away.
+        let moved = hz - self.radio_settings.offset;
+        self.radio_settings.offset = hz;
+        // Applied now if a radio is running, and again when one reports its
+        // controls: an offset typed before the radio was started otherwise
+        // stayed in the settings pane, the dial read the dish's frequency,
+        // and the tuner was asked for it whole.
+        self.radio_dirty = true;
+        self.reach = (self.reach.0 + moved, self.reach.1 + moved);
+        self.center = (self.center + moved).max(0.0);
+        if let Some(d) = self.device.as_ref() {
+            self.offset_by_device.insert(d.label.clone(), hz);
         }
     }
 
@@ -1079,6 +1108,7 @@ impl App {
             // The radio samples at the full rate and the zoom narrows it in
             // software, so it is started at the rate before that division.
             Sps((self.rate * self.zoom.max(1) as f64).round() as u64),
+            self.radio_settings.offset,
             self.scope.fft,
             move || c.request_repaint(),
         ));
@@ -1182,6 +1212,7 @@ impl App {
         // radio being put down keeps its figure and the one picked up brings
         // its own, which is zero until somebody has calibrated it.
         self.radio_settings.ppm = self.ppm_by_device.get(&e.label).copied().unwrap_or(0.0);
+        self.radio_settings.offset = self.offset_by_device.get(&e.label).copied().unwrap_or(0.0);
         self.device = Some(e);
         self.audio.listening = None;
         self.connect(ctx);
@@ -3185,6 +3216,25 @@ mod tests {
         assert_eq!(a.center, 1e6);
         a.retune(9e9);
         assert_eq!(a.center, 6e9);
+    }
+
+    /// Setting an offset moves the dial and what it can reach by the same
+    /// amount, so the receiver stays on the signal it was on and the dial is
+    /// not stranded below everything the radio can do. Taking the offset off
+    /// again puts it back.
+    #[test]
+    fn an_offset_carries_the_dial_and_its_limits_with_it() {
+        let mut a = app();
+        a.reach = (1e6, 6e9);
+        a.retune(739_500_000.0);
+        a.set_offset(9_750_000_000.0);
+        assert_eq!(a.center, 10_489_500_000.0, "the dial reads the frequency at the dish");
+        assert_eq!(a.reach, (9_751_000_000.0, 15_750_000_000.0));
+        a.retune(10_714_000_000.0);
+        assert_eq!(a.center, 10_714_000_000.0, "and a transponder is now reachable");
+        a.set_offset(0.0);
+        assert_eq!(a.center, 964_000_000.0, "taking it off leaves the tuner where it was");
+        assert_eq!(a.reach, (1e6, 6e9));
     }
 
     /// The strip is the only route to a view by pointer, so a view missing

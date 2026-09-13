@@ -735,10 +735,19 @@ pub(super) struct AudioState {
     pub call_agc: bool,
     /// Which publication of the levels was last taken from the radio.
     pub levels_rev: u64,
-    /// The channel being keyed, while the mouse button is down. Held here
-    /// rather than read back off the key, because the key moves when the
-    /// panel relaids itself and a transmission must not.
-    pub keying: Option<u64>,
+    /// The channel being keyed. Held here rather than read back off the key,
+    /// because the key moves when the panel relaids itself and a transmission
+    /// must not.
+    pub keying: Keying,
+}
+
+/// What the transmit key is doing: which channel it is keying, and whether it
+/// is being held or was latched with a right click.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keying {
+    pub at: Option<u64>,
+    /// Latched, so letting the pointer go leaves the carrier up.
+    pub latched: bool,
 }
 
 impl Default for AudioState {
@@ -754,7 +763,7 @@ impl Default for AudioState {
             call_muted: false,
             call_agc: true,
             levels_rev: 0,
-            keying: None,
+            keying: Keying::default(),
         }
     }
 }

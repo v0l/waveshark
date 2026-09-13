@@ -137,6 +137,9 @@ pub fn probe(addr: &str) -> Result<Probe> {
 pub struct IqNet {
     addr: String,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     streaming: Arc<AtomicBool>,
@@ -181,6 +184,7 @@ impl IqNet {
             center: p.center,
             rate: p.rate,
             streaming: Arc::new(AtomicBool::new(false)),
+            tuning: Default::default(),
         }
     }
 
@@ -190,6 +194,14 @@ impl IqNet {
 }
 
 impl Device for IqNet {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }

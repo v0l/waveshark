@@ -814,6 +814,7 @@ impl App {
                     .collect::<Vec<_>>()
             }),
             "ppm": controls.as_ref().map(|c| c.ppm),
+            "offset_hz": controls.as_ref().map(|c| c.offset),
         })
     }
 

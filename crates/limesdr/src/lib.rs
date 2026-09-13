@@ -240,6 +240,9 @@ struct Antenna {
 pub struct LimeSdr {
     handle: Arc<Handle>,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     gain_db: f32,
@@ -404,6 +407,7 @@ impl LimeSdr {
         };
 
         let mut me = Self {
+            tuning: Default::default(),
             handle,
             info,
             center: Hz::mhz(100),
@@ -591,6 +595,14 @@ fn reported_rate_max(handle: &Handle) -> Option<u64> {
 }
 
 impl Device for LimeSdr {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }

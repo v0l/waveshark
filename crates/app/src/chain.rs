@@ -2743,8 +2743,6 @@ pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::
 /// a channel added or retuned afterwards was silent.
 fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     use crate::patch::{builtin, Source};
-    #[cfg(feature = "stt")]
-    use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
     let rate = plan.eff_rate();
     let head = p.tap(builtin::HEAD).unwrap_or(Source::Span);
@@ -2911,12 +2909,16 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // of a transmission still in progress has nowhere to live on one.
     #[cfg(feature = "stt")]
     {
-        let mut t = Settings::new();
+        // This pass runs over the edited patch as well as the drawn one, so
+        // the switch, the model and the device are whatever the stage already
+        // carries. Drawn fresh each rebuild, the operator's edit was applied
+        // and then overwritten a line later, and the switch sprang back off.
+        let mut t = p.stage(derived::TRANSCRIBE).map(|s| s.settings.clone()).unwrap_or_default();
         t.insert("root".into(), V::Text(models_root().display().to_string()));
         // Off in the graph the receiver draws: writing down what people said
         // is not something to start doing because nobody said otherwise.
         // Turning it on is an edit, which is how it is remembered.
-        t.insert("enabled".into(), V::Bool(false));
+        t.entry("enabled".into()).or_insert(V::Bool(false));
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(bus, 1), (id, 0));
     }
@@ -3968,7 +3970,7 @@ impl nodes::Ring for RecordRing {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Whether one stage's output is wired into another's input.
@@ -3987,7 +3989,7 @@ mod tests {
         crate::scanners::FrontAt { front, band: (0.0, f64::INFINITY) }
     }
 
-    pub(super) fn plan(rate: f64, center: Hz) -> Plan {
+    pub(crate) fn plan(rate: f64, center: Hz) -> Plan {
         Plan {
             edits: Default::default(),
             center,
@@ -4101,6 +4103,32 @@ mod tests {
         assert_eq!(log.lock().latest(&key).map(|u| u.text.as_str()), Some("still here"));
         // And the node the rebuild put there writes into the same one.
         assert!(std::sync::Arc::ptr_eq(&log, rx.transcript()));
+    }
+
+    /// The transcriber's switch is an edit, and an edit survives a rebuild.
+    /// `sync_audio` runs after the edits are applied and used to draw the
+    /// stage again from nothing, so the checkbox came back off on the next
+    /// channel change.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_transcriber_stays_on_across_a_rebuild() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert_eq!(rx.transcriber().expect("a transcriber").enabled, false);
+        let id = rx.node_of_stage(derived::TRANSCRIBE).expect("the transcriber's node");
+        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
+        assert_eq!(rx.transcriber().expect("a transcriber").enabled, true);
+        // The switch is the operator's edit, which is how the radio thread
+        // puts it back into the plan for the next rebuild.
+        plan.edits = rx.edits();
+        assert!(plan.edits.settings.iter().any(|(id, name, v)| *id == derived::TRANSCRIBE
+            && name == "enabled"
+            && *v == pipeline::ParamValue::Bool(true)));
+        plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
+        rx.rebuild(&plan).expect("a rebuild");
+        assert_eq!(rx.transcriber().expect("a transcriber").enabled, true);
     }
 
     /// Without the mark it is audio and nothing else, which is what an

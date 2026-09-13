@@ -1755,6 +1755,27 @@ impl App {
         });
         ui.add_space(10.0);
 
+        let offset_help = "Added to the tuner's frequency to get the dial's, for a converter \
+                           on the cable. 9750 for a satellite LNB on its low band, -125 for \
+                           an HF upconverter. Saved against this radio.";
+        row_help(ui, "Offset", offset_help, |ui| {
+            let mut mhz = self.radio_settings.offset / 1e6;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut mhz)
+                        .speed(1.0)
+                        .range(-10_000.0..=100_000.0)
+                        .max_decimals(6)
+                        .suffix(" MHz"),
+                )
+                .changed()
+            {
+                self.set_offset(mhz * 1e6);
+                changed = true;
+            }
+        });
+        ui.add_space(10.0);
+
         let mut dc = self.dc_block;
         let dc_help = "A direct conversion receiver leaks its own local oscillator into the \
                        middle of the span, where it looks exactly like a carrier on the \

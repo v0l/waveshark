@@ -18,8 +18,26 @@ use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Ui, V
 /// for everybody, which a HackRF (6 GHz) and a LimeSDR (3.8 GHz) both have
 /// spectrum above.
 const DECADES: [i32; 10] = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
-/// Where a gap is drawn, keyed by the decade to its right.
-const GROUP_AFTER: [i32; 2] = [6, 3];
+
+/// The most digits the dial will grow to, which is 99.999999999 GHz. A
+/// converter is what needs them: a satellite LNB puts the dial in the Ku band
+/// and a dish cannot be tuned at all through ten digits.
+const MAX_DECADE: i32 = 10;
+
+/// The decades to draw to reach `ceiling` hertz, which is the top of what the
+/// radio in use says it can tune. Ten digits unless something on the cable
+/// has moved the dial above them.
+fn decades(ceiling: f64) -> Vec<i32> {
+    let mut top = DECADES[0];
+    while top < MAX_DECADE && 10f64.powi(top + 1) <= ceiling {
+        top += 1;
+    }
+    (0..=top).rev().collect()
+}
+/// Where a gap is drawn, keyed by the decade to its right: the gigahertz, the
+/// megahertz and the kilohertz breaks, which is how a frequency is written
+/// down and read out.
+const GROUP_AFTER: [i32; 3] = [9, 6, 3];
 
 pub struct Dial {
     /// Decade currently under the pointer, if any.
@@ -42,10 +60,22 @@ impl Dial {
     /// pinned by whoever feeds it. The digits are drawn but take no input,
     /// and say so, since a dial that looks live and ignores every drag reads
     /// as broken rather than as fixed.
-    pub fn show_tunable(&mut self, ui: &mut Ui, hz: f64, size: f32, tunable: bool) -> DialOut {
+    pub fn show_tunable(
+        &mut self,
+        ui: &mut Ui,
+        hz: f64,
+        size: f32,
+        tunable: bool,
+        ceiling: f64,
+    ) -> DialOut {
+        let decades = decades(ceiling.max(hz));
         let digit_w = size * 0.62;
         let gap = size * 0.22;
-        let width = DECADES.len() as f32 * digit_w + GROUP_AFTER.len() as f32 * gap + size * 2.4;
+        // Only the breaks that fall between digits: on a dial whose top digit
+        // is the gigahertz there is nothing to its left to separate it from,
+        // and a gap there would be an indent.
+        let gaps = decades.iter().filter(|d| **d != decades[0] && GROUP_AFTER.contains(d)).count();
+        let width = decades.len() as f32 * digit_w + gaps as f32 * gap + size * 2.4;
         let height = size * 1.5;
 
         let (rect, response) = ui.allocate_exact_size(
@@ -68,8 +98,8 @@ impl Dial {
         // leading zero and should be dimmed rather than hidden, so the digits
         // never move.
         let mut n = hz.round().max(0.0) as u64;
-        let mut digits = [0u8; 10];
-        for (i, _) in DECADES.iter().enumerate().rev() {
+        let mut digits = vec![0u8; decades.len()];
+        for (i, _) in decades.iter().enumerate().rev() {
             digits[i] = (n % 10) as u8;
             n /= 10;
         }
@@ -78,7 +108,7 @@ impl Dial {
         let cy = rect.center().y;
         let mut leading = true;
 
-        for (i, &dec) in DECADES.iter().enumerate() {
+        for (i, &dec) in decades.iter().enumerate() {
             if digits[i] != 0 || dec <= 6 {
                 leading = false;
             }
@@ -112,9 +142,9 @@ impl Dial {
             );
 
             x += digit_w;
-            if GROUP_AFTER.contains(&dec) {
-                // A dot at the MHz break, a thinner space at the kHz break:
-                // the same convention as a printed frequency.
+            if GROUP_AFTER.contains(&dec) && dec != decades[0] {
+                // A dot at the MHz break, a thinner space at the GHz and kHz
+                // breaks: the same convention as a printed frequency.
                 let mark = if dec == 6 { "." } else { "\u{2009}" };
                 p.text(
                     Pos2::new(x + gap * 0.5, cy),
@@ -279,6 +309,22 @@ mod tests {
         assert!(10f64.powi(DECADES[0] + 1) > 1.766e9);
     }
 
+    /// The dial grows a digit when the radio can reach past ten gigahertz,
+    /// which is what a satellite converter does to it: an LNB on its low band
+    /// puts a 6 GHz tuner's ceiling at 15.75 GHz, and eleven digits is what
+    /// it takes to write a transponder down.
+    #[test]
+    fn the_dial_grows_a_digit_for_a_converter_and_no_more() {
+        assert_eq!(decades(1.766e9), DECADES.to_vec(), "a dongle needs ten");
+        assert_eq!(decades(6e9), DECADES.to_vec(), "so does a HackRF");
+        assert_eq!(decades(15.75e9).len(), 11, "a dish needs eleven");
+        assert_eq!(*decades(15.75e9).first().unwrap(), 10);
+        assert_eq!(*decades(15.75e9).last().unwrap(), 0, "and still resolves to a hertz");
+        // Nothing reaches a hundred gigahertz, and a dial that grew without
+        // limit would be a dial nobody could read.
+        assert_eq!(decades(1e15).len(), 11);
+    }
+
     #[test]
     fn digit_extraction_matches_the_frequency() {
         let hz = 95_800_000u64;
@@ -388,9 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn groups_break_at_mhz_and_khz() {
-        // 095.800 000 reads as MHz . kHz Hz, matching how frequencies are
-        // written down and spoken.
-        assert_eq!(GROUP_AFTER, [6, 3]);
+    fn groups_break_at_ghz_mhz_and_khz() {
+        // 0 095.800 000 reads as GHz MHz . kHz Hz, matching how frequencies
+        // are written down and spoken.
+        assert_eq!(GROUP_AFTER, [9, 6, 3]);
     }
 }
