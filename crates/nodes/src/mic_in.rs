@@ -10,11 +10,17 @@
 //! stage with no input never runs; this takes the head's stream purely to be
 //! told how much time has passed, and hands over that much microphone audio.
 //!
-//! A microphone is its own clock and runs a few parts per million away from
-//! the radio's, so over a two minute transmission the two drift by a few
-//! milliseconds. That shows up here as a sample repeated or dropped now and
-//! then rather than as a growing delay, which is what a decoder that
-//! resynchronises on every line can absorb and a bit-timed one cannot.
+//! The microphone is the clock, not the radio. What comes out each block is
+//! whatever the device has produced since the last one, so a device running
+//! a few parts per million away from the radio simply delivers slightly more
+//! or fewer samples: the stream stays continuous and a decoder downstream
+//! reads it at its own pace.
+//!
+//! Producing a fixed count per block instead, and padding with silence when
+//! the device was behind, looked reasonable and was not. The padding is not
+//! time that passed, it is samples the transmission never had, so an SSTV
+//! picture drifted further out of step the longer it went on: the top of the
+//! picture was right and the bottom was shredded.
 
 use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -27,13 +33,12 @@ pub struct MicInNode {
     /// one and a plausible one where there is not: a stage waiting for a
     /// device still has to negotiate, or everything wired to it is dropped.
     rate: f64,
-    /// Samples per input sample, from negotiation.
-    step: f64,
-    /// Fraction of a sample carried between blocks, so a ratio that is not a
-    /// whole number does not lose a sample a block.
-    owed: f64,
-    /// Output samples with no microphone audio behind them, which is the
-    /// device not keeping up or not being there at all.
+    /// Most samples to take in one block, from negotiation: a burst longer
+    /// than this is a device that stalled, and catching up on all of it at
+    /// once would put a lump of old audio into the stream.
+    most: usize,
+    /// Samples the device produced that nobody read in time, which is this
+    /// node not being run often enough.
     silent: u64,
     peak: f32,
 }
@@ -51,14 +56,14 @@ impl Default for MicInNode {
 impl MicInNode {
     pub fn new(src: std::sync::Arc<dyn audio::AudioSource>) -> Self {
         let rate = src.rate().max(1.0);
-        Self { src: Some(src), rate, step: 0.0, owed: 0.0, silent: 0, peak: 0.0 }
+        Self { src: Some(src), rate, most: 0, silent: 0, peak: 0.0 }
     }
 
     /// A stage with no microphone yet. It produces silence rather than
     /// refusing to build, so the chain behind it survives until a device
     /// arrives.
     pub fn idle() -> Self {
-        Self { src: None, rate: IDLE_RATE, step: 0.0, owed: 0.0, silent: 0, peak: 0.0 }
+        Self { src: None, rate: IDLE_RATE, most: 0, silent: 0, peak: 0.0 }
     }
 
     pub fn is_open(&self) -> bool {
@@ -70,7 +75,7 @@ impl MicInNode {
         self.peak
     }
 
-    /// Samples handed on that the microphone had nothing behind.
+    /// Samples the microphone produced that were never read.
     pub fn silent(&self) -> u64 {
         self.silent
     }
@@ -85,8 +90,9 @@ impl Simple for MicInNode {
         if input.spec.rate <= 0.0 {
             return Err(common::Error::other("mic_in needs a stream to pace it"));
         }
-        self.step = self.rate / input.spec.rate;
-        self.owed = 0.0;
+        // Half a second: long enough to ride a scheduling hiccup, short
+        // enough that what arrives is still what was heard.
+        self.most = (self.rate * 0.5) as usize;
         let mut out = input.spec.with_kind(PortKind::Real);
         out.rate = self.rate;
         out.bandwidth = self.rate / 2.0;
@@ -102,30 +108,19 @@ impl Simple for MicInNode {
         if n == 0 {
             return Ok(());
         }
-        let exact = n as f64 * self.step + self.owed;
-        let want = exact.floor() as usize;
-        self.owed = exact - want as f64;
-
         let out = o.real_mut();
         let before = out.len();
         if let Some(src) = &self.src {
-            src.take(out, want);
-        }
-        let got = out.len() - before;
-        // Short is normal at the start and after a hiccup: the ring holds a
-        // tenth of a second, and what is missing is silence rather than a
-        // gap in time, since the decoder downstream counts samples.
-        if got < want {
-            self.silent += (want - got) as u64;
-            out.resize(before + want, 0.0);
+            // Everything the device has, rather than a share of the block:
+            // the microphone's own clock decides how much that is.
+            src.take(out, self.most);
+            self.silent = src.overruns();
         }
         self.peak = out[before..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.owed = 0.0;
-    }
+    fn reset(&mut self) {}
 }
 
 pub const DESC: StageDesc = StageDesc {
@@ -146,14 +141,6 @@ mod tests {
     use super::*;
     use common::Hz;
 
-    /// A known waveform through the same node the microphone feeds.
-    fn canned(rate: f64, n: usize) -> std::sync::Arc<dyn audio::AudioSource> {
-        let tone: Vec<f32> = (0..n)
-            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / rate as f32).sin())
-            .collect();
-        std::sync::Arc::new(audio::Canned::new(tone, rate, true))
-    }
-
     fn run(node: &mut MicInNode, blocks: usize, block: usize, rate: f64) -> Vec<f32> {
         let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(0)), latency: 0 };
         node.negotiate(&spec).expect("a stream to pace it");
@@ -170,27 +157,30 @@ mod tests {
         out
     }
 
-    /// A block of radio samples buys its own length in time of audio, and the
-    /// fraction left over is carried: 16384 samples at 2.048 MS/s is 384 at
-    /// 48 kHz exactly, and at 2.4 MS/s it is 327.68, which has to average out
-    /// rather than truncate every block.
+    /// What the device produced, with nothing added and nothing dropped.
+    ///
+    /// The stream has to be the microphone's own samples in order: padding a
+    /// short block with silence puts time into the stream that never
+    /// happened, and an SSTV picture drifts out of step by the bottom.
     #[test]
-    fn the_audio_keeps_up_with_the_clock_that_paces_it() {
-        let mut n = MicInNode::new(canned(48_000.0, 48_000));
-        let got = run(&mut n, 100, 16_384, 2_400_000.0);
-        let want = (100.0 * 16_384.0 * 48_000.0 / 2_400_000.0) as usize;
-        assert!(got.len().abs_diff(want) <= 1, "{} samples against {want}", got.len());
+    fn what_comes_out_is_what_the_microphone_put_in() {
+        let n = 4_800;
+        let tone: Vec<f32> =
+            (0..n).map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin()).collect();
+        let src = std::sync::Arc::new(audio::Canned::new(tone.clone(), 48_000.0, false));
+        let mut node = MicInNode::new(src);
+        let got = run(&mut node, 40, 16_384, 2_048_000.0);
+        assert_eq!(got.len(), n, "every sample once");
+        assert_eq!(got, tone, "in the order the device produced them");
     }
 
-    /// With no device the stage still builds, negotiates and produces the
-    /// silence its consumers expect, rather than taking the chain down.
+    /// With no device the stage still builds and negotiates, and produces
+    /// nothing rather than taking the chain down.
     #[test]
-    fn a_stage_with_no_microphone_produces_silence() {
+    fn a_stage_with_no_microphone_produces_nothing() {
         let mut n = MicInNode::idle();
         assert!(!n.is_open());
         let got = run(&mut n, 4, 16_384, 2_048_000.0);
-        assert_eq!(got.len(), 4 * 384);
-        assert!(got.iter().all(|v| *v == 0.0), "silence");
-        assert_eq!(n.silent(), 4 * 384);
+        assert!(got.is_empty(), "no device, no audio");
     }
 }

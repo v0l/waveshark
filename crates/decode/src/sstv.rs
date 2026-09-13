@@ -198,6 +198,50 @@ pub struct Picture {
     pub lines: usize,
 }
 
+/// The tones a picture is sent in, with the margin a reading off a noisy
+/// signal needs: black is 1500 Hz and white 2300, and a real transmission
+/// overshoots both by a little. Below this band is a sync pulse, above it is
+/// nothing any mode sends. Tightening it any further starts throwing away
+/// black.
+const PICTURE_LOW_HZ: f64 = 1330.0;
+const PICTURE_HIGH_HZ: f64 = 2470.0;
+
+/// Fill the runs of pixels whose tone was not a picture tone, straight across
+/// from the last good pixel to the next one. Returns how many were filled.
+///
+/// Only holes with a good pixel on both sides are filled. A run at either end
+/// of the line is the sampling window overlapping what comes before or after
+/// the scan rather than a dropout, and there is nothing on the far side to
+/// interpolate towards; a line with no good pixel at all is left as it is,
+/// and the caller treats it as a line that did not arrive.
+fn fill_gaps(row: &mut [u8], gaps: &[bool]) -> usize {
+    let holes = gaps.iter().filter(|g| **g).count();
+    if holes == 0 || holes == row.len() {
+        return holes;
+    }
+    let mut at = 0;
+    while at < row.len() {
+        if !gaps[at] {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < row.len() && gaps[at] {
+            at += 1;
+        }
+        let (Some(before), Some(after)) =
+            (start.checked_sub(1).map(|i| row[i] as f32), row.get(at).map(|v| *v as f32))
+        else {
+            continue;
+        };
+        let span = (at - start) as f32;
+        for (k, i) in (start..at).enumerate() {
+            row[i] = (before + (after - before) * (k as f32 + 1.0) / (span + 1.0)) as u8;
+        }
+    }
+    holes
+}
+
 /// A pixel's brightness from its tone: 1500 Hz is black, 2300 Hz white.
 fn luma(hz: f64) -> u8 {
     let v = ((hz - 1500.0) / 3.1372549).round();
@@ -279,12 +323,34 @@ fn align_sync(
     // one: past that the hunt is walking through the picture, and in silence
     // it walked to the end of the buffer and left the decoder stuck there.
     let stop = (from + (mode.line_time * rate).round() as usize).min(audio.len() - window);
+    // A pulse lasts; noise crossing the threshold does not. Confirming a
+    // crossing before believing it costs nothing on a clean signal, where the
+    // first crossing is the pulse, and is what stops a weak one being read as
+    // a line starting wherever the noise happened to peak.
+    let hold = (mode.sync_pulse * 0.5 * rate).round().max(2.0) as usize;
+    let probe = ((rate * 0.0005).round() as usize).max(1);
     let mut at = from;
     let mut found = false;
     while at < stop {
         if meter.peak_hz(&audio[at..at + window]) > 1350.0 {
-            found = true;
-            break;
+            let until = (at + hold).min(stop);
+            let mut k = at + probe;
+            let mut steady = true;
+            while k < until {
+                if meter.peak_hz(&audio[k..k + window]) <= 1350.0 {
+                    steady = false;
+                    break;
+                }
+                k += probe;
+            }
+            if steady {
+                found = true;
+                break;
+            }
+            // Past the tone that was not a pulse, rather than one sample on:
+            // every sample of it would otherwise be tested again.
+            at = k + probe;
+            continue;
         }
         at += 1;
     }
@@ -347,6 +413,10 @@ fn read_line(
         *seq = seq.saturating_sub(back);
     }
     let mut row = vec![vec![0u8; mode.width]; mode.channels];
+    // Pixels whose tone was not a picture tone, per channel. Left as they
+    // were read they are black or white speckle; what they are is a gap, and
+    // a gap between two known pixels is better guessed than declared.
+    let mut gaps = vec![vec![false; mode.width]; mode.channels];
     for chan in 0..mode.channels {
         if chan == mode.sync_channel {
             if line > 0 || chan > 0 {
@@ -387,7 +457,17 @@ fn read_line(
             if at < 0 || at as usize + len >= audio.len() {
                 return Read::Hungry;
             }
-            row[chan][px] = luma(meter.peak_hz(&audio[at as usize..at as usize + len]));
+            let hz = meter.peak_hz(&audio[at as usize..at as usize + len]);
+            row[chan][px] = luma(hz);
+            gaps[chan][px] = !(PICTURE_LOW_HZ..=PICTURE_HIGH_HZ).contains(&hz);
+        }
+        // Interference, a dropout or a sync pulse read as picture: whatever
+        // it was, the tone was not one this mode sends, and a run of them
+        // between two pixels that are is a hole to fill rather than evidence.
+        let holes = fill_gaps(&mut row[chan], &gaps[chan]);
+        // A line that is mostly holes is not a line that was received.
+        if holes * 2 > mode.width {
+            synced = false;
         }
     }
     // The level of the line, for telling a transmission that stopped from
@@ -758,6 +838,27 @@ mod tests {
         assert!((m.line_time - 0.446446).abs() < 1e-6, "line is {}", m.line_time);
         let total = m.line_time * m.height as f64;
         assert!((total - 114.3).abs() < 0.1, "picture is {total} seconds");
+    }
+
+    /// A hole between two pixels that arrived is filled straight across, and
+    /// one at the end of a line is left alone: there is nothing on the far
+    /// side of it to guess from.
+    #[test]
+    fn a_hole_in_a_line_is_filled_from_both_sides() {
+        let mut row = [10u8, 0, 0, 0, 50, 200, 0];
+        let gaps = [false, true, true, true, false, false, true];
+        assert_eq!(fill_gaps(&mut row, &gaps), 4, "holes found");
+        assert_eq!(&row[..5], &[10, 20, 30, 40, 50], "filled straight across");
+        assert_eq!(row[6], 0, "the run at the end is left as it was read");
+    }
+
+    /// A line with nothing in it is not a line to guess at.
+    #[test]
+    fn a_line_of_holes_is_left_alone() {
+        let mut row = [7u8; 4];
+        let gaps = [true; 4];
+        assert_eq!(fill_gaps(&mut row, &gaps), 4);
+        assert_eq!(row, [7u8; 4]);
     }
 
     #[test]

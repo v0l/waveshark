@@ -33,6 +33,19 @@ pub fn lowpass(taps: usize, cutoff: f64, atten_db: f64) -> Vec<f32> {
     h
 }
 
+/// Windowed-sinc bandpass, as the difference of two lowpasses. `low` and
+/// `high` are in cycles per sample, measured to the -6 dB points.
+///
+/// What it is for: a decoder that reads the frequency of a tone has no way to
+/// tell a tone from the loudest thing in the band, so hum below the signal or
+/// hiss above it becomes a reading. Limiting the audio to the tones a mode
+/// uses is the cheapest thing that helps.
+pub fn bandpass(taps: usize, low: f64, high: f64, atten_db: f64) -> Vec<f32> {
+    let n = if taps.is_multiple_of(2) { taps + 1 } else { taps };
+    let (hi, lo) = (lowpass(n, high, atten_db), lowpass(n, low, atten_db));
+    hi.iter().zip(lo.iter()).map(|(a, b)| a - b).collect()
+}
+
 /// Number of taps needed for a given transition width, per Kaiser's estimate.
 /// `transition` is in cycles per sample.
 pub fn estimate_taps(transition: f64, atten_db: f64) -> usize {
@@ -654,5 +667,37 @@ mod decim_hz_tests {
         let mut keep = Vec::new();
         d2.process(&tone(20_000, 2_000.0, rate), &mut keep);
         assert!(rms(&keep[2000..]) > 0.6, "passband lost at {}", rms(&keep[2000..]));
+    }
+}
+
+#[cfg(test)]
+mod bandpass_tests {
+    use super::*;
+
+    fn gain(taps: &[f32], hz: f64, rate: f64) -> f64 {
+        // The response at one frequency, by summing the taps against it.
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, t) in taps.iter().enumerate() {
+            let a = -std::f64::consts::TAU * hz * i as f64 / rate;
+            re += *t as f64 * a.cos();
+            im += *t as f64 * a.sin();
+        }
+        (re * re + im * im).sqrt()
+    }
+
+    /// The SSTV band: tones run 1200 to 2300 Hz, and what has to go is the
+    /// mains hum below them and the hiss above.
+    #[test]
+    fn a_bandpass_keeps_its_band_and_drops_the_rest() {
+        let rate = 44_100.0;
+        let taps = bandpass(255, 900.0 / rate, 2700.0 / rate, 60.0);
+        for hz in [1200.0, 1500.0, 1900.0, 2300.0] {
+            let g = gain(&taps, hz, rate);
+            assert!(g > 0.7, "{hz} Hz passes at {g:.3}");
+        }
+        for hz in [50.0, 300.0, 4000.0, 8000.0] {
+            let g = gain(&taps, hz, rate);
+            assert!(g < 0.02, "{hz} Hz is stopped at {g:.4}");
+        }
     }
 }

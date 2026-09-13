@@ -264,6 +264,11 @@ the code is in the commit log.
   failed.
 
 ### Changed
+- SSTV decoding holds up better on a weak signal: the audio is band-limited
+  to the tones a transmission uses before anything reads it, a sync pulse has
+  to last to be believed rather than being whatever crossed a threshold
+  first, and a pixel whose tone was not a picture tone is filled in from its
+  neighbours instead of appearing as black or white speckle.
 - A hopping link is read as one transmitter rather than as a new signal on
   every channel it visits. Once an ExpressLRS handset's link has been read
   once, the receiver knows the eighty channels it uses and hands each visit
