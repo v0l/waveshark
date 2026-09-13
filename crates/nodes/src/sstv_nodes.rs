@@ -14,6 +14,7 @@
 
 use crate::protocol::{Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::RealFir;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::sstv;
 use dsp::resample::Rational;
@@ -45,12 +46,28 @@ const AUDIO_HZ: f64 = 44_100.0;
 /// so this need only be in the right region.
 const DEVIATION_HZ: f64 = 3_000.0;
 
+/// The band an SSTV transmission lives in: 1200 Hz for the sync pulses, 1500
+/// to 2300 for the picture, and 1900 for the calibration leader.
+const TONE_LOW_HZ: f64 = 900.0;
+const TONE_HIGH_HZ: f64 = 2_700.0;
+
+/// The filter in front of the decoder.
+///
+/// A decoder that reads the frequency of a tone cannot tell a tone from the
+/// loudest thing in the band, so mains hum under the signal or hiss over it
+/// becomes a pixel. This is most of what a receiver can do about that, and it
+/// costs a few hundred multiplies a sample at 44.1 kHz.
+fn band_taps() -> Vec<f32> {
+    dsp::fir::bandpass(255, TONE_LOW_HZ / AUDIO_HZ, TONE_HIGH_HZ / AUDIO_HZ, 60.0)
+}
+
 pub struct SstvNode {
     channel_hz: f64,
     mixer: Mixer,
     decim: FirDecim,
     fm: FmDemod,
     resample: Option<Rational>,
+    band: RealFir,
     rx: sstv::Receiver,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
@@ -73,6 +90,7 @@ impl SstvNode {
             decim: FirDecim::design_hz(AUDIO_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
             resample: None,
+            band: RealFir::new(band_taps()),
             rx: sstv::Receiver::new(AUDIO_HZ),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -145,6 +163,7 @@ impl Simple for SstvNode {
             _ => return Err(common::Error::other("sstv reads baseband or audio")),
         }
         self.rx = sstv::Receiver::new(AUDIO_HZ);
+        self.band = RealFir::new(band_taps());
 
         let mut out = i.spec.with_kind(PortKind::Video);
         out.center = common::Hz(self.channel_hz as u64);
@@ -169,10 +188,11 @@ impl Simple for SstvNode {
             Some(r) => {
                 self.at_rate.clear();
                 r.process_real(&self.audio, &mut self.at_rate);
-                &self.at_rate
+                &mut self.at_rate
             }
-            None => &self.audio,
+            None => &mut self.audio,
         };
+        self.band.process(audio);
         if let Some(p) = self.rx.push(audio) {
             let out = o.video_mut();
             self.publish(p, out);
@@ -184,6 +204,7 @@ impl Simple for SstvNode {
         self.mixer.reset();
         self.decim.reset();
         self.fm.reset();
+        self.band.reset();
         self.rx.reset();
     }
 }
