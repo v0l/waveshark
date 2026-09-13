@@ -47,6 +47,9 @@ the code is in the commit log.
   detector has fired.
 
 ### Fixed
+- Robot 36 and 72 colours. The two colour differences were the wrong way
+  round, and a Robot 36 line borrowed the missing half from the line before
+  it rather than the one after, so cyan came out green.
 - An SSTV transmission that stopped part way being filled to the bottom with
   noise. The picture now ends where the signal did, and the receiver goes
   back to listening for the next one.
