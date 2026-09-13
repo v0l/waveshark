@@ -319,9 +319,19 @@ fn align_sync(
     if from + window >= audio.len() {
         return None;
     }
-    // A sync comes once a line, so there is no reason to look further than
-    // one: past that the hunt is walking through the picture, and in silence
-    // it walked to the end of the buffer and left the decoder stuck there.
+    // What is looked for is where the sync ends, since everything after it is
+    // picture and picture is above this threshold while the pulse is below.
+    let threshold = 1350.0;
+    // Back a pulse and a half, because a line that arrived early is still
+    // this line and a search that only looks forward cannot see it. Looking
+    // forward only was a picture that slid sideways a little more on every
+    // line: a transmitter running fast is always a touch ahead of the clock,
+    // the pulse had already gone by, and the hunt caught the next thing above
+    // the threshold instead, which is picture.
+    let begin = from.saturating_sub((mode.sync_pulse * 1.5 * rate).round() as usize);
+    // A pulse comes once a line, so a search wider than one is looking at
+    // somebody else's line, and in silence an unbounded one walked to the end
+    // of the buffer and left the decoder stuck there.
     let stop = (from + (mode.line_time * rate).round() as usize).min(audio.len() - window);
     // A pulse lasts; noise crossing the threshold does not. Confirming a
     // crossing before believing it costs nothing on a clean signal, where the
@@ -329,40 +339,50 @@ fn align_sync(
     // a line starting wherever the noise happened to peak.
     let hold = (mode.sync_pulse * 0.5 * rate).round().max(2.0) as usize;
     let probe = ((rate * 0.0005).round() as usize).max(1);
-    let mut at = from;
+
+    let mut at = begin;
     let mut found = false;
+    // The pulse itself has to be seen before its end means anything.
+    let mut in_pulse = false;
     while at < stop {
-        if meter.peak_hz(&audio[at..at + window]) > 1350.0 {
-            let until = (at + hold).min(stop);
-            let mut k = at + probe;
-            let mut steady = true;
-            while k < until {
-                if meter.peak_hz(&audio[k..k + window]) <= 1350.0 {
-                    steady = false;
-                    break;
-                }
-                k += probe;
-            }
-            if steady {
-                found = true;
-                break;
-            }
-            // Past the tone that was not a pulse, rather than one sample on:
-            // every sample of it would otherwise be tested again.
-            at = k + probe;
+        if meter.peak_hz(&audio[at..at + window]) <= threshold {
+            in_pulse = true;
+            at += 1;
             continue;
         }
-        at += 1;
+        if !in_pulse {
+            at += 1;
+            continue;
+        }
+        let until = (at + hold).min(stop);
+        let mut k = at + probe;
+        let mut steady = true;
+        while k < until {
+            if meter.peak_hz(&audio[k..k + window]) <= threshold {
+                steady = false;
+                break;
+            }
+            k += probe;
+        }
+        if steady {
+            found = true;
+            break;
+        }
+        // Past the tone that was not the end of a pulse, rather than one
+        // sample on: every sample of it would otherwise be tested again.
+        at = k + probe;
+        in_pulse = false;
     }
+    let at = if found { at } else { from };
     let end = at + window / 2;
     let start = match want_start {
         true => end.saturating_sub((mode.sync_pulse * rate).round() as usize),
         false => end,
     };
-    // How far it had to walk, and whether it found anything at all. In noise
-    // something crosses the threshold eventually, so how far away it was is
-    // what tells a line that arrived from one the decoder invented.
-    Some((start, at - from, found))
+    // How far from the prediction it was, and whether a pulse was seen at
+    // all: in noise something crosses the threshold eventually, so the
+    // distance is what tells a line that arrived from one that was invented.
+    Some((start, at.abs_diff(from), found))
 }
 
 /// Decode the first picture in `audio`, or `None` where there is no header.
