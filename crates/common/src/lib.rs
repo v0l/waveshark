@@ -20,7 +20,7 @@ pub use decode::{
 };
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
-    TxInfo, TxStream,
+    Tuning, TxInfo, TxStream,
 };
 pub use error::{Error, Result};
 pub use iq::{IqBuf, SampleFormat, C32};

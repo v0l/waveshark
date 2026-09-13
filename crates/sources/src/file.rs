@@ -75,6 +75,9 @@ fn parse_si(tok: &str) -> Option<f64> {
 pub struct FileSource {
     path: PathBuf,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     format: SampleFormat,
@@ -143,7 +146,17 @@ impl FileSource {
             tx: None,
         };
 
-        Ok(Self { path, info, center, rate, format, block: 16384, repeat: false, realtime: false })
+        Ok(Self {
+            path,
+            info,
+            center,
+            rate,
+            format,
+            block: 16384,
+            repeat: false,
+            realtime: false,
+            tuning: Default::default(),
+        })
     }
 
     pub fn with_rate(mut self, r: Sps) -> Self {
@@ -205,6 +218,14 @@ impl FileSource {
 }
 
 impl Device for FileSource {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }

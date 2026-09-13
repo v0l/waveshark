@@ -80,7 +80,13 @@ impl App {
                     // the number above it means, and a cell of its own put a
                     // legend and a divider around a caption.
                     ui.vertical(|ui| {
-                        let out = self.dial.show_tunable(ui, self.center, 34.0, self.tunable);
+                        let out = self.dial.show_tunable(
+                            ui,
+                            self.center,
+                            34.0,
+                            self.tunable,
+                            self.reach.1,
+                        );
                         if out.changed {
                             self.retune(out.hz);
                         }

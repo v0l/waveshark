@@ -43,6 +43,10 @@ pub struct RadioSettings {
     /// number because the settings pane edits the radio in front of it; the
     /// session keeps one of these per radio.
     pub ppm: f64,
+    /// What the dial reads above the tuner for this radio, in hertz:
+    /// positive for a converter that mixes down, negative for one that mixes
+    /// up, zero for an aerial straight into it.
+    pub offset: f64,
     /// Transmit gain in dB, which the radio's transmit stages are set to
     /// when a channel is keyed.
     pub tx_gain_db: f32,
@@ -95,8 +99,12 @@ pub struct Session {
     /// are both plugged into the same receiver, and applying either one's
     /// figure to the other puts it further off than leaving it alone.
     pub ppm: BTreeMap<String, f64>,
-    /// Transmit gain in dB, which the radio's own transmit stages are set to
-    /// when a channel is keyed.
+    /// What the dial reads above the tuner, in hertz, by device label.
+    ///
+    /// Per radio for the same reason the correction is: the dish's LNB is on
+    /// the cable of one radio, and adding its 9.75 GHz to the dial of a
+    /// dongle on an aerial would put every frequency in the wrong band.
+    pub offset: BTreeMap<String, f64>,
     pub tx_gain_db: f32,
     /// Where the receiver is, in degrees. Used to resolve an aircraft's
     /// position from a single frame instead of waiting for a matching pair.
@@ -252,6 +260,7 @@ impl Default for Session {
             toggles: Vec::new(),
             choices: Vec::new(),
             ppm: BTreeMap::new(),
+            offset: BTreeMap::new(),
             tx_gain_db: 0.0,
             location: None,
             language: String::new(),
@@ -303,6 +312,7 @@ impl Session {
             toggles: self.toggles.clone(),
             choices: self.choices.clone(),
             ppm: self.ppm_for(device),
+            offset: self.offset_for(device),
             tx_gain_db: self.tx_gain_db,
         }
     }
@@ -311,6 +321,12 @@ impl Session {
     /// been calibrated. Never another radio's figure.
     pub fn ppm_for(&self, device: Option<&str>) -> f64 {
         device.and_then(|d| self.ppm.get(d)).copied().unwrap_or(0.0)
+    }
+
+    /// The saved offset for one radio, and zero for a radio with an aerial
+    /// straight into it.
+    pub fn offset_for(&self, device: Option<&str>) -> f64 {
+        device.and_then(|d| self.offset.get(d)).copied().unwrap_or(0.0)
     }
 
     /// `$XDG_CONFIG_HOME/waveshark/session`, or `~/.config` when unset.
@@ -350,6 +366,7 @@ impl Session {
         let mut streams = Vec::new();
         let mut map_layers = Vec::new();
         let mut ppm: BTreeMap<String, f64> = BTreeMap::new();
+        let mut offset: BTreeMap<String, f64> = BTreeMap::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -372,6 +389,10 @@ impl Session {
             } else if let Some(name) = k.strip_prefix("ppm.") {
                 if let Ok(v) = v.parse() {
                     ppm.insert(name.to_string(), v);
+                }
+            } else if let Some(name) = k.strip_prefix("offset.") {
+                if let Ok(v) = v.parse() {
+                    offset.insert(name.to_string(), v);
                 }
             } else if k == "feed" {
                 if let Some(f) = parse_feed(v) {
@@ -412,6 +433,7 @@ impl Session {
             toggles,
             choices,
             ppm,
+            offset,
             tx_gain_db: f("tx_gain_db", d.tx_gain_db as f64) as f32,
             location: match (kv.get("lat"), kv.get("lon")) {
                 (Some(a), Some(o)) => a.parse().ok().zip(o.parse().ok()),
@@ -492,6 +514,9 @@ impl Session {
         s.push_str(&format!("tx_gain_db = {}\n", self.tx_gain_db));
         for (device, v) in &self.ppm {
             s.push_str(&format!("ppm.{device} = {v}\n"));
+        }
+        for (device, v) in &self.offset {
+            s.push_str(&format!("offset.{device} = {v:.0}\n"));
         }
         if let Some((lat, lon)) = self.location {
             s.push_str(&format!("lat = {lat}\nlon = {lon}\n"));
@@ -636,6 +661,7 @@ mod tests {
                 ("RTL2838 #00000001".into(), -3.5),
                 ("HackRF One 78d063dc".into(), 5.25),
             ]),
+            offset: BTreeMap::from([("HackRF One 78d063dc".into(), 9_750_000_000.0)]),
             tx_gain_db: 12.0,
             location: Some((53.6369, -6.6528)),
             language: "en".into(),
@@ -713,7 +739,12 @@ mod tests {
 
     #[test]
     fn a_correction_belongs_to_one_radio_and_not_to_the_others() {
-        let s = Session::parse("ppm.RTL2838 #1 = -3.5\nppm.HackRF One 78d063dc = 5.25\n");
+        let s = Session::parse(
+            "ppm.RTL2838 #1 = -3.5\nppm.HackRF One 78d063dc = 5.25\noffset.HackRF One 78d063dc = 9750000000\noffset.Ham It Up = -125000000\n",
+        );
+        assert_eq!(s.offset_for(Some("HackRF One 78d063dc")), 9_750_000_000.0);
+        assert_eq!(s.offset_for(Some("Ham It Up")), -125_000_000.0, "an upconverter reads below");
+        assert_eq!(s.offset_for(Some("RTL2838 #1")), 0.0, "an aerial needs no offset");
         assert_eq!(s.ppm_for(Some("RTL2838 #1")), -3.5);
         assert_eq!(s.ppm_for(Some("HackRF One 78d063dc")), 5.25);
         // A radio nobody has calibrated is not off by somebody else's crystal.

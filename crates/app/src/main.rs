@@ -82,7 +82,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         println!("no radio found");
         return;
     };
-    let r = radio::Radio::start(entry, Hz((mhz * 1e6) as u64), Sps(2_304_000), 2048, || {});
+    let r = radio::Radio::start(entry, Hz((mhz * 1e6) as u64), Sps(2_304_000), 0.0, 2048, || {});
     r.send(radio::Cmd::Channels(vec![radio::ChannelSpec {
         id: 1,
         label: String::new(),
@@ -144,7 +144,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
         return;
     };
     println!("using {}", entry.label);
-    let r = radio::Radio::start(entry, Hz((mhz * 1e6) as u64), Sps(rate as u64), 2048, || {});
+    let r = radio::Radio::start(entry, Hz((mhz * 1e6) as u64), Sps(rate as u64), 0.0, 2048, || {});
     r.send(radio::Cmd::DcBlock(dc_on));
     println!("dc block: {}", if dc_on { "on" } else { "off" });
     if listen {
@@ -586,7 +586,7 @@ fn bench_pan() {
         return;
     };
     println!("using {}", entry.label);
-    let r = radio::Radio::start(entry, Hz(95_800_000), Sps(2_304_000), 2048, || {});
+    let r = radio::Radio::start(entry, Hz(95_800_000), Sps(2_304_000), 0.0, 2048, || {});
 
     let count = |label: &str, drag: bool| {
         // Settle, then count for three seconds.
@@ -715,8 +715,14 @@ fn scan(
         return;
     };
     let rate = span_khz * 1e3;
-    let r =
-        radio::Radio::start(entry.clone(), Hz((mhz * 1e6) as u64), Sps(rate as u64), 1024, || {});
+    let r = radio::Radio::start(
+        entry.clone(),
+        Hz((mhz * 1e6) as u64),
+        Sps(rate as u64),
+        0.0,
+        1024,
+        || {},
+    );
     r.send(radio::Cmd::DcBlock(dc_on));
     r.send(radio::Cmd::Decode(true));
     if let Some((lat, lon)) = location {

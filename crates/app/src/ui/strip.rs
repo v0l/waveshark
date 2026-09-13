@@ -235,7 +235,7 @@ impl Strip<'_> {
         keyed: Option<u64>,
         mic: f32,
         mic_clipped: bool,
-        keying: &mut Option<u64>,
+        keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
     ) -> bool {
         let mut changed = false;
@@ -394,7 +394,13 @@ impl Strip<'_> {
                 ink,
             );
         }
-        key.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+        let mine = keying.at == Some(ch.id);
+        let latched_here = mine && keying.latched;
+        let hint = match latched_here {
+            true => "Click to stop transmitting",
+            false => "Hold to transmit, or right click to leave it keyed",
+        };
+        key.clone().on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hint);
         // Held from the pointer rather than from the widget. A key that asks
         // the button whether it is still pressed is a key that lets go
         // whenever the panel relaids itself underneath it: on WFM the RDS
@@ -402,13 +408,23 @@ impl Strip<'_> {
         // below it moves, and the carrier dropped mid-word. What is held is
         // the mouse button, and it stays held until it is let go.
         let down = ui.input(|i| i.pointer.primary_down());
-        if keying.is_none() && key.is_pointer_button_down_on() {
-            *keying = Some(ch.id);
-            cmds.push(Cmd::Key(Some(ch.id)));
-        }
-        if *keying == Some(ch.id) && !down {
-            *keying = None;
+        // Right click latches, because a net, a long over or a tuning carrier
+        // is not something to hold a mouse button through. A left click while
+        // it is latched lets it go, so the same key both starts and stops it.
+        let latch = key.secondary_clicked();
+        let hold = !mine && down && key.is_pointer_button_down_on();
+        let stop = (mine && latch) || (mine && keying.latched && key.clicked());
+        if stop || (mine && !keying.latched && !down) {
+            *keying = Default::default();
             cmds.push(Cmd::Key(None));
+        } else if latch || hold {
+            // The radio ignores a key on a radio that is already keyed, so a
+            // latch moving to another channel lets the first one go first.
+            if keying.at.is_some() {
+                cmds.push(Cmd::Key(None));
+            }
+            *keying = crate::ui::state::Keying { at: Some(ch.id), latched: latch };
+            cmds.push(Cmd::Key(Some(ch.id)));
         }
         changed
     }

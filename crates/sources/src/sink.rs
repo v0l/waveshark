@@ -31,6 +31,9 @@ enum Target {
 pub struct FileSink {
     target: Target,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     format: SampleFormat,
@@ -132,7 +135,16 @@ impl FileSink {
                 channels: 1,
             }),
         };
-        Self { target, info, center, rate, format, gain: 0.0, written: Arc::new(AtomicU64::new(0)) }
+        Self {
+            target,
+            info,
+            center,
+            rate,
+            format,
+            gain: 0.0,
+            written: Arc::new(AtomicU64::new(0)),
+            tuning: Default::default(),
+        }
     }
 
     /// Complex samples written so far.
@@ -142,6 +154,14 @@ impl FileSink {
 }
 
 impl Device for FileSink {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }

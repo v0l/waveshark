@@ -141,6 +141,9 @@ fn tuner_ranges(t: ffi::rtlsdr_tuner) -> Vec<TunerRange> {
 pub struct RtlSdr {
     handle: Arc<Handle>,
     info: DeviceInfo,
+    /// The converter on the cable and the reference correction, which the
+    /// `Device` trait does the arithmetic with.
+    tuning: common::Tuning,
     center: Hz,
     rate: Sps,
     /// Supported tuner gains in dB, ascending, as reported by the tuner driver.
@@ -233,6 +236,7 @@ impl RtlSdr {
         };
 
         let mut me = Self {
+            tuning: Default::default(),
             handle,
             info,
             center: Hz::mhz(100),
@@ -319,6 +323,14 @@ impl RtlSdr {
 }
 
 impl Device for RtlSdr {
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }
