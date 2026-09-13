@@ -19,6 +19,7 @@ pub mod decode_nodes;
 pub mod dmr_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
+pub mod dvbt_nodes;
 pub mod elrs_nodes;
 pub mod feed_nodes;
 pub mod filter_nodes;
@@ -171,6 +172,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
+    (dvbt_nodes::DESC, dvbt_nodes::build),
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),

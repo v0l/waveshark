@@ -31,6 +31,8 @@ the code is in the commit log.
 - Interlogix, GE and UTC security sensors on 319.5 MHz, with the ELK-319DWM
   and Alula RE101 modules.
 - A bias tee switch for the HackRF, to power a mast head amplifier.
+- DVB-T television multiplexes on the UHF and band III channels: the
+  transmission parameters, the transport stream, and the services on it.
 
 ### Changed
 
