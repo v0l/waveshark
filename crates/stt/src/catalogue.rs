@@ -390,13 +390,19 @@ pub fn default_model_in(root: &std::path::Path) -> String {
 }
 
 /// The models on disc under a root, by id, whether or not they are in the
-/// list: a directory holding a `config.json` is a model somebody put there.
+/// list: a directory holding a whole set of files is a model somebody put
+/// there.
+///
+/// Whole, not merely started. A fetch that stopped after `config.json` leaves
+/// a directory that looks like a model and loads as nothing, and counting it
+/// meant the receiver chose it, failed to load it, and transcribed silence
+/// without ever saying why.
 pub fn installed(root: &std::path::Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("config.json").exists())
+        .filter(|p| crate::Files::in_dir(p).is_ok())
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .map(|n| if n == "whisper" { DEFAULT_MODEL.to_string() } else { n })
         .collect();
