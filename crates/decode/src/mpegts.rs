@@ -249,6 +249,10 @@ pub struct Mux {
     counters: HashMap<u16, u8>,
     /// PIDs that carry a programme map, so a packet on one is read.
     maps: HashMap<u16, u16>,
+    /// The elementary streams somebody asked to be put back together, and
+    /// what has been gathered of each so far.
+    following: HashMap<u16, Assembly>,
+    ready: Vec<Pes>,
 }
 
 impl Mux {
@@ -264,6 +268,22 @@ impl Mux {
     /// there is any point offering to a viewer.
     pub fn watchable(&self) -> impl Iterator<Item = &Service> {
         self.services.iter().filter(|s| s.name.is_some() && s.video().is_some())
+    }
+
+    /// Reassemble this packet identifier's elementary stream. Nothing is
+    /// gathered for a PID nobody asked for: a multiplex is twenty megabits a
+    /// second and all but one service of it is somebody else's programme.
+    pub fn follow(&mut self, pid: u16) {
+        self.following.entry(pid).or_default();
+    }
+
+    pub fn unfollow(&mut self, pid: u16) {
+        self.following.remove(&pid);
+    }
+
+    /// The PES packets completed since this was last called.
+    pub fn take_pes(&mut self) -> Vec<Pes> {
+        std::mem::take(&mut self.ready)
     }
 
     /// Read one transport packet.
@@ -283,6 +303,11 @@ impl Mux {
         }
         if h.payload.is_some() {
             self.counters.insert(h.pid, h.counter);
+        }
+        if let (Some(at), Some(a)) = (h.payload, self.following.get_mut(&h.pid)) {
+            if let Some(pes) = a.push(h.pid, &packet[at..], h.start) {
+                self.ready.push(pes);
+            }
         }
         let table = h.pid == PID_PAT
             || h.pid == PID_SDT
@@ -442,6 +467,111 @@ impl Mux {
             at += 6 + len;
         }
     }
+}
+
+/// One PES packet: a picture, or a run of coded audio, as the transport
+/// stream carried it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pes {
+    pub pid: u16,
+    /// Which elementary stream of its kind this is. 0xE0 to 0xEF is video,
+    /// 0xC0 to 0xDF is MPEG audio, 0xBD is the private stream AC-3 rides on.
+    pub stream_id: u8,
+    /// When it is to be shown, on the 90 kHz clock, where it says.
+    pub pts: Option<u64>,
+    /// When it is to be decoded, which differs from the above wherever
+    /// pictures are coded out of order.
+    pub dts: Option<u64>,
+    pub data: Vec<u8>,
+}
+
+impl Pes {
+    pub fn is_video(&self) -> bool {
+        (0xE0..=0xEF).contains(&self.stream_id)
+    }
+
+    pub fn is_audio(&self) -> bool {
+        (0xC0..=0xDF).contains(&self.stream_id) || self.stream_id == 0xBD
+    }
+
+    /// The presentation time in seconds, on the stream's own clock. Not a
+    /// wall clock: it wraps every 26 hours and starts wherever the encoder
+    /// started.
+    pub fn seconds(&self) -> Option<f64> {
+        self.pts.map(|t| t as f64 / 90_000.0)
+    }
+}
+
+/// One elementary stream being put back together.
+#[derive(Clone, Debug, Default)]
+struct Assembly {
+    buf: Vec<u8>,
+    /// What the header said the packet is, which is only known once its start
+    /// has arrived.
+    started: bool,
+}
+
+impl Assembly {
+    /// Feed one packet's payload. Returns the packet that just finished,
+    /// which is the one before this: a video PES gives its length as zero and
+    /// ends where the next one starts, so the only thing that says a picture
+    /// is whole is the picture after it.
+    fn push(&mut self, pid: u16, payload: &[u8], start: bool) -> Option<Pes> {
+        if !start {
+            if self.started {
+                self.buf.extend_from_slice(payload);
+            }
+            return None;
+        }
+        let done = self.take(pid);
+        self.started = true;
+        self.buf.clear();
+        self.buf.extend_from_slice(payload);
+        done
+    }
+
+    /// Parse what has been gathered, if it is a PES packet at all.
+    fn take(&mut self, pid: u16) -> Option<Pes> {
+        let buf = std::mem::take(&mut self.buf);
+        if !self.started || buf.len() < 9 || buf[..3] != [0x00, 0x00, 0x01] {
+            return None;
+        }
+        let stream_id = buf[3];
+        // The length may be zero, which a video stream is allowed to say and
+        // means "to the end of me", and the end is where the next one starts.
+        let stated = ((buf[4] as usize) << 8) | buf[5] as usize;
+        let body = match stated {
+            0 => &buf[6..],
+            n => buf.get(6..6 + n)?,
+        };
+        // Padding and the stream map carry no header of their own.
+        if matches!(stream_id, 0xBE | 0xBF) {
+            return None;
+        }
+        let flags = *body.get(1)?;
+        let header_len = *body.get(2)? as usize;
+        let rest = body.get(3 + header_len..)?;
+        let stamps = body.get(3..3 + header_len)?;
+        let (pts, dts) = match flags >> 6 {
+            0b10 => (timestamp(stamps.get(..5)?), None),
+            0b11 => (timestamp(stamps.get(..5)?), timestamp(stamps.get(5..10)?)),
+            _ => (None, None),
+        };
+        Some(Pes { pid, stream_id, pts, dts, data: rest.to_vec() })
+    }
+}
+
+/// A 33 bit timestamp out of the five bytes that carry it, marker bits and
+/// all. The clock is 90 kHz, and the markers are there so a decoder cannot
+/// read one out of the middle of something else.
+fn timestamp(raw: &[u8]) -> Option<u64> {
+    if raw.len() < 5 || raw[0] & 0x01 == 0 || raw[2] & 0x01 == 0 || raw[4] & 0x01 == 0 {
+        return None;
+    }
+    let hi = ((raw[0] >> 1) & 0x07) as u64;
+    let mid = ((raw[1] as u64) << 7) | ((raw[2] >> 1) as u64);
+    let lo = ((raw[3] as u64) << 7) | ((raw[4] >> 1) as u64);
+    Some((hi << 30) | (mid << 15) | lo)
 }
 
 /// Walk a descriptor loop, yielding each tag and its body.
@@ -621,6 +751,80 @@ mod tests {
             mux.service(223).and_then(|s| s.name.clone()).as_deref(),
             Some("Service number 223")
         );
+    }
+
+    /// Carry a PES packet on a PID, split across as many transport packets
+    /// as it takes.
+    fn pes_packets(
+        pid: u16,
+        stream_id: u8,
+        pts: u64,
+        body: &[u8],
+        counter: &mut u8,
+    ) -> Vec<[u8; PACKET]> {
+        let mut pes = vec![0x00, 0x00, 0x01, stream_id, 0, 0, 0x80, 0x80, 5];
+        let t = |sh: u32| (((pts >> sh) & 0x7F) as u8) << 1 | 1;
+        pes.push(0x20 | ((((pts >> 30) & 0x07) as u8) << 1) | 1);
+        pes.push((((pts >> 22) & 0xFF) as u8).rotate_left(0));
+        pes.push(t(15));
+        pes.push((((pts >> 7) & 0xFF) as u8).rotate_left(0));
+        pes.push(t(0));
+        pes.extend_from_slice(body);
+        let len = pes.len() - 6;
+        pes[4] = (len >> 8) as u8;
+        pes[5] = len as u8;
+        let mut out = Vec::new();
+        let mut first = true;
+        for chunk in pes.chunks(PACKET - 4) {
+            let mut p = [0xFFu8; PACKET];
+            p[0] = SYNC;
+            p[1] = ((pid >> 8) as u8 & 0x1F) | if first { 0x40 } else { 0 };
+            p[2] = pid as u8;
+            p[3] = 0x10 | (*counter & 0x0F);
+            *counter = counter.wrapping_add(1);
+            p[4..4 + chunk.len()].copy_from_slice(chunk);
+            out.push(p);
+            first = false;
+        }
+        out
+    }
+
+    /// An elementary stream is put back together only where it was asked
+    /// for, and a packet comes out whole with the time it is to be shown at.
+    /// A PES ends where the next one starts, so the last picture of a
+    /// recording is still inside the assembler when the samples run out.
+    #[test]
+    fn an_elementary_stream_is_reassembled_where_it_is_followed() {
+        let mut mux = Mux::new();
+        let mut counter = 0u8;
+        let bodies: Vec<Vec<u8>> =
+            (0..3u8).map(|n| (0..400u16).map(|i| (i as u8) ^ n).collect()).collect();
+
+        // Nothing is gathered until the PID is followed.
+        for p in pes_packets(0x31, 0xE0, 0, &bodies[0], &mut counter) {
+            mux.push(&p);
+        }
+        assert!(mux.take_pes().is_empty(), "a PID nobody asked for is not gathered");
+
+        mux.follow(0x31);
+        let mut got = Vec::new();
+        for (n, body) in bodies.iter().enumerate() {
+            for p in pes_packets(0x31, 0xE0, 90_000 * n as u64, body, &mut counter) {
+                mux.push(&p);
+            }
+            got.extend(mux.take_pes());
+        }
+        // Three went in and two came out: the third is still open, because
+        // what ends a PES packet is the one after it.
+        assert_eq!(got.len(), 2);
+        for (n, pes) in got.iter().enumerate() {
+            assert_eq!(pes.pid, 0x31);
+            assert_eq!(pes.stream_id, 0xE0);
+            assert!(pes.is_video() && !pes.is_audio());
+            assert_eq!(pes.pts, Some(90_000 * n as u64), "packet {n}");
+            assert_eq!(pes.seconds(), Some(n as f64));
+            assert_eq!(pes.data, bodies[n], "packet {n} came back changed");
+        }
     }
 
     /// A section whose check fails is not a table, and a packet lost on a PID

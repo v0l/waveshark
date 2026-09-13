@@ -44,6 +44,7 @@ pub mod m17;
 pub mod meshcore;
 pub mod meshtastic;
 pub mod morse;
+pub mod mpeg2;
 pub mod mpegts;
 pub mod nrf24;
 pub mod odid;
