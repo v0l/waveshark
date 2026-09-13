@@ -4831,6 +4831,12 @@ pub(crate) mod tests {
         }];
         let since = std::time::Instant::now();
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        // Transcription is off in the graph the receiver draws, because
+        // writing down what people said is not something to start doing
+        // because nobody said otherwise. Switching it on is what an operator
+        // does, and is what this test is about.
+        let id = rx.node_of_stage(crate::chain::derived::TRANSCRIBE).expect("a transcriber");
+        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
         // The receiver's own transcript, so what this test reads is what
         // this receiver heard.
         let log = rx.transcript().clone();
@@ -4867,18 +4873,19 @@ pub(crate) mod tests {
         assert_eq!(key.channel_hz, CHANNEL_HZ as u64, "read on {key}");
     }
 
-    /// A channel marked as voice is heard through its own fader and listed
-    /// as a call off the audio bus, and nothing of it touches the packet bus.
+    /// A channel marked as voice is heard through its own fader, and nothing
+    /// of it reaches the packet bus or the call list.
     ///
-    /// The bus is the first stop for every demodulator's audio, and the one
-    /// place that knows who is talking now. An analogue over used to be
-    /// wrapped in an empty packet so the call list, which read only the
-    /// packet bus, would see it: that put a row saying nothing into the
-    /// packet log for every transmission, made the channel inaudible until
-    /// something subscribed to it, and was wrong in principle, since there
-    /// is no packet in analogue speech.
+    /// An analogue over used to be wrapped in an empty packet so the call
+    /// list, which read only the packet bus, would see it: that put a row
+    /// saying nothing into the packet log for every transmission, made the
+    /// channel inaudible until something subscribed to it, and was wrong in
+    /// principle, since there is no packet in analogue speech. It is not a
+    /// call either, because a mode and a frequency do not say whether what is
+    /// coming out is a conversation, a repeater idling or an airband loop.
+    /// What it is is audio on a strip, and what reads it is the tap.
     #[test]
-    fn a_voice_channel_is_heard_and_listed_off_the_audio_bus() {
+    fn a_voice_channel_is_heard_and_is_not_a_call() {
         let Some(buf) = pmr446_fixture() else {
             eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
             return;
@@ -4933,22 +4940,11 @@ pub(crate) mod tests {
         let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
         assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
 
-        // Listed, once, as one over of about four seconds on the channel it
-        // was heard on, and the row is the same conversation the transcriber
-        // keys its lines by.
-        let over: Vec<&crate::audiobus::LiveCall> = heard.iter().filter(|c| c.over).collect();
-        assert_eq!(over.len(), 1, "{heard:?}");
-        assert_eq!(over[0].to, "PMR1");
-        assert_eq!(over[0].system, crate::audiobus::ANALOGUE);
-        assert!((3.5..4.5).contains(&over[0].seconds), "the over ran {:.2} s", over[0].seconds);
-        assert_eq!(over[0].key().to_string(), "Audio:446049100:PMR1:");
-        let now = std::time::Instant::now();
-        let rows = calls.active(now);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].to, "PMR1");
-        assert_eq!(rows[0].overs, 1);
-        assert!((3.5..4.5).contains(&rows[0].seconds), "the row says {:.2} s", rows[0].seconds);
-        assert_eq!(rows[0].key(), over[0].key());
+        // Not listed: the strip is where a tuned channel is watched and
+        // heard, and the call list is for a front end that decoded a call and
+        // can say who was on it.
+        assert!(heard.is_empty(), "a tuned channel became a call: {heard:?}");
+        assert!(calls.active(std::time::Instant::now()).is_empty());
     }
 
     fn pmr446_fixture() -> Option<common::IqBuf> {

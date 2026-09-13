@@ -1530,7 +1530,7 @@ impl Receiver {
 
     /// The node a stage of the patch became, for a setting applied without a
     /// rebuild.
-    fn node_of_stage(&self, stage: u64) -> Option<NodeId> {
+    pub(crate) fn node_of_stage(&self, stage: u64) -> Option<NodeId> {
         self.graph.by_tag(stage)
     }
 

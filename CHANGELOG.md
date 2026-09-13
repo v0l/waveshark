@@ -42,6 +42,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- A half-fetched speech model was picked and read nothing, with no sign of why.
 - The Transcribe switch turning itself back off whenever a channel changed.
 - Keying a second transmit channel put the first channel's source on air.
 - Robot 36 and 72 colours: cyan came out green.
