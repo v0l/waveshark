@@ -269,16 +269,21 @@ fn align_sync(
     mode: &Mode,
     meter: &mut ToneMeter,
     want_start: bool,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, bool)> {
     let rate = meter.rate();
     let window = (mode.sync_pulse * 1.4 * rate).round() as usize;
     if from + window >= audio.len() {
         return None;
     }
-    let stop = audio.len() - window;
+    // A sync comes once a line, so there is no reason to look further than
+    // one: past that the hunt is walking through the picture, and in silence
+    // it walked to the end of the buffer and left the decoder stuck there.
+    let stop = (from + (mode.line_time * rate).round() as usize).min(audio.len() - window);
     let mut at = from;
+    let mut found = false;
     while at < stop {
         if meter.peak_hz(&audio[at..at + window]) > 1350.0 {
+            found = true;
             break;
         }
         at += 1;
@@ -288,10 +293,10 @@ fn align_sync(
         true => end.saturating_sub((mode.sync_pulse * rate).round() as usize),
         false => end,
     };
-    // How far it had to walk, which is the only thing that tells a line that
-    // arrived from one the decoder invented: in noise the hunt runs until
-    // something crosses the threshold, and something always does.
-    Some((start, at - from))
+    // How far it had to walk, and whether it found anything at all. In noise
+    // something crosses the threshold eventually, so how far away it was is
+    // what tells a line that arrived from one the decoder invented.
+    Some((start, at - from, found))
 }
 
 /// Decode the first picture in `audio`, or `None` where there is no header.
@@ -348,20 +353,18 @@ fn read_line(
                 *seq += (mode.line_time * rate).round() as u64;
             }
             let Some(from) = here(*seq) else { return Read::Hungry };
-            let Some((found, walked)) = align_sync(audio, from, mode, meter, true) else {
+            let Some((at, walked, found)) = align_sync(audio, from, mode, meter, true) else {
                 return Read::Hungry;
             };
-            // A sync found where one was not due is something in the noise,
-            // not this line: keep the clock's own answer, read the line at
-            // the timing it predicts, and let the caller decide what a run of
-            // unsynced lines means. Following it instead walked the decoder
-            // off the end of the buffer and left it reading silence for
-            // ever.
-            if walked <= slack {
-                *seq = base + found as u64;
-            } else {
-                synced = false;
+            // Follow the sync wherever it is inside the line, because that is
+            // what keeps a picture straight: transmitter and receiver clocks
+            // differ, and a line that started late is still this line. What
+            // the distance decides is only whether to believe there was a
+            // transmission here at all, which a run of unsynced lines answers.
+            if found {
+                *seq = base + at as u64;
             }
+            synced &= found && walked <= slack;
         }
         let half = mode.half_scan && chan > 0;
         let pixel_time = if half { mode.half_pixel_time() } else { mode.pixel_time() };
@@ -570,7 +573,7 @@ impl Receiver {
                     // Scottie opens with a sync pulse before the picture.
                     let from = (seq - self.base) as usize;
                     match align_sync(&self.audio, from, mode, &mut self.meter, false) {
-                        Some((at, _)) => seq = self.base + at as u64,
+                        Some((at, _, _)) => seq = self.base + at as u64,
                         None => return,
                     }
                 }
