@@ -370,7 +370,6 @@ fn read_line(
         let pixel_time = if half { mode.half_pixel_time() } else { mode.pixel_time() };
         let scan_time = if half { mode.half_scan_time } else { mode.scan_time };
         let half_window = pixel_time * mode.window_factor / 2.0;
-        let window = (half_window * 2.0 * rate).round() as usize;
         // The window is several pixels wide, so at the ends of a scan it
         // reaches past it. Where what follows is a separator pulse that is
         // where the smearing stops, but a Robot mode's colour difference
