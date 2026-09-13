@@ -208,6 +208,20 @@ pub fn crc16(data: &[u8], poly: u16, init: u16) -> u16 {
     crc
 }
 
+/// MSB-first CRC-32, `poly` in its normal representation. 0x04C11DB7 with an
+/// all-ones start and no final inversion is the check every MPEG and DVB
+/// table carries, and a section including its own check yields zero.
+pub fn crc32(data: &[u8], poly: u32, init: u32) -> u32 {
+    let mut crc = init;
+    for &b in data {
+        crc ^= (b as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ poly } else { crc << 1 };
+        }
+    }
+    crc
+}
+
 /// LSB-first CRC-16, `poly` in its reflected representation: 0x8408 is the
 /// CCITT polynomial as X.25, ARINC 618 and a dozen packet radios use it.
 pub fn crc16le(data: &[u8], poly: u16, init: u16) -> u16 {

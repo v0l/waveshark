@@ -50,6 +50,19 @@ impl Rational {
         Some(Self::with_ratio(l, m))
     }
 
+    /// The closest resampler to `rate_in` into `rate_out` with a denominator
+    /// no larger than `max_denominator`, which always exists.
+    ///
+    /// For a rate that is not a whole number of hertz. DVB-T runs at 64/7
+    /// megasamples a second, so against a radio at 20 MS/s the ratio is 16/35
+    /// exactly and against an awkward one it is a continued fraction a few
+    /// terms deep. The error left over is parts per billion, which a
+    /// decoder's own timing recovery carries the way it carries a crystal.
+    pub fn approx(rate_in: f64, rate_out: f64, max_denominator: usize) -> Self {
+        let (l, m) = approximate(rate_out / rate_in, max_denominator);
+        Self::with_ratio(l, m)
+    }
+
     /// Interpolate by `l` and decimate by `m`, whatever those mean in rates.
     pub fn with_ratio(l: usize, m: usize) -> Self {
         assert!(l >= 1 && m >= 1);
@@ -182,6 +195,30 @@ pub fn stage(
     None
 }
 
+/// The best rational approximation to `x` with a denominator no larger than
+/// `max_denominator`, by continued fractions.
+fn approximate(x: f64, max_denominator: usize) -> (usize, usize) {
+    assert!(x > 0.0 && x.is_finite(), "a ratio is a positive number");
+    let (mut p0, mut q0, mut p1, mut q1) = (0usize, 1usize, 1usize, 0usize);
+    let mut v = x;
+    loop {
+        let a = v.floor() as usize;
+        let (p, q) = (a * p1 + p0, a * q1 + q0);
+        if q > max_denominator {
+            break;
+        }
+        (p0, q0, p1, q1) = (p1, q1, p, q);
+        let rest = v - a as f64;
+        if rest < 1e-12 {
+            break;
+        }
+        v = 1.0 / rest;
+    }
+    // The first term of a ratio below one is zero, which is a convergent of
+    // 0/1 and not a resampler; the next term is the first usable one.
+    (p1.max(1), q1.max(1))
+}
+
 /// `a / b` in lowest terms, or `None` when the denominator is over the bound.
 fn ratio(a: f64, b: f64, max_denominator: usize) -> Option<(usize, usize)> {
     // Both rates are whole numbers of hertz in every case this receiver has,
@@ -205,6 +242,27 @@ fn gcd(a: u64, b: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::Rational;
+
+    /// DVB-T runs at 64/7 megasamples a second, which no radio rate divides
+    /// into and which is not a whole number of hertz. Against the rates the
+    /// radios here run at, the ratio is exact and small; the approximation
+    /// only has to work at all, and it has to land within a part per million
+    /// so the decoder's own timing carries what is left.
+    #[test]
+    fn an_irrational_rate_is_approximated_closely() {
+        let want = 64_000_000.0 / 7.0;
+        for rate in [10_000_000.0, 12_000_000.0, 20_000_000.0, 30_720_000.0, 61_440_000.0] {
+            let r = Rational::approx(rate, want, 4096);
+            let got = rate * r.ratio();
+            let ppm = (got - want) / want * 1e6;
+            assert!(ppm.abs() < 1.0, "{rate} lands {ppm} ppm out");
+        }
+        // 20 MS/s is 35/16 of the DVB-T rate, so the approximation is the
+        // exact ratio rather than anything near it.
+        assert_eq!(Rational::approx(20_000_000.0, want, 4096).ratio(), 16.0 / 35.0);
+    }
+
     /// Every rate a radio in this receiver runs at has to reach the rates the
     /// decoders want. The ones that bit: 2.048 MS/s to 44.1 kHz, which is
     /// what a HackRF hands an SSTV channel.

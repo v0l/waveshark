@@ -734,3 +734,45 @@ so the check is against a known input rather than against this decoder.
 Synthetic, so it says nothing about reception. There is no off-air recording
 of this mode in the corpus.
 """
+
+[[capture]]
+name = "dvbt_gr_dtv_429M_9142857.cs8"
+sha256 = "144a768149fc8c754ba87416b41c53550e23e0c0fac2f419ab5e470a039dc16e"
+url = "https://nostr.download/144a768149fc8c754ba87416b41c53550e23e0c0fac2f419ab5e470a039dc16e.xz"
+compression = "xz"
+center_hz = 429_000_000
+rate_sps = 9_142_857
+format = "cs8"
+description = """
+A DVB-T multiplex in 8K mode: 16-QAM, code rate 2/3, guard interval 1/32, at
+the standard's own 64/7 megasamples a second.
+
+This is the test vector Ron Economos published at https://www.w6rz.net/adv16.cfile
+for gnuradio's own DVB-T receiver, which its `gr-dtv/examples/dvbt_rx_8k.grc`
+flow graph reads. It earns its place by coming from somebody else's modulator:
+a loopback against our own transmitter proves the two halves agree with each
+other and nothing about whether either agrees with the standard, and this one
+carries a transport stream a different implementation produced. The multiplex
+is one service, number 1, carrying MPEG-2 video on PID 49 and AC-3 audio on
+PID 52, with no service description table, so it has no name.
+
+Cut from the original 934 MB file: 7,000,000 samples from 1,000,000 samples in,
+which is three super frames and the margin to lock on. Quantised from the
+original 32-bit floats to 8 bits, scaled so the largest sample reaches 127,
+which clips nothing and costs no packets: the whole cut reads with no
+Reed-Solomon corrections at either depth.
+"""
+
+[capture.expect]
+mode = "8k"
+guard = "1/32"
+constellation = "16-QAM"
+code_rate = "2/3"
+cell_id = 0
+packets = 6641
+uncorrectable = 0
+corrected = 0
+service_id = 1
+map_pid = 48
+video_pid = 49
+audio_pid = 52
