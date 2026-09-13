@@ -14,6 +14,7 @@ the code is in the commit log.
 - SSTV pictures on the video pane: Martin 1 and 2, Scottie 1, 2 and DX, Robot
   36 and 72, on 144.500 or any chain with audio.
 - Every still picture is saved to `~/.local/share/waveshark/pictures`.
+- Right click the transmit key to leave it keyed; left click stops it.
 - A microphone input stage, so a decoder can read audio from the machine
   rather than off the air.
 - VDL Mode 2, the aircraft datalink most European traffic uses, on 136.725 to
@@ -29,6 +30,7 @@ the code is in the commit log.
   Wind is not read yet.
 - Interlogix, GE and UTC security sensors on 319.5 MHz, with the ELK-319DWM
   and Alula RE101 modules.
+- A bias tee switch for the HackRF, to power a mast head amplifier.
 
 ### Changed
 
@@ -36,6 +38,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- The Transcribe switch turning itself back off whenever a channel changed.
+- Keying a second transmit channel put the first channel's source on air.
 - Robot 36 and 72 colours: cyan came out green.
 - A green stripe down the right of a Robot picture.
 - An SSTV transmission that stopped part way being filled with noise.
