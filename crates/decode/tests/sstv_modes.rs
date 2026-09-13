@@ -45,6 +45,35 @@ const MODES: [(&str, &str, usize); 5] = [
     ("sstv_robot36_bars_44100.wav", "Robot 36", 239),
 ];
 
+fn audio_of(name: &str) -> Option<(Vec<f32>, f64)> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name);
+    if !p.exists() {
+        eprintln!("skipping: {name} absent, run testdata/fetch.sh to enable");
+        return None;
+    }
+    let raw = std::fs::read(&p).ok()?;
+    let rate = u32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]) as f64;
+    let audio = raw[44..]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .collect();
+    Some((audio, rate))
+}
+
+/// The same transmission from a transmitter whose clock runs at `factor`
+/// times the receiver's, by reading between the samples.
+fn at_clock(audio: &[f32], factor: f64) -> Vec<f32> {
+    let n = (audio.len() as f64 / factor) as usize;
+    (0..n)
+        .map(|i| {
+            let x = i as f64 * factor;
+            let (a, f) = (x.floor() as usize, (x - x.floor()) as f32);
+            let (lo, hi) = (audio[a], *audio.get(a + 1).unwrap_or(&0.0));
+            lo + (hi - lo) * f
+        })
+        .collect()
+}
+
 fn picture(name: &str) -> Option<sstv::Picture> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name);
     if !p.exists() {
@@ -118,6 +147,38 @@ fn every_mode_reads_the_ramp_as_a_ramp() {
         );
         for (at, px) in [("left", left), ("middle", mid), ("right", right)] {
             assert!((px.2 as i32 - 128).abs() < 60, "{mode}: blue is constant, {at} read {}", px.2);
+        }
+    }
+}
+
+/// A transmitter whose clock is not the receiver's.
+///
+/// Every line carries its own sync pulse and the decoder realigns on each, so
+/// half a percent either way should cost a couple of pixels of width and no
+/// shear at all. A picture that slides sideways as it goes down is this
+/// tracking having failed, which is worth being able to rule out: the pulse
+/// hunt looks a pulse and a half behind the clock as well as forwards, since
+/// a transmitter running fast puts the pulse before the clock expects it.
+#[test]
+fn a_clock_that_is_not_ours_does_not_shear_the_picture() {
+    let Some((audio, rate)) = audio_of("sstv_robot36_bars_44100.wav") else { return };
+    for factor in [0.995, 1.005] {
+        let shifted = at_clock(&audio, factor);
+        let p = sstv::decode(&shifted, rate).expect("a picture at a different clock");
+        assert_eq!(p.mode.name, "Robot 36");
+        // The top of the bars and the bottom of them, which is halfway down
+        // the picture: a drift of a pixel a line has had a hundred lines to
+        // add up by then.
+        for y in [20usize, 110] {
+            for (i, (name, _)) in BARS.iter().enumerate() {
+                let x = i * p.width / 7 + p.width / 14;
+                let got = pixel(&p, x, y);
+                assert_eq!(
+                    nearest_bar(got),
+                    i,
+                    "clock {factor}, line {y}: the {name} bar read as {got:?}"
+                );
+            }
         }
     }
 }
