@@ -19,13 +19,14 @@ use crate::protocol::{Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use common::{Result, C32};
 use decode::dvbt::{Outer, OuterTx, TsPacket};
+use decode::mpeg2;
 use decode::mpegts::Mux;
 use dsp::conv;
 use dsp::dvbt::{self, Inner, Mode, Params, Symbol};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
 use pipeline::event::Decoded;
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
@@ -238,6 +239,14 @@ pub struct DvbtNode {
     told: Option<Params>,
     named: Vec<u16>,
     at: f64,
+    /// The video decoder, and which stream it is being fed.
+    video: mpeg2::Decoder,
+    watching: Option<u16>,
+    /// The service an operator asked for, or none to take the first one the
+    /// multiplex describes that has a picture in it.
+    wanted: Option<u16>,
+    pictures: Vec<mpeg2::Picture>,
+    sequence: u64,
 }
 
 impl Default for DvbtNode {
@@ -262,6 +271,92 @@ impl DvbtNode {
             told: None,
             named: Vec::new(),
             at: 0.0,
+            video: mpeg2::Decoder::new(),
+            watching: None,
+            wanted: None,
+            pictures: Vec::new(),
+            sequence: 0,
+        }
+    }
+
+    /// Watch one service by its identifier, or none to take whichever the
+    /// multiplex describes first.
+    pub fn watch(&mut self, service: Option<u16>) {
+        if self.wanted != service {
+            self.wanted = service;
+            self.watching = None;
+            self.video = mpeg2::Decoder::new();
+        }
+    }
+
+    /// The service being watched, and the packet identifier its pictures are
+    /// on, once the tables have named one.
+    pub fn watching(&self) -> Option<u16> {
+        self.watching
+    }
+
+    /// Point the demux at the video of whichever service is wanted, as soon
+    /// as the programme map names it.
+    fn follow_video(&mut self) {
+        if self.watching.is_some() {
+            return;
+        }
+        let service = match self.wanted {
+            Some(id) => self.mux.service(id).cloned(),
+            None => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
+        };
+        let Some(pid) = service.as_ref().and_then(|s| s.video()).map(|v| v.pid) else {
+            return;
+        };
+        self.mux.follow(pid);
+        self.watching = Some(pid);
+    }
+
+    /// Decode whatever picture is still held back, for a recording that has
+    /// run out rather than a transmission that has stopped.
+    ///
+    /// A picture ends where the next one starts, so the last picture of a
+    /// stream is still inside the decoder when the samples run out. On the
+    /// air the next picture is forty milliseconds away and nothing needs
+    /// this; at the end of a capture it is the difference between a picture
+    /// and none.
+    pub fn flush(&mut self, out: &mut Vec<common::VideoFrame>) {
+        let mut pictures = std::mem::take(&mut self.pictures);
+        pictures.clear();
+        self.video.flush(&mut pictures);
+        for p in &pictures {
+            let frame = self.frame(p);
+            out.push(frame);
+        }
+        self.pictures = pictures;
+    }
+
+    /// A decoded picture as the video bus carries it.
+    fn frame(&mut self, p: &mpeg2::Picture) -> common::VideoFrame {
+        self.sequence += 1;
+        let name = self
+            .mux
+            .services
+            .iter()
+            .find(|s| s.video().is_some_and(|v| Some(v.pid) == self.watching))
+            .and_then(|s| s.name.clone());
+        common::VideoFrame {
+            system: DVB,
+            channel_hz: self.channel_hz,
+            label: name,
+            width: p.width,
+            height: p.height,
+            // Broadcast pictures are 16:9 and their samples are square at
+            // this size, so the grid is the shape.
+            aspect: p.width as f32 / p.height as f32,
+            pixels: common::Pixels::Rgb8,
+            samples: std::sync::Arc::new(p.rgb()),
+            lines_seen: p.height,
+            sequence: self.sequence,
+            update: common::Update::Whole,
+            // A picture every half second or so, each superseding the last,
+            // which is what an intra picture out of a broadcast is.
+            cadence: common::Cadence::Live,
         }
     }
 
@@ -333,12 +428,25 @@ impl DvbtNode {
     }
 }
 
-impl Simple for DvbtNode {
+/// What the video bus calls a picture off the television multiplex.
+pub const DVB: &str = "DVB-T";
+
+impl pipeline::node::Node for DvbtNode {
     fn name(&self) -> &str {
         "dvbt"
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    /// The transport stream, and the pictures read out of it.
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("dvbt reads complex baseband"));
         }
@@ -367,11 +475,20 @@ impl Simple for DvbtNode {
         // The stream this puts out is transport packets, at whatever rate the
         // multiplex carries them.
         out.rate = self.rx.params().map(|p| p.bitrate() / 8.0).unwrap_or(RATE_HZ);
-        Ok(out)
+        let mut video = out.with_kind(PortKind::Video);
+        // A picture is not a sampled stream: it carries its own geometry and
+        // arrives when the multiplex sends one.
+        video.rate = 0.0;
+        Ok(vec![out, video])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let Some(iq) = i.as_iq() else { return Ok(()) };
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
         self.at = c.timestamp();
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
@@ -383,12 +500,27 @@ impl Simple for DvbtNode {
         self.packets.clear();
         let mut packets = std::mem::take(&mut self.packets);
         self.rx.push(&self.at_rate, &mut packets);
-        let out = o.bytes_mut();
+        let out = outputs[0].bytes_mut();
         for p in &packets {
             self.mux.push(&p.bytes);
             out.extend_from_slice(&p.bytes);
         }
         self.packets = packets;
+        self.follow_video();
+
+        // The pictures, where the demux is pointed at a service's video.
+        let mut pictures = std::mem::take(&mut self.pictures);
+        pictures.clear();
+        for pes in self.mux.take_pes() {
+            if Some(pes.pid) == self.watching {
+                self.video.push(&pes.data, &mut pictures);
+            }
+        }
+        for p in &pictures {
+            let frame = self.frame(p);
+            outputs[1].video_mut().push(frame);
+        }
+        self.pictures = pictures;
 
         if let Some(params) = self.rx.params() {
             if self.told != Some(params) {
@@ -415,6 +547,8 @@ impl Simple for DvbtNode {
         self.decim.reset();
         self.rx = DvbtReceiver::new();
         self.mux = Mux::new();
+        self.video = mpeg2::Decoder::new();
+        self.watching = None;
         self.told = None;
         self.named.clear();
     }
@@ -456,11 +590,11 @@ impl Protocol for Dvbt {
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} DVB-T", hz / 1e6)
     }
-    /// A transport stream rather than frames: a multiplex is 24 megabits a
-    /// second of packets, which is a stream for a stage above to read and not
-    /// a list for a person.
+    /// A transport stream and the pictures in it. The stream is 24 megabits
+    /// a second of packets, which is for a stage above to read rather than a
+    /// list for a person; the pictures go to the video pane.
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Bytes]
+        &[PortKind::Bytes, PortKind::Video]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -591,6 +725,7 @@ mod node_tests {
     use super::*;
     use common::Hz;
     use dvbt::{CodeRate, Constellation, Guard, Hierarchy};
+    use pipeline::node::Node;
 
     /// Every radio rate the receiver sees reaches 64/7 megasamples a second,
     /// which is not a whole number of hertz and so is approximated.
@@ -599,7 +734,7 @@ mod node_tests {
         for rate in [10_000_000.0, 12_000_000.0, 16_000_000.0, 20_000_000.0, 61_440_000.0] {
             let mut n = DvbtNode::new(DEFAULT_HZ);
             let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(474_000_000)), latency: 0 };
-            n.negotiate(&spec).unwrap_or_else(|e| panic!("{rate} refused: {e}"));
+            n.negotiate(&[spec]).unwrap_or_else(|e| panic!("{rate} refused: {e}"));
             let got = rate / (rate / RATE_HZ).floor() * n.resample.ratio();
             let ppm = (got - RATE_HZ) / RATE_HZ * 1e6;
             assert!(ppm.abs() < 1.0, "{rate} lands {ppm} ppm out");
@@ -612,9 +747,9 @@ mod node_tests {
     fn a_narrow_span_is_refused() {
         let mut n = DvbtNode::new(DEFAULT_HZ);
         let thin = PortSpec { spec: StreamSpec::iq(8_000_000.0, Hz(474_000_000)), latency: 0 };
-        assert!(n.negotiate(&thin).is_err(), "8 MS/s does not hold the channel");
+        assert!(n.negotiate(&[thin]).is_err(), "8 MS/s does not hold the channel");
         let far = PortSpec { spec: StreamSpec::iq(20_000_000.0, Hz(500_000_000)), latency: 0 };
-        assert!(n.negotiate(&far).is_err(), "the channel is not in the span");
+        assert!(n.negotiate(&[far]).is_err(), "the channel is not in the span");
     }
 
     /// The whole stage: a multiplex two megahertz off the middle of a 20 MS/s
@@ -642,21 +777,22 @@ mod node_tests {
 
         let mut node = DvbtNode::new(474_000_000.0);
         let spec = PortSpec { spec: StreamSpec::iq(20_000_000.0, Hz(476_000_000)), latency: 0 };
-        let out_spec = node.negotiate(&spec).expect("a channel in the span");
-        assert_eq!(out_spec.kind, PortKind::Bytes);
-        assert_eq!(out_spec.center, Hz(474_000_000));
+        let out_spec = node.negotiate(&[spec]).expect("a channel in the span");
+        assert_eq!(out_spec[0].kind, PortKind::Bytes);
+        assert_eq!(out_spec[1].kind, PortKind::Video);
+        assert_eq!(out_spec[0].center, Hz(474_000_000));
 
         let mut events = Vec::new();
         let mut stream = Vec::new();
         for block in span.chunks(65_536) {
             let payload = Payload::Iq(block.to_vec());
-            let mut out = Payload::Bytes(Vec::new());
+            let mut out = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Video)];
             let ins = [spec];
             let tags = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&payload, &mut out, &mut ctx).expect("the stage runs");
-            stream.extend_from_slice(out.as_bytes().unwrap_or(&[]));
+            Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
+            stream.extend_from_slice(out[0].as_bytes().unwrap_or(&[]));
         }
 
         assert_eq!(node.rx.params(), Some(params), "the TPS came through the resampler");
