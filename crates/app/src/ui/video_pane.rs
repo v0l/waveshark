@@ -21,6 +21,7 @@
 
 use super::*;
 use common::{Pixels, VideoFrame};
+use nodes::dvbt_nodes::Want;
 
 /// How long a picture with nothing to say about its cadence stays on screen.
 /// What a frame does say is [`common::Cadence::hold_s`], which is half a
@@ -63,6 +64,11 @@ pub(super) struct VideoPane<'a> {
     pub inputs: Vec<crate::chain::VideoInput>,
     /// Pictures written to disk this session, newest last.
     pub saved: Vec<std::path::PathBuf>,
+    /// The television multiplexes being decoded, with the services each
+    /// carries. A multiplex is many programmes on one frequency, so it needs
+    /// a chooser of its own: the one above picks the transmission, this one
+    /// picks what inside it is decoded.
+    pub muxes: Vec<crate::chain::Multiplex>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
 }
@@ -129,6 +135,50 @@ impl VideoPane<'_> {
                 r.on_hover_text(dir.clone());
                 if ui.small_button("open").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
+                }
+            }
+            for mux in &self.muxes {
+                ui.add_space(12.0);
+                theme::Line::new().legend("service").show(ui);
+                let mut pick = mux.wanted.clone();
+                let shown = match &pick {
+                    Want::Any => nodes::dvbt_nodes::ANY.to_string(),
+                    Want::Named(n) => n.clone(),
+                    Want::Id(id) => mux
+                        .services
+                        .iter()
+                        .find(|s| s.id == *id)
+                        .map_or_else(|| format!("service {id}"), nodes::dvbt_nodes::service_label),
+                };
+                egui::ComboBox::from_id_salt(("dvb-service", mux.node))
+                    .selected_text(theme::value(shown))
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut pick, Want::Any, nodes::dvbt_nodes::ANY);
+                        for s in &mux.services {
+                            ui.selectable_value(
+                                &mut pick,
+                                Want::of(s),
+                                nodes::dvbt_nodes::service_label(s),
+                            );
+                        }
+                        if mux.services.is_empty() {
+                            ui.label(
+                                egui::RichText::new("no services described yet")
+                                    .color(theme::LEGEND)
+                                    .size(11.0),
+                            );
+                        }
+                    });
+                if pick != mux.wanted {
+                    // As a name or a number rather than a position, because
+                    // this is written into the patch and read back by a
+                    // rebuild, which happens before any table has arrived.
+                    self.cmds.push(Cmd::NodeParam(
+                        mux.node,
+                        nodes::dvbt_nodes::SERVICE.into(),
+                        pick.setting(),
+                    ));
                 }
             }
             if want != st.watching {
